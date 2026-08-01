@@ -195,8 +195,11 @@
     color: var(--on-accent);       /* t.onAccent */
     display: grid;
     place-items: center;
+  }
+  .search-plus-glyph {
     font-size: 20px;               /* plus icon .font(.system(size:20, weight:.medium)) */
     font-weight: 500;
+    line-height: 1;
   }
 </style>
 </head>
@@ -280,7 +283,9 @@
   <div class="searchbar" data-role="searchbar">
     <svg class="search-icon" data-role="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
     <span class="search-text" data-role="search-text" data-label="Search">Search</span>
-    <span class="search-plus" data-role="search-plus" aria-label="Add plus">+</span>
+    <span class="search-plus" data-role="search-plus" aria-label="Add plus">
+      <span class="search-plus-glyph" data-role="search-plus-glyph">+</span>
+    </span>
   </div>
 
   <!-- CONTEXT: home-indicator safe area. -->

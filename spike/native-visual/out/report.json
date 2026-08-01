@@ -1,0 +1,1554 @@
+{
+  "report": "PoC 03 — native visual-verification measurement",
+  "coordinateContract": {
+    "viewport": "402x874 CSS px = simulator pt",
+    "deviceScaleFactor": 1,
+    "note": "mockup origin == AX capture origin (window-chrome bands reproduce the iOS status/nav + home-indicator insets); geometry compared in px==pt",
+    "deltaTolerancePx": 1,
+    "themeAssumed": "light (iOS default); reported colours come from the shared tokens, and app colour is unavailable regardless of theme"
+  },
+  "sources": {
+    "spec": "spike/native-visual/mockup/session-list.html (Playwright Chromium, computed styles + bounding boxes)",
+    "app": "spike/native-visual/out/session-list-hierarchy.txt (iOS accessibility hierarchy, XCUITest debugDescription)"
+  },
+  "elements": [
+    {
+      "id": "group-header-Alpha",
+      "role": "group-header",
+      "label": "Alpha",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 24,
+            "y": 190
+          },
+          "app": {
+            "x": 24,
+            "y": 190
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 40.9,
+            "height": 19
+          },
+          "app": {
+            "width": 40,
+            "height": 18
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 600,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(72, 67, 60)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "match",
+          "spec": 6,
+          "app": 6
+        }
+      }
+    },
+    {
+      "id": "row-API Gateway",
+      "role": "row",
+      "label": "API Gateway",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 12,
+            "y": 215
+          },
+          "app": {
+            "x": 12,
+            "y": 214
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 378,
+            "height": 62
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 2,
+          "app": 23.7
+        }
+      }
+    },
+    {
+      "id": "row-dot-API Gateway",
+      "role": "row-dot",
+      "label": "API Gateway",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 242
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(46, 107, 255)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-API Gateway",
+      "role": "row-name",
+      "label": "API Gateway",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 40,
+            "y": 228
+          },
+          "app": {
+            "x": 40,
+            "y": 227.5
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 92.3,
+            "height": 19
+          },
+          "app": {
+            "width": 89.7,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "match",
+          "spec": 2,
+          "app": 2
+        }
+      }
+    },
+    {
+      "id": "row-subtitle-API Gateway",
+      "role": "row-subtitle",
+      "label": "API Gateway",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 40,
+            "y": 249
+          },
+          "app": {
+            "x": 40,
+            "y": 248.2
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 105.8,
+            "height": 15
+          },
+          "app": {
+            "width": 107,
+            "height": 14.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 12,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "row-timer-API Gateway",
+      "role": "row-timer",
+      "label": "API Gateway",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 361.1,
+            "y": 239
+          },
+          "app": {
+            "x": 360.7,
+            "y": 238.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 16.9,
+            "height": 14
+          },
+          "app": {
+            "width": 17.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "row-Database",
+      "role": "row",
+      "label": "Database",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 12,
+            "y": 279
+          },
+          "app": {
+            "x": 24,
+            "y": 299.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 354,
+            "height": 18.7
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 24,
+          "app": 45.6
+        }
+      }
+    },
+    {
+      "id": "row-dot-Database",
+      "role": "row-dot",
+      "label": "Database",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 306
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-Database",
+      "role": "row-name",
+      "label": "Database",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 40,
+            "y": 300.5
+          },
+          "app": {
+            "x": 40,
+            "y": 299.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 68.9,
+            "height": 19
+          },
+          "app": {
+            "width": 67.3,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "n/a",
+          "spec": null,
+          "app": null,
+          "reason": "row has no subtitle, so there is no name→subtitle gap"
+        }
+      }
+    },
+    {
+      "id": "row-timer-Database",
+      "role": "row-timer",
+      "label": "Database",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 337.3,
+            "y": 303
+          },
+          "app": {
+            "x": 336.7,
+            "y": 302.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 40.7,
+            "height": 14
+          },
+          "app": {
+            "width": 41.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "group-header-Beta",
+      "role": "group-header",
+      "label": "Beta",
+      "properties": {
+        "position": {
+          "delta": "match",
+          "spec": {
+            "x": 24,
+            "y": 365
+          },
+          "app": {
+            "x": 24,
+            "y": 364
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 31.8,
+            "height": 19
+          },
+          "app": {
+            "width": 32,
+            "height": 18
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 600,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(72, 67, 60)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 6,
+          "app": 19.5
+        }
+      }
+    },
+    {
+      "id": "row-Mobile Client",
+      "role": "row",
+      "label": "Mobile Client",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 12,
+            "y": 390
+          },
+          "app": {
+            "x": 24,
+            "y": 401.5
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 354,
+            "height": 35
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 2,
+          "app": 37.2
+        }
+      }
+    },
+    {
+      "id": "row-dot-Mobile Client",
+      "role": "row-dot",
+      "label": "Mobile Client",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 417
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 90, 8)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-Mobile Client",
+      "role": "row-name",
+      "label": "Mobile Client",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 40,
+            "y": 403
+          },
+          "app": {
+            "x": 40,
+            "y": 401.5
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 95,
+            "height": 19
+          },
+          "app": {
+            "width": 92.7,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "match",
+          "spec": 2,
+          "app": 2
+        }
+      }
+    },
+    {
+      "id": "row-subtitle-Mobile Client",
+      "role": "row-subtitle",
+      "label": "Mobile Client",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 40,
+            "y": 424
+          },
+          "app": {
+            "x": 40,
+            "y": 422.2
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 59.5,
+            "height": 15
+          },
+          "app": {
+            "width": 59.7,
+            "height": 14.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 12,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "row-timer-Mobile Client",
+      "role": "row-timer",
+      "label": "Mobile Client",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 354,
+            "y": 414
+          },
+          "app": {
+            "x": 353.7,
+            "y": 412.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 24,
+            "height": 14
+          },
+          "app": {
+            "width": 24.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "row-Docs",
+      "role": "row",
+      "label": "Docs",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 12,
+            "y": 454
+          },
+          "app": {
+            "x": 24,
+            "y": 473.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 354,
+            "height": 18.7
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 24,
+          "app": 45.6
+        }
+      }
+    },
+    {
+      "id": "row-dot-Docs",
+      "role": "row-dot",
+      "label": "Docs",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 481
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-Docs",
+      "role": "row-name",
+      "label": "Docs",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 40,
+            "y": 475.5
+          },
+          "app": {
+            "x": 40,
+            "y": 473.7
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 37.2,
+            "height": 19
+          },
+          "app": {
+            "width": 36.3,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "n/a",
+          "spec": null,
+          "app": null,
+          "reason": "row has no subtitle, so there is no name→subtitle gap"
+        }
+      }
+    },
+    {
+      "id": "row-timer-Docs",
+      "role": "row-timer",
+      "label": "Docs",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 364.1,
+            "y": 478
+          },
+          "app": {
+            "x": 363.7,
+            "y": 476.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 13.9,
+            "height": 14
+          },
+          "app": {
+            "width": 14.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "group-header-Gamma",
+      "role": "group-header",
+      "label": "Gamma",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 24,
+            "y": 540
+          },
+          "app": {
+            "x": 24,
+            "y": 538
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 54.4,
+            "height": 19
+          },
+          "app": {
+            "width": 53.7,
+            "height": 18
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 600,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(72, 67, 60)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 6,
+          "app": 27.7
+        }
+      }
+    },
+    {
+      "id": "row-Infra",
+      "role": "row",
+      "label": "Infra",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 12,
+            "y": 565
+          },
+          "app": {
+            "x": 24,
+            "y": 583.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 354,
+            "height": 18.7
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "mismatch",
+          "spec": 2,
+          "app": 45.3
+        }
+      }
+    },
+    {
+      "id": "row-dot-Infra",
+      "role": "row-dot",
+      "label": "Infra",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 592
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-Infra",
+      "role": "row-name",
+      "label": "Infra",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 40,
+            "y": 586.5
+          },
+          "app": {
+            "x": 40,
+            "y": 583.7
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 33.4,
+            "height": 19
+          },
+          "app": {
+            "width": 32.7,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "n/a",
+          "spec": null,
+          "app": null,
+          "reason": "row has no subtitle, so there is no name→subtitle gap"
+        }
+      }
+    },
+    {
+      "id": "row-timer-Infra",
+      "role": "row-timer",
+      "label": "Infra",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 337.3,
+            "y": 589
+          },
+          "app": {
+            "x": 336.7,
+            "y": 586.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 40.7,
+            "height": 14
+          },
+          "app": {
+            "width": 41.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "row-Analytics",
+      "role": "row",
+      "label": "Analytics",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 12,
+            "y": 629
+          },
+          "app": {
+            "x": 24,
+            "y": 647.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 378,
+            "height": 62
+          },
+          "app": {
+            "width": 354,
+            "height": 18.7
+          }
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        },
+        "spacingToNext": {
+          "delta": "n/a",
+          "spec": null,
+          "app": null,
+          "reason": "no following element in the vertical list flow (last item)"
+        }
+      }
+    },
+    {
+      "id": "row-dot-Analytics",
+      "role": "row-dot",
+      "label": "Analytics",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 24,
+            "y": 656
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 8,
+            "height": 8
+          },
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side"
+        }
+      }
+    },
+    {
+      "id": "row-name-Analytics",
+      "role": "row-name",
+      "label": "Analytics",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 40,
+            "y": 650.5
+          },
+          "app": {
+            "x": 40,
+            "y": 647.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 67.4,
+            "height": 19
+          },
+          "app": {
+            "width": 65.3,
+            "height": 18.7
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 15.5,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(26, 24, 21)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        },
+        "spacingToNext": {
+          "delta": "n/a",
+          "spec": null,
+          "app": null,
+          "reason": "row has no subtitle, so there is no name→subtitle gap"
+        }
+      }
+    },
+    {
+      "id": "row-timer-Analytics",
+      "role": "row-timer",
+      "label": "Analytics",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 337.3,
+            "y": 653
+          },
+          "app": {
+            "x": 336.7,
+            "y": 650.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 40.7,
+            "height": 14
+          },
+          "app": {
+            "width": 41.3,
+            "height": 13.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 11,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 500,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(138, 130, 117)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "searchbar-",
+      "role": "searchbar",
+      "label": "",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 14,
+            "y": 772
+          },
+          "app": null
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 374,
+            "height": 56
+          },
+          "app": null
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "rgb(255, 255, 255)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no fill/background colour attribute"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 28,
+          "app": null,
+          "reason": "accessibility frame is an axis-aligned rectangle; no corner-radius attribute"
+        }
+      }
+    },
+    {
+      "id": "search-icon-",
+      "role": "search-icon",
+      "label": "",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 32,
+            "y": 790
+          },
+          "app": {
+            "x": 34.3,
+            "y": 790.3
+          }
+        },
+        "size": {
+          "delta": "match",
+          "spec": {
+            "width": 20,
+            "height": 20
+          },
+          "app": {
+            "width": 19.3,
+            "height": 19.3
+          }
+        }
+      }
+    },
+    {
+      "id": "search-text-Search",
+      "role": "search-text",
+      "label": "Search",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 62,
+            "y": 790
+          },
+          "app": {
+            "x": 66,
+            "y": 790.3
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 53.1,
+            "height": 20
+          },
+          "app": {
+            "width": 50.7,
+            "height": 19.3
+          }
+        },
+        "fontSize": {
+          "delta": "unavailable",
+          "spec": 16,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no font-size attribute"
+        },
+        "fontWeight": {
+          "delta": "unavailable",
+          "spec": 400,
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no type/weight attribute"
+        },
+        "textColour": {
+          "delta": "unavailable",
+          "spec": "rgb(102, 95, 85)",
+          "app": null,
+          "reason": "accessibility hierarchy reports element geometry only; no colour attribute"
+        }
+      }
+    },
+    {
+      "id": "search-plus-",
+      "role": "search-plus",
+      "label": "",
+      "properties": {
+        "position": {
+          "delta": "unavailable",
+          "spec": {
+            "x": 330,
+            "y": 780
+          },
+          "app": null,
+          "reason": "the 40pt accentSolid Circle and its plus glyph's button box are not exposed as their own element; AX exposes only the plus glyph, so the button box geometry and its colour/radius are not measurable from native"
+        },
+        "size": {
+          "delta": "unavailable",
+          "spec": {
+            "width": 40,
+            "height": 40
+          },
+          "app": null,
+          "reason": "the 40pt accentSolid Circle and its plus glyph's button box are not exposed as their own element; AX exposes only the plus glyph, so the button box geometry and its colour/radius are not measurable from native"
+        },
+        "backgroundColor": {
+          "delta": "unavailable",
+          "spec": "transparent",
+          "app": null,
+          "reason": "the 40pt accentSolid Circle and its plus glyph's button box are not exposed as their own element; AX exposes only the plus glyph, so the button box geometry and its colour/radius are not measurable from native"
+        },
+        "cornerRadius": {
+          "delta": "unavailable",
+          "spec": 20,
+          "app": null,
+          "reason": "the 40pt accentSolid Circle and its plus glyph's button box are not exposed as their own element; AX exposes only the plus glyph, so the button box geometry and its colour/radius are not measurable from native"
+        }
+      }
+    },
+    {
+      "id": "search-plus-glyph-",
+      "role": "search-plus-glyph",
+      "label": "",
+      "properties": {
+        "position": {
+          "delta": "mismatch",
+          "spec": {
+            "x": 343.3,
+            "y": 790
+          },
+          "app": {
+            "x": 341.7,
+            "y": 791.7
+          }
+        },
+        "size": {
+          "delta": "mismatch",
+          "spec": {
+            "width": 13.4,
+            "height": 20
+          },
+          "app": {
+            "width": 16.7,
+            "height": 16.7
+          }
+        }
+      }
+    }
+  ],
+  "summary": {
+    "position": {
+      "match": 8,
+      "mismatch": 18,
+      "unavailable": 8,
+      "n_a": 0
+    },
+    "size": {
+      "match": 14,
+      "mismatch": 12,
+      "unavailable": 8,
+      "n_a": 0
+    },
+    "fontSize": {
+      "match": 0,
+      "mismatch": 0,
+      "unavailable": 18,
+      "n_a": 0
+    },
+    "fontWeight": {
+      "match": 0,
+      "mismatch": 0,
+      "unavailable": 18,
+      "n_a": 0
+    },
+    "textColour": {
+      "match": 0,
+      "mismatch": 0,
+      "unavailable": 18,
+      "n_a": 0
+    },
+    "spacingToNext": {
+      "match": 3,
+      "mismatch": 7,
+      "unavailable": 0,
+      "n_a": 5
+    },
+    "backgroundColor": {
+      "match": 0,
+      "mismatch": 0,
+      "unavailable": 14,
+      "n_a": 0
+    },
+    "cornerRadius": {
+      "match": 0,
+      "mismatch": 0,
+      "unavailable": 8,
+      "n_a": 0
+    }
+  }
+}

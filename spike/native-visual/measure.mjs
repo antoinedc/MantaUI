@@ -72,6 +72,8 @@ const REASON = {
     "accessibility frame is an axis-aligned rectangle; no corner-radius attribute",
   dotAbsent:
     "the 8pt status Circle is not exposed as an accessibility element, so the dot and its colour are not measurable from the native side",
+  circleAbsent:
+    "the 40pt accentSolid Circle and its plus glyph's button box are not exposed as their own element; AX exposes only the plus glyph, so the button box geometry and its colour/radius are not measurable from native",
 };
 
 function classifyDelta(spec, app, { tolerance = TOLERANCE, kind = "number" } = {}) {
@@ -93,6 +95,13 @@ function classifyDelta(spec, app, { tolerance = TOLERANCE, kind = "number" } = {
     const { x: sx, y: sy } = spec;
     const { x: ax, y: ay } = app;
     const match = Math.abs(sx - ax) <= tolerance && Math.abs(sy - ay) <= tolerance;
+    return { delta: match ? "match" : "mismatch", spec, app };
+  }
+  if (kind === "size") {
+    const { width: sw, height: sh } = spec;
+    const { width: aw, height: ah } = app;
+    const match =
+      Math.abs(sw - aw) <= tolerance && Math.abs(sh - ah) <= tolerance;
     return { delta: match ? "match" : "mismatch", spec, app };
   }
   if (kind === "color") {
@@ -160,6 +169,8 @@ function propertyMatrix(role) {
       return ["position", "size"];
     case "search-plus":
       return ["position", "size", "backgroundColor", "cornerRadius"];
+    case "search-plus-glyph":
+      return ["position", "size"];
     default:
       return [];
   }
@@ -167,9 +178,28 @@ function propertyMatrix(role) {
 
 // -- spec measurement --------------------------------------------------------
 
+// The AX capture reports a text element's CONTENT box (the line box), not the
+// padded/stretched layout box the DOM exposes via getBoundingClientRect. To
+// compare like-with-like, text roles are measured with a Range over their text
+// (the rendered text box); box roles stay on their border box.
+const TEXT_ROLES = new Set([
+  "group-header",
+  "row-name",
+  "row-subtitle",
+  "row-timer",
+  "search-text",
+]);
+
 async function measureSpec(page) {
   return page.evaluate(() => {
-    const rgbToKey = (s) => {
+    const TEXT_ROLES = new Set([
+      "group-header",
+      "row-name",
+      "row-subtitle",
+      "row-timer",
+      "search-text",
+    ]);
+    const RGB_TO_KEY = (s) => {
       const m = /rgba?\(([^)]+)\)/.exec(s);
       if (!m) return s;
       const parts = m[1].split(",").map((x) => x.trim());
@@ -177,26 +207,55 @@ async function measureSpec(page) {
       if (alpha) return "transparent";
       return `rgb(${parts[0]}, ${parts[1]}, ${parts[2]})`;
     };
-    const weightToNum = (w) => {
+    const WEIGHT_TO_NUM = (w) => {
       if (w === "normal") return 400;
       if (w === "bold") return 700;
       return parseFloat(w);
     };
+    // Resolve a border-top-left-radius that may be a percentage to px.
+    const RADIUS_PX = (cs, el) => {
+      const v = cs.borderTopLeftRadius;
+      if (v.endsWith("%")) {
+        const pct = parseFloat(v);
+        return Math.min(el.clientWidth, el.clientHeight) * (pct / 100);
+      }
+      return parseFloat(v) || 0;
+    };
+    // The rendered line box of the element's text (matches how AX reports it).
+    const TEXT_BOX = (el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const r = range.getBoundingClientRect();
+      const base = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return base;
+      const nodeRect = r;
+      return {
+        x: nodeRect.x,
+        y: nodeRect.y,
+        width: nodeRect.width,
+        height: nodeRect.height,
+      };
+    };
     const round1 = (n) => Math.round(n * 10) / 10;
     const out = [];
     for (const el of document.querySelectorAll("[data-role]")) {
-      const r = el.getBoundingClientRect();
+      const role = el.dataset.role;
+      const useTextBox = TEXT_ROLES.has(role);
+      const r = useTextBox
+        ? TEXT_BOX(el)
+        : el.getBoundingClientRect();
       const cs = getComputedStyle(el);
       out.push({
-        role: el.dataset.role,
+        role,
         label: el.dataset.label ?? "",
+        text: (el.textContent ?? "").trim(),
         position: { x: round1(r.x), y: round1(r.y) },
         size: { width: round1(r.width), height: round1(r.height) },
         fontSize: parseFloat(cs.fontSize),
-        fontWeight: weightToNum(cs.fontWeight),
-        textColour: rgbToKey(cs.color),
-        backgroundColor: rgbToKey(cs.backgroundColor),
-        cornerRadius: parseFloat(cs.borderTopLeftRadius) || 0,
+        fontWeight: WEIGHT_TO_NUM(cs.fontWeight),
+        textColour: RGB_TO_KEY(cs.color),
+        backgroundColor: RGB_TO_KEY(cs.backgroundColor),
+        cornerRadius: round1(RADIUS_PX(cs, el)),
       });
     }
     return out;
@@ -232,6 +291,11 @@ function main_report({ specEls, parsed }) {
       case "search-icon":
         return appImages.find((s) => s.identifier === "magnifyingglass") ?? null;
       case "search-plus":
+        // The 40pt accentSolid Circle itself is a non-accessible shape — AX
+        // exposes only its plus glyph (handled by search-plus-glyph) — so the
+        // circle has no app frame of its own.
+        return null;
+      case "search-plus-glyph":
         return appImages.find((s) => s.identifier === "plus") ?? null;
       default:
         return null; // row-dot — not exposed by SwiftUI's AX tree
@@ -269,13 +333,16 @@ function main_report({ specEls, parsed }) {
         Math.round((nextApp.frame.y - (curApp.frame.y + curApp.frame.h)) * 10) / 10;
     }
   }
-  // app name->subtitle gap.
+  // app name->subtitle gap. A row's subtitle is the spec element with the same
+  // data-label (session name) but its RENDERED text is the subtitle string, and
+  // the app StaticText is labelled by that rendered string.
   const appNameSpacing = {};
   for (const d of specEls.filter((e) => e.role === "row-name")) {
-    const nameApp = findApp("row-name", d.label);
-    const subApp = appStatic.find(
-      (s) => s.label === d.label && s !== nameApp,
+    const sub = specEls.find(
+      (e) => e.role === "row-subtitle" && e.label === d.label,
     );
+    const nameApp = findApp("row-name", d.label);
+    const subApp = sub ? appStatic.find((s) => s.label === sub.text) : null;
     if (nameApp && subApp) {
       appNameSpacing[d.label] =
         Math.round((subApp.frame.y - (nameApp.frame.y + nameApp.frame.h)) * 10) / 10;
@@ -287,7 +354,11 @@ function main_report({ specEls, parsed }) {
     const role = spec.role;
     const label = spec.label;
     const props = {};
-    const app = findApp(role, label);
+    // Subtitle and timer AX elements are labelled by their RENDERED text
+    // (e.g. 'running - opus 4.8', '1m'), not by the row/session data-label.
+    const matchKey =
+      role === "row-subtitle" || role === "row-timer" ? spec.text : label;
+    const app = findApp(role, matchKey);
     const frame = app?.frame ?? null;
 
     const put = (key, specVal, appVal, kind, reason) => {
@@ -301,14 +372,23 @@ function main_report({ specEls, parsed }) {
 
     const appPos = frame ? { x: frame.x, y: frame.y } : null;
     const appSize = frame ? { width: frame.w, height: frame.h } : null;
+    // Shapes SwiftUI does not expose to the AX tree: the status dot and the
+    // 40pt accentSolid circle carry no app frame, so their box/colour are
+    // unavailable from native (the only thing reported is their glyph/child).
+    const notExposedReason =
+      role === "row-dot"
+        ? REASON.dotAbsent
+        : role === "search-plus"
+          ? REASON.circleAbsent
+          : null;
 
     for (const key of propertyMatrix(role)) {
       switch (key) {
         case "position":
-          put(key, spec.position, appPos, "point");
+          put(key, spec.position, appPos, "point", notExposedReason);
           break;
         case "size":
-          put(key, spec.size, appSize, "point");
+          put(key, spec.size, appSize, "size", notExposedReason);
           break;
         case "fontSize":
           put(key, spec.fontSize, null, "number", REASON.fontSize);
@@ -320,10 +400,22 @@ function main_report({ specEls, parsed }) {
           put(key, spec.textColour, null, "color", REASON.textColour);
           break;
         case "backgroundColor":
-          put(key, spec.backgroundColor, null, "color", REASON.backgroundColor);
+          put(
+            key,
+            spec.backgroundColor,
+            null,
+            "color",
+            notExposedReason ?? REASON.backgroundColor,
+          );
           break;
         case "cornerRadius":
-          put(key, spec.cornerRadius, null, "number", REASON.cornerRadius);
+          put(
+            key,
+            spec.cornerRadius,
+            null,
+            "number",
+            notExposedReason ?? REASON.cornerRadius,
+          );
           break;
         case "spacingToNext": {
           const keyId = `${role}:${label}`;
