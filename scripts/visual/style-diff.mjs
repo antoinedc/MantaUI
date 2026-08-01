@@ -328,7 +328,7 @@ async function captureSide(page, baseURL, { url, ready, final, actions, region }
 function fmtValue(value, map) {
   const toks = resolveToken(value, map);
   return toks && toks.length
-    ? `${toks.map((t) => `--${t}`).join("|")} (${value})`
+    ? `${toks.join("|")} (${value})`
     : `[no token] (${value})`;
 }
 
@@ -350,7 +350,7 @@ function renderSectionA(appRecords, mockRecords, map) {
         if (isDefault(prop, value)) continue;
         const toks = resolveToken(value, map);
         if (!toks) continue;
-        for (const t of toks) bump(GROUP_OF[prop], side, `--${t}`);
+        for (const t of toks) bump(GROUP_OF[prop], side, t);
       }
     }
   }
