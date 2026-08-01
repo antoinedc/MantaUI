@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { normalizeCode } from "../../shared/claim.mjs";
 import {
   type DebugEntry,
   getDebugLog,
@@ -8,7 +7,8 @@ import {
   clearDebugLog,
 } from "./debugLog";
 import { isValidBoxToken } from "../../shared/transport.mjs";
-import { normalizeVerifyCode } from "./pairPayload";
+import { VerifyCodeInput } from "../VerifyCodeInput";
+import { PairingCodeInput } from "../PairingCodeInput";
 import { MantaMark } from "../onboardingUi";
 import {
   canConnectSetup,
@@ -214,19 +214,13 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               </Field>
 
               <Field label="Pairing code">
-                <input
+                <PairingCodeInput
                   ref={codeRef}
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  aria-label="Pairing code"
-                  aria-invalid={error != null}
-                  placeholder="000000"
-                  maxLength={6}
                   disabled={submitting}
+                  hasError={error != null}
                   value={code}
-                  onChange={(e) => {
-                    setCode(normalizeCode(e.target.value));
+                  onChange={(v) => {
+                    setCode(v);
                     setError(null);
                   }}
                   className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
@@ -238,19 +232,14 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
                   verify (desktop "Add a phone" / web pair page), typing it
                   here claims this device as a DISTINCT Stage-2 device rather
                   than reusing the desktop's primary box_token. Optional —
-                  blank keeps the legacy path. */}
+                  blank keeps the legacy path. Field logic + normalization
+                  live in the shared VerifyCodeInput. */}
               <Field label="Verify (optional)">
-                <input
-                  type="text"
-                  inputMode="text"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="K7Q2"
-                  maxLength={4}
+                <VerifyCodeInput
                   disabled={submitting}
                   value={verifyCode}
-                  onChange={(e) => {
-                    setVerifyCode(normalizeVerifyCode(e.target.value).slice(0, 4));
+                  onChange={(v) => {
+                    setVerifyCode(v);
                     setError(null);
                   }}
                   className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"

@@ -32,29 +32,24 @@ describe("parsePairPayload", () => {
       ).toEqual({ boxId: BOX, code: "847291" });
     });
 
-    it("parses an optional &verify= four-char code (BET-514 two-sided confirm)", () => {
-      expect(
-        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7Q2`),
-      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
-      // Normalizes whitespace + case ("k7 q2" → "K7Q2").
-      expect(
-        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=k7%20q2`),
-      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
-    });
-
-    it("treats an empty &verify= as absent (legacy path, BET-514)", () => {
-      expect(
-        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=`),
-      ).toEqual({ boxId: BOX, code: "847291" });
-    });
-
-    it("refuses a present-but-malformed verify (BET-514, never drops to legacy)", () => {
-      expect(
-        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7`),
-      ).toBeNull();
-      expect(
-        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7Q2Z`),
-      ).toBeNull();
+    // BET-514: verification-code parse cases, collapsed into one loop so the
+    // repeated `manta://pair?…&verify=…` structure isn't cloned per assertion:
+    //   • present + well-formed, incl. case/whitespace normalization
+    //   • empty → treated as absent (legacy primary-token path)
+    //   • present-but-malformed → refuse the whole payload (never drop to legacy)
+    it("parses / normalizes / rejects the four-char verify (BET-514)", () => {
+      const cases = [
+        ["verify=K7Q2", { boxId: BOX, code: "847291", verify: "K7Q2" }],
+        ["verify=k7%20q2", { boxId: BOX, code: "847291", verify: "K7Q2" }],
+        ["verify=", { boxId: BOX, code: "847291" }],
+        ["verify=K7", null],
+        ["verify=K7Q2Z", null],
+      ] as const;
+      for (const [q, expected] of cases) {
+        expect(parsePairPayload(`manta://pair?box=${BOX}&code=847291&${q}`)).toEqual(
+          expected,
+        );
+      }
     });
 
     it("accepts manta://pair regardless of where the engine puts the authority (BET-240 regression)", () => {
@@ -442,18 +437,22 @@ describe("buildPairPayload", () => {
   });
 });
 
+// Shared round-trip input set — valid canonical payloads used by both the
+// default-scheme and the per-channel round-trip tests (BET-336 server URL +
+// plain box-form), so the case array isn't cloned across the two.
+const ROUND_TRIP_CASES: PairPayload[] = [
+  { boxId: BOX, code: "111111" },
+  { boxId: BOX, code: "000000" },
+  { boxId: BOX, code: "987654" },
+  // BET-336: round-trip preserves the server URL through both directions.
+  { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
+  { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
+  { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
+];
+
 describe("round-trip", () => {
   it("parsePairPayload(buildPairPayload(p)) deep-equals p for valid canonical inputs", () => {
-    const cases: PairPayload[] = [
-      { boxId: BOX, code: "111111" },
-      { boxId: BOX, code: "000000" },
-      { boxId: BOX, code: "987654" },
-      // BET-336: round-trip preserves the server URL through both directions.
-      { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
-      { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
-      { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
-    ];
-    for (const p of cases) {
+    for (const p of ROUND_TRIP_CASES) {
       expect(parsePairPayload(buildPairPayload(p))).toEqual(p);
     }
   });
@@ -465,15 +464,7 @@ describe("round-trip", () => {
   describe("BET-373: build → parse round-trip per channel", () => {
     for (const scheme of SCHEMES) {
       it(`parsePairPayload(buildPairPayload(p, "${scheme}"), "${scheme}") deep-equals p`, () => {
-        const cases: PairPayload[] = [
-          { boxId: BOX, code: "111111" },
-          { boxId: BOX, code: "000000" },
-          { boxId: BOX, code: "987654" },
-          { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
-          { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
-          { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
-        ];
-        for (const p of cases) {
+        for (const p of ROUND_TRIP_CASES) {
           expect(
             parsePairPayload(buildPairPayload(p, scheme), scheme),
           ).toEqual(p);

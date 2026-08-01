@@ -24,13 +24,13 @@
 // from PairStep but the action is not.
 
 import { useEffect, useRef, useState } from "react";
-import { normalizeCode } from "../shared/claim.mjs";
 import {
   canConnectSetup,
   normalizeServerUrl,
   prefillFromPairLink,
 } from "./mobile/setupLogic";
-import { normalizeVerifyCode } from "./mobile/pairPayload";
+import { VerifyCodeInput } from "./VerifyCodeInput";
+import { PairingCodeInput } from "./PairingCodeInput";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
@@ -267,20 +267,14 @@ function ManualPairForm({
           >
             Code
           </label>
-          <input
+          <PairingCodeInput
             id="pair-code"
             ref={codeRef}
-            type="text"
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            aria-label="Pairing code"
-            aria-invalid={error != null}
-            placeholder="000000"
-            maxLength={6}
             disabled={submitting}
+            hasError={error != null}
             value={code}
-            onChange={(e) => {
-              setCode(normalizeCode(e.target.value));
+            onChange={(v) => {
+              setCode(v);
               setError(null);
             }}
             className="w-full rounded-md bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
@@ -292,7 +286,8 @@ function ManualPairForm({
             (`manta pair` / web pair page now emit one), a device that types
             or pastes it here claims as a DISTINCT Stage-2 device instead of
             reusing the desktop's own primary box_token. Prefilled from a
-            `&verify=` deep link. Optional — blank keeps the legacy path. */}
+            `&verify=` deep link. Optional — blank keeps the legacy path.
+            Field logic + normalization live in the shared VerifyCodeInput. */}
         <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-verify"
@@ -300,18 +295,12 @@ function ManualPairForm({
           >
             Verify
           </label>
-          <input
+          <VerifyCodeInput
             id="pair-verify"
-            type="text"
-            inputMode="text"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="K7Q2"
-            maxLength={4}
             disabled={submitting}
             value={verifyCode}
-            onChange={(e) => {
-              setVerifyCode(normalizeVerifyCode(e.target.value).slice(0, 4));
+            onChange={(v) => {
+              setVerifyCode(v);
               setError(null);
             }}
             className="w-full rounded-md bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
