@@ -4,6 +4,8 @@ import {
   parseBlockerKeys,
   decideUnblock,
   TERMINAL_STATUSES,
+  parseDeliverablePaths,
+  decideDeliverable,
 } from "./multica-unblock.mjs";
 
 describe("parseBlockerKeys", () => {
@@ -153,5 +155,88 @@ describe("TERMINAL_STATUSES", () => {
     for (const s of ["todo", "in_progress", "in_review", "blocked"]) {
       assert.ok(!TERMINAL_STATUSES.has(s), `${s} must not be terminal`);
     }
+  });
+});
+
+describe("parseDeliverablePaths", () => {
+  test("splits a newline-separated metadata value touching real BET-481 shape", () => {
+    assert.deepEqual(
+      parseDeliverablePaths("spike/native-visual/SCROLL-FINDING.md\nspike/native-visual/capture.sh"),
+      ["spike/native-visual/SCROLL-FINDING.md", "spike/native-visual/capture.sh"],
+    );
+  });
+
+  test("trims whitespace and drops empty lines", () => {
+    assert.deepEqual(
+      parseDeliverablePaths("  a/b.md \n\n c/d.sh \n"),
+      ["a/b.md", "c/d.sh"],
+    );
+  });
+
+  test("returns empty for a non-string value", () => {
+    assert.deepEqual(parseDeliverablePaths(null), []);
+    assert.deepEqual(parseDeliverablePaths(undefined), []);
+    assert.deepEqual(parseDeliverablePaths(42), []);
+  });
+
+  test("returns empty for a blank string", () => {
+    assert.deepEqual(parseDeliverablePaths("   \n  "), []);
+  });
+});
+
+describe("decideDeliverable", () => {
+  const done = (branch, paths) => ({
+    identifier: "BET-481",
+    status: "done",
+    metadata: {
+      ...(branch ? { deliverable_branch: branch } : {}),
+      ...(paths ? { deliverable_paths: paths } : {}),
+    },
+  });
+
+  test("REGRESSION: both keys set and every path present → no change", () => {
+    const r = decideDeliverable(done("spike/native-visual", "spike/native-visual/SCROLL-FINDING.md"), new Set(["spike/native-visual/SCROLL-FINDING.md"]));
+    assert.equal(r.act, false);
+    assert.match(r.reason, /present/);
+  });
+
+  test("both keys set, one path missing → in_review + deliverable_missing", () => {
+    const paths = "a/b.md\nc/d.md";
+    const r = decideDeliverable(done("feat/x", paths), new Set(["a/b.md"]));
+    assert.equal(r.act, true);
+    assert.equal(r.status, "in_review");
+    assert.deepEqual(r.missing, ["c/d.md"]);
+  });
+
+  test("both keys set, branch missing → in_review + branch not found", () => {
+    const r = decideDeliverable(done("spike/native-visual", "a/b.md"), null);
+    assert.equal(r.act, true);
+    assert.equal(r.status, "in_review");
+    assert.deepEqual(r.missing, ["branch not found"]);
+  });
+
+  test("REGRESSION: only one of the two keys set → no change", () => {
+    const branchOnly = done("spike/native-visual", null);
+    assert.equal(decideDeliverable(branchOnly, new Set()).act, false);
+    const pathsOnly = done(null, "a/b.md");
+    assert.equal(decideDeliverable(pathsOnly, new Set()).act, false);
+  });
+
+  test("neither key set → no change", () => {
+    assert.equal(decideDeliverable({ identifier: "BET-1", status: "done", metadata: {} }, new Set()).act, false);
+    assert.equal(decideDeliverable({ identifier: "BET-1", status: "done", metadata: undefined }, new Set()).act, false);
+  });
+
+  test("issue not done → no change, even with keys set", () => {
+    const r = decideDeliverable(
+      { identifier: "BET-1", status: "in_review", metadata: { deliverable_branch: "x", deliverable_paths: "a/b.md" } },
+      null,
+    );
+    assert.equal(r.act, false);
+  });
+
+  test("tolerates a malformed issue object", () => {
+    assert.equal(decideDeliverable(null, new Set()).act, false);
+    assert.equal(decideDeliverable({}, new Set()).act, false);
   });
 });
