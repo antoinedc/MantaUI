@@ -30,9 +30,17 @@ function rendererFiles(): string[] {
   const out: string[] = [];
   const walk = (d: string) => {
     for (const e of readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (/\.(tsx|ts)$/.test(e.name)) out.push(path.relative(RENDERER, p));
+      // M527: the two-adopter scan must not count files under
+      // src/renderer/mobile/** as adopters (owner-standing, BET-549). The
+      // mobile-redesign deletes that whole tree (DECISIONS.md §12), so an
+      // adopter there would mark a primitive satisfied via a file that
+      // vanishes — hiding a real one-adopter gap. Exclude it from the walk.
+      if (e.isDirectory()) {
+        if (d === RENDERER && e.name === "mobile") continue;
+        walk(path.join(d, e.name));
+        continue;
+      }
+      if (/\.(tsx|ts)$/.test(e.name)) out.push(path.relative(RENDERER, path.join(d, e.name)));
     }
   };
   walk(RENDERER);
@@ -103,20 +111,24 @@ function offendingLines(content: string, re: RegExp): string[] {
   return out;
 }
 
-// Bet-546 landed the second adopting files for IconButton (NewSessionScreen,
-// BET-538), Field (CustomProviderForm) and MenuItem (the mobile SessionScreen ⋯
-// sheet), so all three now assert the two-adopter rule ACTIVELY.
-//
 // SINGLE_SURFACE is a FORMAL, owner-approved exemption from the two-adopter
 // rule (BET-546, option (a) confirmed by the owner 2026-08-01) — not a pending
-// finding. SessionRow is a density-scoped primitive (C2): its metrics resolve
-// only under a [data-density] ancestor, and the sole density-scoped session-row
-// surface in the renderer is the desktop rail (Sidebar.tsx). The only other
-// session list (mobile/SessionListScreen) is chrome-incompatible (56px two-line
-// rows, no [data-density] scope), so adopting the primitive there is a redesign,
-// not a no-visual-change migration. Its 2nd adopter is deferred to the BET-527
-// mobile-consolidation follow-up.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow"]);
+// finding. It records the reason in SKIP_REASON so the exemption survives the
+// BET-527 mobile consolidation.
+//
+// SessionRow stays a recorded single-surface exemption. Its sole web
+// adopter is the desktop rail (Sidebar.tsx); its only other session list was
+// mobile/SessionListScreen, which the mobile-redesign deletes wholesale
+// (DECISIONS.md §12). The recorded reason cites that deletion rather than any
+// chrome incompatibility, so the waiver survives the mobile removal.
+//
+// MenuItem gains a recorded waiver in BET-549. After the mobile exclusion,
+// its only remaining web adopter is SessionHeader.tsx (the session menu /
+// dropdown); its former second adopter was the excluded mobile SessionScreen
+// sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
+// in the desktop client — carried by the redesign spec — so it is a legitimate
+// one-web-surface primitive rather than a chrome-incompatible one.
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -133,7 +145,9 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
 
 const SKIP_REASON: Record<string, string> = {
   SessionRow:
-    "single-density-surface primitive: 1 adopting file (Sidebar.tsx) — the only [data-density]-scoped session-row surface. The second session list (mobile/SessionListScreen) uses incompatible card chrome (56px two-line rows, no [data-density] ancestor), so adopting the primitive there is a redesign, not a no-visual-change migration. Owner-approved formal exemption from the two-adopter rule (BET-546); 2nd adopter deferred to the BET-527 follow-up.",
+    "single-surface primitive: 1 web adopting file (Sidebar.tsx, the desktop session rail). Its only other session list lived in mobile/SessionListScreen, which the mobile-redesign deletes wholesale (DECISIONS.md §12) — so the two-adopter scan no longer counts it. Owner-approved formal exemption from the two-adopter rule (BET-546); the 2nd web adopter is deferred to the mobile-consolidation follow-up.",
+  MenuItem:
+    "single-surface primitive: 1 web adopting file (SessionHeader.tsx, the session menu / dropdown), which carries the menu/dropdown contract from the redesign spec. Its former second adopter was the mobile SessionScreen sheet, deleted wholesale by the mobile-redesign (DECISIONS.md §12), so it no longer counts as a web adopter. Owner-approved formal waiver (BET-549), recorded option A.",
 };
 
 describe("M527 primitive rules", () => {

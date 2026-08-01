@@ -71,8 +71,11 @@ Primitives that exist today, their adopting files (matching the two-adopter
 count the enforce test asserts, `src/renderer/primitives.test.ts`), and the
 variant axes their props actually accept (read from the props, not the spec).
 A primitive with fewer than two adopting files is either under-adopted (see the
-BET-541 findings) or — in the case of SessionRow — a **single-surface
-exemption** owner-approved in BET-546.
+BET-541 findings) or a **single-surface exemption / waiver** owner-approved in
+BET-546 / BET-549. Since BET-549 the two-adopter scan excludes
+`src/renderer/mobile/**` — the mobile-redesign deletes that tree wholesale
+(DECISIONS.md §12), so a file there would mark a primitive satisfied via one
+that vanishes. Adopter counts below are **web** adopters only.
 
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
@@ -80,5 +83,5 @@ exemption** owner-approved in BET-546.
 | IconButton | `src/renderer/IconButton.tsx` | 2 — `SessionHeader.tsx`, `NewSessionScreen.tsx` | `size: md\|lg`; `ariaHaspopup`/`ariaExpanded`/`hook` |
 | Field | `src/renderer/Field.tsx` | 2 — `Settings.tsx`, `CustomProviderForm.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading`/`footer`/`disabled` |
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
-| MenuItem | `src/renderer/MenuItem.tsx` | 2 — `SessionHeader.tsx`, `mobile/SessionScreen.tsx` | `variant: normal\|danger\|active` |
+| MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` — **single-surface waiver** (owner-approved, BET-549) | `variant: normal\|danger\|active` |
 | SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` — **single-surface exemption** (owner-approved, BET-546) | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |
