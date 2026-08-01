@@ -15,7 +15,7 @@ import { useStore } from "./store";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
-import { PairingQR, PairingCountdown } from "./PairingQR";
+import { AddPhonePanel } from "./AddPhonePanel";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
@@ -28,7 +28,6 @@ import {
   useRegistryUrls,
 } from "./settingsShared";
 import type {
-  AuthPairResult,
   PluginRegistryRow,
 } from "../shared/types";
 import {
@@ -442,23 +441,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
     return () => { cancelled = true; clearInterval(timer); };
   }, [activeTab]);
 
-  // Mobile pairing (Box section).
-  const [pairing, setPairing] = useState<AuthPairResult | null>(null);
-  const [pairingExpiry, setPairingExpiry] = useState<Date | null>(null);
-  const [pairingMinting, setPairingMinting] = useState(false);
-  const mintPairingCode = async () => {
-    setPairingMinting(true);
-    try {
-      const result = await window.api.authPair();
-      setPairing(result);
-      if (result.ok) setPairingExpiry(new Date(result.expiresAt));
-    } catch (e) {
-      push({ id: `err-pair-${Date.now()}`, message: errorDisclosure("Couldn't generate a pairing code. Try again.", e) });
-    } finally {
-      setPairingMinting(false);
-    }
-  };
-
   // Remove box — in-app confirm replaces window.confirm (BET-419 §D).
   const [removingBox, setRemovingBox] = useState(false);
   const [removeResult, setRemoveResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -635,32 +617,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           </GroupCard>
 
           <GroupCard title="Devices">
-            <div className="flex items-start justify-between gap-4">
-              <div className="text-body text-text-faint">Scan this QR with the Manta mobile app to connect it to your box. The code is one-time and valid for ~5 minutes.</div>
-              {!pairing ? (
-                <button onClick={mintPairingCode} disabled={pairingMinting} className="shrink-0 text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
-                  {pairingMinting ? "Generating…" : "Generate pairing code"}
-                </button>
-              ) : pairing.ok ? (
-                <div className="shrink-0 space-y-4">
-                  <div className="flex items-start gap-4">
-                    <div className="bg-white p-2 rounded border border-border shrink-0">
-                      <PairingQR boxId={pairing.boxId} pairingCode={pairing.pairingCode} />
-                    </div>
-                    <div className="flex-1 space-y-2">
-                      <div className="text-body"><span className="text-text-muted">Code:</span> <span className="font-mono text-text">{pairing.pairingCode}</span></div>
-                      <div className="text-body"><span className="text-text-muted">Box ID:</span> <span className="font-mono text-text break-all" title={pairing.boxId}>{pairing.boxId}</span></div>
-                      {pairingExpiry && <PairingCountdown expiry={pairingExpiry} />}
-                    </div>
-                  </div>
-                  <button onClick={mintPairingCode} disabled={pairingMinting} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">
-                    {pairingMinting ? "Generating…" : "Refresh code"}
-                  </button>
-                </div>
-              ) : (
-                <div className="shrink-0 text-body text-danger">{pairing.error}</div>
-              )}
-            </div>
+            <AddPhonePanel />
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
               <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
