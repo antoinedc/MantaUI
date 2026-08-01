@@ -313,6 +313,93 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  // BET-511: the model picker's dropdown was previously opened by NO capture —
+  // BET-486 recorded it as unverified with every row leaving the trigger
+  // closed. This row does the real gesture a user makes (click the model
+  // button) so the OPEN dropdown gets a structure snapshot + pixel baseline.
+  // Once opened here, `manta-model-picker-btn` is removed from this row's
+  // surfacesClosed (it appears once, for the non-active pane still closed).
+  {
+    id: "model-picker",
+    title: "Model picker — open model dropdown (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-model-dropdown",
+    region: ".manta-model-dropdown",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+      await page.locator(".manta-model-picker-btn:visible").first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    // No design exists for the OPEN dropdown — docs/screens/session/mockup.html
+    // draws the closed model/effort pills but not their menus. `null` is the
+    // registry's documented way to say "no design filed".
+    mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The effort picker is only openable when the active model has selectable
+    // variants; the fixture's two default models have none, so the effort
+    // button starts disabled ("High"). This row first selects a variant-bearing
+    // model (a real user gesture through the model picker), which enables the
+    // effort button, then clicks it to open the effort dropdown.
+    id: "effort-picker",
+    title: "Effort picker — open effort/variant dropdown (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-effort-dropdown",
+    region: ".manta-effort-dropdown",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+      await page.locator(".manta-model-picker-btn:visible").first().click();
+      await page.getByRole("button", { name: "Claude Opus 4.7 Rationale" }).click();
+      await page.locator(".manta-effort-picker-btn:visible").first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The context pill's popover was also opened by no capture (BET-511). This
+    // row clicks the pill — the one real gesture that reveals the context
+    // breakdown — so the OPEN popover gets structure + pixels. Once opened,
+    // `manta-ctx-pill` is gone from this row's surfacesClosed; the model/effort
+    // pickers and session menu remain closed here.
+    id: "ctx-pill",
+    title: "Context pill — open context popover (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-ctx-popover",
+    region: ".manta-ctx-popover",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+      await page.locator(".manta-ctx-pill:visible").first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */
