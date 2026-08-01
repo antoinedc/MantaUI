@@ -766,12 +766,22 @@ const handleRequest = async (req, res) => {
         // Accept both `pairing_code` and the shorter `code` spelling emitted
         // by the mobile QR / deep-link payload — coalesce so both work.
         const pairing_code = body?.pairing_code ?? body?.code;
-        const result = authEngine.claim({ pairing_code });
+        // Optional per-device identity (BET-490): a client that already holds
+        // a device_id resumes its entry (same distinct token) instead of
+        // minting a new device. A claim with no device_id returns the shared
+        // primary box_token exactly as before (back-compat).
+        const device_id = body?.device_id ?? body?.deviceId ?? null;
+        const name = body?.name ?? null;
+        const result = authEngine.claim({ pairing_code, device_id, name });
         if (!result.ok) {
           respondJson(res, result.status ?? 400, { error: result.error });
           return;
         }
-        respondJson(res, 200, { box_token: result.box_token, box_id: result.box_id });
+        respondJson(res, 200, {
+          box_token: result.box_token,
+          box_id: result.box_id,
+          device_id: result.device_id ?? null,
+        });
         return;
       }
       if (req.method === "DELETE" && path === "/auth/revoke") {
@@ -779,13 +789,24 @@ const handleRequest = async (req, res) => {
         // we can distinguish malformed-token → 400 from missing-token → 401;
         // the gate collapses both into 401). The shape of the response is
         // whatever authEngine.revoke returns: { ok, status?, error? }.
+        // BET-490: `device_id` targets ONE device for per-device revoke;
+        // absent → legacy whole-box reset.
         const token = parseBearer(req.headers["authorization"]);
-        const result = await authEngine.revoke({ token });
+        const q = Object.fromEntries(url.searchParams);
+        const result = await authEngine.revoke({
+          token,
+          device_id: q.device_id ?? q.deviceId ?? null,
+        });
         if (!result.ok) {
           respondJson(res, result.status ?? 401, { error: result.error });
           return;
         }
-        respondJson(res, 200, { ok: true, box_id: result.box_id });
+        respondJson(res, 200, {
+          ok: true,
+          box_id: result.box_id,
+          device_id: result.device_id ?? null,
+          reset: !!result.reset,
+        });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
@@ -894,6 +915,17 @@ const handleRequest = async (req, res) => {
         enforced: authEngine.enforce,
       }),
     );
+    return;
+  }
+
+  // ---------- Linked-device list (AUTHENTICATED) ----------
+  // GET /auth/devices → { box_id, devices: [{device_id, name, last_seen, created_at, primary}] }
+  // Reaching here means the gate passed, so the caller holds a live device
+  // token. Serves §6.3's linked-device list (with last_seen) so the desktop
+  // (Stage 5) and any paired device can render the alert + revoke one-tap.
+  // NEVER exposes tokens — only per-device public metadata.
+  if (req.method === "GET" && path === "/auth/devices") {
+    respondJson(res, 200, { box_id: authEngine.box_id, devices: authEngine.listDevices() });
     return;
   }
 

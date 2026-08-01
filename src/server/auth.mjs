@@ -35,8 +35,15 @@ import { unlink } from "node:fs/promises";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { createDeviceRegistry, DEVICES_STORE_PATH, saveDevicesRaw } from "./devices.mjs";
 
 const STORE_PATH = statePath("auth.json");
+
+// How often the device registry's in-memory `last_seen` touches are flushed to
+// disk. authorize() runs on every authenticated request, so persisting each
+// one would be a write per request; a 1s throttle keeps the device-list's
+// last_seen roughly fresh without any write amplification.
+const DEVICE_PERSIST_MS = 1000;
 
 // Pairing codes are short-lived by design: a device must claim within this
 // window or the code expires and the user re-opens the pair screen.
@@ -380,6 +387,10 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  *                 regenerate step
  *   deleteAuth  — injectable unlink (default deleteAuth) for the post-revoke
  *                 "wipe + regenerate" path.
+ *   devices     — injectable device registry (createDeviceRegistry instance).
+ *                 Tests MUST inject their own (with no-op load/save); the
+ *                 DEFAULT targets ~/.manta/devices.json (0600) and is owned by
+ *                 index.mjs.
  *
  * DANGER — the saveAuth/deleteAuth DEFAULTS target the real box store
  * (~/.manta/auth.json). Only index.mjs, which owns that store, may rely on
@@ -396,11 +407,34 @@ export function createAuthEngine({
   now = () => Date.now(),
   saveAuth: saveAuthFn = saveAuth,
   deleteAuth: deleteAuthFn = deleteAuth,
+  devices: devicesFn,
 } = {}) {
   if (!auth || !isValidToken(auth.box_id) || !isValidToken(auth.box_token)) {
     throw new Error("createAuthEngine: valid { box_id, box_token } required");
   }
   const pairing = createPairingRegistry({ ttlMs, now });
+
+  // Per-device credential registry. Default targets ~/.manta/devices.json;
+  // the shared box_token is seeded as the `primary` device so existing paired
+  // devices (desktop + manta-native AI tools) keep working unchanged.
+  const devices = devicesFn ?? createDeviceRegistry({ now });
+  // Seed/resync the primary (shared box_token) device — idempotent: if a
+  // primary already exists (upgrade path) this just re-syncs its token; on a
+  // fresh registry it creates one. This is what keeps the existing desktop +
+  // manta-native AI tools authenticating against the new per-device gate.
+  devices.seedPrimary(auth.box_token);
+
+  // Fire-and-forget, throttled flush of the device registry (last_seen). Safe
+  // to ignore: it never blocks the synchronous auth path, and a lost write
+  // only means a stale last_seen on the next process start.
+  let lastDevicePersist = 0;
+  function maybePersistDevices(force = false) {
+    const t = now();
+    if (force || t - lastDevicePersist > DEVICE_PERSIST_MS) {
+      lastDevicePersist = t;
+      devices.persist().catch(() => {});
+    }
+  }
 
   // Is this request authorized? Returns { ok } or { ok:false, status, error }.
   // Exempt paths and the disabled-enforcement mode short-circuit to allow.
@@ -412,7 +446,12 @@ export function createAuthEngine({
     if (method === "GET" && isPublicAssetPath(path)) return { ok: true };
     if (!enforce) return { ok: true };
     const presented = parseBearer(authorization);
-    if (presented && tokenMatches(auth.box_token, presented)) return { ok: true };
+    if (presented && devices.authorize(presented)) {
+      // matched a live device (primary or per-device) → authorized; last_seen
+      // bumped in memory, flushed at most once per DEVICE_PERSIST_MS.
+      maybePersistDevices();
+      return { ok: true };
+    }
     return { ok: false, status: 401, error: "unauthorized" };
   }
 
@@ -424,56 +463,77 @@ export function createAuthEngine({
     return { ok: true, pairing_code: code, box_id: auth.box_id, expiresAt };
   }
 
-  // Handle POST /auth/claim {pairing_code} — exchange a valid code for the
-  // box_token. One-time: a correct code is consumed. Returns 400 on a
-  // missing/invalid code and 403 on a wrong/expired/already-used code (so a
-  // guesser learns only "no", never partial progress).
-  function claim({ pairing_code } = {}) {
+  // Handle POST /auth/claim {pairing_code, device_id?, name?} — exchange a
+  // valid code for a device credential. One-time: a correct code is consumed.
+  // Returns 400 on a missing/invalid code and 403 on a wrong/expired/already-
+  // used code (so a guesser learns only "no", never partial progress).
+  //
+  // Back-compat / coexistence: a claim with NO device_id resumes the PRIMARY
+  // (shared box_token) device and returns `box_token = auth.box_token` exactly
+  // as before — existing clients keep working unchanged. A claim WITH a
+  // device_id provisions (or resumes) that distinct device and returns its own
+  // per-device token. Either way the response keeps the `{ box_token, box_id }`
+  // shape existing clients already persist; `device_id` is additive.
+  function claim({ pairing_code, device_id = null, name = null } = {}) {
     if (!isValidPairingCode(pairing_code)) {
       return { ok: false, status: 400, error: "invalid pairing code" };
     }
     if (!pairing.consume(pairing_code)) {
       return { ok: false, status: 403, error: "pairing failed" };
     }
-    return { ok: true, box_token: auth.box_token, box_id: auth.box_id };
+    const { entry } = devices.claim({ deviceId: device_id, name });
+    maybePersistDevices(true);
+    return {
+      ok: true,
+      box_token: entry.token,
+      box_id: auth.box_id,
+      device_id: entry.device_id,
+    };
   }
 
-  // Handle DELETE /auth/revoke — "remove this box from the device that holds
-  // the current box_token". Three distinct failure shapes for the desktop's
-  // classifier (BET-357 §2):
+  // Handle DELETE /auth/revoke — two modes:
+  //   • PER-DEVICE (device_id supplied): kill only that device's token, leaving
+  //     every other device (and the primary box_token holder) working. This is
+  //     §6.3/§6.4 "revoke one device" — the revoked token is dead on its very
+  //     next request.
+  //   • WHOLE-BOX RESET (no device_id): the legacy "remove this box" handshake
+  //     (BET-357 §2) — regenerate the entire identity, so EVERY credential
+  //     (primary + per-device) must re-pair.
+  //
+  // Three distinct failure shapes for the desktop's classifier:
   //   • no token presented           → 401 (the standard "unauthorized")
   //   • token is not 32-hex          → 400 (malformed; the device's own value
   //                                    was wrong before it ever reached us)
-  //   • token is well-shaped but the box's own token is different → 401
-  //   • token matches                → delete the on-disk auth file, mint a
-  //                                    fresh identity (box_id + box_token),
-  //                                    and mutate the in-memory `auth` so the
-  //                                    next request — by ANY device — is
-  //                                    forced to pair+claim the new pair.
-  //                                    Returns 200.
-  // Why a fresh identity (not just a no-op-after-delete): a literal "delete
-  // the file" leaves the engine's `auth.box_token` stale until the server
-  // restarts and re-runs ensureAuth(); during that window the engine would
-  // still issue the OLD token from /auth/claim (because `claim` reads from the
-  // in-memory `auth`). Regenerating in place collapses the gap: the device
-  // that called revoke immediately loses access (its old token is dead) AND
-  // a fresh /auth/pair → /auth/claim returns the new token to whoever pairs
-  // next. This matches the spec's "next install mints a new one" semantics
-  // without leaving the engine in a "no token at all" stuck state.
-  async function revoke({ token } = {}) {
+  //   • token is well-shaped but not a live device → 401
+  async function revoke({ token, device_id = null } = {}) {
     if (typeof token !== "string" || token === "") {
       return { ok: false, status: 401, error: "unauthorized" };
     }
     if (!isValidToken(token)) {
       return { ok: false, status: 400, error: "malformed token" };
     }
-    if (!tokenMatches(auth.box_token, token)) {
+    // The presented token must itself belong to a live (non-revoked) device —
+    // primary or per-device. authorize() bumps last_seen as a side effect.
+    if (!devices.authorize(token)) {
       return { ok: false, status: 401, error: "unauthorized" };
     }
-    // Caller is the legitimate holder of the current box_token. Mint a fresh
-    // identity, write it, and swap it into the closed-over `auth` so the
-    // very next /authorize and /auth/claim use the new token. The OLD token
-    // is dead from this instant.
+
+    // ---- Per-device revoke: caller names the target device ----
+    if (device_id) {
+      const target = devices.getDevice(device_id);
+      if (!target) return { ok: false, status: 404, error: "device not found" };
+      if (devices.revokeDevice(device_id) === null) {
+        return { ok: false, status: 404, error: "device not found" };
+      }
+      maybePersistDevices(true);
+      return { ok: true, box_id: auth.box_id, device_id, reset: false };
+    }
+
+    // ---- Whole-box reset (legacy back-compat path) ----
+    // Caller is a live device and wants the whole box reset. Mint a fresh
+    // identity, write it, swap it into the closed-over `auth`, and reset the
+    // device registry to a single fresh primary. The OLD token (and every
+    // per-device token) is dead from this instant.
     const fresh = {
       box_id: genToken(),
       box_token: genToken(),
@@ -488,12 +548,23 @@ export function createAuthEngine({
     // creates it).
     await deleteAuthFn();
     await saveAuthFn(fresh);
+    // Reset the device registry to the fresh primary token (drops every
+    // per-device credential).
+    devices.resetAll(fresh.box_token);
+    maybePersistDevices(true);
     // Mutate the closed-over `auth` in place. The caller (index.mjs) holds a
     // reference to the same object via `boxAuth`, so it sees the new values.
     auth.box_id = fresh.box_id;
     auth.box_token = fresh.box_token;
     auth.created_at = fresh.created_at;
-    return { ok: true, box_id: fresh.box_id };
+    return { ok: true, box_id: fresh.box_id, device_id: null, reset: true };
+  }
+
+  // Linked-device list for the desktop (Stage 5) + any paired device: public
+  // metadata per live device (no tokens). The caller iid is already validated
+  // by the auth gate when this is served behind /auth/devices.
+  function listDevices() {
+    return devices.listDevices();
   }
 
   return {
@@ -503,6 +574,7 @@ export function createAuthEngine({
     pair,
     claim,
     revoke,
+    listDevices,
     // exposed for /auth/status and tests
     hasActivePairing: () => pairing.hasActive(),
     clearPairing: () => pairing.clear(),
