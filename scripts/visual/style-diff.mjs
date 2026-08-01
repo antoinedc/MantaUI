@@ -111,6 +111,46 @@ const GROUP_OF = {
 };
 
 /**
+ * Which token family is the AUTHORITATIVE match for each property's value
+ * type, used to disambiguate spacing/radius collisions (BET-530).
+ *
+ * `border-radius` takes radius tokens (`--r-*`); `padding-*`/`gap` take
+ * spacing tokens (`--sp-*`). Every OTHER property takes neither — a
+ * `--sp-*`/`--r-*` token matching it is a category error, not a close call
+ * (a 12px font-size is not a `--sp-3|--r-lg` collision). This is ground
+ * truth from the CSS property, not a token-name heuristic.
+ *
+ * A property whose type matches no token family (e.g. font-size, font-weight,
+ * opacity, z-index, line-height) therefore renders as NO match, never as a
+ * bucket and never by falling back to the both-families behaviour.
+ */
+const FAMILY_PREFIX = {
+  "border-radius": "r-",
+  "padding-top": "sp-",
+  "padding-right": "sp-",
+  "padding-bottom": "sp-",
+  "padding-left": "sp-",
+  gap: "sp-",
+  "row-gap": "sp-",
+  "column-gap": "sp-",
+};
+
+/**
+ * Properties whose value type maps to NO token family at all — a font size
+ * is not a spacing, radius, or border token. A resolved token matching one
+ * of these is a category error, so per the BET-530 constraint they render as
+ * NO match (never a bucket, never a fall-through to another family).
+ * `z-index` is in the issue but isn't one of the tracked PROPERTIES.
+ */
+const NO_FAMILY_PROPERTIES = new Set([
+  "font-size",
+  "font-weight",
+  "line-height",
+  "letter-spacing",
+  "opacity",
+]);
+
+/**
  * The browser-default sentinel per property. A property is SKIPPED when BOTH
  * sides sit at the default (otherwise the report is thousands of lines of
  * transparent/0px/normal noise). `null` = never default-skippable (inherited
@@ -353,7 +393,21 @@ function fmtValue(value, map) {
     : `[no token] (${value})`;
 }
 
-function renderSectionA(appRecords, mockRecords, map) {
+/**
+ * Filter a resolved token name-set down to the ones legitimately matching
+ * `prop`'s value type (BET-530). A property with an explicit family
+ * (FAMILY_PREFIX) keeps only that family's tokens; a property whose type
+ * matches no token family (NO_FAMILY_PROPERTIES) keeps nothing (no match);
+ * every other property is left unchanged. An empty result means "no match".
+ */
+export function matchFamilyTokens(prop, toks) {
+  if (NO_FAMILY_PROPERTIES.has(prop)) return [];
+  const prefix = FAMILY_PREFIX[prop];
+  if (!prefix) return toks;
+  return toks.filter((t) => t.startsWith(`--${prefix}`));
+}
+
+export function renderSectionA(appRecords, mockRecords, map) {
   const counts = new Map(); // group -> side -> token -> count
   const bump = (group, side, token) => {
     if (!counts.has(group)) counts.set(group, new Map());
@@ -372,10 +426,18 @@ function renderSectionA(appRecords, mockRecords, map) {
         if (isPhantomBorderColor(prop, rec.props)) continue;
         const toks = resolveToken(value, map);
         if (!toks) continue;
-        // A value that maps to several colliding tokens is ONE observation —
-        // count the candidate set as a single bucket (`--sp-3|--r-lg`), not
-        // each token separately (which would multiply one element into N).
-        const bucket = toks.length > 1 ? toks.join("|") : toks[0];
+        // Disambiguate spacing/radius collisions by property family (BET-530).
+        // A token family that doesn't match the property's type is a category
+        // error, not a candidate: drop it. If nothing legitimate remains, the
+        // value is "no match" for this property — don't count it and don't
+        // fall back to an honest-but-wrong cross-family bucket.
+        const famToks = matchFamilyTokens(prop, toks);
+        if (famToks.length === 0) continue;
+        // A value that maps to several colliding tokens WITHIN its family is
+        // ONE observation — count the candidate set as a single bucket
+        // (`--sp-a|--sp-b`), not each token separately (which would multiply
+        // one element into N).
+        const bucket = famToks.length > 1 ? famToks.join("|") : famToks[0];
         bump(GROUP_OF[prop], side, bucket);
       }
     }
