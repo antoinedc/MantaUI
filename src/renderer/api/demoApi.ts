@@ -36,16 +36,16 @@
 import type { Api } from "../../shared/api.js";
 import type { AvailableLauncher } from "../../shared/types.js";
 import { demoState } from "./demoFixture.js";
-import { pickDemoDataset } from "../demoLayout.js";
+import { pickDemoState } from "../demoLayout.js";
 
 // Resolved once at module load — the demo transport is only ever imported
-// from bootDemo(), which has already decided we are in demo mode. "empty"
-// serves a box with no projects so the zero-project screens are reachable
-// from a URL (see pickDemoDataset).
-const DEMO_DATASET =
+// from bootDemo(), which has already decided we are in demo mode. The state
+// is a single selector (see pickDemoState), so each fixture state is a URL
+// value rather than a boolean flag per state.
+const DEMO_STATE =
   typeof window === "undefined"
     ? "full"
-    : pickDemoDataset(new URLSearchParams(window.location.search));
+    : pickDemoState(new URLSearchParams(window.location.search));
 
 // ===========================================================================
 // Explicit methods — the ones the renderer actually calls during load +
@@ -56,7 +56,7 @@ const configGet = (): Promise<typeof demoState.config> =>
   Promise.resolve(demoState.config);
 
 const tmuxList = (): Promise<typeof demoState.projects> =>
-  Promise.resolve(DEMO_DATASET === "empty" ? [] : demoState.projects);
+  Promise.resolve(DEMO_STATE === "empty" ? [] : demoState.projects);
 
 // SSE-style push subscription. The renderer (App.tsx) registers one
 // onStatusEvent listener; we call it back once with the full fixture status
@@ -136,7 +136,14 @@ const getClientVersion = (): Promise<{ version: string }> =>
   Promise.resolve({ version: "0.0.13" });
 
 const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string }> =>
-  Promise.resolve({ version: "0.0.13", minClient: "0.0.0", opencodeVersion: "0.0.0" });
+  Promise.resolve({
+    version: "0.0.13",
+    // "version-skew" makes the client (0.0.13) older than the floor, which is
+    // what drives App.tsx's non-dismissible skew banner. Every other state
+    // keeps the never-skewed default.
+    minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",
+    opencodeVersion: "0.0.0",
+  });
 
 // Subscription provider auth (BET-308 / BET-309). Demo returns the three
 // disconnected rows so the connect-card UI still renders the registry

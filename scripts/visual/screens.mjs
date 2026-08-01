@@ -92,7 +92,7 @@ export const SCREENS = [
     title: "Welcome / new session composer (zero projects)",
     // The zero-project state IS this screen: App renders the new-session
     // composer full-panel when the box has no projects yet.
-    url: "/app/index.html?demo&desktop&empty",
+    url: "/app/index.html?demo&desktop&state=empty",
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
@@ -123,6 +123,28 @@ export const SCREENS = [
       "manta-model-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The version-skew banner is a blocking, non-dismissible bar that no
+    // capture has ever rendered. Same screen, same fixture, one URL param.
+    id: "session-version-skew",
+    title: "Session view with the version-skew banner (state)",
+    url: "/app/index.html?demo&desktop&state=version-skew",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    // No mockup draws the banner; `null` is the registry's documented way to
+    // say "no design filed" and the row still gets structure + pixels.
+    mockup: null,
+    // Same session shell as the `session` row, rendered without the click
+    // action, so it closes the model/effort picker and session-menu triggers
+    // (but not the click-only ctx pill). From the coverage gate's failure
+    // output — BET-486 requires every non-opening row to declare this.
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
       "manta-session-menu-trigger",
     ],
   },

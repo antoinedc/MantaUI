@@ -7,7 +7,7 @@
 // the conflict + edge cases the PR review specifically asked us to cover.
 
 import { describe, it, expect } from "vitest";
-import { pickDemoLayout, pickDemoDataset } from "./demoLayout";
+import { pickDemoLayout, pickDemoState, DEMO_STATES, type DemoState } from "./demoLayout";
 
 describe("pickDemoLayout — demo-mode URL override", () => {
   it("forces <App/> (desktop) with ?demo&desktop, independent of preload presence", () => {
@@ -37,17 +37,28 @@ describe("pickDemoLayout — demo-mode URL override", () => {
   });
 });
 
-describe("pickDemoDataset", () => {
-  it("defaults to the full fixture", () => {
-    expect(pickDemoDataset(new URLSearchParams(""))).toBe("full");
-    expect(pickDemoDataset(new URLSearchParams("demo&desktop"))).toBe("full");
+describe("pickDemoState — single URL selector for fixture states", () => {
+  it("resolves each DEMO_STATES member by name", () => {
+    for (const state of DEMO_STATES) {
+      expect(pickDemoState(new URLSearchParams(`demo&state=${state}`))).toBe(state);
+    }
   });
 
-  it("serves the empty box when ?empty is present", () => {
-    expect(pickDemoDataset(new URLSearchParams("demo&desktop&empty"))).toBe("empty");
+  it("defaults to the full fixture when state is absent", () => {
+    expect(pickDemoState(new URLSearchParams(""))).toBe("full");
+    expect(pickDemoState(new URLSearchParams("demo&desktop"))).toBe("full");
   });
 
-  it("ignores the flag's value — presence is the signal", () => {
-    expect(pickDemoDataset(new URLSearchParams("empty=0"))).toBe("empty");
+  it("falls back to full when state is an unknown value (typo-safe)", () => {
+    expect(pickDemoState(new URLSearchParams("demo&state=bogus"))).toBe("full");
+    expect(pickDemoState(new URLSearchParams("demo&state=empty-ish"))).toBe("full");
+    expect(pickDemoState(new URLSearchParams("demo&state="))).toBe("full");
+  });
+});
+
+describe("pickDemoState — every member is a valid DemoState", () => {
+  it("DEMO_STATES is exactly the set of DemoState values", () => {
+    const states: readonly DemoState[] = DEMO_STATES;
+    expect(states).toEqual(["full", "empty", "version-skew"]);
   });
 });

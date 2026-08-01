@@ -1,0 +1,54 @@
+- complementary:
+  - heading "Workspace" [level=2]
+  - button "Search sessions"
+  - button "+"
+  - tree "Sessions":
+    - treeitem "ethernal + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Add CSV export Pin" [selected]:
+      - text: ""
+      - button "Pin"
+    - treeitem /Refactor auth middleware Pin [\d,.]+[bkmBKM]+/:
+      - text: ""
+      - button "Pin"
+      - text: ""
+    - treeitem /Investigate \d+[hmsp]+ in \/api\/v1\/orders Pin [\d,.]+[bkmBKM]+/:
+      - text: ""
+      - button "Pin"
+      - text: ""
+    - treeitem "marketing + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Landing page copy Pin now":
+      - text: ""
+      - button "Pin"
+      - text: ""
+    - treeitem "Build pipeline Pin":
+      - text: ""
+      - button "Pin"
+    - treeitem "infra + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Deploy new billing service Pin":
+      - text: ""
+      - button "Pin"
+  - button "Settings…"
+- main:
+  - text: This app is out of date and may not work correctly — please update.
+  - button "Update"
+  - text: ethernal / Add CSV export feat/orders-csv-export
+  - button "Terminal"
+  - button "Session actions"
+  - text: ✻ Welcome. Type a message below to start.
+  - textbox "Try something… (@ files · / commands · tab insert · ⏎ send)":
+    - /placeholder: Try something…  (@ files · / commands · tab insert · ⏎ send)
+  - button "Opus 4.7"
+  - button "High" [disabled]
+  - button "schedules"
+  - button "secrets"
+  - button "webhooks"
+  - button "Permissions on — click to bypass"
