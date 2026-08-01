@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   dep-audit:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

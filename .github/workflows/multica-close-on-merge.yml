@@ -18,7 +18,7 @@ jobs:
   close:
     name: Close or comment on BET issue
     if: github.event_name == 'pull_request_target'
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # pull_request_target defaults to checking out the PR's BASE ref, which
@@ -64,7 +64,7 @@ jobs:
       (github.event_name == 'schedule' ||
        github.event_name == 'workflow_dispatch' ||
        github.event.pull_request.merged == true)
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

@@ -24,9 +24,10 @@
 # (which would break ALL push notifications across every box — silent
 # outage).
 #
-# RUNNER + AUTH: self-hosted manta-dev-runner (this dev box), SSH to prod via
-#   ~/.manta-deploy/prod_key. No GitHub secret needed (public half is already
-#   in the prod box's authorized_keys).
+# RUNNER + AUTH: GitHub-hosted ubuntu-latest (repo is PUBLIC — free), SSH to
+#   prod via the PROD_SSH_KEY repo secret (private half of
+#   ~/.manta-deploy/prod_key; public half is already in the prod box's
+#   authorized_keys). The key is written to /tmp/prod_key (0600) at run time.
 #
 # TRIGGER: push a tag matching gateway-v* (e.g. gateway-v1). Also
 #   workflow_dispatch (deploys current main).
@@ -45,14 +46,23 @@ concurrency:
 
 env:
   PROD_HOST: root@91.107.196.2
-  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  SSH_KEY: /tmp/prod_key
   GATEWAY_URL: https://gateway.mantaui.com
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Authorize deploy key
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PROD_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
+
       - name: Pull + restart the gateway
         run: |
           set -euo pipefail

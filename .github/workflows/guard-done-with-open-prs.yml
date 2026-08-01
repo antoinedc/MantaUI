@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   reconcile:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     env:
       MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
       MULTICA_WORKSPACE_ID: 264c89bb-4659-4570-af7b-5f8daaf87985

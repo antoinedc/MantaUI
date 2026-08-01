@@ -2,17 +2,24 @@
 #
 # Job name `typecheck-test` is THE required check — the single context in
 # required-checks.json and in the `main` branch ruleset. This makes the PM
-# agent's GATE 2 tamper-proof: the gate runs on the repo's self-hosted runner
-# (manta-dev-runner on the dev box), independent of whatever an implementer
-# agent claims locally. The PM reads `gh pr checks` instead of checking out PR
-# branches.
+# agent's GATE 2 tamper-proof: the gate runs on fresh, ephemeral GitHub-hosted
+# runners (this repo is PUBLIC — minutes are free + unlimited, and the 20-job
+# concurrency replaced the single self-hosted runner's queue), independent of
+# whatever an implementer agent claims locally. The PM reads `gh pr checks`
+# instead of checking out PR branches.
 #
-# ── COST DISCIPLINE (2026-07-27, mirrors tenanture TEN-618) ──────────────────
-# This repo has exactly ONE self-hosted runner, so jobs do NOT run in parallel —
-# they queue, and every extra job is wall-clock time every other open PR waits
-# behind. Before this pass a PR cost 13.2 minutes of exclusive runner time
+# ── COST DISCIPLINE (2026-07-27, mirrors tenanture TEN-618; RETIRED 2026-08-01) ─
+# This repo HAD exactly ONE self-hosted runner, so jobs did NOT run in parallel —
+# they queued, and every extra job was wall-clock time every other open PR waited
+# behind. Before that pass a PR cost 13.2 minutes of exclusive runner time
 # across six jobs in three workflow files, four of them repeating the same
 # checkout and `npm ci`.
+#
+# 2026-08-01: the repo moved every job to fresh GitHub-hosted runners (it is
+# PUBLIC → free + unlimited minutes, 20 concurrent jobs), so the one-runner
+# queue is gone. The three fixes below remain best practice (caching, folding
+# detectors into steps, dropping redundant required contexts) — keep them as
+# written; only the "adding a job queues every other PR" cost is retired.
 #
 # Three fixes, all of which keep every detector and every blocking semantic:
 #   1. `node_modules` is CACHED on the lockfile hash, so `npm ci` runs only when
@@ -25,9 +32,11 @@
 #      were dropped first, which is the mandatory ordering — a required context
 #      that no job produces blocks every PR forever.
 #
-# The corollary: adding a JOB now costs every other open PR wall-clock time, so
-# prefer a step. Adding a required CONTEXT means editing GitHub-side ruleset
-# config that CI cannot reach — a deliberate speed bump.
+# (The old corollary — "adding a JOB costs every other open PR wall-clock time,
+# so prefer a step" — is retired with the one-runner queue; jobs now run in
+# parallel on GitHub-hosted runners. Prefer a step only when it keeps logic
+# co-located. Adding a required CONTEXT still means editing GitHub-side ruleset
+# config that CI cannot reach — a deliberate speed bump.)
 #
 # Scope deliberately matches AGENTS.md's documented gate:
 #   npm run typecheck && npm test   (tsc x2, vitest, node:test)
@@ -49,7 +58,7 @@ concurrency:
 
 jobs:
   typecheck-test:
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
@@ -100,8 +109,8 @@ jobs:
       #    branch cut and merge, the committed shots go silently stale; this
       #    catches it at PR time instead of post-merge.
       #
-      #    Added as a STEP (not a new job) per the cost discipline at the top
-      #    of this file — one self-hosted runner, one queue slot. `typecheck-
+      #    Added as a STEP (not a new job) to keep logic co-located with the
+      #    required gate. `typecheck-
       #    test` IS the required check (required-checks.json + the main
       #    ruleset), so a failed diff here blocks the PR, which is exactly
       #    what BET-341 asked for. No new required-context, no ruleset edit.
@@ -170,9 +179,9 @@ jobs:
       #    for structure (accessibility-tree snapshot) and pixels (screenshot
       #    vs committed baseline). See docs/visual-verification.md.
       #
-      #    Why this is a STEP in the required job, not a new job: one
-      #    self-hosted runner, one queue slot (cost discipline at the top of
-      #    this file). It is deterministic by construction — fixture-backed
+      #    Why this is a STEP in the required job, not a new job: it shares the
+      #    app's checkout + Playwright install with the rest of the gate. It is
+      #    deterministic by construction — fixture-backed
       #    demo transport, no network, animations disabled, selector-gated
       #    waits, and Playwright's version-pinned Chromium (NOT system Chrome,
       #    which auto-updates and would silently invalidate every baseline).
@@ -289,7 +298,7 @@ jobs:
   # that BET-220 flagged.
   duplication-gate:
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -314,7 +323,7 @@ jobs:
   # e2e-smoke as a judgment call, a red typecheck-test as an absolute stop.
   e2e-smoke:
     name: E2E Smoke Test
-    runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: typecheck-test
     steps:
@@ -350,4 +359,7 @@ jobs:
         run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
 
       - name: Run E2E smoke tests
-        run: bash scripts/check-e2e-smoke.sh
+        # xvfb-run: script needs a display for headless Electron but does not
+        # start one itself (relied on the old self-hosted box's display).
+        # `-a` auto-allocates a free server on the GitHub-hosted runner.
+        run: xvfb-run -a bash scripts/check-e2e-smoke.sh

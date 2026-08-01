@@ -31,10 +31,10 @@
 #   burned on the slow arm64 build.
 #
 # PUBLISH HOST + AUTH
-#   Self-hosted runner (same as website-deploy.yml + gateway-deploy.yml) —
-#   reaches prod over SSH with the deploy key at ~/.manta-deploy/prod_key. No
-#   GitHub secret needed. Reuses website-deploy.yml's scp/ssh invocation
-#   verbatim.
+#   GitHub-hosted ubuntu-latest (same as website-deploy.yml + gateway-deploy.yml)
+#   — reaches prod over SSH with the PROD_SSH_KEY repo secret written to
+#   /tmp/prod_key (0600) at run time. Reuses website-deploy.yml's scp/ssh
+#   invocation verbatim.
 #
 # ATOMICITY
 #   tarballs + versioned manifest are uploaded FIRST; manta-latest.txt is
@@ -82,13 +82,13 @@ concurrency:
 
 env:
   PROD_HOST: root@91.107.196.2
-  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  SSH_KEY: /tmp/prod_key
 
 jobs:
   # Resolve channel ONCE at the entrypoint. Downstream steps read the resolved
   # outputs and never re-derive — same shape as website-deploy.yml.
   resolve:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
       channel: ${{ steps.resolve.outputs.channel }}
@@ -197,7 +197,7 @@ jobs:
   publish:
     name: publish + verify
     needs: [resolve, build]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -247,10 +247,21 @@ jobs:
             --out "dist/manta-${VERSION}.txt"
           echo "✓ combined manifest: dist/manta-${VERSION}.txt"
 
-      # Same scp/ssh plumbing as website-deploy.yml — no new secrets, no new
-      # key path. tarballs + versioned manifest first; channel *-latest.txt
+      # /tmp/prod_key holds the PROD_SSH_KEY repo secret (private half of
+      # ~/.manta-deploy/prod_key; public half already in the prod box's
+      # authorized_keys). Written 0600 at run time on this ephemeral GitHub
+      # runner. tarballs + versioned manifest first; channel *-latest.txt
       # pointer LAST so a client either sees old (and old tarballs) or new
       # (and new tarballs are already uploaded) — drift is impossible.
+      - name: Authorize deploy key
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PROD_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
+
       - name: Upload tarballs + combined manifest to channel destination
         env:
           VERSION: ${{ steps.vars.outputs.version }}

@@ -30,10 +30,11 @@
 # needs the bundle to be committed.
 #
 # RUNNER + AUTH
-#   Runs on the self-hosted manta-dev-runner (this dev box), which reaches the
-#   prod box over SSH with the deploy key at ~/.manta-deploy/prod_key (public
-#   half is in the prod box's authorized_keys). Same as website-deploy.yml — no
-#   GitHub secret needed.
+#   Runs on GitHub-hosted ubuntu-latest (repo is PUBLIC — free), which reaches
+#   the prod box over SSH with the PROD_SSH_KEY repo secret (private half of
+#   ~/.manta-deploy/prod_key; public half in the prod box's authorized_keys).
+#   Same as website-deploy.yml — the key is written to /tmp/prod_key (0600)
+#   at run time.
 #
 # TRIGGER: push to main (the source of truth). Also runnable manually via
 #   workflow_dispatch (rebuilds + republishes from current main).
@@ -55,12 +56,12 @@ concurrency:
 env:
   PROD_HOST: root@91.107.196.2
   WEBROOT: /var/www/mantaui
-  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  SSH_KEY: /tmp/prod_key
   SITE: https://mantaui.com
 
 jobs:
   build-and-publish:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +77,15 @@ jobs:
       # package.json); the mobile build is pure Vite and doesn't need the native
       # module, so npm ci succeeds on the runner regardless.
       - run: npm ci
+
+      - name: Authorize deploy key
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PROD_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
 
       - name: Build mobile bundle
         run: npm run build:mobile

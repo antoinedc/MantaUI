@@ -19,9 +19,10 @@
 # Verify follows the copy — no hand-maintained file list, so no silent 404.
 #
 # RUNNER + AUTH
-#   Runs on the self-hosted manta-dev-runner (this dev box), which reaches the prod
-#   box over SSH with the deploy key at ~/.manta-deploy/prod_key (public half is
-#   in the prod box's authorized_keys). No GitHub secret needed.
+#   Runs on GitHub-hosted ubuntu-latest (repo is PUBLIC — free), which reaches
+#   the prod box over SSH with the PROD_SSH_KEY repo secret (private half of
+#   ~/.manta-deploy/prod_key; public half is in the prod box's authorized_keys).
+#   The key is written to /tmp/prod_key (0600) at run time.
 #
 # TRIGGER: push a tag matching web-v* (e.g. web-v1, web-v2026-07-19) → ALWAYS
 #   resolves to `prod`. Also runnable manually via workflow_dispatch with the
@@ -51,11 +52,11 @@ concurrency:
 
 env:
   PROD_HOST: root@91.107.196.2
-  SSH_KEY: /home/dev/.manta-deploy/prod_key
+  SSH_KEY: /tmp/prod_key
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # Resolve channel ONCE here: a tag push is always prod; a workflow_dispatch
     # honours its input (default staging). Downstream steps read the resolved
@@ -70,6 +71,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Authorize deploy key
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PROD_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
 
       - id: resolve
         name: Resolve channel + destinations
