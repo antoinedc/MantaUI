@@ -169,7 +169,7 @@ export function SessionHeader({
           <button
             type="button"
             onClick={() => onModeChange(targetMode)}
-            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill rounded p-1 inline-flex items-center"
+            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill-hover rounded p-1 inline-flex items-center"
             title={`Switch to ${modeLabel}`}
             aria-label={modeLabel}
           >
@@ -280,7 +280,7 @@ function ContextPill({
         "manta-ctx-pill inline-flex items-center gap-2 rounded-full px-2 py-px text-meta transition-colors " +
         (stale
           ? "bg-warn-bg hover:bg-warn-bg"
-          : "hover:bg-fill")
+          : "hover:bg-fill-hover")
       }
       aria-haspopup="dialog"
       aria-expanded={open}

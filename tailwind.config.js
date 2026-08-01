@@ -91,6 +91,14 @@ export default {
           elev: "rgb(var(--panel-rgb) / <alpha-value>)",
           soft: "rgb(var(--card-rgb) / <alpha-value>)",
         },
+        // Hover/active fill token (BET-539). `bg-fill-hover` and `bg-fill-active`
+        // resolve to --fill-hover / --fill-active; `bg-fill` resolves to the
+        // DEFAULT --fill base.
+        fill: {
+          DEFAULT: "var(--fill)",
+          hover: "var(--fill-hover)",
+          active: "var(--fill-active)",
+        },
         border: {
           DEFAULT: "rgb(var(--border-rgb) / <alpha-value>)",
           subtle: "var(--border-subtle)",
