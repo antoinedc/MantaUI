@@ -119,10 +119,9 @@ jobs:
       #    NOTE: shots.mjs hardcodes that absolute path rather than resolving
       #    the binary from PATH. apt installs to /usr/bin so this works, but
       #    the hardcode is still wrong (a Homebrew ffmpeg lands in
-      #    /opt/homebrew/bin and would not be found) — tracked separately;
-      #    not fixed here because main is red and this PR is the unblock.
-      - name: Install ffmpeg (hero-poster extraction in the drift gate)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      #    /opt/homebrew/bin and would not be found) — tracked separately
+      #    (BET-522 does not change shots.mjs). Shared with dep-audit-nightly.
+      - uses: ./.github/actions/install-ffmpeg
 
       - name: Typecheck
         run: npm run typecheck
@@ -181,23 +180,15 @@ jobs:
       #    `npm run shots` and commit. A determinism regression fails HERE (as
       #    itself), not as a mystery diff on some unrelated PR.
       #
-      #    The pinned Chromium must be present BEFORE the drift gate captures.
-      #    After the 2026-07-31 Chrome-148 failure the gate ran cold against
-      #    whatever browser was already in the runner cache — the visual gate's
-      #    browser install step sat AFTER this step — so a stale cache could
-      #    launch a browser that paints differently from the committed set.
-      #    The lockfile-pinned browser is installed here, first, so both this
-      #    gate and the visual gate below drive the exact renderer the
-      #    baselines were encoded under.
-      - name: Cache Playwright browsers
-        id: pw-cache-drift
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright Chromium
-        run: npx playwright install ${{ steps.pw-cache-drift.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+      # The pinned Chromium must be present BEFORE the drift gate captures.
+      # After the 2026-07-31 Chrome-148 failure the gate ran cold against
+      # whatever browser was already in the runner cache — the visual gate's
+      # browser install step sat AFTER this step — so a stale cache could
+      # launch a browser that paints differently from the committed set.
+      # The lockfile-pinned browser is installed here, first, so both this
+      # gate and the visual gate below drive the exact renderer the
+      # baselines were encoded under. Shared with the E2E job + dep-audit-nightly.
+      - uses: ./.github/actions/cache-playwright-browsers
 
       - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
         if: github.event_name == 'pull_request'
@@ -429,18 +420,10 @@ jobs:
         if: steps.nm-cache.outputs.cache-hit != 'true'
         run: npm ci
 
-      # Playwright's browser download is the slowest part of this job and only
-      # changes when the Playwright version does. `--with-deps` needs sudo apt
-      # and is only required the first time on a given runner.
-      - name: Cache Playwright browsers
-        id: pw-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-
-      - name: Install Playwright browsers
-        run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+      # Playwright's pinned Chromium — same shared unit the drift gate uses,
+      # so both capture gates drive the identical browser. --with-deps needs
+      # sudo apt and is only required the first time on a given runner.
+      - uses: ./.github/actions/cache-playwright-browsers
 
       - name: Run E2E smoke tests
         # xvfb-run: script needs a display for headless Electron but does not
