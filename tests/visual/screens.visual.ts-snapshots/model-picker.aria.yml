@@ -1,0 +1,5 @@
+- button "●Server default"
+- text: anthropic
+- button /● Claude Opus 4\.7 [\d,.]+[bkmBKM]+/
+- button /● Claude Sonnet 4\.6 [\d,.]+[bkmBKM]+/
+- button /● Claude Opus 4\.7 Rationale [\d,.]+[bkmBKM]+/
