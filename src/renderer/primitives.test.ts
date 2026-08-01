@@ -132,8 +132,10 @@ describe("M527 primitive rules", () => {
       if (UNDER_ADOPTED.has(p)) {
         // Under-adopted at baseline — an epic finding, NOT fixed in this cell
         // ("If a primitive has fewer than two, report it"). Un-skip when a
-        // second adopting file lands. Reason: ${SKIP_REASON[p]}
-        it.skip(label, () => {});
+        // second adopting file lands.
+        it.skip(label, () => {
+          void SKIP_REASON[p];
+        });
       } else {
         it(label, () => {
           const adopters = importers(p);
@@ -150,9 +152,11 @@ describe("M527 primitive rules", () => {
     for (const p of PRIMITIVES) {
       const label = `${p} code has no raw colour or off-grid pixel literal`;
       if (RAW_PX_EXCEPTION.has(p)) {
-        // SessionRow's .srow metrics are spec-authorized off-grid values (see
-        // SKIP_REASON[SessionRow_rawpx]); un-skip if/when a token captures them.
-        it.skip(label, () => {});
+        // SessionRow's .srow metrics are spec-authorized off-grid values; un-skip
+        // if/when a token captures them.
+        it.skip(label, () => {
+          void SKIP_REASON[p + "_rawpx"];
+        });
       } else {
         it(label, () => {
           const code = sourceCode(p);
