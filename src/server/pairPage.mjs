@@ -24,69 +24,6 @@ export const HEX32_RE = /^[0-9a-f]{32}$/;
 export const CODE_RE = /^\d{6}$/;
 
 /**
- * Parse the pairing payload from the URL FRAGMENT (`#code=…&box=…`), the only
- * place the manual-entry code ever travels on the wire (BET-489).
- *
- * The box's public /pair page is served over the same origin that ALSO ends
- * up in access logs (Caddy, reverse proxy, server), so the pairing code must
- * never appear in a path or query string — a fragment is never sent to the
- * server in a GET, so it can't be logged. This helper reads ONLY the
- * fragment. The code is then handed to the /auth/claim POST body (the one
- * place the server is DESIGNED to receive it).
- *
- * Returns `{ code, box }` where each is the raw trimmed string (may be ""),
- * so callers can validate with CODE_RE / HEX32_RE.
- */
-export function parsePairFragment(fragment) {
-  const q = new URLSearchParams((fragment || "").replace(/^#/, ""));
-  const code = (q.get("code") || "").trim();
-  const box = (q.get("box") || "").trim().toLowerCase();
-  return { code, box };
-}
-
-/**
- * Build the manual-entry claim request for a 6-digit code.
- *
- * Manual entry (§5.2.9) sends ONLY the six digits — the box ID is gone, the
- * server resolves the box from the code (/auth/claim already does this). The
- * code goes in the JSON POST BODY, never in the URL, so it can't be logged
- * by a proxy that only records the request line. Reuses the existing
- * `/auth/claim` path (no new route, no exempt-route change).
- */
-export function buildClaimRequest(code) {
-  return {
-    url: "/auth/claim",
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
-  };
-}
-
-/**
- * Classify a manual-entry claim outcome into a §5.4 `{cause, action}` state.
- *
- * - "ok"          — the claim succeeded (the box was resolved from the code).
- * - "expired"     — the server answered with a rejection (wrong / expired /
- *                   already-used code). The code the page can't distinguish
- *                   sub-reasons without more signal, and §5.4's "expired"
- *                   screen is the correct umbrella: "nothing was linked".
- * - "unreachable" — the box itself didn't answer (network error / no
- *                   response), i.e. §5.4 "Can't reach your box".
- *
- * The §5.4 "codes don't match" state is deliberately NOT reachable here: it
- * needs the human to compare what the DESKTOP shows, which a box-served page
- * cannot know (per the issue, it's a renderer-side no-op). Classified as
- * "expired" (a server rejection) rather than surfaced with wrong copy.
- */
-export function classifyClaimFailure({ threw = false, status } = {}) {
-  if (threw) return "unreachable";
-  const s = Number(status);
-  if (s >= 200 && s < 300) return "ok";
-  if (Number.isNaN(s) || s === 0) return "unreachable";
-  return "expired";
-}
-
-/**
  * Resolve the box's pair-link URL scheme from `MANTA_CHANNEL` (BET-370 +
  * BET-373). The box's release tarball bakes a `MANTA_CHANNEL` env var at
  * deploy time (mirroring the desktop's `__MANTA_CHANNEL__`); the same

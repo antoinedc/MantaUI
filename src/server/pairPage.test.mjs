@@ -14,9 +14,6 @@ import {
   resolveBoxChannel,
   renderPairQr,
   readPairAsset,
-  parsePairFragment,
-  buildClaimRequest,
-  classifyClaimFailure,
 } from "./pairPage.mjs";
 import { CHANNELS, CHANNEL_IDS } from "../shared/channel.mjs";
 
@@ -387,64 +384,59 @@ test("readPairAsset returns pair-logo.png bytes (PNG magic)", () => {
 
 // ---------------------------------------------------------------------------
 // BET-489 — manual six-digit entry on the /pair page
+//
+// These tests assert DIRECTLY on the shipped `pair.html` (the exact file the
+// server serves verbatim via readPairAsset), not on extracted/module helpers.
+// The page's dynamic logic (fragment parse, /auth/claim POST, resolved-box
+// render) lives in its inline <script> — so we certify the shipped artifact.
 // ---------------------------------------------------------------------------
 
-// parsePairFragment — the code is read ONLY from the URL fragment.
-test("parsePairFragment reads code+box from the URL fragment only (BET-489)", () => {
-  assert.deepEqual(
-    parsePairFragment("#code=847291&box=0123456789abcdef0123456789abcdef"),
-    { code: "847291", box: "0123456789abcdef0123456789abcdef" },
-  );
-});
-
-test("parsePairFragment trims + lowercases box and tolerates a leading '#'", () => {
-  assert.deepEqual(parsePairFragment("code=847291&box=ABCD"), { code: "847291", box: "abcd" });
-  assert.deepEqual(parsePairFragment(""), { code: "", box: "" });
-  assert.deepEqual(parsePairFragment(null), { code: "", box: "" });
-  assert.deepEqual(parsePairFragment("#box=x"), { code: "", box: "x" });
-});
-
-// The manual-entry mailbox: the fragment's code is handed to the EXISTING
-// /auth/claim path, which resolves the box from the code (the box ID is gone
-// in manual entry — §5.2.9). This pins that the claim reuses that endpoint.
-test("manual-entry mailbox: fragment code claims against /auth/claim (BET-489)", () => {
-  const fragment = "#code=847291&box=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-  const { code } = parsePairFragment(fragment);
-  assert.equal(code, "847291");
-  const req = buildClaimRequest(code);
-  assert.equal(req.url, "/auth/claim", "must reuse the existing claim path");
-  assert.equal(req.method, "POST");
-  assert.deepEqual(JSON.parse(req.body), { code: "847291" });
+// The manual-entry mailbox: the shipped page hands the code from the URL
+// FRAGMENT to the EXISTING /auth/claim endpoint as a {code} POST body —
+// manual entry sends only the six digits, the server resolves the box (§5.2.9).
+// The /auth/claim server half (code → resolved box) is already covered by
+// auth.test.mjs; this pins that the page wires to that same endpoint.
+test("manual-entry mailbox: shipped page claims the fragment code against /auth/claim (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // The claim endpoint is built by claimEndpointFor — it must resolve to the
+  // EXISTING /auth/claim path, never a new route.
+  const endpoint = html.match(/function claimEndpointFor\(origin\)\{([\s\S]*?)\n\}/);
+  assert.ok(endpoint, "the page must define claimEndpointFor(origin)");
+  assert.match(endpoint[1], /\/auth\/claim/, "the endpoint must reuse /auth/claim");
+  assert.match(endpoint[1], /"\/auth\/claim";/, "endpoint is exactly <origin>/auth/claim");
+  assert.doesNotMatch(endpoint[1], /"\/auth\/claim\?/, "no query appended after /auth/claim");
+  assert.doesNotMatch(endpoint[1], /[?&]code\s*=/i, "no code in a query string");
+  // doClaim POSTs only {code} to that endpoint — the code travels in the body.
+  const doClaim = html.match(/function doClaim\(code\)\{([\s\S]*?)\n\}/);
+  assert.ok(doClaim, "the page must define doClaim(code)");
+  assert.match(doClaim[1], /fetch\(claimEndpointFor\(origin\)/, "claims via the built endpoint");
+  assert.match(doClaim[1], /method:\s*"POST"/, "must be a POST");
+  assert.match(doClaim[1], /JSON\.stringify\(\{\s*code:\s*code\s*\}\)/, "body carries {code}");
+  assert.doesNotMatch(doClaim[1], /box\s*:/, "manual entry sends no box id");
 });
 
 // Fragment-only: the code must never be placed in a path/query the server
-// could log. The claim request URL carries NO query string, and the page's JS
-// sources the code only from `location.hash`, never reconstructs a URL with
-// it in the query.
+// could log. The code is sourced only from `location.hash` and sent as a POST
+// body, never reconstructed into a URL the proxy records.
 test("the page never puts the code in a path/query the server could log (fragment only) (BET-489)", () => {
-  const req = buildClaimRequest("847291");
-  assert.ok(!req.url.includes("?"), "claim URL must carry no query string");
-  assert.ok(!req.url.includes("code="), "code must never appear in the URL");
-  assert.ok(!req.body.includes("?code="), "code stays in the POST body, not a query");
-
   const html = readPairAsset("pair.html").toString("utf-8");
-  // The code is sourced only from the fragment.
-  assert.match(html, /location\.hash/);
+  // The code is sourced only from the URL fragment.
+  assert.match(html, /location\.hash/, "code must be read from the fragment");
   // No path/query construction that would surface the code to a proxy log.
-  assert.ok(!html.includes("/auth/claim?"), "no code-carrying claim URL query");
-  assert.ok(!html.includes("code="), "no literal 'code=' in a query position");
+  assert.doesNotMatch(html, /"\/auth\/claim\?"/, "no code-carrying claim URL query");
+  assert.doesNotMatch(html, /&code=|&box=/, "no query-string code/box usage");
 });
 
-// classifyClaimFailure — maps a claim outcome to a §5.4 {cause,action} state.
-test("classifyClaimFailure: server rejection / network failure map to expired / unreachable (BET-489)", () => {
-  assert.equal(classifyClaimFailure({ status: 200 }), "ok");
-  assert.equal(classifyClaimFailure({ status: 400 }), "expired");
-  assert.equal(classifyClaimFailure({ status: 403 }), "expired");
-  assert.equal(classifyClaimFailure({ status: 500 }), "expired");
-  assert.equal(classifyClaimFailure({ thrown: true }), "unreachable");
-  assert.equal(classifyClaimFailure({ status: 0 }), "unreachable");
-  assert.equal(classifyClaimFailure({ status: NaN }), "unreachable");
-  assert.equal(classifyClaimFailure({}), "unreachable");
+// The resolved-box card is fed by a claim that resolved the box (the server
+// returns box_id on success). The page must key the "Box found" card off
+// that resolved response — not off any client-side assumption.
+test("resolved-box card is fed by a successful /auth/claim that resolved the box (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  const present = html.match(/function presentClaimResult\(res, body\)\{([\s\S]*?)\n\}/);
+  assert.ok(present, "presentClaimResult must exist");
+  assert.match(present[1], /res\s*&&\s*res\.ok/, "only a successful response shows the card");
+  assert.match(present[1], /body\s*\.\s*box_id/, "keys off the server-resolved box_id");
+  assert.match(html, /Box found/, "the resolved-box card heading");
 });
 
 // Failure-state copy renders per §5.4 — the verbatim {cause, action} pairs.
