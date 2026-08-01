@@ -444,6 +444,33 @@ periods."*
 | Device token idle expiry | 90 days unused → revoked (Home Assistant's default) |
 | Revocation | Immediate, from any linked device or the desktop |
 
+### 6.4a What is actually built, as of 2026-08-01
+
+§6.1–§6.4 describe the design. This table records the **implementation** status,
+because the two had already diverged once: BET-491 was cancelled on the board
+eight minutes *after* its PR merged, and the cancellation had to be withdrawn.
+
+| Piece | Issue | Status |
+|---|---|---|
+| Pairing web page — manual six-digit + not-installed fallback (§5.3/§5.4) | BET-489 | **Built** |
+| Device registry, per-device token, linked-device list with per-device revoke | BET-490 | **Built** |
+| Device token 90-day idle expiry + rotation (§6.4 row 3) | BET-491 | **Built** (PR #414) |
+| Desktop "Add a phone" panel + two-sided four-char confirm (§6.3) | BET-493 | **Built** |
+| Push to existing devices on every new pairing | BET-492 | **Deferred** — owner decision, see below |
+| iOS "Link this phone?" joiner screen | — | **Deferred** to the implementation epic — it is mobile UI |
+| Universal link + `apple-app-site-association` | — | **Deferred** — cannot be built until the app ships (§6.6) |
+
+**On the one deliberate deferral.** §6.3 pairs a *prevention* mitigation with a
+*detection* one: the four-character two-sided confirm stops the Signal-style
+linked-device attack, and the push-on-new-pairing tells you when an unexpected
+device joins. The prevention half is built. The detection half is deferred
+because it matters at public release rather than during internal testing, where
+the user set is the maintainer.
+
+**Re-open BET-492 before public release.** Without it an unauthorised pairing is
+silent, and §6.2's whole point is that this class of compromise "can go
+unnoticed for extended periods".
+
 ### 6.5 Optional hardening — recommended, not yet committed
 
 Have the QR carry a **phone-generated public key** so the box encrypts the token
@@ -940,7 +967,7 @@ durations; semantic colour tokens rather than hex.
 | What | When | Notes |
 |---|---|---|
 | **The implementation epic** | **After BET-475 closes.** BET-431 has reported (§2). | Written against the winning stack. §1–§12 plus §17 are the input. The decomposition is **no longer purely mechanical**: §17 puts a server-side migration ahead of the app, and §15.4 is an open measurement that can change the device-side scope. BET-475 exists to close those before the epic is written. |
-| **The pairing rework** (universal link, `apple-app-site-association`, the pairing web page, the two-sided code on both screens, device list with revoke, TTL and rotation, push to existing devices) | **Being decomposed now — BET-484.** | Almost entirely **server and desktop** work. Needed identically under either stack. It is the security spine of onboarding and it de-risks the flow that matters most. |
+| **The pairing rework** (universal link, `apple-app-site-association`, the pairing web page, the two-sided code on both screens, device list with revoke, TTL and rotation, push to existing devices) | **Largely BUILT — see §6.4a.** BET-488's tree is complete except the two deferrals recorded there. | Almost entirely **server and desktop** work. Needed identically under either stack. It is the security spine of onboarding and it de-risks the flow that matters most. |
 | **App Clip** | **After the app is live on the App Store.** | Physically cannot be built before then (§6.6). |
 | **Retire the mobile web client, the CI bundle publish and the self-update fetch** | **When the native replacement is ready**, not before. | §12. |
 | **Per-session notification mute** | Only if it comes back as a product requirement. | Needs new server-side routing (§7.5). |
