@@ -87,6 +87,20 @@ describe("IconButton", () => {
     expect(el.getAttribute("aria-expanded")).toBe("true");
   });
 
+  it("renders the native disabled attribute, a not-allowed cursor and a suppressed hover when disabled", () => {
+    h = mount(<IconButton label="Attach" icon={<Terminal />} disabled />);
+    const el = buttonEl(h);
+    expect(el.disabled).toBe(true);
+    expect(el.className).toBe(
+      `${CHROME} disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-text-faint`,
+    );
+  });
+
+  it("keeps the exact chrome string when not disabled (disabled classes are opt-in)", () => {
+    h = mount(<IconButton label="Attach" icon={<Terminal />} />);
+    expect(buttonEl(h).className).toBe(CHROME);
+  });
+
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
     // If IconButton ever grew a className prop this directive becomes unused
     // and typecheck fails — the standing-decision-3 guard lives in the types.

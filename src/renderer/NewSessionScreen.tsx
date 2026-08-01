@@ -28,6 +28,7 @@ import {
 import { useStore } from "./store";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
+import { IconButton } from "./IconButton";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
@@ -525,15 +526,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
           {/* Attach — no implementation on this screen yet (welcome is
               create-first). Rendered disabled, per the UI-only constraint. */}
-          <button
-            type="button"
-            disabled
-            aria-label="Attach a file"
+          <IconButton
+            icon={<Paperclip />}
+            label="Attach a file"
             title="Attaching files is not available when starting a session"
-            className="shrink-0 w-9 h-9 rounded-lg border border-transparent inline-grid place-items-center text-text-faint disabled:cursor-not-allowed"
-          >
-            <Paperclip size={17} aria-hidden="true" />
-          </button>
+            disabled
+          />
 
           {voiceEnabled ? (
             <MicButton
@@ -547,15 +545,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             /* Dictate — no voice configured on this box yet (no Groq key).
                Rendered disabled to match the attach button, so the controls
                row agrees with the mockup whether or not voice is set up. */
-            <button
-              type="button"
-              disabled
-              aria-label="Dictate"
+            <IconButton
+              icon={<Mic />}
+              label="Dictate"
               title="Dictation needs a Groq API key in Settings"
-              className="shrink-0 w-9 h-9 rounded-lg border border-transparent inline-grid place-items-center text-text-faint disabled:cursor-not-allowed"
-            >
-              <Mic size={17} aria-hidden="true" />
-            </button>
+              disabled
+            />
           )}
         </div>
 

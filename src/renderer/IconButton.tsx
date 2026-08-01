@@ -37,6 +37,7 @@ export function IconButton({
   ariaHaspopup,
   ariaExpanded,
   hook,
+  disabled,
 }: {
   /** Accessible name for the button (required — the icon is decorative). */
   label: string;
@@ -50,6 +51,8 @@ export function IconButton({
   /** Menu/popover semantics for a trigger-style icon button. */
   ariaHaspopup?: "menu" | "dialog" | "listbox" | "grid" | "tree" | "true" | "false";
   ariaExpanded?: boolean;
+  /** Renders the native `disabled` attribute + the not-allowed cursor, and suppresses the hover fill (a disabled icon button stays flat). */
+  disabled?: boolean;
   /**
    * A stable `manta-*` identity class for the call site (repo contract for
    * popup triggers — the visual coverage registry keys on it). This is an
@@ -59,10 +62,15 @@ export function IconButton({
   hook?: string;
 }) {
   const iconSize = size === "lg" ? 20 : 16;
-  const className = hook ? `${hook} ${CHROME}` : CHROME;
+  // Disabled-only classes are appended by the primitive itself (a disabled
+  // icon button stays flat: no hover fill/foreground, not-allowed cursor) —
+  // never by a caller, so the standing-decision-3 escape hatch still holds.
+  const disabledClasses = "disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-text-faint";
+  const className = `${hook ? `${hook} ` : ""}${CHROME}${disabled ? ` ${disabledClasses}` : ""}`;
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
       className={className}
       aria-label={label}
