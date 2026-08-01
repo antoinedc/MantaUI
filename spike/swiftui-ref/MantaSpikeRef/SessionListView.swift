@@ -57,7 +57,7 @@ struct SessionRow: View {
 
     var body: some View {
         NavigationLink(value: session) {
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 Circle()
                     .fill(session.status.dotColor(t))
                     .frame(width: 8, height: 8)
