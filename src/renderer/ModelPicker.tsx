@@ -153,12 +153,14 @@ export function ModelPicker({
     >
       {/* Model button — friendly name + Sparkles icon, opens the model list. */}
       <div className={separatePills ? "relative" : ""}>
-        <button
-          className={
-            "manta-model-picker-btn truncate text-meta text-text hover:bg-fill flex items-center gap-1 px-2 py-1 " +
-            (separatePills ? "rounded-lg border border-border-strong bg-card" : "")
-          }
-          onClick={() => {
+          <button
+            className={
+              "manta-model-picker-btn truncate text-meta text-text hover:bg-fill flex items-center gap-1 px-2 py-1 " +
+              (separatePills ? "rounded-lg border border-border-strong bg-card" : "")
+            }
+            aria-haspopup="listbox"
+            aria-expanded={modelOpen}
+            onClick={() => {
             if (!modelOpen) onOpen();
             setVariantOpen(false);
             setModelOpen((v) => !v);
@@ -245,6 +247,8 @@ export function ModelPicker({
                 : "border-l border-border-strong") +
               (effortDisabled ? " cursor-not-allowed" : "")
             }
+            aria-haspopup="listbox"
+            aria-expanded={variantOpen}
             onClick={() => {
               if (effortDisabled) return;
               setModelOpen(false);

@@ -111,6 +111,32 @@ for (const screen of SCREENS) {
             animations: "disabled",
           });
         }
+
+        // 3. Surface coverage — which popup triggers this capture leaves closed.
+        // A trigger declares itself with aria-haspopup (Change 1); `aria-expanded`
+        // tells open from closed. Identity is the element's `manta-*` hook class,
+        // which is already a stable contract (AGENTS.md) — do NOT key on the
+        // accessible name, which is the model name / percentage and changes with
+        // the fixture.
+        const closed = await page.evaluate(() =>
+          [...document.querySelectorAll("[aria-haspopup]")]
+            .filter((el) => el.getAttribute("aria-expanded") !== "true")
+            .map((el) => [...el.classList].find((c) => c.startsWith("manta-")) ?? "")
+            .filter(Boolean)
+            .sort(),
+        );
+        expect(
+          closed,
+          // Two directions, opposite meanings:
+          //   new entry  → someone added a popup trigger no capture opens. Either
+          //                add a row that opens it, or record the class here.
+          //   missing entry → someone added a row that opens it. Delete the class.
+          `surface coverage for "${screen.id}": closed triggers ${JSON.stringify(closed)} ` +
+            `vs surfacesClosed ${JSON.stringify(screen.surfacesClosed ?? [])}. ` +
+            "A NEW entry = a popup trigger no capture opens (add a row that opens it, " +
+            "or record it here as unverified). A MISSING entry = a row now opens it " +
+            "(delete the class from this row's list).",
+        ).toEqual(screen.surfacesClosed ?? []);
       } finally {
         await context.close();
       }

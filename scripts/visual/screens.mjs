@@ -53,6 +53,12 @@
  *             to `region`. It exists because the mockup is a different DOM and
  *             the selector usually differs (e.g. app `nav[role="tablist"]` vs
  *             mockup `.snav`).
+ *   surfacesClosed  Hook classes (see AGENTS.md "Mobile CSS hook-class
+ *                   contract") of every popup trigger present in this capture
+ *                   but NOT opened by it. Committed inventory: a surface that
+ *                   appears in EVERY row's list is opened by no capture and is
+ *                   therefore unverified. Generate it from the assertion's own
+ *                   failure output — never hand-write it.
  *
  *   Structure-root precedence: `snapshot ?? region ?? ready`. Explicit
  *   `snapshot` wins (a dialog opened by actions), then `region` when the row
@@ -70,6 +76,7 @@
  *   snapshot?: string,
  *   region?: string,
  *   mockupRegion?: string,
+ *   surfacesClosed?: string[],
  *   actions?: (page: any) => Promise<void>,
  *   viewport: { width: number, height: number },
  *   mockup: string | null,
