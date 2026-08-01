@@ -19,7 +19,11 @@ name: Multica Unstick
 #
 # WHY SCHEDULED: the stall lives entirely on the Multica platform. No GitHub
 # event fires for it, so a periodic scan is the only way a workflow can see it.
-# Every 15 minutes; most runs are a no-op costing one API call.
+# Scheduled every 15 minutes, but GitHub throttles cron heavily — ticks 58-202
+# minutes apart were observed on 2026-08-01. Treat this as the safety net, not
+# the mechanism: the timely trigger is the merge-event step in
+# multica-close-on-merge.yml, which runs this same script the moment an unblock
+# makes an issue eligible.
 #
 # Failure policy: housekeeping must never break a pipeline. The script logs and
 # exits 0 on per-issue failures; the job itself is continue-on-error.

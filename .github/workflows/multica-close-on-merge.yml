@@ -51,7 +51,8 @@ jobs:
   # observed live when BET-297 sat blocked on BET-294/BET-295 for an hour after
   # both had merged, stalling the whole website epic until a human noticed.
   #
-  # Runs after `close` so the just-merged issue is already `done` and counts.
+  # Runs after `close` so the just-merged issue is already `done` and counts,
+  # then re-dispatches any dropped hand-off it has made eligible.
   # ---------------------------------------------------------------------------
   unblock:
     name: Unblock issues whose blockers are done
@@ -75,4 +76,17 @@ jobs:
           MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
         run: node scripts/multica-unblock.mjs --verbose
         # Housekeeping must never fail a merge pipeline.
+        continue-on-error: true
+
+      # Unblocking only changes a STATUS, and a status change dispatches
+      # nobody — the issue sits `todo`, correctly labelled and untouched,
+      # until a sweep re-fires its assignment. The scheduled sweep in
+      # multica-unstick.yml is the safety net, but GitHub throttles cron
+      # hard (observed 58-202 min between ticks), so the merge event is the
+      # only timely trigger. Runs AFTER the unblock step on purpose: the
+      # issue must already be `todo` for the unstick screen to pick it up.
+      - name: Re-dispatch dropped hand-offs
+        env:
+          MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+        run: node scripts/multica-unstick.mjs --verbose
         continue-on-error: true
