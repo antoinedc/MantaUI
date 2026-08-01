@@ -1,6 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { extractIssueKey, classifyClosure, buildComment, run as runPrClosed } from "./multica-pr-closed.mjs";
+import {
+  extractIssueKey,
+  classifyClosure,
+  buildComment,
+  shouldReconcile,
+  run as runPrClosed,
+  runReconcile,
+} from "./multica-pr-closed.mjs";
 import { run as runUnblock } from "./multica-unblock.mjs";
 import { api, ApiError } from "./lib/multicaApi.mjs";
 
@@ -154,6 +161,39 @@ describe("buildComment", () => {
   });
 });
 
+describe("shouldReconcile (BET-505)", () => {
+  const mergedPR = { state: "merged" };
+  const openPR = { state: "open" };
+  const closedUnmergedPR = { state: "closed" };
+
+  test("non-terminal issue + a merged PR → reconcile", () => {
+    assert.equal(shouldReconcile({ status: "todo" }, [mergedPR]), true);
+    assert.equal(shouldReconcile({ status: "in_progress" }, [mergedPR]), true);
+    assert.equal(shouldReconcile({ status: "blocked" }, [mergedPR]), true);
+  });
+
+  test("non-terminal issue + only open/closed-unmerged PRs → no change", () => {
+    assert.equal(shouldReconcile({ status: "todo" }, [openPR]), false);
+    assert.equal(shouldReconcile({ status: "todo" }, [closedUnmergedPR]), false);
+    assert.equal(shouldReconcile({ status: "todo" }, [openPR, closedUnmergedPR]), false);
+  });
+
+  test("non-terminal issue + no PRs → no change", () => {
+    assert.equal(shouldReconcile({ status: "todo" }, []), false);
+  });
+
+  test("done issue + merged PR → no change (idempotent)", () => {
+    assert.equal(shouldReconcile({ status: "done" }, [mergedPR]), false);
+  });
+
+  test("REGRESSION (BET-505): cancelled issue + merged PR → no change", () => {
+    // Cancelling is a deliberate human decision; a merged PR must not resurrect
+    // deliberately-killed work.
+    assert.equal(shouldReconcile({ status: "cancelled" }, [mergedPR]), false);
+    assert.equal(shouldReconcile({ status: "canceled" }, [mergedPR]), false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Fail-loud writes + the shared Multica API helper (BET-504).
 //
@@ -277,5 +317,88 @@ describe("BET-504 — a batch finishes before failing", () => {
     const puts = fetchImpl.calls.filter((c) => c.method === "PUT").map((c) => c.url);
     assert.ok(puts.some((u) => u.includes("/api/issues/BET-1")), "BET-1 write attempted");
     assert.ok(puts.some((u) => u.includes("/api/issues/BET-2")), "BET-2 write attempted");
+  });
+});
+
+describe("BET-505 — the reconcile sweep (pure-decision IO, no real HTTP)", () => {
+  const ws = "ws";
+  const B = "https://api.multica.ai";
+
+  function listPage(issues) {
+    return { method: "GET", match: "/api/issues?workspace_id=ws&limit=100&offset=0", status: 200, body: JSON.stringify({ issues, total: issues.length }) };
+  }
+
+  test("reconciles a non-terminal issue with a merged PR, writes done + metadata, never a comment", async () => {
+    const fetchImpl = stubFetch([
+      listPage([{ id: "u1", identifier: "BET-1", status: "blocked" }]),
+      { method: "GET", match: "/api/issues/BET-1/pull-requests", status: 200, body: JSON.stringify({ pull_requests: [{ number: 397, merged_at: "2026-08-01T09:51:46Z", state: "merged" }] }) },
+      { method: "PUT", match: "/api/issues/BET-1?workspace_id=ws", status: 200, body: "{}" },
+      { method: "PUT", match: "/metadata/reconciled_last", status: 200, body: "{}" },
+      { method: "PUT", match: "/metadata/reconciled_reason", status: 200, body: "{}" },
+    ]);
+    const code = await runReconcile({ token: "t", workspace: ws, base: B, fetchImpl });
+    assert.equal(code, 0);
+    const puts = fetchImpl.calls.filter((c) => c.method === "PUT");
+    assert.ok(puts.some((u) => u.url.includes("/api/issues/BET-1?")), "status write to done");
+    assert.ok(puts.some((u) => u.url.includes("/metadata/reconciled_last")), "reconciled_last written");
+    assert.ok(puts.some((u) => u.url.includes("/metadata/reconciled_reason")), "reconciled_reason written");
+    // No comment anywhere, on any issue.
+    assert.ok(!fetchImpl.calls.some((c) => c.method === "POST"), "no comment posted");
+  });
+
+  test("a merged PR on a done issue changes nothing (idempotent second run)", async () => {
+    const fetchImpl = stubFetch([
+      listPage([{ id: "u1", identifier: "BET-1", status: "done" }]),
+    ]);
+    const code = await runReconcile({ token: "t", workspace: "ws", base: B, fetchImpl });
+    assert.equal(code, 0);
+    assert.ok(!fetchImpl.calls.some((c) => c.method === "PUT"), "no writes on a terminal issue");
+  });
+
+  test("a merged PR on a cancelled issue changes nothing", async () => {
+    const fetchImpl = stubFetch([
+      listPage([{ id: "u1", identifier: "BET-1", status: "cancelled" }]),
+    ]);
+    const code = await runReconcile({ token: "t", workspace: "ws", base: B, fetchImpl });
+    assert.equal(code, 0);
+    assert.ok(!fetchImpl.calls.some((c) => c.method === "PUT"), "no writes on a cancelled issue");
+  });
+
+  test("no linked merged PR → no change", async () => {
+    const fetchImpl = stubFetch([
+      listPage([{ id: "u1", identifier: "BET-1", status: "todo" }]),
+      { method: "GET", match: "/api/issues/BET-1/pull-requests", status: 200, body: JSON.stringify({ pull_requests: [{ state: "open" }, { state: "closed" }] }) },
+    ]);
+    const code = await runReconcile({ token: "t", workspace: "ws", base: B, fetchImpl });
+    assert.equal(code, 0);
+    assert.ok(!fetchImpl.calls.some((c) => c.method === "PUT"), "no writes without a merged PR");
+  });
+
+  test("a failed status write fails the job but does not write metadata", async () => {
+    const fetchImpl = stubFetch([
+      listPage([{ id: "u1", identifier: "BET-1", status: "blocked" }]),
+      { method: "GET", match: "/api/issues/BET-1/pull-requests", status: 200, body: JSON.stringify({ pull_requests: [{ state: "merged" }] }) },
+      { method: "PUT", match: "/api/issues/BET-1?workspace_id=ws", status: 500, body: "boom" },
+    ]);
+    const code = await runReconcile({ token: "t", workspace: "ws", base: B, fetchImpl });
+    assert.equal(code, 1);
+    // Status write failed -> no metadata was attempted for this issue.
+    assert.ok(!fetchImpl.calls.some((c) => c.url.includes("/metadata/")), "no metadata after failed status write");
+  });
+
+  test("logs to a smaller page and continues (enumeration via pagination)", async () => {
+    // Two pages: one full page of a non-terminal + one cw. The sweep must page
+    // through both rather than rely on limit=100 returning everything.
+    const fetchImpl = stubFetch([
+      { method: "GET", match: "/api/issues?workspace_id=ws&limit=100&offset=0", status: 200, body: JSON.stringify({ issues: Array.from({ length: 100 }, (_, i) => ({ id: `u${i}`, identifier: `BET-${i}`, status: "todo" })) }) },
+      { method: "GET", match: "/api/issues?workspace_id=ws&limit=100&offset=100", status: 200, body: JSON.stringify({ issues: [{ id: "uA", identifier: "BET-A", status: "todo" }] }) },
+      { method: "GET", match: "/api/issues/BET-A/pull-requests", status: 200, body: JSON.stringify({ pull_requests: [{ state: "merged" }] }) },
+      { method: "PUT", match: "/api/issues/BET-A?workspace_id=ws", status: 200, body: "{}" },
+      { method: "PUT", match: "/metadata/reconciled_last", status: 200, body: "{}" },
+      { method: "PUT", match: "/metadata/reconciled_reason", status: 200, body: "{}" },
+    ]);
+    const code = await runReconcile({ token: "t", workspace: "ws", base: B, fetchImpl });
+    assert.equal(code, 0);
+    assert.ok(fetchImpl.calls.some((c) => c.url.includes("offset=100")), "paginated past the first 100");
   });
 });

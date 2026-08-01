@@ -42,18 +42,20 @@
  * never suggested, because that is the word the PM acted on.
  *
  * USAGE
- *   node scripts/multica-pr-closed.mjs [--dry-run]
+ *   node scripts/multica-pr-closed.mjs [--dry-run]          (event path)
+ *   node scripts/multica-pr-closed.mjs --reconcile [--dry-run] [--verbose]
  *
  * ENV
- *   GITHUB_EVENT_PATH      required — the pull_request_target payload
+ *   GITHUB_EVENT_PATH      required (event path) — the pull_request_target payload
  *   GITHUB_TOKEN           required — reads branches/PRs to detect the stack
  *   MULTICA_TOKEN          required to mutate Multica; absent → log and skip
  *   MULTICA_WORKSPACE_ID   optional — defaults to the MantaUI (BET) workspace
  *   MULTICA_API_BASE       optional — defaults to https://api.multica.ai
  *   GITHUB_API_URL         optional — set by Actions
  *
- * Exit code is 0 unless the payload itself is unreadable. Every remote call
- * warns and continues: housekeeping must never fail a merge pipeline.
+ * Exit code is 0 unless the payload itself is unreadable, or a status / metadata
+ * WRITE fails (those fail the job — see runReconcile). Every remote read warns
+ * and continues: housekeeping must never fail a merge pipeline.
  */
 
 import { readFile } from "node:fs/promises";
@@ -131,6 +133,31 @@ export function classifyClosure({
 
   // Base branch is alive and unmerged — nothing took this PR down but a person.
   return { kind: "abandoned", reason: `its base branch \`${base}\` is still open` };
+}
+
+/** Statuses that mean an issue is finished and must never be moved out of. */
+export const TERMINAL_STATUSES = new Set(["done", "cancelled", "canceled"]);
+
+/**
+ * Should a merged-PR sweep reconcile THIS issue to `done`?
+ *
+ * Pure: `(issue, pullRequests) → boolean`. The rule is deliberately narrow —
+ * print it out, do not extend it:
+ *
+ *   - Throw a non-terminal issue away unless a LINKED PR merged.
+ *   - Never move an issue out of `done`/`cancelled` — a `cancelled` issue with
+ *     a merged PR stays cancelled (someone decided that deliberately).
+ *   - Pure-completion evidence only: a merged linked PR. No branch names, no
+ *     commit messages, no titles. "Closed" without `merged` is not evidence.
+ *
+ * @param {{status?:string}} issue
+ * @param {Array<{state?:string}>} pullRequests
+ * @returns {boolean}
+ */
+export function shouldReconcile(issue = {}, pullRequests = []) {
+  if (TERMINAL_STATUSES.has(issue?.status)) return false;
+  if (!Array.isArray(pullRequests)) return false;
+  return pullRequests.some((pr) => pr?.state === "merged");
 }
 
 /**
@@ -339,8 +366,159 @@ export async function run({
   return writeFailed ? 1 : 0;
 }
 
+/**
+ * Reconcile pass: catch issues whose linked PR merged but never went terminal.
+ *
+ * Runs inside the EXISTING scheduled sweep (the cron on the close-on-merge
+ * workflow), so a single dropped `done` write — the BET-438 shape, where the
+ * merge event fired once and the status write silently failed — is repaired on
+ * the next hourly tick instead of sitting wrong forever.
+ *
+ * For every non-terminal issue: fetch its linked PRs; if ANY has `state:
+ * merged`, set the issue `done` and record it in metadata. No comments ever
+ * (a comment on an agent-assigned issue dispatches a run). A failed status
+ * write fails the job, so a reconcile that does not land is visible.
+ *
+ * USAGE (no GITHUB_EVENT_PATH required)
+ *   MULTICA_TOKEN=… node scripts/multica-pr-closed.mjs --reconcile [--dry-run] [--verbose]
+ *
+ * @returns {Promise<number>} exit code — 1 iff a write failed
+ */
+export async function runReconcile({
+  token,
+  workspace = DEFAULT_WORKSPACE,
+  base = DEFAULT_API_BASE,
+  dryRun = false,
+  verbose = false,
+  pageSize = 100,
+  fetchImpl = fetch,
+} = {}) {
+  if (!token) {
+    console.error("MULTICA_TOKEN is not set — nothing to do.");
+    return 1;
+  }
+
+  // Enumerate every issue in the workspace (paginated) and keep only the
+  // non-terminal ones. This is the "who could have been missed" set.
+  const issues = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await api(
+      base,
+      token,
+      `/issues?workspace_id=${workspace}&limit=${pageSize}&offset=${offset}`,
+      {},
+      fetchImpl,
+    );
+    const batch = page.issues ?? [];
+    issues.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+
+  const candidates = issues.filter((i) => !TERMINAL_STATUSES.has(i?.status));
+  if (candidates.length === 0) {
+    console.log("No non-terminal issues. Nothing to reconcile.");
+    return 0;
+  }
+
+  let reconciled = 0;
+  let writeFailed = false;
+
+  for (const issue of candidates) {
+    const id = issue.identifier;
+    const uuid = issue.id;
+
+    let pullRequests = [];
+    try {
+      const prs = await api(
+        base,
+        token,
+        `/issues/${id}/pull-requests?workspace_id=${workspace}`,
+        {},
+        fetchImpl,
+      );
+      pullRequests = Array.isArray(prs.pull_requests) ? prs.pull_requests : [];
+    } catch (e) {
+      // A failed READ warns and continues — never fail the sweep on it.
+      if (verbose) console.log(`  ! ${id} PRs unreadable, leaving alone: ${e.message}`);
+      continue;
+    }
+
+    if (!shouldReconcile(issue, pullRequests)) {
+      if (verbose) console.log(`  · ${id} stays as-is (${issue.status}, no linked merged PR)`);
+      continue;
+    }
+
+    const merged = pullRequests.find((pr) => pr?.state === "merged");
+    const reason = `PR #${merged?.number ?? "?"} merged ${merged?.merged_at ?? "?"}; issue was ${issue.status}`;
+
+    if (dryRun) {
+      console.log(`  → ${id} WOULD reconcile (${reason})`);
+      reconciled++;
+      continue;
+    }
+
+    try {
+      await api(
+        base,
+        token,
+        `/issues/${id}?workspace_id=${workspace}`,
+        { method: "PUT", body: JSON.stringify({ status: "done" }) },
+        fetchImpl,
+      );
+    } catch (e) {
+      console.error(`Failed to set ${id} done (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+      writeFailed = true;
+      continue;
+    }
+    console.log(`  → ${id} reconciled (${reason})`);
+    reconciled++;
+
+    // Metadata only, never a comment. Mirrors how multica-unstick.mjs records
+    // its own actions: per-key PUTs, inert, invisible to dispatch.
+    const stamps = {
+      reconciled_last: new Date().toISOString(),
+      reconciled_reason: reason,
+    };
+    for (const [key, value] of Object.entries(stamps)) {
+      try {
+        await api(
+          base,
+          token,
+          `/issues/${uuid}/metadata/${key}?workspace_id=${workspace}`,
+          { method: "PUT", body: JSON.stringify({ value }) },
+          fetchImpl,
+        );
+      } catch (e) {
+        // A metadata write for a status change that already landed is still a
+        // write; surface it rather than silently dropping the ledger.
+        console.error(`Failed to write ${key} on ${id} (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+        writeFailed = true;
+      }
+    }
+  }
+
+  console.log(
+    `${dryRun ? "[dry-run] " : ""}${reconciled} of ${candidates.length} non-terminal issue(s) ${dryRun ? "would be" : ""} reconciled.`,
+  );
+  return writeFailed ? 1 : 0;
+}
+
 async function main() {
   const dryRun = process.argv.includes("--dry-run");
+  const verbose = process.argv.includes("--verbose");
+
+  if (process.argv.includes("--reconcile")) {
+    const code = await runReconcile({
+      token: process.env.MULTICA_TOKEN,
+      workspace: process.env.MULTICA_WORKSPACE_ID,
+      base: process.env.MULTICA_API_BASE,
+      dryRun,
+      verbose,
+    });
+    if (code) process.exit(code);
+    return;
+  }
+
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath) {
     console.error("GITHUB_EVENT_PATH is not set — nothing to react to.");
