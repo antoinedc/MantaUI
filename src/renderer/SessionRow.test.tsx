@@ -174,6 +174,10 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(el.getAttribute("title")).toBe("row title");
     const dot = el.firstElementChild as HTMLElement;
     expect(dot.getAttribute("title")).toBe("Running · 2 subagents");
+    // The decorative dot is hidden from the a11y tree so its tooltip never
+    // leaks into the row's accessible name (regression against the clean
+    // "Deploy new billing service Pin" baseline names).
+    expect(dot.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("invokes onClick and onContextMenu on the row", () => {

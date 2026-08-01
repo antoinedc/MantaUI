@@ -157,7 +157,7 @@ export function SessionRow({
       onContextMenu={onContextMenu}
       className={row}
     >
-      <span className={`${DOT_BASE} ${DOT[status]}`} title={statusTitle} />
+      <span className={`${DOT_BASE} ${DOT[status]}`} title={statusTitle} aria-hidden="true" />
       <span className={selected ? NAME_SELECTED : NAME_REST}>{name}</span>
       <span className={AGE_CHROME + (ageStale ? " invisible group-hover:visible" : " visible")}>
         {age}
