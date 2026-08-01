@@ -25,6 +25,7 @@
     "visual": "npm run build:mobile && playwright test --project=visual",
     "visual:update": "npm run build:mobile && playwright test --project=visual --update-snapshots",
     "visual:compare": "npm run build:mobile && node scripts/visual/compare.mjs",
+    "visual:styles": "npm run build:mobile && node scripts/visual/style-diff.mjs",
     "visual:baselines": "node scripts/visual/baseline-diff.mjs"
   },
   "dependencies": {
