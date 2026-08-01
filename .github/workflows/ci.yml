@@ -97,6 +97,20 @@ jobs:
         if: steps.nm-cache.outputs.cache-hit != 'true'
         run: npm ci
 
+      # ── Pillow — `npm test` shells out to scripts/build-og-image.py, which
+      #    imports PIL. The retired self-hosted runner happened to have it
+      #    installed; a GitHub-hosted image does not, so the move to
+      #    ubuntu-latest turned every run red with `ModuleNotFoundError: No
+      #    module named 'PIL'` — on main and on every open PR at once, none of
+      #    them for a reason in their own diff. Installed here rather than
+      #    skipping the test when PIL is absent: a test that silently skips in
+      #    CI is a test that stops running, and og.png determinism is exactly
+      #    the kind of generated-artifact drift nobody re-checks by hand.
+      #    ~3s on a warm image. scripts/gen-icons.py needs the same import but
+      #    no test invokes it today.
+      - name: Install Pillow (scripts/*.py image generation)
+        run: python3 -m pip install --quiet --disable-pip-version-check pillow
+
       - name: Typecheck
         run: npm run typecheck
 
