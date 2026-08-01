@@ -150,69 +150,47 @@ function SegmentedField({ entry, value, onApply }: {
 }
 
 // Text/path (non-credential): local draft committed on blur → toast + Undo.
-function TextField({ entry, value, onCommit }: {
-  entry: SettingEntry; value: string; onCommit: (v: string) => void;
-}) {
-  const id = fieldId(entry);
-  const [draft, setDraft] = useState(value);
-  // Keep the draft in sync with the store ONLY when the field is NOT focused
-  // (so an external change — e.g. Undo from another toast — is picked up,
-  // but an in-progress edit is never stomped).
-  const focused = useRef(false);
-  useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
-  return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
-      <input
-        id={id}
-        type="text"
-        placeholder={entry.placeholder}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onFocus={() => { focused.current = true; }}
-        onBlur={() => {
-          focused.current = false;
-          if (draft !== value) onCommit(draft);
-        }}
-        spellCheck={false}
-        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
-      />
-      {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
-    </div>
-  );
-}
-
 // Password (credential): local draft committed on blur → inline "Saved"
 // confirmation (role=status), no toast. The ONE blur-commit exception called
 // out in the spec.
-function PasswordField({ entry, value, onCommit }: {
+function SettingField({ entry, value, onCommit, credential }: {
   entry: SettingEntry; value: string; onCommit: (v: string) => void;
+  credential?: boolean;
 }) {
   const id = fieldId(entry);
   const [draft, setDraft] = useState(value);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const focused = useRef(false);
+  // Keep the draft in sync with the store ONLY when the field is NOT focused
+  // (so an external change — e.g. Undo from another toast — is picked up,
+  // but an in-progress edit is never stomped).
   useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
   return (
     <div className="space-y-1">
       <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
       <input
         id={id}
-        type="password"
+        type={credential ? "password" : "text"}
         placeholder={entry.placeholder}
         value={draft}
-        onChange={(e) => { setDraft(e.target.value); setSavedAt(null); }}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          if (credential) setSavedAt(null);
+        }}
         onFocus={() => { focused.current = true; }}
         onBlur={() => {
           focused.current = false;
-          if (draft !== value) { onCommit(draft); setSavedAt(Date.now()); }
+          if (draft !== value) {
+            onCommit(draft);
+            if (credential) setSavedAt(Date.now());
+          }
         }}
-        autoComplete="off"
+        autoComplete={credential ? "off" : undefined}
         spellCheck={false}
         className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
       />
       {entry.help && <div className="text-meta text-text-faint">{entry.help}</div>}
-      {savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
+      {credential && savedAt && <div role="status" className="text-meta text-ok">Saved</div>}
     </div>
   );
 }
@@ -551,10 +529,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
       case "segmented":
         return <SegmentedField entry={entry} value={String(cur ?? "")} onApply={(v) => void commitKey(entry, v)} />;
       case "password":
-        return <PasswordField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v.trim())} />;
+        return <SettingField credential entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v.trim())} />;
       case "text":
       case "path":
-        return <TextField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v)} />;
+        return <SettingField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v)} />;
       default:
         return null;
     }
