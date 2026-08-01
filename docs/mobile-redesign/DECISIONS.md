@@ -784,7 +784,7 @@ checked.**
 | Goes | Consequence |
 |---|---|
 | The Capacitor wrapper — Android and iOS shells, plugins, config | No Capacitor 6→8 upgrade needed |
-| The mobile web client — shell screens, settings, create sheet, keyboard bar, connecting and pairing screens (~3,400 lines) | Rewritten natively. This is the part that *should* be rewritten — every native-feel gap lives here. |
+| The mobile web client — shell screens, settings, create sheet, keyboard bar, connecting and pairing screens (~3,400 lines) | Rewritten natively. This is the part that *should* be rewritten — every native-feel gap lives here. **But see §12a: `src/renderer/mobile/` is NOT purely mobile and cannot be deleted wholesale.** |
 | **`src/renderer/mobile/mobile.css` (450 lines)** | **The quiet win.** It reshapes shared desktop components through named hooks and two fragile positional selectors that match on Tailwind class substrings. It disappears entirely, which **discharges the top-severity risk in BET-406's own risk table by deletion rather than by contract** — the hook-class list that epic owed mobile and never wrote is no longer needed. |
 | The six window-level CustomEvent channels between the mobile shell and the shared chat panel | They exist only because mobile cannot pass props into a component it mounts opaquely. Natively they are ordinary props. |
 | The mobile bundle build, the CI publish workflow, the release-host tarball, and the box's self-update fetch of it | The box stops serving a web client. One fewer deploy path, one fewer thing that can be stale on a device. |
@@ -796,6 +796,34 @@ boundaries, the queued-message drain, todo/permission/question state, token
 accounting, the store, and the shared pure helpers.
 
 ---
+
+### 12a. `src/renderer/mobile/` is not purely mobile — do not delete the directory
+
+**Found 2026-08-01, before the epic was written.** The directory name is
+misleading: it holds the mobile web-client shell **and** pairing/setup logic the
+**desktop** imports. Deleting it wholesale breaks desktop onboarding.
+
+Verified consumers outside the mobile shell:
+
+| Module | Imported by | Fate |
+|---|---|---|
+| `mobile/setupLogic.ts` | `PairStep.tsx`, `pairClaim.ts` (desktop onboarding) | **Survives — must move** |
+| `mobile/pairPayload.ts` | `App.tsx`, `PairingQR.tsx` (desktop) | **Survives — must move** |
+| `mobile/pairingLogic.ts` | mobile shell only | Deleted |
+| `mobile/deepLink.ts` | mobile shell only | Deleted |
+| `mobile/PairingScreen.tsx`, `SetupScreen.tsx`, `MobileApp.tsx`, shell screens | mobile shell only | Deleted |
+
+`src/main/auth.ts` also documents the desktop claim shape by pointing at
+`renderer/mobile/setupLogic.ts`, so that reference moves too.
+
+**Consequence for the implementation epic:** extracting the shared pairing/setup
+modules out of `src/renderer/mobile/` is a **prerequisite** of retiring the
+shell, not a cleanup afterwards. Sequenced the other way round, desktop
+onboarding breaks and the failure looks like a mobile change.
+
+This is a naming accident, not a design decision — those modules were written
+for the mobile pairing screen and later reused by desktop onboarding, and
+nothing renamed them.
 
 ## 13. Rejected — do not re-litigate
 
