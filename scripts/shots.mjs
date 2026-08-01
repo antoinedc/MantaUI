@@ -34,8 +34,6 @@
  *   - `page.screenshot` only after a `page.waitForSelector` resolves,
  *   -   never after `waitForTimeout`.
  *
- * BET-542 TRIGGER — do not merge.
- *
  * Captures:
  *
  *   | File                    | Viewport       | URL            |
