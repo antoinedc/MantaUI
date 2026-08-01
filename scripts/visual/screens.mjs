@@ -110,6 +110,40 @@ export const SCREENS = [
     mockup: "docs/screens/session/mockup.html",
   },
   {
+    // REGION ROWS for the session view (BET-468). The header strip and the
+    // composer each own a small baseline, so two issues touching different
+    // session components land in parallel instead of contending over
+    // `session-visual-linux.png`. They reuse the `session` row's url/ready/
+    // final/actions; only what gets cropped changes. The full-page `session`
+    // row stays and remains the composition gate.
+    id: "session-header",
+    title: "Session — header strip (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: "text=Run a shell command?",
+    region: ".manta-session-header",
+    mockupRegion: ".topb",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/session/mockup.html",
+  },
+  {
+    id: "session-composer",
+    title: "Session — composer (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: "text=Run a shell command?",
+    region: ".manta-composer",
+    mockupRegion: ".composer",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/session/mockup.html",
+  },
+  {
     id: "settings",
     title: "Settings — section rail + the first section",
     // Opened by the same click a person makes: the sidebar footer's entry.
