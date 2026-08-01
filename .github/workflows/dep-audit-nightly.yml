@@ -12,6 +12,16 @@ name: dep-audit-nightly
 # So: ci.yml audits a PR only when that PR changes the dependency set, and
 # this run covers main daily. A new advisory then surfaces as ONE red run on
 # main and one fix issue, instead of N blocked PRs.
+#
+# The same shape covers the shot drift gate (BET-518). That gate runs on pull
+# requests ONLY, on the assumption that every merge cleared it — so a push to
+# main never checks the shots, and if one merge lands red the committed set is
+# stale with nothing on main ever noticing, failing every later PR at once
+# for a file it never touched (this actually happened: #406 and #422 merged
+# red). ci.yml therefore gates the PR run on the five files that feed the
+# capture (see the drift-gate step), and this `shots-drift` job covers main on
+# the same schedule so staleness surfaces as ONE red run and one fix, mirroring
+# the dependency-audit reasoning above.
 
 on:
   schedule:
@@ -38,3 +48,56 @@ jobs:
       # breaking-change fixes; shipped-code advisories are the signal.
       - name: Audit production dependencies (high+)
         run: npm audit --omit=dev --audit-level=high
+
+  # Shot drift on main, on the same schedule (BET-518). The drift gate in ci.yml
+  # is PR-only by design and is now path-gated, so main is never checked there;
+  # this job covers it. One run is correct: distinguishing determinism from
+  # staleness is BET-519's job and must not be duplicated here.
+  #
+  # ffmpeg + Playwright's pinned Chromium are installed exactly as ci.yml does,
+  # so the capture drives the same browser/encoder the baselines were encoded
+  # under — a stale committed set must fail, not be masked by a browser that
+  # paints differently.
+  shots-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Cache node_modules
+        id: nm-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-nm-${{ hashFiles('package-lock.json') }}
+      - name: Install dependencies
+        if: steps.nm-cache.outputs.cache-hit != 'true'
+        run: npm ci
+      # ffmpeg — `npm run shots` extracts website/hero-poster.webp from
+      # hero.mp4 (scripts/shots.mjs); ubuntu-24.04 images no longer ship it.
+      - name: Install ffmpeg (hero-poster extraction)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+      - name: Install Playwright Chromium
+        run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+      - name: Shot drift on main — regenerate website/shot-*.webp and diff against the committed set
+        run: |
+          npm run shots
+          # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
+          # hero-poster.webp), matching the PR gate; the npm test step
+          # regenerates website/sitemap.xml so it is deliberately excluded.
+          if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
+            echo "::error::main's committed website/shot-*.webp are stale. The PR drift gate never runs on main, so only this scheduled check covers them. Fix: run 'npm run shots' on main and commit the regenerated website/shot-*.webp + website/hero-poster.webp."
+            git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
+            exit 1
+          fi
