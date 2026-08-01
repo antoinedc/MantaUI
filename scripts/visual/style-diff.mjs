@@ -136,6 +136,21 @@ const FAMILY_PREFIX = {
 };
 
 /**
+ * Properties whose value type maps to NO token family at all — a font size
+ * is not a spacing, radius, or border token. A resolved token matching one
+ * of these is a category error, so per the BET-530 constraint they render as
+ * NO match (never a bucket, never a fall-through to another family).
+ * `z-index` is in the issue but isn't one of the tracked PROPERTIES.
+ */
+const NO_FAMILY_PROPERTIES = new Set([
+  "font-size",
+  "font-weight",
+  "line-height",
+  "letter-spacing",
+  "opacity",
+]);
+
+/**
  * The browser-default sentinel per property. A property is SKIPPED when BOTH
  * sides sit at the default (otherwise the report is thousands of lines of
  * transparent/0px/normal noise). `null` = never default-skippable (inherited
@@ -380,18 +395,16 @@ function fmtValue(value, map) {
 
 /**
  * Filter a resolved token name-set down to the ones legitimately matching
- * `prop`'s value type. A property with an explicit family (FAMILY_PREFIX)
- * keeps only that family's tokens; every other property drops any
- * `--sp-*`/`--r-*` token (a cross-family category error). An empty result
- * means "no match" for this property.
+ * `prop`'s value type (BET-530). A property with an explicit family
+ * (FAMILY_PREFIX) keeps only that family's tokens; a property whose type
+ * matches no token family (NO_FAMILY_PROPERTIES) keeps nothing (no match);
+ * every other property is left unchanged. An empty result means "no match".
  */
 export function matchFamilyTokens(prop, toks) {
+  if (NO_FAMILY_PROPERTIES.has(prop)) return [];
   const prefix = FAMILY_PREFIX[prop];
-  return toks.filter((t) =>
-    prefix
-      ? t.startsWith(`--${prefix}`)
-      : !t.startsWith("--sp-") && !t.startsWith("--r-"),
-  );
+  if (!prefix) return toks;
+  return toks.filter((t) => t.startsWith(`--${prefix}`));
 }
 
 export function renderSectionA(appRecords, mockRecords, map) {

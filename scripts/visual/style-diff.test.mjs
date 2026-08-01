@@ -11,6 +11,7 @@ const MAP_CSS = `
   --r-lg: 12px;
   --r-xl: 16px;
   --r-sm: 8px;
+  --border-row-px: 8px;
   --color-ink: #111111;
 }
 `;
@@ -46,6 +47,11 @@ test("gap value colliding with spacing+radius keeps only the spacing token", () 
 
 test("a value whose family matches no token renders as NO match, not a filtered-empty bucket", () => {
   const out = render({ "font-size": "12px" });
+  assert.equal(out, "No token-mapped styling on either side.");
+});
+
+test("a no-family property is NO match even when a non-spacing non-radius token shares its value", () => {
+  const out = render({ "font-size": "8px" });
   assert.equal(out, "No token-mapped styling on either side.");
 });
 
