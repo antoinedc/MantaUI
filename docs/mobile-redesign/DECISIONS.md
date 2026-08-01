@@ -1000,6 +1000,23 @@ If the Swift app were the first consumer of brand-new server logic, every bug
 would be ambiguous — server or client? This ordering removes that ambiguity and
 shrinks the mobile epic to the small device-side set plus UI.
 
+**Step 2 is also the performance measurement — do not build a separate PoC for
+it.** A standalone spike cannot answer the question before the server side
+exists, and throughput is not in doubt anyway: the box emits flushed chunks at
+roughly 4/sec where the raw stream is ~100/sec, so the phone does strictly less
+work. The real risk is the opposite one — moving the flush decision to the box
+adds a network hop *before text appears*.
+
+So when step 2 lands, instrument **time from first token to rendered text** on
+both paths. The threshold is pre-registered here so the result cannot be
+rationalised after the fact:
+
+> **Under 1 second is acceptable.** Above it, revisit §17's partition — the
+> flush decision moves back to the device while interpretation stays on the box.
+
+Pre-registering the number is the point. Measuring first and deciding afterwards
+reliably produces "that seems fine".
+
 **Accepted cost:** step 2 touches a shipping client for no user-visible benefit.
 That is real work with real regression risk. It is accepted knowingly; the
 mitigations are the existing test coverage on exactly these functions, plus the
