@@ -676,6 +676,59 @@ export async function fireNotify({ message, title, urgent, sessionID } = {}) {
   return { ok: true };
 }
 
+/**
+ * §6.3 "Audit linked devices regularly" mitigation (BET-492, Stage 4): the
+ * moment a genuinely NEW device pairs, every EXISTING paired device is told —
+ * the Google/Signal row that makes a rogue/unknown link visible to the devices
+ * already on the box instead of silently succeeding.
+ *
+ * Reuses the SAME single router as every other notification
+ * (dispatchNotification → routeNotification → desktop sink / sendPush), so
+ * this is ONE informational push subject to the exact router rules — an active
+ * desktop suppresses the mobile leg exactly like "done" (no bypass).
+ *
+ * `existingDevices` is the Stage 2 registry MINUS the joiner: the new device is
+ * never told it just paired (it performed the pairing itself, and it has no
+ * push subscription to receive a "new device" notice anyway). An empty set
+ * means there is nothing to notify → no-op.
+ *
+ * Non-blocking / best-effort, mirroring the pipeline's posture: any failure is
+ * logged and swallowed, so the pairing claim (which returns the token) never
+ * awaits or fails on push delivery.
+ *
+ * @param {Array<{device_id?:string, name?:string}>} existingDevices
+ *   live devices from the registry, the joiner excluded.
+ * @param {{device_id?:string|null, name?:string|null}} [joined]
+ *   the new device's identity, used only for notification copy.
+ */
+export async function fireNewDevicePaired(existingDevices, joined = {}) {
+  try {
+    const existing = Array.isArray(existingDevices) ? existingDevices : [];
+    if (existing.length === 0) {
+      console.log(
+        "[push] new-device: no existing devices to notify — skipping (joiner excluded)",
+      );
+      return;
+    }
+    const devName =
+      joined?.name && joined.name !== "" ? joined.name : "A new device";
+    const deviceId = joined?.device_id ?? null;
+    const payload = {
+      kind: "device-paired",
+      title: "New device paired",
+      body: `${devName} just linked to your box.`,
+      sessionId: null,
+      // Carry the joiner id so a consumer (e.g. the linked-devices list) can
+      // flag which device was added; distinct tag per device for dedup.
+      deviceId,
+      tag: `device-paired-${deviceId ?? Date.now()}`,
+    };
+    await dispatchNotification(payload);
+  } catch (e) {
+    console.warn("[push] new-device push failed:", e?.message ?? e);
+  }
+}
+
 async function sendPush(payload) {
   // APNs is the PRIMARY (native iOS) leg and MUST NOT be gated on the Web Push
   // (PWA) leg. Previously this function awaited webpush.sendNotification for

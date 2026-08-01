@@ -777,6 +777,25 @@ const handleRequest = async (req, res) => {
           respondJson(res, result.status ?? 400, { error: result.error });
           return;
         }
+        // BET-492 (§6.3 "Audit linked devices regularly" mitigation): a
+        // GENUINELY new device just paired (resumed === false — an existing
+        // device re-pairing or the legacy primary path is NOT a new pairing,
+        // so it doesn't spam the other devices). Tell every EXISTING paired
+        // device so a rogue/unknown link is visible to the devices already on
+        // the box. The existing set is read from the Stage 2 registry minus the
+        // joiner (never the new device itself). Best-effort + non-blocking:
+        // delivery must never delay or fail the token return.
+        if (result.resumed === false) {
+          const existingDevices = authEngine
+            .listDevices()
+            .filter((d) => d.device_id !== result.device_id);
+          push
+            .fireNewDevicePaired(existingDevices, {
+              device_id: result.device_id,
+              name: body?.name ?? null,
+            })
+            .catch(() => {});
+        }
         respondJson(res, 200, {
           box_token: result.box_token,
           box_id: result.box_id,

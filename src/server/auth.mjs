@@ -491,13 +491,21 @@ export function createAuthEngine({
     if (!pairing.consume(pairing_code)) {
       return { ok: false, status: 403, error: "pairing failed" };
     }
-    const { entry } = devices.claim({ deviceId: device_id, name });
+    // `resumed` reports whether this claim re-used an existing device entry
+    // (true) or provisioned a brand-new one (false). A resumed claim — an
+    // existing device re-pairing, or the legacy no-device_id path which resumes
+    // the PRIMARY (shared box_token) device — is NOT a new pairing, so the
+    // caller (index.mjs) uses this to decide whether to fire a "new device
+    // paired" notice to the other devices (§6.3, BET-492). Only a genuinely new
+    // provision (resumed === false) is a new device.
+    const { entry, resumed } = devices.claim({ deviceId: device_id, name });
     maybePersistDevices(true);
     return {
       ok: true,
       box_token: entry.token,
       box_id: auth.box_id,
       device_id: entry.device_id,
+      resumed,
     };
   }
 

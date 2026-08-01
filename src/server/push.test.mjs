@@ -11,6 +11,7 @@ import {
   routeNotification,
   notifTier,
   fireNotify,
+  fireNewDevicePaired,
   setDesktopPresence,
   setDesktopSink,
   cancelEscalationsForSession,
@@ -585,6 +586,89 @@ test("escalation: re-notify same tag supersedes (no duplicate timer)", async () 
   await fireNotify({ message: "second", sessionID: "ses_s" });
   assert.deepEqual(_pendingEscalationTags(), ["notify-ses_s"]);
   cancelAllEscalations();
+  _resetPushState();
+});
+
+// ---------------------------------------------------------------------------
+// New-device-paired push (BET-492, Stage 4 of the pairing rework §6.3)
+// ---------------------------------------------------------------------------
+//
+// The mitigation row "plus a push to existing devices on every new pairing":
+// a genuinely new device joining is surfaced to every EXISTING paired device
+// through the SAME cross-device router as every other notification. These tests
+// pin: (1) it routes to existing devices and never the joiner, (2) it is
+// informational — an active desktop suppresses the mobile leg exactly like
+// "done", and (3) delivery failure never rejects (so the pairing claim, which
+// returns the token, is never blocked or failed by a push).
+
+test("new-device: routes to existing devices, never the joiner, via the shared router", async () => {
+  _resetPushState();
+  const sink = [];
+  setDesktopSink((p) => sink.push(p));
+  setDesktopPresence({ visible: false }); // fresh heartbeat, idle/away
+  // The joiner is deliberately NOT in existingDevices — the caller (the claim
+  // path) passes the registry minus the joiner.
+  await fireNewDevicePaired(
+    [{ device_id: "dev-desktop", name: "desktop" }],
+    { device_id: "dev-iphone", name: "iPhone" },
+  );
+  // Idle/away desktop → informational push routes desktop-first + escalates
+  // the mobile leg, exactly like "done". The desktop (an existing device) is
+  // told; the joiner never is.
+  assert.equal(sink.length, 1, "one informational push to the existing device");
+  assert.equal(sink[0].kind, "device-paired");
+  assert.match(sink[0].title ?? "", /New device paired/);
+  assert.match(sink[0].body ?? "", /iPhone/);
+  assert.equal(sink[0].deviceId, "dev-iphone");
+  assert.deepEqual(_pendingEscalationTags(), ["device-paired-dev-iphone"]);
+  _resetPushState();
+});
+
+test("new-device: no existing devices → no push (never tells the joiner)", async () => {
+  _resetPushState();
+  let sinkCalls = 0;
+  setDesktopSink(() => sinkCalls++);
+  setDesktopPresence({ visible: false });
+  await fireNewDevicePaired([], { device_id: "dev-solo", name: "solo" });
+  assert.equal(sinkCalls, 0, "nothing to notify when no existing device exists");
+  assert.deepEqual(_pendingEscalationTags(), []);
+  _resetPushState();
+});
+
+test("new-device: ACTIVE desktop suppresses the mobile leg like any informational kind", async () => {
+  _resetPushState();
+  const sink = [];
+  setDesktopSink((p) => sink.push(p));
+  setDesktopPresence({ visible: true }); // at the desk
+  await fireNewDevicePaired(
+    [{ device_id: "dev-desktop", name: "desktop" }],
+    { device_id: "dev-iphone", name: "iPhone" },
+  );
+  // routeNotification for an informational kind + active desktop → desktop
+  // only, no mobile push and NO escalation. Same row as "done".
+  assert.equal(sink.length, 1);
+  assert.deepEqual(
+    _pendingEscalationTags(),
+    [],
+    "active desktop suppresses the mobile leg + escalation",
+  );
+  _resetPushState();
+});
+
+test("new-device: delivery failure is swallowed (claim token unaffected)", async () => {
+  _resetPushState();
+  setDesktopSink(() => {
+    throw new Error("sink down");
+  });
+  setDesktopPresence({ visible: true });
+  // Even with the desktop leg throwing, the call must NOT reject — the claim
+  // (which returns the token) must never block or fail on push delivery.
+  await assert.doesNotReject(() =>
+    fireNewDevicePaired(
+      [{ device_id: "dev-desktop", name: "desktop" }],
+      { device_id: "dev-iphone", name: "iPhone" },
+    ),
+  );
   _resetPushState();
 });
 
