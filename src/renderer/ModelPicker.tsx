@@ -155,7 +155,7 @@ export function ModelPicker({
       <div className={separatePills ? "relative" : ""}>
         <button
           className={
-            "manta-model-picker-btn truncate text-meta text-text hover:bg-fill flex items-center gap-1 px-2 py-1 " +
+            "manta-model-picker-btn truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
             (separatePills ? "rounded-lg border border-border-strong bg-card" : "")
           }
           aria-haspopup="listbox"
@@ -241,7 +241,7 @@ export function ModelPicker({
         <div className={separatePills ? "relative" : ""}>
           <button
             className={
-              "manta-effort-picker-btn truncate text-meta hover:bg-fill flex items-center gap-1 px-2 py-1 " +
+              "manta-effort-picker-btn truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
               (separatePills
                 ? "rounded-lg border border-border-strong bg-card"
                 : "border-l border-border-strong") +
