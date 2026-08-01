@@ -65,6 +65,9 @@ export const LAUNCH_OPTIONS = {
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--font-render-hinting=none",
+    "--disable-gpu",
+    "--use-angle=swiftshader",
+    "--lang=en-US",
   ],
 };
 
