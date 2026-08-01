@@ -126,10 +126,12 @@ export function SessionHeader({
         </span>
       )}
 
-      {/* Right group — context pill, mode toggle, session menu. opt out of
-          the header's drag region so they stay clickable. */}
+      {/* Right group — context pill, mode toggle, session menu (8px items).
+            opt out of the header's drag region so they stay clickable. The
+            left cluster (breadcrumb + branch) is separated from this group by
+            the 16px group gap the auto-margin reserves. */}
       <div
-        className="ml-auto flex items-center gap-4"
+        className="ml-auto flex items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
       >
         {/* Context pill — clickable, opens the breakdown popover. Amber tint
