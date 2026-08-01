@@ -65,9 +65,6 @@ export const LAUNCH_OPTIONS = {
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--font-render-hinting=none",
-    "--disable-gpu",
-    "--use-angle=swiftshader",
-    "--lang=en-US",
   ],
 };
 
@@ -245,3 +242,5 @@ export async function preparePage(page, { url, readySelector, finalSelector, act
     () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
   );
 }
+
+// [BET-537 validation] comment-only harness touch to force the drift-gate run.
