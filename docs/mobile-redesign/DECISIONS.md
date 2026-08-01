@@ -1,6 +1,6 @@
 # Manta Mobile 2.0 — decisions record
 
-**Status:** design settled, stack pending. Nothing implemented.
+**Status:** design settled; stack settled (Swift — §2); logic location settled (§17). Nothing implemented.
 **Date:** 2026-07-31
 **Visual companion:** [`mockup.html`](./mockup.html) in this directory —
 interactive, light/dark toggle, every screen and every failure state. Also
@@ -23,12 +23,14 @@ re-deriving four rounds of argument, and without re-running the research.
   that feels obvious — it probably already got considered and killed.
 - **§14 is the load-bearing research.** Facts with dates. Do not re-research
   these; do re-verify anything marked as time-sensitive if a year has passed.
-- **§15 is genuinely open.**
+- **§15 is genuinely open.** §15.1 is now closed; §15.4 is being measured.
+- **§17 is the newest decision** and supersedes half of §1.10.
 - **§16 is what to file, and when.**
 
-**The one thing not settled is the stack** — React Native vs Swift. That is
-**BET-431**, a throwaway spike, with pre-registered pass/fail criteria. Do not
-start the implementation epic before it resolves. See §2.
+**The stack is settled: Swift** (§2, decided 2026-08-01). **Where the chat logic
+lives is settled** (§17). What remains open before the implementation epic can
+be written is tracked by **BET-475** — chiefly §15.4, which is a measurement,
+not a decision.
 
 ---
 
@@ -45,17 +47,35 @@ start the implementation epic before it resolves. See §2.
 | 1.7 | **No Capacitor upgrade.** Capacitor 6 is out of support (extended support ended 2026-01-20, current is 8.4.2) but we are deleting it, so the upgrade is wasted work. | The upgrade only made sense to keep a shipping app healthy during a transition that no longer exists. |
 | 1.8 | **Distribution: TestFlight internally now, App Store eventually.** Every install assumption in this document is written against an App Store end state. | So universal links, App Clips and deferred install all behave as specified. |
 | 1.9 | **No over-the-air JS updates.** | We currently get them free via the box's self-update; the native replacement gives that up rather than adopting a per-user-billed service. TestFlight is sufficient for internal testing. |
-| 1.10 | **Design once, build twice is accepted.** Desktop stays web; mobile is native. Every surface is designed once and built twice. | Accepted explicitly by the human. The mitigation is structural — a shared logic layer and a shared token module — not process. |
+| 1.10 | **Design once, build twice is accepted.** Desktop stays web; mobile is native. Every surface is designed once and built twice. | Accepted explicitly by the human. The mitigation is structural — not process. **Corrected 2026-08-01:** this originally read "a shared logic layer and a shared token module". BET-433 measured that shared logic layer against a non-web runtime and it did not survive, so half the stated mitigation was void. The shared *token* module stands (BET-453 builds it). The shared *logic* layer is replaced by §17: the box becomes the single interpreter and both clients consume it. |
 | 1.11 | **Retiring Web Push narrows notification delivery to the native app only. This is deliberate.** | Confirmed explicitly. With TestFlight-only distribution it is a real if temporary narrowing. |
 | 1.12 | **The target metric is time to session list.** | Today: four screens plus a hidden disclosure. Target: one scan and two taps (§5). |
 
 ---
 
-## 2. The stack decision — PENDING
+## 2. The stack decision — SETTLED: Swift
 
-**BET-431** is a throwaway spike that settles React Native (Expo) vs
-Swift/SwiftUI. Seven sub-issues, BET-432 through BET-438. **Do not begin the
-implementation epic until it reports.**
+**Verdict: Swift/SwiftUI.** Reported 2026-08-01 by BET-431; the full record is
+`docs/spike-rn-vs-swift.md` and the evidence trail is the never-merged
+`spike/rn-ios` branch.
+
+The spike stopped at its own pre-registered gate. Q3 — whether React Native
+could import the shared logic layer unmodified — came back **FAIL**: the HTTP
+client and the pure utilities ported cleanly, but three modules read the
+Electron renderer bridge off `window` and the transcript's scroll logic is
+welded to the web renderer's DOM. That is a rewrite, not a missing global. With
+the reuse argument gone, React Native had no compensating advantage left.
+
+The fidelity leg (Q1/Q2, the eight hard cases) was **never run** — stopping at a
+failed gate is the designed behaviour. So this document must not be read as
+saying SwiftUI renders better than React Native; it says the one decisive
+argument for React Native did not survive measurement.
+
+**Consequences:** §11 is discarded (see its header). §15.1 is closed. §1.10's
+mitigation is corrected. §17 is new and follows from the same finding.
+
+The original text of this section — the three questions and the pre-registered
+pass/fail criteria — is preserved in the spike report rather than here.
 
 ### The three questions it answers
 
@@ -695,7 +715,14 @@ checked.**
 
 ---
 
-## 11. Build decisions — apply if the spike returns React Native
+## 11. Build decisions — DISCARDED (React Native only)
+
+> **This section is dead.** The spike returned Swift (§2), and §15.1 prescribed
+> that §11 is discarded in that case. It is kept, unedited, only so a reader who
+> finds a reference to it elsewhere can see what it said and why it no longer
+> applies. **Nothing below is in force.** Do not implement, cite or re-open it.
+
+### Original text — React Native only, not in force
 
 | # | Decision | Reasoning |
 |---|---|---|
@@ -901,10 +928,10 @@ durations; semantic colour tokens rather than hex.
 
 | # | Question | Notes |
 |---|---|---|
-| 15.1 | **React Native or Swift?** | BET-431. Everything in §11 applies only if RN wins. If Swift wins, §11 is discarded and the implementation epic is written against SwiftUI — but §1–§10 and §12 are unaffected. |
+| ~~15.1~~ | ~~**React Native or Swift?**~~ | **CLOSED 2026-08-01 — Swift.** See §2 and `docs/spike-rn-vs-swift.md`. §11 discarded as prescribed. |
 | 15.2 | **Android timing and scope.** | Deferred, not cancelled. When it comes back: Material 3 Expressive is a different design language, the permission-priming screen forks (§5.6), and there is no App Clip equivalent. |
 | 15.3 | **The optional public-key hardening on the pairing QR (§6.5).** | Recommended, not committed. |
-| 15.4 | **Does the spike change the scroll architecture?** | If FlashList v2 handles streaming position maintenance natively, most of the desktop pin-to-bottom machinery becomes unnecessary on mobile. Recorded as a finding in BET-437, not assumed. |
+| 15.4 | **Does SwiftUI hold scroll position under a streaming transcript?** | **Superseded, not answered.** The original wording asked this about FlashList v2 and died with the React Native spike. The question itself survives and is now the riskiest open assumption in the plan: §17 puts scroll position on the device, and the claim that a native scroll view handles it — where the web client needed four attempts — is **untested**. Being measured by BET-481. Do not assume the answer while it is open. |
 
 ---
 
@@ -912,11 +939,124 @@ durations; semantic colour tokens rather than hex.
 
 | What | When | Notes |
 |---|---|---|
-| **The implementation epic** | **After BET-431 reports.** | Written against the winning stack. §1–§12 are the input; the decomposition is mechanical from there. Do not file it early — a large blocked epic creates sunk-cost pressure that biases the reading of an ambiguous spike result. |
-| **The pairing rework** (universal link, `apple-app-site-association`, the pairing web page, the two-sided code on both screens, device list with revoke, TTL and rotation, push to existing devices) | **Now — it is unblocked.** | Almost entirely **server and desktop** work. Needed identically under either stack. It is the security spine of onboarding and it de-risks the flow that matters most. |
+| **The implementation epic** | **After BET-475 closes.** BET-431 has reported (§2). | Written against the winning stack. §1–§12 plus §17 are the input. The decomposition is **no longer purely mechanical**: §17 puts a server-side migration ahead of the app, and §15.4 is an open measurement that can change the device-side scope. BET-475 exists to close those before the epic is written. |
+| **The pairing rework** (universal link, `apple-app-site-association`, the pairing web page, the two-sided code on both screens, device list with revoke, TTL and rotation, push to existing devices) | **Being decomposed now — BET-484.** | Almost entirely **server and desktop** work. Needed identically under either stack. It is the security spine of onboarding and it de-risks the flow that matters most. |
 | **App Clip** | **After the app is live on the App Store.** | Physically cannot be built before then (§6.6). |
 | **Retire the mobile web client, the CI bundle publish and the self-update fetch** | **When the native replacement is ready**, not before. | §12. |
 | **Per-session notification mute** | Only if it comes back as a product requirement. | Needs new server-side routing (§7.5). |
+
+---
+
+## 17. Where the chat logic lives
+
+**Settled 2026-08-01 (BET-469).** This section replaces the "shared logic layer"
+half of §1.10, which BET-433 invalidated.
+
+### The decision
+
+**The box is the single interpreter of the session stream. Both clients consume
+what it produces.** The web client migrates to it too — it is not a mobile-only
+path.
+
+### The criterion — use this, not "is it hard to port"
+
+Judge each piece of logic by one question: **would moving it to the box add a
+network round trip, or does it ride one that already happens?**
+
+This is the criterion because the box is a *remote* machine reached over
+cellular, not a local process. That single fact is what makes the box cheap for
+some work and disqualifying for other work, and it is what a generic
+client-versus-server argument gets wrong.
+
+### The partition
+
+| Kind | Examples | Home |
+|---|---|---|
+| **Stream interpretation** — roughly 60% of `chatUtils.ts` | truncation classification, delta flush boundaries, context arithmetic, cache staleness, todo state, subagent tracking, question hydration, turn-complete detection, auto-rename | **Box** |
+| **Interaction** — ~15 functions | scroll pinning, command filtering, input history, question form state, queued-drain abort | **Device** |
+| **Formatting** | token counts, durations, clock times, stage colours | **Device** — one line each, trivial in any language |
+
+The heavy, subtle, well-tested logic is nearly all box-side. The device-side set
+is small and is the part that should be native anyway.
+
+### Why the web client migrates too
+
+The tempting alternative — box interprets for mobile, web keeps its local copy —
+is rejected. It produces two implementations of delta flushing and context
+arithmetic in two languages, guaranteed to drift, with the box copy exercised
+only by the newer and less-used client. That trades "build twice" for
+"interpret twice", which is worse because it is invisible: two renderers
+disagreeing about whether a turn was truncated looks like a bug in one of them,
+not like a missing decision.
+
+### Sequencing — this ordering is the point, not an implementation detail
+
+1. Move interpretation to the box, behind the existing event stream.
+2. **Migrate the web client first.** It can be tested today, with the existing
+   suite and the visual gates.
+3. Build the Swift app against a server surface already proven in production.
+
+If the Swift app were the first consumer of brand-new server logic, every bug
+would be ambiguous — server or client? This ordering removes that ambiguity and
+shrinks the mobile epic to the small device-side set plus UI.
+
+**Step 2 is also the performance measurement — do not build a separate PoC for
+it.** A standalone spike cannot answer the question before the server side
+exists, and throughput is not in doubt anyway: the box emits flushed chunks at
+roughly 4/sec where the raw stream is ~100/sec, so the phone does strictly less
+work. The real risk is the opposite one — moving the flush decision to the box
+adds a network hop *before text appears*.
+
+So when step 2 lands, instrument **time from first token to rendered text** on
+both paths. The threshold is pre-registered here so the result cannot be
+rationalised after the fact:
+
+> **Under 1 second is acceptable.** Above it, revisit §17's partition — the
+> flush decision moves back to the device while interpretation stays on the box.
+
+Pre-registering the number is the point. Measuring first and deciding afterwards
+reliably produces "that seems fine".
+
+**Accepted cost:** step 2 touches a shipping client for no user-visible benefit.
+That is real work with real regression risk. It is accepted knowingly; the
+mitigations are the existing test coverage on exactly these functions, plus the
+visual gates.
+
+### Breaking changes are allowed. There is no transition period.
+
+Confirmed explicitly by the human. The product is in internal testing, so the
+event stream may change shape without a compatibility layer, a version
+negotiation, or a dual-path shim. **Do not build one.** This mirrors §1.2.
+
+One consequence to be aware of rather than design around: the box self-updates
+from `main` and the desktop auto-updates from its release feed, and the two are
+not atomic. A user whose desktop lags a breaking box change sees a broken app
+until it updates. Acceptable at this stage; it stops being acceptable at public
+release, and that is when a compatibility story becomes required.
+
+### Degraded mode — what still works when the box is unreachable
+
+**Settled.** A phone loses connectivity constantly, and a client that shows a
+spinner where a native app should feel alive is most of the perceived quality
+gap between a native app and a webview.
+
+Unaffected by an unreachable box:
+
+- the composer — typing, editing and queueing a message never blocks
+- scroll position and scrolling through the transcript
+- every message already received
+
+Only **new** interpretation stops. Nothing already delivered may be re-derived
+on demand, because that would make previously-rendered content depend on the
+link.
+
+### Consequences for other sections
+
+- §1.10's mitigation is corrected to point here
+- §15.4 is the open risk this section depends on: scroll position is on the
+  device, and whether SwiftUI holds it under streaming is being measured
+  (BET-481) rather than assumed
+- The Swift test strategy (BET-485) is downstream of this partition
 
 ---
 
