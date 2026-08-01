@@ -32,7 +32,9 @@
  *     cursor in the terminal-mode shot.
  *   - `viewport` + `deviceScaleFactor: 2` per shot table.
  *   - `page.screenshot` only after a `page.waitForSelector` resolves,
- *     never after `waitForTimeout`.
+ *   -   never after `waitForTimeout`.
+ *
+ * BET-542 TRIGGER — do not merge.
  *
  * Captures:
  *
