@@ -250,10 +250,31 @@ export function resolveToken(value, map) {
  *  its computed ARIA role and its ordinal within that role.
  * ------------------------------------------------------------------ */
 
+/** Which border-*-width property gates each border-*-color property. */
+const BORDER_WIDTH_OF_COLOR = {
+  "border-top-color": "border-top-width",
+  "border-right-color": "border-right-width",
+  "border-bottom-color": "border-bottom-width",
+  "border-left-color": "border-left-width",
+};
+
 function isDefault(prop, value) {
   const d = DEFAULTS[prop];
   if (d == null) return false;
   return value === d;
+}
+
+/**
+ * A border-*-color is PHANTOM — CSS computes it to the element's own text
+ * colour (currentColor) even when the border doesn't exist — unless that
+ * side actually renders a border. Gate on the computed border-*-width being
+ * `0px`: the width is the ground truth for whether a border exists, not the
+ * colour spelling and not any token-name heuristic.
+ */
+function isPhantomBorderColor(prop, props) {
+  const widthProp = BORDER_WIDTH_OF_COLOR[prop];
+  if (!widthProp) return false;
+  return props[widthProp] === "0px";
 }
 
 async function extractRegion(page, selector) {
@@ -348,9 +369,14 @@ function renderSectionA(appRecords, mockRecords, map) {
     for (const rec of records) {
       for (const [prop, value] of Object.entries(rec.props)) {
         if (isDefault(prop, value)) continue;
+        if (isPhantomBorderColor(prop, rec.props)) continue;
         const toks = resolveToken(value, map);
         if (!toks) continue;
-        for (const t of toks) bump(GROUP_OF[prop], side, t);
+        // A value that maps to several colliding tokens is ONE observation —
+        // count the candidate set as a single bucket (`--sp-3|--r-lg`), not
+        // each token separately (which would multiply one element into N).
+        const bucket = toks.length > 1 ? toks.join("|") : toks[0];
+        bump(GROUP_OF[prop], side, bucket);
       }
     }
   }
@@ -407,6 +433,11 @@ function renderSectionB(appRecords, mockRecords, map) {
       const av = rec.props[prop];
       const mv = other.props[prop];
       if (isDefault(prop, av) && isDefault(prop, mv)) continue;
+      // Skip a border-colour delta when either side has no border on that
+      // side: the border doesn't render, so the colour is phantom (a
+      // borderless element still computes currentColor). The width delta —
+      // when both widths differ — already reports the real structural gap.
+      if (isPhantomBorderColor(prop, rec.props) || isPhantomBorderColor(prop, other.props)) continue;
       if (av !== mv) {
         deltas.push(
           `  ${prop.padEnd(20)} app ${fmtValue(av, map)}   mockup ${fmtValue(mv, map)}`,
