@@ -264,6 +264,15 @@ assignee). At that point:
    when all its children are done) — do NOT try to "implement the milestone"
    directly. Its children are the buildable units.
 
+A decomposition issue — one whose deliverable is other issues — has exactly
+**one** assignee, and is never re-assigned or re-dispatched while a run is in
+flight. Before decomposing, check whether the children already exist: if any
+child of that parent is already filed, **stop and comment** rather than filing
+a second set, saying what you found. If two trees do exist, they are reconciled
+by a **human**, not by an agent picking one — an agent must not cancel another
+agent's issues. Both BET-484 and BET-475 produced duplicate trees this way and
+needed a human to sort them out.
+
 **Do NOT decompose a milestone before its stage is active.** Later-stage
 milestones stay `todo` + unassigned until their turn — decomposing early
 creates stale sub-issues that drift from the code that lands before them.
