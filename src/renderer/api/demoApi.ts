@@ -34,6 +34,7 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
+import type { AvailableLauncher } from "../../shared/types.js";
 import { demoState } from "./demoFixture.js";
 import { pickDemoDataset } from "../demoLayout.js";
 
@@ -140,9 +141,8 @@ const opencodeCloseStream = (_sessionId: string): Promise<void> =>
 
 const onOpencodeEvent = (_cb: (ev: unknown) => void): (() => void) => () => {};
 
-// Available AI CLI TUI launchers. Demo returns an empty list — the chat
-// session's mode dropdown will show just Chat + Terminal.
-const launchersList = (): Promise<unknown[]> => Promise.resolve([]);
+const launchersList = (): Promise<AvailableLauncher[]> =>
+  Promise.resolve(demoState.launchers);
 
 // Version skew guard (BET-225 stage 3 Part C). Pretend the client and
 // server are perfectly aligned — the renderer reads these in an effect and

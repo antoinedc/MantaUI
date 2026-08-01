@@ -22,6 +22,7 @@
 
 import type {
   AppConfig,
+  AvailableLauncher,
   OpencodeMessage,
   OpencodeModel,
   PermissionRequest,
@@ -666,6 +667,27 @@ export const demoModels: OpencodeModel[] = [
   },
 ];
 
+// AI-CLI TUI launchers the box reports (src/server/launcherRegistry.mjs,
+// filtered to the renderer-visible fields). TWO entries on purpose: `claude`
+// has a flag so it renders in Settings' "AI CLI launch options" card, `codex`
+// has none so it is filtered out of that card while still appearing in the
+// session menu — one fixture exercising both branches of the filter.
+export const demoLaunchers: AvailableLauncher[] = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    flags: [
+      {
+        key: "skipPermissions",
+        label: "Skip all permission prompts",
+        type: "boolean",
+        default: true,
+      },
+    ],
+  },
+  { id: "codex", label: "Codex", flags: [] },
+];
+
 // =============================================================================
 // Aggregate demo state — single import for demoApi.ts. Keeps the fixture file
 // discoverable from one place: `import { demoState } from "./demoFixture"`,
@@ -684,6 +706,7 @@ export const demoState = {
   permission: demoPermission,
   sessions: demoSessionList,
   models: demoModels,
+  launchers: demoLaunchers,
 };
 
 // =============================================================================
