@@ -337,8 +337,9 @@ jobs:
               })().catch(() => {});
             '; } > "$ART/machine.txt" 2>/dev/null || true
           # Per-shot pixel diffs (regenerated vs committed) → report.txt + *.diff.png.
-          node scripts/shots-drift-diff.mjs "$ART" > "$ART/diff/report.txt" 2>/dev/null || \
-            { echo "diff tool failed; artifact carries raw byte sets only" > "$ART/diff/report.txt"; }
+          # The script creates diff/ itself (mkdirSync recursive) and writes
+          # report.txt, so no shell redirect to a pre-existing dir is needed.
+          node scripts/shots-drift-diff.mjs "$ART"
 
       - name: Drift gate failure — upload shot byte sets
         if: failure() && steps.drift_gate.outcome == 'failure'
