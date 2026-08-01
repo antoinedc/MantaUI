@@ -243,4 +243,3 @@ export async function preparePage(page, { url, readySelector, finalSelector, act
   );
 }
 
-// [BET-537 validation] comment-only harness touch to force the drift-gate run.
