@@ -27,7 +27,8 @@
 
 import { chromium } from "playwright";
 import sharp from "sharp";
-import { existsSync, mkdirSync, rmSync, writeFile } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   LAUNCH_OPTIONS,
@@ -139,6 +140,7 @@ async function capture(browser, baseURL, screen) {
     colorScheme: "light",
   });
   const page = await context.newPage();
+  let app;
   try {
     await preparePage(page, {
       url: `${baseURL}${screen.url}`,
@@ -146,14 +148,10 @@ async function capture(browser, baseURL, screen) {
       finalSelector: screen.final,
       actions: screen.actions,
     });
+    app = await captureHalf(page, { region: screen.region, fullPage: true });
   } finally {
     await context.close();
   }
-
-  const app = await captureHalf(page, {
-    region: screen.region,
-    fullPage: true,
-  });
   log(`captured app        → .visual-out/${screen.id}.app.png`);
   await writeFile(join(OUT_DIR, `${screen.id}.app.png`), app.png);
 
@@ -176,19 +174,19 @@ async function capture(browser, baseURL, screen) {
     colorScheme: "light",
   });
   const mpage = await mctx.newPage();
+  let mock;
   try {
     await preparePage(mpage, {
       url: `${baseURL}/${screen.mockup}`,
       readySelector: "[data-screen]",
     });
+    mock = await captureHalf(mpage, {
+      region: screen.mockupRegion ?? screen.region,
+      fullPage: true,
+    });
   } finally {
     await mctx.close();
   }
-
-  const mock = await captureHalf(mpage, {
-    region: screen.mockupRegion ?? screen.region,
-    fullPage: true,
-  });
   log(`captured mockup     → .visual-out/${screen.id}.mockup.png`);
   await writeFile(join(OUT_DIR, `${screen.id}.mockup.png`), mock.png);
 
