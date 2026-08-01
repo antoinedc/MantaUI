@@ -121,7 +121,9 @@ export const SCREENS = [
     url: "/app/index.html?demo&desktop",
     ready: '[data-screen="session"]',
     final: "text=Run a shell command?",
-    region: ".manta-session-header",
+    // Each chat window stays mounted with its pane hidden (display:none),
+    // so scope to the visible pane's header — only the active one is shown.
+    region: ".manta-session-header:visible",
     mockupRegion: ".topb",
     actions: async (page) => {
       await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
@@ -135,7 +137,8 @@ export const SCREENS = [
     url: "/app/index.html?demo&desktop",
     ready: '[data-screen="session"]',
     final: "text=Run a shell command?",
-    region: ".manta-composer",
+    // See session-header: only the active chat pane's composer is visible.
+    region: ".manta-composer:visible",
     mockupRegion: ".composer",
     actions: async (page) => {
       await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
