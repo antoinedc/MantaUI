@@ -22,6 +22,7 @@ import {
   authorizationForRequest,
   QUERY_TOKEN_PATHS,
 } from "./auth.mjs";
+import { createDeviceRegistry } from "./devices.mjs";
 
 const HEX32 = "0123456789abcdef0123456789abcdef";
 const HEX32B = "fedcba9876543210fedcba9876543210";
@@ -331,6 +332,11 @@ function engine(opts = {}) {
   return createAuthEngine({
     saveAuth: async () => {},
     deleteAuth: async () => {},
+    // Fresh in-memory device registry with no-op persistence: keeps the
+    // device store (devices.json) OFF the real/sandboxed filesystem and
+    // isolates each engine so a claim/revoke in one test can't leak into
+    // another. The primary device is seeded from the engine's auth box_token.
+    devices: createDeviceRegistry({ load: () => null, save: async () => {}, now: () => 0 }),
     ...opts,
   });
 }
