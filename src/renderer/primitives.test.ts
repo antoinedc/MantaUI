@@ -109,7 +109,19 @@ function offendingLines(content: string, re: RegExp): string[] {
 // primitive asserts its rule ACTIVELY, so a regression (a deleted import, a
 // pasted raw literal) fails loudly instead of silently passing.
 const UNDER_ADOPTED: Set<string> = new Set(["IconButton", "Field", "MenuItem", "SessionRow"]);
-const RAW_PX_EXCEPTION: Set<string> = new Set(["SessionRow"]);
+
+// Spec-authorized off-grid px values, per primitive, that rule 1c consults
+// instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
+// owner-accepted spec chrome, NOT off-grid drift — BET-536 C6 ("off-grid spec
+// chrome — spec+pre-existing, not invented"): the 7px status dot, 3px ring,
+// -8px selection marker, 13px child connectors, 26px child indent and 20px age
+// slot are real values from the redesign spec's `.srow` definition. A value
+// listed here is spec chrome; a value NOT listed fails 1c and is reported
+// verbatim, so the rule stays active — it just has a documented allow-list for
+// the one spec-authorized component.
+const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
+  SessionRow: [3, 7, 8, 13, 20, 26],
+};
 
 const SKIP_REASON: Record<string, string> = {
   IconButton:
@@ -118,8 +130,6 @@ const SKIP_REASON: Record<string, string> = {
     "1 adopting file (Settings.tsx) today — BET-533 migrated four call sites, all in Settings. Reaching 2 needs a Field call site migrated from another file (BET-533 named CustomProviderForm.tsx / ConnectProvider.tsx as future adopters).",
   MenuItem:
     "1 adopting file (SessionHeader.tsx) today — the three variants are all in the one session menu. Reaching 2 needs a second role=menu surface that adopts MenuItem.",
-  SessionRow_rawpx:
-    "the .srow metrics (7px dot, 3px ring, 13px connector, 26px child indent, 20px age slot) are spec-authorized off-grid values, NOT on the spacing grid by design (BET-536 C6). Incapable of token-expression today; un-skip if/when a token or scale captures them.",
 };
 
 describe("M527 primitive rules", () => {
@@ -164,32 +174,28 @@ describe("M527 primitive rules", () => {
   describe("1c — no raw colour / off-grid px in the primitive's own code", () => {
     for (const p of PRIMITIVES) {
       const label = `${p} code has no raw colour or off-grid pixel literal`;
-      if (RAW_PX_EXCEPTION.has(p)) {
-        // SessionRow's .srow metrics are spec-authorized off-grid values; un-skip
-        // if/when a token captures them.
-        it.skip(label, () => {
-          void SKIP_REASON[p + "_rawpx"];
+      it(label, () => {
+        const code = sourceCode(p);
+        const hex = offendingLines(code, /#[0-9a-fA-F]{3,8}\b/);
+        const rgba = offendingLines(code, /rgba?\(/);
+        const allowed = OFF_GRID_PX_ALLOWLIST[p] ?? [];
+        const px = offendingLines(code, /\b\d+px\b/).filter((line) => {
+          const values = [...line.matchAll(/\d+px/g)].map((m) => parseInt(m[0], 10));
+          return values.some((v) => !allowed.includes(v));
         });
-      } else {
-        it(label, () => {
-          const code = sourceCode(p);
-          const hex = offendingLines(code, /#[0-9a-fA-F]{3,8}\b/);
-          const rgba = offendingLines(code, /rgba?\(/);
-          const px = offendingLines(code, /\b\d+px\b/);
-          expect(
-            hex,
-            `${p} [rule 1c — raw colour] has no raw hex; offending line(s): ${hex.join(" | ") || "none"}`,
-          ).toEqual([]);
-          expect(
-            rgba,
-            `${p} [rule 1c — raw colour] has no rgba(); offending line(s): ${rgba.join(" | ") || "none"}`,
-          ).toEqual([]);
-          expect(
-            px,
-            `${p} [rule 1c — off-grid px] has no \`\\d+px\`; offending line(s): ${px.join(" | ") || "none"}`,
-          ).toEqual([]);
-        });
-      }
+        expect(
+          hex,
+          `${p} [rule 1c — raw colour] has no raw hex; offending line(s): ${hex.join(" | ") || "none"}`,
+        ).toEqual([]);
+        expect(
+          rgba,
+          `${p} [rule 1c — raw colour] has no rgba(); offending line(s): ${rgba.join(" | ") || "none"}`,
+        ).toEqual([]);
+        expect(
+          px,
+          `${p} [rule 1c — off-grid px] has no px value off the spec allow-list; offending line(s): ${px.join(" | ") || "none"}`,
+        ).toEqual([]);
+      });
     }
   });
 });
