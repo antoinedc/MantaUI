@@ -169,13 +169,17 @@ jobs:
       #    because Chrome 148 refused every loopback navigation (the captures
       #    could not run at all) and then, after moving to Playwright's pinned
       #    Chromium, two consecutive captures of the same UI were not
-      #    byte-identical. Both are fixed: shots.mjs now uses the shared
-      #    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json), and
-      #    the two-run below asserts determinism. The first `npm run shots`
-      #    rebuilds + captures; the second proves run-to-run byte-identity; the
-      #    final git diff guards both against the committed set. A determinism
-      #    regression fails HERE (as itself), not as a mystery diff on some
-      #    unrelated PR.
+#    byte-identical. Both are fixed: shots.mjs now uses the shared
+#    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json). The gate
+#    captures twice and compares the two runs for byte-identity: the first
+#    `npm run shots` rebuilds + captures into the working tree, and a copy of
+#    its output is stashed in $RUNNER_TEMP; the second runs again into the same
+#    paths. If the two runs differ, the step fails as CAPTURE IS
+#    NON-DETERMINISTIC — the committed set is not the problem. Only when the two
+#    runs are byte-identical does the step diff the result against the committed
+#    set, failing as COMMITTED SHOTS ARE STALE with the remedy to run
+#    `npm run shots` and commit. A determinism regression fails HERE (as
+#    itself), not as a mystery diff on some unrelated PR.
       #
       #    The pinned Chromium must be present BEFORE the drift gate captures.
       #    After the 2026-07-31 Chrome-148 failure the gate ran cold against
@@ -209,21 +213,46 @@ jobs:
           # pins the browser that renders them.
           if git diff --name-only "$(git merge-base origin/main HEAD)" HEAD -- \
                src/renderer/ website/ scripts/shots.mjs scripts/visual/harness.mjs package-lock.json | grep -q .; then
+            # First capture — rebuilds + renders into website/.
             npm run shots
+            # Stash this run's output OUTSIDE the working tree ($RUNNER_TEMP) so
+            # the second run can't overwrite it and a stray copy can't show up in
+            # the git diff below. Scope is exactly the shot artifacts this gate
+            # owns (website/shot-*.webp + hero-poster.webp), never the whole
+            # website/ dir.
+            TMP="$(mktemp -d "$RUNNER_TEMP/shots-drift.XXXXXX")"
+            trap 'rm -rf "$TMP"' EXIT
+            cp website/shot-*.webp "$TMP"/ 2>/dev/null || true
+            [ -f website/hero-poster.webp ] && cp website/hero-poster.webp "$TMP"/
+            # Second capture — into the same paths as the first.
             npm run shots
-            # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
-            # hero-poster.webp). NOT the whole website/ dir — the npm test step
-            # regenerates website/sitemap.xml from git history, so including it
-            # here makes the gate measure the sitemap's lastmod against a stale
-            # committed copy and fail on an unrelated file (BET-444).
+            # DETERMINISM CHECK — always first. A non-deterministic capture makes
+            # the staleness comparison meaningless, so it must be reported as
+            # itself before any diff against the committed set. Compare the
+            # stashed copy (run 1) to the freshly produced files (run 2) byte for
+            # byte; the committed set is not consulted or implicated.
+            NON_DET=""
+            for f in website/shot-*.webp website/hero-poster.webp; do
+              [ -f "$f" ] || continue
+              b="$(basename "$f")"
+              if [ ! -f "$TMP/$b" ] || ! cmp -s "$TMP/$b" "$f"; then
+                NON_DET="$NON_DET $b"
+              fi
+            done
+            if [ -n "$NON_DET" ]; then
+              echo "::error file=website/shot-*.webp::CAPTURE IS NON-DETERMINISTIC — two consecutive 'npm run shots' runs differ for:${NON_DET# }. The committed set is not the problem."
+              echo "::error::The capture pipeline itself produced different bytes across two identical runs. Investigate the browser/capture before merging; do not regenerate the committed set."
+              exit 1
+            fi
+            # STALENESS CHECK — reached only when the two runs are byte-identical,
+            # so a diff here is genuinely the committed set being stale.
             echo "::group::Post-capture shot diff against the committed set"
             git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
             git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
             git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
             echo "::endgroup::"
             if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
-              echo "::error file=website/shot-*.webp::drift detected — two consecutive runs differ from the committed set. Either the renderer changed or the capture is not byte-deterministic."
-              echo "::error::If the renderer intentionally changed, run 'npm run shots' locally and commit the regenerated files. If not, the capture pipeline is non-deterministic — investigate before merging."
+              echo "::error file=website/shot-*.webp::COMMITTED SHOTS ARE STALE — the fresh deterministic capture differs from the committed set. Run 'npm run shots' locally and commit the regenerated website/shot-*.webp + website/hero-poster.webp."
               exit 1
             fi
           else
