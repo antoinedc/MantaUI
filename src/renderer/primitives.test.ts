@@ -90,6 +90,19 @@ function sourceCode(p: string): string {
   return source(p).replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
+/**
+ * Line numbers (1-based) whose text matches `re` — used to make a rule failure
+ * name the primitive, the rule, AND the offending line, per the epic's
+ * requirement that the message be actionable without opening the file.
+ */
+function offendingLines(content: string, re: RegExp): string[] {
+  const out: string[] = [];
+  for (const [i, line] of content.split("\n").entries()) {
+    if (re.test(line)) out.push(`${i + 1}: ${line.trim()}`);
+  }
+  return out;
+}
+
 // Genuine gaps this cell surfaces (reported as findings — the epic delivered
 // call-site adopters within a single file, and SessionRow carries spec-.srow
 // metrics). Only these are skipped, with justifications below; every OTHER
@@ -140,9 +153,9 @@ describe("M527 primitive rules", () => {
         it(label, () => {
           const adopters = importers(p);
           expect(
-            adopters,
+            adopters.length,
             `${p}: two-adopter rule needs >=2 files importing it; found ${JSON.stringify(adopters)}`,
-          ).toHaveLength(2);
+          ).toBeGreaterThanOrEqual(2);
         });
       }
     }
@@ -160,9 +173,21 @@ describe("M527 primitive rules", () => {
       } else {
         it(label, () => {
           const code = sourceCode(p);
-          expect(code.match(/#[0-9a-fA-F]{3,8}\b/) || [], `${p}: no raw hex colour`).toEqual([]);
-          expect(code.match(/rgba?\(/) || [], `${p}: no rgba() colour`).toEqual([]);
-          expect(code.match(/\b\d+px\b/) || [], `${p}: no off-grid px value`).toEqual([]);
+          const hex = offendingLines(code, /#[0-9a-fA-F]{3,8}\b/);
+          const rgba = offendingLines(code, /rgba?\(/);
+          const px = offendingLines(code, /\b\d+px\b/);
+          expect(
+            hex,
+            `${p} [rule 1c — raw colour] has no raw hex; offending line(s): ${hex.join(" | ") || "none"}`,
+          ).toEqual([]);
+          expect(
+            rgba,
+            `${p} [rule 1c — raw colour] has no rgba(); offending line(s): ${rgba.join(" | ") || "none"}`,
+          ).toEqual([]);
+          expect(
+            px,
+            `${p} [rule 1c — off-grid px] has no \`\\d+px\`; offending line(s): ${px.join(" | ") || "none"}`,
+          ).toEqual([]);
         });
       }
     }
