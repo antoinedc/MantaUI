@@ -381,3 +381,98 @@ test("readPairAsset returns pair-logo.png bytes (PNG magic)", () => {
   assert.ok(buf.subarray(0, 8).equals(expected));
   assert.ok(buf.length > 100, "logo PNG should be non-trivial");
 });
+
+// ---------------------------------------------------------------------------
+// BET-489 — manual six-digit entry on the /pair page
+//
+// These tests assert DIRECTLY on the shipped `pair.html` (the exact file the
+// server serves verbatim via readPairAsset), not on extracted/module helpers.
+// The page's dynamic logic (fragment parse, /auth/claim POST, resolved-box
+// render) lives in its inline <script> — so we certify the shipped artifact.
+// ---------------------------------------------------------------------------
+
+// The manual-entry mailbox: the shipped page hands the code from the URL
+// FRAGMENT to the EXISTING /auth/claim endpoint as a {code} POST body —
+// manual entry sends only the six digits, the server resolves the box (§5.2.9).
+// The /auth/claim server half (code → resolved box) is already covered by
+// auth.test.mjs; this pins that the page wires to that same endpoint.
+test("manual-entry mailbox: shipped page claims the fragment code against /auth/claim (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // The claim endpoint is built by claimEndpointFor — it must resolve to the
+  // EXISTING /auth/claim path, never a new route.
+  const endpoint = html.match(/function claimEndpointFor\(origin\)\{([\s\S]*?)\n\}/);
+  assert.ok(endpoint, "the page must define claimEndpointFor(origin)");
+  assert.match(endpoint[1], /\/auth\/claim/, "the endpoint must reuse /auth/claim");
+  assert.match(endpoint[1], /"\/auth\/claim";/, "endpoint is exactly <origin>/auth/claim");
+  assert.doesNotMatch(endpoint[1], /"\/auth\/claim\?/, "no query appended after /auth/claim");
+  assert.doesNotMatch(endpoint[1], /[?&]code\s*=/i, "no code in a query string");
+  // doClaim POSTs only {code} to that endpoint — the code travels in the body.
+  const doClaim = html.match(/function doClaim\(code\)\{([\s\S]*?)\n\}/);
+  assert.ok(doClaim, "the page must define doClaim(code)");
+  assert.match(doClaim[1], /fetch\(claimEndpointFor\(origin\)/, "claims via the built endpoint");
+  assert.match(doClaim[1], /method:\s*"POST"/, "must be a POST");
+  assert.match(doClaim[1], /JSON\.stringify\(\{\s*code:\s*code\s*\}\)/, "body carries {code}");
+  assert.doesNotMatch(doClaim[1], /box\s*:/, "manual entry sends no box id");
+});
+
+// Fragment-only: the code must never be placed in a path/query the server
+// could log. The code is sourced only from `location.hash` and sent as a POST
+// body, never reconstructed into a URL the proxy records.
+test("the page never puts the code in a path/query the server could log (fragment only) (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // The code is sourced only from the URL fragment.
+  assert.match(html, /location\.hash/, "code must be read from the fragment");
+  // No path/query construction that would surface the code to a proxy log.
+  assert.doesNotMatch(html, /"\/auth\/claim\?"/, "no code-carrying claim URL query");
+  assert.doesNotMatch(html, /&code=|&box=/, "no query-string code/box usage");
+});
+
+// The resolved-box card is fed by a claim that resolved the box (the server
+// returns box_id on success). The page must key the "Box found" card off
+// that resolved response — not off any client-side assumption.
+test("resolved-box card is fed by a successful /auth/claim that resolved the box (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  const present = html.match(/function presentClaimResult\(res, body\)\{([\s\S]*?)\n\}/);
+  assert.ok(present, "presentClaimResult must exist");
+  assert.match(present[1], /res\s*&&\s*res\.ok/, "only a successful response shows the card");
+  assert.match(present[1], /body\s*\.\s*box_id/, "keys off the server-resolved box_id");
+  assert.match(html, /Box found/, "the resolved-box card heading");
+});
+
+// Failure-state copy renders per §5.4 — the verbatim {cause, action} pairs.
+test("pair.html renders the §5.4 failure-state copy verbatim (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // Expired
+  assert.match(html, /That code expired/);
+  assert.match(html, /Codes last five minutes/);
+  assert.match(html, /Nothing was linked and nothing changed/);
+  assert.match(html, /Your desktop already has a new one/);
+  assert.match(html, /Scan again/);
+  assert.match(html, /Enter a code instead/);
+  // Unreachable
+  assert.match(html, /Can't reach your box/);
+  assert.match(html, /Nothing was linked\./);
+  assert.match(html, /It may be asleep/);
+  assert.match(html, /Check it's powered on and the server is running/);
+  assert.match(html, /Or this network blocks it/);
+  assert.match(html, /Try cellular instead of Wi-Fi/);
+  assert.match(html, /Try again/);
+  assert.match(html, /Copy diagnostics/);
+  // Manual + not-installed fallback
+  assert.match(html, /Enter the code/);
+  assert.match(html, /Read the six digits off your desktop/);
+  assert.match(html, /Get the app to finish/);
+  assert.match(html, /Prefer to type it\?/);
+  assert.match(html, /Get Manta/);
+});
+
+// No box_token or secret embedded anywhere in the served page.
+test("pair.html embeds no box_token or secret (BET-489)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  assert.ok(!/box_token/i.test(html), "must not embed the bearer token key");
+  assert.ok(!/Authorization/i.test(html), "must not embed the auth header");
+  assert.ok(!/\bbearer\b/i.test(html), "must not embed the bearer scheme");
+  assert.ok(!/secret/i.test(html), "must not embed any secret string");
+  // No 32-hex literal (a box_token / box_id shape) in the static page.
+  assert.ok(!/[0-9a-f]{32}/i.test(html), "must not embed a 32-hex token literal");
+});
