@@ -92,21 +92,20 @@ function sourceCode(p: string): string {
 
 // Genuine gaps this cell surfaces (reported as findings — the epic delivered
 // call-site adopters within a single file, and SessionRow carries spec-.srow
-// metrics). The tests below it.skip them with justifications; the doc's
-// adopter counts match these true numbers.
-const UNDER_ADOPTED: Record<string, string> = {
+// metrics). Only these are skipped, with justifications below; every OTHER
+// primitive asserts its rule ACTIVELY, so a regression (a deleted import, a
+// pasted raw literal) fails loudly instead of silently passing.
+const UNDER_ADOPTED: Set<string> = new Set(["IconButton", "Field", "MenuItem", "SessionRow"]);
+const RAW_PX_EXCEPTION: Set<string> = new Set(["SessionRow"]);
+
+const SKIP_REASON: Record<string, string> = {
   IconButton:
     "1 adopting file (SessionHeader.tsx) today — BET-532 migrated two call sites IN that one file. A second file (NewSessionScreen) is already tracked in BET-538; un-skip when it lands.",
   Field:
     "1 adopting file (Settings.tsx) today — BET-533 migrated four call sites, all in Settings. Reaching 2 needs a Field call site migrated from another file (BET-533 named CustomProviderForm.tsx / ConnectProvider.tsx as future adopters).",
   MenuItem:
     "1 adopting file (SessionHeader.tsx) today — the three variants are all in the one session menu. Reaching 2 needs a second role=menu surface that adopts MenuItem.",
-  SessionRow:
-    "1 adopting file (Sidebar.tsx) today — BET-536 migrated top-level + child rows, both in Sidebar. Reaching 2 needs a row migrated in another screen.",
-};
-
-const RAW_PX_EXCEPTIONS: Record<string, string> = {
-  SessionRow:
+  SessionRow_rawpx:
     "the .srow metrics (7px dot, 3px ring, 13px connector, 26px child indent, 20px age slot) are spec-authorized off-grid values, NOT on the spacing grid by design (BET-536 C6). Incapable of token-expression today; un-skip if/when a token or scale captures them.",
 };
 
@@ -129,16 +128,15 @@ describe("M527 primitive rules", () => {
 
   describe("1b — two-adopter rule (standing decision 2)", () => {
     for (const p of PRIMITIVES) {
-      const adopters = importers(p);
-      const label = `${p} has at least two adopting files (got ${adopters.length})`;
-      if (adopters.length < 2) {
-        // Under-adopted today — an epic finding, NOT fixed in this cell
-        // (explicitly out of scope: "If a primitive has fewer than two, report
-        // it"). Documented in the PR + filed as follow-up; un-skip when a
-        // second adopting file lands.
+      const label = `${p} has at least two adopting files`;
+      if (UNDER_ADOPTED.has(p)) {
+        // Under-adopted at baseline — an epic finding, NOT fixed in this cell
+        // ("If a primitive has fewer than two, report it"). Un-skip when a
+        // second adopting file lands. Reason: ${SKIP_REASON[p]}
         it.skip(label, () => {});
       } else {
         it(label, () => {
+          const adopters = importers(p);
           expect(
             adopters,
             `${p}: two-adopter rule needs >=2 files importing it; found ${JSON.stringify(adopters)}`,
@@ -150,20 +148,17 @@ describe("M527 primitive rules", () => {
 
   describe("1c — no raw colour / off-grid px in the primitive's own code", () => {
     for (const p of PRIMITIVES) {
-      const code = sourceCode(p);
-      const failures: string[] = [];
-      const badHex = code.match(/#[0-9a-fA-F]{3,8}\b/) || [];
-      const badRgba = code.match(/rgba?\(/) || [];
-      const badPx = code.match(/\b\d+px\b/) || [];
       const label = `${p} code has no raw colour or off-grid pixel literal`;
-      if (badHex.length || badRgba.length || badPx.length) {
+      if (RAW_PX_EXCEPTION.has(p)) {
+        // SessionRow's .srow metrics are spec-authorized off-grid values (see
+        // SKIP_REASON[SessionRow_rawpx]); un-skip if/when a token captures them.
         it.skip(label, () => {});
       } else {
         it(label, () => {
-          expect(failures).toEqual([]);
-          expect(badHex, `${p}: no raw hex colour`).toEqual([]);
-          expect(badRgba, `${p}: no rgba() colour`).toEqual([]);
-          expect(badPx, `${p}: no off-grid px value`).toEqual([]);
+          const code = sourceCode(p);
+          expect(code.match(/#[0-9a-fA-F]{3,8}\b/) || [], `${p}: no raw hex colour`).toEqual([]);
+          expect(code.match(/rgba?\(/) || [], `${p}: no rgba() colour`).toEqual([]);
+          expect(code.match(/\b\d+px\b/) || [], `${p}: no off-grid px value`).toEqual([]);
         });
       }
     }
