@@ -91,3 +91,69 @@ node spike/native-visual/measure.mjs      # reads the AX capture, drives the
 ```
 
 Deterministic: byte-identical across runs on the same capture + mockup.
+
+---
+
+# PoC 04 FINDINGS — inject known defects and score the loop
+
+PoC 03 established what the native render yields (geometry, derivable spacing;
+no typography/colour/radius attributes). PoC 04 asks whether the pipeline can
+**detect** injected deviations and whether the correcting edit can be derived
+from the report alone. Five defects spanning four failure classes were applied
+one at a time to `spike/swiftui-ref/MantaSpikeRef/SessionListView.swift`, each
+captured by the pinned iOS simulator (`macos`, identical env across all six:
+iPhone 17 Pro / iOS 26.5, fixed status bar, animations reduced), and each
+measured with PoC 03's `measure.mjs` unchanged. `out/baseline/` +
+`out/defect-1..5/` hold the per-tree AX captures. Every verdict below is read
+from the JSON report (spec-vs-app values), never from a screenshot.
+
+## Detection table
+
+| # | Defect | Class | Detected? | Fixable from report alone? | Notes |
+|---|---|---|---|---|---|
+| 1 | Session-name font size `15.5`→`17` | typography | **Yes** | **Yes** | Caught only via geometry side-effect: every row-name text-box grows (e.g. API Gateway `89.7×18.7`→`97×20.3` vs spec `92.3×19`), and `Docs`/`Infra` flip size from match→mismatch. `fontSize` itself stays `unavailable`; the signal is a line-box height/width delta that maps back to "text too big → reduce font". |
+| 2 | Row `HStack` spacing `8`→`12` | geometry | **Yes** | **Yes** | Every row-name `position.x` shifts `40`→`44` (+4px, spec 40). Clean uniform column shift; the 4px maps to the 8→12 leading spacing. |
+| 3 | Delete the status-dot `Circle` | structure | **Yes** | **Yes** | Every row-name `position.x` shifts `40`→`24` (−16px, spec 40). Exactly an 8pt dot + 8pt gap removed ahead of the label — reconstructable from the 16px void. (The dot itself stays `unavailable` in AX, as PoC 03 recorded.) |
+| 4 | Group-header colour `tx2`→`tx3` | colour | **No** | — | Null signal: hierarchy byte-identical to baseline (`cmp` clean). Colour has no AX representation, so a colour-only edit is invisible to the report. Matches PoC 03. |
+| 5 | Group-header top padding `22`→`16` | geometry | **Yes** | **Yes** | All group-header `position.y` shift up: Alpha `190`→`184` (baseline match), Beta `365`→`352`, Gamma `540`->`520`, against spec 190/365/540. ~6px-per-group vertical shortage → restore the header's top padding. |
+
+## Verdict
+
+**WORTH BUILDING**
+
+## Rationale
+
+4 of the 5 defects were detected, and every detected one was fixable from the
+report alone — so the pre-registered `WORTH BUILDING` bar (≥4 detected, every
+detected one fixable from the report) is met.
+
+The single miss is defect 4 (colour): the group-header text-token change
+produces no AX-tree delta at all, exactly as PoC 03 established — colour is not
+reachable through the accessibility hierarchy, so it necessarily remains a
+human judgement on native. That is a platform limitation, not a pipeline gap.
+
+One result refines PoC 03's claim that "typography is not reachable": the font-
+size defect (1) **was** detected here, but only through its geometric side-
+effect — the name text's content box grows enough to flip elements from
+match→mismatch. The report still exposes no font-size attribute; a human (or
+agent) must read a line-box-height delta as "text too large → reduce font".
+So typography is detected at the level of the text's size geometry, not as a
+first-class type attribute. Colour remains the one class the report cannot see
+at all.
+
+## Reproduce
+
+```
+# per defect N (1..5): point the measurement at that tree's AX capture, measure
+cp spike/native-visual/out/defect-N/session-list-hierarchy.txt \
+   spike/native-visual/out/session-list-hierarchy.txt
+node spike/native-visual/measure.mjs
+# defect-4 reproduces as a null result because its hierarchy is byte-identical
+# to baseline (cmp spike/native-visual/out/defect-4/session-list-hierarchy.txt
+# spike/native-visual/out/baseline/session-list-hierarchy.txt)
+```
+
+Revert-proof: the branch source tree is byte-identical to PoC 02 —
+`git diff 67ae2e7 HEAD -- . ':!spike/native-visual/out'` is empty and
+`git diff main...HEAD -- ':!spike/'` is empty. Only the new `out/` capture
+artefacts differ from PoC 02.
