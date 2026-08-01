@@ -63,7 +63,7 @@ struct SessionRow: View {
                     .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.name)
-                        .font(.system(size: 15.5, weight: .medium))
+                        .font(.system(size: 17, weight: .medium))
                         .kerning(-0.155)
                         .foregroundStyle(t.tx1)
                         .lineLimit(1)
