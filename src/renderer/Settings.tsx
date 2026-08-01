@@ -764,8 +764,23 @@ export function Settings({ onClose }: { onClose: () => void }) {
             )}
             <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text">Open plugins folder</button>
           </GroupCard>
+          <GroupCard title="Skill registries">
+            <div className="text-body text-text-faint">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>
+            <div className="space-y-2">
+              {registryUrls.map((url) => (
+                <div key={url} className="flex items-center gap-2">
+                  <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">{url}</code>
+                  <button onClick={() => onRemoveRegistry(url)} className="text-body text-text-faint hover:text-text px-2 inline-flex items-center" aria-label="Remove registry URL"><X size={14} aria-hidden="true" /></button>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
+              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
+            </div>
+          </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
-            <GroupCard title="AI CLI launch options">
+            <GroupCard title="CLI launch options">
               <div className="text-body text-text-faint">Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown.</div>
               <div className="space-y-4">
                 {availableLaunchers.filter((l) => l.flags.length > 0).map((l) => (
@@ -782,21 +797,6 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </div>
             </GroupCard>
           )}
-          <GroupCard title="Skill registries">
-            <div className="text-body text-text-faint">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>
-            <div className="space-y-2">
-              {registryUrls.map((url) => (
-                <div key={url} className="flex items-center gap-2">
-                  <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">{url}</code>
-                  <button onClick={() => onRemoveRegistry(url)} className="text-body text-text-faint hover:text-text px-2 inline-flex items-center" aria-label="Remove registry URL"><X size={14} aria-hidden="true" /></button>
-                </div>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <input placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} className="flex-1 bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent" />
-              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
-            </div>
-          </GroupCard>
         </>
       );
     }

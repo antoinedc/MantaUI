@@ -669,7 +669,7 @@ export const demoModels: OpencodeModel[] = [
 
 // AI-CLI TUI launchers the box reports (src/server/launcherRegistry.mjs,
 // filtered to the renderer-visible fields). TWO entries on purpose: `claude`
-// has a flag so it renders in Settings' "AI CLI launch options" card, `codex`
+// has a flag so it renders in Settings' "CLI launch options" card, `codex`
 // has none so it is filtered out of that card while still appearing in the
 // session menu — one fixture exercising both branches of the filter.
 export const demoLaunchers: AvailableLauncher[] = [

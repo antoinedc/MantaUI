@@ -3,13 +3,13 @@
   - checkbox "Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta."
   - text: Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta. Loading…
   - button "Open plugins folder"
-  - heading "AI CLI launch options" [level=5]
-  - text: Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown. Claude Code
-  - checkbox "Skip all permission prompts" [checked]
-  - text: Skip all permission prompts
   - heading "Skill registries" [level=5]
   - text: Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.
   - code: https://example.com/manta-skills-extra.json
   - button "Remove registry URL"
   - textbox "https://example.com/skills"
   - button "Add" [disabled]
+  - heading "CLI launch options" [level=5]
+  - text: Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown. Claude Code
+  - checkbox "Skip all permission prompts" [checked]
+  - text: Skip all permission prompts
