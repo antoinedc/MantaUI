@@ -57,6 +57,36 @@ Three steps, and only one of them is code.
 There is deliberately **one** visual spec file, and it loops the registry. If
 you are adding a second spec file, what you actually want is another row.
 
+### Registering a region
+
+A screen can also declare two optional fields that scope its capture to a
+single element:
+
+- **`region`** (CSS selector) — capture this element instead of the full page.
+  The pixel assertion renders `page.locator(region)` against its own small
+  baseline, and the structure root becomes `snapshot ?? region ?? ready`.
+- **`mockupRegion`** (CSS selector) — the matching element inside the mockup,
+  used by `compare.mjs`. Defaults to `region`; it usually differs because the
+  mockup is a different DOM (e.g. app `nav[role="tablist"]` vs mockup `.snav`).
+
+A region row is a **separate row** in the registry that reuses its screen's
+`url`, `ready`, `final` and `actions` and only changes what gets cropped. The
+screen's own full-page row stays and remains the composition gate, so a region
+baseline is byte-identical between runs where the component is unchanged — two
+issues touching different components touch different baseline files and can
+land in parallel.
+
+**Regions crop the real page. They are not an isolated-component harness.** A
+component rendered on its own can be perfect while the page it lives on is
+broken — the [full-height collapse](#what-the-first-run-taught-us) that
+slugged every vertical chain in BET-447 kept every element present and
+correctly named, so only a capture of the real page, region or full, would
+show it. A region deliberately inherits the screen's `url`, `ready`, `final`
+and `actions`, doing nothing but narrowing what is captured. The screenshot is
+taken from the page as a real user reaches it, so a page-level regression
+inside the region is visible even though the rest of the screen is cropped
+out.
+
 ### Mockup rules
 
 A mockup is a contract, not a picture. Two rules make it one:
@@ -135,8 +165,9 @@ thinks to look.
 ```
 npm run visual           # layers 1+2 — the gate. Builds first.
 npm run visual:update    # re-record baselines after an intended change.
-npm run visual:compare   # layer 3 — writes .visual-out/<id>.{app,mockup}.png
-npm run visual:compare welcome     # one screen
+npm run visual:compare   # layer 3 — writes .visual-out/<id> compare.png (side-
+                         # by-side composite) + the two raw app/mockup PNGs.
+npm run visual:compare settings-general     # one region row
 ```
 
 `.visual-out/` is generated and gitignored.
