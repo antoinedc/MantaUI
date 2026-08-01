@@ -191,6 +191,7 @@ jobs:
       - uses: ./.github/actions/cache-playwright-browsers
 
       - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
+        id: drift_gate
         if: github.event_name == 'pull_request'
         run: |
           # A PR that touches none of the capture inputs cannot make the shots
@@ -249,6 +250,57 @@ jobs:
           else
             echo "PR touches neither the renderer, website/, the shot-capture scripts, nor the lockfile — the shots this gate owns cannot have gone stale from it. Skipping (main coverage is the shots job in dep-audit-nightly.yml)."
           fi
+
+      # ── Drift-failure evidence (BET-537) — make the failing bytes obtainable.
+      #    When the drift gate above fails, nobody can currently see WHAT the
+      #    runner rendered differently from the committed set — only `git diff
+      #    --stat` (byte sizes, not content) in the log. This step runs on the
+      #    drift step's failure and uploads BOTH byte sets (the freshly
+      #    regenerated shots left in the working tree and the committed ones
+      #    from HEAD) plus a per-shot pixel-diff image and machine diagnostics,
+      #    so the difference class can be named offline instead of guessed.
+      #    Scope: exactly this step + `if` check — the artifact is short-lived
+      #    (7d retention; artifact storage is 500 MB and shared, see AGENTS.md).
+      - name: Drift gate failure — gather regenerated + committed shot bytes
+        id: drift_gather
+        if: steps.drift_gate.outcome == 'failure'
+        run: |
+          ART="$RUNNER_TEMP/shots-drift-failure"
+          rm -rf "$ART" && mkdir -p "$ART/committed" "$ART/regenerated"
+          # Regenerated = what `npm run shots` left in the working tree after the
+          # drift step failed (run-2 output, already byte-identical to run-1 by
+          # the determinism check that precedes the staleness diff).
+          cp website/shot-*.webp "$ART/regenerated"/ 2>/dev/null || true
+          [ -f website/hero-poster.webp ] && cp website/hero-poster.webp "$ART/regenerated"/ || true
+          # Committed = the pair from HEAD, so the two can be diffed offline.
+          for f in website/shot-*.webp website/hero-poster.webp; do
+            [ -f "$f" ] || continue
+            b="$(basename "$f")"
+            git show "HEAD:$f" > "$ART/committed/$b" 2>/dev/null || true
+          done
+          # Machine diagnostics to disambiguate font vs GPU vs scale vs timezone
+          # render differences.
+          { echo "== git HEAD =="; git rev-parse HEAD; fc-list 2>/dev/null | sort; \
+            node -e '
+              const { chromium } = require("playwright");
+              (async () => {
+                const c = await chromium.launch({ headless: true, args: ["--font-render-hinting=none"] });
+                console.log("chromium " + await c.version());
+                await c.close();
+              })().catch(() => {});
+            '; } > "$ART/machine.txt" 2>/dev/null || true
+          # Per-shot pixel diffs (regenerated vs committed) → report.txt + *.diff.png.
+          node scripts/shots-drift-diff.mjs "$ART" > "$ART/diff/report.txt" 2>/dev/null || \
+            { echo "diff tool failed; artifact carries raw byte sets only" > "$ART/diff/report.txt"; }
+
+      - name: Drift gate failure — upload shot byte sets
+        if: steps.drift_gate.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shots-drift-failure-${{ github.event.pull_request.number || github.sha }}
+          path: ${{ runner.temp }}/shots-drift-failure/**/*
+          if-no-files-found: warn
+          retention-days: 7
 
       # ── Visual gate — every screen in scripts/visual/screens.mjs is checked
       #    for structure (accessibility-tree snapshot) and pixels (screenshot
