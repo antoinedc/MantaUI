@@ -71,8 +71,7 @@
  * housekeeping and must never break a pipeline.
  */
 
-const DEFAULT_WORKSPACE = "264c89bb-4659-4570-af7b-5f8daaf87985";
-const DEFAULT_API_BASE = "https://api.multica.ai";
+import { api, DEFAULT_WORKSPACE, DEFAULT_API_BASE } from "./lib/multicaApi.mjs";
 
 /**
  * Statuses this sweep reasons about. `blocked` belongs to multica-unblock.
@@ -310,46 +309,24 @@ export function decideUnstick({
  * IO below this line. Everything above is pure and unit-tested.
  * ------------------------------------------------------------------ */
 
-/** @param {string} path @param {object} opts */
-async function api(base, token, path, opts = {}) {
-  const res = await fetch(`${base}/api${path}`, {
-    ...opts,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...(opts.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} on ${path}: ${(await res.text()).slice(0, 200)}`);
-  }
-  const text = await res.text();
-  return text ? JSON.parse(text) : {};
-}
-
-function minutesEnv(name, fallback) {
-  const raw = Number(process.env[name]);
-  return (Number.isFinite(raw) && raw > 0 ? raw : fallback) * 60_000;
-}
-
-async function main() {
-  const dryRun = process.argv.includes("--dry-run");
-  const verbose = process.argv.includes("--verbose");
-  const token = process.env.MULTICA_TOKEN;
-  const ws = process.env.MULTICA_WORKSPACE_ID || DEFAULT_WORKSPACE;
-  const base = process.env.MULTICA_API_BASE || DEFAULT_API_BASE;
-  const graceMs = minutesEnv("MULTICA_UNSTICK_GRACE_MIN", 30);
-  const backoffMs = minutesEnv("MULTICA_UNSTICK_BACKOFF_MIN", 120);
-  const maxActions = Number(process.env.MULTICA_UNSTICK_MAX_ACTIONS) || 5;
-
+export async function run({
+  token,
+  workspace = DEFAULT_WORKSPACE,
+  base = DEFAULT_API_BASE,
+  dryRun = false,
+  verbose = false,
+  graceMs,
+  backoffMs,
+  maxActions,
+  fetchImpl = fetch,
+} = {}) {
   if (!token) {
     console.error("MULTICA_TOKEN is not set — nothing to do.");
-    process.exit(1);
+    return 1;
   }
 
   // Roles, resolved live so a renamed or newly added agent needs no code change.
-  const agents = await api(base, token, `/agents?workspace_id=${ws}`);
+  const agents = await api(base, token, `/agents?workspace_id=${workspace}`, {}, fetchImpl);
   const roleById = new Map(
     (Array.isArray(agents) ? agents : (agents.agents ?? [])).map((a) => [
       a.id,
@@ -367,16 +344,17 @@ async function main() {
 
   const issues = [];
   for (const status of LIVE_STATUSES) {
-    const page = await api(base, token, `/issues?workspace_id=${ws}&status=${status}&limit=200`);
+    const page = await api(base, token, `/issues?workspace_id=${workspace}&status=${status}&limit=200`, {}, fetchImpl);
     issues.push(...(page.issues ?? []));
   }
   if (issues.length === 0) {
     console.log("No in_progress/in_review issues. Nothing to reconcile.");
-    return;
+    return 0;
   }
 
   const now = Date.now();
   let acted = 0;
+  let writeFailed = false;
 
   for (const issue of issues) {
     const id = issue.identifier;
@@ -392,11 +370,12 @@ async function main() {
     let runs = [];
     let pullRequests = [];
     try {
-      runs = await api(base, token, `/issues/${id}/task-runs?workspace_id=${ws}`);
-      const prs = await api(base, token, `/issues/${id}/pull-requests?workspace_id=${ws}`);
+      runs = await api(base, token, `/issues/${id}/task-runs?workspace_id=${workspace}`, {}, fetchImpl);
+      const prs = await api(base, token, `/issues/${id}/pull-requests?workspace_id=${workspace}`, {}, fetchImpl);
       pullRequests = prs.pull_requests ?? [];
     } catch (e) {
-      // Unreadable state is never a reason to act. Skip and retry next tick.
+      // Unreadable state is a READ: never a reason to act. Skip and retry next
+      // tick — one issue's transient error must not abort the sweep.
       console.log(`  ! ${id} state unreadable, leaving alone: ${e.message}`);
       continue;
     }
@@ -439,20 +418,20 @@ async function main() {
 
     try {
       if (decision.action === "rerun") {
-        await api(base, token, `/issues/${issue.id}/rerun?workspace_id=${ws}`, {
-          method: "POST",
-          body: "{}",
-        });
+        await api(base, token, `/issues/${issue.id}/rerun?workspace_id=${workspace}`, { method: "POST", body: "{}" }, fetchImpl);
       } else {
-        await api(base, token, `/issues/${id}?workspace_id=${ws}`, {
+        await api(base, token, `/issues/${id}?workspace_id=${workspace}`, {
           method: "PUT",
           body: JSON.stringify({ assignee_id: target, assignee_type: "agent" }),
-        });
+        }, fetchImpl);
       }
       acted++;
       console.log(`  → ${id} ${what} (${decision.reason})`);
     } catch (e) {
-      console.log(`  ! ${id} could not ${what}: ${e.message}`);
+      // A failed WRITE (rerun/assign) is fatal to the job: log key + status +
+      // body, keep sweeping, exit non-zero at the end.
+      console.error(`Failed to ${what} ${id} (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+      writeFailed = true;
       continue;
     }
 
@@ -471,14 +450,15 @@ async function main() {
     };
     for (const [key, value] of Object.entries(stamps)) {
       try {
-        await api(base, token, `/issues/${issue.id}/metadata/${key}?workspace_id=${ws}`, {
+        await api(base, token, `/issues/${issue.id}/metadata/${key}?workspace_id=${workspace}`, {
           method: "PUT",
           body: JSON.stringify({ value }),
-        });
+        }, fetchImpl);
       } catch (e) {
-        // The unstick itself already landed; losing the ledger is not worth
-        // failing over. Backoff degrades to "may act again next tick".
-        if (verbose) console.log(`    (metadata ${key} failed: ${e.message})`);
+        // A metadata write is a WRITE and must be visible too. The unstick
+        // action itself already landed; keep the batch moving, fail at the end.
+        console.error(`Failed to write ${key} on ${id} (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+        writeFailed = true;
       }
     }
   }
@@ -486,6 +466,26 @@ async function main() {
   console.log(
     `${dryRun ? "[dry-run] " : ""}${acted} of ${issues.length} live issue(s) ${dryRun ? "would be" : ""} unstuck.`,
   );
+  return writeFailed ? 1 : 0;
+}
+
+function minutesEnv(name, fallback) {
+  const raw = Number(process.env[name]);
+  return (Number.isFinite(raw) && raw > 0 ? raw : fallback) * 60_000;
+}
+
+async function main() {
+  const code = await run({
+    token: process.env.MULTICA_TOKEN,
+    workspace: process.env.MULTICA_WORKSPACE_ID,
+    base: process.env.MULTICA_API_BASE,
+    dryRun: process.argv.includes("--dry-run"),
+    verbose: process.argv.includes("--verbose"),
+    graceMs: minutesEnv("MULTICA_UNSTICK_GRACE_MIN", 30),
+    backoffMs: minutesEnv("MULTICA_UNSTICK_BACKOFF_MIN", 120),
+    maxActions: Number(process.env.MULTICA_UNSTICK_MAX_ACTIONS) || 5,
+  });
+  if (code) process.exit(code);
 }
 
 // Only run when invoked directly, so the pure exports stay importable in tests.
