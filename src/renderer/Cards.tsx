@@ -45,7 +45,7 @@ function AskCardShell({
   actions: ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-soft text-meta py-3 px-4">
+    <div className="rounded-xl border border-border bg-bg-soft text-meta py-3 px-4">
       <div className="flex items-start gap-3">
         {/* 30px icon badge — filled by the caller */}
         <span
