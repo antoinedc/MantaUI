@@ -59,6 +59,28 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     expect(h.container.childElementCount).toBeGreaterThan(0);
   });
 
+  it("empty state: worktree chip is unchecked + enabled even when config defaults it on", async () => {
+    // BET-445: on a fresh box the demo/real config defaults worktreePerSession
+    // to true, but the empty-state cwd is "~" (not a git repo) — pre-arming
+    // wantWorktree from config shipped a "checked but can't be honored" chip.
+    // The new-project (empty) state must render it unchecked and tappable so
+    // the user can choose a folder first.
+    installMockApi();
+    resetStore({ projects: [], worktreePerSession: true });
+
+    h = mount(
+      <NewSessionScreen projectName={null} onDone={noop} onCancel={noop} />,
+    );
+    await h.flush();
+
+    const checkbox = h.container.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(checkbox).not.toBeNull();
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+  });
+
   it("still fetches models when window.api IS the paired httpApi", async () => {
     const { api } = installMockApi();
 
