@@ -1,0 +1,73 @@
+# Component primitives — standing decisions & constraints
+
+## Purpose
+
+This is a primitive inventory with adopters — not a design system. Each primitive
+exists only because it replaces two or more real call sites, is owned by the owner,
+and is validated against the companion below. There is no showcase site, no
+documentation site, and no variants nobody uses. This document preserves the rules
+that were previously embedded in the BET-527 cell descriptions so they survive those
+cells closing; it is authoritative for future issues.
+
+## Source of truth
+
+- **The redesign spec** (component inventory, chrome, variants):
+  https://0d5784a7a43451f4ad70dd3d9ee5cf72.boxes.mantaui.com/pages/manta-redesign
+- **Tokens**: `src/renderer/tokens.css` (multi-consumer — BET-516 generates a Swift
+  theme from it, so a token change is no longer a local edit).
+- **Validation surface**: the component companion (`npm run visual:companion`), which
+  renders every candidate from the spec's own CSS, in **both themes**. Do not
+  re-derive a component's appearance from prose.
+
+## Standing decisions
+
+1. **The owner validates every component personally.** Each primitive is reviewed by
+   Antoine before it is adopted anywhere. Route to him; do not merge a primitive on
+   agent review alone.
+2. **Two-adopter rule.** A primitive is only introduced when it replaces **two or more
+   existing call sites**, and those call sites are migrated in the **same PR**. Never
+   land a primitive with no adopter. This is what keeps the inventory evidence-driven
+   instead of speculative.
+3. **No `className` escape hatch.** Primitives own their chrome. A component that
+   accepts arbitrary classes at call sites reintroduces exactly the drift it exists to
+   prevent.
+4. **This is not a design system.** No showcase site, no documentation site, no
+   variants nobody uses. It is a primitive inventory with adopters.
+5. **Chrome only in the first pass. The transcript is excluded.** It lives inside the
+   ChatPanel monolith and the mobile track is migrating its event wiring
+   (DECISIONS.md §17, desktop renderer first). Start with card, field, pill, icon
+   button, menu item — where both style-diff PoC screens live and where
+   `Settings.tsx` already holds half the primitives privately.
+6. **No new token.** If the spec needs a value the scale lacks, the scale changes
+   first, in its own change, with baselines regenerated.
+
+## Constraints C1–C5
+
+### C1 — Set a foreground whenever you set a background. Otherwise inherit. (NARROWED 2026-08-01)
+
+**Corrected after BET-531.** The original C1 said a primitive must always declare its own `color`. That was over-stated: the evidence came from the component companion, which renders TWO themes in ONE document, so a colour inherited from `<body>` resolved against the wrong theme. The app never does that — `data-theme` is set on `<html>` only (`src/renderer/theme.ts:73`), one theme per document, so inheritance always resolves correctly. `Card` correctly declares no text colour and was merged that way.
+
+The real rule that survives: **if a primitive sets a background that differs from the page surface, it must also set the matching foreground token**, because a surface change invalidates the contrast the inherited colour assumed. A primitive that sets no background inherits, and should.
+
+### C2 — Row metrics come from `[data-density]`, NOT `:root`.
+
+`--row-h` (32px comfortable / 26px compact), `--row-px`, `--row-py`, plus `--prose-lh` and `--ui-lh`, are defined on `[data-density="comfortable"]` and `[data-density="compact"]`. A component rendered outside a density scope gets **none** of them — measured live, a session row collapses from 32px with `6px 10px` padding to an unpadded **18.2px** line. Any primitive consuming a `--row-*` token must state that it requires a density ancestor.
+
+### C3 — Some insets belong to the CONTAINER, not the component.
+
+`.rail-scroll` owns the `--sp-2` horizontal inset, and `.srow.on::before` (the selection marker) sits at `left:-8px` — it hangs **outside** the row into that padding. A row primitive that owned its own left inset would clip its own selection marker.
+
+### C4 — An abstract base is not a variant.
+
+The bare `.pill` sets only padding, radius and font — no background, no colour — and **0 of its 81 uses in the spec omit a modifier**. Rendered bare it is invisible text. A primitive whose base is abstract must make the variant a **required prop with no default**, not an optional one.
+
+### C5 — The shadow scale is an open design decision. Do not silently pick a side.
+
+`--shadow-sm/md/lg` differ between the redesign spec and `src/renderer/tokens.css` in both themes (light `--shadow-md`: app `0 4px 12px` + a second layer vs spec `0 8px 24px` single-layer). Every other token agrees — dark 29/29, light 29/32. If your primitive needs a shadow, use the token and **report the divergence**; do not change `tokens.css` and do not hardcode the spec's value.
+
+## Inventory
+
+| Primitive | cls | Adopters migrated (PR) | Owner validated |
+| --- | --- | --- | --- |
+
+_Filled in as each primitive lands — see the last stage of BET-527._
