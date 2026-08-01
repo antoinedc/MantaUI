@@ -1,0 +1,1413 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manta Mobile 2.0 — design companion v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+[data-theme="dark"]{
+--canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;--inset:#070B16;
+--border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+--tx1:#F2F5FA;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+--accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+--ok:#3DD9A4;--warn:#F0A934;--danger:#FF6B7A;--info:#49D7F5;
+--ok-bg:#3DD9A41f;--warn-bg:#F0A9341f;--danger-bg:#FF6B7A1f;--accent-bg:#5A88FF1f;--info-bg:#49D7F51f;
+--fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+--shadow-sm:0 1px 2px rgba(0,0,0,.4);--shadow-md:0 8px 24px rgba(0,0,0,.5);--shadow-lg:0 20px 56px rgba(0,0,0,.6);
+--glow:0 0 0 1px rgba(255,255,255,.05), 0 12px 40px rgba(0,0,0,.55);
+}
+[data-theme="light"]{
+--canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;--inset:#F5F3EF;
+--border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+--tx1:#1A1815;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+--accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+--ok:#0A7A53;--warn:#8A5A08;--danger:#BE2F3C;--info:#0B6E85;
+--ok-bg:#0A7A5314;--warn-bg:#8A5A0814;--danger-bg:#BE2F3C14;--accent-bg:#2E6BFF14;--info-bg:#0B6E8514;
+--fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+--shadow-sm:0 1px 2px rgba(26,24,21,.06);--shadow-md:0 8px 24px rgba(26,24,21,.10);--shadow-lg:0 20px 56px rgba(26,24,21,.14);
+--glow:0 0 0 1px rgba(26,24,21,.04), 0 12px 40px rgba(26,24,21,.10);
+}
+:root{
+--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;--sp-12:48px;
+--r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-2xl:22px;--r-full:999px;
+--ease:cubic-bezier(.22,1,.36,1);
+--font-sans:'Inter',system-ui,-apple-system,sans-serif;
+--font-mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);
+ font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased;transition:background .25s var(--ease),color .25s var(--ease)}
+h1,h2,h3,h4{margin:0;line-height:1.25;letter-spacing:-.015em}
+a{color:var(--accent-tx);text-decoration:none}a:hover{text-decoration:underline}
+code,kbd{font-family:var(--font-mono);font-size:.92em}
+svg.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+svg.ic.s{width:14px;height:14px}svg.ic.xs{width:12px;height:12px;stroke-width:2.2}
+svg.ic.l{width:20px;height:20px}svg.ic.xl{width:26px;height:26px}
+
+.topbar{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:var(--sp-4);
+ padding:10px 24px;border-bottom:1px solid var(--border-subtle);
+ background:color-mix(in srgb,var(--canvas) 88%,transparent);backdrop-filter:blur(12px)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:13px;white-space:nowrap}
+.mark{width:20px;height:20px;border-radius:6px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 45%,var(--info)))}
+.brand small{color:var(--tx3);font-weight:500}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+.seg button{appearance:none;border:0;background:transparent;color:var(--tx3);font:500 11.5px/1 var(--font-sans);
+ padding:7px 11px;cursor:pointer;transition:.15s var(--ease)}
+.seg button:hover{background:var(--fill-hover);color:var(--tx1)}
+.seg button[aria-pressed="true"]{background:var(--accent-solid);color:var(--on-accent)}
+.tnav{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap;justify-content:flex-end}
+.tnav a{color:var(--tx3);font-size:11.5px;font-weight:500;padding:5px 8px;border-radius:var(--r-sm)}
+.tnav a:hover{background:var(--fill-hover);color:var(--tx1);text-decoration:none}
+
+main{max-width:1280px;margin:0 auto;padding:0 24px 96px}
+section{padding:52px 0;border-bottom:1px solid var(--border-subtle);scroll-margin-top:70px}
+.eyebrow{font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);margin-bottom:10px}
+h2.sec{font-size:31px;font-weight:700;letter-spacing:-.028em;margin-bottom:14px}
+h3.sub{font-size:18px;font-weight:600;margin:38px 0 10px}
+h4.sub4{font-size:14px;font-weight:600;margin:24px 0 8px;color:var(--tx2)}
+p.lede{font-size:16.5px;line-height:1.65;color:var(--tx2);max-width:72ch;margin:0 0 22px}
+p{max-width:76ch;color:var(--tx2);font-size:14.5px;line-height:1.65}
+ul.notes{max-width:76ch;color:var(--tx2);font-size:14.5px;line-height:1.65;padding-left:20px}
+ul.notes li{margin-bottom:7px}
+ul.notes b,p b{color:var(--tx1);font-weight:600}
+.hero{font-size:19px;line-height:1.55;color:var(--tx1);max-width:68ch;font-weight:500}
+
+table.spec{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+table.spec th{text-align:left;font:600 11px/1.3 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;
+ color:var(--tx3);padding:0 12px 8px 0;border-bottom:1px solid var(--border);vertical-align:bottom}
+table.spec td{padding:10px 12px 10px 0;border-bottom:1px solid var(--border-subtle);color:var(--tx2);vertical-align:top}
+table.spec td:first-child{color:var(--tx1);font-weight:500}
+table.spec tr:last-child td{border-bottom:0}
+table.spec code{background:var(--fill);padding:1px 5px;border-radius:var(--r-xs);color:var(--tx1)}
+.pill{display:inline-flex;align-items:center;gap:4px;font:600 10.5px/1 var(--font-sans);letter-spacing:.03em;text-transform:uppercase;
+ padding:4px 7px;border-radius:var(--r-full);background:var(--fill);color:var(--tx3);white-space:nowrap}
+.pill.good{background:var(--ok-bg);color:var(--ok)}
+.pill.bad{background:var(--danger-bg);color:var(--danger)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.pill.info{background:var(--accent-bg);color:var(--accent-tx)}
+.callout{border-left:3px solid var(--accent);background:var(--accent-bg);padding:14px 16px;border-radius:0 var(--r-md) var(--r-md) 0;
+ margin:18px 0;font-size:14.5px;line-height:1.6;color:var(--tx2);max-width:88ch}
+.callout b{color:var(--tx1)}
+.callout.ok{border-color:var(--ok);background:var(--ok-bg)}
+.callout.warn{border-color:var(--warn);background:var(--warn-bg)}
+.callout.danger{border-color:var(--danger);background:var(--danger-bg)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:16px;margin:20px 0}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:16px;margin:20px 0}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px}
+.card h4{font-size:14px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card p{font-size:13.5px;margin:0 0 8px;color:var(--tx3)}
+.card ul{font-size:13px;color:var(--tx3);padding-left:18px;margin:8px 0 0;line-height:1.6}
+.card ul li{margin-bottom:5px}
+.kv{font:500 11.5px/1 var(--font-mono);color:var(--tx4)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:20px 0 18px}
+.tabs button{appearance:none;border:1px solid var(--border);background:transparent;color:var(--tx3);
+ font:500 12px/1 var(--font-sans);padding:9px 12px;border-radius:var(--r-md);cursor:pointer;transition:.15s var(--ease);
+ display:inline-flex;align-items:center;gap:6px}
+.tabs button:hover{background:var(--fill-hover);color:var(--tx1);border-color:var(--border-strong)}
+.tabs button[aria-pressed="true"]{background:var(--accent-solid);color:var(--on-accent);border-color:transparent}
+.tabs button.err[aria-pressed="true"]{background:var(--danger);color:#fff}
+[data-panel]{display:none}[data-panel].on{display:block}
+
+/* ---------- phone ---------- */
+.phones{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start;margin:22px 0}
+.pwrap{width:302px}
+.pcap{font:500 12px/1.45 var(--font-sans);color:var(--tx3);margin-top:12px;text-align:center}
+.pcap b{color:var(--tx1);display:block;font-size:12.5px;margin-bottom:3px}
+.phone{width:302px;border-radius:42px;border:1px solid var(--border-strong);background:var(--panel);padding:9px;box-shadow:var(--shadow-lg)}
+.pscreen{border-radius:34px;overflow:hidden;background:var(--canvas);height:612px;display:flex;flex-direction:column;position:relative}
+.pstat{height:46px;display:flex;align-items:flex-end;justify-content:space-between;padding:0 22px 7px;
+ font:600 12px/1 var(--font-sans);color:var(--tx1);flex:0 0 auto;position:relative;z-index:3}
+.pstat .sig{display:flex;gap:4px;align-items:center;color:var(--tx1)}
+.pnotch{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:94px;height:26px;background:#000;border-radius:15px}
+[data-theme="light"] .pnotch{background:#1A1815}
+.pbody{flex:1;overflow:hidden;display:flex;flex-direction:column;position:relative}
+.phome{height:24px;flex:0 0 auto;display:flex;align-items:center;justify-content:center}
+.phome i{display:block;width:116px;height:5px;border-radius:3px;background:var(--tx4);opacity:.55}
+.pctr{flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 22px}
+.ptop{flex:1;display:flex;flex-direction:column;padding:14px 22px 0}
+.pscroll{flex:1;overflow:hidden;padding:14px 18px 0}
+.pmicro{font:600 10.5px/1.3 var(--font-sans);letter-spacing:.09em;text-transform:uppercase;color:var(--tx3)}
+.pmeta{font:500 12px/1.4 var(--font-sans);color:var(--tx3)}
+.pmono{font-family:var(--font-mono)}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.acc{background:var(--accent)}
+.dot.idle{background:var(--tx4)}.dot.dan{background:var(--danger)}
+.dot.acc,.dot.warn{box-shadow:0 0 0 3px var(--accent-bg)}
+.dot.warn{box-shadow:0 0 0 3px var(--warn-bg)}
+
+/* direction A — framed */
+.dA .ph1{font:700 23px/1.25 var(--font-sans);letter-spacing:-.02em;margin-bottom:8px}
+.dA .psub{font:400 14px/1.5 var(--font-sans);color:var(--tx2);margin-bottom:20px}
+.dA .srf{background:var(--card);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px;margin-bottom:14px}
+.dA .pbtn{height:46px;border-radius:var(--r-md);background:var(--accent-solid);color:var(--on-accent);font:600 15px/1 var(--font-sans)}
+.dA .phead{height:46px;border-bottom:1px solid var(--border-subtle);background:var(--canvas)}
+.dA .rowl{min-height:56px;border-bottom:1px solid var(--border-subtle);padding:0 4px}
+
+/* direction B — elevated (recommended) */
+.dB .pscreen{background:var(--canvas)}
+.dB .ph1{font:700 29px/1.14 var(--font-sans);letter-spacing:-.035em;margin-bottom:10px}
+.dB .psub{font:400 15px/1.55 var(--font-sans);color:var(--tx3);margin-bottom:26px}
+.dB .srf{background:var(--card);border:0;border-radius:var(--r-2xl);padding:16px;margin-bottom:12px;box-shadow:var(--glow)}
+.dB .pbtn{height:54px;border-radius:var(--r-xl);background:var(--accent-solid);color:var(--on-accent);font:600 16px/1 var(--font-sans)}
+.dB .pbtn.sec{background:var(--fill-active);color:var(--tx1);box-shadow:none}
+.dB .phead{height:50px;border-bottom:0;background:color-mix(in srgb,var(--canvas) 68%,transparent);backdrop-filter:blur(20px);position:relative;z-index:2}
+.dB .rowl{min-height:60px;border-bottom:0;padding:0 14px;border-radius:var(--r-xl);margin-bottom:4px}
+.dB .rowl.on{background:var(--card);box-shadow:var(--glow)}
+.dB .grp{margin:20px 0 8px;padding-left:14px}
+
+/* direction C — editorial */
+.dC .pscreen{background:var(--canvas)}
+.dC .ph1{font:600 33px/1.06 var(--font-sans);letter-spacing:-.04em;margin-bottom:14px}
+.dC .psub{font:400 15px/1.6 var(--font-sans);color:var(--tx3);margin-bottom:30px}
+.dC .srf{background:transparent;border:0;border-left:2px solid var(--accent);border-radius:0;padding:2px 0 2px 16px;margin-bottom:22px}
+.dC .pbtn{height:52px;border-radius:var(--r-full);background:var(--tx1);color:var(--canvas);font:600 15px/1 var(--font-sans)}
+.dC .pbtn.sec{background:transparent;color:var(--tx2);border:1px solid var(--border)}
+.dC .phead{height:50px;border-bottom:0;background:var(--canvas)}
+.dC .rowl{min-height:62px;border-bottom:1px solid var(--border-subtle);padding:0 2px}
+.dC .grp{margin:26px 0 4px}
+
+/* direction D — native glass (iOS 26 Liquid Glass) */
+.glass{
+ background:color-mix(in srgb,var(--card) 46%,transparent);
+ -webkit-backdrop-filter:blur(28px) saturate(1.8);backdrop-filter:blur(28px) saturate(1.8);
+ box-shadow:inset 0 1px 0 rgba(255,255,255,.16),inset 0 0 0 .5px rgba(255,255,255,.07),0 10px 34px rgba(0,0,0,.34)}
+[data-theme="light"] .glass{background:color-mix(in srgb,#fff 58%,transparent);
+ box-shadow:inset 0 1px 0 rgba(255,255,255,.9),inset 0 0 0 .5px rgba(26,24,21,.06),0 10px 30px rgba(26,24,21,.10)}
+.dD .pscreen{background:var(--canvas)}
+.dD .ph1{font:700 30px/1.12 var(--font-sans);letter-spacing:-.038em;margin-bottom:12px}
+.dD .psub{font:400 16px/1.5 var(--font-sans);color:var(--tx3);margin-bottom:28px;letter-spacing:-.01em}
+.dD .srf{background:var(--fill);border:0;border-radius:22px;padding:16px;margin-bottom:12px}
+.dD .pbtn{height:52px;border-radius:var(--r-full);background:var(--accent-solid);color:var(--on-accent);font:600 17px/1 var(--font-sans);letter-spacing:-.01em}
+.dD .pbtn.sec{background:var(--fill-active);color:var(--tx1)}
+.dD .pbody{position:relative}
+.dD .phead{position:absolute;top:0;left:0;right:0;height:52px;z-index:4;border:0;background:transparent;padding:0 8px}
+.dD .phead .ib{width:38px;height:38px;border-radius:var(--r-full)}
+.dD .phead.chip .ib{background:color-mix(in srgb,var(--card) 46%,transparent);
+ -webkit-backdrop-filter:blur(24px) saturate(1.8);backdrop-filter:blur(24px) saturate(1.8);
+ box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 4px 14px rgba(0,0,0,.3)}
+[data-theme="light"] .dD .phead.chip .ib{background:color-mix(in srgb,#fff 62%,transparent);box-shadow:inset 0 1px 0 rgba(255,255,255,.9),0 4px 12px rgba(26,24,21,.1)}
+.dD .edgefx{position:absolute;top:0;left:0;right:0;height:76px;z-index:3;pointer-events:none;
+ background:linear-gradient(to bottom,var(--canvas) 8%,color-mix(in srgb,var(--canvas) 55%,transparent) 62%,transparent 100%)}
+.dD .pscroll{padding:60px 14px 0}
+.dD .rowl{min-height:62px;border-bottom:0;padding:0 12px;border-radius:20px;margin-bottom:2px}
+.dD .rowl.on{background:var(--fill)}
+.dD .grp{margin:22px 0 6px;padding-left:12px;font:600 15px/1.3 var(--font-sans);letter-spacing:-.015em;text-transform:none;color:var(--tx2)}
+.dD .lgtitle{font:700 32px/1.1 var(--font-sans);letter-spacing:-.04em;padding:10px 12px 4px}
+.floatbar{position:absolute;left:14px;right:14px;bottom:12px;z-index:5;border-radius:var(--r-full);
+ height:56px;display:flex;align-items:center;gap:10px;padding:0 8px 0 18px}
+.floatbar .ph{flex:1;color:var(--tx3);font-size:16px;letter-spacing:-.01em}
+.floatbar .fb{width:40px;height:40px;border-radius:var(--r-full);display:flex;align-items:center;justify-content:center;
+ background:var(--accent-solid);color:var(--on-accent)}
+.tabbar{position:absolute;left:44px;right:44px;bottom:12px;z-index:5;border-radius:var(--r-full);height:56px;
+ display:flex;align-items:center;justify-content:space-around;padding:0 8px}
+.tabbar .tb2{display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--tx4);font:500 10px/1 var(--font-sans)}
+.tabbar .tb2.on{color:var(--accent-tx)}
+.pbtn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;flex:0 0 auto}
+.pbtn.sec{background:transparent;border:1px solid var(--border-strong);color:var(--tx1)}
+.pbtn.dis{background:var(--fill-active);color:var(--tx4)}
+.pbtn.dan{background:var(--danger);color:#fff}
+.plink{font:500 14.5px/1 var(--font-sans);color:var(--accent-tx);text-align:center;padding:16px 0}
+.phead{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:0 14px}
+.phead .t{font:600 16px/1.2 var(--font-sans);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-.01em}
+.phead .ib{width:34px;height:34px;border-radius:var(--r-md);display:flex;align-items:center;justify-content:center;color:var(--tx3);flex:0 0 auto}
+.dB .phead .ib{background:var(--fill);border-radius:var(--r-full)}
+.rowl{display:flex;align-items:center;gap:12px}
+.rowl .n{flex:1;min-width:0;font:500 15.5px/1.3 var(--font-sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;letter-spacing:-.01em}
+.rowl .sb{font:500 12px/1.3 var(--font-sans);color:var(--tx4);margin-top:2px}
+.rowl .tm{font:500 11px/1 var(--font-mono);color:var(--tx4);font-variant-numeric:tabular-nums}
+.grp{font:600 10.5px/1.3 var(--font-sans);letter-spacing:.09em;text-transform:uppercase;color:var(--tx3);display:flex;align-items:center;gap:8px}
+.badge{width:60px;height:60px;border-radius:var(--r-xl);display:flex;align-items:center;justify-content:center;margin-bottom:22px}
+.dB .badge{border-radius:var(--r-2xl);width:64px;height:64px}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.dan{background:var(--danger-bg);color:var(--danger)}
+.badge.acc{background:var(--accent-bg);color:var(--accent-tx)}
+.badge.wr{background:var(--warn-bg);color:var(--warn)}
+.sas{display:flex;gap:10px;justify-content:center;margin:6px 0 8px}
+.sas i{font:700 27px/1 var(--font-mono);letter-spacing:.14em;font-style:normal;color:var(--tx1)}
+.otp{display:flex;gap:8px;justify-content:center;margin:10px 0 20px}
+.otp i{width:38px;height:50px;border-radius:var(--r-lg);display:flex;align-items:center;justify-content:center;
+ font:600 21px/1 var(--font-mono);color:var(--tx1);font-style:normal;background:var(--fill);border:1px solid transparent}
+.otp i.cur{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.otp i.e{color:var(--tx4)}
+.qr{width:148px;height:148px;border-radius:var(--r-md);background:repeating-conic-gradient(var(--tx1) 0% 25%,transparent 0% 50%) 0 0/13px 13px;
+ background-color:var(--tx1);border:9px solid var(--tx1);margin:0 auto 18px;position:relative}
+.qr::after{content:"";position:absolute;inset:38%;background:var(--canvas);border-radius:5px}
+.sheet{position:absolute;left:8px;right:8px;bottom:8px;background:var(--card);border-radius:var(--r-2xl);
+ padding:10px 0 14px;box-shadow:var(--shadow-lg);z-index:4}
+.sheet .grab{width:38px;height:5px;border-radius:3px;background:var(--tx4);opacity:.45;margin:0 auto 12px}
+.sheet .it{min-height:50px;display:flex;align-items:center;gap:14px;padding:0 20px;font:500 15.5px/1 var(--font-sans);color:var(--tx1)}
+.sheet .it svg{color:var(--tx3)}
+.sheet .it.dan,.sheet .it.dan svg{color:var(--danger)}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:3}
+.composer{margin:0 12px 10px;padding:14px 16px;background:var(--card);border-radius:var(--r-2xl);display:flex;align-items:center;gap:10px;box-shadow:var(--glow)}
+.dA .composer{background:var(--canvas);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:none}
+.composer .ph{color:var(--tx4);font-size:15.5px;flex:1}
+.bubble{background:var(--accent-solid);color:var(--on-accent);border-radius:var(--r-2xl) var(--r-2xl) var(--r-sm) var(--r-2xl);
+ padding:11px 15px;font-size:15px;line-height:1.5;max-width:82%;margin-left:auto;margin-bottom:22px}
+.dA .bubble{background:var(--fill);color:var(--tx1);border:1px solid var(--border-subtle);border-radius:var(--r-lg)}
+.aturn{font-size:15px;line-height:1.6;color:var(--tx1);margin-bottom:12px}
+.tool{border-radius:var(--r-lg);padding:11px 13px;background:var(--fill);font:500 12.5px/1.3 var(--font-mono);
+ color:var(--tx2);margin-bottom:12px;display:flex;gap:9px;align-items:center}
+.dA .tool{background:var(--card);border:1px solid var(--border);border-radius:var(--r-md)}
+.prog{height:5px;border-radius:3px;background:var(--fill-active);overflow:hidden;margin:14px 0}
+.prog i{display:block;height:100%;background:var(--accent-solid);border-radius:3px}
+.prog.dan i{background:var(--danger)}
+.stg{display:flex;align-items:center;gap:11px;font-size:14px;color:var(--tx2);padding:6px 0}
+.stg .m{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--border-strong);flex:0 0 auto;display:flex;align-items:center;justify-content:center}
+.stg .m.done{background:var(--ok);border-color:var(--ok);color:var(--canvas)}
+.stg .m.now{border-color:var(--accent);border-right-color:transparent;animation:spin .8s linear infinite}
+.stg .m.err{background:var(--danger);border-color:var(--danger);color:#fff}
+.stg .t{font:500 11px/1 var(--font-mono);color:var(--tx4);margin-left:auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.rail{display:flex;align-items:center;gap:8px;margin-bottom:24px}
+.rail .b{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--border-strong);display:flex;
+ align-items:center;justify-content:center;font:600 11px/1 var(--font-sans);color:var(--tx3)}
+.rail .b.on{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.rail .b.dn{background:var(--ok);border-color:transparent;color:var(--canvas)}
+.rail .l{height:1.5px;flex:1;background:var(--border);border-radius:1px}
+.desk{width:430px;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--panel);overflow:hidden;box-shadow:var(--shadow-md)}
+.desk .tb{height:34px;display:flex;align-items:center;gap:6px;padding:0 12px;border-bottom:1px solid var(--border-subtle);background:var(--card)}
+.desk .tb i{width:10px;height:10px;border-radius:50%;background:var(--border-strong);display:block}
+.desk .ct{padding:24px}
+.tick{color:var(--ok);font-weight:700}
+.cross{color:var(--danger);font-weight:700}
+.vs{display:flex;align-items:center;justify-content:center;align-self:center;width:34px;height:34px;border-radius:50%;
+ background:var(--fill);color:var(--tx4);font:600 11px/1 var(--font-sans);margin-top:280px}
+.ann{border:1px dashed var(--border-strong);border-radius:var(--r-md);padding:8px 10px;font:500 12px/1.4 var(--font-sans);
+ color:var(--tx3);margin-top:10px;max-width:302px}
+.ann b{color:var(--tx1)}
+.ann.bad{border-color:var(--danger);color:var(--danger)}
+.ann.good{border-color:var(--ok);color:var(--ok)}
+.ann.bad b,.ann.good b{color:inherit}
+@media(max-width:900px){.tnav{display:none}}
+</style>
+</head>
+<body>
+
+<svg style="display:none" aria-hidden="true">
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M21 4H14"/><path d="M10 4H3"/><path d="M21 12H12"/><path d="M8 12H3"/><path d="M21 20H16"/><path d="M12 20H3"/><path d="M14 2v4"/><path d="M8 10v4"/><path d="M16 18v4"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2.5"/><path d="M12 18h.01"/></symbol>
+<symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></symbol>
+<symbol id="i-wifioff" viewBox="0 0 24 24"><path d="M12 20h.01"/><path d="M8.5 16.4a5 5 0 0 1 7 0"/><path d="M5 12.9a10 10 0 0 1 5.2-2.7"/><path d="M2 8.8a15 15 0 0 1 4.2-2.5"/><path d="m2 2 20 20"/><path d="M19.9 13a10 10 0 0 0-4.4-2.8"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></symbol>
+<symbol id="i-clip" viewBox="0 0 24 24"><path d="m16 6-8.4 8.4a2.1 2.1 0 0 0 3 3L19 9a4.2 4.2 0 0 0-6-6l-9 9a6.3 6.3 0 0 0 9 9l8-8"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><path d="M8 12h8"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M5 12H3"/><path d="M21 12h-2"/><path d="m6.5 6.5 1.5 1.5"/><path d="m16 16 1.5 1.5"/><path d="m17.5 6.5-1.5 1.5"/><path d="M8 16l-1.5 1.5"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-battery" viewBox="0 0 24 24"><rect x="2" y="7" width="17" height="10" rx="2.5"/><path d="M22 11v2"/><rect x="4" y="9" width="12" height="6" rx="1" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-cell" viewBox="0 0 24 24"><path d="M3 18h1.5"/><path d="M8 18v-4"/><path d="M12.5 18v-8"/><path d="M17 18V6"/><path d="M21.5 18V4"/></symbol>
+</svg>
+
+<div class="topbar">
+  <div class="brand"><span class="mark"></span>Manta Mobile 2.0 <small>· design companion · v3</small></div>
+  <div class="seg" id="themeSeg">
+    <button data-theme-set="light" aria-pressed="false">Light</button>
+    <button data-theme-set="dark" aria-pressed="true">Dark</button>
+  </div>
+  <nav class="tnav">
+    <a href="#verdict">Why it looked wrong</a>
+    <a href="#look">Look &amp; feel</a>
+    <a href="#onboarding">Onboarding</a>
+    <a href="#actions">Session actions</a>
+    <a href="#terminal">Terminal</a>
+    <a href="#shell">Plan</a>
+    <a href="#a11y">Text size</a>
+    <a href="#decide">You decide</a>
+  </nav>
+</div>
+
+<main>
+
+<section id="verdict">
+  <div class="eyebrow">The answer to “why doesn't it look sleek”</div>
+  <h2 class="sec">I was drawing the wrong decade</h2>
+  <p class="hero">You were right and the reason is specific. My mockups were a <b>custom flat design system</b> — bordered cards, opaque bars, hard dividers, uppercase micro-labels. That was correct for iOS 16. Apple replaced the entire design language in <b>iOS 26</b> (September 2025) with <b>Liquid Glass</b>, and refined it again in <b>iOS 27</b> this June. Nothing I drew was built on it.</p>
+
+  <div class="grid3">
+    <div class="card">
+      <h4>What Liquid Glass actually is</h4>
+      <p>Not a blur. Apple's own word is <b>lensing</b> — the material <i>bends</i> the content behind it the way real glass does, with specular highlights that track the shape, shadows that darken when they pass over text, and a glow that spreads outward from your fingertip onto neighbouring controls.</p>
+      <p>It's a real-time OS-rendered material. You can't paint it — you can only ask for it.</p>
+    </div>
+    <div class="card">
+      <h4>The two-layer model</h4>
+      <p>Everything is now either <b>content</b> or <b>controls</b>.</p>
+      <ul>
+        <li><b>Content layer</b> — edge-to-edge, fills the whole screen, scrolls under everything. Never glass.</li>
+        <li><b>Controls layer</b> — bars, sheets, menus, buttons. Floats above, made of glass, and the content is visible through it.</li>
+      </ul>
+      <p>Bars no longer have backgrounds or dividers. A tab bar is a floating capsule inset from the edges that shrinks as you scroll.</p>
+    </div>
+    <div class="card">
+      <h4>Why this settles the RN question <span class="pill good">decisive</span></h4>
+      <p><b>A webview cannot render Liquid Glass.</b> It can imitate a frosted blur — and that's exactly what my “Elevated” direction was doing. It cannot do lensing, adaptive shadow, the light/dark flip against background luminance, the scroll edge effect, or the fingertip glow.</p>
+      <p>Going native isn't “nicer transitions” any more. It's the difference between <b>being the platform</b> and drawing a picture of it.</p>
+    </div>
+  </div>
+
+  <div class="callout ok"><b>And React Native gets it for free.</b> <code>expo-glass-effect</code> has shipped since SDK 54 (Sept 2025) wrapping the real <code>UIVisualEffectView</code>. More tellingly, Expo's own docs say navigation headers <i>“adopt the system's Liquid Glass effect by default — it cannot be disabled per screen.”</i> You have to work to opt <b>out</b>. Form sheets adopt it with no code changes. The native tab bar exposes minimize-on-scroll and the bottom accessory slot. Using native components <i>is</i> the design work.</div>
+
+  <h3 class="sub">What else the research changed</h3>
+  <table class="spec">
+    <tr><th>I had</th><th>Actually</th></tr>
+    <tr><td>Uppercase micro-labels for section headers</td><td>iOS 26 changed section headers from <b>ALL CAPS to Title Case</b>, at a larger size. My uppercase labels are a dated tell in themselves.</td></tr>
+    <tr><td>Rounded-rectangle buttons at 8–12px</td><td><b>Buttons are capsules by default</b> now. Radii across the industry grew <i>upward</i> — Material's scale added 20, 32 and 48dp in the same cycle.</td></tr>
+    <tr><td>Opaque header with a hairline under it</td><td><b>No background, no divider.</b> Content scrolls under, and legibility comes from the <b>scroll edge effect</b> — a gradient blur-and-fade applied to content as it passes beneath.</td></tr>
+    <tr><td>Search and primary actions at the top</td><td><i>“Place search at the bottom if there's room.”</i> Apple's own Settings, Mail and Notes now do. Primary actions moved into thumb reach as a platform default, not a trend.</td></tr>
+    <tr><td>Fixed corner radii I chose</td><td><b>Concentric radii:</b> inner radius = parent radius − padding. Apple ships <code>ConcentricRectangle</code> specifically so you <i>don't</i> hard-code them. Getting it wrong reads as “pinched” or “flared” corners — which is a large part of why a mockup can look subtly cheap.</td></tr>
+    <tr><td>Accent used on several controls</td><td><b>One tinted primary action per view.</b> <i>“When every element is tinted, nothing stands out.”</i> And if the content is colourful, the bars go monochrome. Brand colour belongs <b>in the scroll view</b>, so the glass picks it up as content moves under it.</td></tr>
+    <tr><td>Centred alert copy</td><td>Apple explicitly refined typography to be <i>“bolder and left-aligned to improve readability in key moments like <b>alerts and onboarding</b>.”</i></td></tr>
+  </table>
+
+  <div class="callout"><b>The pattern every Apple Design Award winner shares:</b> native chrome, bespoke content. Tab bars, toolbars, sheets and menus are stock and uncustomised; all the personality lives in the content layer. Slack and Gentler Streak are instantly recognisable brands running entirely default navigation. Apple's guidance is to spend custom-component effort on <b>one hero surface</b> and use the system for everything else. For us that hero is the transcript.</div>
+
+  <h3 class="sub">Your other calls, taken</h3>
+  <table class="spec">
+    <tr><th>You said</th><th>Result</th></tr>
+    <tr><td>React Native + Expo, skip OTA, TestFlight is fine, accept design-once-build-twice</td><td><span class="pill good">confirmed</span> No Expo Updates, no per-user billing. Two view layers on one logic layer.</td></tr>
+    <tr><td>No transition period — full replacement</td><td><span class="pill good">confirmed, and it simplifies a lot</span> See the plan: five stages collapse to three, and one long-standing risk is discharged by deletion.</td></tr>
+    <tr><td>No Capacitor upgrade — nuke it</td><td><span class="pill good">confirmed</span> The upgrade only existed to keep a shipping app healthy during a transition there now isn't.</td></tr>
+    <tr><td>Retire the PWA</td><td><span class="pill good">confirmed</span> The web mobile client, the CI bundle publish and the self-update fetch all go with it.</td></tr>
+    <tr><td>Terminal mode is first class</td><td><span class="pill good">has its own section now</span> Including the one place a webview is genuinely invisible.</td></tr>
+    <tr><td>App Clips as a follow-up issue once we're on the App Store</td><td><span class="pill good">noted, not filed</span></td></tr>
+    <tr><td>Drop the icon at the top of each onboarding step</td><td><span class="pill good">done</span></td></tr>
+    <tr><td>Don't file yet</td><td><span class="pill warn">nothing filed</span></td></tr>
+  </table>
+</section>
+<section id="look">
+  <div class="eyebrow">Foundations · 01 — pick one</div>
+  <h2 class="sec">Look and feel, rebuilt</h2>
+  <p class="lede">Two directions now, not three. <b>D · Native glass</b> is the platform's own language as of iOS 26/27 — floating translucent chrome, content edge-to-edge underneath, capsule controls, Title Case section headers, one tinted action per screen. <b>B · Elevated</b> is the best custom system I can draw, kept as the alternative if you'd rather own the language than adopt it. Same tokens, same icons, same content.</p>
+
+  <div class="callout warn"><b>An honest caveat on the mockups.</b> The glass below is HTML <code>backdrop-filter</code> — a blur, which is the <i>old</i> material. It cannot do lensing, adaptive shadow, the light/dark flip, or the fingertip glow. So the real thing looks better than this, and it also means <b>these frames are themselves the argument</b>: this is the ceiling of what a webview can draw.</div>
+
+  <div class="tabs" data-group="dir">
+    <button data-tab="d1" aria-pressed="true">Session list</button>
+    <button data-tab="d2" aria-pressed="false">Chat</button>
+    <button data-tab="d3" aria-pressed="false">Link screen</button>
+  </div>
+  <div data-group-panels="dir">
+
+  <div data-panel="d1" class="on">
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle">Sessions</div>
+            <div class="grp">better-ui</div>
+            <div class="rowl on"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+            <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+            <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">main</div></div><span class="tm">1h</span></div>
+            <div class="grp">tenanture</div>
+            <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">ci consolidation</div></div><span class="tm">3h</span></div>
+            <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">billing webhook</div></div><span class="tm">1d</span></div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span><span class="ib"><svg class="ic l"><use href="#i-plus"/></svg></span></div>
+          <div class="floatbar glass"><svg class="ic l" style="color:var(--tx3)"><use href="#i-scan"/></svg><span class="ph">Search</span><span class="fb"><svg class="ic l"><use href="#i-plus"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>D · Native glass</b> <span class="pill good" style="margin-left:4px">recommended</span></div>
+      <div class="ann good"><b>Six things the platform gives you here.</b> The large title scrolls away into the header. Rows pass <i>under</i> the glass buttons, which invert their own colour against whatever is behind them. The scroll edge fade is a system effect, not a gradient we drew. Section headers are Title Case at body size, not uppercase micro-caps. Search sits at the bottom, in thumb reach, because Apple now says put it there. One tinted control on the screen.</div>
+    </div>
+    <div class="vs">vs</div>
+    <div class="pwrap dB">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="phead"><span class="t" style="font-size:22px;font-weight:700;letter-spacing:-.03em">Sessions</span><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span><span class="ib" style="background:var(--accent-solid);color:var(--on-accent)"><svg class="ic l"><use href="#i-plus"/></svg></span></div>
+        <div class="pbody"><div class="pscroll" style="padding:6px 10px 0">
+          <div class="grp">better-ui</div>
+          <div class="rowl on"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+          <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+          <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">main</div></div><span class="tm">1h</span></div>
+          <div class="grp">tenanture</div>
+          <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">ci consolidation</div></div><span class="tm">3h</span></div>
+        </div></div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>B · Elevated</b>The custom alternative.</div>
+      <div class="ann"><b>Nothing wrong with it</b> — it's a coherent modern system. But it's a system we'd own, maintain and keep in step with a platform that moves under us. And the header is opaque, so content stops at a line instead of passing beneath.</div>
+    </div>
+  </div>
+  </div>
+
+  <div data-panel="d2">
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll" style="padding:62px 16px 0">
+            <div class="bubble">why does the composer overlap on iphone</div>
+            <div class="aturn">The nested footer group has <code>shrink-0</code> children the wrap rule never reaches.</div>
+            <div class="tool"><svg class="ic xs" style="color:var(--ok)"><use href="#i-check"/></svg>read · mobile.css</div>
+            <div class="aturn">Two rows instead of four fixes it without touching the shared panel. I'll take the branch chip onto its own line while I'm there.</div>
+            <div class="tool"><svg class="ic xs" style="color:var(--accent-tx)"><use href="#i-branch"/></svg>edit · mobile.css</div>
+            <div class="aturn" style="color:var(--tx3)">Running the device check</div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip">
+            <span class="ib"><svg class="ic l"><use href="#i-left"/></svg></span>
+            <div style="flex:1;min-width:0;text-align:center"><div style="font:600 14.5px/1.2 var(--font-sans);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">mobile shell redesign</div><div style="font:500 11px/1.2 var(--font-sans);color:var(--tx4);margin-top:1px"><span style="color:var(--accent-tx)">running</span> · 2m · 8%</div></div>
+            <span class="ib"><svg class="ic l"><use href="#i-more"/></svg></span>
+          </div>
+          <div class="floatbar glass" style="padding:0 8px 0 16px"><svg class="ic l" style="color:var(--tx3)"><use href="#i-clip"/></svg><span class="ph">Message</span><svg class="ic l" style="color:var(--tx3)"><use href="#i-mic"/></svg><span class="fb"><svg class="ic l"><use href="#i-send"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>D · Native glass</b></div>
+      <div class="ann good"><b>The transcript is the hero, and it's the one thing we build custom.</b> Full-bleed to both edges and behind both bars. The composer is a floating glass capsule, not a docked strip — so the transcript keeps its full height and the last message is visible through it. Session status lives in the header subtitle, which is exactly where desktop is moving it.</div>
+    </div>
+    <div class="vs">vs</div>
+    <div class="pwrap dB">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="phead"><span class="ib"><svg class="ic l"><use href="#i-left"/></svg></span><div style="flex:1;min-width:0"><div class="t" style="font-size:15px">mobile shell redesign</div><div class="sb" style="font-size:11px;color:var(--tx4)"><span style="color:var(--accent-tx)">running</span> · 2m · 8%</div></div><span class="ib"><svg class="ic l"><use href="#i-more"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="bubble">why does the composer overlap on iphone</div>
+            <div class="aturn">The nested footer group has <code>shrink-0</code> children the wrap rule never reaches.</div>
+            <div class="tool"><svg class="ic xs" style="color:var(--ok)"><use href="#i-check"/></svg>read · mobile.css</div>
+            <div class="aturn">Two rows instead of four fixes it without touching the shared panel.</div>
+          </div>
+          <div class="composer"><svg class="ic l" style="color:var(--tx3)"><use href="#i-clip"/></svg><span class="ph">Message</span><svg class="ic l" style="color:var(--tx3)"><use href="#i-mic"/></svg></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>B · Elevated</b></div>
+      <div class="ann"><b>The composer is docked</b>, so it permanently costs the transcript its height and the divide between them is a hard edge. Workable — just not what the platform does any more.</div>
+    </div>
+  </div>
+  </div>
+
+  <div data-panel="d3">
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody"><div class="pctr">
+          <div class="ph1">Link this<br>phone?</div>
+          <div class="psub">It'll be able to run commands on the machine below.</div>
+          <div class="srf">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span class="dot ok"></span>
+              <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:16px;letter-spacing:-.015em">Your box</div><div class="pmeta pmono" style="font-size:12px;margin-top:1px">157.90.224.92</div></div>
+            </div>
+            <div style="height:.5px;background:var(--border);margin:15px -16px;opacity:.6"></div>
+            <div style="font:600 14px/1.3 var(--font-sans);letter-spacing:-.01em;margin-bottom:9px;color:var(--tx2)">Match the code on your desktop</div>
+            <div class="sas" style="justify-content:flex-start"><i>K7</i><i>Q2</i></div>
+          </div>
+          <div class="pbtn" style="margin-top:14px">Link this phone</div>
+          <div class="plink">Codes don't match</div>
+        </div></div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>D · Native glass</b></div>
+      <div class="ann good"><b>Bolder, left-aligned, no icon.</b> Apple refined typography specifically for “alerts and onboarding” in this direction. Capsule button. The card is a plain fill, not glass — <b>never glass on glass</b>, which is the rule I'd have broken by instinct.</div>
+    </div>
+    <div class="vs">vs</div>
+    <div class="pwrap dB">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody"><div class="pctr">
+          <div class="ph1">Link this<br>phone?</div>
+          <div class="psub">It'll be able to run commands on the machine below.</div>
+          <div class="srf">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span class="dot ok"></span>
+              <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:15px;letter-spacing:-.01em">Your box</div><div class="pmeta pmono" style="font-size:11.5px;margin-top:1px">157.90.224.92</div></div>
+            </div>
+            <div style="height:1px;background:var(--fill-active);margin:14px -16px"></div>
+            <div class="pmicro" style="margin-bottom:9px">Match the code on your desktop</div>
+            <div class="sas" style="justify-content:flex-start"><i>K7</i><i>Q2</i></div>
+          </div>
+          <div class="pbtn" style="margin-top:10px">Link this phone</div>
+          <div class="plink">Codes don't match</div>
+        </div></div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>B · Elevated</b></div>
+      <div class="ann"><b>Uppercase micro-label and a rounded-rect button</b> — both of which iOS 26 moved away from. On a decision screen the gap between the two is small; on the list and chat it isn't.</div>
+    </div>
+  </div>
+  </div>
+  </div>
+
+  <h3 class="sub">What D commits us to</h3>
+  <table class="spec">
+    <tr><th>Rule</th><th>Consequence for us</th></tr>
+    <tr><td><b>Content layer never uses glass</b></td><td>Transcript, rows, cards and code blocks use plain fills and tonal steps. Glass is only bars, sheets, menus and the composer capsule.</td></tr>
+    <tr><td><b>Never glass on glass</b></td><td>Anything sitting on a bar uses transparency and vibrancy, not a second pane. This kills the “card inside a sheet” pattern I used twice.</td></tr>
+    <tr><td><b>One tinted action per view</b></td><td>Accent goes on the primary button, the running dot, and the selected tab. Everything else is monochrome and takes its colour from the material.</td></tr>
+    <tr><td><b>Bars have no backgrounds and no dividers</b></td><td>Legibility comes from the scroll edge effect, which is a system behaviour we get by using the system bar.</td></tr>
+    <tr><td><b>Concentric radii</b></td><td>Nested radius = parent radius − padding. Apple ships a shape type for it so we don't hard-code. Getting this wrong is a large part of why a UI reads as subtly cheap.</td></tr>
+    <tr><td><b>Section headers are Title Case</b></td><td>Every uppercase micro-label in the current app becomes sentence-shaped and larger.</td></tr>
+    <tr><td><b>Ship dark variants even for light-only surfaces</b></td><td>The material itself flips dark under bright content, so both palettes must exist regardless. We already have both.</td></tr>
+    <tr><td><b>iOS 27 made glass a user slider</b></td><td>Users can set it anywhere from ultra-clear to fully tinted. Our layouts must be legible at both ends — which mostly means never relying on the material for contrast.</td></tr>
+    <tr><td><b>Test Reduce Transparency, Increase Contrast, Reduce Motion</b></td><td>Free if we use system components; mandatory to check on the transcript, which is ours.</td></tr>
+  </table>
+
+  <h3 class="sub">Where consistency with desktop actually lives</h3>
+  <p>Not in identical chrome — desktop can't have a floating glass tab bar and shouldn't try. It lives in the layer underneath: <b>the same colour tokens, the same lucide icon set, the same status vocabulary</b> (running / needs you / idle), the same session-header contents, the same transcript anatomy. That's also what the Design Award winners do: unmistakable brand in the content, stock platform chrome around it.</p>
+</section>
+<section id="onboarding">
+  <div class="eyebrow">The product · 01</div>
+  <h2 class="sec">Onboarding</h2>
+  <p class="lede">One scan, two taps, in. Icons removed from the step headers as you asked — which also happens to match Apple's refinement of onboarding typography toward bolder, left-aligned text with no decorative lead-in. Box setup stays on desktop. The model step is gone.</p>
+
+  <table class="spec">
+    <tr><th>Step</th><th>Action</th><th>Why it stays</th></tr>
+    <tr><td>Scan</td><td>Camera at the desktop</td><td>Zero taps in the app</td></tr>
+    <tr><td>Link</td><td><b>One tap</b>, after matching four characters</td><td>Without it a QR from a message can link your phone to someone else's machine</td></tr>
+    <tr><td>Notifications</td><td><b>One tap</b></td><td>Being told when the agent stops is the mobile product</td></tr>
+    <tr><td>Sessions</td><td>—</td><td>—</td></tr>
+  </table>
+
+  <div class="tabs" data-group="ob">
+    <button data-tab="ob1" aria-pressed="true">1 · Scan</button>
+    <button data-tab="ob2" aria-pressed="false">2 · Link</button>
+    <button data-tab="ob3" aria-pressed="false">3 · Notifications</button>
+    <button data-tab="ob4" aria-pressed="false">4 · In</button>
+    <button data-tab="ob5" aria-pressed="false">Not installed</button>
+    <button data-tab="ob6" aria-pressed="false">Manual</button>
+    <button data-tab="ob7" aria-pressed="false" class="err">Expired</button>
+    <button data-tab="ob8" aria-pressed="false" class="err">Mismatch</button>
+    <button data-tab="ob9" aria-pressed="false" class="err">Unreachable</button>
+  </div>
+  <div data-group-panels="ob">
+
+  <div data-panel="ob1" class="on">
+    <div class="phones">
+      <div>
+        <div class="desk"><div class="tb"><i></i><i></i><i></i></div><div class="ct">
+          <div style="font:600 15px/1.3 var(--font-sans);letter-spacing:-.01em;color:var(--tx3);margin-bottom:10px">Connection</div>
+          <div style="font:700 22px/1.2 var(--font-sans);letter-spacing:-.03em;margin-bottom:8px">Add a phone</div>
+          <div style="font-size:14px;color:var(--tx3);margin-bottom:22px;max-width:46ch">Point your phone's camera at this code. It refreshes on its own every five minutes.</div>
+          <div class="qr"></div>
+          <div style="text-align:center">
+            <div style="font:600 14px/1.3 var(--font-sans);color:var(--tx2);margin-bottom:10px">Verification code</div>
+            <div class="sas"><i>K7</i><i>Q2</i></div>
+            <div style="font-size:13px;color:var(--tx3);max-width:40ch;margin:8px auto 0;line-height:1.5">Your phone will show the same four characters. Only tap Link if they match.</div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:center;margin-top:22px">
+            <span class="pill"><svg class="ic xs"><use href="#i-clock"/></svg>expires in 4:41</span>
+            <span class="pill info"><svg class="ic xs"><use href="#i-scan"/></svg>already installed? scan again</span>
+          </div>
+        </div></div>
+        <div class="pcap"><b>Desktop</b>QR and verification code rotate together.</div>
+      </div>
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat" style="color:#fff"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody" style="background:#000">
+            <div style="flex:1;display:flex;align-items:center;justify-content:center">
+              <div style="width:206px;height:206px;border:2px solid rgba(255,255,255,.85);border-radius:26px;position:relative">
+                <div style="position:absolute;inset:26px;background:repeating-conic-gradient(#fff 0% 25%,transparent 0% 50%) 0 0/12px 12px;background-color:#fff;border:7px solid #fff;border-radius:6px"></div>
+              </div>
+            </div>
+            <div class="floatbar glass" style="background:rgba(255,255,255,.14);justify-content:center;padding:0 18px">
+              <svg class="ic l" style="color:#fff"><use href="#i-link"/></svg><span class="ph" style="flex:0;color:#fff;font-weight:500">app.mantaui.com</span>
+            </div>
+          </div>
+          <div class="phome" style="background:#000"><i style="background:#fff"></i></div>
+        </div></div>
+        <div class="pcap"><b>System camera</b>No in-app scanner on first run.</div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>A universal link, not <code>manta://</code>.</b> A custom scheme has one outcome and no ownership verification — any app can claim it. A universal link falls back to a real page when the app isn't installed.</li>
+      <li><b>The four characters are never typed.</b> They exist to be compared. Six digits survive as the typed fallback.</li>
+      <li><b>Single-use nonce, not a token.</b> Photographing the screen later gets you nothing.</li>
+    </ul>
+  </div>
+
+  <div data-panel="ob2">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1">Link this<br>phone?</div>
+            <div class="psub">It'll be able to run commands on the machine below.</div>
+            <div class="srf">
+              <div style="display:flex;align-items:center;gap:12px"><span class="dot ok"></span>
+                <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:16px;letter-spacing:-.015em">Your box</div><div class="pmeta pmono" style="font-size:12px;margin-top:1px">157.90.224.92</div></div></div>
+              <div style="height:.5px;background:var(--border);margin:15px -16px;opacity:.6"></div>
+              <div style="font:600 14px/1.3 var(--font-sans);margin-bottom:9px;color:var(--tx2)">Match the code on your desktop</div>
+              <div class="sas" style="justify-content:flex-start"><i>K7</i><i>Q2</i></div>
+            </div>
+            <div class="pbtn" style="margin-top:14px">Link this phone</div>
+            <div class="plink">Codes don't match</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>The only unavoidable tap</b></div>
+      </div>
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1" style="font-size:26px">Linking</div>
+            <div class="psub">A couple of seconds.</div>
+            <div class="stg"><span class="m done"><svg class="ic xs" style="width:10px;height:10px;stroke-width:3"><use href="#i-check"/></svg></span>Reached your box<span class="t">0:00</span></div>
+            <div class="stg"><span class="m done"><svg class="ic xs" style="width:10px;height:10px;stroke-width:3"><use href="#i-check"/></svg></span>Verified the code<span class="t">0:01</span></div>
+            <div class="stg"><span class="m now"></span>Saving credentials<span class="t">0:01</span></div>
+            <div class="prog"><i style="width:74%"></i></div>
+            <div class="pmeta" style="text-align:center;margin-top:12px;line-height:1.5">Credentials stay on this phone and on your box.</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>The shared process panel</b>Same stage list as the desktop installer.</div>
+      </div>
+      <div>
+        <div class="desk"><div class="tb"><i></i><i></i><i></i></div><div class="ct" style="padding:40px 24px">
+          <div style="font:700 20px/1.2 var(--font-sans);letter-spacing:-.03em;margin-bottom:8px">Phone linked</div>
+          <div style="font-size:14px;color:var(--tx3);margin-bottom:20px">iPhone · linked just now · from 82.66.x.x</div>
+          <div style="display:inline-flex;gap:8px"><span class="pill"><svg class="ic xs"><use href="#i-phone"/></svg>Manage devices</span><span class="pill bad">Unlink</span></div>
+        </div></div>
+        <div class="pcap"><b>Desktop confirms, and offers the undo</b>Linked devices listed with last-seen and one-tap revoke.</div>
+      </div>
+    </div>
+  </div>
+
+  <div data-panel="ob3">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1">Know when<br>it needs you</div>
+            <div class="psub">Agents stop for permission, ask questions, and finish while you're somewhere else. This is the point of having Manta on your phone.</div>
+            <div class="srf" style="padding:2px 16px">
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 0"><svg class="ic" style="color:var(--warn)"><use href="#i-shield"/></svg><div style="font-size:15px">Permission needed to run a command</div></div>
+              <div style="height:.5px;background:var(--border);margin:0 -16px;opacity:.5"></div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 0"><svg class="ic" style="color:var(--accent-tx)"><use href="#i-alert"/></svg><div style="font-size:15px">A question is blocking the turn</div></div>
+              <div style="height:.5px;background:var(--border);margin:0 -16px;opacity:.5"></div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 0"><svg class="ic" style="color:var(--ok)"><use href="#i-check"/></svg><div style="font-size:15px">A long turn finished</div></div>
+            </div>
+            <div class="pbtn" style="margin-top:16px">Continue</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>iOS</b>One button, and it opens the system alert. No dismiss, no “Allow”, no cancel.</div>
+        <div class="ann"><b>Apple's rule, verbatim:</b> exactly one button, it must open the alert, it must not be titled “Allow”, and there must be no way out. Violating it <i>“will lead to rejection by App Store review.”</i></div>
+      </div>
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr" style="opacity:.3">
+            <div class="ph1">Know when<br>it needs you</div>
+            <div class="psub">Agents stop for permission, ask questions, and finish while you're somewhere else.</div>
+          </div>
+          <div class="scrim"></div>
+          <div class="glass" style="position:absolute;left:32px;right:32px;top:196px;border-radius:26px;padding:22px 18px 0;text-align:center;z-index:5">
+            <div style="font:600 16px/1.35 var(--font-sans);margin-bottom:6px">“Manta” Would Like to Send You Notifications</div>
+            <div style="font-size:13px;line-height:1.45;color:var(--tx2);margin-bottom:18px">Notifications may include alerts, sounds and icon badges. These can be configured in Settings.</div>
+            <div style="display:flex;border-top:.5px solid var(--border);margin:0 -18px">
+              <div style="flex:1;padding:14px;font:400 16px/1 var(--font-sans);color:var(--accent-tx);border-right:.5px solid var(--border)">Don't Allow</div>
+              <div style="flex:1;padding:14px;font:600 16px/1 var(--font-sans);color:var(--accent-tx)">Allow</div>
+            </div>
+          </div>
+          </div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>The system alert, immediately after</b>You get exactly one of these, ever.</div>
+      </div>
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1">Know when<br>it needs you</div>
+            <div class="psub">Agents stop for permission, ask questions, and finish while you're somewhere else.</div>
+            <div class="srf" style="padding:2px 16px">
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 0"><svg class="ic" style="color:var(--warn)"><use href="#i-shield"/></svg><div style="font-size:15px">Permission needed</div></div>
+              <div style="height:.5px;background:var(--border);margin:0 -16px;opacity:.5"></div>
+              <div style="display:flex;align-items:center;gap:13px;padding:13px 0"><svg class="ic" style="color:var(--accent-tx)"><use href="#i-alert"/></svg><div style="font-size:15px">A blocking question</div></div>
+            </div>
+            <div class="pbtn" style="margin-top:16px">Turn on notifications</div>
+            <div class="plink">Not now</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Android — same screen, opposite rules</b>Google requires <i>“always provide the option to cancel an educational UI flow.”</i></div>
+        <div class="ann bad"><b>The only screen in the flow that must fork per platform.</b> A shared component with a Cancel on iOS is a rejection; without one on Android it violates Google's stated principle.</div>
+      </div>
+    </div>
+    <div class="callout warn"><b>Hard constraint either way:</b> guideline 5.1.2(i) — no functionality may be gated on granting a system permission. Denying notifications must land you in the session list exactly like accepting does; the only difference is a quiet, dismissible reminder in Settings.</div>
+  </div>
+
+  <div data-panel="ob4">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody">
+            <div class="pscroll">
+              <div class="lgtitle">Sessions</div>
+              <div class="grp">better-ui</div>
+              <div class="rowl on"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+              <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+              <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">main</div></div><span class="tm">1h</span></div>
+              <div class="grp">tenanture</div>
+              <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">ci consolidation</div></div><span class="tm">3h</span></div>
+            </div>
+            <div class="edgefx"></div>
+            <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+            <div class="floatbar glass"><svg class="ic l" style="color:var(--tx3)"><use href="#i-scan"/></svg><span class="ph">Search</span><span class="fb"><svg class="ic l"><use href="#i-plus"/></svg></span></div>
+          </div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Straight to work</b>No “all set” screen, no final button. Two taps after the scan.</div>
+      </div>
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody">
+            <div class="pscroll" style="justify-content:center;display:flex;flex-direction:column;text-align:center;padding:0 34px">
+              <div style="font:700 24px/1.2 var(--font-sans);letter-spacing:-.03em;margin-bottom:8px">No sessions yet</div>
+              <div style="font-size:15px;line-height:1.5;color:var(--tx3)">Pick a folder on your box and say what you want to do.</div>
+            </div>
+            <div class="floatbar glass" style="height:auto;flex-direction:column;align-items:stretch;gap:12px;padding:14px 16px;border-radius:26px">
+              <div style="display:flex;align-items:center;gap:8px;color:var(--tx3);font:500 13px/1 var(--font-sans)"><svg class="ic s"><use href="#i-folder"/></svg><span class="pmono">~/projects</span><svg class="ic xs" style="margin-left:auto"><use href="#i-right"/></svg></div>
+              <div style="display:flex;align-items:center;gap:10px"><span class="ph" style="flex:1;color:var(--tx3);font-size:16px">What do you want to do?</span><span class="fb"><svg class="ic l"><use href="#i-send"/></svg></span></div>
+            </div>
+          </div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Zero state is the composer</b>You don't create a session — you write the first message and one appears.</div>
+      </div>
+    </div>
+  </div>
+
+  <div data-panel="ob5">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody">
+            <div class="pctr">
+              <div class="ph1" style="font-size:27px">Get the app<br>to finish</div>
+              <div class="psub">Your box is waiting. Install Manta, then scan the code on your desktop again.</div>
+              <div class="pbtn" style="margin-bottom:14px">Get Manta</div>
+              <div class="srf">
+                <div style="font:600 14px/1.3 var(--font-sans);color:var(--tx2);margin-bottom:8px">Prefer to type it?</div>
+                <div style="font:600 24px/1 var(--font-mono);letter-spacing:.18em;text-align:center;padding:8px 0 12px">418 902</div>
+                <div class="pmeta" style="text-align:center;display:flex;align-items:center;justify-content:center;gap:6px"><svg class="ic xs"><use href="#i-clock"/></svg>expires in 4:12</div>
+              </div>
+            </div>
+            <div class="phead chip" style="justify-content:center"><span class="pmeta pmono" style="font-size:12px">app.mantaui.com</span></div>
+          </div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>App not installed → the page still works</b>The single biggest reason to leave <code>manta://</code> behind: this screen can't exist with a custom scheme.</div>
+      </div>
+    </div>
+    <div class="callout"><b>Nothing survives an App Store install except an App Clip.</b> So the desktop code stays live and rotating, and the page says <i>scan it again</i>. One extra scan, and it never fails. The App Clip removes even that — and it's the follow-up issue you asked for, filed once we're on the store.</div>
+  </div>
+
+  <div data-panel="ob6">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody">
+            <div class="pctr">
+              <div class="ph1" style="font-size:27px">Enter the code</div>
+              <div class="psub">Read the six digits off your desktop, or run <span class="pmono" style="color:var(--tx1)">manta pair</span> on the box.</div>
+              <div class="otp"><i>4</i><i>1</i><i>8</i><i class="cur">9</i><i class="e">·</i><i class="e">·</i></div>
+              <div class="srf" style="display:flex;align-items:center;gap:12px">
+                <span class="dot ok"></span>
+                <div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:600">Box found</div><div class="pmeta pmono" style="font-size:11.5px">157.90.224.92</div></div>
+                <svg class="ic s" style="color:var(--ok)"><use href="#i-check"/></svg>
+              </div>
+              <div class="pbtn dis" style="margin-top:4px">Continue</div>
+              <div class="plink">My box isn't reachable from the internet</div>
+            </div>
+            <div class="phead chip"><span class="ib"><svg class="ic l"><use href="#i-left"/></svg></span></div>
+          </div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>The 32-character box ID is gone</b>The code identifies the box on its own. Today this screen asks for 38 typed characters.</div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>Numeric keypad, one-time-code autofill, and paste must work.</b> Blocking paste in an OTP field is a WCAG 3.3.8 failure.</li>
+      <li><b>The server URL field survives only behind “isn't reachable”</b> — the tailnet case. An escape hatch, not a step.</li>
+      <li><b>This screen is what keeps the app self-sufficient</b> under App Store guideline 4.2.3(i). The desktop QR must stay an accelerator, never the only route.</li>
+    </ul>
+  </div>
+
+  <div data-panel="ob7">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1" style="font-size:28px">That code<br>expired</div>
+            <div class="psub">Codes last five minutes. <b style="color:var(--tx1)">Nothing was linked and nothing changed.</b></div>
+            <div class="srf">
+              <div style="font-weight:600;font-size:15px;margin-bottom:5px">Your desktop already has a new one</div>
+              <div style="font-size:14px;color:var(--tx3);line-height:1.5">It refreshes on its own. Scan it again.</div>
+            </div>
+            <div class="pbtn" style="margin-top:14px">Scan again</div>
+            <div class="plink">Enter a code instead</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Expired</b>Cause and action, always as a pair.</div>
+      </div>
+    </div>
+    <div class="callout"><b>“Nothing was linked and nothing changed” is the most valuable sentence in a failure screen.</b> Without it, a failed pair reads as a broken box and the user goes looking for a problem that doesn't exist.</div>
+  </div>
+
+  <div data-panel="ob8">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1" style="font-size:28px">Don't link<br>this</div>
+            <div class="psub">If your desktop doesn't show <b style="color:var(--tx1)">K7 Q2</b>, this code didn't come from your machine.</div>
+            <div class="srf" style="background:var(--danger-bg)">
+              <div style="font-size:14px;line-height:1.6;color:var(--tx2)">Someone may have sent you a code that links your phone to their machine — or theirs to yours. Only ever scan a code you can see on your own screen.</div>
+            </div>
+            <div class="pbtn dan" style="margin-top:14px">Cancel</div>
+            <div class="plink">Let me look again</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Mismatch</b>Reachable only from the link on the confirm screen — never auto-triggered, because the app can't know what the desktop shows. <b>The human is the comparator.</b></div>
+      </div>
+    </div>
+  </div>
+
+  <div data-panel="ob9">
+    <div class="phones">
+      <div class="pwrap dD">
+        <div class="phone"><div class="pscreen">
+          <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+          <div class="pbody"><div class="pctr">
+            <div class="ph1" style="font-size:28px">Can't reach<br>your box</div>
+            <div class="psub">The code is valid but nothing answered. <b style="color:var(--tx1)">Nothing was linked.</b></div>
+            <div class="srf" style="padding:2px 16px">
+              <div style="padding:13px 0"><div style="font-weight:600;font-size:15px;margin-bottom:3px">It may be asleep</div><div style="font-size:13.5px;color:var(--tx3);line-height:1.5">Check it's powered on and the server is running.</div></div>
+              <div style="height:.5px;background:var(--border);margin:0 -16px;opacity:.5"></div>
+              <div style="padding:13px 0"><div style="font-weight:600;font-size:15px;margin-bottom:3px">Or this network blocks it</div><div style="font-size:13.5px;color:var(--tx3);line-height:1.5">Try cellular instead of Wi-Fi.</div></div>
+            </div>
+            <div class="pbtn" style="margin-top:14px">Try again</div>
+            <div class="plink">Copy diagnostics</div>
+          </div></div>
+          <div class="phome"><i></i></div>
+        </div></div>
+        <div class="pcap"><b>Unreachable</b>Two causes, two actions. Never one generic “something went wrong”.</div>
+      </div>
+    </div>
+  </div>
+  </div>
+</section>
+<style>
+.landwrap{width:612px}
+.land{width:612px;border-radius:40px;border:1px solid var(--border-strong);background:var(--panel);padding:9px;box-shadow:var(--shadow-lg)}
+.land .pscreen{height:300px;border-radius:32px}
+.kbd{display:flex;gap:6px;padding:8px 10px}
+.kbd b{min-width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
+ font:600 13px/1 var(--font-mono);color:var(--tx2);background:var(--fill-active);font-weight:600}
+.kbd b.act{background:var(--accent-solid);color:var(--on-accent)}
+.kbd b.dan{background:var(--danger-bg);color:var(--danger)}
+.kbd b.w{min-width:58px}
+.term{font:400 12px/1.55 var(--font-mono);color:#c8d3e6;padding:10px 12px;white-space:pre-wrap}
+[data-theme="light"] .term{color:#c8d3e6}
+.term .g{color:#3DD9A4}.term .b2{color:#7BA0FF}.term .y{color:#F0A934}.term .d{color:#6B7690}
+.swipe{display:flex;gap:6px;margin-bottom:3px}
+</style>
+
+<section id="actions">
+  <div class="eyebrow">The product · 02 — you asked me to define this</div>
+  <h2 class="sec">Acting on a session</h2>
+  <p class="lede">Your proposal was long-press for rename and delete, swipe for delete. That's the right shape. I'd change three things, and one of them matters a lot.</p>
+
+  <h3 class="sub">The proposal</h3>
+  <table class="spec">
+    <tr><th>Gesture</th><th>Does</th><th>Reasoning</th></tr>
+    <tr><td><b>Tap</b></td><td>Open</td><td>—</td></tr>
+    <tr><td><b>Swipe left</b> (trailing)</td><td><b>Mute</b> · <b>Delete</b>. Full-swipe commits Delete.</td><td>Trailing is the destructive side by iOS convention. Two actions fit comfortably; three don't.</td></tr>
+    <tr><td><b>Swipe right</b> (leading)</td><td><b>Pin / Unpin</b>. Full-swipe commits.</td><td>Leading is the positive side. Pin is already a concept desktop introduced in this same redesign, so it costs nothing new and it's the action you take most after opening.</td></tr>
+    <tr><td><b>Long-press</b></td><td>Native context menu: <b>Rename · Pin · Mute notifications · Fork · Copy path</b>, separator, <b>Delete</b></td><td>Everything, including both swipe actions. Apple: <i>“always make context menu items available in the main interface too”</i> — and destructive items go at the <b>end</b> of a context menu (the opposite of an action sheet, where they go at the top).</td></tr>
+  </table>
+
+  <h3 class="sub">The three changes, and why</h3>
+  <div class="grid3">
+    <div class="card">
+      <h4>1 · Delete undoes, it doesn't confirm <span class="pill good">the one that matters</span></h4>
+      <p>A confirm dialog on every delete makes the common case slow to punish the rare case. The modern pattern is the reverse: <b>delete immediately, show an undo for five seconds</b>, and only actually fire the RPC when the toast expires.</p>
+      <p>That's genuinely easy here — the deletion is one call we simply hold. It also means a full-swipe can commit safely, which a confirm dialog would make reckless.</p>
+    </div>
+    <div class="card">
+      <h4>2 · Except when the session is running</h4>
+      <p>Deleting a <i>running</i> session kills a live turn and the work in it. That's not undoable by holding an RPC for five seconds, because the turn is already dead.</p>
+      <p>So: <b>idle sessions delete with undo, running sessions confirm.</b> The confirm names what's being interrupted — “this will stop a turn that's been running 4 minutes”.</p>
+    </div>
+    <div class="card">
+      <h4>3 · Mute is worth adding <span class="pill info">new concept</span></h4>
+      <p>One noisy agent shouldn't cost you notifications from the other four. Today notification routing is global, so per-session mute is a small server-side addition — a set of muted session IDs consulted before a push fires.</p>
+      <p>It's the action most likely to be wanted at 2am, and it's the reason the trailing swipe has room for two things.</p>
+    </div>
+  </div>
+
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle">Sessions</div>
+            <div class="grp">better-ui</div>
+            <div class="swipe">
+              <div class="rowl" style="flex:1;transform:translateX(-4px)"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">main</div></div></div>
+              <div style="width:56px;border-radius:20px;background:var(--warn);display:flex;align-items:center;justify-content:center;color:var(--canvas)"><svg class="ic l"><use href="#i-bell"/></svg></div>
+              <div style="width:56px;border-radius:20px;background:var(--danger);display:flex;align-items:center;justify-content:center;color:#fff"><svg class="ic l"><use href="#i-x"/></svg></div>
+            </div>
+            <div class="rowl"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+            <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Swipe left</b>Mute, then Delete. Full-swipe commits Delete.</div>
+    </div>
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll" style="filter:blur(1px);opacity:.5">
+            <div class="lgtitle">Sessions</div>
+            <div class="grp">better-ui</div>
+            <div class="rowl"><span class="dot idle"></span><div style="flex:1"><div class="n">main</div></div></div>
+          </div>
+          <div class="scrim" style="background:rgba(0,0,0,.28)"></div>
+          <div style="position:absolute;left:16px;right:16px;top:120px;z-index:5">
+            <div class="rowl" style="background:var(--card);box-shadow:var(--shadow-lg);margin-bottom:10px"><span class="dot idle"></span><div style="flex:1"><div class="n">main</div></div></div>
+            <div class="glass" style="border-radius:22px;overflow:hidden">
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans)"><svg class="ic"><use href="#i-spark"/></svg>Rename<span style="margin-left:auto"></span></div>
+              <div style="height:.5px;background:var(--border);opacity:.5"></div>
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans)"><svg class="ic"><use href="#i-key"/></svg>Pin</div>
+              <div style="height:.5px;background:var(--border);opacity:.5"></div>
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans)"><svg class="ic"><use href="#i-bell"/></svg>Mute notifications</div>
+              <div style="height:.5px;background:var(--border);opacity:.5"></div>
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans)"><svg class="ic"><use href="#i-branch"/></svg>Fork</div>
+              <div style="height:.5px;background:var(--border);opacity:.5"></div>
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans)"><svg class="ic"><use href="#i-folder"/></svg>Copy path</div>
+              <div style="height:6px;background:var(--fill-active)"></div>
+              <div class="it" style="min-height:48px;display:flex;align-items:center;gap:13px;padding:0 16px;font:500 16px/1 var(--font-sans);color:var(--danger)"><svg class="ic"><use href="#i-x"/></svg>Delete</div>
+            </div>
+          </div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Long-press</b>The row lifts out and the menu springs from it. Destructive last.</div>
+    </div>
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle">Sessions</div>
+            <div class="grp">better-ui</div>
+            <div class="rowl"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+            <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+          <div class="floatbar glass" style="padding:0 8px 0 18px"><span class="ph" style="color:var(--tx1);font-weight:500">Deleted “main”</span><span style="color:var(--accent-tx);font:600 15px/1 var(--font-sans);padding:0 12px">Undo</span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>After delete</b>Five seconds to undo. The RPC hasn't fired yet.</div>
+    </div>
+  </div>
+
+  <ul class="notes">
+    <li><b>Both swipe actions must also exist somewhere non-swipe</b> — WCAG 2.5.7 Dragging Movements, AA, new in 2.2. The context menu is that path, which is another reason it carries everything rather than a subset.</li>
+    <li><b>Haptics, per Apple's taxonomy:</b> a light impact when the swipe passes the commit threshold, a warning notification when the destructive confirm appears for a running session, a success notification when a delete finally lands. Not a buzz per gesture — Apple's rule is that good haptics are something you'd only miss if they were switched off.</li>
+    <li><b>Compact and Clear stay out of the list.</b> They're session-context actions and belong in the chat screen's overflow menu, where you can see what you're compacting.</li>
+  </ul>
+</section>
+
+<section id="terminal">
+  <div class="eyebrow">The product · 03 — first class, per your call</div>
+  <h2 class="sec">Terminal mode</h2>
+  <p class="lede">It's a webview under every plan — and this is the one screen where that genuinely doesn't matter. A terminal is full-bleed with no navigation chrome, so there's nothing for the platform to render differently. What it does need is everything <i>around</i> the text, and today it has almost none of it.</p>
+
+  <div class="callout"><b>Worth restating why the webview is fine here.</b> Blink Shell — native Swift, the reference professional iOS terminal — renders its terminal through a JavaScript emulator in a webview <i>by choice</i>. Their stated reason is rendering fidelity and speed. A terminal emulator is a VT100/xterm state machine plus a high-throughput text renderer, and xterm.js is twenty years of accumulated edge cases we already depend on. The native work is the <b>keyboard, gestures and chrome</b>, and all of that sits outside the webview in React Native.</div>
+
+  <h3 class="sub">What's missing today</h3>
+  <table class="spec">
+    <tr><th>Gap</th><th>Consequence</th></tr>
+    <tr><td>No modifier keys</td><td><b>Ctrl-C is unreachable.</b> You cannot interrupt a running process from the phone at all. This alone makes terminal mode unusable for its main job.</td></tr>
+    <tr><td>No tab, no arrows in terminal mode</td><td>No completion, no history, no navigating a TUI.</td></tr>
+    <tr><td>The keyboard bar is chat-only</td><td>Terminal mode falls back to the raw system keyboard.</td></tr>
+    <tr><td>No font size control</td><td>A fixed size that's either unreadable or wastes half the columns.</td></tr>
+    <tr><td>Landscape is untested</td><td>Which is the orientation you'd actually use for 80 columns.</td></tr>
+    <tr><td>No hardware keyboard handling</td><td>An iPad with a Magic Keyboard is the best case for this feature and it's unhandled.</td></tr>
+  </table>
+
+  <h3 class="sub">Proposed</h3>
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody" style="background:var(--inset)">
+          <div style="flex:1;overflow:hidden;padding-top:56px">
+            <div class="term"><span class="g">dev@box</span>:<span class="b2">~/projects/better-ui</span>$ npm test
+
+<span class="d">&gt;</span> vitest run &amp;&amp; node --test
+
+ <span class="g">✓</span> src/renderer/chatUtils.test.ts <span class="d">(184)</span>
+ <span class="g">✓</span> src/shared/subagentSync.test.ts <span class="d">(18)</span>
+ <span class="y">↻</span> src/server/opencode.test.mjs
+<span class="d">   running 41 of 63…</span></div>
+          </div>
+          <div class="edgefx" style="background:linear-gradient(to bottom,var(--inset) 10%,transparent 100%)"></div>
+          <div class="phead chip">
+            <span class="ib"><svg class="ic l"><use href="#i-left"/></svg></span>
+            <div style="flex:1;min-width:0;text-align:center"><div style="font:600 14.5px/1.2 var(--font-sans)">main</div><div style="font:500 11px/1.2 var(--font-sans);color:var(--tx4);margin-top:1px">terminal · 80×24</div></div>
+            <span class="ib"><svg class="ic l"><use href="#i-more"/></svg></span>
+          </div>
+          <div style="position:absolute;left:0;right:0;bottom:0;z-index:5">
+            <div class="kbd glass" style="border-radius:20px 20px 0 0">
+              <b class="dan">esc</b><b class="act">ctrl</b><b>tab</b><b>↑</b><b>↓</b><b>←</b><b>→</b>
+            </div>
+            <div style="height:170px;background:var(--panel);border-top:.5px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--tx4);font:500 12px/1 var(--font-sans)">system keyboard</div>
+          </div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Portrait — the key row</b><code>ctrl</code> is sticky: tap it, then <code>c</code>. It stays lit until used.</div>
+      <div class="ann good"><b>The bar is React Native, not the webview</b> — so it's a real keyboard accessory view and tracks the keyboard's own animation exactly. That's the thing a webview bar can never do, and in a terminal you notice it on every keystroke.</div>
+    </div>
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody" style="background:var(--inset)">
+          <div style="flex:1;overflow:hidden;padding-top:56px">
+            <div class="term">╭──────────────────────────────╮
+│  <span class="b2">claude</span>                      │
+╰──────────────────────────────╯
+
+<span class="y">✻</span> Ruminating… <span class="d">(18s · 4.1k tokens)</span>
+
+<span class="d">╭──────────────────────────────╮
+│ &gt;                            │
+╰──────────────────────────────╯</span></div>
+          </div>
+          <div class="edgefx" style="background:linear-gradient(to bottom,var(--inset) 10%,transparent 100%)"></div>
+          <div class="phead chip">
+            <span class="ib"><svg class="ic l"><use href="#i-left"/></svg></span>
+            <div style="flex:1;min-width:0;text-align:center"><div style="font:600 14.5px/1.2 var(--font-sans)">main</div><div style="font:500 11px/1.2 var(--font-sans);color:var(--tx4);margin-top:1px">claude · 80×24</div></div>
+            <span class="ib"><svg class="ic l"><use href="#i-more"/></svg></span>
+          </div>
+          <div class="floatbar glass" style="padding:0 10px;justify-content:space-around">
+            <svg class="ic l" style="color:var(--tx2)"><use href="#i-x"/></svg>
+            <svg class="ic l" style="color:var(--tx2)"><use href="#i-clip"/></svg>
+            <svg class="ic l" style="color:var(--tx2)"><use href="#i-terminal"/></svg>
+            <svg class="ic l" style="color:var(--tx2)"><use href="#i-mic"/></svg>
+          </div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Keyboard closed</b>The key row collapses to a floating glass bar with the four things you need without typing: interrupt, paste, keyboard, dictate.</div>
+    </div>
+  </div>
+
+  <div class="phones">
+    <div class="landwrap">
+      <div class="land"><div class="pscreen">
+        <div class="pbody" style="background:var(--inset);flex-direction:row">
+          <div style="flex:1;overflow:hidden;padding:14px 0 0 34px">
+            <div class="term" style="font-size:11px">dev@box:~/projects/better-ui$ git log --oneline -8
+<span class="y">d282633</span> Merge pull request #338 from antoinedc/chore/multica-manta-dev-rename
+<span class="y">12fc429</span> Merge pull request #337 from antoinedc/multica/BET-375-prompt-delivery
+<span class="y">1222671</span> chore(multica): rename better-ui-dev → manta-dev, add PM re-decomposition gate
+<span class="y">a6a9456</span> refactor(server): extract shared defer-while-busy prompt-delivery engine
+<span class="y">0cc21ea</span> Merge pull request #316 from antoinedc/multica/BET-357-poc-cleanup
+<span class="y">7ba5c64</span> Merge pull request #336 from antoinedc/multica/BET-385-sitemap-utc
+<span class="g">dev@box</span>:<span class="b2">~/projects/better-ui</span>$ <span style="background:var(--tx1);color:var(--inset)"> </span></div>
+          </div>
+          <div class="kbd glass" style="flex-direction:column;border-radius:20px;margin:12px;padding:8px">
+            <b class="dan">esc</b><b class="act">ctrl</b><b>tab</b><b>↑</b><b>↓</b>
+          </div>
+        </div>
+      </div></div>
+      <div class="pcap"><b>Landscape — where 80 columns actually fit</b>The key row moves to the trailing edge so it doesn't eat the rows. Locking portrait would also be a straight WCAG 1.3.4 failure.</div>
+    </div>
+  </div>
+
+  <h3 class="sub">The rest of the spec</h3>
+  <table class="spec">
+    <tr><th>Item</th><th>Behaviour</th></tr>
+    <tr><td><b>Sticky modifiers</b></td><td><code>ctrl</code> latches on tap, lights up, applies to the next keypress, then releases. Double-tap to lock. Same for <code>alt</code> if we add it.</td></tr>
+    <tr><td><b>Key row contents</b></td><td><code>esc · ctrl · tab · ↑ ↓ ← →</code> in the first row. A second, horizontally scrollable row holds <code>| ~ / - _ : $</code> — the characters buried three taps deep on the iOS keyboard and constant in a shell.</td></tr>
+    <tr><td><b>esc</b></td><td>Tinted red while a process is running, matching the chat bar's behaviour. It's the interrupt.</td></tr>
+    <tr><td><b>Pinch to zoom</b></td><td>Changes font size and re-fits columns. Persisted per device, not per session. Announce the resulting size briefly so it isn't guesswork.</td></tr>
+    <tr><td><b>Selection and copy</b></td><td>Long-press enters selection with native handles; copy goes to the system clipboard. Paste from the floating bar, from the key row, and from the system menu.</td></tr>
+    <tr><td><b>Hardware keyboard</b></td><td>Full pass-through including modifiers. The key row hides itself when one is attached.</td></tr>
+    <tr><td><b>Reattach</b></td><td>The pane is a tmux window, so backgrounding the app loses nothing. On foreground, reattach and repaint rather than reconnecting from scratch.</td></tr>
+    <tr><td><b>Chrome</b></td><td>Header shows the window name and the live geometry (<code>80×24</code>) — the number you need when a TUI renders wrong, and currently invisible everywhere.</td></tr>
+  </table>
+</section>
+<section id="shell">
+  <div class="eyebrow">Delivery</div>
+  <h2 class="sec">The plan — full replacement</h2>
+  <p class="lede">You said no transition, we can nuke the existing client, and the epic should be a straight replacement. That's simpler in a way worth spelling out: it deletes work rather than adding a migration.</p>
+
+  <h3 class="sub">What gets deleted on day one</h3>
+  <table class="spec">
+    <tr><th>Goes</th><th>Consequence</th></tr>
+    <tr><td>The Capacitor wrapper — Android and iOS shells, plugins, config</td><td>No Capacitor 6→8 upgrade needed. That upgrade only existed to keep a shipping app healthy during a transition there now isn't.</td></tr>
+    <tr><td>The mobile web client — the mobile shell screens, settings, create sheet, keyboard bar, connecting and pairing screens <span class="kv">~3,400 lines</span></td><td>Rewritten natively. This is the part that <i>should</i> be rewritten — every native-feel gap lives here.</td></tr>
+    <tr><td><b>The CSS override layer</b> <span class="kv">450 lines</span></td><td><span class="pill good">the quiet win</span> This is the file that reshapes shared desktop components through named hooks and two fragile positional selectors matching on Tailwind class substrings. It disappears entirely — which <b>discharges the top-severity risk in BET&#8209;406's own risk table by deletion rather than by contract</b>. The hook-class list that epic owed mobile and never wrote is no longer needed.</td></tr>
+    <tr><td>The six window-level event channels between the mobile shell and the shared chat panel</td><td>They exist only because mobile can't pass props into a component it mounts opaquely. In React Native they're ordinary props.</td></tr>
+    <tr><td>The mobile bundle build, the CI publish workflow, the release-host tarball, and the box's self-update fetch of it</td><td>The box stops serving a web client. One fewer deploy path, one fewer thing that can be stale on a device.</td></tr>
+    <tr><td>The PWA — service worker, manifest, install instructions, Web Push registration</td><td>Push moves entirely to APNs and Firebase through the native app, which is a simplification: one delivery path instead of two.</td></tr>
+  </table>
+  <div class="callout warn"><b>One thing to check before you commit to that last row.</b> Web Push is currently the delivery path for the PWA <i>and</i> the fallback for anything not running the native shell. Retiring it means the only way to get a notification is the native app. Given TestFlight-only distribution for now, that's a real if temporary narrowing — worth being deliberate about rather than discovering.</div>
+
+  <h3 class="sub">What survives untouched</h3>
+  <p>The whole logic layer, which is most of the hard-won behaviour: the transport and HTTP client, the SSE fan-out and per-directory stream handling, the delta buffering and flush boundaries, the queued-message drain, todo and permission and question state, token accounting, the store, and the shared pure helpers. <b>The test is mechanical: the native view layer imports zero DOM.</b> Most of it already passes.</p>
+
+  <h3 class="sub">Three stages</h3>
+  <table class="spec">
+    <tr><th>#</th><th>Stage</th><th>What lands</th></tr>
+    <tr><td>1</td><td><b>Tokens and headless extraction</b></td><td>One module emitting the palette, type scale, spacing and radii as CSS variables for desktop <i>and</i> a typed theme object for native. Then everything non-rendering moves out of the shared chat panel until a pure-Node import compiles with no DOM. Neither is visible; both improve the codebase on their own merits.</td></tr>
+    <tr><td>2</td><td><b>The app</b></td><td>Expo, native stack and tabs, onboarding, session list, chat, terminal, settings. Transcript on a native list. Our own markdown renderer against a shared parser. Glass chrome by using system components. Haptics, context menus, swipe actions, Dynamic Type.</td></tr>
+    <tr><td>3</td><td><b>Native-only surfaces</b></td><td>Live Activity for a running turn, share extension, App Clip once we're on the App Store.</td></tr>
+  </table>
+
+  <h3 class="sub">Two build decisions I'd lock in the epic</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>No NativeWind</h4>
+      <p>The stable release pins Tailwind v3, and v4 support has sat in a preview marked not-for-production since September 2025. It also bakes colour opacity statically, which fights variable-driven theming.</p>
+      <p>Instead: the token module feeds a typed theme, and styles are plain objects. That's better than class strings on both platforms and it removes a dependency that would gate our design system on someone else's release schedule.</p>
+    </div>
+    <div class="card">
+      <h4>Our own markdown renderer</h4>
+      <p>The leading React Native markdown library hasn't published to npm since December 2023; the leading syntax highlighter died in 2019. But we don't need a general one — <b>we control the markdown the agent emits.</b></p>
+      <p>A purpose-built renderer streams by block without re-parsing the document, and makes tool cards, diffs and todo lists first-class node types instead of HTML we style afterwards. Parsing is shared with desktop; only the rendering differs.</p>
+    </div>
+  </div>
+
+  <h3 class="sub">Risks</h3>
+  <table class="spec">
+    <tr><th>Risk</th><th>Severity</th><th>Note</th></tr>
+    <tr><td>Native tabs and the new navigation stack are still alpha</td><td><span class="pill warn">med</span> Expo's native tab bar is alpha roughly ten months after iOS 26 shipped, and the screens library's next stack is at alpha 1. A SwiftUI app got all of this on day one; we're on someone else's timeline for the newest chrome.</td><td>Mitigation is to keep the chrome stock and shallow — two screens deep, which we already are.</td></tr>
+    <tr><td>Seams where the glass and our layout meet</td><td><span class="pill warn">med</span> Documented and real: you cannot measure the tab bar's height, there's no callback when the material inverts your icon colours, and a standard list loses scroll-to-top and scroll-edge detection under native tabs.</td><td>Use platform colour objects rather than computing contrast; keep the transcript's scroll view as the direct child it needs to be.</td></tr>
+    <tr><td>Design once, build twice</td><td><span class="pill warn">accepted</span></td><td>You've taken this one. The mitigation is the shared logic layer and the shared token module, not process.</td></tr>
+    <tr><td>Retiring Web Push narrows notification delivery</td><td><span class="pill warn">med</span></td><td>See the callout above.</td></tr>
+  </table>
+</section>
+
+<section id="pairing">
+  <div class="eyebrow">Reference</div>
+  <h2 class="sec">Pairing — what the link grants</h2>
+  <p class="lede">Unchanged from the last round, kept here because it's the security spine of onboarding. The payload grants command execution on a machine the user owns, and there's a published, state-actor-operated attack against exactly this flow shape.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h4>Already right today</h4>
+      <ul>
+        <li>Short-lived single-use nonce, not a bearer token</li>
+        <li>The code is generated by the already-authenticated side and claimed by the joiner — structurally safer than Signal's, where the QR <i>grants</i> access</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>Missing today</h4>
+      <ul>
+        <li>Any screen naming what's being linked</li>
+        <li>Out-of-band code comparison</li>
+        <li>A linked-device list with revoke</li>
+        <li>A notification to existing devices when a new one appears — the push pipeline already exists</li>
+        <li>Idle expiry on device tokens</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>In February 2025 Google's threat-intelligence group published a campaign in which Russia-aligned actors abused <b>Signal's linked-devices feature</b> at scale: fake “group invite” pages swapped the redirect for a device-linking URL pointing at an attacker-controlled instance, so <b>the victim's own device performs the link</b>. Malicious QRs were disguised as group invites, security alerts, and Signal's own pairing instructions. Their assessment of why it worked: <i>“a low-signature form of initial access due to the lack of centralized, technology-driven detections… a compromise can go unnoticed for extended periods.”</i></p>
+
+  <table class="spec">
+    <tr><th>Their recommended mitigation</th><th>Where it lands</th></tr>
+    <tr><td>Two-factor confirmation when linking a new device</td><td>The four characters shown on both screens — the attacker controls the phone's view, never the desktop's</td></tr>
+    <tr><td>Show what's being linked, in human terms</td><td>The confirm screen names the machine and the access</td></tr>
+    <tr><td>Audit linked devices regularly</td><td>Device list with last-seen, plus a push to existing devices on every new pairing</td></tr>
+    <tr><td>Short-lived, single-use provisioning</td><td>Five-minute TTL, invalidated on first claim, auto-rotating</td></tr>
+  </table>
+  <div class="callout"><b>Optional hardening:</b> have the QR carry a phone-generated public key so the box encrypts the token <i>to that phone</i>. An intercepted or photographed QR then grants nothing at all, and the code comparison becomes belt-and-braces rather than the only defence. This is Signal's own provisioning shape.</div>
+
+  <h3 class="sub">App Clips — the follow-up you asked for</h3>
+  <p>An App Clip is a slice of the app under 15&nbsp;MB that iOS runs <b>without installing anything</b>, launched from a QR. It pairs for real, writes the token to a shared keychain or App Group container — which Apple documents for precisely this case — and the full app reads it on first launch and opens straight to the session list. <b>No second scan.</b> It's the only Apple-sanctioned way to carry a credential through an App Store install.</p>
+  <p>It cannot be built before the app is live on the App Store: default and demo App Clip links can only be tested once the app and clip have passed review. So it's a follow-up issue by necessity, not by preference. Two constraints to note when it's written: the 100&nbsp;MB size tier explicitly <b>forbids QR and App Clip Code launches</b>, so the budget really is 15&nbsp;MB; and Android has no equivalent, since Google shut down Instant Apps — the web fallback page has to exist regardless.</p>
+</section>
+<section id="a11y">
+  <div class="eyebrow">Foundations · 04 — clarifying, because I explained this badly</div>
+  <h2 class="sec">Text size</h2>
+  <p class="hero">No — I'm not proposing 53pt text in a list. That number is the user's own OS setting at its maximum, and almost nobody sets it there. The requirement isn't to design at it. It's that the layout <b>doesn't break if someone chooses it</b>.</p>
+
+  <table class="spec">
+    <tr><th></th><th>What I'm actually asking for</th></tr>
+    <tr><td><b>Design size</b></td><td>17pt body, exactly as now. Every mockup on this page is drawn at the default.</td></tr>
+    <tr><td><b>What scales</b></td><td>The user's setting multiplies it. In React Native this is on by default — text scales unless you opt out.</td></tr>
+    <tr><td><b>The actual design work</b></td><td>Three things: don't fix row heights, let names wrap instead of truncating, and let a row grow taller. That's it.</td></tr>
+    <tr><td><b>And a cap</b></td><td>React Native lets you cap the multiplier per element. My proposal: <b>chrome and list rows cap at 1.4×</b>, the <b>header at 1.2×</b>, and the <b>transcript uncapped</b> — reading the agent's output is the one place someone genuinely wants it as large as they asked for. That's what well-built apps do; nobody supports 3.1× on a navigation bar.</td></tr>
+    <tr><td><b>What people actually pick</b></td><td>The realistic case is one or two steps up — the middle frame below. The right-hand frame is a stress test we check on a PR, not a design target.</td></tr>
+  </table>
+
+  <div class="phones">
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle">Sessions</div>
+            <div class="grp">better-ui</div>
+            <div class="rowl on"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n">mobile shell redesign</div><div class="sb">running · opus 4.8</div></div><span class="tm">2m</span></div>
+            <div class="rowl"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n">settings restructure</div><div class="sb">needs you</div></div><span class="tm">14m</span></div>
+            <div class="rowl"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n">main</div></div><span class="tm">1h</span></div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Default — 17pt</b>What we design.</div>
+    </div>
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle" style="font-size:36px">Sessions</div>
+            <div class="grp" style="font-size:17px">better-ui</div>
+            <div class="rowl on" style="min-height:70px"><span class="dot acc"></span><div style="flex:1;min-width:0"><div class="n" style="font-size:18px">mobile shell redesign</div><div class="sb" style="font-size:14px">running · opus 4.8</div></div><span class="tm" style="font-size:13px">2m</span></div>
+            <div class="rowl" style="min-height:70px"><span class="dot warn"></span><div style="flex:1;min-width:0"><div class="n" style="font-size:18px">settings restructure</div><div class="sb" style="font-size:14px">needs you</div></div><span class="tm" style="font-size:13px">14m</span></div>
+            <div class="rowl" style="min-height:70px"><span class="dot idle"></span><div style="flex:1;min-width:0"><div class="n" style="font-size:18px">main</div></div><span class="tm" style="font-size:13px">1h</span></div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Two steps up — the realistic case</b>Rows grow a little. Nothing else changes.</div>
+      <div class="ann good"><b>This is what “supporting Dynamic Type” looks like in practice</b> — not a dramatic reflow, just rows that breathe instead of clipping.</div>
+    </div>
+    <div class="pwrap dD">
+      <div class="phone"><div class="pscreen">
+        <div class="pstat"><div class="pnotch"></div><span>9:41</span><span class="sig"><svg class="ic xs"><use href="#i-cell"/></svg><svg class="ic xs"><use href="#i-battery"/></svg></span></div>
+        <div class="pbody">
+          <div class="pscroll">
+            <div class="lgtitle" style="font-size:40px;line-height:1.08">Sessions</div>
+            <div class="grp" style="font-size:20px">better-ui</div>
+            <div class="rowl on" style="min-height:auto;padding:14px 12px;align-items:flex-start">
+              <span class="dot acc" style="margin-top:8px"></span>
+              <div style="flex:1;min-width:0">
+                <div class="n" style="font-size:24px;line-height:1.28;white-space:normal">mobile shell redesign</div>
+                <div class="sb" style="font-size:17px;margin-top:5px">running · opus 4.8 · 2m</div>
+              </div>
+            </div>
+            <div class="rowl" style="min-height:auto;padding:14px 12px;align-items:flex-start">
+              <span class="dot warn" style="margin-top:8px"></span>
+              <div style="flex:1;min-width:0">
+                <div class="n" style="font-size:24px;line-height:1.28;white-space:normal">settings restructure</div>
+                <div class="sb" style="font-size:17px;margin-top:5px">needs you · 14m</div>
+              </div>
+            </div>
+          </div>
+          <div class="edgefx"></div>
+          <div class="phead chip"><div style="flex:1"></div><span class="ib"><svg class="ic l"><use href="#i-sliders"/></svg></span></div>
+        </div>
+        <div class="phome"><i></i></div>
+      </div></div>
+      <div class="pcap"><b>Capped at 1.4× — the stress test</b>Names wrap; the timer folds into the subtitle line.</div>
+      <div class="ann"><b>Note what the cap buys.</b> Uncapped this row would be at 53pt and unusable. Capped at 1.4× it stays a list. The transcript, meanwhile, keeps scaling all the way — because there, bigger is the point.</div>
+    </div>
+  </div>
+
+  <div class="callout"><b>The rest of the accessibility work is unchanged and mostly unglamorous:</b> 48px hit areas with fewer controls rather than bigger ones; the transcript announcing state transitions rather than streaming tokens into a live region; never moving focus on a new message; a programmatic speaker label on each turn so authorship isn't carried by alignment and colour alone; landscape unlocked. Using system components covers Reduce Transparency, Increase Contrast and Reduce Motion for free — the transcript is ours, so it's the one that needs checking.</div>
+</section>
+
+<section id="decide">
+  <div class="eyebrow">Over to you</div>
+  <h2 class="sec">Open questions</h2>
+  <p class="lede">Nothing filed. Two real decisions, three confirmations, one flag.</p>
+  <table class="spec">
+    <tr><th>#</th><th>Question</th><th>My answer</th></tr>
+    <tr><td>1</td><td><b>Direction D (native glass) or B (custom elevated)?</b></td><td><b>D.</b> It's the platform's actual language as of iOS 26/27, we get most of it by using system components, and it's the one thing a webview provably cannot draw — which makes it the strongest possible justification for the rewrite you've already chosen.</td></tr>
+    <tr><td>2</td><td><b>Session actions as specified?</b> Swipe left mute/delete, swipe right pin, long-press for everything, delete-with-undo except when running.</td><td>The three changes from your version are undo-instead-of-confirm, the running-session exception, and adding mute. <b>Mute is a new server-side concept</b> — small, but it's not free, so say if you'd rather cut it.</td></tr>
+    <tr><td>3</td><td><b>Terminal spec — anything missing?</b></td><td>The gap that struck me is that <b>Ctrl-C is currently unreachable</b>, which means you cannot interrupt a process from the phone at all today.</td></tr>
+    <tr><td>4</td><td><b>Retiring Web Push narrows notification delivery to the native app only.</b></td><td>Deliberate or accidental? With TestFlight-only distribution it's a real if temporary narrowing.</td></tr>
+    <tr><td>5</td><td><b>No NativeWind, own markdown renderer</b></td><td>Both locked in the epic body unless you object. They're the two decisions that determine whether the rewrite ages well.</td></tr>
+    <tr><td>6</td><td><b>Android — same effort, or iOS-first?</b></td><td>Haven't asked yet and it changes scope materially. The design language differs (Material 3 Expressive), the permission-priming screen must fork, and there's no App Clip equivalent.</td></tr>
+    <tr><td>7</td><td><b>File the epic?</b></td><td><b>Waiting on you.</b> Same shape as BET&#8209;406: settled decisions and engineering standards in the epic body, staged sub-issues, this page as the design record. Plus the App Clip follow-up, held until we're on the store.</td></tr>
+  </table>
+</section>
+
+</main>
+
+<script>
+(function(){
+  var KEY='manta-mobile3-theme';
+  function setTheme(t){
+    document.documentElement.setAttribute('data-theme',t);
+    document.querySelectorAll('#themeSeg button').forEach(function(b){
+      b.setAttribute('aria-pressed', b.dataset.themeSet===t ? 'true':'false');
+    });
+    try{localStorage.setItem(KEY,t)}catch(e){}
+  }
+  document.querySelectorAll('#themeSeg button').forEach(function(b){
+    b.addEventListener('click',function(){setTheme(b.dataset.themeSet)});
+  });
+  var saved=null; try{saved=localStorage.getItem(KEY)}catch(e){}
+  setTheme(saved||'dark');
+
+  document.querySelectorAll('.tabs[data-group]').forEach(function(strip){
+    var g=strip.dataset.group;
+    var panels=document.querySelector('[data-group-panels="'+g+'"]');
+    strip.addEventListener('click',function(e){
+      var btn=e.target.closest('button[data-tab]');
+      if(!btn) return;
+      strip.querySelectorAll('button[data-tab]').forEach(function(b){
+        b.setAttribute('aria-pressed', b===btn ? 'true':'false');
+      });
+      panels.querySelectorAll('[data-panel]').forEach(function(p){
+        p.classList.toggle('on', p.dataset.panel===btn.dataset.tab);
+      });
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
