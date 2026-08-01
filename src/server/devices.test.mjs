@@ -135,6 +135,27 @@ test("registry: revoking a device kills only it; others + primary stay live", ()
   assert.equal(ids.includes(b.device_id), true);
 });
 
+test("registry REGRESSION: re-claim after a revoke gets a FRESH id (no duplicate), stays revocable by id", () => {
+  const reg = createDeviceRegistry({ load: () => null, save: async () => {}, now });
+  reg.seedPrimary(PRIMARY_TOKEN);
+  const victim = reg.claim({ deviceId: "D", name: "phone" }).entry;
+  reg.revokeDevice("D");
+  assert.equal(reg.authorize(victim.token), null);
+
+  // Re-claim with the SAME device_id — must NOT resurrect or duplicate id D.
+  const again = reg.claim({ deviceId: "D", name: "phone" }).entry;
+  assert.notEqual(again.device_id, "D"); // fresh id, never a duplicate
+  assert.notEqual(again.token, victim.token); // fresh token too
+  // exactly one entry ever holds id "D" (the stale revoked one)
+  assert.equal(reg.serialize().devices.filter((d) => d.device_id === "D").length, 1);
+
+  // The resurrected device is LIVE and one-tap revocable by its own id.
+  assert.notEqual(reg.authorize(again.token), null);
+  assert.notEqual(reg.revokeDevice(again.device_id), null);
+  assert.equal(reg.authorize(again.token), null);
+  assert.equal(reg.listDevices().some((d) => d.device_id === again.device_id), false);
+});
+
 test("registry: whole-box reset drops every device and re-seeds one primary", () => {
   const reg = createDeviceRegistry({ load: () => null, save: async () => {}, now });
   reg.seedPrimary("a".repeat(32));
@@ -231,6 +252,30 @@ test("per-device revoke kills ONLY that device; other devices + primary still pa
   assert.equal(missing.ok, false);
   assert.equal(missing.status, 404);
   assert.equal(gate(eng, b.box_token).ok, true);
+});
+
+test("REGRESSION: per-device revoke still works after a re-claim with a revoked device_id", async () => {
+  const { eng } = makeEngine();
+  const a1 = doClaim(eng, { device_id: "devA" });
+  assert.equal(gate(eng, a1.box_token).ok, true);
+
+  // revoke the first incarnation of "devA" by id
+  const r1 = await eng.revoke({ token: PRIMARY_TOKEN, device_id: "devA" });
+  assert.equal(r1.ok, true);
+  assert.equal(eng.listDevices().some((d) => d.device_id === "devA"), false);
+
+  // the SAME physical device re-pairs under the same claim id → the server
+  // must mint a fresh device, leave the stale revoked one untouched, and
+  // return something that stays revocable one-tap.
+  const a2 = doClaim(eng, { device_id: "devA" });
+  assert.notEqual(a2.device_id, "devA");
+  assert.ok(a2.device_id);
+  assert.equal(gate(eng, a2.box_token).ok, true); // resurrected + live
+
+  // one-tap revoke by the resurrected device's ACTUAL id now works
+  const r2 = await eng.revoke({ token: PRIMARY_TOKEN, device_id: a2.device_id });
+  assert.equal(r2.ok, true);
+  assert.equal(gate(eng, a2.box_token).ok, false); // dead on next request
 });
 
 test("whole-box reset (no device_id) kills the shared token AND every per-device token", async () => {

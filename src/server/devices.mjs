@@ -165,8 +165,18 @@ export function createDeviceRegistry({
     }
     let token = gen();
     while (devices.some((d) => d.token === token)) token = gen(); // distinct
+    // Only ever reuse the client-supplied device_id when NO entry already has
+    // it — live OR revoked. Otherwise the new live entry would duplicate the
+    // stale revoked id and `byId`/`revokeDevice` (which return the FIRST match)
+    // would resolve to the revoked entry, silently breaking one-tap revoke of
+    // the resurrected device (§6.3). A revoked device is never resurrected, so
+    // a re-claim under a revoked id gets a brand-new device_id.
+    let newId = gen();
+    if (typeof deviceId === "string" && !devices.some((d) => d.device_id === deviceId)) {
+      newId = deviceId;
+    }
     const entry = {
-      device_id: deviceId ?? gen(),
+      device_id: newId,
       token,
       name: name && typeof name === "string" && name !== "" ? name : "device",
       last_seen: now(),
