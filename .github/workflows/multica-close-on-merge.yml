@@ -78,6 +78,27 @@ jobs:
         # Housekeeping must never fail a merge pipeline.
         continue-on-error: true
 
+      # ---------------------------------------------------------------------
+      # Catch merged PRs whose issue never went terminal (BET-505).
+      #
+      # The `close` job reacts to the pull_request_target CLOSE EVENT, which
+      # fires ONCE — if that single status write fails (BET-438: PR #397 merged,
+      # the write silently failed, the issue sat `blocked` until a human
+      # noticed), nothing ever re-checks. This pass runs inside THIS scheduled
+      # sweep (the hourly cron) and looks in the direction that actually failed:
+      # every non-terminal issue with a linked merged PR is set to `done` and
+      # recorded in metadata. It never comments (a comment on an agent-assigned
+      # issue dispatches a run), and it never moves an issue out of `done` or
+      # `cancelled`. A failed status write fails the job — and unlike the
+      # housekeeping steps below, this step must NOT carry continue-on-error:
+      # swallowing the exit code would silently reintroduce the exact BET-438
+      # failure this reconcile exists to catch. If runReconcile exits non-zero,
+      # the job goes red; a dropped reconcile is visible.
+      - name: Reconcile merged-PR issues that never went terminal
+        env:
+          MULTICA_TOKEN: ${{ secrets.MULTICA_TOKEN }}
+        run: node scripts/multica-pr-closed.mjs --reconcile --verbose
+
       # Unblocking only changes a STATUS, and a status change dispatches
       # nobody — the issue sits `todo`, correctly labelled and untouched,
       # until a sweep re-fires its assignment. The scheduled sweep in
