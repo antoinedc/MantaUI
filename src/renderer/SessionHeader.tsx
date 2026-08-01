@@ -21,6 +21,7 @@ import {
 import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher } from "../shared/types";
+import { IconButton } from "./IconButton";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -166,15 +167,13 @@ export function SessionHeader({
             accessible name. Omitted when the caller owns mode elsewhere
             (mobile SessionScreen has its own toggle). */}
         {onModeChange && (
-          <button
-            type="button"
-            onClick={() => onModeChange(targetMode)}
-            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill-hover rounded p-1 inline-flex items-center"
+          <IconButton
+            icon={<Terminal />}
+            label={modeLabel}
             title={`Switch to ${modeLabel}`}
-            aria-label={modeLabel}
-          >
-            <Terminal size={16} aria-hidden="true" />
-          </button>
+            hook="manta-session-mode-toggle"
+            onClick={() => onModeChange(targetMode)}
+          />
         )}
 
         {/* Session menu — mode (Chat / Terminal / AI-CLI launchers) + Fork /
@@ -502,17 +501,14 @@ function SessionMenu({
 
   return (
     <div ref={rootRef} className="manta-session-menu relative shrink-0">
-      <button
-        type="button"
+      <IconButton
+        icon={<MoreHorizontal />}
+        label="Session actions"
+        hook="manta-session-menu-trigger"
         onClick={() => setOpen((v) => !v)}
-        className="manta-session-menu-trigger text-text-faint hover:text-text rounded p-1 inline-flex items-center"
-        title="Session actions"
-        aria-label="Session actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <MoreHorizontal size={16} aria-hidden="true" />
-      </button>
+        ariaHaspopup="menu"
+        ariaExpanded={open}
+      />
       {open && (
         <div
           role="menu"
