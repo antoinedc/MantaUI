@@ -130,6 +130,20 @@ jobs:
       - name: Test (vitest + node:test)
         run: npm test
 
+      # ── Swift token drift gate — keep `generated/swift/Theme.swift`
+      #    byte-identical to what `scripts/gen-swift-tokens.mjs` regenerates
+      #    from `src/renderer/tokens.css` (BET-516). `tokens.css` is the
+      #    single source of truth for design tokens; a committed Swift file
+      #    that drifts from it is a silent divergence. This is a STEP in the
+      #    required `typecheck-test` job (not a new job) so a drift fails the
+      #    PR — same shape as the `website/shot-*.webp` gate below.
+      #    `--check` regenerates in memory, writes nothing, and exits non-zero
+      #    on mismatch; the script prints the remedy (run `npm run
+      #    gen:swift-tokens` and commit). Deliberately unconditional: no path
+      #    filter, so a hand-edit of the generated file is also caught.
+      - name: Swift token drift gate — regenerate and diff against committed generated/swift/Theme.swift
+        run: npm run gen:swift-tokens -- --check
+
       # ── Drift gate — keep `website/shot-*.webp` byte-identical to what
       #    the live renderer paints today. BET-341 (follow-up from BET-303
       #    review Nit #1) — when origin/main's renderer changes between
