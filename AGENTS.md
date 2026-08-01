@@ -2664,6 +2664,8 @@ The shared components expose these hook classes:
 | `manta-effort-dropdown` | `ModelPicker.tsx` (variant list) | (same clamp as model dropdown) | Variant/effort menu fits phone width |
 | `manta-session-toolbar` | `ComposerParts.tsx` (footer toolbar) | `display: none` | Hidden on mobile — actions live in the header ⋯ sheet |
 | `manta-session-branch` | `SessionHeader.tsx` (branch chip) | `flex-basis: 100%; max-width: 100%` | Branch chip gets its own line in the header |
+| `manta-session-crumb` | `SessionHeader.tsx` (breadcrumb) | (none — desktop + mobile row) | Project / window breadcrumb, dropped cwd, lives in the header |
+| `manta-session-mode-toggle` | `SessionHeader.tsx` (mode button) | (none — desktop + mobile row) | Chat ↔ Terminal icon toggle replacing the old `<select>` |
 | `manta-ctx-track` | `ContextBar.tsx` / `SessionHeader.tsx` (bar span) | `display: none` | Drops the dotted context bar, keeps the `%` digits |
 | `manta-ctx-pill` | `SessionHeader.tsx` (context pill) | (future mobile rule) | Clickable context pill in the header |
 | `manta-ctx-popover` | `SessionHeader.tsx` (popover) | (future mobile rule) | Context breakdown popover |

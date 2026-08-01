@@ -10,8 +10,8 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useRef, useState } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2 } from "lucide-react";
+import { useRef, useState, type CSSProperties } from "react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -19,6 +19,7 @@ import {
   type StaleCacheResult,
 } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
+import type { SessionMode } from "./chatShared";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -53,6 +54,9 @@ export function SessionHeader({
   onCompact,
   onClear,
   onDelete,
+  breadcrumb,
+  mode,
+  onModeChange,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -70,15 +74,47 @@ export function SessionHeader({
   onCompact: () => void;
   onClear: () => void;
   onDelete: () => void;
+  // BET-459: the session header is the single top-of-pane row. It inherits the
+  // breadcrumb (project / window — the cwd path was dropped) and the
+  // Chat↔Terminal mode toggle from the app chrome so nothing renders up there
+  // twice. `onModeChange` is optional: when the caller owns mode elsewhere
+  // (mobile SessionScreen) the toggle is omitted rather than duplicated.
+  breadcrumb: { project: string; window: string | null } | null;
+  mode?: SessionMode;
+  onModeChange?: (m: SessionMode) => void;
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
   const fill = ctxStageColor(pct);
   const showContext = totalInput > 0;
   const stale = staleCache.isStale;
+  const crumb = breadcrumb
+    ? breadcrumb.window
+      ? `${breadcrumb.project} / ${breadcrumb.window}`
+      : breadcrumb.project
+    : "";
+  // The mode toggle is a single terminal glyph (BET-459): the accessible name
+  // names the mode you'll switch TO, so it stays nameable in the structure
+  // snapshot ("Terminal" from chat, "Chat" from terminal).
+  const isTerminal = mode === "terminal";
+  const targetMode: SessionMode = isTerminal ? "chat" : "terminal";
+  const modeLabel = isTerminal ? "Chat" : "Terminal";
 
   return (
-    <div className="manta-session-header flex items-center gap-2 px-4 h-12 border-b border-border shrink-0">
+    <div
+      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
+      style={{ WebkitAppRegion: "drag" } as CSSProperties}
+    >
+      {/* Breadcrumb — project / window (the cwd path was dropped, BET-459) */}
+      {crumb && (
+        <span
+          className="manta-session-crumb text-label text-text-faint shrink-0 truncate max-w-[200px]"
+          title={crumb}
+        >
+          {crumb}
+        </span>
+      )}
+
       {/* Branch chip — session state, lives in the header not the composer. */}
       {branch && (
         <span
@@ -90,10 +126,15 @@ export function SessionHeader({
         </span>
       )}
 
-      {/* Context pill — clickable, opens the breakdown popover. Amber tint
-          when the cache is stale so the user has a peripheral signal before
-          clicking. */}
-      <div className="ml-auto flex items-center gap-2">
+      {/* Right group — context pill, mode toggle, session menu. opt out of
+          the header's drag region so they stay clickable. */}
+      <div
+        className="ml-auto flex items-center gap-4"
+        style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+      >
+        {/* Context pill — clickable, opens the breakdown popover. Amber tint
+            when the cache is stale so the user has a peripheral signal before
+            clicking. */}
         {showContext && (
           <ContextPill
             pct={pct}
@@ -109,6 +150,22 @@ export function SessionHeader({
             staleCache={staleCache}
             onClear={onClear}
           />
+        )}
+
+        {/* Mode toggle (BET-459): a terminal glyph that swaps Chat ↔
+            Terminal — the presentation of the old mode <select>, keeping its
+            accessible name. Omitted when the caller owns mode elsewhere
+            (mobile SessionScreen has its own toggle). */}
+        {onModeChange && (
+          <button
+            type="button"
+            onClick={() => onModeChange(targetMode)}
+            className="manta-session-mode-toggle text-text-faint hover:text-text hover:bg-fill rounded p-1 inline-flex items-center"
+            title={`Switch to ${modeLabel}`}
+            aria-label={modeLabel}
+          >
+            <Terminal size={16} aria-hidden="true" />
+          </button>
         )}
 
         {/* Session menu — Fork / Compact / Clear / Delete. No badge on the

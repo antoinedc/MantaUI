@@ -56,6 +56,7 @@ import {
   type AgentMention,
   type Attachment,
   type ModelSelection,
+  type SessionMode,
   type TaskContextValue,
   type TokenUsage,
 } from "./chatShared";
@@ -125,9 +126,27 @@ type Props = {
   // mounted (display:none) so we need a prop to gate "global" UI like the
   // screenshot detection toast — only the active panel should render it.
   isActive: boolean;
+  // BET-459: the session header is the single top-of-pane row and now owns
+  // the breadcrumb + mode toggle that used to live in the app titlebar.
+  // Optional so callers that don't own mode (e.g. the mobile SessionScreen)
+  // keep composing the header without one.
+  projectName?: string | null;
+  winName?: string | null;
+  mode?: SessionMode;
+  onModeChange?: (m: SessionMode) => void;
 };
 
-export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }: Props) {
+export function ChatPanel({
+  sessionId,
+  tmuxSession,
+  windowIndex,
+  cwd,
+  isActive,
+  projectName = null,
+  winName = null,
+  mode = "chat",
+  onModeChange,
+}: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
@@ -1935,6 +1954,9 @@ export function ChatPanel({ sessionId, tmuxSession, windowIndex, cwd, isActive }
         onCompact={() => void compactSession()}
         onClear={() => void clearSession()}
         onDelete={() => void deleteSession()}
+        breadcrumb={projectName ? { project: projectName, window: winName } : null}
+        mode={mode}
+        onModeChange={onModeChange}
       />
 
       <Transcript
