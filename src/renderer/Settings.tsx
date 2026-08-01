@@ -559,7 +559,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <GroupCard title="Danger zone" danger>
             <div className="flex items-start justify-between gap-4">
               <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
-              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded-md border border-danger/40 text-danger hover:bg-danger/10">Reset all settings…</button>
             </div>
           </GroupCard>
         </>
