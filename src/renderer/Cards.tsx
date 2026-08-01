@@ -14,10 +14,79 @@
 // and question options become checkboxes (multi-select aware). Recommended
 // answers render as a pill and preselect only for single-select.
 
-import { useState } from "react";
-import { Shield, HelpCircle, X, Check } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { Shield, HelpCircle, Check } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
+
+// ===== Shared ask-card shell (BET-458) =====
+//
+// PermissionCard and QuestionCard are the same thing: a blocking ask inside
+// the transcript. They had diverged into two card implementations with
+// different widths, borders, headers and action rows. This one shell owns
+// the card surface (edge, radius, padding, the transcript measure it
+// inherits) plus the badge/title/sub/body/actions slots; the two cards below
+// can only differ in their slots, never in the shell.
+function AskCardShell({
+  badge,
+  badgeBg,
+  badgeColor,
+  title,
+  subtitle,
+  body,
+  actions,
+}: {
+  badge: ReactNode;
+  badgeBg: string;
+  badgeColor: string;
+  title: ReactNode;
+  subtitle?: ReactNode;
+  body?: ReactNode;
+  actions: ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-soft text-meta py-3 px-4">
+      <div className="flex items-start gap-3">
+        {/* 30px icon badge — filled by the caller */}
+        <span
+          className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
+          style={{ backgroundColor: badgeBg, color: badgeColor }}
+        >
+          {badge}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-text font-medium mb-px">{title}</div>
+          {subtitle && <div className="text-text-muted mb-px">{subtitle}</div>}
+        </div>
+      </div>
+      {/* Full-width body slot — the code well (permission) or the question
+          form, sit at the card edge, aligned with the prose around them. */}
+      {body && <div className="mt-3">{body}</div>}
+      <div className="flex items-center gap-2 mt-4">{actions}</div>
+    </div>
+  );
+}
+
+// An outlined secondary button — shared by the two cards' non-destructive row.
+function SecondaryButton({
+  onClick,
+  children,
+  title,
+}: {
+  onClick: () => void;
+  children: ReactNode;
+  title?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="px-3 py-1 rounded-lg border border-border-strong text-text hover:bg-bg-soft text-meta"
+    >
+      {children}
+    </button>
+  );
+}
 
 // ===== Retry card =====
 
@@ -113,8 +182,10 @@ export function CompactionCard({
 //     outline.
 //   - Plain-language title ("Run a shell command?") above a one-line
 //     description; the literal command in its own --inset well below.
-//   - Button ladder: primary filled (Always), secondary outlined (Allow once),
-//     Reject pushed right and tinted only on hover.
+//   - Button ladder (fixed in BET-458): Allow once is the FILLED accent
+//     primary; Always allow <tool> the outlined secondary; Reject text-tinted
+//     --danger only on hover, pushed to the far right.
+//   - Rendered through the shared AskCardShell (the deduped card surface).
 
 // Map opencode permission categories to plain-language titles.
 function permissionTitle(perm: PermissionRequest): string {
@@ -153,57 +224,53 @@ export function PermissionCard({
   const title = permissionTitle(perm);
   const desc = permissionDescription(perm);
 
+  // Button ladder (the loudest element on screen is the primary action):
+  //   Allow once — the FILLED accent primary.
+  //   Always allow <tool> — outlined secondary.
+  //   Reject — text-coloured, pushed to the far right, gains --danger on hover.
+  const actions = (
+    <>
+      <button
+        onClick={() => onReply("once")}
+        className="px-3 py-1 rounded-lg text-on-accent text-meta font-medium"
+        style={{ backgroundColor: "var(--accent-solid)" }}
+      >
+        Allow once
+      </button>
+      {alwaysScope ? (
+        <SecondaryButton
+          onClick={() => onReply("always")}
+          title={`Always allow ${alwaysScope}`}
+        >
+          Always allow <span className="text-text-faint">{alwaysScope}</span>
+        </SecondaryButton>
+      ) : null}
+      <button
+        onClick={() => onReply("reject")}
+        className="ml-auto px-3 py-1 rounded-lg text-muted hover:text-danger hover:bg-danger-bg text-meta"
+      >
+        Reject
+      </button>
+    </>
+  );
+
   return (
-    <div className="manta-perm-card rounded-xl border border-border bg-bg-elev px-4 py-3 text-meta">
-      <div className="flex items-start gap-3">
-        {/* 30px icon badge — Shield on --warn-bg */}
-        <span
-          className="manta-perm-badge inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
-          style={{ backgroundColor: "var(--warn-bg)", color: "var(--warn)" }}
-        >
-          <Shield size={16} aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          {/* Plain-language title + one-line description */}
-          <div className="text-text font-medium mb-px">
-            {title}
+    <AskCardShell
+      badge={<Shield size={16} aria-hidden="true" />}
+      badgeBg="var(--warn-bg)"
+      badgeColor="var(--warn)"
+      title={title}
+      subtitle={desc}
+      body={
+        detail ? (
+          // The literal command in its own mono well — only for permissions.
+          <div className="rounded-lg bg-inset border border-border-subtle px-3 py-[9px] font-mono text-text break-all">
+            {detail}
           </div>
-          <div className="text-text-muted mb-px">{desc}</div>
-          {/* Literal command in its own --inset well */}
-          {detail && (
-            <div className="rounded-md bg-inset px-2 py-1 mt-2 mb-1 font-mono text-text break-all">
-              {detail}
-            </div>
-          )}
-        </div>
-      </div>
-      {/* Button ladder: primary filled (Always), secondary outlined (Allow
-          once), Reject pushed right + tinted only on hover. */}
-      <div className="flex items-center gap-2 mt-3">
-        {alwaysScope ? (
-          <button
-            onClick={() => onReply("always")}
-            className="px-3 py-1 rounded text-bg text-meta font-medium"
-            style={{ backgroundColor: "var(--warn)" }}
-            title={`Always allow ${alwaysScope}`}
-          >
-            Always allow
-          </button>
-        ) : null}
-        <button
-          onClick={() => onReply("once")}
-          className="px-3 py-1 rounded border border-border-strong text-text hover:bg-bg-soft text-meta"
-        >
-          Allow once
-        </button>
-        <button
-          onClick={() => onReply("reject")}
-          className="ml-auto px-3 py-1 rounded text-danger hover:bg-danger-bg text-meta"
-        >
-          Reject
-        </button>
-      </div>
-    </div>
+        ) : null
+      }
+      actions={actions}
+    />
   );
 }
 
@@ -291,144 +358,133 @@ export function QuestionCard({
   const isMulti = totalQuestions > 1;
 
   return (
-    <div className="manta-question-card rounded-xl border border-border bg-bg-elev px-4 py-3 text-meta">
-      <div className="flex items-start gap-3 mb-3">
-        {/* 30px icon badge — HelpCircle on --accent-bg */}
-        <span
-          className="manta-question-badge inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
-          style={{ backgroundColor: "var(--accent-bg)", color: "var(--accent)" }}
-        >
-          <HelpCircle size={16} aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-text font-medium">
-            Question
-          </div>
-          {isMulti && (
-            <div className="text-text-faint">
-              {answeredCount} of {totalQuestions} answered
-            </div>
-          )}
-        </div>
-        <button
-          onClick={onReject}
-          className="text-text-faint hover:text-text leading-none inline-flex items-center"
-          title="Reject / dismiss"
-          aria-label="Reject question"
-        >
-          <X size={16} aria-hidden="true" />
-        </button>
-      </div>
+    <AskCardShell
+      badge={<HelpCircle size={16} aria-hidden="true" />}
+      badgeBg="var(--accent-bg)"
+      badgeColor="var(--accent-tx)"
+      title="Question"
+      subtitle={
+        isMulti ? (
+          <span>
+            {answeredCount} of {totalQuestions} answered
+          </span>
+        ) : undefined
+      }
+      body={
+        <>
+          <div className="space-y-3">
+            {parsedQuestions.map(({ info, options }, qIdx) => (
+              <div key={qIdx}>
+                {/* Numbered section header when multiple questions */}
+                {isMulti && (
+                  <div className="text-text-faint text-label mb-px">
+                    {qIdx + 1}. {info.header}
+                  </div>
+                )}
+                {!isMulti && (
+                  <div className="text-text-muted mb-px font-medium">{info.header}</div>
+                )}
+                <div className="text-text mb-2 leading-snug">{info.question}</div>
 
-      <div className="space-y-3">
-        {parsedQuestions.map(({ info, options }, qIdx) => (
-          <div key={qIdx}>
-            {/* Numbered section header when multiple questions */}
-            {isMulti && (
-              <div className="text-text-faint text-label mb-px">
-                {qIdx + 1}. {info.header}
-              </div>
-            )}
-            {!isMulti && (
-              <div className="text-text-muted mb-px font-medium">{info.header}</div>
-            )}
-            <div className="text-text mb-2 leading-snug">{info.question}</div>
-
-            {/* Checkbox options — multi-select aware */}
-            <div className="mt-px flex flex-col gap-1">
-              {options.map((opt) => {
-                const isSelected = selected[qIdx].has(opt.origLabel);
-                const multiple = info.multiple ?? false;
-                return (
-                  <label
-                    key={opt.origLabel}
-                    className={
-                      "flex items-start gap-2 rounded-md px-2 py-1 cursor-pointer border text-meta transition-colors " +
-                      (isSelected
-                        ? "border-accent bg-accent-bg"
-                        : "border-border hover:bg-bg-soft")
-                    }
-                    title={opt.description}
-                  >
-                    <span
-                      className={
-                        "inline-flex items-center justify-center w-4 h-4 rounded border shrink-0 mt-px " +
-                        (isSelected
-                          ? "bg-accent-solid border-transparent text-on-accent"
-                          : "border-border-strong")
-                      }
-                      style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
-                    >
-                      {isSelected && <Check size={12} aria-hidden="true" />}
-                    </span>
-                    <span className="text-text min-w-0">{opt.displayLabel}</span>
-                    {opt.recommended && (
-                      <span
-                        className="ml-auto shrink-0 px-2 rounded-sm text-label"
-                        style={{
-                          backgroundColor: "var(--accent-bg)",
-                          color: "var(--accent)",
-                        }}
+                {/* Checkbox options — multi-select aware */}
+                <div className="mt-px flex flex-col gap-1">
+                  {options.map((opt) => {
+                    const isSelected = selected[qIdx].has(opt.origLabel);
+                    const multiple = info.multiple ?? false;
+                    return (
+                      <label
+                        key={opt.origLabel}
+                        className={
+                          "flex items-start gap-2 rounded-md px-2 py-1 cursor-pointer border text-meta transition-colors " +
+                          (isSelected
+                            ? "border-accent bg-accent-bg"
+                            : "border-border hover:bg-bg-soft")
+                        }
+                        title={opt.description}
                       >
-                        Recommended
-                      </span>
-                    )}
-                    <input
-                      type={multiple ? "checkbox" : "radio"}
-                      name={`q-${qIdx}`}
-                      checked={isSelected}
-                      onChange={() => toggleOption(qIdx, opt.origLabel, multiple)}
-                      className="sr-only"
-                    />
-                  </label>
-                );
-              })}
-            </div>
+                        <span
+                          className={
+                            "inline-flex items-center justify-center w-4 h-4 rounded border shrink-0 mt-px " +
+                            (isSelected
+                              ? "bg-accent-solid border-transparent text-on-accent"
+                              : "border-border-strong")
+                          }
+                          style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
+                        >
+                          {isSelected && <Check size={12} aria-hidden="true" />}
+                        </span>
+                        <span className="text-text min-w-0">{opt.displayLabel}</span>
+                        {opt.recommended && (
+                          <span
+                            className="ml-auto shrink-0 px-2 rounded-sm text-label"
+                            style={{
+                              backgroundColor: "var(--accent-bg)",
+                              color: "var(--accent)",
+                            }}
+                          >
+                            Recommended
+                          </span>
+                        )}
+                        <input
+                          type={multiple ? "checkbox" : "radio"}
+                          name={`q-${qIdx}`}
+                          checked={isSelected}
+                          onChange={() => toggleOption(qIdx, opt.origLabel, multiple)}
+                          className="sr-only"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
 
-            {/* Free-text input — always available */}
-            <input
-              type="text"
-              placeholder="Or type your own answer…"
-              value={customValues[qIdx]}
-              onChange={(e) => {
-                const v = e.target.value;
-                setCustomValues((prev) => {
-                  const next = [...prev];
-                  next[qIdx] = v;
-                  return next;
-                });
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && canSubmit) {
-                  e.preventDefault();
-                  handleSubmit();
-                }
-              }}
-              className="mt-2 w-full rounded border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
-            />
+                {/* Free-text input — always available */}
+                <input
+                  type="text"
+                  placeholder="Or type your own answer…"
+                  value={customValues[qIdx]}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setCustomValues((prev) => {
+                      const next = [...prev];
+                      next[qIdx] = v;
+                      return next;
+                    });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey && canSubmit) {
+                      e.preventDefault();
+                      handleSubmit();
+                    }
+                  }}
+                  className="mt-2 w-full rounded border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+                />
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
 
-      <hr className="mx-2 border-border my-3" />
-
-      {/* Button ladder: Cancel (outlined) left, Submit (primary filled) right */}
-      <div className="flex justify-end gap-2">
-        <button
-          onClick={onReject}
-          className="px-3 py-1 rounded border border-border text-text-faint hover:text-text text-meta"
-        >
-          Cancel
-        </button>
-        <button
-          onClick={handleSubmit}
-          disabled={!canSubmit}
-          className="px-3 py-1 rounded text-on-accent text-meta font-medium disabled:opacity-40"
-          style={{ backgroundColor: "var(--accent-solid)" }}
-        >
-          Submit
-        </button>
-      </div>
-    </div>
+          <hr className="border-border my-3" />
+        </>
+      }
+      actions={
+        <>
+          <button
+            onClick={onReject}
+            className="ml-auto px-3 py-1 rounded-lg text-muted hover:text-danger hover:bg-danger-bg text-meta"
+            title="Dismiss this question"
+          >
+            Dismiss
+          </button>
+          {/* Submit is the filled accent primary — the loudest element. */}
+          <button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            className="px-3 py-1 rounded-lg text-on-accent text-meta font-medium disabled:opacity-40"
+            style={{ backgroundColor: "var(--accent-solid)" }}
+          >
+            Submit
+          </button>
+        </>
+      }
+    />
   );
 }
