@@ -27,7 +27,7 @@ import type { ReactElement } from "react";
 import { cloneElement } from "react";
 
 const CHROME =
-  "manta-icon-button inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 export function IconButton({
   label,
@@ -37,6 +37,7 @@ export function IconButton({
   size = "md",
   ariaHaspopup,
   ariaExpanded,
+  hook,
 }: {
   /** Accessible name for the button (required — the icon is decorative). */
   label: string;
@@ -50,13 +51,21 @@ export function IconButton({
   /** Menu/popover semantics for a trigger-style icon button. */
   ariaHaspopup?: "menu" | "dialog" | "listbox" | "grid" | "tree" | "true" | "false";
   ariaExpanded?: boolean;
+  /**
+   * A stable `manta-*` identity class for the call site (repo contract for
+   * popup triggers — the visual coverage registry keys on it). This is an
+   * IDENTITY hook, not a chrome class: it has no styling and cannot shear the
+   * chrome, so it is not the `className` escape hatch the epic forbids.
+   */
+  hook?: string;
 }) {
   const iconSize = size === "lg" ? 20 : 16;
+  const className = hook ? `${hook} ${CHROME}` : CHROME;
   return (
     <button
       type="button"
       onClick={onClick}
-      className={CHROME}
+      className={className}
       aria-label={label}
       title={title ?? label}
       aria-haspopup={ariaHaspopup}

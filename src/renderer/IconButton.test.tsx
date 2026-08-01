@@ -21,7 +21,7 @@ import { SessionHeader } from "./SessionHeader";
 // The exact chrome string IconButton owns (no className escape hatch means
 // every call site renders exactly this).
 const CHROME =
-  "manta-icon-button inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-[var(--fill-hover)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 function buttonEl(h: Harness): HTMLButtonElement {
   const el = h.container.querySelector("button") as HTMLButtonElement;
@@ -131,19 +131,20 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     const els = Array.from(h!.container.querySelectorAll("button"));
     expect(els.length).toBe(2);
     const modeToggle = els[0];
-    // Same chrome class + same accessible name/title as the pre-migration
-    // button (aria-label names the mode you switch TO from chat: Terminal).
-    expect(modeToggle.className).toBe(CHROME);
+    // Same chrome + same accessible name/title as the pre-migration button
+    // (aria-label names the mode you switch TO from chat: Terminal). The hook
+    // class is preserved for test/coverage identity.
+    expect(modeToggle.className).toBe(`manta-session-mode-toggle ${CHROME}`);
     expect(modeToggle.getAttribute("aria-label")).toBe("Terminal");
     expect(modeToggle.getAttribute("title")).toBe("Switch to Terminal");
     expect(modeToggle.querySelector("svg")?.getAttribute("width")).toBe("16");
   });
 
-  it("session-menu trigger renders through IconButton with its menu semantics", () => {
+  it("session-menu trigger renders through IconButton with its menu semantics and hook", () => {
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     const trigger = els[1];
-    expect(trigger.className).toBe(CHROME);
+    expect(trigger.className).toBe(`manta-session-menu-trigger ${CHROME}`);
     expect(trigger.getAttribute("aria-label")).toBe("Session actions");
     expect(trigger.getAttribute("title")).toBe("Session actions");
     expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
@@ -153,8 +154,9 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
 
   it("does not inject arbitrary classes into the migrated call sites", () => {
     h = renderHeader();
-    for (const el of h!.container.querySelectorAll("button")) {
-      expect(el.className).toBe(CHROME);
-    }
+    const els = Array.from(h!.container.querySelectorAll("button"));
+    expect(els.map((el) => el.className).sort()).toEqual(
+      [`manta-session-mode-toggle ${CHROME}`, `manta-session-menu-trigger ${CHROME}`].sort(),
+    );
   });
 });

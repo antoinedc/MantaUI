@@ -171,6 +171,7 @@ export function SessionHeader({
             icon={<Terminal />}
             label={modeLabel}
             title={`Switch to ${modeLabel}`}
+            hook="manta-session-mode-toggle"
             onClick={() => onModeChange(targetMode)}
           />
         )}
@@ -503,6 +504,7 @@ function SessionMenu({
       <IconButton
         icon={<MoreHorizontal />}
         label="Session actions"
+        hook="manta-session-menu-trigger"
         onClick={() => setOpen((v) => !v)}
         ariaHaspopup="menu"
         ariaExpanded={open}
