@@ -137,9 +137,14 @@ Therefore, before any PASS:
      - Set status back to `todo`: `multica issue status BET-<N> todo`
 
    - **Zero `Block`s + zero `Question`s** (clean, or only `Nit`s):
-     - Post a short Multica comment: *"Review passed (0 Blocks, 0 Questions, N nits — see PR). Routing to manta-pm for merge."*
-     - Reassign the issue to `manta-pm`: `multica issue assign BET-<N> --to manta-pm`
-     - Set status `in_review`: `multica issue status BET-<N> in_review`
+      - Post a short Multica comment: *"Review passed (0 Blocks, 0 Questions, N nits — see PR). Routing to manta-pm for merge."*
+      - Reassign the issue to `manta-pm`: `multica issue assign BET-<N> --to manta-pm`
+      - Set status `in_review`: `multica issue status BET-<N> in_review`
+
+      Exception — if this PR creates or re-records any visual baseline, the
+      hand-off goes to Antoine instead of `manta-pm` (see
+      `manta-pr-workflow` step 10); never route a baseline-routing PR back to
+      the PM.
 
     Do **NOT** flip the PR from draft to ready — that's the PM's call.
 

@@ -26,7 +26,6 @@
  */
 
 import { chromium } from "playwright";
-import sharp from "sharp";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -38,12 +37,9 @@ import {
   startStaticServer,
 } from "./harness.mjs";
 import { SCREENS, getScreen } from "./screens.mjs";
+import { writeComposite } from "./composite.mjs";
 
 const OUT_DIR = join(ROOT, ".visual-out");
-
-// Composite compositing, done with sharp (already a direct dependency).
-const LABEL_H = 22; // dark label band above each half
-const GAP = 12; // gutter between the two halves
 
 function log(msg) {
   process.stdout.write(`[visual:compare] ${msg}\n`);
@@ -66,57 +62,6 @@ function describeRegionDelta(appBox, mockupBox) {
   if (dW !== 0) parts.push(`width ${dW > 0 ? "+" : ""}${dW}`);
   if (dH !== 0) parts.push(`height ${dH > 0 ? "+" : ""}${dH}`);
   return parts.length ? parts.join(", ") : "size matches";
-}
-
-/** Stamp a dark label band with `label` across the top of an image buffer. */
-async function withLabel(img, label) {
-  const { width } = await sharp(img).metadata();
-  const band = Buffer.from(
-    `<svg width="${width}" height="${LABEL_H}" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="#131318"/>
-      <text x="8" y="15" fill="#e6e6ec" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">${label}</text>
-    </svg>`,
-  );
-  return sharp(img)
-    .extend({ top: LABEL_H, background: "#131318" })
-    .composite([{ input: band, top: 0, left: 0 }])
-    .toBuffer();
-}
-
-/**
- * Join the app and mockup halves side by side at IDENTICAL scale (both scaled
- * to the taller half's height) and write the single `<id>.compare.png`.
- */
-async function writeComposite(appPng, mockupPng, outPath) {
-  const [aMeta, mMeta] = await Promise.all([
-    sharp(appPng).metadata(),
-    sharp(mockupPng).metadata(),
-  ]);
-  const targetH = Math.max(aMeta.height, mMeta.height);
-  const [appScaled, mockScaled] = await Promise.all([
-    sharp(appPng).resize({ height: targetH, withoutEnlargement: false }).toBuffer(),
-    sharp(mockupPng).resize({ height: targetH, withoutEnlargement: false }).toBuffer(),
-  ]);
-  const [appLabelled, mockLabelled] = await Promise.all([
-    withLabel(appScaled, "app"),
-    withLabel(mockScaled, "mockup"),
-  ]);
-  const [a, m] = await Promise.all([
-    sharp(appLabelled).metadata(),
-    sharp(mockLabelled).metadata(),
-  ]);
-  const canvasW = a.width + GAP + m.width;
-  const canvasH = a.height;
-  await sharp({
-    create: { width: canvasW, height: canvasH, channels: 4, background: "#000000" },
-  })
-    .composite([
-      { input: appLabelled, top: 0, left: 0 },
-      { input: mockLabelled, top: 0, left: a.width + GAP },
-    ])
-    .png()
-    .toFile(outPath);
-  return canvasW;
 }
 
 /** Capture one half (app or mockup), cropping to the region when declared. */

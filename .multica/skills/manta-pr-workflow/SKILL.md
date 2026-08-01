@@ -100,6 +100,19 @@ The standard implementer workflow for the MANTA agents.
 
     Print the scores. If all 8+, you may submit.
 
+    > **If this PR creates or re-records ANY file under
+    > `tests/visual/screens.visual.ts-snapshots/`, the reviewer's hand-off goes
+    > to Antoine, not to the PM.** Run `npm run visual:baselines`, upload every
+    > generated `*.before-after.png` into a PR comment, and
+    > `multica issue assign <KEY> --to Antoine` with status `in_review`. Say in
+    > the comment what changed and what should have changed. A baseline is
+    > committed evidence and the two agents in this loop compare the app only
+    > to that evidence — a human looking at the picture once is the only thing
+    > that can catch a record taken from a broken render. Merging is his call;
+    > do not merge, and do not route back to the PM. Upload the images (a
+    > `raw.githubusercontent.com/.../<pr-branch>/...` branch link dies when
+    > `--delete-branch` runs at merge), never link them.
+
     Then: Post the PR URL on the Multica issue **with a structured
     `Verification results` block** (template below), stamp `loop_history`
     metadata (see below), and reassign to the reviewer via
