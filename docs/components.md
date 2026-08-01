@@ -70,14 +70,15 @@ The bare `.pill` sets only padding, radius and font — no background, no colour
 Primitives that exist today, their adopting files (matching the two-adopter
 count the enforce test asserts, `src/renderer/primitives.test.ts`), and the
 variant axes their props actually accept (read from the props, not the spec).
-A primitive with fewer than two adopting files is under-adopted — see the
-BET-541 findings.
+A primitive with fewer than two adopting files is either under-adopted (see the
+BET-541 findings) or — in the case of SessionRow — a **single-surface
+exemption** owner-approved in BET-546.
 
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
 | Card | `src/renderer/Card.tsx` | 2 — `Cards.tsx`, `Settings.tsx` | `danger` (optional); `header`/`actions` slots |
-| IconButton | `src/renderer/IconButton.tsx` | 1 — `SessionHeader.tsx` | `size: md\|lg`; `ariaHaspopup`/`ariaExpanded`/`hook` |
-| Field | `src/renderer/Field.tsx` | 1 — `Settings.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading` |
+| IconButton | `src/renderer/IconButton.tsx` | 2 — `SessionHeader.tsx`, `NewSessionScreen.tsx` | `size: md\|lg`; `ariaHaspopup`/`ariaExpanded`/`hook` |
+| Field | `src/renderer/Field.tsx` | 2 — `Settings.tsx`, `CustomProviderForm.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading`/`footer`/`disabled` |
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
-| MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` | `variant: normal\|danger\|active` |
-| SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |
+| MenuItem | `src/renderer/MenuItem.tsx` | 2 — `SessionHeader.tsx`, `mobile/SessionScreen.tsx` | `variant: normal\|danger\|active` |
+| SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` — **single-surface exemption** (owner-approved, BET-546) | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |

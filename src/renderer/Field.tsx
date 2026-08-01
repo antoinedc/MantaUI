@@ -57,6 +57,8 @@ type FieldProps = {
   mono?: boolean;
   /** An icon rendered flush to the left of the value; adds the leading inset. */
   leading?: ReactNode;
+  /** Disabled the native input (e.g. while a probe is in flight). */
+  disabled?: boolean;
   /** A ref to the native input (e.g. to focus/select it on mount). */
   inputRef?: Ref<HTMLInputElement>;
 };
@@ -83,6 +85,7 @@ export function Field({
   autoComplete,
   mono = true,
   leading,
+  disabled = false,
   inputRef,
 }: FieldProps) {
   // sp-3 / sp-4 = 12px vertical / 16px horizontal. A leading icon replaces the
@@ -117,6 +120,7 @@ export function Field({
           ref={inputRef}
           autoComplete={autoComplete}
           spellCheck={false}
+          disabled={disabled}
           className={`${INPUT_BASE} ${inset} ${fontCls}`}
         />
       </div>
