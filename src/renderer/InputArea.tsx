@@ -16,7 +16,7 @@
 // above the transcript. The composer shell is now a real bordered input with
 // a focus state instead of hairline dividers around a naked textarea.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Mic, Shield } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
@@ -28,7 +28,9 @@ import {
 import {
   type ModelSelection,
   type Attachment,
+  resolveActiveModel,
 } from "./chatShared";
+import { shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
@@ -193,6 +195,19 @@ export function InputArea({
       setIsMobileShell(!!rowRef.current.closest(".mobile-body"));
     }
   }, []);
+
+  // Short model name for the composer pill (BET-460): resolve the active
+  // model the same way ModelPicker does and compact its friendly name
+  // (e.g. "Claude Opus 4.7" → "Opus 4.7"), which sits as its own pill with
+  // the effort pill showing the accent. Passed via ModelPicker's existing
+  // `labelOverride` (a call-site change — ModelPicker gains no new props).
+  const shortLabel = useMemo(
+    () => {
+      const activeModel = resolveActiveModel(models, modelOverride, defaultModel);
+      return activeModel ? shortModelName(activeModel.name) : null;
+    },
+    [models, modelOverride, defaultModel],
+  );
   return (
     <div className="manta-composer shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
@@ -337,6 +352,10 @@ export function InputArea({
             deactivatedMainModels={deactivatedMainModels}
             onOpen={onOpenModels}
             onSelect={onSelectModel}
+            labelOverride={shortLabel}
+            separatePills
+            alwaysShowEffort
+            effortAccent
           />
         </span>
         <span className="shrink-0 flex items-center gap-3 flex-wrap">
