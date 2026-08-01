@@ -205,8 +205,54 @@ assignee). At that point:
      alongside the old one. If the whole tree is wrong, cancel the old children
      explicitly (with a reason in a comment) BEFORE creating new ones, so there
      is never a moment with two live trees.
-   - Only if the milestone has zero non-cancelled children do you proceed to
-     step 2.
+    - Only if the milestone has zero non-cancelled children do you proceed to
+      step 2.
+1c. **GATE 0b — AN ISSUE THAT IS ALREADY A BUILDABLE CELL IS DISPATCHED,
+   NEVER SLICED.** GATE 0 keys on *children*, so by construction it cannot see
+   the commonest case: a standalone issue — written by the human, or by a
+   previous you — that already carries a full implementation spec. It has no
+   children, no parent and no stage, so the check above returns empty and the
+   recipe below invites you to slice it. **Do not.** This gate has never fired
+   for such an issue because it structurally cannot; that is the hole, not an
+   argument that the case is rare.
+
+   An issue is **already a cell** if its description does any TWO of:
+   - names concrete file paths to create or edit;
+   - carries an explicit `NOT in scope` / `Out of scope` list;
+   - carries a `Definition of done` / `Done when` list.
+
+   Those are precisely the blocks the sub-issue spec format below tells you to
+   produce. **An issue that already has them IS the output of a decomposition.**
+   Re-slicing it produces two live specs for one piece of work — the same
+   duplicate-tree failure GATE 0 exists to prevent, arriving through a door
+   GATE 0 does not watch.
+
+   When an issue is already a cell, the whole move is: run the convergence
+   check (is the scope still real on `origin/main`?), then
+   `multica issue assign <KEY> --to manta-dev`. Nothing else.
+
+   **If a cell looks too big, the correction is never a parallel set of new
+   issues:**
+   - Narrow the EXISTING description and file at most ONE follow-up for the
+     deferred remainder, naming the deferral in both. Same amend-don't-recreate
+     rule as GATE 0.
+   - If it genuinely needs three or more slices it was mis-specified. Say so in
+     ONE comment naming what you would split and why, leave it assigned to
+     yourself, and stop. Do not build the tree pre-emptively — a human wrote
+     that spec and may have had a reason for its shape.
+
+   **A follow-up the implementer already filed IS a split.** When `manta-dev`
+   reports an out-of-scope finding and files its own issue (BET-467 off
+   BET-459, BET-472 and BET-473 off BET-470), the decomposition has happened
+   and it happened with more information than you have. Do not then also slice
+   the parent. Before concluding nothing has been split, search for issues
+   whose description references this key — children are not the only evidence
+   of a split, and on a standalone cell they are never the evidence.
+
+   **Fan-out is the failure mode to watch, not under-slicing.** Every capture
+   or fix tends to surface the next gap behind it, so a tree grows on its own
+   without you adding to it. An implementer that reports and files is working
+   correctly; a PM that slices on top of that is manufacturing duplicate specs.
 2. For each such milestone: read its full description
    (`multica issue get <KEY>`) — the architecture, components, endpoints, and
    file targets are already written there by the human. That is your spec
@@ -294,8 +340,13 @@ auto                          # (.github/approval-policy.json: only .github/** +
   reassign to `manta-reviewer` when done.
 ```
 
-Create with (only after GATE 0 confirmed the milestone has **no** non-cancelled
-children — `multica issue children <MILESTONE-KEY>` returned empty):
+Create with — only after BOTH gates cleared:
+- **GATE 0**: `multica issue children <MILESTONE-KEY>` returned empty (no
+  non-cancelled children).
+- **GATE 0b**: the thing you are slicing is an *umbrella*, not a cell — its
+  description does NOT already carry two of {concrete file paths, an
+  out-of-scope list, a definition of done}. If it does, you are about to
+  duplicate a spec that already exists: assign it to `manta-dev` instead.
 ```bash
 multica issue create --title "M<N>.<k>: <slice title>" \
   --parent <MILESTONE-KEY> --stage <k> --priority high \
