@@ -282,6 +282,8 @@ function ContextPill({
           ? "bg-warn-bg hover:bg-warn-bg"
           : "hover:bg-fill")
       }
+      aria-haspopup="dialog"
+      aria-expanded={open}
       title={stale ? "Context stale — click for details" : "Context usage — click for details"}
     >
       {/* Mini segmented bar inside the pill — same segment order/colors as

@@ -53,6 +53,12 @@
  *             to `region`. It exists because the mockup is a different DOM and
  *             the selector usually differs (e.g. app `nav[role="tablist"]` vs
  *             mockup `.snav`).
+ *   surfacesClosed  Hook classes (see AGENTS.md "Mobile CSS hook-class
+ *                   contract") of every popup trigger present in this capture
+ *                   but NOT opened by it. Committed inventory: a surface that
+ *                   appears in EVERY row's list is opened by no capture and is
+ *                   therefore unverified. Generate it from the assertion's own
+ *                   failure output — never hand-write it.
  *
  *   Structure-root precedence: `snapshot ?? region ?? ready`. Explicit
  *   `snapshot` wins (a dialog opened by actions), then `region` when the row
@@ -70,6 +76,7 @@
  *   snapshot?: string,
  *   region?: string,
  *   mockupRegion?: string,
+ *   surfacesClosed?: string[],
  *   actions?: (page: any) => Promise<void>,
  *   viewport: { width: number, height: number },
  *   mockup: string | null,
@@ -89,6 +96,7 @@ export const SCREENS = [
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
   },
   {
     id: "session",
@@ -108,6 +116,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     // REGION ROWS for the session view (BET-468). The header strip and the
@@ -130,6 +147,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     id: "session-composer",
@@ -145,6 +171,15 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
   },
   {
     id: "settings",
@@ -164,6 +199,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // REGION ROWS — a component that owns its own small baseline. These are
@@ -184,6 +220,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "settings-general",
@@ -198,6 +235,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // Extensions panel — the four settings sections (box/accounts/extensions)
@@ -221,6 +259,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes
@@ -243,6 +282,14 @@ export const SCREENS = [
     // registry's documented way to say "no design filed"; the row still gets
     // a structure snapshot and a pixel baseline.
     mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
   },
 ];
 
