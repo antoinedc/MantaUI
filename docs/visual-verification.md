@@ -142,8 +142,10 @@ user gestures — a click a person could make — not for reaching into internal
    cause of the composer defect, and no tooling substitutes for it.
 2. The screen is a row in `scripts/visual/screens.mjs`.
 3. `npm run visual` is green, with the baselines committed.
-4. `npm run visual:compare` has been run and its findings addressed or
-   explicitly deferred in the PR description.
+4. `npm run visual:compare` has been run and its findings addressed, or
+   recorded in `docs/screens/<id>/conformance.md` with the "Last reviewed"
+   line updated. A finding that lives only in a PR description is lost the
+   moment the PR is merged.
 5. **Any baseline this PR creates or re-records is in the PR body as an
    image.** Not a filename, not "regenerated" — the picture. A baseline is
    committed *evidence*, and a reviewer who cannot see it is approving a hash.

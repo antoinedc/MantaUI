@@ -183,6 +183,18 @@ async function main() {
   log("  5. Emphasis — is the same element the loudest one on the screen?");
   log("  6. States — is the empty/placeholder state the one the design shows?");
   log("Findings are advisory. Nothing here blocks a merge.");
+
+  const withMockup = screens.filter(
+    (s) => s.mockup && s.mockup === `docs/screens/${s.id}/mockup.html`,
+  );
+  for (const s of withMockup) {
+    const record = `docs/screens/${s.id}/conformance.md`;
+    if (existsSync(join(ROOT, record))) {
+      log(`  Record findings in ${record} (update "Last reviewed").`);
+    } else {
+      log(`  NO conformance record for "${s.id}" — create ${record}.`);
+    }
+  }
 }
 
 main().catch((e) => {
