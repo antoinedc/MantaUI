@@ -2837,6 +2837,15 @@ and before a reassign it would wake the stalled agent being routed away from.
 Metadata writes are inert. Anything automated that touches an agent-assigned
 issue must account for this — a "harmless status comment" is an agent run.
 
+**A decomposition issue — one whose deliverable is other issues — has exactly
+one owner.** BET-484 and BET-475 both decomposed concurrently on 2026-08-01
+(two assignments, or an assignment plus a comment, fired two runs and produced
+two trees a human had to diff and cancel). Such an issue has one assignee and
+is never re-assigned or re-dispatched while a run is in flight; before
+decomposing, check whether the children already exist and stop rather than
+filing a second set. If two trees do exist, they are reconciled by a human, not
+by an agent picking one — an agent must not cancel another agent's issues.
+
 **`manta-ops` is NOT part of this.** It's an agent driven by a Multica autopilot
 that has been paused since 2026-07-21, so every recovery path its instructions
 describe (`manta-pm.md` cases D and E) currently routes to nobody. The CI
