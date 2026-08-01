@@ -114,7 +114,19 @@ if ! grep -q 'AX-TREE-BEGIN' "$HIER_LOG"; then
   rm -f "$HIER_LOG"
   exit 1
 fi
-awk '/AX-TREE-BEGIN/{f=1;next}/AX-TREE-END/{f=0} f' "$HIER_LOG" > "$OUT_DIR/session-list-hierarchy.txt"
+# Redact the two live values that change on every launch — heap object addresses
+# (0x…) and the process id — replacing each with a fixed placeholder so the line
+# structure and column positions are preserved and the dump is reproducible.
+# Nothing else on the line is touched: this is a redaction, not a rewrite.
+awk '
+  /AX-TREE-BEGIN/{f=1;next}
+  /AX-TREE-END/{f=0}
+  f{
+    gsub(/0x[0-9a-fA-F]+/, "0xADDR")
+    gsub(/pid: [0-9]+/, "pid: PID")
+    print
+  }
+' "$HIER_LOG" > "$OUT_DIR/session-list-hierarchy.txt"
 rm -f "$HIER_LOG"
 echo "words in hierarchy: $(wc -w < "$OUT_DIR/session-list-hierarchy.txt")"
 
