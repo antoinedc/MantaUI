@@ -22,6 +22,7 @@ import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher } from "../shared/types";
 import { IconButton } from "./IconButton";
+import { Pill } from "./Pill";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
 // the (retired) footer bar stay in sync visually.
@@ -276,28 +277,31 @@ function ContextPill({
       type="button"
       onClick={() => setOpen((v) => !v)}
       className={
-        "manta-ctx-pill inline-flex items-center gap-2 rounded-full px-2 py-px text-meta transition-colors " +
-        (stale
-          ? "bg-warn-bg hover:bg-warn-bg"
-          : "hover:bg-fill-hover")
+        // The button is the interactive host (click + popover + hover fill);
+        // the pill chrome itself lives on the Pill below. `rounded-full`
+        // keeps the resting-transparent hover fill capsule-shaped.
+        "manta-ctx-pill text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
+        (stale ? "" : "hover:bg-fill-hover")
       }
       aria-haspopup="dialog"
       aria-expanded={open}
       title={stale ? "Context stale — click for details" : "Context usage — click for details"}
     >
-      {/* Mini segmented bar inside the pill — same segment order/colors as
-          ContextBar but at pill scale (w-16 h-2). */}
-      <SegmentedBar
-        segments={segments}
-        segColor={segColor}
-        className="manta-ctx-track inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
-      />
-      <span
-        className="tabular-nums text-meta font-mono font-semibold"
-        style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
-      >
-        {pct}%
-      </span>
+      <Pill tone={stale ? "warn" : "neutral"}>
+        {/* Mini segmented bar inside the pill — same segment order/colors as
+            ContextBar but at pill scale (w-16 h-2). */}
+        <SegmentedBar
+          segments={segments}
+          segColor={segColor}
+          className="manta-ctx-track inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
+        />
+        <span
+          className="tabular-nums font-mono font-semibold"
+          style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
+        >
+          {pct}%
+        </span>
+      </Pill>
 
       {open && (
         <span
