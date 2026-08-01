@@ -30,35 +30,90 @@ struct Tokens {
     static func scheme(_ scheme: ColorScheme) -> Tokens {
         switch scheme {
         case .light:
-            return Tokens(
-                canvas: Color("#FAF9F7"), panel: Color("#F2F0EC"), card: Color("#FFFFFF"),
-                raised: Color("#EAE7E1"), inset: Color("#F5F3EF"),
-                borderSubtle: Color("#E8E4DD"), border: Color("#DAD5CC"), borderStrong: Color("#857C6E"),
-                tx1: Color("#1A1815"), tx2: Color("#48433C"), tx3: Color("#665F55"), tx4: Color("#8A8275"),
-                accent: Color("#2E6BFF"), accentTx: Color("#1F55D6"), accentSolid: Color("#1F55D6"), onAccent: Color("#FFFFFF"),
-                ok: Color("#0A7A53"), warn: Color("#8A5A08"), danger: Color("#BE2F3C"), info: Color("#0B6E85"),
-                fill: Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.035),
-                fillActive: Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.09)
-            )
+            return lightTokens
         case .dark:
-            return Tokens(
-                canvas: Color("#0B1020"), panel: Color("#0F1526"), card: Color("#151C33"),
-                raised: Color("#1C2440"), inset: Color("#070B16"),
-                borderSubtle: Color("#222C49"), border: Color("#33406B"), borderStrong: Color("#5E6C9B"),
-                tx1: Color("#F2F5FA"), tx2: Color("#BDC7DB"), tx3: Color("#939FB8"), tx4: Color("#6B7690"),
-                accent: Color("#5A88FF"), accentTx: Color("#7BA0FF"), accentSolid: Color("#5A88FF"), onAccent: Color("#0B1020"),
-                ok: Color("#3DD9A4"), warn: Color("#F0A934"), danger: Color("#FF6B7A"), info: Color("#49D7F5"),
-                fill: Color(red: 1, green: 1, blue: 1, opacity: 0.04),
-                fillActive: Color(red: 1, green: 1, blue: 1, opacity: 0.10)
-            )
+            return darkTokens
         @unknown default:
-            return .scheme(.dark)
+            return darkTokens
         }
+    }
+
+    // Light + dark token sets, transcribing spike/rn-ios/tokens.ts verbatim. Split
+    // each scheme into a standalone returning function so the type checker resolves
+    // the ~17 Color sub-expressions as distinct statements instead of one call that
+    // exceeds its type-check budget (the compiler's own "break up the expression"
+    // guidance).
+    private static var lightTokens: Tokens {
+        let canvas: Color = Color(hex: "#FAF9F7")
+        let panel: Color = Color(hex: "#F2F0EC")
+        let card: Color = Color(hex: "#FFFFFF")
+        let raised: Color = Color(hex: "#EAE7E1")
+        let inset: Color = Color(hex: "#F5F3EF")
+        let borderSubtle: Color = Color(hex: "#E8E4DD")
+        let border: Color = Color(hex: "#DAD5CC")
+        let borderStrong: Color = Color(hex: "#857C6E")
+        let tx1: Color = Color(hex: "#1A1815")
+        let tx2: Color = Color(hex: "#48433C")
+        let tx3: Color = Color(hex: "#665F55")
+        let tx4: Color = Color(hex: "#8A8275")
+        let accent: Color = Color(hex: "#2E6BFF")
+        let accentTx: Color = Color(hex: "#1F55D6")
+        let accentSolid: Color = Color(hex: "#1F55D6")
+        let onAccent: Color = Color(hex: "#FFFFFF")
+        let ok: Color = Color(hex: "#0A7A53")
+        let warn: Color = Color(hex: "#8A5A08")
+        let danger: Color = Color(hex: "#BE2F3C")
+        let info: Color = Color(hex: "#0B6E85")
+        let fill: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.035)
+        let fillActive: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.09)
+        return Tokens(
+            canvas: canvas, panel: panel, card: card,
+            raised: raised, inset: inset,
+            borderSubtle: borderSubtle, border: border, borderStrong: borderStrong,
+            tx1: tx1, tx2: tx2, tx3: tx3, tx4: tx4,
+            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent,
+            ok: ok, warn: warn, danger: danger, info: info,
+            fill: fill, fillActive: fillActive
+        )
+    }
+
+    private static var darkTokens: Tokens {
+        let canvas: Color = Color(hex: "#0B1020")
+        let panel: Color = Color(hex: "#0F1526")
+        let card: Color = Color(hex: "#151C33")
+        let raised: Color = Color(hex: "#1C2440")
+        let inset: Color = Color(hex: "#070B16")
+        let borderSubtle: Color = Color(hex: "#222C49")
+        let border: Color = Color(hex: "#33406B")
+        let borderStrong: Color = Color(hex: "#5E6C9B")
+        let tx1: Color = Color(hex: "#F2F5FA")
+        let tx2: Color = Color(hex: "#BDC7DB")
+        let tx3: Color = Color(hex: "#939FB8")
+        let tx4: Color = Color(hex: "#6B7690")
+        let accent: Color = Color(hex: "#5A88FF")
+        let accentTx: Color = Color(hex: "#7BA0FF")
+        let accentSolid: Color = Color(hex: "#5A88FF")
+        let onAccent: Color = Color(hex: "#0B1020")
+        let ok: Color = Color(hex: "#3DD9A4")
+        let warn: Color = Color(hex: "#F0A934")
+        let danger: Color = Color(hex: "#FF6B7A")
+        let info: Color = Color(hex: "#49D7F5")
+        let fill: Color = Color(red: 1, green: 1, blue: 1, opacity: 0.04)
+        let fillActive: Color = Color(red: 1, green: 1, blue: 1, opacity: 0.10)
+        return Tokens(
+            canvas: canvas, panel: panel, card: card,
+            raised: raised, inset: inset,
+            borderSubtle: borderSubtle, border: border, borderStrong: borderStrong,
+            tx1: tx1, tx2: tx2, tx3: tx3, tx4: tx4,
+            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent,
+            ok: ok, warn: warn, danger: danger, info: info,
+            fill: fill, fillActive: fillActive
+        )
     }
 }
 
 extension Color {
-    init(_ hex: String, opacity: Double = 1) {
+    init(hex: String, opacity: Double = 1) {
         var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         hexSanitized = hexSanitized.hasPrefix("#") ? String(hexSanitized.dropFirst()) : hexSanitized
         var r: UInt64 = 0, g: UInt64 = 0, b: UInt64 = 0

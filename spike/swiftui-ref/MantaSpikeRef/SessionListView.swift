@@ -113,7 +113,7 @@ struct FloatingSearchBar: View {
         }
         .padding(.horizontal, 18)
         .frame(height: 56)
-        .background(.glassEffect(.regular), in: Capsule())
+        .background { Capsule().glassEffect(.regular) }
         .padding(.horizontal, 14)
         .padding(.bottom, 12)
     }

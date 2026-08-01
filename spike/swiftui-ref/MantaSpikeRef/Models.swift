@@ -2,7 +2,7 @@ import SwiftUI
 
 // Hardcoded sample data for the visual reference. No networking, no state.
 
-enum SessionStatus {
+enum SessionStatus: Hashable {
     case running
     case needsAttention
     case idle
@@ -25,7 +25,7 @@ enum SessionStatus {
     }
 }
 
-struct Session: Identifiable {
+struct Session: Identifiable, Hashable {
     let id: Int
     let name: String
     let project: String
@@ -41,13 +41,13 @@ struct Session: Identifiable {
     let messages: [Message]
 }
 
-enum MessageParts {
+enum MessageParts: Hashable {
     case user(String)
     case assistant(String)
     case tool(name: String, running: Bool)
 }
 
-struct Message: Identifiable {
+struct Message: Identifiable, Hashable {
     let id: Int
     let parts: MessageParts
 }

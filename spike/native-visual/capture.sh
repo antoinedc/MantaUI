@@ -34,9 +34,13 @@ SIMCCTL_DESTINATION="platform=iOS Simulator,id=$DEVICE_UDID"
 mkdir -p "$OUT_DIR"
 
 echo "== boot pinned simulator: $DEVICE_NAME ($DEVICE_UDID) =="
-STATE=$(xcrun simctl list devices "$DEVICE_UDID" | sed -n '2p')
-echo "state: $STATE"
-if [[ "$STATE" != *"Booted"* ]]; then
+# simctl list prints header + runtime header before the device line, so `sed -n
+# '2p'` grabbed "-- iOS 26.5 --" and never saw "Booted" — on a real machine a
+# second consecutive run hit `boot` on an already-booted device and errored.
+# Match on the device line's reported state instead.
+STATE=$(xcrun simctl list devices "$DEVICE_UDID" | grep "Booted" | head -1)
+echo "state: ${STATE:-not booted}"
+if [[ -z "$STATE" ]]; then
   xcrun simctl boot "$DEVICE_UDID"
   # bootstatus -b blocks until the device is fully booted (real state, no sleep).
   xcrun simctl bootstatus "$DEVICE_UDID" -b

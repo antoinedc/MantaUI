@@ -118,7 +118,7 @@ struct UserBubble: View {
                 .foregroundStyle(t.onAccent)
                 .padding(.vertical, 11)
                 .padding(.horizontal, 15)
-                .background(t.accentSolid, in: ConcentricRectangle(cornerRadii: .init(topLeading: 22, bottomLeading: 22, bottomTrailing: 6, topTrailing: 22)))
+                .background(t.accentSolid, in: UnevenRoundedRectangle(cornerRadii: .init(topLeading: 22, bottomLeading: 22, bottomTrailing: 6, topTrailing: 22)))
                 .padding(.bottom, 22)
         }
         .containerRelativeFrame(.horizontal, alignment: .trailing) { length, _ in length * 0.82 }
@@ -192,7 +192,7 @@ struct FloatingComposer: View {
         }
         .padding(.horizontal, 16)
         .frame(height: 56)
-        .background(.glassEffect(.regular), in: Capsule())
+        .background { Capsule().glassEffect(.regular) }
         .padding(.horizontal, 14)
         .padding(.bottom, 12)
     }
