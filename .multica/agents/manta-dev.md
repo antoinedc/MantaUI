@@ -89,6 +89,24 @@ starts from zero. Therefore:
    If a branch exists, fetch it, check it out, and CONTINUE from it (re-run
    verification to establish state) instead of re-implementing. A prior run
    may have died one step from the finish line — its pushed work is yours.
+5. **NEVER block on a remote CI run. This is the single most common way your
+   run dies.** `gh run watch`, `gh pr checks --watch`, or any poll loop that
+   prints nothing produces no messages, and the idle watchdog cannot tell a
+   productive wait from a hang — it force-stops you at 10 minutes with your
+   work done and unhanded-off. **CI here cannot finish inside that budget and
+   that is accepted, not a bug to work around:** GitHub Actions runs on ONE
+   self-hosted runner, so jobs queue rather than run in parallel and the queue
+   is routinely several PRs deep. A pass is ~4 minutes once it *starts*; the
+   wait to start is frequently longer than your whole watchdog budget.
+
+   So: push, open the PR, and **hand off**. Do not wait for green. Verifying
+   checks is the reviewer's job, and a merge-event sweep re-dispatches the next
+   step automatically — waiting buys nothing and costs you the run. If you have
+   a specific reason to look at CI, take ONE snapshot (`gh pr checks <n>`
+   without `--watch`), say what it showed, and continue or hand off. Never loop.
+
+   Observed live 2026-08-01: BET-472 died twice this way, ~45 minutes of wall
+   clock, both times with the work already pushed and the PR already green.
 
 ## Coding Standards
 
