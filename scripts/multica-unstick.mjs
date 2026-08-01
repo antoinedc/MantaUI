@@ -309,24 +309,23 @@ export function decideUnstick({
  * IO below this line. Everything above is pure and unit-tested.
  * ------------------------------------------------------------------ */
 
-export async function run({
-  token,
-  workspace = DEFAULT_WORKSPACE,
-  base = DEFAULT_API_BASE,
-  dryRun = false,
-  verbose = false,
-  graceMs,
-  backoffMs,
-  maxActions,
-  fetchImpl = fetch,
-} = {}) {
+async function main() {
+  const dryRun = process.argv.includes("--dry-run");
+  const verbose = process.argv.includes("--verbose");
+  const token = process.env.MULTICA_TOKEN;
+  const workspace = process.env.MULTICA_WORKSPACE_ID || DEFAULT_WORKSPACE;
+  const base = process.env.MULTICA_API_BASE || DEFAULT_API_BASE;
+  const graceMs = minutesEnv("MULTICA_UNSTICK_GRACE_MIN", 30);
+  const backoffMs = minutesEnv("MULTICA_UNSTICK_BACKOFF_MIN", 120);
+  const maxActions = Number(process.env.MULTICA_UNSTICK_MAX_ACTIONS) || 5;
+
   if (!token) {
     console.error("MULTICA_TOKEN is not set — nothing to do.");
-    return 1;
+    process.exit(1);
   }
 
   // Roles, resolved live so a renamed or newly added agent needs no code change.
-  const agents = await api(base, token, `/agents?workspace_id=${workspace}`, {}, fetchImpl);
+  const agents = await api(base, token, `/agents?workspace_id=${workspace}`);
   const roleById = new Map(
     (Array.isArray(agents) ? agents : (agents.agents ?? [])).map((a) => [
       a.id,
@@ -344,7 +343,7 @@ export async function run({
 
   const issues = [];
   for (const status of LIVE_STATUSES) {
-    const page = await api(base, token, `/issues?workspace_id=${workspace}&status=${status}&limit=200`, {}, fetchImpl);
+    const page = await api(base, token, `/issues?workspace_id=${workspace}&status=${status}&limit=200`, {});
     issues.push(...(page.issues ?? []));
   }
   if (issues.length === 0) {
@@ -370,8 +369,8 @@ export async function run({
     let runs = [];
     let pullRequests = [];
     try {
-      runs = await api(base, token, `/issues/${id}/task-runs?workspace_id=${workspace}`, {}, fetchImpl);
-      const prs = await api(base, token, `/issues/${id}/pull-requests?workspace_id=${workspace}`, {}, fetchImpl);
+      runs = await api(base, token, `/issues/${id}/task-runs?workspace_id=${workspace}`, {});
+      const prs = await api(base, token, `/issues/${id}/pull-requests?workspace_id=${workspace}`, {});
       pullRequests = prs.pull_requests ?? [];
     } catch (e) {
       // Unreadable state is a READ: never a reason to act. Skip and retry next
@@ -418,12 +417,12 @@ export async function run({
 
     try {
       if (decision.action === "rerun") {
-        await api(base, token, `/issues/${issue.id}/rerun?workspace_id=${workspace}`, { method: "POST", body: "{}" }, fetchImpl);
+        await api(base, token, `/issues/${issue.id}/rerun?workspace_id=${workspace}`, { method: "POST", body: "{}" });
       } else {
         await api(base, token, `/issues/${id}?workspace_id=${workspace}`, {
           method: "PUT",
           body: JSON.stringify({ assignee_id: target, assignee_type: "agent" }),
-        }, fetchImpl);
+        });
       }
       acted++;
       console.log(`  → ${id} ${what} (${decision.reason})`);
@@ -453,7 +452,7 @@ export async function run({
         await api(base, token, `/issues/${issue.id}/metadata/${key}?workspace_id=${workspace}`, {
           method: "PUT",
           body: JSON.stringify({ value }),
-        }, fetchImpl);
+        });
       } catch (e) {
         // A metadata write is a WRITE and must be visible too. The unstick
         // action itself already landed; keep the batch moving, fail at the end.
@@ -466,26 +465,15 @@ export async function run({
   console.log(
     `${dryRun ? "[dry-run] " : ""}${acted} of ${issues.length} live issue(s) ${dryRun ? "would be" : ""} unstuck.`,
   );
-  return writeFailed ? 1 : 0;
+
+  // A write that never landed must fail the job — invisible here means an
+  // issue left assigned-but-dead with a green-looking run.
+  if (writeFailed) process.exit(1);
 }
 
 function minutesEnv(name, fallback) {
   const raw = Number(process.env[name]);
   return (Number.isFinite(raw) && raw > 0 ? raw : fallback) * 60_000;
-}
-
-async function main() {
-  const code = await run({
-    token: process.env.MULTICA_TOKEN,
-    workspace: process.env.MULTICA_WORKSPACE_ID,
-    base: process.env.MULTICA_API_BASE,
-    dryRun: process.argv.includes("--dry-run"),
-    verbose: process.argv.includes("--verbose"),
-    graceMs: minutesEnv("MULTICA_UNSTICK_GRACE_MIN", 30),
-    backoffMs: minutesEnv("MULTICA_UNSTICK_BACKOFF_MIN", 120),
-    maxActions: Number(process.env.MULTICA_UNSTICK_MAX_ACTIONS) || 5,
-  });
-  if (code) process.exit(code);
 }
 
 // Only run when invoked directly, so the pure exports stay importable in tests.
