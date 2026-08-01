@@ -1011,6 +1011,32 @@ export const readBoxIdentity = loadAuth;
 // Pairing-output formatter
 // ---------------------------------------------------------------------------
 
+// Normalize a presented verification code (BET-493 two-sided confirm): strip
+// whitespace + fold case so "K7 Q2", "k7 q2" and "K7Q2" all resolve to the
+// same 4-char string. Mirrors src/server/auth.mjs `normalizeVerifyCode`.
+export function normalizeVerifyCode(s) {
+  return typeof s === "string" ? s.replace(/\s+/g, "").toUpperCase() : "";
+}
+
+// Render the 4-char verify as the two pairs a human reads — "K7Q2" → "K7 Q2"
+// — matching the desktop panel's presentation (§5.3). Passes non-4-char input
+// through unchanged (defensive — the server always sends 4).
+export function formatVerifyDisplay(verify) {
+  const s = normalizeVerifyCode(verify);
+  if (s.length !== 4) return s;
+  return `${s.slice(0, 2)} ${s.slice(2, 4)}`;
+}
+
+// The four-char verification-code shape: exactly four uppercase alnum after
+// normalization. The server only ever mints the unambiguous alphabet
+// (A–H J K M N P–Z letters, 2–9 digits), but we accept any 4 uppercase
+// alnum here and let the server do the authoritative match (a wrong-but-valid
+// shape just 403s without consuming the one-time code).
+export const VERIFY_RE = /^[A-Z0-9]{4}$/;
+export function isValidVerifyCode(s) {
+  return VERIFY_RE.test(normalizeVerifyCode(s));
+}
+
 /**
  * Format the human-facing pairing block printed at the end of install (and by
  * `manta pair`). Given the server's { pairing_code, box_id, expiresAt } response,
@@ -1019,6 +1045,14 @@ export const readBoxIdentity = loadAuth;
  * `serverUrl` is the address the DESKTOP should point at (the box's public
  * ingress the user set up — tailscale/reverse-proxy/cloudflared). We can't know
  * it, so it's passed in (or omitted, in which case we print a hint line).
+ *
+ * `verify` (BET-513) is the four-character two-sided-confirm code (§5.3)
+ * minted alongside the six digits. When supplied, it is surfaced as a
+ * `Verify code:` line (rendered "K7 Q2") right after the six digits AND
+ * threaded through the pair link / pair-page URL so a device that claims from
+ * either carries the confirm → gets a DISTINCT Stage-2 device, never the
+ * shared primary token. Absent (a pre-BET-513 caller) → no line, no param —
+ * the output stays byte-compatible with before.
  *
  * The output is the single connect block both install.sh and `manta pair`
  * print — install.sh captures it once and emits it LAST so the user sees it
@@ -1051,11 +1085,14 @@ export const readBoxIdentity = loadAuth;
  * (saves the cold-install path from a needless dep).
  */
 export function formatPairingOutput(
-  { pairing_code, box_id, expiresAt, serverUrl } = {},
+  { pairing_code, box_id, expiresAt, serverUrl, verify } = {},
   { qrRender = defaultQrRender, scheme = "manta" } = {},
 ) {
   if (!/^[0-9]{6}$/.test(String(pairing_code ?? ""))) {
     throw new Error("formatPairingOutput: pairing_code must be 6 digits");
+  }
+  if (verify != null && verify !== "" && !isValidVerifyCode(verify)) {
+    throw new Error("formatPairingOutput: verify must be a 4-character verification code");
   }
   const lines = [];
   if (box_id) {
@@ -1078,9 +1115,11 @@ export function formatPairingOutput(
     // ONE wire shape — no more manta:///pair-page fork.
     const useServerUrl = typeof serverUrl === "string" && serverUrl !== "";
     const pairLinkOpts = useServerUrl ? { serverUrl, scheme } : { scheme };
+    if (verify != null) pairLinkOpts.verify = verify;
     const pairLink = buildPairLink(box_id, pairing_code, pairLinkOpts);
     const pairPageUrl = buildPairPageUrl(box_id, pairing_code, {
       baseUrl: useServerUrl ? serverUrl : undefined,
+      verify,
     });
     lines.push(`       Pair page:     ${pairPageUrl}`);
     lines.push(`       ${pairLink}`);
@@ -1108,6 +1147,9 @@ export function formatPairingOutput(
       lines.push("");
     }
     lines.push(`  Pairing code:  ${pairing_code}`);
+    if (verify != null) {
+      lines.push(`  Verify code:   ${formatVerifyDisplay(verify)}  (matches the code on the screen you're pairing)`);
+    }
     lines.push(`  Box ID:        ${box_id}`);
     if (serverUrl) {
       lines.push(`  Server URL:    ${serverUrl}`);
@@ -1125,6 +1167,9 @@ export function formatPairingOutput(
     lines.push("  ✓ Manta server is running.");
     lines.push("");
     lines.push(`  Pairing code:  ${pairing_code}`);
+    if (verify != null) {
+      lines.push(`  Verify code:   ${formatVerifyDisplay(verify)}  (matches the code on the screen you're pairing)`);
+    }
     if (expiresAt != null) {
       lines.push(`  Expires:       ${formatExpiry(expiresAt)}`);
     }
@@ -1172,29 +1217,45 @@ export function formatPairingOutput(
  * literal — mirrors how `pairPage.mjs`'s `validatePairQrQuery` and the
  * renderer's `buildPairPayload` take the same channel-derived value.
  *
+ * BET-513 (two-sided confirm): an optional `verify` may be appended as
+ * `&verify=<4-char>` so a device that claims from this link carries the
+ * two-sided confirm and gets a DISTINCT Stage-2 device instead of the
+ * shared primary box_token. A present-but-malformed verify throws (refused,
+ * never silently dropped) — mirroring how this helper refuses an invalid
+ * serverUrl.
+ *
  * Cross-reference: keep in sync with src/renderer/mobile/pairPayload.ts
  * `buildPairPayload` (box-form branch). If the canonical shape changes,
  * BOTH helpers must change in lockstep — the test catches drift.
  */
-export function buildPairLink(boxId, code, { serverUrl, scheme = "manta" } = {}) {
+export function buildPairLink(boxId, code, { serverUrl, scheme = "manta", verify } = {}) {
   if (typeof boxId !== "string" || !/^[0-9a-f]{32}$/.test(boxId)) {
     throw new Error("buildPairLink: boxId must be a 32-hex token");
   }
   if (!/^[0-9]{6}$/.test(String(code ?? ""))) {
     throw new Error("buildPairLink: code must be 6 digits");
   }
+  if (verify != null && verify !== "" && !isValidVerifyCode(verify)) {
+    throw new Error("buildPairLink: verify must be a 4-character verification code");
+  }
+  let out = `${scheme}://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
+  if (verify != null && verify !== "") {
+    out += `&verify=${normalizeVerifyCode(verify)}`;
+  }
   if (serverUrl !== undefined) {
     if (typeof serverUrl !== "string" || serverUrl === "") {
-      throw new Error("buildPairLink: serverUrl must be a non-empty string");
+      throw new Error(
+        "buildPairLink: serverUrl must be a non-empty string",
+      );
     }
     if (!isPrivateServerUrl(serverUrl)) {
       throw new Error(
         "buildPairLink: serverUrl must be a private/tailnet http(s) URL",
       );
     }
-    return `${scheme}://pair?box=${encodeURIComponent(boxId)}&code=${code}&server=${encodeURIComponent(serverUrl)}`;
+    out += `&server=${encodeURIComponent(serverUrl)}`;
   }
-  return `${scheme}://pair?box=${encodeURIComponent(boxId)}&code=${code}`;
+  return out;
 }
 
 /**
@@ -1211,18 +1272,24 @@ export function buildPairLink(boxId, code, { serverUrl, scheme = "manta" } = {})
  * the canonical `<boxId>.boxes.mantaui.com`. The fragment (`#box=&code=`) is
  * emitted in both branches — one wire shape from one code path.
  */
-export function buildPairPageUrl(boxId, code, { baseUrl } = {}) {
+export function buildPairPageUrl(boxId, code, { baseUrl, verify } = {}) {
   if (!/^[0-9a-f]{32}$/.test(boxId ?? "")) {
     throw new Error("buildPairPageUrl: boxId must be a 32-hex token");
   }
   if (!/^[0-9]{6}$/.test(code ?? "")) {
     throw new Error("buildPairPageUrl: code must be 6 digits");
   }
+  if (verify != null && verify !== "" && !isValidVerifyCode(verify)) {
+    throw new Error("buildPairPageUrl: verify must be a 4-character verification code");
+  }
+  const frag = `#box=${boxId}&code=${code}${
+    verify != null && verify !== "" ? `&verify=${normalizeVerifyCode(verify)}` : ""
+  }`;
   if (typeof baseUrl === "string" && baseUrl !== "") {
     const trimmed = baseUrl.replace(/\/+$/, "");
-    return `${trimmed}/pair#box=${boxId}&code=${code}`;
+    return `${trimmed}/pair${frag}`;
   }
-  return `https://${boxId}.boxes.mantaui.com/pair#box=${boxId}&code=${code}`;
+  return `https://${boxId}.boxes.mantaui.com/pair${frag}`;
 }
 
 // Lazy-default QR renderer: requires `qrcode-terminal` at call time, not at

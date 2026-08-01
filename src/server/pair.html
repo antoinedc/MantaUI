@@ -150,8 +150,8 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
       <div class="picon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
       </div>
-      <h1>Enter the code</h1>
-      <p class="lead">Read the six digits off your desktop, or run <span class="mono" style="background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:5px;padding:0 6px">manta pair</span> on the box.</p>
+      <h1>Enter the codes</h1>
+      <p class="lead">Read the six digits <b>and the four-character code</b> off your desktop's "Add a phone" screen (or run <span class="mono" style="background:var(--fill-subtle);border:1px solid var(--border-subtle);border-radius:5px;padding:0 6px">manta pair</span> on the box).</p>
       <div class="otp-wrap" id="otp" role="group" aria-label="Six digit pairing code">
         <input class="otp-auto" id="otp-auto" inputmode="numeric" autocomplete="one-time-code" autofocus>
         <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 1">
@@ -160,6 +160,13 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
         <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 4">
         <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 5">
         <input class="otp-cell" inputmode="numeric" maxlength="1" pattern="[0-9]*" aria-label="Digit 6">
+      </div>
+      <p class="hint" style="margin-top:18px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;font-weight:700">Also enter the four-character code, e.g. K7 Q2</p>
+      <div class="otp-wrap" id="votp" role="group" aria-label="Four character verification code">
+        <input class="otp-cell votp-cell" inputmode="text" maxlength="1" autocapitalize="characters" aria-label="Verify character 1">
+        <input class="otp-cell votp-cell" inputmode="text" maxlength="1" autocapitalize="characters" aria-label="Verify character 2">
+        <input class="otp-cell votp-cell" inputmode="text" maxlength="1" autocapitalize="characters" aria-label="Verify character 3">
+        <input class="otp-cell votp-cell" inputmode="text" maxlength="1" autocapitalize="characters" aria-label="Verify character 4">
       </div>
       <div class="action">
         <button class="btn btn-primary" id="btn-continue" type="button" disabled onclick="submitCode()">Continue</button>
@@ -268,7 +275,7 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
 <footer>Served by your box · the pairing code never leaves your machines</footer>
 
 <script>
-var cells, code, claimOrigin;
+var cells, vcells, code, claimOrigin;
 
 function $(id){ return document.getElementById(id); }
 
@@ -278,12 +285,14 @@ function show(id){
     var s=$("view-"+sections[i]);
     if(s) s.classList.toggle("active", sections[i]===id);
   }
-  if(id==="manual" && cells) setTimeout(function(){ var t=digtarget(); if(t) t.focus(); },30);
+  if(id==="manual"){
+    if(cells) setTimeout(function(){ var t=digtarget(); if(t) t.focus(); },30);
+  }
 }
 
 function parseFragment(){
   var q=new URLSearchParams((location.hash||"").replace(/^#/,""));
-  return { code:(q.get("code")||"").trim(), box:(q.get("box")||"").trim().toLowerCase() };
+  return { code:(q.get("code")||"").trim(), box:(q.get("box")||"").trim().toLowerCase(), verify:(q.get("verify")||"").trim() };
 }
 
 function claimEndpointFor(origin){
@@ -296,7 +305,7 @@ function resolveHost(){
   try{ return o? new URL(o).host : location.host; }catch(e){ return location.host; }
 }
 
-// --- OTP ---
+// --- OTP (six digits) ---
 function gather(){
   var s="";
   for(var i=0;i<cells.length;i++) s+=cells[i].value||"";
@@ -315,9 +324,7 @@ function onCellInput(el,i){
   el.value=el.value.replace(/[^0-9]/g,"");
   el.classList.toggle("filled", !!el.value);
   if(el.value) focusCell(i+1);
-  var s=gather();
-  $("btn-continue").disabled = !/^\d{6}$/.test(s);
-  if(/^\d{6}$/.test(s)) submitCode();
+  updateContinue();
 }
 function onCellKey(e,i){
   if(e.key==="Backspace" && !cells[i].value && i>0){ focusCell(i-1); }
@@ -329,8 +336,8 @@ function onCellPaste(e){
   var t=(e.clipboardData||window.clipboardData).getData("text")||"";
   var digits=t.replace(/[^0-9]/g,"");
   if(digits.length>6) digits=digits.slice(0,6);
-  if(/^\d{6}$/.test(digits)) setCells(digits);
-  else if(digits.length) setCells(digits);
+  setCells(digits);
+  updateContinue();
   var first=digtarget();
   if(first) first.focus();
 }
@@ -339,14 +346,54 @@ function digtarget(){
   return cells[5];
 }
 
+// --- Verify code (four characters, two-sided confirm §5.3) ---
+function gatherVerify(){
+  var s="";
+  for(var i=0;i<vcells.length;i++) s+=vcells[i].value||"";
+  return s.toUpperCase();
+}
+function setVerifyCells(str){
+  var v=(str||"").replace(/[^A-Za-z0-9]/g,"").toUpperCase();
+  for(var i=0;i<vcells.length;i++){
+    vcells[i].value=(v&&v[i])?v[i]:"";
+    vcells[i].classList.toggle("filled", !!vcells[i].value);
+  }
+}
+function focusVerifyCell(i){
+  if(i>=0&&i<vcells.length) vcells[i].focus();
+}
+function onVerifyCellInput(el,i){
+  el.value=(el.value||"").replace(/[^A-Za-z0-9]/g,"").toUpperCase();
+  el.classList.toggle("filled", !!el.value);
+  if(el.value) focusVerifyCell(i+1);
+  updateContinue();
+}
+function onVerifyCellKey(e,i){
+  if(e.key==="Backspace" && !vcells[i].value && i>0){ focusVerifyCell(i-1); }
+  if(e.key==="ArrowLeft"){ e.preventDefault(); focusVerifyCell(i-1); }
+  if(e.key==="ArrowRight"){ e.preventDefault(); focusVerifyCell(i+1); }
+}
+function verifytarget(){
+  for(var i=0;i<vcells.length;i++) if(!vcells[i].value) return vcells[i];
+  return vcells[3];
+}
+function isValidVerify(s){ return /^[A-Z0-9]{4}$/.test(s); }
+
+function updateContinue(){
+  var btn=$("btn-continue");
+  btn.disabled = !(/^\d{6}$/.test(gather()) && isValidVerify(gatherVerify()));
+}
+
 // --- claim ---
 function submitCode(){
   var s=gather();
+  var v=gatherVerify();
   if(!/^\d{6}$/.test(s)) return;
-  doClaim(s);
+  if(!isValidVerify(v)) return;
+  doClaim(s, v);
 }
 
-function doClaim(code){
+function doClaim(code, verify){
   show("checking");
   var origin=$("server-url")? $("server-url").value : "";
   claimOrigin=origin;
@@ -354,7 +401,7 @@ function doClaim(code){
   fetch(claimEndpointFor(origin), {
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ code: code })
+    body:JSON.stringify({ code: code, verify: verify })
   }).then(function(r){
     res=r;
     return r.text();
@@ -393,6 +440,7 @@ function goFinish(){ show("landing"); }
 
 function copyDiagnostics(){
   var blob="MantaUI pair diagnostics\nhost: "+resolveHost()+"\ncode: "+gather()+
+    "\nverify: "+gatherVerify()+
     "\nsource: "+location.href+"\nuserAgent: "+navigator.userAgent;
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(blob).then(function(){ $("view-unreachable").querySelector(".btn-row .btn-ghost").textContent="Copied"; });
@@ -400,11 +448,18 @@ function copyDiagnostics(){
 }
 
 (function init(){
-  cells=Array.prototype.slice.call(document.querySelectorAll(".otp-cell"));
+  cells=Array.prototype.slice.call(document.querySelectorAll("#otp .otp-cell"));
   cells.forEach(function(c,i){
     c.addEventListener("input",function(){ onCellInput(c,i); });
     c.addEventListener("keydown",function(e){ onCellKey(e,i); });
     c.addEventListener("paste",onCellPaste);
+    c.addEventListener("focus",function(){ c.select(); });
+  });
+
+  vcells=Array.prototype.slice.call(document.querySelectorAll("#votp .votp-cell"));
+  vcells.forEach(function(c,i){
+    c.addEventListener("input",function(){ onVerifyCellInput(c,i); });
+    c.addEventListener("keydown",function(e){ onVerifyCellKey(e,i); });
     c.addEventListener("focus",function(){ c.select(); });
   });
 
@@ -415,7 +470,7 @@ function copyDiagnostics(){
   if(auto){
     auto.addEventListener("input",function(){
       var d=(this.value||"").replace(/[^0-9]/g,"");
-      if(/^\d{6}$/.test(d)) setCells(d);
+      if(/^\d{6}$/.test(d)){ setCells(d); updateContinue(); }
     });
   }
 
@@ -431,16 +486,26 @@ function copyDiagnostics(){
   var host=(location.hostname||"").split(".")[0];
   $("boxchip-id").textContent=("box "+host);
 
+  updateContinue();
+
   if(f.code && /^\d{6}$/.test(f.code)){
-    // Arrived with a code in the URL fragment — prefill and go straight to
-    // the resolved-box card.
-    var q=new URLSearchParams((location.hash||"").replace(/^#/,""));
-    if(q.get("box")){ /* box id also carried; unused by manual flow */ }
-    $("btn-continue").disabled=false;
-    show("manual");
+    // Arrived with a code (and maybe a verify) in the URL fragment. Prefill
+    // the six digits, and when the two-sided confirm is also carried, go
+    // straight to the resolved-box card. A legacy six-digit-only link (no
+    // verify) CANNOT auto-claim — the joiner must type the four-char code
+    // shown on the desktop so the claim provisions a distinct device, not
+    // the shared primary token.
     setCells(f.code);
-    $("landing-code").textContent=(f.code.slice(0,3)+" "+f.code.slice(3));
-    doClaim(f.code);
+    updateContinue();
+    if(f.verify && isValidVerify(f.verify)){
+      setVerifyCells(f.verify);
+      show("manual");
+      doClaim(f.code, f.verify);
+    } else {
+      show("manual");
+      var t=verifytarget();
+      if(t) t.focus();
+    }
   } else {
     show("landing");
   }

@@ -23,6 +23,16 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const HEX32_RE = /^[0-9a-f]{32}$/;
 export const CODE_RE = /^\d{6}$/;
 
+// BET-493 two-sided confirm: the four-character verification code mints
+// alongside the six digits. Normalized (whitespace-stripped, uppercase) and
+// required to be four uppercase alnum — the server does the authoritative
+// timing-safe match; the safe-shape check here only refuses clearly-broken
+// QR inputs. Mirrors src/server/auth.mjs `normalizeVerifyCode`.
+export function normalizeVerifyCode(s) {
+  return typeof s === "string" ? s.replace(/\s+/g, "").toUpperCase() : "";
+}
+export const VERIFY_RE = /^[A-Z0-9]{4}$/;
+
 /**
  * Resolve the box's pair-link URL scheme from `MANTA_CHANNEL` (BET-370 +
  * BET-373). The box's release tarball bakes a `MANTA_CHANNEL` env var at
@@ -51,7 +61,7 @@ export function resolveBoxChannel() {
 
 /**
  * Validate the /pair/qr.png query. Returns
- *   { ok: true, payload: "<scheme>://pair?box=<box>&code=<code>[&server=<url>]" }
+ *   { ok: true, payload: "<scheme>://pair?box=<box>&code=<code>[&verify=<v>][&server=<url>]" }
  * or
  *   { ok: false, error: <string> }.
  * Box is lowercased before validation (hostnames arrive case-insensitive).
@@ -72,6 +82,12 @@ export function resolveBoxChannel() {
  * refused outright with an error — a pair link that points the device at
  * a non-private host is exactly the "crafted link → attacker's server"
  * attack the gate prevents.
+ *
+ * BET-513 (two-sided confirm): an optional `verify` query param is
+ * accepted (the four-char confirm minted alongside the code). When absent
+ * or empty, the payload has no `&verify=` (legacy six-digit-only QR).
+ * When present, it must be a well-formed four-char code; a malformed
+ * verify is refused with an error rather than silently dropped.
  */
 export function validatePairQrQuery(query, scheme) {
   const box =
@@ -79,11 +95,19 @@ export function validatePairQrQuery(query, scheme) {
   const code = typeof query?.code === "string" ? query.code.trim() : "";
   const server =
     typeof query?.server === "string" ? query.server.trim() : "";
+  const verify =
+    typeof query?.verify === "string" ? query.verify.trim() : "";
   if (!HEX32_RE.test(box)) {
     return { ok: false, error: "box must be a 32-char lowercase hex id" };
   }
   if (!CODE_RE.test(code)) {
     return { ok: false, error: "code must be exactly 6 digits" };
+  }
+  if (verify !== "") {
+    const norm = normalizeVerifyCode(verify);
+    if (!VERIFY_RE.test(norm)) {
+      return { ok: false, error: "verify must be a 4-character verification code" };
+    }
   }
   // BET-373: default to the box's own channel-derived scheme. `scheme ? : …`
   // collapses the "caller passed nothing" / "caller passed undefined" /
@@ -92,6 +116,9 @@ export function validatePairQrQuery(query, scheme) {
   // how to spell "use the box's channel".
   const useScheme = scheme || resolveBoxChannel().urlScheme;
   let payload = `${useScheme}://pair?box=${box}&code=${code}`;
+  if (verify !== "") {
+    payload += `&verify=${normalizeVerifyCode(verify)}`;
+  }
   if (server !== "") {
     if (!isPrivateServerUrl(server)) {
       return {

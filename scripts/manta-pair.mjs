@@ -95,6 +95,7 @@ async function main() {
       {
         pairing_code: data?.pairing_code,
         box_id: data?.box_id,
+        verify: data?.verify,
         expiresAt: data?.expiresAt,
         serverUrl: readIngressServerUrl(cfg.authDir),
       },

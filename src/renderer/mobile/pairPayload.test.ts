@@ -83,6 +83,40 @@ describe("parsePairPayload", () => {
     });
   });
 
+  // BET-513: the two-sided confirm travels as an optional verify= param. A
+  // present + well-formed verify is carried through; a present + malformed
+  // one refuses the WHOLE payload (a broken link, not a silently-dropped
+  // confirm that would fall back to the shared primary token).
+  describe("BET-513: verify param (two-sided confirm)", () => {
+    it("carries a well-formed verify through to the payload", () => {
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=K7Q2`),
+      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
+    });
+
+    it("normalizes a spaced/lower-case verify (K7 Q2 → K7Q2)", () => {
+      expect(
+        parsePairPayload(
+          `manta://pair?box=${BOX}&code=847291&verify=${encodeURIComponent("k7 q2")}`,
+        ),
+      ).toEqual({ boxId: BOX, code: "847291", verify: "K7Q2" });
+    });
+
+    it("rejects a malformed verify", () => {
+      for (const bad of ["K7", "K7Q22", "12!4", "123", "ABCDE"]) {
+        expect(
+          parsePairPayload(`manta://pair?box=${BOX}&code=847291&verify=${bad}`),
+        ).toBeNull();
+      }
+    });
+
+    it("omits verify from the payload when absent (back-compat)", () => {
+      expect(
+        parsePairPayload(`manta://pair?box=${BOX}&code=847291`),
+      ).toEqual({ boxId: BOX, code: "847291" });
+    });
+  });
+
   // BET-373: every channel's scheme is a legal pair-link prefix. The
   // wire format is identical across channels — same query, same code,
   // same server= gate — only the scheme prefix differs because that's
@@ -346,6 +380,25 @@ describe("buildPairPayload", () => {
     expect(empty).not.toContain("server=");
   });
 
+  it("appends &verify=<normalized> when a verify is present (BET-513)", () => {
+    expect(
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "k7 q2" }),
+    ).toBe(`manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2`);
+  });
+
+  it("omits &verify= when verify is absent or empty (back-compat)", () => {
+    const without = buildPairPayload({ boxId: BOX, code: "847291" });
+    expect(without).not.toContain("verify=");
+    const empty = buildPairPayload({ boxId: BOX, code: "847291", verify: "" });
+    expect(empty).not.toContain("verify=");
+  });
+
+  it("throws on a malformed verify (BET-513)", () => {
+    expect(() =>
+      buildPairPayload({ boxId: BOX, code: "847291", verify: "K7" }),
+    ).toThrow(/4-character verification code/);
+  });
+
   // BET-373: per-channel emission. The builder picks up the caller's
   // `scheme` arg verbatim — no derivation, no fallback chain — so the
   // OS-registered scheme and the wire-format scheme can never disagree.
@@ -381,10 +434,16 @@ describe("round-trip", () => {
       { boxId: BOX, code: "111111" },
       { boxId: BOX, code: "000000" },
       { boxId: BOX, code: "987654" },
+      // BET-513: round-trip preserves the two-sided confirm through both
+      // directions (verify is normalized uppercase on the way back).
+      { boxId: BOX, code: "111111", verify: "K7Q2" },
+      { boxId: BOX, code: "000000", verify: "MN29" },
       // BET-336: round-trip preserves the server URL through both directions.
       { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
       { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
       { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
+      // BET-513 + BET-336: verify + server together.
+      { boxId: BOX, code: "111111", verify: "K7Q2", serverUrl: "http://100.64.1.5:8787" },
     ];
     for (const p of cases) {
       expect(parsePairPayload(buildPairPayload(p))).toEqual(p);
@@ -402,9 +461,11 @@ describe("round-trip", () => {
           { boxId: BOX, code: "111111" },
           { boxId: BOX, code: "000000" },
           { boxId: BOX, code: "987654" },
+          { boxId: BOX, code: "111111", verify: "K7Q2" },
           { boxId: BOX, code: "111111", serverUrl: "http://100.64.1.5:8787" },
           { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
           { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
+          { boxId: BOX, code: "111111", verify: "K7Q2", serverUrl: "http://100.64.1.5:8787" },
         ];
         for (const p of cases) {
           expect(

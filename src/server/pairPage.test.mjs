@@ -223,6 +223,45 @@ test("validatePairQrQuery rejects a PUBLIC server URL (BET-336, crafted-link gua
 });
 
 // ---------------------------------------------------------------------------
+// validatePairQrQuery — verify= param (BET-513, two-sided confirm)
+// ---------------------------------------------------------------------------
+
+test("validatePairQrQuery without a verify param leaves the payload unchanged (BET-513 back-compat)", () => {
+  const r = validatePairQrQuery({ box: HEX32, code: "847291" });
+  assert.equal(r.ok, true);
+  assert.equal(r.payload, `manta://pair?box=${HEX32}&code=847291`);
+  assert.equal(r.payload.includes("verify="), false);
+});
+
+test("validatePairQrQuery appends &verify=<normalized> for a valid verify (BET-513)", () => {
+  const r = validatePairQrQuery({ box: HEX32, code: "847291", verify: "k7 q2" });
+  assert.equal(r.ok, true);
+  assert.equal(r.payload, `manta://pair?box=${HEX32}&code=847291&verify=K7Q2`);
+});
+
+test("validatePairQrQuery rejects a malformed verify (BET-513)", () => {
+  for (const bad of ["K7", "K7Q22", "K7!2", "123", "ABCDE"]) {
+    const r = validatePairQrQuery({ box: HEX32, code: "847291", verify: bad });
+    assert.equal(r.ok, false, `verify=${JSON.stringify(bad)} should be refused`);
+    assert.match(r.error, /4-character verification code/);
+  }
+});
+
+test("validatePairQrQuery composes verify= with server= (BET-513 + BET-336)", () => {
+  const r = validatePairQrQuery({
+    box: HEX32,
+    code: "847291",
+    verify: "K7Q2",
+    server: "http://100.64.1.5:8787",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(
+    r.payload,
+    `manta://pair?box=${HEX32}&code=847291&verify=K7Q2&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // validatePairQrQuery — channel-aware scheme (BET-373)
 //
 // The renderer + desktop pair-link path now keys off the channel table
@@ -406,13 +445,41 @@ test("manual-entry mailbox: shipped page claims the fragment code against /auth/
   assert.match(endpoint[1], /"\/auth\/claim";/, "endpoint is exactly <origin>/auth/claim");
   assert.doesNotMatch(endpoint[1], /"\/auth\/claim\?/, "no query appended after /auth/claim");
   assert.doesNotMatch(endpoint[1], /[?&]code\s*=/i, "no code in a query string");
-  // doClaim POSTs only {code} to that endpoint — the code travels in the body.
-  const doClaim = html.match(/function doClaim\(code\)\{([\s\S]*?)\n\}/);
-  assert.ok(doClaim, "the page must define doClaim(code)");
+  // doClaim POSTs both {code, verify} to that endpoint — the code AND the
+  // two-sided confirm travel in the body (BET-513: claiming WITH verify
+  // provisions a DISTINCT Stage-2 device, never the shared primary token).
+  const doClaim = html.match(/function doClaim\(code,\s*verify\)\{([\s\S]*?)\n\}/);
+  assert.ok(doClaim, "the page must define doClaim(code, verify)");
   assert.match(doClaim[1], /fetch\(claimEndpointFor\(origin\)/, "claims via the built endpoint");
   assert.match(doClaim[1], /method:\s*"POST"/, "must be a POST");
-  assert.match(doClaim[1], /JSON\.stringify\(\{\s*code:\s*code\s*\}\)/, "body carries {code}");
+  assert.match(
+    doClaim[1],
+    /JSON\.stringify\(\{\s*code:\s*code,\s*verify:\s*verify\s*\}\)/,
+    "body carries {code, verify}",
+  );
   assert.doesNotMatch(doClaim[1], /box\s*:/, "manual entry sends no box id");
+});
+
+// BET-513 — two-sided confirm on the web page. A device claimed through the
+// /pair page must carry `verify` so the server provisions a DISTINCT Stage-2
+// joiner device, never the shared primary box_token. The page therefore
+// surfaces the four-char code: it is read from the URL fragment (like the six
+// digits) and collected as a required four-cell entry in the manual view.
+test("pair.html surfaces + collects the four-char verify so web claims carry it (BET-513)", () => {
+  const html = readPairAsset("pair.html").toString("utf-8");
+  // Four dedicated verify cells exist and are separate from the six digits.
+  assert.match(html, /id="votp"/, "a verify OTP group must exist");
+  assert.match(html, /id="votp"[^]*?votp-cell/, "#votp must contain verify cells");
+  const verifyCells = html.match(/class="otp-cell votp-cell"/g) ?? [];
+  assert.equal(verifyCells.length, 4, "exactly four verify cells");
+  // parseFragment must carry the verify from the URL fragment alongside code.
+  const frag = html.match(/function parseFragment\(\)\{([\s\S]*?)\n\}/);
+  assert.ok(frag, "parseFragment must exist");
+  assert.match(frag[1], /verify:/, "parseFragment must read the verify param");
+  // A legacy six-digit-only fragment must NOT auto-claim: without a verify the
+  // claim would fall back to the shared primary token.
+  assert.doesNotMatch(html, /if\(f\.code[^]*?doClaim\(f\.code\)\s*\)/, "no auto-claim on code alone");
+  assert.match(html, /doClaim\(f\.code,\s*f\.verify\)/, "auto-claim only with the verify");
 });
 
 // Fragment-only: the code must never be placed in a path/query the server
@@ -459,8 +526,10 @@ test("pair.html renders the §5.4 failure-state copy verbatim (BET-489)", () => 
   assert.match(html, /Try again/);
   assert.match(html, /Copy diagnostics/);
   // Manual + not-installed fallback
-  assert.match(html, /Enter the code/);
-  assert.match(html, /Read the six digits off your desktop/);
+  assert.match(html, /Enter the codes/);
+  assert.match(html, /Read the six digits/);
+  assert.match(html, /four-character code/);
+  assert.match(html, /K7 Q2/);
   assert.match(html, /Get the app to finish/);
   assert.match(html, /Prefer to type it\?/);
   assert.match(html, /Get Manta/);

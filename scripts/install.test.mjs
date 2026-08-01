@@ -551,6 +551,37 @@ test("formatPairingOutput pins the greppable 'Pairing code' line shape", () => {
   assert.match(out, /^  Pairing code:  847291$/m);
 });
 
+test("formatPairingOutput surfaces a Verify code line + threads verify into the link/page URL (BET-513)", () => {
+  const out = formatPairingOutput({
+    pairing_code: "847291",
+    box_id: HEX32,
+    verify: "k7 q2",
+    expiresAt: Date.UTC(2026, 6, 3, 12, 34, 56),
+  });
+  // The four-char code is surfaced right after the six digits, rendered as
+  // the two pairs a human reads ("K7 Q2").
+  assert.match(out, /^  Verify code:   K7 Q2/m);
+  // And threaded into BOTH the pair page URL + the deep link so a device
+  // that claims from either carries the two-sided confirm.
+  assert.match(out, /pair#box=0123456789abcdef0123456789abcdef&code=847291&verify=K7Q2/);
+  assert.match(out, /manta:\/\/pair\?box=0123456789abcdef0123456789abcdef&code=847291&verify=K7Q2/);
+});
+
+test("formatPairingOutput omits the Verify code line when none supplied (back-compat)", () => {
+  const out = formatPairingOutput({
+    pairing_code: "847291",
+    box_id: HEX32,
+  });
+  assert.doesNotMatch(out, /Verify code/);
+});
+
+test("formatPairingOutput rejects a malformed verify (BET-513)", () => {
+  assert.throws(
+    () => formatPairingOutput({ pairing_code: "847291", box_id: HEX32, verify: "K7" }),
+    /4-character verification code/,
+  );
+});
+
 // ----------------------------------------------------------------------------
 // buildPairLink — canonical box-form pair link (BET-177 §2.4)
 // ----------------------------------------------------------------------------
@@ -649,6 +680,38 @@ test("buildPairLink threads scheme through the serverUrl branch too", () => {
 });
 
 // ----------------------------------------------------------------------------
+// buildPairLink — verify= (BET-513, two-sided confirm)
+// ----------------------------------------------------------------------------
+
+test("buildPairLink appends &verify=<normalized> when a verify is supplied (BET-513)", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", { verify: "k7 q2" }),
+    `manta://pair?box=${HEX32}&code=847291&verify=K7Q2`,
+  );
+});
+
+test("buildPairLink omits &verify= when no verify is supplied (back-compat)", () => {
+  assert.doesNotMatch(buildPairLink(HEX32, "847291"), /verify=/);
+  assert.doesNotMatch(buildPairLink(HEX32, "847291", { verify: "" }), /verify=/);
+});
+
+test("buildPairLink rejects a malformed verify (BET-513)", () => {
+  assert.throws(() => buildPairLink(HEX32, "847291", { verify: "K7" }), /4-character verification code/);
+  assert.throws(() => buildPairLink(HEX32, "847291", { verify: "K7Q22" }), /4-character/);
+  assert.throws(() => buildPairLink(HEX32, "847291", { verify: "12!4" }), /4-character/);
+});
+
+test("buildPairLink composes verify= with server= (BET-513 + BET-336)", () => {
+  assert.equal(
+    buildPairLink(HEX32, "847291", {
+      verify: "K7Q2",
+      serverUrl: "http://100.64.1.5:8787",
+    }),
+    `manta://pair?box=${HEX32}&code=847291&verify=K7Q2&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+  );
+});
+
+// ----------------------------------------------------------------------------
 // buildPairPageUrl — box-served /pair onboarding URL (BET-239 §2.6)
 // ----------------------------------------------------------------------------
 //
@@ -677,6 +740,22 @@ test("buildPairPageUrl rejects a non-6-digit code", () => {
   assert.throws(() => buildPairPageUrl(HEX32, "12345"), /6 digits/);
   assert.throws(() => buildPairPageUrl(HEX32, "abcdef"), /6 digits/);
   assert.throws(() => buildPairPageUrl(HEX32, ""), /6 digits/);
+});
+
+test("buildPairPageUrl carries &verify= in the fragment when supplied (BET-513)", () => {
+  assert.equal(
+    buildPairPageUrl(HEX32, "847291", { verify: "k7 q2" }),
+    "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com/pair#box=0123456789abcdef0123456789abcdef&code=847291&verify=K7Q2",
+  );
+});
+
+test("buildPairPageUrl omits &verify= when none supplied (back-compat)", () => {
+  assert.doesNotMatch(buildPairPageUrl(HEX32, "847291"), /verify=/);
+});
+
+test("buildPairPageUrl rejects a malformed verify (BET-513)", () => {
+  assert.throws(() => buildPairPageUrl(HEX32, "847291", { verify: "K7" }), /4-character/);
+  assert.throws(() => buildPairPageUrl(HEX32, "847291", { verify: "K7Q22" }), /4-character/);
 });
 
 // ----------------------------------------------------------------------------
