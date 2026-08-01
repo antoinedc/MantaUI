@@ -61,8 +61,8 @@ struct Tokens {
         let warn: Color = Color(hex: "#8A5A08")
         let danger: Color = Color(hex: "#BE2F3C")
         let info: Color = Color(hex: "#0B6E85")
-        let fill: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: .035)
-        let fillActive: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: .09)
+        let fill: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.035)
+        let fillActive: Color = Color(red: 26/255, green: 24/255, blue: 21/255, opacity: 0.09)
         return Tokens(
             canvas: canvas, panel: panel, card: card,
             raised: raised, inset: inset,
@@ -95,8 +95,8 @@ struct Tokens {
         let warn: Color = Color(hex: "#F0A934")
         let danger: Color = Color(hex: "#FF6B7A")
         let info: Color = Color(hex: "#49D7F5")
-        let fill: Color = Color(red: 255/255, green: 255/255, blue: 255/255, opacity: .04)
-        let fillActive: Color = Color(red: 255/255, green: 255/255, blue: 255/255, opacity: .10)
+        let fill: Color = Color(red: 255/255, green: 255/255, blue: 255/255, opacity: 0.04)
+        let fillActive: Color = Color(red: 255/255, green: 255/255, blue: 255/255, opacity: 0.10)
         return Tokens(
             canvas: canvas, panel: panel, card: card,
             raised: raised, inset: inset,

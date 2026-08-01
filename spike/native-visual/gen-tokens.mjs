@@ -50,13 +50,17 @@ function parseThemes(css) {
   return themes;
 }
 
+// CSS allows a leading-dot decimal (".035"); Swift requires a leading zero
+// ("0.035"). Normalize so the emitted Swift literals always compile.
+const swiftNumber = (n) => (n.startsWith(".") ? "0" + n : n);
+
 function swiftExpr(name, value) {
   const rgba = value.match(
     /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+))?\s*\)$/,
   );
   if (rgba) {
     const [, r, g, b, a] = rgba;
-    return `Color(red: ${r}/255, green: ${g}/255, blue: ${b}/255, opacity: ${a})`;
+    return `Color(red: ${swiftNumber(r)}/255, green: ${swiftNumber(g)}/255, blue: ${swiftNumber(b)}/255, opacity: ${swiftNumber(a)})`;
   }
   if (value.startsWith("#")) return `Color(hex: \"${value}\")`;
   throw new Error(
