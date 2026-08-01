@@ -69,7 +69,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const RENDERER_DIR = join(ROOT, "mobile/www");
 const WEBSITE_DIR = join(ROOT, "website");
-const FFMPEG_PATH = "/usr/bin/ffmpeg";
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
 const POSTER_MAX_SIZE_KB = 250;
@@ -443,24 +442,29 @@ async function composeSync(heroPath, phonePath, outPath) {
 // video file, not a page in a browser — driving Chromium to load the mp4,
 // seek to frame 0, and screenshot is much heavier than `ffmpeg -ss 0 -i
 // hero.mp4 -frames:v 1 -f image2pipe` for the same byte-identical output.
-// ffmpeg is a system dependency, present wherever Chrome is.
+// ffmpeg is a system dependency and is NOT implied by anything else here —
+// the "present wherever Chrome is" assumption this comment used to make was
+// wrong, and cost a red main when CI moved to a GitHub-hosted image that
+// ships no ffmpeg. CI installs it explicitly (.github/workflows/ci.yml).
 //
 // `-ss 0` (before `-i`) seeks to the keyframe at frame 0; combined with
 // `-frames:v 1` this returns exactly one PNG-equivalent frame. `-update 1`
 // is implicit when piping; we pipe into sharp so we never touch disk for
 // the intermediate PNG.
 async function extractPoster(videoPath, outPath) {
-  if (!existsSync(FFMPEG_PATH)) {
-    throw new Error(
-      `ffmpeg not found at ${FFMPEG_PATH} — required for poster extraction`,
-    );
-  }
   log(`→ hero-poster.webp (ffmpeg frame 0 of ${videoPath})`);
   // Spawn ffmpeg and pipe its stdout (a single-frame PNG) into sharp.
   // Using a child process rather than `-frames:v 1` + a temp file keeps
   // the working directory clean.
+  //
+  // Resolved from PATH by BARE NAME — never an absolute path. This used to
+  // be a hardcoded `/usr/bin/ffmpeg` + existsSync guard, which is only
+  // correct on a Linux box that apt-installed it: Homebrew puts ffmpeg in
+  // /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel), so the
+  // macOS box path could never have run this at all. Absence now surfaces
+  // as the child's ENOENT, handled below with the same clear message.
   const ff = spawn(
-    FFMPEG_PATH,
+    "ffmpeg",
     [
       "-y",
       "-ss",
@@ -479,9 +483,23 @@ async function extractPoster(videoPath, outPath) {
     ],
     { stdio: ["ignore", "pipe", "inherit"] },
   );
+  // A missing binary rejects the child with ENOENT rather than exiting
+  // non-zero, and it can fire before or after stdout closes — so latch it
+  // here and re-throw with a message that names the actual problem.
+  let spawnError = null;
+  ff.on("error", (e) => {
+    spawnError = e;
+  });
   const chunks = [];
   for await (const chunk of ff.stdout) chunks.push(chunk);
   const exitCode = await new Promise((resolve) => ff.on("close", resolve));
+  if (spawnError) {
+    throw new Error(
+      spawnError.code === "ENOENT"
+        ? "ffmpeg not found on PATH — required for poster extraction (apt install ffmpeg / brew install ffmpeg)"
+        : `ffmpeg failed to start: ${spawnError.message}`,
+    );
+  }
   if (exitCode !== 0) {
     throw new Error(`ffmpeg exited with code ${exitCode}`);
   }
