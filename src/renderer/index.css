@@ -17,6 +17,13 @@
   overflow-wrap: anywhere;
 }
 
+/* Hover fill for the settings rail chip — Tailwind has no color utility for
+   --fill-hover (only --panel, which is a visibly heavier block), so expose the
+   token as a single utility. Uses an existing token; no new colour. */
+.bg-fill-hover {
+  background-color: var(--fill-hover);
+}
+
 html, body, #root {
   height: 100%;
   margin: 0;
