@@ -140,8 +140,7 @@ export async function run({
     return 0;
   }
 
-  // Resolve every referenced blocker once. A single unresolvable blocker is a
-  // READ: warn and keep sweeping — it must never abort the batch.
+  // Resolve every referenced blocker once. Unresolvable = READ, warn + continue.
   const statusByKey = new Map();
   const needed = new Set(blocked.flatMap((i) => parseBlockerKeys(i?.metadata?.waiting_on)));
   for (const key of needed) {
@@ -180,8 +179,7 @@ export async function run({
       console.log(`  → ${id} unblocked (${reason})`);
       unblocked++;
     } catch (e) {
-      // A failed WRITE is fatal to the job. Log the key + status + body, keep
-      // sweeping the rest of the batch, and exit non-zero at the end.
+      // Fail the job on a failed WRITE; keep sweeping the rest of the batch.
       console.error(`Failed to set ${id} todo (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
       writeFailed = true;
     }

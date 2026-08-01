@@ -298,8 +298,7 @@ export async function run({
       );
       log(`Set ${key} to done.`);
     } catch (e) {
-      // The exact failure this issue exists to make loud: a status write that
-      // never landed previously looked identical to one that did.
+      // The exact bug BET-504 exists to surface: a silent status-write failure.
       console.error(`Failed to set ${key} done (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
       writeFailed = true;
     }
