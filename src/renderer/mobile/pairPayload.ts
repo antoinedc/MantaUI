@@ -8,12 +8,15 @@
 // (Caddy on the box reverse-proxies 127.0.0.1:8787). The only live payload
 // shape is the box form:
 //   • Custom scheme (primary — what the desktop panel + install heredoc render):
-//       <scheme>://pair?box=<box_id>&code=<6-digit>
+//       <scheme>://pair?box=<box_id>&code=<6-digit>[&verify=<4-char>]
 //       scheme ∈ {manta, manta-staging, manta-dev} — the box + desktop emit
 //       the scheme their CHANNEL registered with the OS as a URL handler
 //       (BET-370 channel table; BET-373 thread this through pair links so
 //       staging-desktop users scanning a staging-box QR land in staging, not
 //       whatever other channel happened to register `manta://` last).
+//       `verify` (BET-513/BET-514) is the four-char two-sided confirm (§5.3) —
+//       when carried, the receiving device claims WITH it and gets a DISTINCT
+//       Stage-2 device instead of the shared primary box_token.
 //   • Deferred-deeplink https form (Branch/Firebase style):
 //       https://<host>/m/<payload>?box=<box_id>&code=<6-digit>
 //
@@ -59,6 +62,15 @@ export type PairPayload = {
   boxId: string;
   code: string;
   /**
+   * Optional four-character verification code (BET-493 two-sided confirm,
+   * §5.3 "K7 Q2"). When present, the pairing flow claims WITH `verify` so
+   * the server provisions a DISTINCT Stage-2 joiner device rather than the
+   * shared primary `box_token` (the legacy no-verify path). Absent on
+   * pre-BET-513 payloads and on any emitter that only had the six digits.
+   * Always stored in the normalized form (whitespace-stripped, uppercase).
+   */
+  verify?: string;
+  /**
    * Optional server URL (BET-336, Tailscale path). When present, the
    * pairing flow claims against THIS URL instead of the derived public
    * hostname (`https://<boxId>.boxes.mantaui.com`) — so a Tailscale box
@@ -69,6 +81,28 @@ export type PairPayload = {
    */
   serverUrl?: string;
 };
+
+/**
+ * Normalize a presented verification code for comparison: strip whitespace +
+ * fold case so "K7 Q2", "k7 q2" and "K7Q2" all resolve to "K7Q2". Mirrors
+ * the server's `normalizeVerifyCode` in src/server/auth.mjs — the human
+ * reads the two-pair form, so we never want a stray space or case to break
+ * the two-factor confirm.
+ */
+export function normalizeVerifyCode(s: string): string {
+  return typeof s === "string" ? s.replace(/\s+/g, "").toUpperCase() : "";
+}
+
+// The four-char verification code shape: exactly four alphanumeric chars
+// after normalization. The server only ever mints the unambiguous alphabet
+// (A–H J K M N P–Z letters, 2–9 digits), but we accept any 4 uppercase
+// alnum client-side and let the server do the authoritative timing-safe
+// match (a wrong-but-valid-shape verify just 403s without consuming the
+// one-time code).
+export const VERIFY_RE = /^[A-Z0-9]{4}$/;
+export function isValidVerifyCode(s: string): boolean {
+  return VERIFY_RE.test(s);
+}
 
 /**
  * Coerce a raw boxId value to a validated 32-hex string, or null. The shape is
@@ -150,6 +184,7 @@ export function parsePairPayload(
   const rawBox = q.get("box") ?? "";
   const rawCode = q.get("code") ?? q.get("token") ?? "";
   const rawServer = q.get("server") ?? "";
+  const rawVerify = q.get("verify") ?? "";
 
   const boxId = coerceBoxId(rawBox);
   if (!boxId) return null;
@@ -174,7 +209,18 @@ export function parsePairPayload(
     serverUrl = normalized;
   }
 
-  return { boxId, code, serverUrl };
+  // BET-513 (two-sided confirm): when the link carries a `verify` param it
+  // MUST be a well-formed four-char code. A present-but-malformed verify is
+  // a broken link — refuse the whole payload rather than silently dropping
+  // it and falling back to the legacy primary-token claim.
+  let verify: string | undefined;
+  if (rawVerify !== "") {
+    const normalized = normalizeVerifyCode(rawVerify);
+    if (!isValidVerifyCode(normalized)) return null;
+    verify = normalized;
+  }
+
+  return { boxId, code, serverUrl, verify };
 }
 
 /**
@@ -199,11 +245,25 @@ export function parsePairPayload(
  * of the derived public hostname. The current callers only feed this
  * helper with server URLs that have already passed `isPrivateServerUrl`,
  * so we do NOT re-validate here (the constructor is a thin encoder).
+ *
+ * BET-513/BET-514: when the payload carries a `verify` code (the four-char
+ * two-sided confirm), a `verify=<verify>` query param is appended so a
+ * CLI / web-paired device claims WITH the confirm and gets a DISTINCT
+ * Stage-2 device instead of the shared primary box_token. Only a
+ * well-formed normalized verify is appended; a malformed one is refused
+ * (throws), never silently dropped.
  */
 export function buildPairPayload(p: PairPayload, scheme: string = "manta"): string {
-  const base = `${scheme}://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  let base = `${scheme}://pair?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  if (p.verify && p.verify !== "") {
+    const norm = normalizeVerifyCode(p.verify);
+    if (!isValidVerifyCode(norm)) {
+      throw new Error("buildPairPayload: verify must be a 4-character verification code");
+    }
+    base += `&verify=${norm}`;
+  }
   if (p.serverUrl) {
-    return `${base}&server=${encodeURIComponent(p.serverUrl)}`;
+    base += `&server=${encodeURIComponent(p.serverUrl)}`;
   }
   return base;
 }

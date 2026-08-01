@@ -34,7 +34,10 @@ export function PairingScreen({ onPaired }: Props) {
     // non-submittable state (the reducer also no-ops, but avoid the round-trip).
     if (!canSubmit(state)) return;
     dispatch({ type: "submit" });
-    const result = await submitPairingCode(state.code);
+    // BET-514: when the user entered the four-char two-sided-confirm code
+    // (verify, §5.3), forward it so the box provisions a DISTINCT Stage-2
+    // device rather than the shared primary box_token.
+    const result = await submitPairingCode(state.code, state.verify);
     if (result.ok) {
       dispatch({ type: "success" });
       onPaired();
@@ -79,6 +82,26 @@ export function PairingScreen({ onPaired }: Props) {
             disabled={submitting}
             value={state.code}
             onChange={(e) => dispatch({ type: "edit", raw: e.target.value })}
+            className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-lg bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
+          />
+
+          {/* BET-514: optional four-character two-sided-confirm code (§5.3
+              "K7 Q2"). When the code was minted WITH a verify (desktop
+              "Add a phone" / `manta pair` / web pair page now emits one),
+              typing it here claims as a DISTINCT Stage-2 device instead of
+              reusing the desktop's own primary box_token. Optional — leaving
+              it blank keeps the legacy first-pair path. */}
+          <input
+            type="text"
+            inputMode="text"
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Verification code (optional)"
+            placeholder="K7Q2"
+            maxLength={4}
+            disabled={submitting}
+            value={state.verify}
+            onChange={(e) => dispatch({ type: "editVerify", raw: e.target.value })}
             className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-lg bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
           />
 

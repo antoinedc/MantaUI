@@ -97,6 +97,7 @@ export type DeepLinkDeps = {
   authClaim: (input: {
     serverUrl: string;
     code: string;
+    verify?: string;
   }) => Promise<ClaimOutcome>;
   /** Persist the resolved server URL to localStorage["manta_server"]. Called
    *  AFTER a successful claim — the URL is whatever `resolveSetupServerUrl`
@@ -146,6 +147,7 @@ export async function handlePairUrl(
     boxId: payload.boxId,
     code: payload.code,
     serverUrl: payload.serverUrl,
+    verify: payload.verify,
   });
   let outcome: ClaimOutcome;
   try {

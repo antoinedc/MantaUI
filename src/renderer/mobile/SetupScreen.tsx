@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { normalizeCode } from "../../shared/claim.mjs";
 import {
   type DebugEntry,
   getDebugLog,
@@ -8,6 +7,8 @@ import {
   clearDebugLog,
 } from "./debugLog";
 import { isValidBoxToken } from "../../shared/transport.mjs";
+import { VerifyCodeInput } from "../VerifyCodeInput";
+import { PairingCodeInput } from "../PairingCodeInput";
 import { MantaMark } from "../onboardingUi";
 import {
   canConnectSetup,
@@ -57,6 +58,10 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
   const [manualOpen, setManualOpen] = useState(false);
   const [boxId, setBoxId] = useState("");
   const [code, setCode] = useState("");
+  // BET-514: optional four-char two-sided-confirm code (§5.3). Forwarded on
+  // the claim so this device becomes a DISTINCT Stage-2 device, not the
+  // shared primary token. Optional — blank keeps the legacy path.
+  const [verifyCode, setVerifyCode] = useState("");
   const [serverUrl, setServerUrl] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -75,7 +80,12 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
     setSubmitting(true);
     setError(null);
     const result = await window.api.authClaim(
-      buildSetupClaimInput({ boxId, code, serverUrl: serverUrlTrimmed }),
+      buildSetupClaimInput({
+        boxId,
+        code,
+        verify: verifyCode,
+        serverUrl: serverUrlTrimmed,
+      }),
     );
     if (result.ok) {
       // Token is already persisted by authClaim. Persist the resolved server
@@ -204,19 +214,32 @@ export function SetupScreen({ onConnected, pairStatus }: Props) {
               </Field>
 
               <Field label="Pairing code">
-                <input
+                <PairingCodeInput
                   ref={codeRef}
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  aria-label="Pairing code"
-                  aria-invalid={error != null}
-                  placeholder="000000"
-                  maxLength={6}
                   disabled={submitting}
+                  hasError={error != null}
                   value={code}
-                  onChange={(e) => {
-                    setCode(normalizeCode(e.target.value));
+                  onChange={(v) => {
+                    setCode(v);
+                    setError(null);
+                  }}
+                  className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"
+                />
+              </Field>
+
+              {/* Verify — optional four-char two-sided-confirm code (BET-514,
+                  §5.3 "K7 Q2"). When the pairing code was minted WITH a
+                  verify (desktop "Add a phone" / web pair page), typing it
+                  here claims this device as a DISTINCT Stage-2 device rather
+                  than reusing the desktop's primary box_token. Optional —
+                  blank keeps the legacy path. Field logic + normalization
+                  live in the shared VerifyCodeInput. */}
+              <Field label="Verify (optional)">
+                <VerifyCodeInput
+                  disabled={submitting}
+                  value={verifyCode}
+                  onChange={(v) => {
+                    setVerifyCode(v);
                     setError(null);
                   }}
                   className="w-full text-center tracking-[0.4em] text-2xl font-mono rounded-xl bg-bg-soft text-text placeholder:text-text-faint border border-border px-4 py-3 outline-none focus:border-accent disabled:opacity-60"

@@ -41,6 +41,12 @@ import { networkFailure, type ClaimOutcome } from "../shared/claim.mjs";
  *
  * @param input.boxId      32-hex box id (validated by canConnectSetup upstream)
  * @param input.code       6-digit pairing code (validated by canConnectSetup upstream)
+ * @param input.verify     optional four-character two-sided-confirm code
+ *                         (BET-514 §5.3). Forwarded on the claim so the box
+ *                         provisions a DISTINCT Stage-2 joiner device rather
+ *                         than the shared primary box_token. Collected from a
+ *                         `&verify=` pair link (prefill) or typed by hand.
+ *                         Absent → legacy first-pair path.
  * @param input.serverUrl  optional Advanced server URL override (BET-268,
  *                         tailnet path). Empty/absent → the box's public
  *                         hostname. Non-empty → `normalizeServerUrl`d then
@@ -51,6 +57,7 @@ import { networkFailure, type ClaimOutcome } from "../shared/claim.mjs";
 export async function claimBox(input: {
   boxId: string;
   code: string;
+  verify?: string;
   serverUrl?: string;
 }): Promise<ClaimOutcome> {
   // Box-form claim input — by default `serverUrl` is the resolved direct
@@ -64,6 +71,7 @@ export async function claimBox(input: {
     boxId: input.boxId,
     code: input.code,
     serverUrl: input.serverUrl,
+    verify: input.verify,
   });
 
   let result: ClaimOutcome;
