@@ -174,6 +174,12 @@ Steps 4 and 5 apply **whenever a baseline moves**, not only when the issue is a
 design issue. A refactor that shifts a pixel is exactly the case where nobody
 thinks to look.
 
+> **A UI issue that renders card, field, pill, icon-button, menu-item or
+> session-row chrome uses the existing primitive** (`docs/components.md`).
+> Introducing a new primitive requires two or more adopters migrated in the
+> same PR; re-implementing one inline is rejected on sight. This is the rule
+> that stops the inventory eroding back into per-screen utilities.
+
 ## Commands
 
 ```
