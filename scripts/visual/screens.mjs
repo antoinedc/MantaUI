@@ -20,6 +20,13 @@
  *   ready     Selector proving boot finished. Gate on something structural.
  *   final     Selector proving the target state is on screen (defaults to
  *             `ready`). Required when `actions` navigates somewhere.
+ *   snapshot  Element whose accessibility tree IS the structure contract.
+ *             Defaults to `ready`, which is correct whenever `ready` is the
+ *             screen's container. It is NOT correct when `ready` merely gates
+ *             boot — a text selector snapshots that one text node, producing a
+ *             one-line "contract" that would accept any regression. Set this
+ *             whenever the captured state lives in a container that does not
+ *             exist yet at boot (a dialog opened by `actions`).
  *   actions   Optional async (page) => {} to reach a state that is not a URL.
  *             Keep these to real user gestures — a click a person could make.
  *             If reaching a state needs internal poking, that is a signal the
@@ -37,6 +44,7 @@
  *   url: string,
  *   ready: string,
  *   final?: string,
+ *   snapshot?: string,
  *   actions?: (page: any) => Promise<void>,
  *   viewport: { width: number, height: number },
  *   mockup: string | null,
@@ -56,6 +64,44 @@ export const SCREENS = [
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
+  },
+  {
+    id: "session",
+    title: "Session view — rail, header, transcript, ask card, composer",
+    // The product's main screen, and the one the marketing hero shows. The
+    // fixture's `Deploy new billing service` session is the state the mockup
+    // is drawn against: a permission card open, a tool call above it.
+    url: "/app/index.html?demo&desktop",
+    // The shell root exists from first paint, and it is also the structure
+    // contract — the mockup covers rail + header + transcript + composer.
+    ready: '[data-screen="session"]',
+    // The permission card's heading proves the transcript rendered AND the
+    // blocking ask is on screen — the state the design is specified for.
+    final: "text=Run a shell command?",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/session/mockup.html",
+  },
+  {
+    id: "settings",
+    title: "Settings — section rail + the first section",
+    // Opened by the same click a person makes: the sidebar footer's entry.
+    // Settings is local component state, not a route, so there is no URL for
+    // it; this is exactly the "real user gesture" the actions field is for.
+    url: "/app/index.html?demo&desktop",
+    ready: "text=Refactor auth middleware",
+    final: '[role="dialog"][aria-labelledby="settings-title"]',
+    // `ready` only gates boot here — the dialog does not exist until the click
+    // below. Without this the structure snapshot would be the sidebar row's
+    // text node rather than the dialog.
+    snapshot: '[role="dialog"][aria-labelledby="settings-title"]',
+    actions: async (page) => {
+      await page.getByText("Settings…", { exact: false }).first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/settings/mockup.html",
   },
 ];
 

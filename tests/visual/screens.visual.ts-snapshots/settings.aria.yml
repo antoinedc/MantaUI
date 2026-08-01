@@ -1,0 +1,26 @@
+- dialog "Settings":
+  - heading "Settings" [level=2]
+  - tablist "Settings sections":
+    - tab "General" [selected]
+    - tab "Box"
+    - tab "Accounts"
+    - tab "Models"
+    - tab "Sessions"
+    - tab "Files"
+    - tab "Extensions"
+    - tab "Voice"
+  - textbox "Search settings":
+    - /placeholder: Find a setting…
+  - button "Close settings"
+  - tabpanel "General":
+    - text: Theme
+    - group "Theme":
+      - button "Theme" [pressed]: System
+      - button "Light"
+      - button "Dark"
+    - text: System follows your OS appearance and re-themes live.
+    - heading "About" [level=3]
+    - text: /Manta v0\.\d+\.\d+ Box server v0\.\d+\.\d+ Desktop client for remote Claude Code sessions\./
+    - heading "Reset all settings" [level=3]
+    - text: Restore every setting below to its default. This does not remove your box pairing or projects.
+    - button "Reset all settings…"

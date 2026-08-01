@@ -756,7 +756,11 @@ export function App() {
   const activeBanner = pickBanner(bannerState);
 
   return (
-    <div className="h-full w-full flex bg-bg text-text">
+    // data-screen is the visual harness's handle on the app shell (see
+    // scripts/visual/screens.mjs), matching NewSessionScreen's. One stable
+    // attribute per screen root, so the harness never depends on a class name
+    // or a DOM position — both of which a redesign is expected to change.
+    <div data-screen="session" className="h-full w-full flex bg-bg text-text">
       <Sidebar
         ref={sidebarRef}
         onOpenSettings={() => setSettingsOpen(true)}

@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Session view — app shell</title>
+
+<!--
+  THE SPEC for the session screen. This file is the design contract, not a picture
+  of one. Read docs/visual-verification.md before editing.
+
+  PROVENANCE: lifted from the MantaUI 2.0 redesign spec (v2, decisions locked) —
+  its live mockup for this screen, markup and rules intact — so this file and
+  that document cannot drift apart. Do not "improve" the design here; raise it
+  against the spec instead.
+
+  Two rules make this a contract rather than decoration:
+
+  1. It loads the app's REAL token stylesheet below. Every colour, spacing step,
+     radius, shadow and type stack resolves to the same variable the app uses at
+     runtime — including the radius scale (--r-*), the measure and the row
+     metrics, which exist precisely so a design can NAME a value instead of
+     hardcoding a pixel the implementer then has to reconcile against the
+     "no off-grid value" rule.
+
+  2. It renders in the same browser, at the same viewport, as the implementation
+     capture — so `npm run visual:compare` yields a fair side-by-side rather than
+     a font-mismatch diff.
+
+  Placeholder content deliberately MATCHES the demo fixture this screen is
+  captured against, so the side-by-side compares layout and not words.
+
+
+  ============================ CONFORMANCE SCOPE ============================
+  This mockup is the DESIGN for the whole screen, but not all of it is
+  implementable as a restyle. Elements below exist in this file for design
+  completeness and are explicitly OUT of conformance scope — do NOT build
+  them in a UI issue, and do NOT treat their absence from the app as a defect:
+
+    - the ⌘K search ROW (a command palette). The app has a search BUTTON in
+      the rail; the palette itself does not exist.
+    - the "Pinned" group. Pin buttons exist per row; a pinned SECTION does not.
+    - the account footer (avatar, name, plan, connection state). No such
+      component exists.
+    - the attach (paperclip) and voice (mic) buttons in the session composer.
+      Upload plumbing and MicButton exist, but the session composer renders
+      neither today; wiring them is a feature, not a restyle.
+
+  Everything else in this file is a restyle, a reorder or a deletion of
+  something the app already renders. If you believe an element is miscategorised,
+  say so in the PR — do not silently build it.
+  ===========================================================================
+
+  What this file is NOT: a component library. Nothing here is imported by the
+  app. The markup reads like the target DOM so the structure snapshot is
+  comparable, but it is throwaway HTML.
+-->
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* Only the mockup shell + the icon primitives. Everything carrying a colour,
+     a spacing step, a radius, a shadow or a type stack reads a token. */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font: 400 15px/var(--ui-lh) var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  code, kbd, pre, .mono { font-family: var(--font-mono); }
+  .ic {
+    width: 16px; height: 16px; stroke: currentColor; fill: none;
+    stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    flex-shrink: 0; display: block;
+  }
+  .ic.s  { width: 14px; height: 14px; }
+  .ic.xs { width: 12px; height: 12px; stroke-width: 2.2; }
+  .spec-notes {
+    max-width: 78ch; margin: var(--sp-8) auto; padding: 0 var(--sp-6);
+    color: var(--tx2); font-size: 14px; line-height: var(--prose-lh);
+  }
+  .spec-notes strong.h { color: var(--tx1); }
+
+  /* Row tags (from the spec's shared styles). `config only` = the config key
+     exists with no screen; `new` = does not exist yet. Part of the contract:
+     they tell an implementer a restyle from a build. */
+  .pill { display: inline-block; padding: 2px 8px; border-radius: var(--r-full);
+          font: 600 11px/1.5 var(--font-sans); }
+  .pill.bad  { background: var(--danger-bg); color: var(--danger); }
+  .pill.good { background: var(--ok-bg);     color: var(--ok); }
+  .pill.warn { background: var(--warn-bg);   color: var(--warn); }
+  .pill.info { background: var(--accent-bg); color: var(--accent-tx); }
+  .mono-inline { font-family: var(--font-mono); font-size: .9em;
+                 background: var(--fill); padding: 1px 5px;
+                 border-radius: var(--r-xs); color: var(--tx1); }
+
+
+/* ================= MOCK APP ================= */
+.app{border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-lg);
+  background:var(--canvas);display:grid;grid-template-columns:252px 1fr;height:730px;margin:var(--sp-5) 0 var(--sp-2)}
+@media(max-width:900px){.app{grid-template-columns:1fr;height:auto}.app .rail{display:none}}
+
+/* ---- rail ---- */
+.rail{background:var(--panel);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;min-width:0}
+.rail-top{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);border-bottom:1px solid var(--border-subtle);flex-shrink:0}
+.rail-top .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent) 40%,var(--info)))}
+.rail-top .nm{font:600 13px/1 var(--font-sans)}
+.iconbtn{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:transparent;color:var(--tx3);
+  cursor:pointer;display:grid;place-items:center;transition:.15s var(--ease)}
+.iconbtn:hover{background:var(--fill-hover);color:var(--tx1)}
+.iconbtn.r{margin-left:auto}
+.rail-search{padding:var(--sp-2) var(--sp-2) var(--sp-1)}
+.rail-search div{display:flex;align-items:center;gap:var(--sp-2);height:30px;padding:0 9px;border-radius:var(--r-md);
+  background:var(--fill);color:var(--tx3);font:400 12.5px/1 var(--font-sans)}
+.rail-search kbd{margin-left:auto;font:500 10px/1 var(--font-sans);color:var(--tx3);background:var(--card);
+  border:1px solid var(--border);border-radius:var(--r-xs);padding:3px 5px}
+.rail-scroll{flex:1;overflow-y:auto;padding:var(--sp-1) var(--sp-2) var(--sp-3);min-height:0}
+.grp{margin-top:var(--sp-4)}
+.grp:first-child{margin-top:var(--sp-2)}
+.grp-h{display:flex;align-items:center;gap:6px;padding:5px 6px;font:600 11px/1 var(--font-sans);
+  letter-spacing:.08em;text-transform:uppercase;color:var(--tx3);cursor:pointer;border-radius:var(--r-sm)}
+.grp-h:hover{background:var(--fill)}
+.grp-h .ic{width:12px;height:12px;color:var(--tx4);stroke-width:2.5}
+.grp-h .cnt{margin-left:auto;font:500 10px/1 var(--font-mono);color:var(--tx4);letter-spacing:0}
+
+/* ---- SESSION ROW: one line. dot · name · timer. nothing else. ---- */
+.srow{display:flex;align-items:center;gap:var(--sp-2);min-height:var(--row-h);
+  padding:var(--row-py) var(--row-px);border-radius:var(--r-md);cursor:pointer;
+  transition:background .12s var(--ease);position:relative;margin-bottom:var(--sp-1)}
+.srow:last-child{margin-bottom:0}
+.srow:hover{background:var(--fill-hover)}
+.srow.on{background:var(--raised)}
+.srow.on::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
+  width:3px;height:16px;border-radius:0 3px 3px 0;background:var(--accent)}
+.srow .st{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--tx4)}
+.srow .st.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);animation:pulse 1.6s ease-in-out infinite}
+.srow .st.att{background:var(--danger);box-shadow:0 0 0 3px var(--danger-bg);animation:pulse 1.2s ease-in-out infinite}
+.srow .st.idle{background:var(--warn)}
+.srow .st.ok{background:var(--ok)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.srow .t{font:500 13px/1.4 var(--font-sans);color:var(--tx2);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;flex:1;min-width:0}
+.srow.on .t{color:var(--tx1);font-weight:600}
+/* Timer: fixed slot so digits never jitter the row. */
+.srow .age{font:500 11px/1 var(--font-mono);color:var(--tx4);flex-shrink:0;
+  font-variant-numeric:tabular-nums;min-width:20px;text-align:right}
+.srow .age.stale{visibility:hidden}
+.srow:hover .age.stale{visibility:visible}
+/* Pin: slot is ALWAYS reserved (18px) so revealing it shifts nothing.
+   Hidden at rest in BOTH sections — membership of "Pinned" is the state signal,
+   the glyph is only the affordance. Filled = pinned, outline = not. */
+.srow .pin{width:18px;height:18px;flex-shrink:0;display:grid;place-items:center;
+  opacity:0;color:var(--tx4);transition:opacity .12s var(--ease),color .12s var(--ease);cursor:pointer}
+.srow:hover .pin,.srow.demo-hover .pin{opacity:1}
+.srow .pin:hover{color:var(--accent-tx)}
+.srow.pinned .pin .ic{fill:currentColor;stroke-width:1.25}
+.srow.pinned:hover .pin,.srow.pinned.demo-hover .pin{color:var(--accent-tx)}
+.rail-foot{border-top:1px solid var(--border-subtle);padding:var(--sp-2) var(--sp-3);display:flex;align-items:center;gap:var(--sp-2);flex-shrink:0}
+.avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--info));
+  display:grid;place-items:center;font:600 10px/1 var(--font-sans);color:#fff}
+.rail-foot .who{font:500 12.5px/1.3 var(--font-sans);color:var(--tx2)}
+.rail-foot .plan{font:500 10.5px/1.3 var(--font-mono);color:var(--tx4)}
+
+/* ---- main ---- */
+.mainpane{display:flex;flex-direction:column;min-width:0;background:var(--canvas)}
+.topb{height:46px;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);flex-shrink:0;
+  border-bottom:1px solid var(--border-subtle)}
+.crumb{display:flex;align-items:center;gap:7px;font:500 13px/1 var(--font-sans);color:var(--tx1);min-width:0}
+.crumb .mut{color:var(--tx3)}
+.crumb .slash{color:var(--tx4)}
+.tag{display:inline-flex;align-items:center;gap:5px;height:23px;padding:0 8px;border-radius:var(--r-full);
+  border:1px solid var(--border);background:var(--fill);font:500 11.5px/1 var(--font-mono);color:var(--tx3)}
+.tag .ic{width:12px;height:12px}
+.topb .sp{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2)}
+/* context lives HERE now, not in the composer */
+.ctxpill{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 9px;border-radius:var(--r-full);
+  border:1px solid var(--border);background:var(--fill);cursor:pointer}
+.ctxpill:hover{border-color:var(--border-strong)}
+.ctxpill .track{width:44px;height:5px;border-radius:3px;background:var(--fill-active);overflow:hidden;display:flex}
+.ctxpill .track i{display:block;height:100%}
+.ctxpill .pct{font:600 11.5px/1 var(--font-mono);color:var(--ok);font-variant-numeric:tabular-nums}
+.badge{position:absolute;top:2px;right:2px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;
+  background:var(--accent);color:var(--on-accent);font:600 9px/14px var(--font-sans);text-align:center}
+
+/* ---- transcript: ONE gap value ---- */
+.scroll{flex:1;overflow-y:auto;padding:var(--sp-6) 0;min-height:0}
+.wrap{max-width:var(--measure);margin:0 auto;padding:0 28px;display:flex;flex-direction:column;gap:var(--turn-gap)}
+.turn{display:flex;flex-direction:column;gap:var(--block-gap)}   /* ← the whole fix, one line */
+.uwrap{display:flex;justify-content:flex-end}
+.umsg{background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);
+  padding:11px var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);max-width:88%}
+.amsg{font:400 15px/var(--prose-lh) var(--font-sans);color:var(--tx1);display:flex;flex-direction:column;gap:var(--block-gap)}
+.amsg p{font:inherit;color:inherit;margin:0;max-width:none}
+.amsg .ic-t{font-family:var(--font-mono);font-size:.86em;background:var(--fill);
+  border:1px solid var(--border-subtle);padding:1px 5px;border-radius:var(--r-xs)}
+
+.tool{border:1px solid var(--border-subtle);border-radius:var(--r-md);background:var(--panel);overflow:hidden}
+.tool-h{display:flex;align-items:center;gap:var(--sp-2);padding:9px var(--sp-3);font:500 12.5px/1 var(--font-mono);color:var(--tx2);cursor:pointer}
+.tool-h .g{width:6px;height:6px;border-radius:50%;background:var(--ok);flex-shrink:0}
+.tool-h .g.run{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
+.tool-h .nmx{color:var(--tx1);font-weight:600}
+.tool-h .arg{color:var(--tx3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-h .r{margin-left:auto;font-size:11px;color:var(--tx4);display:flex;gap:var(--sp-2);align-items:center}
+.tool-b{border-top:1px solid var(--border-subtle);background:var(--inset);padding:var(--sp-2) var(--sp-3);
+  font:400 12.5px/1.55 var(--font-mono);color:var(--tx2);white-space:pre;overflow-x:auto}
+.dl{display:block;padding:0 6px;margin:0 -6px;border-radius:2px}
+.dl.add{background:var(--diff-add)}
+.dl.del{background:var(--diff-del)}
+.dl .ln{color:var(--tx4);display:inline-block;width:30px;user-select:none}
+
+/* ---- REDESIGNED ask card ---- */
+.ask{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);
+  box-shadow:var(--shadow-md);overflow:hidden}
+.ask-top{display:flex;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-3)}
+.ask-badge{width:30px;height:30px;border-radius:var(--r-md);display:grid;place-items:center;flex-shrink:0;
+  background:var(--warn-bg);color:var(--warn)}
+.ask-badge .ic{width:16px;height:16px}
+.ask.q .ask-badge{background:var(--accent-bg);color:var(--accent-tx)}
+.ask-txt{min-width:0;flex:1}
+.ask-txt h5{font:600 14px/1.35 var(--font-sans);color:var(--tx1);margin:0 0 2px}
+.ask-txt .sub{font:400 12.5px/1.45 var(--font-sans);color:var(--tx3)}
+.ask-cmd{margin:0 var(--sp-4);padding:9px var(--sp-3);border-radius:var(--r-md);background:var(--inset);
+  border:1px solid var(--border-subtle);font:400 12.5px/1.5 var(--font-mono);color:var(--tx1);overflow-x:auto}
+.ask-acts{display:flex;gap:var(--sp-2);padding:var(--sp-4);flex-wrap:wrap;align-items:center}
+.opt{display:block;width:calc(100% - 32px);margin:0 var(--sp-4) var(--sp-2);padding:10px var(--sp-3);
+  text-align:left;border:1px solid var(--border);border-radius:var(--r-md);background:var(--canvas);
+  font:500 13px/1.4 var(--font-sans);color:var(--tx1);cursor:pointer;transition:.15s var(--ease)}
+.opt:hover{border-color:var(--accent);background:var(--accent-bg)}
+
+.btn{height:32px;padding:0 14px;border-radius:var(--r-md);border:1px solid var(--border);background:var(--canvas);
+  color:var(--tx1);font:500 12.5px/1 var(--font-sans);cursor:pointer;display:inline-flex;align-items:center;
+  gap:6px;transition:.15s var(--ease)}
+.btn:hover{background:var(--raised);border-color:var(--border-strong)}
+.btn.pri{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent)}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--tx3)}
+.btn.ghost:hover{background:var(--fill-hover);color:var(--tx1)}
+.btn.danger{color:var(--danger);border-color:transparent;background:transparent}
+.btn.danger:hover{background:var(--danger-bg)}
+.btn .ic{width:14px;height:14px}
+.btn.pri .ic{stroke-width:2.8}
+.kbd{font:500 10px/1 var(--font-sans);color:var(--tx4);border:1px solid var(--border);border-radius:3px;padding:2px 4px;margin-left:2px}
+/* On any filled surface the canvas tokens are wrong — derive from currentColor. */
+.btn.pri .kbd{color:currentColor;background:color-mix(in srgb,currentColor 18%,transparent);border-color:transparent;opacity:.92}
+
+/* ---- composer: composing only ---- */
+.composer{flex-shrink:0;padding:0 0 var(--sp-3)}
+.comp-in{max-width:var(--measure);margin:0 auto;padding:0 28px}
+.chiprow{display:flex;align-items:center;gap:7px;margin-bottom:var(--sp-2);flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;height:29px;padding:0 11px;border-radius:var(--r-md);
+  border:1px solid var(--border);background:var(--card);font:500 12px/1 var(--font-sans);color:var(--tx2);
+  cursor:pointer;transition:.15s var(--ease);white-space:nowrap}
+.chip:hover{border-color:var(--border-strong);color:var(--tx1)}
+.chip .ic{width:13px;height:13px;color:var(--tx3)}
+.chip.split{padding:0;overflow:hidden}
+.chip.split>span{display:inline-flex;align-items:center;gap:6px;height:100%;padding:0 11px}
+.chip.split>span+span{border-left:1px solid var(--border)}
+.chip.on{border-color:var(--accent);background:var(--accent-bg);color:var(--accent-tx)}
+.chip.on .ic{color:var(--accent-tx)}
+.cbx{width:13px;height:13px;border:1.5px solid var(--border-strong);border-radius:3px;display:inline-grid;place-items:center}
+.cbx.on{background:var(--accent-solid);border-color:var(--accent-solid);color:var(--on-accent)}
+.cbx .ic{width:10px;height:10px;stroke-width:4;color:currentColor}
+.cbox{border:1px solid var(--border-strong);border-radius:var(--r-lg);background:var(--card);
+  padding:var(--sp-3) 14px;display:flex;align-items:flex-start;gap:var(--sp-3);transition:.15s var(--ease);box-shadow:var(--shadow-sm)}
+.cbox:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.cbox .ta{flex:1;font:400 15px/1.55 var(--font-sans);color:var(--tx1);min-height:22px}
+.cbox .ta.ph{color:var(--tx3)}
+.cbox .send{width:28px;height:28px;border-radius:var(--r-sm);border:0;background:var(--fill);color:var(--tx3);
+  display:grid;place-items:center;cursor:pointer;flex-shrink:0}
+.cbox .send.hot{background:var(--accent);color:var(--on-accent)}
+.metarow{display:flex;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2);flex-wrap:wrap}
+.mbtn{display:inline-flex;align-items:center;gap:6px;height:27px;padding:0 8px;border-radius:var(--r-sm);
+  border:0;background:transparent;color:var(--tx3);font:500 12px/1 var(--font-sans);cursor:pointer;transition:.15s var(--ease)}
+.mbtn:hover{background:var(--fill-hover);color:var(--tx1)}
+.mbtn .cnum{font:600 11px/1 var(--font-mono);color:var(--tx2);font-variant-numeric:tabular-nums}
+.msplit{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--r-md);
+  overflow:hidden;height:28px;background:var(--card)}
+.msplit button{border:0;background:transparent;height:100%;padding:0 10px;font:500 12px/1 var(--font-sans);
+  color:var(--tx2);cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:.15s var(--ease)}
+.msplit button:hover{background:var(--fill-hover);color:var(--tx1)}
+.msplit button+button{border-left:1px solid var(--border)}
+.msplit .lvl{color:var(--accent-tx);font-weight:600}
+.msplit .ic{width:13px;height:13px}
+.spacer{margin-left:auto}
+.trust{display:inline-flex;align-items:center;gap:6px;font:500 11.5px/1 var(--font-sans);color:var(--tx4);
+  border:0;background:transparent;cursor:pointer;padding:6px 0}
+.trust:hover{color:var(--tx2)}
+.trust .ic{width:13px;height:13px}
+/* --- capture geometry (mockup-only; not part of the spec) --------------- */
+.app { height: 100vh; width: 100vw; border: 0; border-radius: 0; margin: 0; max-width: none; }
+
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/></symbol>
+<symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></symbol>
+<symbol id="i-clip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m9 10-5 5 5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+<symbol id="i-hook" viewBox="0 0 24 24"><path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2"/><path d="m6 17 3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06"/><path d="m12 6 3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></symbol>
+<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+</defs></svg>
+<div class="app" data-screen="session">
+  <!-- ============ RAIL ============ -->
+  <aside class="rail">
+    <div class="rail-top">
+      <span class="logo"></span><span class="nm">Manta</span>
+      <button class="iconbtn r" title="New session"><svg class="ic"><use href="#i-plus"/></svg></button>
+    </div>
+    <div class="rail-search"><div><svg class="ic s"><use href="#i-search"/></svg><span>Search</span><kbd>⌘K</kbd></div></div>
+
+    <div class="rail-scroll">
+      <div class="grp">
+        <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg> Pinned</div>
+        <div class="srow pinned on"><span class="st run"></span><span class="t">Deploy new billing service</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">2m</span></div>
+        <div class="srow pinned"><span class="st att"></span><span class="t">Investigate 500s in /api</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">8m</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>ethernal</div>
+        <div class="srow"><span class="st ok"></span><span class="t">Add CSV export</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">4m</span></div>
+        <div class="srow"><span class="st"></span><span class="t">Refactor auth middleware</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">2h</span></div>
+        <div class="srow"><span class="st idle"></span><span class="t">Bump deps</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age stale">1d</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-h"><svg class="ic"><use href="#i-chev-d"/></svg>marketing</div>
+        <div class="srow"><span class="st"></span><span class="t">Landing page copy</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">3h</span></div>
+        <div class="srow"><span class="st"></span><span class="t">Build pipeline</span><span class="pin"><svg class="ic s"><use href="#i-pin"/></svg></span><span class="age">5h</span></div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-h"><svg class="ic"><use href="#i-chev-r"/></svg>infra</div>
+      </div>
+    </div>
+
+    <div class="rail-foot">
+      <span class="avatar">AC</span>
+      <span><span class="who">Antoine</span><br><span class="plan">Max · connected</span></span>
+      <button class="iconbtn r" title="Settings"><svg class="ic"><use href="#i-settings"/></svg></button>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <div class="mainpane">
+    <div class="topb">
+      <span class="crumb"><span class="mut">infra</span> <span class="slash">/</span> Deploy new billing service</span>
+      <span class="tag"><svg class="ic"><use href="#i-branch"/></svg> feat/orders-csv</span>
+      <span class="sp">
+        <span class="ctxpill" title="Context 54% — 108k of 200k">
+          <span class="track"><i style="width:34%;background:var(--ok)"></i><i style="width:12%;background:var(--warn)"></i><i style="width:8%;background:var(--info)"></i></span>
+          <span class="pct">54%</span>
+        </span>
+        <button class="iconbtn" title="Terminal"><svg class="ic"><use href="#i-terminal"/></svg></button>
+        <button class="iconbtn" title="Session menu"><svg class="ic"><use href="#i-more"/></svg></button>
+      </span>
+    </div>
+
+    <div class="scroll">
+      <div class="wrap">
+        <div class="uwrap"><div class="umsg">
+          It should accept the same filters as the existing <span class="ic-t">GET /orders</span>
+          and stream the result as CSV. Header row first, then one row per order.
+        </div></div>
+
+        <div class="turn">
+          <div class="amsg">
+            <p>I'll add a streaming CSV export next to the existing list endpoint.</p>
+            <p>Reading the current handler first so the filter logic can be shared rather than duplicated.</p>
+          </div>
+
+          <div class="tool">
+            <div class="tool-h"><span class="g"></span><span class="nmx">Read</span><span class="arg">app/routes/orders.py</span>
+              <span class="r"><span>23 lines</span><svg class="ic xs"><use href="#i-chev-d"/></svg></span></div>
+          </div>
+
+          <div class="tool">
+            <div class="tool-h"><span class="g"></span><span class="nmx">Edit</span><span class="arg">app/routes/orders.py</span>
+              <span class="r"><span style="color:var(--ok)">+38</span><span style="color:var(--danger)">−4</span><svg class="ic xs"><use href="#i-chev-d"/></svg></span></div>
+            <div class="tool-b"><span class="dl"><span class="ln">10</span>@router.get("")</span><span class="dl del"><span class="ln">11</span>−async def list_orders(</span><span class="dl add"><span class="ln">11</span>+async def list_orders(</span><span class="dl"><span class="ln">12</span>    status: str | None = Query(default=None),</span><span class="dl add"><span class="ln">17</span>+) -&gt; list[dict]:</span></div>
+          </div>
+
+          <div class="amsg">
+            <p>The filter block is now shared. The new <span class="ic-t">/export.csv</span> route streams through <span class="ic-t">app/utils/stream.py</span>, so a 100k-row export never lands in memory.</p>
+            <p>Running the migration next — that needs your approval.</p>
+          </div>
+
+          <div class="ask">
+            <div class="ask-top">
+              <span class="ask-badge"><svg class="ic"><use href="#i-shield"/></svg></span>
+              <span class="ask-txt">
+                <h5>Run a shell command?</h5>
+                <span class="sub">Applies the pending Alembic migration to the dev database.</span>
+              </span>
+            </div>
+            <div class="ask-cmd">alembic upgrade head</div>
+            <div class="ask-acts">
+              <button class="btn pri"><svg class="ic"><use href="#i-check"/></svg> Allow once <span class="kbd">⏎</span></button>
+              <button class="btn">Always allow <span style="color:var(--tx3)">alembic</span></button>
+              <span class="spacer"></span>
+              <button class="btn danger"><svg class="ic"><use href="#i-x"/></svg> Reject</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="comp-in">
+        <div class="cbox">
+          <span class="ta ph">Reply, or describe the next task…</span>
+          <button class="send hot"><svg class="ic s"><use href="#i-send"/></svg></button>
+        </div>
+        <div class="metarow">
+          <div class="msplit">
+            <button><svg class="ic"><use href="#i-spark"/></svg> Opus 4.8 <svg class="ic xs" style="color:var(--tx4)"><use href="#i-chev-d"/></svg></button>
+            <button><span class="lvl">High</span> <svg class="ic xs" style="color:var(--tx4)"><use href="#i-chev-d"/></svg></button>
+          </div>
+          <button class="mbtn" title="Attach"><svg class="ic s"><use href="#i-clip"/></svg></button>
+          <button class="mbtn" title="Voice"><svg class="ic s"><use href="#i-mic"/></svg></button>
+          <span class="spacer"></span>
+          <button class="mbtn" title="Scheduled tasks"><svg class="ic s"><use href="#i-clock"/></svg> <span class="cnum">2</span></button>
+          <button class="mbtn" title="Secrets"><svg class="ic s"><use href="#i-key"/></svg></button>
+          <button class="mbtn" title="Webhooks"><svg class="ic s"><use href="#i-hook"/></svg></button>
+        </div>
+        <button class="trust"><svg class="ic"><use href="#i-shield"/></svg> Permissions on — click to bypass</button>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="spec-notes">
+  <strong class="h">Spec notes — the parts a screenshot cannot express.</strong>
+  <strong>Two numbers govern the transcript.</strong> Every sibling block inside one turn —
+  paragraph, tool card, diff, todo list, permission card, question card — is separated by
+  <code>--block-gap</code> (12px). Turns are separated by <code>--turn-gap</code> (24px),
+  which is double. The gap comes from one <code>gap</code> on the turn container, never from
+  per-child margins, so a new block type inherits the rhythm and cannot opt out. Today three
+  components each pick their own value (4 / 8 / 8 / 12px) and the hierarchy is inverted: the
+  gap between turns is larger than the gap between a paragraph and the tool card it
+  introduces, which is why the transcript reads as one undifferentiated column.
+  <strong>The transcript is measure-capped</strong> at <code>--measure</code> (72ch) and
+  centred. Ask cards sit at that same measure, edge-aligned with the prose — they are blocks
+  in the conversation, not floating overlays, so they are never narrower or wider than the
+  body around them.
+  <strong>The header owns session state; the composer owns composing.</strong> Context %,
+  branch and the session menu (⋯) belong in the header. Model ▸ effort, attach, voice, send,
+  the bypass-permissions toggle and the three resource buttons stay by the input, because
+  they change what happens when you press Enter.
+  <strong>The sidebar row is one line and four fixed slots</strong> — [dot] [name] [pin]
+  [timer]. The pin slot is permanently 18px wide whether or not a glyph is in it, so nothing
+  shifts on hover; the timer has a min-width and tabular figures so 4m → 12m does not nudge
+  it either. One dot carries every state: no trailing badge, no second status glyph, no
+  branch or model subtitle.
+  <strong>Emphasis:</strong> the loudest element on the screen is the primary action of
+  whatever is blocking — the filled <em>Allow once</em> when a permission card is open.
+  Reject is pushed to the far right and tinted only on hover, so the destructive option is
+  reachable but never where the eye lands first.
+  <strong>What grows:</strong> the transcript grows vertically within its measure; the
+  composer grows downward from a fixed top edge, so the send control never moves.
+  <strong>Icons are stroked, never emoji</strong> — emoji render differently per platform and
+  cannot take <code>currentColor</code>, which is why today's toolbar cannot be themed.
+</p>
+</body>
+</html>
