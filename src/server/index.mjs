@@ -708,13 +708,17 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
-  // GET    /auth/pair            → {pairing_code, box_id, expiresAt}
-  //                                Mint a one-time, ~5-min code. The desktop
-  //                                shows it (and encodes box_id+code in a QR
-  //                                for mobile).
-  // POST   /auth/claim {pairing_code} → {box_token, box_id}
-  //                                Exchange a valid code for the bearer token.
+  // GET    /auth/pair            → {pairing_code, box_id, expiresAt, verify}
+  //                                Mint a one-time, ~5-min code + the four-
+  //                                character verification code (§5.3/§6.4). The
+  //                                desktop shows both (and encodes box_id+code
+  //                                in a QR for mobile).
+  // POST   /auth/claim {pairing_code, verify?} → {box_token, box_id, device_id}
+  //                                Exchange a valid code for a device credential.
   //                                One-time; 403 on wrong/expired/reused code.
+  //                                `verify` (BET-493): when the joiner echoes the
+  //                                four characters it provisions a DISTINCT
+  //                                Stage-2 device; absent → legacy primary token.
   // DELETE /auth/revoke           → 200 on success; 400/401 on bad token.
   //                                "Remove this box from the device that holds
   //                                the current box_token" (BET-357 §2). Mints

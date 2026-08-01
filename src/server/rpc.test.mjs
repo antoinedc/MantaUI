@@ -256,6 +256,7 @@ test("auth:pair translates snake_case authEngine.pair() output to AuthPairResult
     pairing_code: "123456",
     box_id: "abc",
     expiresAt: "2026-01-01T00:00:00Z",
+    verify: "K7Q2",
   });
   const handlers = buildHandlers(deps);
   const result = await dispatch(handlers, "auth:pair", []);
@@ -264,6 +265,7 @@ test("auth:pair translates snake_case authEngine.pair() output to AuthPairResult
     pairingCode: "123456",
     boxId: "abc",
     expiresAt: "2026-01-01T00:00:00Z",
+    verify: "K7Q2",
   });
 });
 
