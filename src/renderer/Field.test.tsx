@@ -109,6 +109,14 @@ describe("Field", () => {
     expect(h.container.querySelector('[role="status"]')?.textContent).toBe("Saved");
   });
 
+  it("passes through type=number with min/max bounds", () => {
+    h = mount(<Field value="14096" type="number" min={1} max={65535} />);
+    const el = inputEl(h.container);
+    expect(el.getAttribute("type")).toBe("number");
+    expect(el.getAttribute("min")).toBe("1");
+    expect(el.getAttribute("max")).toBe("65535");
+  });
+
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
     // If Field ever grew a className prop this directive becomes unused and
     // typecheck fails — the standing-decision-3 guard lives in the types.

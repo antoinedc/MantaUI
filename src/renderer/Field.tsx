@@ -38,7 +38,10 @@ type FieldProps = {
   label?: string;
   /** Accessible name for the input when there is no visible label. */
   ariaLabel?: string;
-  type?: "text" | "password";
+  type?: "text" | "password" | "number";
+  /** For `type="number"`: the min/max bounds passed to the native input. */
+  min?: number;
+  max?: number;
   value: string;
   placeholder?: string;
   onChange?: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -67,6 +70,8 @@ export function Field({
   label,
   ariaLabel,
   type = "text",
+  min,
+  max,
   value,
   placeholder,
   onChange,
@@ -100,6 +105,8 @@ export function Field({
         <input
           id={id}
           type={type}
+          min={min}
+          max={max}
           placeholder={placeholder}
           value={value}
           onChange={onChange}

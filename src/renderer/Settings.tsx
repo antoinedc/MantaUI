@@ -602,20 +602,18 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <details>
               <summary className="text-body text-text-muted cursor-pointer select-none">Advanced</summary>
               <div className="mt-4 space-y-1">
-                <label htmlFor="setting-opencodePort" className="block text-micro font-semibold uppercase text-text-muted">opencode port</label>
-                <input
+                <Field
                   id="setting-opencodePort"
+                  label="opencode port"
                   type="number"
                   min={1}
                   max={65535}
                   value={opencodePortDraft}
                   onChange={(e) => { setOpencodePortDraft(e.target.value); setOpencodePortSavedAt(null); }}
                   onBlur={commitOpencodePort}
-                  spellCheck={false}
-                  className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent font-mono"
+                  help="Local port forwarded to the box's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096."
+                  footer={opencodePortSavedAt ? <div role="status" className="text-meta text-ok">Saved</div> : undefined}
                 />
-                <div className="text-meta text-text-faint">Local port forwarded to the box's opencode serve instance. Defaults to 14096 to avoid colliding with a local opencode on 4096.</div>
-                {opencodePortSavedAt && <div role="status" className="text-meta text-ok">Saved</div>}
               </div>
             </details>
           </GroupCard>
