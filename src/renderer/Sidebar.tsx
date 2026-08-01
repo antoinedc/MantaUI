@@ -1,4 +1,5 @@
 import {
+  cloneElement,
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -6,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
@@ -815,6 +817,49 @@ function PinSlot({
   );
 }
 
+// One composed session row: the SessionRow primitive PLUS the session delete
+// affordance. Right-clicking a row requests the delete confirm (the same
+// context-menu behaviour both window and job rows share) and, when armed, the
+// ConfirmDelete dialog renders below the row. Both the top-level window rows
+// and the nested job rows render through this, so the delete-on-context-menu
+// handler + ConfirmDelete block live in exactly ONE place — without it the
+// SessionRow migration would reintroduce the 17-line clone between
+// WindowRow/JobChildRow that BET-536 is supposed to remove.
+function DeletableSessionRow({
+  row,
+  showConfirm,
+  label,
+  onKill,
+  onCancel,
+  onRequestDelete,
+  children,
+}: {
+  /** The SessionRow element; its onContextMenu is overridden to request the delete. */
+  row: ReactElement;
+  showConfirm: boolean;
+  /** ConfirmDelete label, e.g. `session "Deploy"`. */
+  label: string;
+  onKill: () => void;
+  onCancel: () => void;
+  onRequestDelete: () => void;
+  /** Optional extra sibling confirm dialogs (e.g. the worktree-dirty prompt). */
+  children?: ReactNode;
+}) {
+  return (
+    <div>
+      {cloneElement(row, {
+        onContextMenu: (e: React.MouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onRequestDelete();
+        },
+      })}
+      {showConfirm && <ConfirmDelete label={label} onKill={onKill} onCancel={onCancel} />}
+      {children}
+    </div>
+  );
+}
+
 // The four-slot session row: [status dot] [name] [pin slot] [timer]. One line,
 // nothing else. The close (X) is a hover-revealed overlay in the trailing
 // timer slot so the at-rest layout is exactly four slots and hover shifts
@@ -880,51 +925,47 @@ function WindowRow({
   const dot = dotFor(status);
   const age = useAge(status);
   return (
-    <div>
-      <SessionRow
-        status={dot.variant}
-        statusTitle={dot.title}
-        selected={isActive}
-        name={
-          isRenaming ? (
-            <RenameInput
-              value={renameValue}
-              onChange={setRenameValue}
-              onCommit={commitRename}
-              onCancel={cancelRename}
-              size="window"
-            />
-          ) : (
-            <span
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                onRename();
-              }}
-            >
-              {w.name}
-            </span>
-          )
-        }
-        age={age.text}
-        ageStale={age.stale}
-        trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
-        title={title}
-        tabIndex={focused ? 0 : -1}
-        ariaSelected={isActive}
-        onClick={onActivate}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onClose();
-        }}
-      />
-      {showConfirm && (
-        <ConfirmDelete
-          label={`session "${w.name}"`}
-          onKill={onKillWindow}
-          onCancel={() => setConfirmDeleteFor(null)}
+    <DeletableSessionRow
+      row={
+        <SessionRow
+          status={dot.variant}
+          statusTitle={dot.title}
+          selected={isActive}
+          name={
+            isRenaming ? (
+              <RenameInput
+                value={renameValue}
+                onChange={setRenameValue}
+                onCommit={commitRename}
+                onCancel={cancelRename}
+                size="window"
+              />
+            ) : (
+              <span
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  onRename();
+                }}
+              >
+                {w.name}
+              </span>
+            )
+          }
+          age={age.text}
+          ageStale={age.stale}
+          trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
+          title={title}
+          tabIndex={focused ? 0 : -1}
+          ariaSelected={isActive}
+          onClick={onActivate}
         />
-      )}
+      }
+      showConfirm={showConfirm}
+      label={`session "${w.name}"`}
+      onKill={onKillWindow}
+      onCancel={() => setConfirmDeleteFor(null)}
+      onRequestDelete={onClose}
+    >
       {showWorktreeConfirm && confirmDeleteFor?.kind === "worktree-dirty" && (
         <ConfirmWorktreeDirty
           worktreePath={confirmDeleteFor.worktreePath}
@@ -932,7 +973,7 @@ function WindowRow({
           onKeep={() => onKillWorktreeDirty(confirmDeleteFor.worktreePath, false)}
         />
       )}
-    </div>
+    </DeletableSessionRow>
   );
 }
 
@@ -971,34 +1012,29 @@ function JobChildRow({
   const dot = dotFor(status);
   const age = useAge(status);
   return (
-    <div>
-      <SessionRow
-        status={dot.variant}
-        statusTitle={dot.title}
-        selected={isActive}
-        child
-        name={w.name}
-        age={age.text}
-        ageStale={age.stale}
-        title={title}
-        ariaLevel={2}
-        tabIndex={focused ? 0 : -1}
-        ariaSelected={isActive}
-        onClick={onActivate}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onClose();
-        }}
-      />
-      {showConfirm && (
-        <ConfirmDelete
-          label={`session "${w.name}"`}
-          onKill={onKillWindow}
-          onCancel={() => setConfirmDeleteFor(null)}
+    <DeletableSessionRow
+      row={
+        <SessionRow
+          status={dot.variant}
+          statusTitle={dot.title}
+          selected={isActive}
+          child
+          name={w.name}
+          age={age.text}
+          ageStale={age.stale}
+          title={title}
+          ariaLevel={2}
+          tabIndex={focused ? 0 : -1}
+          ariaSelected={isActive}
+          onClick={onActivate}
         />
-      )}
-    </div>
+      }
+      showConfirm={showConfirm}
+      label={`session "${w.name}"`}
+      onKill={onKillWindow}
+      onCancel={() => setConfirmDeleteFor(null)}
+      onRequestDelete={onClose}
+    />
   );
 }
 
