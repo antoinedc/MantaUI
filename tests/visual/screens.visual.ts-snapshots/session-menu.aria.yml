@@ -1,0 +1,11 @@
+- menu:
+  - text: Mode
+  - button "Chat"
+  - button "Terminal"
+  - text: AI-CLI
+  - button "Claude Code"
+  - button "Codex"
+  - button "Fork session"
+  - button "Compact context"
+  - button "Clear session"
+  - button "Delete session"
