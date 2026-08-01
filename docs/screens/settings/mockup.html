@@ -405,5 +405,24 @@
   <em>config only</em> means the config key exists with no screen, and <em>new</em> means it
   does not exist yet — so an implementer can tell a restyle from a build.
 </p>
+<script>
+  // Section rail switching, so the visual gate can reveal any panel before
+  // capture (scripts/visual/compare.mjs `mockupActions` clicks [data-tab]).
+  // Design-neutral: the default state is unchanged (the `general` panel is
+  // already `on`; nothing else toggles until a rail button is clicked).
+  (function () {
+    var tabs = document.querySelectorAll(".snav [data-tab]");
+    var panels = document.querySelectorAll(".setpanel");
+    tabs.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var tab = btn.getAttribute("data-tab");
+        tabs.forEach(function (b) { b.classList.toggle("on", b === btn); });
+        panels.forEach(function (p) {
+          p.classList.toggle("on", p.getAttribute("data-panel") === tab);
+        });
+      });
+    });
+  })();
+</script>
 </body>
 </html>
