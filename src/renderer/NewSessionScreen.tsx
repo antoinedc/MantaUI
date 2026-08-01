@@ -70,8 +70,14 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   const [cwd, setCwd] = useState<string>(isNewProject ? "~" : "");
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  // Branch / worktree chip state.
-  const [wantWorktree, setWantWorktree] = useState(worktreePerSession);
+  // Branch / worktree chip state. Starts OFF in new-project mode: the
+  // composer opens on "~" (never a git repo), so pre-arming the worktree
+  // intent from config would ship a "checked but can't be honored" chip
+  // (BET-445). It stays config-driven for new-session mode, where the cwd is
+  // a real project folder.
+  const [wantWorktree, setWantWorktree] = useState(
+    isNewProject ? false : worktreePerSession,
+  );
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
   // BET-417 §A: "Ticking worktree makes the branch field editable." When
@@ -371,6 +377,13 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     return parts[parts.length - 1] || cwd;
   }, [cwd]);
 
+  // Empty state (BET-445): new-project mode opens on "~", which is never a
+  // git repo, so the worktree intent can't be honored yet. Render the chip
+  // unchecked and enabled so the picker can choose a folder first — matching
+  // the mockup. Outside this state the chip is gated on isGitRepo.
+  const emptyWorktree = isNewProject && !isGitRepo;
+  const worktreeChipEnabled = emptyWorktree || isGitRepo;
+
   return (
     // data-screen is the visual harness's handle on this screen (see
     // scripts/visual/screens.mjs). One stable attribute per screen root, so
@@ -430,14 +443,14 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             )}
             <label
               className={`inline-flex items-center gap-1.5 pl-3 pr-3 self-stretch border-l border-border ${
-                isGitRepo ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+                worktreeChipEnabled ? "cursor-pointer" : "cursor-not-allowed opacity-50"
               }`}
-              title={isGitRepo ? "Create in a fresh git worktree" : "not a git repository"}
+              title={worktreeChipEnabled ? "Create in a fresh git worktree" : "not a git repository"}
             >
               <input
                 type="checkbox"
                 checked={wantWorktree}
-                disabled={!isGitRepo}
+                disabled={!worktreeChipEnabled}
                 onChange={(e) => setWantWorktree(e.target.checked)}
                 className="accent-accent"
               />
