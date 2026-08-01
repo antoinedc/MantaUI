@@ -16,11 +16,16 @@ import { useState, type ReactNode } from "react";
 import { Shield, HelpCircle, Check } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
+import { Card } from "./Card";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
-// One card surface (edge, radius, padding, the transcript measure it
-// inherits) plus badge/title/sub/body/actions slots for both ask cards.
+// One card surface through the Card chrome primitive (edge, radius, padding,
+// the transcript measure it inherits) plus badge/title/sub/body/actions
+// slots for both ask cards. `text-meta` lives on a wrapper (not Card) because
+// Card owns the chrome uniformly and the GroupCard adopters don't use the
+// meta size — keeping it here preserves each ask card's inherited 12px text
+// with no visual change (BET-531).
 function AskCardShell({
   badge,
   badgeBg,
@@ -39,21 +44,26 @@ function AskCardShell({
   actions: ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-bg-soft text-meta py-3 px-4">
-      <div className="flex items-start gap-3">
-        <span
-          className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
-          style={{ backgroundColor: badgeBg, color: badgeColor }}
-        >
-          {badge}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-text font-medium mb-px">{title}</div>
-          {subtitle && <div className="text-text-muted mb-px">{subtitle}</div>}
-        </div>
-      </div>
-      {body && <div className="mt-3">{body}</div>}
-      <div className="flex items-center gap-2 mt-4">{actions}</div>
+    <div className="text-meta">
+      <Card
+        header={
+          <>
+            <span
+              className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
+              style={{ backgroundColor: badgeBg, color: badgeColor }}
+            >
+              {badge}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-text font-medium mb-px">{title}</div>
+              {subtitle && <div className="text-text-muted mb-px">{subtitle}</div>}
+            </div>
+          </>
+        }
+        actions={actions}
+      >
+        {body || undefined}
+      </Card>
     </div>
   );
 }

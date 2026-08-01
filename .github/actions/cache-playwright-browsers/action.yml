@@ -1,0 +1,19 @@
+name: Cache and install Playwright pinned Chromium
+description: |
+  Caches Playwright's browser download (keyed on the Playwright version via
+  package-lock.json) and installs the pinned Chromium. --with-deps needs sudo
+  apt and is only required the first time on a given runner. Single source for
+  the drift and visual/E2E gates, so every capture drives the same renderer.
+runs:
+  using: composite
+  steps:
+    - name: Cache Playwright browsers
+      id: pw-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+    - name: Install Playwright Chromium
+      shell: bash
+      run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}

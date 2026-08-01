@@ -2,7 +2,7 @@
 - paragraph: Start a session on any folder your box can see.
 - button "Home"
 - text: no branch
-- checkbox "worktree" [checked] [disabled]
+- checkbox "worktree"
 - text: worktree
 - textbox "Describe a task or ask a question"
 - button "Start a session" [disabled]

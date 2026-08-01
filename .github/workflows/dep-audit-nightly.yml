@@ -78,18 +78,11 @@ jobs:
       - name: Install dependencies
         if: steps.nm-cache.outputs.cache-hit != 'true'
         run: npm ci
-      # ffmpeg — `npm run shots` extracts website/hero-poster.webp from
-      # hero.mp4 (scripts/shots.mjs); ubuntu-24.04 images no longer ship it.
-      - name: Install ffmpeg (hero-poster extraction)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: Cache Playwright browsers
-        id: pw-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
-      - name: Install Playwright Chromium
-        run: npx playwright install ${{ steps.pw-cache.outputs.cache-hit == 'true' && 'chromium' || '--with-deps chromium' }}
+      # ffmpeg + Playwright's pinned Chromium are the same shared units ci.yml
+      # uses, so the capture drives the same browser/encoder the baselines were
+      # encoded under.
+      - uses: ./.github/actions/install-ffmpeg
+      - uses: ./.github/actions/cache-playwright-browsers
       - name: Shot drift on main — regenerate website/shot-*.webp and diff against the committed set
         run: |
           npm run shots

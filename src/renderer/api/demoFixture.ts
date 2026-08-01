@@ -665,6 +665,23 @@ export const demoModels: OpencodeModel[] = [
     limit: { context: 200_000, output: 16_000 },
     capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
   },
+  // Third model exists so the visual gate can capture the effort picker's
+  // OPEN state (BET-511): the two default models expose no `variants`, which
+  // leaves the effort button permanently disabled. This one carries a variant
+  // list, so selecting it enables the picker and its dropdown can be opened by
+  // a real user gesture. It is NOT the default active model, so existing
+  // captures (whose effort pill stays "High" [disabled]) are unchanged — it
+  // only renders inside the model-picker dropdown once that is opened.
+  {
+    id: "claude-opus-4-7-thinking",
+    providerID: "anthropic",
+    name: "Claude Opus 4.7 Rationale",
+    status: "active",
+    enabled: true,
+    limit: { context: 1_000_000, output: 32_000 },
+    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    variants: [{ id: "balanced" }, { id: "maximum" }],
+  },
 ];
 
 // AI-CLI TUI launchers the box reports (src/server/launcherRegistry.mjs,
