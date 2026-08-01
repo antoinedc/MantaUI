@@ -92,7 +92,7 @@ export const SCREENS = [
     title: "Welcome / new session composer (zero projects)",
     // The zero-project state IS this screen: App renders the new-session
     // composer full-panel when the box has no projects yet.
-    url: "/app/index.html?demo&desktop&empty",
+    url: "/app/index.html?demo&desktop&state=empty",
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
@@ -125,6 +125,19 @@ export const SCREENS = [
       "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
+  },
+  {
+    // The version-skew banner is a blocking, non-dismissible bar that no
+    // capture has ever rendered. Same screen, same fixture, one URL param.
+    id: "session-version-skew",
+    title: "Session view with the version-skew banner (state)",
+    url: "/app/index.html?demo&desktop&state=version-skew",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    // No mockup draws the banner; `null` is the registry's documented way to
+    // say "no design filed" and the row still gets structure + pixels.
+    mockup: null,
   },
   {
     // REGION ROWS for the session view (BET-468). The header strip and the

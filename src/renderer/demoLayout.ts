@@ -24,22 +24,30 @@ export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
   return null;
 }
 
-// Which fixture dataset the demo transport serves.
+// Which fixture state the demo transport serves.
 //
-// "full"  — the populated fixture (projects, sessions, a transcript). The
-//           default, and what the marketing shots capture.
-// "empty" — a box with no projects yet. This is a REAL product state (a
-//           freshly-paired box), and it is the only way to reach the
-//           zero-project screens, which otherwise require deleting fixture
-//           data from a live box.
+// Every fixture state the demo transport can serve is a single named member
+// here plus its branch in demoApi — never a new URL boolean. Each state is
+// reachable by pasting a URL into a browser, so a human reviewer sees
+// exactly what the machine captured.
 //
-// Exposed as a URL flag rather than a code path so every state the visual
-// harness captures is reachable by pasting a URL into a browser — a human
-// reviewer can see exactly what the machine saw. Keep it that way: if a
-// screen can only be reached by poking internals, make it URL-addressable
-// instead of teaching the harness a special case.
-export type DemoDataset = "full" | "empty";
+// "full"         — the populated fixture (projects, sessions, a transcript).
+//                  The default, and what the marketing shots capture.
+// "empty"        — a box with no projects yet. This is a REAL product state
+//                  (a freshly-paired box), and it is the only way to reach
+//                  the zero-project screens, which otherwise require
+//                  deleting fixture data from a live box.
+// "version-skew" — minClient raised above the client so the non-dismissible
+//                  version-skew banner renders (the first non-happy-path
+//                  capture).
+export const DEMO_STATES = ["full", "empty", "version-skew"] as const;
+export type DemoState = (typeof DEMO_STATES)[number];
 
-export function pickDemoDataset(params: URLSearchParams): DemoDataset {
-  return params.has("empty") ? "empty" : "full";
+/** `?demo&state=<name>`. An unknown or absent value falls back to "full", so
+ *  a typo degrades to the default capture rather than a blank screen. */
+export function pickDemoState(params: URLSearchParams): DemoState {
+  const raw = params.get("state");
+  return (DEMO_STATES as readonly string[]).includes(raw ?? "")
+    ? (raw as DemoState)
+    : "full";
 }
