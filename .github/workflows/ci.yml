@@ -111,6 +111,19 @@ jobs:
       - name: Install Pillow (scripts/*.py image generation)
         run: python3 -m pip install --quiet --disable-pip-version-check pillow
 
+      # ── ffmpeg — the drift gate runs `npm run shots`, which extracts
+      #    website/hero-poster.webp from hero.mp4 (scripts/shots.mjs). Same
+      #    class of breakage as Pillow above: the self-hosted runner had it,
+      #    and GitHub dropped ffmpeg from the ubuntu-24.04 image, so the step
+      #    died with "ffmpeg not found at /usr/bin/ffmpeg".
+      #    NOTE: shots.mjs hardcodes that absolute path rather than resolving
+      #    the binary from PATH. apt installs to /usr/bin so this works, but
+      #    the hardcode is still wrong (a Homebrew ffmpeg lands in
+      #    /opt/homebrew/bin and would not be found) — tracked separately;
+      #    not fixed here because main is red and this PR is the unblock.
+      - name: Install ffmpeg (hero-poster extraction in the drift gate)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: Typecheck
         run: npm run typecheck
 
