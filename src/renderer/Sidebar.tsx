@@ -493,6 +493,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         role="tree"
         aria-label="Sessions"
         tabIndex={-1}
+        data-density="comfortable"
         onKeyDown={onRailKeyDown}
       >
         {projects.length === 0 && (
