@@ -20,6 +20,7 @@ import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
 import { TtlToggle } from "./TtlToggle";
+import { Card } from "./Card";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -226,28 +227,23 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
   ],
 };
 
-// A --card surface with a micro-caps group heading (BET-461 §4): --card bg,
-// --border edge, --r-lg radius, 12px vertical / 16px horizontal padding.
-function GroupCard({ title, danger = false, className, children }: {
+// A --card surface with a micro-caps group heading (BET-461 §4). The chrome
+// (--card bg, --border edge, --r-lg radius, 12px v / 16px h padding) lives on
+// the Card primitive; GroupCard keeps only its group title + the space-y gap
+// between its entries (BET-531).
+export function GroupCard({ title, danger = false, children }: {
   title?: string;
   danger?: boolean;
-  className?: string;
   children: ReactNode;
 }) {
   return (
-    <div className={className}>
+    <div>
       {title && (
         <h5 className="mb-3 text-micro font-semibold uppercase tracking-wide text-text-faint">{title}</h5>
       )}
-      <div
-        className={
-          danger
-            ? "rounded-xl border border-danger bg-danger-bg px-4 py-3 space-y-4"
-            : "rounded-xl border border-border bg-bg-soft px-4 py-3 space-y-4"
-        }
-      >
-        {children}
-      </div>
+      <Card danger={danger}>
+        <div className="space-y-4">{children}</div>
+      </Card>
     </div>
   );
 }
