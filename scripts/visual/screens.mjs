@@ -162,6 +162,28 @@ export const SCREENS = [
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
   },
+  {
+    // The ⋯ session menu is the only entry point for AI-CLI launcher modes
+    // (BET-467). It is closed in every other captured state, so without this
+    // row the launcher entries appear in no capture at all — the gap that let
+    // BET-459 drop them.
+    id: "session-menu",
+    title: "Session menu — mode switch + session actions (region)",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: '[role="menu"]',
+    region: ".manta-session-menu-dropdown",
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+      await page.getByRole("button", { name: "Session actions" }).click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    // No design exists for the OPEN menu — docs/screens/session/mockup.html
+    // draws the ⋯ button (line 375) but not its dropdown. `null` is the
+    // registry's documented way to say "no design filed"; the row still gets
+    // a structure snapshot and a pixel baseline.
+    mockup: null,
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */
