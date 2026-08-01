@@ -53,9 +53,7 @@
   - code: csv_stream
   - text: ", and writes the header first. Running the test suite now — should turn green on the new"
   - code: test_…
-  - text: /cases\. ⎿ ■ Add \/api\/v1\/orders\/export\.csv endpoint ☐ Test with \d+-row synthetic dataset ☐ Update API docs ✓ Inspect existing \/orders route \+ filter parser ✓ Confirm streaming response helper signature Question/
-  - button "Reject question"
-  - text: "Column order Which CSV column ordering should `/export.csv` use? Match the JSON shape"
+  - text: "/cases\\. ⎿ ■ Add \\/api\\/v1\\/orders\\/export\\.csv endpoint ☐ Test with \\d+-row synthetic dataset ☐ Update API docs ✓ Inspect existing \\/orders route \\+ filter parser ✓ Confirm streaming response helper signature Question Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"
@@ -63,11 +61,11 @@
   - radio "Custom (specify in notes)"
   - textbox "Or type your own answer…"
   - separator
-  - button "Cancel"
+  - button "Dismiss"
   - button "Submit" [disabled]
   - text: Run a shell command? bash
-  - button "Always allow"
   - button "Allow once"
+  - button "Always allow alembic upgrade *"
   - button "Reject"
   - textbox "Try something… (@ files · / commands · tab insert · ⏎ send)":
     - /placeholder: Try something…  (@ files · / commands · tab insert · ⏎ send)
