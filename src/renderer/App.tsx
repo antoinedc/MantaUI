@@ -21,7 +21,7 @@ import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
-import { parsePairPayload } from "./mobile/pairPayload";
+import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import type { AvailableLauncher } from "../shared/types";
 

@@ -2,7 +2,7 @@
 //
 // The QR encodes the CANONICAL box-form `<scheme>://pair?box=<boxId>&code=<6-digit>`
 // payload produced by the SHARED `buildPairPayload` helper
-// (src/renderer/mobile/pairPayload.ts). BET-237 removed the deprecated
+// (src/shared/pairPayload.ts). BET-237 removed the deprecated
 // serverUrl / id forms — `parsePairPayload` rejects anything other than
 // `box=<boxId>&code=<6-digit>`. The canonical form is the SAME shape `manta
 // pair` prints + the install heredoc + the deep-link handler in
@@ -24,7 +24,7 @@
 // renderer at build time (electron.vite.config.ts renderer `define`).
 
 import { useEffect, useMemo, useState } from "react";
-import { buildPairPayload } from "./mobile/pairPayload";
+import { buildPairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 
 // Channel-aware scheme for the QR prefix. The baked `__MANTA_CHANNEL__`

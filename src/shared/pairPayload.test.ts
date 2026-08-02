@@ -4,7 +4,7 @@ import {
   buildPairPayload,
   type PairPayload,
 } from "./pairPayload";
-import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
+import { CHANNELS, CHANNEL_IDS } from "./channel.mjs";
 // BET-386: install-lib.mjs's buildPairLink is the OTHER emitter of this
 // wire shape (install.sh's pairing block, via scripts/manta-pair.mjs) —
 // plain .mjs, no Electron/DOM dependency, importable straight into vitest's
@@ -13,7 +13,7 @@ import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
 // parser in one place, rather than re-implementing the wire shape as a
 // literal string in scripts/install.test.mjs (which is plain Node and
 // can't load this .ts parser directly).
-import { buildPairLink } from "../../../scripts/install-lib.mjs";
+import { buildPairLink } from "../../scripts/install-lib.mjs";
 
 const BOX = "0123456789abcdef0123456789abcdef"; // 32 hex
 

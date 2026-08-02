@@ -1146,7 +1146,7 @@ export function formatPairingOutput(
 
 /**
  * Build the canonical box-form pair link. Mirrors the renderer-side
- * `buildPairPayload` (src/renderer/mobile/pairPayload.ts) but lives here as
+ * `buildPairPayload` (src/shared/pairPayload.ts) but lives here as
  * a tiny local helper because install-lib.mjs is plain Node — importing the
  * TS helper would cross a transpile boundary for a one-liner. The shape
  * MUST round-trip through `parsePairPayload` to a non-null payload, so the
@@ -1172,7 +1172,7 @@ export function formatPairingOutput(
  * literal — mirrors how `pairPage.mjs`'s `validatePairQrQuery` and the
  * renderer's `buildPairPayload` take the same channel-derived value.
  *
- * Cross-reference: keep in sync with src/renderer/mobile/pairPayload.ts
+ * Cross-reference: keep in sync with src/shared/pairPayload.ts
  * `buildPairPayload` (box-form branch). If the canonical shape changes,
  * BOTH helpers must change in lockstep — the test catches drift.
  */

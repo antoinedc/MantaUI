@@ -30,7 +30,7 @@ export {
   networkFailure,
 } from "../../shared/claim.mjs";
 import { isSubmittableCode, normalizeCode } from "../../shared/claim.mjs";
-import { normalizeVerifyCode } from "./pairPayload";
+import { normalizeVerifyCode } from "../../shared/pairPayload";
 import type { ClaimFailureKind, ClaimOutcome } from "../../shared/claim.mjs";
 
 // Historical alias: the mobile client + tests refer to the classified outcome

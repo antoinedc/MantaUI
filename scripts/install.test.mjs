@@ -597,7 +597,7 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
   // enforce the wire shape on the install-lib helper so a future drift is
   // caught here. (BET-386: the actual cross-module round-trip against the
   // real `parsePairPayload`, for all three channel schemes, lives in
-  // src/renderer/mobile/pairPayload.test.ts — vitest, not plain Node,
+  // src/shared/pairPayload.test.ts — vitest, not plain Node,
   // can load the .ts parser directly.)
   //
   // 1. install-lib's buildPairLink produces the canonical shape:
@@ -616,7 +616,7 @@ test("buildPairLink produces the canonical box-form pair link (BET-177 §2.4)", 
 // `buildPairLink` no longer hardcodes the `manta` literal in its URL
 // template — the scheme comes from the `scheme` option (default "manta",
 // same default as the renderer's `buildPairPayload`). Callers pass
-// `resolveConfig().urlScheme`. See src/renderer/mobile/pairPayload.test.ts
+// `resolveConfig().urlScheme`. See src/shared/pairPayload.test.ts
 // for the round-trip-through-parsePairPayload coverage across all three
 // channel schemes.
 
@@ -3774,7 +3774,7 @@ test("buildPairLink round-trips with a serverUrl through parsePairPayload (BET-3
   // mobile deep-link parser + the desktop QR panel) accepts and
   // round-trips to a `{ boxId, code, serverUrl }` payload. We assert
   // the literal here — the round-trip itself is enforced by the vitest
-  // tests at src/renderer/mobile/pairPayload.test.ts (Node has no TS
+  // tests at src/shared/pairPayload.test.ts (Node has no TS
   // loader in this Node:test run).
   const out = formatPairingOutput({
     pairing_code: "123456",

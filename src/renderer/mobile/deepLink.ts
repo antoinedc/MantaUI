@@ -34,11 +34,11 @@
 // Dep injection keeps handlePairUrl unit-testable without DOM / fetch / the
 // Capacitor bridge — see deepLink.test.ts beside this file.
 
-import { parsePairPayload } from "./pairPayload";
+import { parsePairPayload } from "../../shared/pairPayload";
 import {
   buildSetupClaimInput,
   resolveSetupServerUrl,
-} from "./setupLogic";
+} from "../../shared/setupLogic";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 import { dlog } from "./debugLog";
 

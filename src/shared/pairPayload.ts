@@ -51,11 +51,11 @@
 // and isPrivateServerUrl (../../shared/transport.mjs — single source of
 // truth for the ranges; every other consumer imports it from there).
 
-import { normalizeCode } from "../../shared/claim.mjs";
+import { normalizeCode } from "./claim.mjs";
 import {
   isValidBoxToken,
   isPrivateServerUrl,
-} from "../../shared/transport.mjs";
+} from "./transport.mjs";
 import { normalizeServerUrl } from "./setupLogic";
 
 export type PairPayload = {

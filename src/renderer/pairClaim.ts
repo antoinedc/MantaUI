@@ -13,7 +13,7 @@
 //
 // The helper is intentionally non-pure (it touches window.api, the store,
 // and the httpApi transport swap), but the parts that ARE pure (claim input
-// shape, persisted server URL) live in renderer/mobile/setupLogic.ts and are
+// shape, persisted server URL) live in shared/setupLogic.ts and are
 // already tested in setupLogic.test.ts — single source of truth reused here.
 //
 // Side effects on success:
@@ -30,7 +30,7 @@ import { useStore } from "./store";
 import {
   buildSetupClaimInput,
   resolveSetupServerUrl,
-} from "./mobile/setupLogic";
+} from "../shared/setupLogic";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport } from "./transportInstall";
 import { networkFailure, type ClaimOutcome } from "../shared/claim.mjs";
@@ -64,7 +64,7 @@ export async function claimBox(input: {
   // hostname (https://<boxId>.boxes.mantaui.com); when an explicit override is
   // supplied (BET-268 tailnet path), it's the user-entered URL after
   // normalization. Main's claimPairing dispatcher accepts either shape; using
-  // the pre-resolved URL mirrors the mobile client (renderer/mobile/
+  // the pre-resolved URL mirrors the mobile client (shared/
   // setupLogic.buildSetupClaimInput) and keeps `boxDirectUrl` as the single
   // source of truth for the default URL.
   const claimInput = buildSetupClaimInput({
