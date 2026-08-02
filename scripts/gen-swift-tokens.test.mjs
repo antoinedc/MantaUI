@@ -9,7 +9,7 @@ const VARIABLES = [
   "canvas", "panel", "card", "raised", "inset",
   "border-subtle", "border", "border-strong",
   "tx1", "tx2", "tx3", "tx4",
-  "accent", "accent-tx", "accent-solid", "on-accent",
+  "accent", "accent-tx", "accent-solid", "on-accent", "accent-soft",
   "ok", "warn", "danger", "info",
   "fill", "fill-active",
 ];

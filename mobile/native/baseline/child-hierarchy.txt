@@ -1,0 +1,47 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+    Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'subagent-scene'
+                          Other, 0xADDR, {{12.0, 70.0}, {273.0, 34.0}}, identifier: 'subagent-header'
+                            Button, 0xADDR, {{12.0, 70.0}, {22.7, 34.0}}, identifier: 'subagent-back', label: '‹'
+                            StaticText, 0xADDR, {{163.8, 72.0}, {105.0, 15.7}}, label: 'pr-closed sweep'
+                            StaticText, 0xADDR, {{147.7, 88.7}, {137.3, 13.3}}, label: 'subagent · running 1m12s'
+                          ScrollView, 0xADDR, {{0.0, 112.0}, {402.0, 762.0}}
+                            Other, 0xADDR, {{0.0, 112.0}, {402.0, 185.0}}
+                              Other, 0xADDR, {{12.0, 112.0}, {316.0, 44.3}}, identifier: 'assistant-prose'
+                                StaticText, 0xADDR, {{12.0, 112.0}, {316.0, 44.3}}, label: 'Reading the close-on-merge workflow and its CI posture.'
+                              Other, 0xADDR, {{-0.5, 167.8}, {403.0, 61.3}}, identifier: 'step-rows'
+                                Button, 0xADDR, {{0.0, 168.3}, {402.0, 29.7}}, label: 'Read, multica-close-on-merge.yml, 0.3s'
+                                  StaticText, 0xADDR, {{26.0, 175.3}, {32.0, 15.7}}, label: 'Read'
+                                  StaticText, 0xADDR, {{66.0, 176.0}, {193.0, 14.3}}, label: 'multica-close-on-merge.yml'
+                                  StaticText, 0xADDR, {{367.3, 176.5}, {22.7, 13.3}}, label: '0.3s'
+                                Button, 0xADDR, {{0.0, 199.0}, {402.0, 29.7}}, label: 'Ran, node scripts/multica-unblock.mjs --dry-run, 1.8s'
+                                  StaticText, 0xADDR, {{26.0, 206.0}, {24.3, 15.7}}, label: 'Ran'
+                                  StaticText, 0xADDR, {{58.3, 206.7}, {289.3, 14.3}}, label: 'node scripts/multica-unblock.mjs --dry-run'
+                                  StaticText, 0xADDR, {{369.0, 207.2}, {21.0, 13.3}}, label: '1.8s'
+                              Other, 0xADDR, {{12.0, 240.7}, {378.0, 44.3}}, identifier: 'assistant-prose'
+                                StaticText, 0xADDR, {{12.0, 240.7}, {378.0, 44.3}}, label: 'The sweep flips a blocked issue to todo the moment its blockers clear.'
+                            Other, 0xADDR, {{369.0, 140.0}, {30.0, 672.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0xADDR, {{396.0, 732.0}, {3.0, 139.0}}
+                            Other, 0xADDR, {{369.0, 140.0}, {30.0, 672.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0xADDR, {{396.0, 732.0}, {3.0, 139.0}}
+                Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0xADDR, pid: PID, label: 'MantaUI'
+  }
+

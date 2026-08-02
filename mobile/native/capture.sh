@@ -37,6 +37,8 @@
 #   DEVICE_NAME   pinned simulator device (default "iPhone 17 Pro")
 #   RUNTIME_IOS   pinned iOS runtime version (default "26.5")
 #   SCENE         output filename prefix (default "screen")
+#   SCENE_MODE    app scene to capture: empty = parent transcript (default),
+#                 "child" = the subagent drill-in screen (S4b)
 #   OUT_DIR       output directory (default "$REPO/mobile/native/.capture-out")
 #   BUILD_DIR     xcodebuild DerivedData (default "$REPO/mobile/native/.build")
 #
@@ -50,6 +52,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${DEVICE_NAME:=iPhone 17 Pro}"
 : "${RUNTIME_IOS:=26.5}"
 : "${SCENE:=screen}"
+: "${SCENE_MODE:=}"
 : "${OUT_DIR:=$REPO_ROOT/mobile/native/.capture-out}"
 : "${BUILD_DIR:=$REPO_ROOT/mobile/native/.build}"
 
@@ -129,9 +132,22 @@ fi
 # -- 5. Install + launch, then wait for a SETTLED frame -----------------------
 # Two consecutive byte-identical screenshots must agree before one is kept. No
 # retry-until-pass: if the frame never converges the run fails loudly.
-echo "== install + launch =="
+echo "== install + launch (scene: '${SCENE_MODE:-parent}') =="
 xcrun simctl install "$UDID" "$APP_PATH"
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
+# The scene is delivered to the app by TWO channels so both capture legs see
+# the same scene: a SIMCTL_CHILD_ env var (the only way `simctl launch` gives
+# the screenshot leg's process its environment) AND a UserDefaults value (the
+# hierarchy leg's app is launched by the XCUITest runner, which inherits
+# neither of those, but the app reads UserDefaults itself). Both are explicit
+# per scene, so the selection is deterministic and the legs cannot disagree.
+if [ -n "$SCENE_MODE" ]; then
+  export SIMCTL_CHILD_MANTA_SCENE="$SCENE_MODE"
+  xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" MantaScene -string "$SCENE_MODE" >/dev/null 2>&1 || true
+else
+  unset SIMCTL_CHILD_MANTA_SCENE
+  xcrun simctl spawn "$UDID" defaults delete "$BUNDLE_ID" MantaScene >/dev/null 2>&1 || true
+fi
 xcrun simctl launch "$UDID" "$BUNDLE_ID"
 
 echo "== wait for a settled frame (convergent screenshot, not a timer) =="
@@ -169,6 +185,14 @@ echo "== dump accessibility hierarchy =="
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" >/dev/null 2>&1 || true
 HIER_LOG="$OUT_DIR/.xctest.log"
 set +e
+# The XCUITest runner does not inherit the shell env, so arm the scene via the
+# app's OWN UserDefaults (which the app reads at launch) rather than relying on
+# forwarding an env var through the test harness.
+if [ -n "$SCENE_MODE" ]; then
+  xcrun simctl spawn "$UDID" defaults write "$BUNDLE_ID" MantaScene -string "$SCENE_MODE" >/dev/null 2>&1 || true
+else
+  xcrun simctl spawn "$UDID" defaults delete "$BUNDLE_ID" MantaScene >/dev/null 2>&1 || true
+fi
 xcodebuild \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
