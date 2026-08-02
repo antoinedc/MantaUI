@@ -592,3 +592,79 @@ change; passes on the Linux CI runner).
   not poll permissions.
 - **`chat-header-btn`, `chat-title` values are additive to `:root`** and unused
   by the web app, so no visual change there (same policy as `--step-dot`).
+
+## S7 — settings screen driven by the generated schema (BET-599)
+
+Implements the settings surface per the retired `MobileSettings.tsx` semantics
+(search, "Modified" dots, per-section reset, undoable reset-all) but driven by
+a GENERATED Swift inventory instead of a hand-written list.
+
+### The schema decision (generation, not RPC)
+
+The shared schema (`src/shared/settingsSchema.ts`) is TypeScript. Per BET-599's
+explicit choice, I picked **(a) generation** — the same approach proven for
+design tokens by `scripts/gen-swift-tokens.mjs` — over (b) serving it from the
+box over RPC. Why:
+
+- **Fails at CI time, not runtime** — a committed `SettingsSchema.swift` that
+  drifts from the schema is caught by a new `gen:swift-settings -- --check`
+  step in the required `typecheck-test` CI job (identical shape to the tokens
+  gate), so "adding a setting to the schema surfaces it on iOS" is enforced,
+  and a hand-edit of the generated file is also caught.
+- **Consistent with tokens** — design tokens and the settings inventory now
+  share the same build-time → committed-Swift pipeline.
+- RPC would need the box up at Settings-open, delay the first render, and
+  change the wire contract — generation avoids all three.
+
+`scripts/gen-swift-settings.mjs` reads `settingsSchema.ts` at build time via
+`typescript.transpileModule` + a synchronous CJS eval (the schema is a pure,
+dependency-free module), filters to `settingsForPlatform(SETTINGS, "mobile")`,
+and writes `generated/swift/SettingsSchema.swift`. It runs on the CI Node 20
+(matching the tokens generator) — no Node 22 type-stripping dependency.
+
+### What surfaced
+
+| Section | Schema-driven entries (from the generated schema) |
+|---|---|
+| Box | `serverUrlMobile` (device-local, configKey nil) |
+| Models | `cacheTtl` (segmented) |
+| Sessions | `autoRenameSessions`, `chatAutoAllow` (toggles) |
+| Files | `uploadCleanupHours` (segmented, numeric coerced) |
+| Voice | `groqApiKey` (password, commit-on-blur), `voiceTranscriptionModel`, `voiceCommandModel` (text, commit-on-blur) |
+
+`accountsList` is a `custom` control with no configKey — rendered as a
+reachable/searchable label row (no native accounts-subscription management UI;
+that is beyond S7's schema-driven scope). Search, Modified dots, per-section
+reset and reset-all (both undoable) mirror the retired implementation.
+Config-driven entries persist via `config:update` (the box is source of truth,
+so the S5 mic gate's `groqApiKey` read and the box's `uploadCleanupHours` sweep
+see changes); device-local entries go to `UserDefaults` (not credentials). The
+settings screen opens from a gear in the session list's navigation bar.
+
+### Verification
+
+- `MantaUITests`: full suite 165 tests — **162 passed, 3 failed**. All **14 new
+  settings tests pass** (9 `MantaSettingsLogicTests` + 5 `MantaSettingsStoreTests`,
+  incl. reset-section/reset-all undo round-trips and the segmented numeric
+  coercion). The 3 failures are the pre-existing Keychain tests
+  (`status(-34018)` `errSecMissingEntitlement`) that fail on an unsigned
+  simulator build — the Keychain files are untouched by this stage.
+- App builds for the iOS Simulator destination: `BUILD SUCCEEDED`.
+- `npm run typecheck` exit 0.
+- `node scripts/gen-swift-settings.mjs --check` green; `gen-swift-settings.test.mjs`
+  passes (7/7); `gen-swift-tokens.test.mjs` still passes (5/5).
+- `npm test`: 1836 passed / 2 skipped / 1 known environment failure
+  (`capExecutor.test.ts` PATH passthrough fails on a Mac with Homebrew on PATH —
+  documented above, passes on the Linux CI runner). My node-test generator
+  tests are green in the harness (`12/12` settings+tokens).
+
+### Honesty notes
+
+- **No live-box/device round trip on Settings itself.** Settings needs no pairing
+  to render (it loads config on open), and its persistence is verified against a
+  fake config seam + UserDefaults; a real on-device pass (settings reaching the
+  box and the box honoring `uploadCleanupHours`/voice keys) belongs to the epic's
+  device-check issues once a box is reachable.
+- **"Adding a setting surfaces it" is enforced structurally**: the UI iterates
+  the generated `SettingsSchema.entries` / `sections` and never hand-writes a
+  row; the CI drift gate catches a schema edit without a regenerate commit.
