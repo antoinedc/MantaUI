@@ -26,7 +26,10 @@ struct SessionListView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
-    @State private var createItem: CreateItem?
+    // ONE sheet binding. Three separate `.sheet` modifiers used to sit on the
+    // same view, and SwiftUI honours only one of them — which is why the `+`
+    // button appeared dead: its sheet was never the one that won.
+    @State private var sheetRoute: SheetRoute?
     // ONE path-driven stack. It used to be a bare NavigationStack whose only
     // destination was item-based (`navigationDestination(item:)`) while the
     // subagent row inside the chat screen pushed a VALUE
@@ -38,11 +41,11 @@ struct SessionListView: View {
     // (a session target here, a subagent value pushed from inside the chat
     // screen), and a typed path would silently swallow the second.
     @State private var path = NavigationPath()
-    @State private var renameTarget: MantaWindow?
+
     @State private var renameProject = ""
     @State private var renameValue = ""
     @State private var confirmDeleteProject = ""
-    @State private var confirmDeleteWindow: MantaWindow?
+
     @State private var deleteRunningText = ""
     @State private var showSettings = false
 
@@ -74,7 +77,6 @@ struct SessionListView: View {
             .refreshable { await store.refresh() }
             .safeAreaInset(edge: .bottom) { capsule }
             .overlay(alignment: .top) { errorBanner }
-            .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
                     ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
@@ -88,21 +90,29 @@ struct SessionListView: View {
                 }
             }
         }
-        .sheet(item: $confirmDeleteWindow) { target in confirmDeleteSheet(target: target) }
         .overlay(alignment: .bottom) { undoToast }
-        .sheet(item: $createItem) { item in
-            SessionCreateSheet(
-                mode: item.mode,
-                onClose: { createItem = nil },
-                onCreated: { project, index in
-                    let window = store.projects.first(where: { $0.tmuxSession == project })?
-                        .windows.first(where: { $0.index == index })
-                    let name = window?.name ?? "session"
-                    createItem = nil
-                    path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
-                }
-            )
-            .presentationDetents([.medium, .large])
+        .sheet(item: $sheetRoute) { route in
+            switch route {
+            case .create(let project):
+                SessionCreateSheet(
+                    projects: store.projects,
+                    initialProject: project,
+                    onClose: { sheetRoute = nil },
+                    onCreated: { project, index in
+                        let window = store.projects.first(where: { $0.tmuxSession == project })?
+                            .windows.first(where: { $0.index == index })
+                        let name = window?.name ?? "session"
+                        sheetRoute = nil
+                        path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
+                    }
+                )
+            case .rename(let window, let project):
+                renameSheet(target: window, targetProject: project)
+                    .presentationDetents([.height(320)])
+            case .confirmDelete(let window):
+                confirmDeleteSheet(target: window)
+                    .presentationDetents([.height(320)])
+            }
         }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
@@ -200,8 +210,8 @@ struct SessionListView: View {
             let id = SessionPinID.window(project.tmuxSession, index: window.index)
             Button("Rename") {
                 renameProject = project.tmuxSession
-                renameTarget = window
                 renameValue = window.name
+                sheetRoute = .rename(window: window, project: project.tmuxSession)
             }
             Button(store.isPinned(session: project.tmuxSession, index: window.index) ? "Unpin" : "Pin") {
                 store.togglePin(session: project.tmuxSession, index: window.index)
@@ -258,7 +268,7 @@ struct SessionListView: View {
             let durationText = runningDuration(of: window)
             deleteRunningText = durationText
             confirmDeleteProject = project.tmuxSession
-            confirmDeleteWindow = window
+            sheetRoute = .confirmDelete(window: window)
             SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
         } else {
             store.beginIdleDelete(session: project.tmuxSession, index: window.index)
@@ -287,7 +297,7 @@ struct SessionListView: View {
             Button {
                 let index = target.index
                 let project = confirmDeleteProject
-                confirmDeleteWindow = nil
+                sheetRoute = nil
                 Task {
                     if let sid = target.opencodeSessionId {
                         try? await MantaAPIClient.live().deleteSession(sessionId: sid, sessionName: project, windowIndex: index)
@@ -306,7 +316,7 @@ struct SessionListView: View {
                     .background(tokens.danger, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             }
             Button {
-                confirmDeleteWindow = nil
+                sheetRoute = nil
             } label: {
                 Text("Cancel")
                     .font(.system(size: Metrics.type.small, weight: .medium))
@@ -315,7 +325,6 @@ struct SessionListView: View {
             }
         }
         .padding(Metrics.spacing.sp4)
-        .presentationDetents([.height(320)])
     }
 
     // MARK: - Undo toast
@@ -405,16 +414,12 @@ struct SessionListView: View {
     }
 
     private func presentCreateMenu() {
-        if store.projects.isEmpty {
-            createItem = CreateItem(mode: .newProject)
-        } else {
-            createItem = CreateItem(mode: .newSession(projectName: store.projects.first?.tmuxSession ?? ""))
-        }
+        sheetRoute = .create(project: store.projects.first?.tmuxSession)
     }
 
     // MARK: - Rename (§7.2 context menu)
 
-    private func renameSheet(targetProject: String) -> some View {
+    private func renameSheet(target: MantaWindow, targetProject: String) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
             Text("Rename session")
                 .font(.system(size: Metrics.type.body, weight: .semibold))
@@ -428,24 +433,23 @@ struct SessionListView: View {
                 .autocorrectionDisabled()
             HStack {
                 Spacer()
-                Button("Cancel") { renameTarget = nil }
+                Button("Cancel") { sheetRoute = nil }
                     .foregroundColor(tokens.tx2)
                 Button("Save") {
                     let value = renameValue.trimmingCharacters(in: .whitespaces)
-                    if !value.isEmpty, let target = renameTarget {
+                    if !value.isEmpty {
                         Task {
                             try? await MantaAPIClient.live().renameWindow(session: targetProject, index: target.index, newName: value)
                             await store.refresh()
                         }
                     }
-                    renameTarget = nil
+                    sheetRoute = nil
                 }
                 .fontWeight(.semibold)
                 .foregroundColor(tokens.accentTx)
             }
         }
         .padding(Metrics.spacing.sp4)
-        .presentationDetents([.height(220)])
     }
 
     // MARK: - Fork
@@ -586,9 +590,20 @@ enum SessionHaptics {
 
 // MARK: - Identifiable helpers
 
-private struct CreateItem: Identifiable {
-    let id = UUID()
-    let mode: SessionCreateMode
+/// Every sheet this screen can present, so exactly one `.sheet` modifier is
+/// attached to the view.
+private enum SheetRoute: Identifiable {
+    case create(project: String?)
+    case rename(window: MantaWindow, project: String)
+    case confirmDelete(window: MantaWindow)
+
+    var id: String {
+        switch self {
+        case .create(let project): return "create:\(project ?? "")"
+        case .rename(let window, let project): return "rename:\(project):\(window.index)"
+        case .confirmDelete(let window): return "delete:\(window.index)"
+        }
+    }
 }
 
 /// A route value, so its identity must be stable and derived from what it
