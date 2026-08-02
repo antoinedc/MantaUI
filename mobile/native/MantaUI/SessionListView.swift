@@ -53,7 +53,7 @@ struct SessionListView: View {
             .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
             .navigationDestination(item: $openTarget) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, eventStore: eventStore)
+                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
                 } else {
                     SessionScreenPlaceholder(name: target.name)
                 }

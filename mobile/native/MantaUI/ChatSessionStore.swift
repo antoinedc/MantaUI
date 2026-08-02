@@ -237,6 +237,106 @@ final class ChatSessionStore: ObservableObject {
         }
     }
 
+    // MARK: - Composer (S5 / BET-597)
+
+    /// Send a prompt for this session. `text` needs no trimming here (the
+    /// composer trims); attachments + model are optional and flow through the
+    /// unchanged `opencode:prompt` surface.
+    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+        Task {
+            try? await api.sendPrompt(SendPromptInput(
+                sessionId: sessionId,
+                text: text,
+                model: model,
+                attachments: attachments.isEmpty ? nil : attachments
+            ))
+        }
+    }
+
+    /// Interrupt the running turn (voice `abort`).
+    func abort() {
+        Task { try? await api.abort(sessionId: sessionId) }
+    }
+
+    /// Compact the session to free context (voice `compact`).
+    func compact() {
+        Task { try? await api.compactSession(sessionId: sessionId) }
+    }
+
+    /// Dispatch a store-level voice action. Returns a human hint string when
+    /// the action was NOT handled here (the caller should surface it), or nil
+    /// when it was handled. Actions that insert/modify composer text
+    /// (`submit`/`append`/`unknown`) and the app-level ones (`newSession`,
+    /// `openSettings`, `switchWindow`, `fork`, `clear`, `help`,
+    /// `toggleTrust`) are NOT this store's job — the composer routes those.
+    @discardableResult
+    func dispatchVoice(_ action: VoiceAction) -> String? {
+        switch action {
+        case .allowOnce:
+            replyToLatestPermission(.once)
+            return nil
+        case .allowAlways:
+            replyToLatestPermission(.always)
+            return nil
+        case .reject:
+            if newestPermission != nil {
+                replyToLatestPermission(.reject)
+            } else if newestQuestion != nil {
+                rejectQuestion(newestQuestion!)
+            }
+            return nil
+        case .answer(let choice):
+            return answerLatestQuestion(choice: choice)
+        case .abort:
+            abort()
+            return nil
+        case .compact:
+            compact()
+            return nil
+        default:
+            return ChatVoiceHint.text(for: action)
+        }
+    }
+
+    private func replyToLatestPermission(_ reply: PermissionReply) {
+        guard let permission = newestPermission else { return }
+        replyPermission(permission, reply: reply)
+    }
+
+    /// Answer the newest pending question from a spoken `choice`: a bare
+    /// "yes"/"no" token, a numbered option (1..n), or an option label / free
+    /// text. Returns a hint (non-nil) when no question is pending — the caller
+    /// surfaces it; nil when answered.
+    private func answerLatestQuestion(choice: String) -> String? {
+        guard let question = newestQuestion, let first = question.questions.first else {
+            return "No question waiting"
+        }
+        let trimmed = choice.trimmingCharacters(in: .whitespacesAndNewlines)
+        let optionIndex: Int?
+        if let asNumber = Int(trimmed), asNumber >= 1, asNumber <= first.options.count {
+            optionIndex = asNumber - 1
+        } else if let labelIndex = first.options.firstIndex(where: {
+            $0.label.compare(trimmed, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) {
+            optionIndex = labelIndex
+        } else {
+            optionIndex = nil
+        }
+        var answers = [[String]]()
+        for (index, q) in question.questions.enumerated() {
+            if let optionIndex, q.options.indices.contains(optionIndex) {
+                answers.append([q.options[optionIndex].label])
+            } else if index == 0 {
+                // Free-form answer applies to the spoken question (the first).
+                answers.append([trimmed])
+            } else {
+                answers.append([])
+            }
+        }
+        replyQuestion(question, answers: answers)
+        return nil
+    }
+
     // MARK: - Subagent drill-in (BET-576)
 
     func ensureChildStore(_ childSessionId: String) -> ChatSessionStore {
@@ -260,6 +360,13 @@ final class ChatSessionStore: ObservableObject {
     }
 
     // MARK: - Header
+
+    /// The newest pending permission, if any (used by the composer's voice
+    /// answer routing + the bottom cards).
+    var newestPermission: PermissionRequest? { permissions.last }
+
+    /// The newest pending question request, if any.
+    var newestQuestion: QuestionRequest? { questions.last }
 
     /// §8 header subtitle ("running · 2m · 8%" / "idle").
     var headerSubtitle: String {
