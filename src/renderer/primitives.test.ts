@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button"] as const;
 
 const RENDERER = fileURLToPath(new URL(".", import.meta.url));
 
@@ -142,6 +142,12 @@ const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem"]);
 // the one spec-authorized component.
 const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   SessionRow: [3, 7, 8, 13, 20, 26],
+  // Button's verbatim spec chrome (BET-611 stage 1): 14px inline padding
+  // (px-[14px]); 32px resolves via h-8, so it needs no entry. The 6px icon gap
+  // (gap-[6px]) and the 12.5px label (text-[12.5px] → 5px after the decimal)
+  // are the other spec pixel values in the BUTTON_BASE constant — all three
+  // are real values from the redesign spec's button definition, not drift.
+  Button: [5, 6, 14],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -198,6 +204,7 @@ describe("M527 primitive rules", () => {
       "bg-black/40": ["Modal.tsx"], // the modal overlay tint
       "shadow-lg": ["Modal.tsx"], // window-level floating surface
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
+      "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {

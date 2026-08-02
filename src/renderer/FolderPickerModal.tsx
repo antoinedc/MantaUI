@@ -34,6 +34,7 @@ import {
   worktreeBadge,
 } from "./folderPicker";
 import { Modal } from "./Modal";
+import { Button } from "./Button";
 
 type Props = {
   // The initial path the picker opens at. Usually "~" or the project's cwd.
@@ -435,18 +436,12 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                 {gitState || "not a git repo"}
               </div>
               <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={onCancel}
-                  className="text-meta px-3 py-2 text-text-muted hover:text-text"
-                >
+                <Button onClick={onCancel} tone="ghost">
                   Cancel
-                </button>
-                <button
-                  onClick={() => void select()}
-                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90"
-                >
+                </Button>
+                <Button onClick={() => void select()} tone="primary">
                   Select folder
-                </button>
+                </Button>
               </div>
             </div>
           </>

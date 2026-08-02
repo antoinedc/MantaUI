@@ -24,6 +24,7 @@ import { applyTheme, type ThemePref } from "./theme";
 import { TtlToggle } from "./TtlToggle";
 import { Card } from "./Card";
 import { Field } from "./Field";
+import { Button } from "./Button";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -554,7 +555,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <GroupCard title="Danger zone" danger>
             <div className="flex items-start justify-between gap-4">
               <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
-              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+              <Button onClick={() => setConfirmReset(true)} tone="danger">Reset all settings…</Button>
             </div>
           </GroupCard>
         </>
@@ -593,7 +594,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <AddPhonePanel />
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
-              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded-xs border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
+              <Button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} tone="default">Run setup again</Button>
             </div>
           </GroupCard>
 
@@ -623,9 +624,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <GroupCard title="Danger zone" danger>
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
-              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="shrink-0 text-body px-4 py-2 rounded-xs border border-danger text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed">
+              <Button onClick={() => setConfirmRemove(true)} disabled={removingBox} tone="default">
                 {removingBox ? "Removing…" : "Remove box"}
-              </button>
+              </Button>
             </div>
             {removeResult && !removeResult.ok && <div role="alert" className="text-body text-warn">{removeResult.message}</div>}
           </GroupCard>
@@ -834,9 +835,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <span className="flex-1 text-body text-text">
                 An opencode restart is needed to apply recent model or endpoint changes. Restarting interrupts all running sessions.
               </span>
-              <button onClick={() => void performRestart()} disabled={restarting} className="shrink-0 px-3 py-2 text-body rounded-xs bg-warn-bg border border-warn text-warn hover:bg-warn/20 disabled:opacity-40">
+              <Button onClick={() => void performRestart()} disabled={restarting} tone="default">
                 {restarting ? "Restarting…" : "Restart opencode"}
-              </button>
+              </Button>
               <button onClick={() => setRestartNeeded(false)} disabled={restarting} className="shrink-0 px-2 py-2 text-body text-text-muted hover:text-text disabled:opacity-40">Later</button>
             </div>
           )}
@@ -879,7 +880,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={removeBox} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Remove</button>
+              <Button onClick={removeBox} tone="danger">Remove</Button>
             </div>
           </div>
         </Modal>
@@ -893,7 +894,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={resetAll} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Reset</button>
+              <Button onClick={resetAll} tone="danger">Reset</Button>
             </div>
           </div>
         </Modal>
