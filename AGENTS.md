@@ -440,16 +440,12 @@ Server→client: raw PTY bytes.
 in `mobile/` builds the debug APK. `mobile/sync-web.sh` runs `build:mobile`
 to refresh `mobile/www/`.
 
-**Mobile-native shell** (`src/renderer/mobile/`): on the no-`window.api`
-branch `main.tsx` renders `<MobileApp/>` instead of `<App/>` — a drill-down
-shell (`SessionListScreen` → `SessionScreen`) that reuses `ChatPanel` /
-`Terminal` unchanged. CSS is `.mobile`-scoped (`mobile/mobile.css`) so it
-never matches the desktop tree. Desktop `App.tsx`/`Sidebar.tsx` are untouched.
-Session owner→props mapping is the tested `resolveSessionOwner()` in
-`store.ts`. Safe-area/home-indicator inset is applied on the mobile-owned
-`.mobile-body` wrapper + its absolute child — **not** on ChatPanel internals
-(those selectors would require editing a desktop-invariant file and silently
-match nothing).
+**Mobile-native shell (RETIRED — BET-559):** the React drill-down shell
+previously in `src/renderer/mobile/` (`SessionListScreen` →
+`SessionScreen`, `MobileApp.tsx`) is gone. BET-559 retired the web/PWA
+client it belonged to; neither `src/renderer/mobile/` nor the `.mobile`-
+scoped `mobile/mobile.css` exists any more, and `main.tsx` renders `<App/>`
+only. The native iOS client lives in `mobile/native` (Swift).
 
 **Reshaping shared components for mobile (RETIRED — BET-559):** the
 `.mobile`-scoped CSS approach and the `manta-*` hook classes below applied
