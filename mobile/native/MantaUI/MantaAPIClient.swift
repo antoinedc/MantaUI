@@ -133,13 +133,14 @@ final class MantaAPIClient: Sendable {
 
     /// `tmux:new-session` — create a new project (tmux session).
     func newSession(_ input: NewSessionInput) async throws -> [MantaProject] {
-        try await call("tmux:new-session", args: [[
+        let dict: [String: Any] = [
             "name": input.name,
             "cwd": input.cwd,
             "windowName": input.windowName,
             "createDir": input.createDir,
             "chatMode": input.chatMode,
-        ]], as: [MantaProject].self) ?? []
+        ]
+        return try await call("tmux:new-session", args: [dict], as: [MantaProject].self) ?? []
     }
 
     /// `tmux:new-window` — create a new session (window) in an existing project.
@@ -157,20 +158,22 @@ final class MantaAPIClient: Sendable {
 
     /// `tmux:kill-window` — delete a session (a row in the list).
     func killWindow(_ input: KillWindowInput) async throws {
-        _ = try await callVoid("tmux:kill-window", args: [[
+        let dict: [String: Any] = [
             "sessionName": input.sessionName,
             "windowIndex": input.windowIndex,
-        ]])
+        ]
+        _ = try await callVoid("tmux:kill-window", args: [dict])
     }
 
     /// `opencode:delete-session` — delete a chat session AND its tmux window
     /// (the desktop path). Used when the row has an opencode session id.
     func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
-        _ = try await callVoid("opencode:delete-session", args: [[
+        let dict: [String: Any] = [
             "sessionId": sessionId,
             "sessionName": sessionName,
             "windowIndex": windowIndex,
-        ]])
+        ]
+        _ = try await callVoid("opencode:delete-session", args: [dict])
     }
 
     /// `opencode:fork-session` — fork a chat session into a new window (§7.2
@@ -188,19 +191,21 @@ final class MantaAPIClient: Sendable {
 
     /// `tmux:rename-window` — rename a session (the row's name).
     func renameWindow(session: String, index: Int, newName: String) async throws {
-        _ = try await callVoid("tmux:rename-window", args: [[
+        let dict: [String: Any] = [
             "sessionName": session,
             "windowIndex": index,
             "newName": newName,
-        ]])
+        ]
+        _ = try await callVoid("tmux:rename-window", args: [dict])
     }
 
     /// `tmux:select-window` — make a window the active one in its project.
     func selectWindow(session: String, index: Int) async throws {
-        _ = try await callVoid("tmux:select-window", args: [[
+        let dict: [String: Any] = [
             "sessionName": session,
             "windowIndex": index,
-        ]])
+        ]
+        _ = try await callVoid("tmux:select-window", args: [dict])
     }
 
     /// `fs:list-dirs` — directory path completion for the folder picker.

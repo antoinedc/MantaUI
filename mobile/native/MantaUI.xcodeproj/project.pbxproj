@@ -16,6 +16,7 @@
 		3A14CB75D91300937752389C /* MantaAppRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD646A4951E292E750890CCB /* MantaAppRoot.swift */; };
 		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
+		5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */; };
 		5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */; };
 		612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */; };
 		6545C305B308C5D49D581CFC /* MantaOnboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B1B39AEF93CAAB814A6DBD7 /* MantaOnboarding.swift */; };
@@ -72,6 +73,7 @@
 		9803742B79E4302F8813EFCC /* SessionModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionModelsTests.swift; sourceTree = "<group>"; };
 		989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAuthClientTests.swift; sourceTree = "<group>"; };
 		9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaTransportTests.swift; sourceTree = "<group>"; };
+		9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaActionRPCWireTests.swift; sourceTree = "<group>"; };
 		A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptComponents.swift; sourceTree = "<group>"; };
 		A4E84DF65831DE58599C53BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingTests.swift; sourceTree = "<group>"; };
@@ -105,6 +107,7 @@
 		7168FDC00E99AA075ACA9698 /* MantaUITests */ = {
 			isa = PBXGroup;
 			children = (
+				9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */,
 				989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */,
 				EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */,
 				ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */,
@@ -285,6 +288,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */,
 				0129D15936E52427A46702E7 /* MantaAuthClientTests.swift in Sources */,
 				9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */,
 				685261838F0EFABC1AB8B6B1 /* MantaPairingTests.swift in Sources */,
