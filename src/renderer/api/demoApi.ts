@@ -104,6 +104,11 @@ let streamStep: number = DEMO_STREAM_PHASE_STEPS.early;
 let streamPending = false;
 let streamServed = false;
 const opencodeListeners = new Set<(ev: unknown) => void>();
+// Box-derived interpreted event subscribers (stream.running, stream.turnComplete…).
+// Mirrors httpApi's `onStreamEvent` (`/events` `kind:"stream"`), delivering the
+// `{ sub, sessionId, payload }` envelope so useSseBus's interpreted consumer
+// (S1b) is exercised by the demo too, not just a live box.
+const streamListeners = new Set<(ev: { sub: string; sessionId: string; payload: unknown }) => void>();
 
 function phaseForStep(step: number): string {
   const entries = Object.entries(DEMO_STREAM_PHASE_STEPS);
@@ -146,10 +151,29 @@ export function revealedTranscript(step: number): OpencodeMessage[] {
   return shown;
 }
 
+/** The box-derived interpreted envelopes (mirror of streamInterp.mjs) that a
+ *  phase advance emits for the still-in-flight assistant turn: the session is
+ *  `running` and the turn is not `complete`. Pure so the emission shape is
+ *  assertable in a unit test without booting React or re-pointing
+ *  window.location. */
+export function buildStreamAdvanceEnvelopes(
+  sessionId: string,
+): Array<{ sub: string; sessionId: string; payload: unknown }> {
+  return [
+    { sub: "running", sessionId, payload: { running: true } },
+    { sub: "turnComplete", sessionId, payload: { complete: false, running: true } },
+  ];
+}
+
 /** `advance()` — move the stepped stream to its next named phase and tell
- *  every live assembler subscriber the in-flight message grew, so the
- *  rendered transcript follows without a navigation. No-op once `late` is
- *  reached. */
+ *  every live subscriber the in-flight message grew, so the rendered
+ *  transcript follows without a navigation. No-op once `late` is reached.
+ *
+ *  The demo mirrors the box here: it emits BOTH the raw opencode event that
+ *  reveals new canonical message parts (the box forwards the raw stream; the
+ *  renderer's spliceMessage → opencodeMessage refetch is how new tool parts
+ *  appear on a live box too) AND the box-derived interpreted envelopes
+ *  (running / turnComplete) consumed via onStreamEvent. */
 function streamAdvance(): void {
   const next = nextPhaseStep(streamStep);
   if (next == null) return;
@@ -157,14 +181,18 @@ function streamAdvance(): void {
   streamPending = true;
   streamServed = false;
   const assistant = demoState.messages.find((m) => m.info.role === "assistant");
+  const sessionId = demoState.activeSessionId;
   const ev = {
     type: "message.updated",
     properties: {
-      sessionID: demoState.activeSessionId,
+      sessionID: sessionId,
       messageID: assistant?.info?.id ?? "",
     },
   };
   for (const cb of opencodeListeners) cb(ev);
+  for (const env of buildStreamAdvanceEnvelopes(sessionId)) {
+    for (const cb of streamListeners) cb(env);
+  }
 }
 
 /** Install the harness window handle. Exported+pure so a test can assert the
@@ -310,12 +338,20 @@ const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
   return () => {};
 };
 
-// Box-interpreted stream events (BET-551 / §17) never reach the demo: the
-// demo fixture drives the `stream` state through onOpencodeEvent
-// (message.updated → splice) instead, and the Proxy fallback would also serve
-// a benign no-op. Declared explicitly so the coverage test records the
-// subscription as intentionally stubbed rather than silently absent.
-const onStreamEvent = (_cb: unknown): (() => void) => () => {};
+// Box-interpreted stream events (BET-551 / §17). In the `stream` state the
+// demo registers the renderer's onStreamEvent consumer and drives it with the
+// same derived envelopes the box emits on advance (see buildStreamAdvanceEnvelopes),
+// so the renderer's interpreted consumption path (useSseBus's `stream.*`
+// switch, added S1b) is exercised by the demo too. Every other state is the
+// pre-existing no-op — the Proxy fallback would also serve one.
+const onStreamEvent = (cb: (ev: unknown) => void): (() => void) => {
+  if (isStream) {
+    streamListeners.add(cb as (ev: { sub: string; sessionId: string; payload: unknown }) => void);
+    return () =>
+      streamListeners.delete(cb as (ev: { sub: string; sessionId: string; payload: unknown }) => void);
+  }
+  return () => {};
+};
 
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);

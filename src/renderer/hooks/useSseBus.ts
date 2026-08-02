@@ -73,6 +73,7 @@ import {
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
+import { markFirstToken, markRendered } from "../firstTokenLatency";
 
 export type SseBus = {
   running: boolean;
@@ -658,6 +659,9 @@ export function useSseBus(params: {
         case "flush": {
           const { messageID, partID, field, text } = ev.payload as StreamFlushPayload;
           if (!partID || !messageID) return;
+          // First-token-latency instrumentation (BET-553 / §17): the flush is
+          // the box's interpreted text chunk — the start of "first token".
+          markFirstToken("interpreted", sessionId);
           if (!isActiveRef.current) {
             refetchOwedWhileInactive.current = true;
             return;
@@ -665,6 +669,7 @@ export function useSseBus(params: {
           // The box already flushed at a safe boundary; apply the chunk
           // directly. Unmatched → the part snapshot isn't loaded yet.
           const unmatched = applyStreamFlush({ messageID, partID, field, text });
+          markRendered("interpreted", sessionId);
           if (unmatched > 0) scheduleRefetch();
           return;
         }

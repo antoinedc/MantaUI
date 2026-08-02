@@ -23,6 +23,7 @@ import { demoState } from "./demoFixture.js";
 import { demoApi } from "./demoApi.js";
 import {
   DEMO_STREAM_PHASES,
+  buildStreamAdvanceEnvelopes,
   installDemoStreamWindow,
   revealedAssistantPartCount,
   revealedTranscript,
@@ -230,6 +231,22 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
 
   it("exposes exactly the three named phases early/mid/late", () => {
     expect(DEMO_STREAM_PHASES).toEqual(["early", "mid", "late"]);
+  });
+
+  it("emits the box-derived interpreted envelopes for the in-flight turn (S1c — demo mirrors streamInterp.mjs)", () => {
+    // A phase advance on a still-running, unfinished assistant turn means the
+    // box would publish stream.running {running:true} and a not-complete
+    // stream.turnComplete. The demo's onStreamEvent drives these so the
+    // renderer's interpreted consumer (S1b) is exercised, not just a live box.
+    const envs = buildStreamAdvanceEnvelopes(demoState.activeSessionId!);
+    expect(envs).toEqual([
+      { sub: "running", sessionId: demoState.activeSessionId, payload: { running: true } },
+      {
+        sub: "turnComplete",
+        sessionId: demoState.activeSessionId,
+        payload: { complete: false, running: true },
+      },
+    ]);
   });
 
   it("installs the window handle ONLY in the stream state — undefined elsewhere (DoD 5)", () => {
