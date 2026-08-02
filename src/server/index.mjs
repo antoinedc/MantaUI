@@ -479,7 +479,8 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
 });
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
-const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";const TAILNET_HOST = process.env.MANTA_TAILNET_HOST ?? "";
+const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";
+const TAILNET_HOST = process.env.MANTA_TAILNET_HOST ?? "";
 
 // ---------- static file serving ----------
 
