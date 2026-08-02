@@ -321,7 +321,11 @@ private struct QuestionCard: View {
     let onSubmit: ([[String]]) -> Void
     let onReject: () -> Void
 
-    @State private var selected: Set<Int> = []
+    /// Per-question selected option indices (keyed by the question's position
+    /// in `question.questions`) — a request can carry several questions and
+    /// each keeps its own selection, so option index 0 on question A cannot
+    /// bleed into question B.
+    @State private var selected: [Int: Set<Int>] = [:]
     @State private var customText = ""
 
     var body: some View {
@@ -337,18 +341,21 @@ private struct QuestionCard: View {
                         .font(.system(size: Metrics.type.body))
                         .foregroundColor(tokens.tx1)
                     ForEach(Array(q.options.enumerated()), id: \.offset) { oi, option in
-                        optionButton(oi, label: option.label, multi: q.multiple == true)
+                        optionButton(questionIndex: index, optionIndex: oi, label: option.label, multi: q.multiple == true)
                     }
                 }
             }
-            if !customText.isEmpty {
-                TextField("Or type your own answer…", text: $customText)
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.tx1)
-                    .padding(.horizontal, Metrics.spacing.sp3)
-                    .padding(.vertical, Metrics.spacing.sp2)
-                    .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-            }
+            // Always-available free text (the desktop QuestionCard shows it for
+            // ANY question, not just custom:true). It must NOT be gated on its
+            // own non-empty state — that gate would make the field that is its
+            // only writer unreachable, so free-form questions could never be
+            // answered.
+            TextField("Or type your own answer…", text: $customText)
+                .font(.system(size: Metrics.type.small))
+                .foregroundColor(tokens.tx1)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             HStack {
                 Button("Reject", action: onReject)
                     .font(.system(size: Metrics.type.small, weight: .medium))
@@ -376,14 +383,20 @@ private struct QuestionCard: View {
         .accessibilityIdentifier("question-card")
     }
 
+    /// Submit is enabled when every question has a selection (or the shared
+    /// free text, which counts for all) — matching the desktop canSubmitQuestion.
     private var canSubmit: Bool {
-        !selected.isEmpty || !customText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ChatQuestionAnswers.canSubmit(
+            questions: question.questions,
+            selected: selected,
+            customText: customText
+        )
     }
 
-    private func optionButton(_ index: Int, label: String, multi: Bool) -> some View {
-        let isOn = selected.contains(index)
+    private func optionButton(questionIndex: Int, optionIndex: Int, label: String, multi: Bool) -> some View {
+        let isOn = selected[questionIndex, default: []].contains(optionIndex)
         return Button {
-            toggle(index, multi: multi)
+            toggle(questionIndex: questionIndex, optionIndex: optionIndex, multi: multi)
         } label: {
             HStack(spacing: Metrics.spacing.sp2) {
                 Image(systemName: isOn ? "checkmark.square.fill" : "square")
@@ -400,22 +413,23 @@ private struct QuestionCard: View {
         .buttonStyle(.plain)
     }
 
-    private func toggle(_ index: Int, multi: Bool) {
+    private func toggle(questionIndex: Int, optionIndex: Int, multi: Bool) {
+        var perQuestion = selected[questionIndex, default: []]
         if multi {
-            if selected.contains(index) { selected.remove(index) } else { selected.insert(index) }
+            if perQuestion.contains(optionIndex) { perQuestion.remove(optionIndex) } else { perQuestion.insert(optionIndex) }
         } else {
-            selected = [index]
+            perQuestion = [optionIndex]
         }
+        selected[questionIndex] = perQuestion
     }
 
     private func submit() {
-        var answers: [[String]] = []
-        for q in question.questions {
-            var picked = q.options.enumerated().compactMap { i, o in selected.contains(i) ? o.label : nil }
-            let typed = customText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !typed.isEmpty { picked.append(typed) }
-            answers.append(picked)
-        }
-        onSubmit(answers)
+        onSubmit(
+            ChatQuestionAnswers.answers(
+                questions: question.questions,
+                selected: selected,
+                customText: customText
+            )
+        )
     }
 }

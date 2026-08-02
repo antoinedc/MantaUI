@@ -193,4 +193,49 @@ final class ChatTranscriptTests: XCTestCase {
     func testHeaderSubtitleIdle() {
         XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: nil), "idle")
     }
+
+    // MARK: - Question answers (§7.5)
+
+    private func q(_ question: String, options: [String], multiple: Bool = false) -> QuestionInfo {
+        QuestionInfo(
+            question: question,
+            header: "",
+            options: options.map { QuestionOption(label: $0, description: "") },
+            multiple: multiple,
+            custom: false
+        )
+    }
+
+    func testQuestionFreeTextAloneCanSubmitAcrossAll() {
+        let questions = [q("Pick", options: ["A", "B"]), q("Pick2", options: ["C", "D"])]
+        XCTAssertTrue(ChatQuestionAnswers.canSubmit(questions: questions, selected: [:], customText: "typed"))
+        let out = ChatQuestionAnswers.answers(questions: questions, selected: [:], customText: "typed")
+        XCTAssertEqual(out, [["typed"], ["typed"]])
+    }
+
+    func testQuestionSubmitDisabledUntilEveryQuestionAnswered() {
+        let questions = [q("Q1", options: ["A"]), q("Q2", options: ["B"])]
+        // Only Q1 answered → disabled.
+        XCTAssertFalse(ChatQuestionAnswers.canSubmit(questions: questions, selected: [0: [0]], customText: ""))
+        // Both answered → enabled.
+        XCTAssertTrue(ChatQuestionAnswers.canSubmit(questions: questions, selected: [0: [0], 1: [0]], customText: ""))
+    }
+
+    func testQuestionPerQuestionSelectionsDoNotCollide() {
+        // Option index 0 selected on question A must not select option 0 on B.
+        let questions = [q("Q1", options: ["A0", "A1"]), q("Q2", options: ["B0", "B1"])]
+        let out = ChatQuestionAnswers.answers(questions: questions, selected: [0: [1]], customText: "")
+        XCTAssertEqual(out, [["A1"], []])
+        XCTAssertFalse(ChatQuestionAnswers.canSubmit(questions: questions, selected: [0: [1]], customText: ""))
+        XCTAssertTrue(ChatQuestionAnswers.canSubmit(questions: questions, selected: [0: [1], 1: [0]], customText: ""))
+    }
+
+    func testQuestionMultipleSelectionAccumulates() {
+        let q = [QuestionInfo(question: "M", header: "", options: [
+            QuestionOption(label: "x", description: ""),
+            QuestionOption(label: "y", description: ""),
+        ], multiple: true, custom: false)]
+        let out = ChatQuestionAnswers.answers(questions: q, selected: [0: [0, 1]], customText: "")
+        XCTAssertEqual(out, [["x", "y"]])
+    }
 }

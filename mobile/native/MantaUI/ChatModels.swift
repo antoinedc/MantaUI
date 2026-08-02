@@ -282,9 +282,40 @@ enum ChatTranscriptMapper {
     }
 }
 
-// MARK: - Header subtitle (§8 "running · 2m · 8%" / idle)
+// MARK: - Question answers (§7.5, answerable from the phone)
 
-/// The §8 chat-header subtitle: while running, `running · <elapsed> · <N>%`;
+/// Per-question answer assembly + submit gating, ported from the desktop's
+/// pure `buildQuestionAnswers` / `canSubmitQuestion` (src/renderer/chatUtils.ts).
+/// `selected` maps a question's position to the set of its selected option
+/// indices — the free text is ALWAYS available and, when non-empty, is appended
+/// to every question's answer (matching the desktop).
+enum ChatQuestionAnswers {
+    static func answers(questions: [QuestionInfo], selected: [Int: Set<Int>], customText: String) -> [[String]] {
+        let typed = customText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return questions.enumerated().map { index, q in
+            var picked = q.options.enumerated().compactMap { i, o in
+                selected[index, default: []].contains(i) ? o.label : nil
+            }
+            if !typed.isEmpty { picked.append(typed) }
+            return picked
+        }
+    }
+
+    /// Submit is enabled only when every question has a selection OR the shared
+    /// free text is non-empty (which counts for all).
+    static func canSubmit(questions: [QuestionInfo], selected: [Int: Set<Int>], customText: String) -> Bool {
+        guard !questions.isEmpty else { return false }
+        let typed = customText.trimmingCharacters(in: .whitespacesAndNewlines)
+        for index in questions.indices {
+            if selected[index, default: []].isEmpty && typed.isEmpty {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+// MARK: - Header subtitle (§8 "running · 2m · 8%" / idle)/// The §8 chat-header subtitle: while running, `running · <elapsed> · <N>%`;
 /// otherwise `idle`. Token-aware on the surrounding prose only; the string is
 /// assembled here so the view stays a thin token resolver.
 enum ChatHeaderSubtitle {
