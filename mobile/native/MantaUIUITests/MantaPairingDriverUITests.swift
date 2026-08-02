@@ -85,3 +85,24 @@ final class MantaPairingDriverUITests: XCTestCase {
         print("AX-TREE-END")
     }
 }
+
+// Answering the system notification alert is not something `simctl` can do
+// (`simctl privacy` has no notifications service), and the alert re-presents
+// on every launch until it is answered — which obscures every screenshot taken
+// after pairing. Springboard is an ordinary accessibility target, so tapping it
+// from a UI test is the deterministic way to clear it.
+final class MantaSystemAlertUITests: XCTestCase {
+
+    func testAnswerNotificationAlert() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for label in ["Allow", "Don't Allow", "OK"] {
+            let button = springboard.buttons[label]
+            if button.waitForExistence(timeout: 3) {
+                button.tap()
+                print("PAIRDRIVE alert-answered=\(label)")
+                return
+            }
+        }
+        print("PAIRDRIVE alert-answered=none")
+    }
+}
