@@ -109,6 +109,54 @@ struct Tokens {
     }
 }
 
+// ---- Theme-independent metric + typography tokens --------------------------
+// Generated from tokens.css :root. These are the non-colour half of the design
+// substrate: spacing scale, corner radii, type faces/sizes/weights and the
+// prose/UI leading. They are theme-independent (unlike the color Tokens).
+struct Spacing {
+    let sp0: CGFloat
+    let spPx: CGFloat
+    let sp1: CGFloat
+    let sp2: CGFloat
+    let sp3: CGFloat
+    let sp4: CGFloat
+    let sp5: CGFloat
+    let sp6: CGFloat
+    let sp8: CGFloat
+    let sp10: CGFloat
+    let sp12: CGFloat
+}
+
+struct Radius {
+    let xs: CGFloat
+    let sm: CGFloat
+    let md: CGFloat
+    let lg: CGFloat
+    let xl: CGFloat
+    let full: CGFloat
+}
+
+struct TypeMetrics {
+    let sans: String
+    let mono: String
+    let body: CGFloat
+    let small: CGFloat
+    let xs: CGFloat
+    let twoXS: CGFloat
+    let medium: CGFloat
+    let semibold: CGFloat
+    let proseLineHeight: CGFloat
+    let uiLineHeight: CGFloat
+    let stepRowY: CGFloat
+    let stepDot: CGFloat
+}
+
+enum Metrics {
+    static let spacing = Spacing(sp0: 0, spPx: 1, sp1: 4, sp2: 8, sp3: 12, sp4: 16, sp5: 20, sp6: 24, sp8: 32, sp10: 40, sp12: 48)
+    static let radius = Radius(xs: 4, sm: 6, md: 8, lg: 12, xl: 16, full: 999)
+    static let type = TypeMetrics(sans: "Inter Variable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", mono: "JetBrains Mono Variable, JetBrains Mono, SF Mono, Menlo, Consolas, monospace", body: 15, small: 13, xs: 12, twoXS: 11, medium: 500, semibold: 600, proseLineHeight: 1.55, uiLineHeight: 1.45, stepRowY: 7, stepDot: 6)
+}
+
 extension Color {
     init(hex: String, opacity: Double = 1) {
         var hexSanitized = hex.trimmingCharacters(in: .whitespacesAndNewlines)

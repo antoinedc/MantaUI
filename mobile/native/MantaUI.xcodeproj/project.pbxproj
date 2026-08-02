@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
+		95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
 		E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799EED7CC4F10C6684A5662C /* Theme.swift */; };
 /* End PBXBuildFile section */
@@ -29,6 +30,7 @@
 		714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIHierarchyCaptureUITests.swift; sourceTree = "<group>"; };
 		799EED7CC4F10C6684A5662C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIApp.swift; sourceTree = "<group>"; };
+		A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptComponents.swift; sourceTree = "<group>"; };
 		A4E84DF65831DE58599C53BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -82,6 +84,7 @@
 			children = (
 				87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */,
 				A4E84DF65831DE58599C53BD /* RootView.swift */,
+				A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */,
 			);
 			path = MantaUI;
 			sourceTree = "<group>";
@@ -186,6 +189,7 @@
 				4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */,
 				9CF891D747797006729FDBD3 /* RootView.swift in Sources */,
 				E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */,
+				95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
