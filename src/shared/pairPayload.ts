@@ -55,7 +55,7 @@ import { normalizeCode } from "./claim.mjs";
 import {
   isValidBoxToken,
   isPrivateServerUrl,
-} from "../../shared/transport.mjs";
+} from "./transport.mjs";
 import { normalizeServerUrl } from "./setupLogic";
 
 export type PairPayload = {

@@ -15,7 +15,7 @@ import {
   buildSetupClaimInput,
   resolveSetupServerUrl,
   normalizeServerUrl,
-} from "./setupLogic";
+} from "../../shared/setupLogic";
 
 type Props = {
   // Called after a successful claim (token already persisted by
