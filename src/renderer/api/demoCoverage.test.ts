@@ -56,7 +56,6 @@ export const DEMO_UNIMPLEMENTED = [
   "onAgentFileReady",
   "onAutoUpdateAvailable",
   "onAutoUpdateDownloaded",
-  "onAutoUpdateError",
   "onDelegateUpdated",
   "onDesktopNotify",
   "onPtyEvent",

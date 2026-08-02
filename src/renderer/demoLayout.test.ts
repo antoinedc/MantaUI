@@ -59,6 +59,14 @@ describe("pickDemoState — single URL selector for fixture states", () => {
 describe("pickDemoState — every member is a valid DemoState", () => {
   it("DEMO_STATES is exactly the set of DemoState values", () => {
     const states: readonly DemoState[] = DEMO_STATES;
-    expect(states).toEqual(["full", "empty", "version-skew"]);
+    expect(states).toEqual([
+      "full",
+      "empty",
+      "version-skew",
+      "reconnecting",
+      "incompatible",
+      "update-failed",
+      "server-update",
+    ]);
   });
 });

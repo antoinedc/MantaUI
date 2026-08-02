@@ -37,6 +37,7 @@ import type { Api } from "../../shared/api.js";
 import type { AvailableLauncher } from "../../shared/types.js";
 import { demoState } from "./demoFixture.js";
 import { pickDemoState } from "../demoLayout.js";
+import { useStore } from "../store.js";
 
 // Resolved once at module load — the demo transport is only ever imported
 // from bootDemo(), which has already decided we are in demo mode. The state
@@ -46,6 +47,21 @@ const DEMO_STATE =
   typeof window === "undefined"
     ? "full"
     : pickDemoState(new URLSearchParams(window.location.search));
+
+// "reconnecting" — the real transport (httpApi) reports the events-WebSocket
+// connection state into the store via `setConnectionState`; demo mode has no
+// socket, so the fake transport reports the degraded state directly over the
+// SAME seam httpApi uses (useStore.getState().setConnectionState). This is the
+// only input the reconnecting banner's predicate reads, and no version value
+// in the fixture can reach it — so the state is URL-addressable only through
+// the transport reporting it. Skipped everywhere else (idle default).
+if (typeof window !== "undefined" && DEMO_STATE === "reconnecting") {
+  useStore.getState().setConnectionState({
+    state: "reconnecting",
+    attempt: 2,
+    backoffMs: 5000,
+  });
+}
 
 // ===========================================================================
 // Explicit methods — the ones the renderer actually calls during load +
@@ -129,21 +145,46 @@ const onOpencodeEvent = (_cb: (ev: unknown) => void): (() => void) => () => {};
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
 
-// Version skew guard (BET-225 stage 3 Part C). Pretend the client and
-// server are perfectly aligned — the renderer reads these in an effect and
-// decides whether to render the non-dismissible "outdated" banner.
+// Version guard (BET-225 stage 3 Part C + BET-357 §3). Pretend the client and
+// server are the aligned default unless the demo state needs a specific version
+// pair to drive a banner — the renderer reads these in an effect and derives
+// the mismatch/skew/behind state from them:
+//   - "version-skew"  → minClient raised above the client (0.0.13), which is
+//                       what drives App.tsx's non-dismissible skew banner.
+//   - "incompatible"  → the box on a different major (1.0.0) than the desktop
+//                       (0.0.13), which drives the wire-contract card.
+//   - "server-update" → the box one patch behind the desktop (0.0.10) on the
+//                       same major, which drives the "Box needs an upgrade"
+//                       card. minClient stays 0.0.0 so it isn't ALSO a skew.
+// Every other state keeps the aligned default (same major, match, no skew).
 const getClientVersion = (): Promise<{ version: string }> =>
   Promise.resolve({ version: "0.0.13" });
 
 const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string }> =>
   Promise.resolve({
-    version: "0.0.13",
-    // "version-skew" makes the client (0.0.13) older than the floor, which is
-    // what drives App.tsx's non-dismissible skew banner. Every other state
-    // keeps the never-skewed default.
+    version: DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
     minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",
     opencodeVersion: "0.0.0",
   });
+
+// Desktop auto-update failure (BET-226 / shared/updateError.mjs). The real
+// transport forwards only integrity/permission-class failures the user must
+// act on; demo mode has no updater, so the fake transport reports one only for
+// the "update-failed" state. The renderer's consumer (onAutoUpdateError in
+// App.tsx) writes the store field the update-failed banner reads. Every other
+// state returns the benign no-op subscribe (never fires).
+const onAutoUpdateError = (cb: (info: { message: string; raw: string }) => void): (() => void) => {
+  if (DEMO_STATE === "update-failed") {
+    queueMicrotask(() =>
+      cb({
+        message:
+          "Update failed to verify — the download's checksum did not match. Please reinstall Manta from the downloads page.",
+        raw: "sha512 mismatch: expected a3f1…, got b7c9…",
+      }),
+    );
+  }
+  return () => {};
+};
 
 // Subscription provider auth (BET-308 / BET-309). Demo returns the three
 // disconnected rows so the connect-card UI still renders the registry
@@ -198,6 +239,7 @@ export const explicitMethods = {
   launchersList,
   getClientVersion,
   getServerVersion,
+  onAutoUpdateError,
   opencodeProviderAuth,
   claudeLoginCancel,
 } as const;
