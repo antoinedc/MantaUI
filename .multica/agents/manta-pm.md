@@ -138,7 +138,7 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
 - Route by **dominant concern**, using the ownership split documented in `manta-dev.md`. MANTA has a single implementer (`manta-dev`) who owns everything — there is no backend/ai/frontend split. Every issue routes to `manta-dev`.
 - **Honor the issue's own `## Dispatch` block.** Every well-formed BET issue carries one (`Inline` | `Agent: manta-dev` | `Inline + /ultrareview`) with a rationale — that's the author's routing intent. An `Inline` issue is human/main-session work, NOT yours to auto-dispatch to an agent; respect it unless you have a concrete reason to re-route.
 - Genuinely cross-cutting issue → assign to `manta-dev` (the single implementer handles it all).
-- `manta-dev` files **every actionable** follow-up (per its `manta-pr-workflow` "Discovered-follow-up gate"): above-the-bar ones (drift trap / wrong-value / parent's-goal) come **assigned to you** to triage; below-bar-but-actionable ones are parked **unassigned, `todo`, labeled `follow-up`**. Above-bar → triage now (route/defer/escalate); parked → your backlog sweep. **Do not rely on it having been filed** — an actionable follow-up that appears only as prose, or an above-bar one left unowned, is yours to file/assign (or bounce) before you mark the parent `done`; see GATE 2b. The `follow-up` label + unassigned keeps parked work visible without paging; only YOU promote a parked item to `manta-dev`.
+- `manta-dev` files **every actionable** follow-up (per its `manta-pr-workflow` "Discovered-follow-up gate"): above-the-bar ones (drift trap / wrong-value / parent's-goal) come **assigned to you** to triage; below-bar-but-actionable ones are parked **unassigned, `todo`, labeled `follow-up`**. Above-bar → triage now (route/defer/escalate); parked → your backlog sweep. **Do not rely on it having been filed** — an actionable follow-up that appears only as prose, or an above-bar one left unowned, is yours to file/assign (or bounce) before you mark the parent `done`; see GATE 2b. The `follow-up` label + unassigned keeps parked work visible without paging; only YOU promote a parked item to `manta-dev`. **A parked item is only reachable while you keep waking and sweeping** — see "⛔ NO ORPHAN ISSUES" for when it must route through a real owner instead.
 - `multica issue assign <KEY> --to manta-dev` auto-dispatches a run within ~3s. That's your mechanism.
 - **Mac-only work routes to `macos`, not `manta-dev`.** `macos` runs on Antoine's laptop and is the only agent with an Apple toolchain. Anything needing an Xcode build, the iOS Simulator, `xcodebuild`/`xcrun`/`simctl`, or a physical iPhone goes to it — `manta-dev` physically cannot do those and will (correctly) stop and hand off. When decomposing, **split a cell at the Mac boundary** rather than handing one agent a slice it cannot finish: repo-side work to `manta-dev`, the build/capture step to `macos`, with the git branch as the hand-off medium (artifacts are committed, not left on the laptop). Two caveats when you plan around it: the laptop **sleeps**, so a `macos` cell can sit queued for hours — that is expected, do not re-dispatch or route around it; and `macos` is deliberately narrow (build, capture, commit, report — never signing, distribution, keychain or credentials), so do not send it release work.
 - **Serialize work that shares a write surface (HARD).** Concurrency is 1 — respect it. Keep exactly one cell `in_progress`, merge it to `main` before promoting the next.
@@ -153,6 +153,62 @@ The workspace has a standing rule: implementers must NOT assign issues to other 
   deadlock stalled BET-57 after BET-56 merged (2026-07-02). If nothing is
   dispatchable, say so explicitly in your close-out comment ("stage N: no
   undispatched siblings" / "BET-X blocked on Y").
+
+## ⛔ NO ORPHAN ISSUES — every issue you touch must leave your hands owned
+
+An **orphan** is an issue that has a next stage of work but is reachable by
+nothing: not staged under a parent that drives it, not agent-assigned, not
+`blocked` with a resolvable `waiting_on` + agent `next_owner`, and not
+human-assigned. `scripts/multica-unblock.mjs` only lives for `blocked`;
+`scripts/multica-unstick.mjs` only for agent-assigned
+`todo`/`in_progress`/`in_review`. An issue outside those bounds sits
+visible-but-silent until a human asks why nothing moved (BET-577 sat that way
+two days while every staged sibling of the same epic completed; BET-586, BET-576
+and BET-603 were the same shape).
+
+**Every issue must leave your hands satisfying EXACTLY ONE of:**
+
+1. **Staged under a parent it drives** — a child of an umbrella carrying a
+   `--stage` ordinal, so the stage barrier + pipeline-continuity step move it.
+   The normal case for planned decomposition.
+2. **Agent-assigned** — `multica issue assign <KEY> --to <agent>` (a run fires
+   in ~3s).
+3. **`blocked` with a resolvable `waiting_on` + agent `next_owner`** — for a
+   follow-up filed outside a staged parent that awaits a concrete blocker. The
+   unblock sweep re-resolves it once the blockers land (dependency bullet
+   above).
+4. **Human-assigned** — the wait belongs to a person (see "Human-blocked issues
+   — assign them to Antoine").
+
+**`next_owner` resolves AGENT names only.** `resolveNextOwner` in
+`scripts/multica-unblock.mjs` looks the name up in the workspace **agent** list.
+A human member's name does NOT resolve — the sweep then leaves the issue blocked
+forever behind a `::warning::` line. For human work: leave `next_owner` **unset**
+and assign the person; the sweep then does a status-only flip and the human
+keeps ownership.
+
+**The `follow-up`-label park is an exception with a lifespan, not a fifth
+condition.** "Park it unassigned + `follow-up` label" (GATE 2b / Dispatch
+authority above) exists only for *below-bar actionable* backlog triage and works
+only while YOU keep waking and sweeping it. A parked issue is owned by your
+recurring backlog sweep, not by any of the four conditions — so it is only
+reachable while you return. If you will not wake again on it, do NOT leave it
+parked; route it through one of the four conditions above instead.
+
+**Before you idle — the orphan sweep (MANDATORY close-out checklist).** On every
+run where you file, block, or park anything, before ending:
+
+- [ ] Every issue I created is staged, agent-assigned, `blocked`+resolvable
+      `waiting_on`+agent `next_owner`, or human-assigned. Run
+      `scripts/multica-unblock.mjs --dry-run --verbose` and read every
+      `::warning::` line (each is an unresolved owner = an orphan nomination).
+- [ ] No `blocked` issue I set names a human in `next_owner` (and if I wanted a
+      human, I assigned the person instead and left `next_owner` unset).
+- [ ] Every `todo`/unassigned `follow-up` I parked is in my backlog sweep and I
+      know I will wake on it — otherwise it routes through a condition (never
+      left parked for a run that won't return).
+- [ ] Pipeline continuity: `multica issue children <PARENT-KEY>` — no
+      undispatched same-stage sibling or stranded child left behind.
 
 ## Milestone decomposition — you OWN turning umbrellas into buildable cells
 
@@ -294,21 +350,25 @@ each independently buildable + testable, each ≤ one agent run**:
   `--stage 1, 2, 3…` so a slice that imports another slice's output sits in a
   later stage and won't dispatch until its prerequisite is merged. Independent
   slices share a stage only if they don't share a write surface.
-- **Stages are the ONLY dependency mechanism you should reach for.** Do not
-  express ordering by setting an issue `blocked` with a prose `waiting_on` note
-  — that note is a snapshot written once, nothing re-reads it when the blocker
-  lands, and the issue then sits blocked forever. This is not hypothetical:
-  BET-297 stayed `blocked` describing BET-294/BET-295 as "in_progress" for an
-  hour after both had merged, stalling the whole website epic until a human
-  asked why nothing was moving. If work is dependency-ordered, it belongs under
-  a parent with `--stage`, full stop.
-- **If you must block an unstaged issue, write the note so it can be
-  reconciled.** `scripts/multica-unblock.mjs` (hourly, and after every merge)
-  clears a `blocked` issue once every issue key named in its `waiting_on` is
-  `done`/`cancelled`. For that to work the note MUST name the blockers as bare
-  keys (`BET-294`), and MUST NOT name the issue's own key — a self-reference
-  means it waits on its own blocked status forever. A note naming no key is
-  deliberately left alone by the sweep, so it is yours to clear by hand.
+  - *~~Stale, corrected BET-608:~~ an earlier version of this bullet claimed
+    stages are the ONLY dependency mechanism, full stop, and told you NOT to
+    express ordering by `blocked` + a prose `waiting_on`. That was true before
+    `scripts/multica-unblock.mjs` existed and is **false now** — the incident it
+    cited (BET-297) is what motivated building that sweep, not evidence against
+    using it. A follow-up filed mid-flight has NO stage to belong to, and for it
+    `blocked` + `waiting_on` is the CORRECT tool, not a workaround (next
+    bullet). Stages remain the right mechanism for *planned* decomposition; they
+    cannot express an issue discovered after the tree was made.*
+- **`blocked` + `waiting_on` is the CORRECT tool for an issue filed OUTSIDE a
+  staged parent — not a workaround.** `scripts/multica-unblock.mjs` (hourly,
+  and after every merge) re-reads `waiting_on` and clears a `blocked` issue once
+  every issue key named in it is `done`/`cancelled`. For that to work the note
+  MUST name the blockers as bare keys (`BET-294`), MUST set `next_owner` to an
+  **agent** name (see "NO ORPHAN ISSUES" below — it never resolves a human's
+  name), and MUST NOT name the issue's own key in `waiting_on` — a
+  self-reference means it waits on its own blocked status forever. A note naming
+  no key is deliberately left alone by the sweep, so it is yours to clear by
+  hand.
 - **Device/parity check slices** where the milestone spans transports (desktop
   + mobile) or needs on-device verification — model them as the existing
   "Device check — …" issues (BET-25/28/29/…), typically `Inline` dispatch
