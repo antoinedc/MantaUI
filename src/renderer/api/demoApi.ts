@@ -100,7 +100,7 @@ export const DEMO_STREAM_PHASES = ["early", "mid", "late"] as const;
 
 /** Module state for the stepped stream. Only ever read/written when
  *  DEMO_STATE === "stream". */
-let streamStep = DEMO_STREAM_PHASE_STEPS.early;
+let streamStep: number = DEMO_STREAM_PHASE_STEPS.early;
 let streamPending = false;
 let streamServed = false;
 const opencodeListeners = new Set<(ev: unknown) => void>();
@@ -254,7 +254,7 @@ const opencodeMessages = (sessionId: string) =>
 // stream position, so a message.updated event causes the rendered copy to
 // grow one phase at a time. Served marks the phase as applied so the harness
 // knows not to screenshot while the splice debounce is still pending.
-const opencodeMessage = (sessionId: string, messageId: string) => {
+const opencodeMessage = (_sessionId: string, messageId: string) => {
   const list = isStream ? revealedTranscript(streamStep) : demoState.messages;
   const hit = list.find((m) => m.info.id === messageId) ?? null;
   if (isStream && hit && !hit.info.time?.completed) {
