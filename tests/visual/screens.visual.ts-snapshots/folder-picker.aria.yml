@@ -1,7 +1,8 @@
-- text: Choose a folder
+- text: Select folder
 - button "Close"
 - textbox: ~/projects/
-- button "Go up one level"
+- button "Go"
+- button "Home"
 - button "~"
 - button "projects"
 - button ".."

@@ -16,7 +16,13 @@
 // gitStateLabel) live in folderPicker.ts and are unit-tested there.
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, X, Folder as FolderIcon, ArrowUp } from "lucide-react";
+import {
+  ChevronRight,
+  X,
+  Folder as FolderIcon,
+  ArrowUp,
+  Home,
+} from "lucide-react";
 import type { WorktreeInfo } from "../shared/types";
 import {
   breadcrumbs,
@@ -194,6 +200,16 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
     setPath(up);
   };
 
+  // The design's "Go" discovery trigger (§07): browse into whatever path is
+  // in the field, treating it as a directory to descend into. Mirrors the
+  // row-click/descend affordance for a typed (or ghost-completed) path.
+  const goNavigate = () => {
+    const target = (path || "").trim() || "~";
+    const next = target.endsWith("/") ? target : target + "/";
+    setSuggestion(null);
+    setPath(next);
+  };
+
   const select = async () => {
     const chosen = path.endsWith("/") ? path.slice(0, -1) : path;
     // Probe worktrees before committing — the fan-out question is asked
@@ -220,7 +236,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
       >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <div className="text-body font-semibold text-text">Choose a folder</div>
+          <div className="text-body font-semibold text-text">Select folder</div>
           <button
             onClick={onCancel}
             className="text-text-muted hover:text-text leading-none inline-flex items-center"
@@ -271,76 +287,91 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
           </div>
         ) : (
           <>
-            {/* Path field with ghost-text completion */}
+            {/* Path field with ghost-text completion + the design's Go button */}
             <div className="px-4 py-3 border-b border-border">
-              <div className="relative w-full bg-bg-soft border border-border rounded focus-within:border-accent">
-                {suggestion && suggestion.startsWith(path) && (
-                  <div
-                    aria-hidden
-                    className="absolute inset-0 px-3 py-2 text-meta flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
-                  >
-                    <span className="invisible">{path}</span>
-                    <span className="text-text-faint">
-                      {suggestion.slice(path.length)}
-                    </span>
-                  </div>
-                )}
-                <input
-                  autoFocus
-                  value={path}
-                  onChange={(e) => onPathChange(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Tab" && suggestion) {
-                      e.preventDefault();
-                      acceptSuggestion();
-                      return;
-                    }
-                    if (e.key === "ArrowRight" && suggestion) {
-                      const el = e.currentTarget;
-                      if (
-                        el.selectionStart === el.value.length &&
-                        el.selectionEnd === el.value.length
-                      ) {
+              <div className="flex gap-2">
+                <div className="relative flex-1 min-w-0 bg-bg-soft border border-border rounded focus-within:border-accent">
+                  {suggestion && suggestion.startsWith(path) && (
+                    <div
+                      aria-hidden
+                      className="absolute inset-0 px-3 py-2 text-meta flex items-center pointer-events-none whitespace-pre overflow-hidden font-mono"
+                    >
+                      <span className="invisible">{path}</span>
+                      <span className="text-text-faint">
+                        {suggestion.slice(path.length)}
+                      </span>
+                    </div>
+                  )}
+                  <input
+                    autoFocus
+                    value={path}
+                    onChange={(e) => onPathChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Tab" && suggestion) {
                         e.preventDefault();
                         acceptSuggestion();
                         return;
                       }
-                    }
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void select();
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      if (suggestion) setSuggestion(null);
-                      else onCancel();
-                    }
-                  }}
-                  spellCheck={false}
-                  autoComplete="off"
-                  className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded focus:outline-none font-mono"
-                />
+                      if (e.key === "ArrowRight" && suggestion) {
+                        const el = e.currentTarget;
+                        if (
+                          el.selectionStart === el.value.length &&
+                          el.selectionEnd === el.value.length
+                        ) {
+                          e.preventDefault();
+                          acceptSuggestion();
+                          return;
+                        }
+                      }
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void select();
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        if (suggestion) setSuggestion(null);
+                        else onCancel();
+                      }
+                    }}
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded focus:outline-none font-mono"
+                  />
+                </div>
+                <button
+                  onClick={goNavigate}
+                  type="button"
+                  className="shrink-0 px-4 text-meta border border-border rounded bg-bg-soft text-text hover:bg-bg-soft"
+                >
+                  Go
+                </button>
               </div>
 
-              {/* Breadcrumbs */}
+              {/* Breadcrumbs — home icon + inter-crumb chevrons, current crumb
+                  at full weight (aligns to §07). */}
               <div className="flex items-center flex-wrap gap-px mt-2 text-label">
                 <button
-                  onClick={goUp}
-                  className="inline-flex items-center gap-1 text-text-faint hover:text-text px-1 py-px rounded"
-                  title="Go up one level"
+                  onClick={() => setPath("~")}
+                  className="inline-flex items-center px-1 py-px rounded text-text-faint hover:text-text"
+                  title="Home"
+                  aria-label="Home"
                 >
-                  <ArrowUp size={12} aria-hidden="true" />
+                  <Home size={12} aria-hidden="true" />
                 </button>
                 {crumbs.map((c, i) => (
                   <span key={c} className="inline-flex items-center">
-                    {i > 0 && (
-                      <ChevronRight size={12} className="text-text-quiet" aria-hidden="true" />
-                    )}
+                    <ChevronRight
+                      size={12}
+                      className="text-text-quiet"
+                      aria-hidden="true"
+                    />
                     <button
                       onClick={() => setPath(c)}
                       className={
-                        "px-1 py-px rounded font-mono " +
-                        (c === path ? "text-text" : "text-text-faint hover:text-text-muted")
+                        "px-1 py-px rounded " +
+                        (i === crumbs.length - 1
+                          ? "font-semibold text-text"
+                          : "text-text-faint hover:text-text-muted")
                       }
                       title={c}
                     >
