@@ -8,14 +8,18 @@
 
 /* Begin PBXBuildFile section */
 		01871023D47544D64443194D /* MantaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C8240F1954861B4846E279D /* MantaModels.swift */; };
+		33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1306D325FEB295B7AB874E /* MantaEventStore.swift */; };
 		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
+		5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */; };
 		612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */; };
 		67A2877890E8B008335AD7C0 /* KeychainCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */; };
 		95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */; };
+		9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
 		B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */; };
 		E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799EED7CC4F10C6684A5662C /* Theme.swift */; };
+		EAA66561F9150E1E2D4FBA4A /* MantaReconnectController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,17 +41,21 @@
 
 /* Begin PBXFileReference section */
 		17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAPIClient.swift; sourceTree = "<group>"; };
+		1E1306D325FEB295B7AB874E /* MantaEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStore.swift; sourceTree = "<group>"; };
 		2C13A01F9048A8907CBCC31D /* MantaUIUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MantaUIUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		35ECC10E3DB9A931F8EB5420 /* MantaUI.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MantaUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainCredentialStore.swift; sourceTree = "<group>"; };
 		714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIHierarchyCaptureUITests.swift; sourceTree = "<group>"; };
+		772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaReconnectController.swift; sourceTree = "<group>"; };
 		799EED7CC4F10C6684A5662C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaStreamModels.swift; sourceTree = "<group>"; };
 		87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIApp.swift; sourceTree = "<group>"; };
 		8C8240F1954861B4846E279D /* MantaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaModels.swift; sourceTree = "<group>"; };
 		9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaTransportTests.swift; sourceTree = "<group>"; };
 		A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptComponents.swift; sourceTree = "<group>"; };
 		A4E84DF65831DE58599C53BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		C7F564F718747579264A4370 /* MantaUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MantaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStreamTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -73,6 +81,7 @@
 		7168FDC00E99AA075ACA9698 /* MantaUITests */ = {
 			isa = PBXGroup;
 			children = (
+				EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */,
 				9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */,
 			);
 			path = MantaUITests;
@@ -110,7 +119,10 @@
 			children = (
 				6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */,
 				17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */,
+				1E1306D325FEB295B7AB874E /* MantaEventStore.swift */,
 				8C8240F1954861B4846E279D /* MantaModels.swift */,
+				772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */,
+				7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */,
 				87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */,
 				A4E84DF65831DE58599C53BD /* RootView.swift */,
 				A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */,
@@ -237,6 +249,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */,
 				B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -247,7 +260,10 @@
 			files = (
 				67A2877890E8B008335AD7C0 /* KeychainCredentialStore.swift in Sources */,
 				612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */,
+				33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */,
 				01871023D47544D64443194D /* MantaModels.swift in Sources */,
+				EAA66561F9150E1E2D4FBA4A /* MantaReconnectController.swift in Sources */,
+				5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */,
 				4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */,
 				9CF891D747797006729FDBD3 /* RootView.swift in Sources */,
 				E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */,
