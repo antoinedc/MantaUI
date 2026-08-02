@@ -451,27 +451,16 @@ Session owner→props mapping is the tested `resolveSessionOwner()` in
 (those selectors would require editing a desktop-invariant file and silently
 match nothing).
 
-**Reshaping reused ChatPanel/Terminal internals on mobile:** the desktop
-composer footer is one non-wrapping flex row built for a wide panel; at
-phone width its children overlap. Fix is always `.mobile`-scoped CSS in
-`mobile/mobile.css` — never edit `ChatPanel.tsx`. Prefer a stable `manta-*`
-hook class on the shared element (precedent: `manta-session-toolbar`,
-`manta-stale-full`/`manta-stale-min`, `manta-loading-divider`,
-`manta-session-branch`) — adding a class name to a shared component is a
-desktop no-op. Only fall back to a positional selector when you truly
-cannot touch the component: ChatPanel is
-the lone `.mobile-body > div` (h-full flex-col); its composer is that div's
-`> div:last-child`; footer rows are matched via `div[class*="flex"]` /
-`[class*="justify-between"]` + child position. Established rules: composer
-rows `flex-wrap`; hide desktop keyboard-hint span + fork/compact/delete
-toolbar (`SessionToolbar` — actions live in the header `⋯` sheet on mobile);
-drop the context bar track (`manta-ctx-track`, unique to ContextBar) but keep
-the stage-colored `%`; clamp the empty textarea placeholder to one line via
-`textarea:placeholder-shown` (reverts to `pre-wrap` once typed so
-`resizeInput` still owns height); branch chip gets its own line via
-`.manta-session-branch` (in the SessionHeader, not the composer footer).
-Verify on-device: `cd mobile && npm run
-apk`, `adb install -r`, screenshot the composer.
+**Reshaping shared components for mobile (RETIRED — BET-559):** the
+`.mobile`-scoped CSS approach and the `manta-*` hook classes below applied
+to the web/PWA client that BET-559 retired and the `src/renderer/mobile/`
+shell it rendered — `mobile/mobile.css` no longer exists. BET-578 stripped
+the inert `manta-*` hooks this guidance used to recommend as precedent
+(`manta-session-toolbar`, `manta-stale-full`/`-min`, `manta-ctx-track`,
+`manta-session-branch`); do not reintroduce `manta-*` classes as mobile CSS
+hooks (see the "Mobile CSS hook-class contract — RETIRED" section). The only
+surviving example, `manta-loading-divider`, is a live desktop class in
+`src/renderer/index.css`, not a mobile hook.
 
 ## Desktop transport (HTTP-only)
 
