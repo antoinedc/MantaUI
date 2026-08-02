@@ -131,14 +131,18 @@ final class MantaOpenSessionUITests: XCTestCase {
         // Each hop is one push (session row, then e.g. a subagent row), so a
         // drill-in can be driven end to end rather than only the first screen.
         for hop in hops {
-            let target = app.staticTexts[hop]
+            // A list row combines its children for accessibility, so it is ONE
+            // element whose label is "<name>, <subtitle>" — an exact staticText
+            // match finds only headers, never a row.
+            let prefix = NSPredicate(format: "label BEGINSWITH %@", hop)
+            let target = app.descendants(matching: .any).matching(prefix).firstMatch
             guard target.waitForExistence(timeout: 10) else {
                 print("PAIRDRIVE open-miss=\(hop)")
                 break
             }
             target.tap()
-            print("PAIRDRIVE open-row=\(hop)")
-            sleep(3)
+            print("PAIRDRIVE open-row=\(hop) kind=\(target.elementType.rawValue)")
+            sleep(4)
         }
         sleep(6)
         // The runner tears the app down the moment the test ends, so a
