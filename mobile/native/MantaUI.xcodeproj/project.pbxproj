@@ -7,13 +7,26 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
 		E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799EED7CC4F10C6684A5662C /* Theme.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		8810EC5DBFDD634E1F282BE7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 747EF81B08A2EE0658BCE94C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 27F9832827A761BC0E5BCE51;
+			remoteInfo = MantaUI;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		2C13A01F9048A8907CBCC31D /* MantaUIUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MantaUIUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		35ECC10E3DB9A931F8EB5420 /* MantaUI.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MantaUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIHierarchyCaptureUITests.swift; sourceTree = "<group>"; };
 		799EED7CC4F10C6684A5662C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIApp.swift; sourceTree = "<group>"; };
 		A4E84DF65831DE58599C53BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -24,6 +37,7 @@
 			isa = PBXGroup;
 			children = (
 				35ECC10E3DB9A931F8EB5420 /* MantaUI.app */,
+				2C13A01F9048A8907CBCC31D /* MantaUIUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -42,6 +56,7 @@
 			children = (
 				D7128F5AAFA315FE875EEC98 /* MantaUI */,
 				50A0ACE5FA8F3A848B41986E /* MantaUI */,
+				DF70760D7D88A6A31A5243DA /* MantaUIUITests */,
 				0141B3CF9BBB5EB026BDA8C5 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,9 +86,35 @@
 			path = MantaUI;
 			sourceTree = "<group>";
 		};
+		DF70760D7D88A6A31A5243DA /* MantaUIUITests */ = {
+			isa = PBXGroup;
+			children = (
+				714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */,
+			);
+			path = MantaUIUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		0A2210EB32D156B1FB712083 /* MantaUIUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DC932F22BD30025150B13A2C /* Build configuration list for PBXNativeTarget "MantaUIUITests" */;
+			buildPhases = (
+				4724733D1545274205A1D812 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				19FA46D00CE3D8123D4EBB52 /* PBXTargetDependency */,
+			);
+			name = MantaUIUITests;
+			packageProductDependencies = (
+			);
+			productName = MantaUIUITests;
+			productReference = 2C13A01F9048A8907CBCC31D /* MantaUIUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		27F9832827A761BC0E5BCE51 /* MantaUI */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 2849616DFC1A158C2EC07212 /* Build configuration list for PBXNativeTarget "MantaUI" */;
@@ -100,6 +141,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					0A2210EB32D156B1FB712083 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = 27F9832827A761BC0E5BCE51;
+					};
 					27F9832827A761BC0E5BCE51 = {
 						ProvisioningStyle = Automatic;
 					};
@@ -120,11 +165,20 @@
 			projectRoot = "";
 			targets = (
 				27F9832827A761BC0E5BCE51 /* MantaUI */,
+				0A2210EB32D156B1FB712083 /* MantaUIUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
+		4724733D1545274205A1D812 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		85AE13C7C7852F37B78D84D2 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -137,7 +191,34 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		19FA46D00CE3D8123D4EBB52 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 27F9832827A761BC0E5BCE51 /* MantaUI */;
+			targetProxy = 8810EC5DBFDD634E1F282BE7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		63A8F6B5A9D8C75C21C7BBC2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MantaUI;
+			};
+			name = Debug;
+		};
 		8857613A992CF5C51AF05CFD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -218,6 +299,25 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		C002E5BFFE962393F5EF7147 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.antoinedc.mantaui.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = MantaUI;
 			};
 			name = Release;
 		};
@@ -328,6 +428,15 @@
 			buildConfigurations = (
 				CD6610745679E80B8D16AE5F /* Debug */,
 				9FF72AEF1528C0288306AE59 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		DC932F22BD30025150B13A2C /* Build configuration list for PBXNativeTarget "MantaUIUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				63A8F6B5A9D8C75C21C7BBC2 /* Debug */,
+				C002E5BFFE962393F5EF7147 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
