@@ -49,6 +49,27 @@ struct UserBand: View {
     }
 }
 
+
+// MARK: - Inline markdown
+//
+// The native transcript has no markdown renderer (the spike explicitly did not
+// build one), so assistant turns showed their source: `**bold**`, backticked
+// code and link syntax appeared verbatim. This covers the INLINE subset that
+// SwiftUI can parse natively — emphasis, strong, inline code, links —
+// preserving newlines so paragraph structure survives.
+//
+// BLOCK-level markdown (headings, lists, fenced code, thematic breaks) is
+// still unrendered; that needs a real block parser and its own components,
+// which is a separate piece of work, not something to fake here.
+enum MantaInlineMarkdown {
+    static func render(_ raw: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+        return (try? AttributedString(markdown: raw, options: options)) ?? AttributedString(raw)
+    }
+}
+
 // MARK: - Assistant prose
 //
 // §8: full width, `tx1`, 15px/`--prose-lh`, margin-bottom `--sp-3`.
@@ -57,7 +78,7 @@ struct AssistantProse: View {
     let tokens: Tokens
 
     var body: some View {
-        Text(text)
+        Text(MantaInlineMarkdown.render(text))
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))

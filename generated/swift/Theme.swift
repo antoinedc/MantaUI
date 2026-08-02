@@ -58,7 +58,7 @@ struct Tokens {
         let accentTx: Color = Color(hex: "#1F55D6")
         let accentSolid: Color = Color(hex: "#1F55D6")
         let onAccent: Color = Color(hex: "#FFFFFF")
-        let accentSoft: Color = Color(hex: "#1F55D6")
+        let accentSoft: Color = Color(hex: "#DFE8FF")
         let ok: Color = Color(hex: "#0A7A53")
         let warn: Color = Color(hex: "#8A5A08")
         let danger: Color = Color(hex: "#BE2F3C")
