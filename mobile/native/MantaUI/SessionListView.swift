@@ -131,8 +131,14 @@ struct SessionListView: View {
                 ForEach(filteredProjects) { project in
                     Section {
                         groupHeader(project.tmuxSession)
-                        ForEach(project.windows) { window in
-                            row(project: project, window: window)
+                        // Identity MUST be project-scoped. `MantaWindow.id` is
+                        // the tmux window index, which repeats across projects
+                        // (every project has a window 0), and a LazyVStack
+                        // keeps ONE flat identity space across the nested
+                        // ForEachs — so the second project's window 0 collided
+                        // with the first project's and rendered as a blank row.
+                        ForEach(project.windows.map { SessionRowKey(project: project.tmuxSession, window: $0) }) { entry in
+                            row(project: project, window: entry.window)
                         }
                     }
                 }
@@ -471,6 +477,15 @@ struct SessionListView: View {
 }
 
 // MARK: - Row content (§7.1 slots)
+
+/// Project-scoped row identity for the session list. A tmux window index is
+/// only unique WITHIN its project, so it cannot be the identity of a row in a
+/// LazyVStack that renders every project in one flat identity space.
+private struct SessionRowKey: Identifiable {
+    let project: String
+    let window: MantaWindow
+    var id: String { "\(project)#\(window.index)" }
+}
 
 private struct SessionRowContent: View {
     let window: MantaWindow
