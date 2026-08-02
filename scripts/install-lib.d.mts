@@ -6,7 +6,7 @@
 // helpers, exercised by the plain-Node scripts/install.test.mjs suite (no
 // type declarations needed there — node:test loads the .mjs directly).
 // This file declares ONLY the exports a checked .ts file actually imports
-// (currently: src/renderer/mobile/pairPayload.test.ts, for the BET-386
+// (currently: src/shared/pairPayload.test.ts, for the BET-386
 // buildPairLink round-trip) — extend it if a future .ts file imports more.
 
 /**
