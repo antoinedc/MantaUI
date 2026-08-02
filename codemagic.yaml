@@ -1,20 +1,160 @@
-# Codemagic CI/CD — macOS desktop (Electron) distribution only.
+# Codemagic CI/CD — iOS TestFlight + macOS desktop (Electron) distribution.
 #
-# BET-559: the iOS TestFlight workflow (which built the retired Capacitor
-# wrapper in mobile/ios) was removed along with the Capacitor shell. This file
-# now drives only the mac-desktop workflow: electron-builder → signed +
-# notarized DMG → mantaui.com.
+# BET-601 (S9): the iOS TestFlight workflow was restored after BET-559 removed
+# it (with the Capacitor shell). It now builds the NATIVE app in mobile/native
+# (xcodegen → MantaUI.xcodeproj, scheme `MantaUI`) instead of the retired
+# Capacitor wrapper in mobile/ios. The mac-desktop workflow is unchanged.
+#
+# WHY CODEMAGIC (not Xcode Cloud): Xcode Cloud built + signed fine but could
+# NEVER authenticate to upload the binary to App Store Connect ("Session Proxy
+# Provider Code=1" — a known Xcode Cloud auth bug). Codemagic uploads via the
+# App Store Connect API key, which authenticates reliably. Do not reintroduce
+# Xcode Cloud.
 #
 # ONE-TIME SETUP IN THE CODEMAGIC WEB UI (you do this once):
 #   1. Sign up at codemagic.io, connect the GitHub repo antoinedc/MantaUI.
-#   2. For the desktop: create the "Developer ID Application" cert + the
-#      App Store Connect API key and wire the env groups (mac_signing /
-#      mantaui / prod_deploy) as documented in the mac-desktop workflow below.
+#   2. iOS: the ASC API key integration must be named "APS Key" (referenced
+#      below as app_store_connect: APS Key). The persistent iOS distribution
+#      private key lives in the "ios_signing" env group as
+#      CERTIFICATE_PRIVATE_KEY.
+#   3. Desktop: create the "Developer ID Application" cert + wire the env
+#      groups as documented in the mac-desktop workflow below.
 #
-# TRIGGER: a git tag matching mac-v*. Also runnable manually from the
-#   Codemagic UI.
+# TRIGGER: a git tag matching ios-v* (iOS) or mac-v* (desktop); the tag prefix
+#   routes each build so one never fires the other. iOS tags are usually
+#   created automatically by .github/workflows/ios-release-tag.yml on merge to
+#   main (reads MARKETING_VERSION from mobile/native/project.yml).
 
 workflows:
+  # ---------------------------------------------------------------------------
+  # iOS native (mobile/native) → signed .ipa → TestFlight
+  # ---------------------------------------------------------------------------
+  # Restored in BET-601. Builds the SwiftUI app in mobile/native: xcodegen
+  # generates MantaUI.xcodeproj from project.yml (the source of truth), then a
+  # distribution cert + App Store profile are created on the build machine from
+  # the PERSISTENT private key (CERTIFICATE_PRIVATE_KEY in the ios_signing env
+  # group), and the archive is uploaded to TestFlight via the ASC API key.
+  #
+  # PRIVATE-KEY CUSTODY is the crux: a distribution certificate is only usable
+  # by whoever holds its private key, so the key lives on the build machine and
+  # the cert is created FROM it. Do NOT go back to a per-build throwaway key —
+  # each such build minted a new cert whose key died with the VM; after 2
+  # builds the account's cert quota (max 2/type) filled with unusable certs and
+  # signing silently produced zero profiles (the ios-v1.0.8 outage, c899c89).
+  ios-testflight:
+    name: MantaUI iOS → TestFlight
+    instance_type: mac_mini_m2      # 500 free M2 minutes/month
+    max_build_duration: 60
+    integrations:
+      app_store_connect: APS Key  # MUST match the ASC API key integration name in the Codemagic UI exactly (Team > Integrations > Developer Portal)
+    environment:
+      # NOTE: no declarative `ios_signing:` block on purpose. That block makes
+      # Codemagic resolve signing at environment-setup time (before scripts run)
+      # and fails with "No matching profiles found" if the profile doesn't
+      # already exist. Instead the "Set up code signing" script below runs
+      # `app-store-connect fetch-signing-files --create`, which CREATES the
+      # distribution cert + App Store profile via the ASC API key if missing.
+      groups:
+        # ios_signing holds CERTIFICATE_PRIVATE_KEY — the PERSISTENT RSA key
+        # (secure app variable, uploaded via the Codemagic API; durable copy at
+        # ~/.manta/ios-dist-key.pem on the box). One stable key ⇒ one stable
+        # distribution cert reused across builds.
+        - ios_signing
+      vars:
+        BUNDLE_ID: "com.antoinedc.mantaui"
+        APP_STORE_APPLE_ID: 6792363427
+        XCODE_PROJECT: "mobile/native/MantaUI.xcodeproj"
+        XCODE_SCHEME: "MantaUI"
+      node: 22
+      xcode: latest
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: "ios-v*"
+          include: true
+    scripts:
+      - name: Generate Xcode project from project.yml (xcodegen)
+        script: |
+          # mobile/native/project.yml is the source of truth; MantaUI.xcodeproj
+          # is derived from it (xcodegen). Generate it so the pbxproj can never
+          # drift from the spec — this is what keeps MARKETING_VERSION + the
+          # bundle id correct even if only project.yml was bumped. The generated
+          # project is deterministic, so re-generating over the checked-in file
+          # is a no-op when they already match.
+          brew install xcodegen
+          cd mobile/native
+          xcodegen generate
+      - name: Set up code signing (App Store profile via ASC API key)
+        script: |
+          # THE PRIVATE-KEY REQUIREMENT: a distribution certificate is only
+          # usable for signing by whoever holds its PRIVATE KEY. The key comes
+          # from the PERSISTENT secure variable CERTIFICATE_PRIVATE_KEY
+          # (ios_signing group) so every build reuses the SAME key and the SAME
+          # cert. A per-build throwaway key minted a new cert every build until
+          # the 2-cert quota filled with certs whose keys were lost — then
+          # signing silently produced zero profiles (ios-v1.0.8).
+          keychain initialize
+
+          # 1. Materialize the persistent private key.
+          printf '%s\n' "$CERTIFICATE_PRIVATE_KEY" > /tmp/dist_key
+          chmod 600 /tmp/dist_key
+
+          # 2. Create the distribution certificate FROM that key via the ASC API
+          #    key — first run only; afterwards it 409s (cert exists) and the
+          #    fallback `list` finds the existing cert matching our key.
+          #    --save stores the resulting cert next to the key so
+          #    fetch/keychain steps can find both.
+          app-store-connect certificates create \
+            --type IOS_DISTRIBUTION \
+            --certificate-key=@file:/tmp/dist_key \
+            --save || \
+          app-store-connect certificates list \
+            --type IOS_DISTRIBUTION \
+            --certificate-key=@file:/tmp/dist_key \
+            --save
+
+          # 3. Fetch signing files, passing the SAME private key so Codemagic can
+          #    match the cert to its key and build a usable p12 + create the
+          #    App Store provisioning profile for the bundle id.
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --platform IOS \
+            --type IOS_APP_STORE \
+            --certificate-key=@file:/tmp/dist_key \
+            --create
+
+          # 4. Import the certificate(s) into the keychain.
+          keychain add-certificates
+
+          # 5. Write the profile's specifier into the Xcode project + the export
+          #    options plist that build-ipa consumes. This also converts the
+          #    project's `CODE_SIGN_STYLE = Automatic` (project.yml) to Manual
+          #    with the fetched profile, so the archive resolves a concrete cert.
+          xcode-project use-profiles \
+            --export-options-plist "$CM_BUILD_DIR/export_options.plist"
+      - name: Build + archive .ipa
+        script: |
+          # use-profiles (previous step) set the project to manual signing with
+          # the fetched App Store profile and wrote the export options plist to
+          # $CM_BUILD_DIR/export_options.plist. Feed it so the archive + export
+          # have a concrete profile (fixes "app requires a provisioning
+          # profile"). Force the team so manual signing resolves. No pods, so a
+          # --project rather than the Capacitor era's --workspace.
+          xcode-project build-ipa \
+            --project "$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+            --archive-xcargs "DEVELOPMENT_TEAM=FSQ3HS4Z24" \
+            --export-options-plist "$CM_BUILD_DIR/export_options.plist"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration          # use the ASC API key integration
+        submit_to_testflight: true
+        # Internal testers get it automatically once processing completes.
+        # No App Store review needed for internal TestFlight.
+
   # ---------------------------------------------------------------------------
   # macOS desktop (Electron) → signed + notarized DMG → mantaui.com
   # ---------------------------------------------------------------------------
