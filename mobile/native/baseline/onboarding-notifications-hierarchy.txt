@@ -1,0 +1,34 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+    Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+              ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'onboarding-root'
+                Other, 0xADDR, {{0.0, 62.0}, {402.0, 369.7}}
+                  StaticText, 0xADDR, {{24.0, 94.0}, {306.3, 33.7}}, label: 'Know when it needs you'
+                  StaticText, 0xADDR, {{24.0, 135.7}, {332.7, 54.0}}, label: 'Agents stop for permission, ask questions, and finish while you're somewhere else. This is the point of having Manta on your phone.'
+                  StaticText, 0xADDR, {{46.0, 233.8}, {263.7, 15.7}}, label: 'Permission needed to run a command'
+                    Image, 0xADDR, {{46.0, 234.3}, {12.3, 15.0}}, identifier: 'exclamationmark.shield', label: 'exclamationmark.shield'
+                    StaticText, 0xADDR, {{76.0, 233.8}, {233.7, 15.7}}, label: 'Permission needed to run a command'
+                  StaticText, 0xADDR, {{44.3, 269.8}, {220.7, 15.7}}, label: 'A question is blocking the turn'
+                    Image, 0xADDR, {{44.3, 270.7}, {15.7, 14.0}}, identifier: 'exclamationmark.triangle', label: 'Warning'
+                    StaticText, 0xADDR, {{76.0, 269.8}, {189.0, 15.7}}, label: 'A question is blocking the turn'
+                  StaticText, 0xADDR, {{44.7, 305.8}, {152.7, 15.7}}, label: 'A long turn finished', Selected
+                    Image, 0xADDR, {{44.7, 306.3}, {15.0, 15.0}}, identifier: 'checkmark.circle', label: 'Selected', Selected
+                    StaticText, 0xADDR, {{76.0, 305.8}, {121.3, 15.7}}, label: 'A long turn finished'
+                  Button, 0xADDR, {{24.0, 365.7}, {354.0, 42.0}}, label: 'Continue'
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 473.3}, {3.0, 335.7}}
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 473.3}, {3.0, 335.7}}
+Path to element:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0xADDR, pid: PID, label: 'MantaUI'
+  }
+

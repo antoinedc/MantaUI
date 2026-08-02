@@ -11,7 +11,10 @@ struct MantaUIApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            // S2: MantaAppRoot gates fresh-install onboarding vs. the paired
+            // main destination (BET-594). The app-wide event store still owns
+            // the /events stream and bounds to whatever S4 mounts.
+            MantaAppRoot()
                 .environmentObject(store)
                 .task { store.start() }
         }

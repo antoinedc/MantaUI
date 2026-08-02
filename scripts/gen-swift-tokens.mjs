@@ -86,6 +86,9 @@ const RADIUS_MAP = [
 const TYPE_MAP = {
   body: "font-size-body", small: "font-size-small",
   xs: "font-size-xs", twoXS: "font-size-2xs",
+  // S2 onboarding display sizes (BET-594): screen headings, the two-sided
+  // four-char confirm code, and the six-digit OTP field.
+  display: "font-size-display", confirm: "font-size-confirm", otp: "font-size-otp",
   medium: "weight-medium", semibold: "weight-semibold",
   proseLineHeight: "prose-lh", uiLineHeight: "ui-lh",
 };

@@ -1,0 +1,30 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+    Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+              ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'onboarding-root'
+                Other, 0xADDR, {{0.0, 62.0}, {402.0, 485.7}}
+                  StaticText, 0xADDR, {{24.0, 94.0}, {207.3, 33.7}}, label: 'Link this phone?'
+                  StaticText, 0xADDR, {{24.0, 135.7}, {255.3, 36.0}}, label: 'It'll be able to run commands on the machine below.'
+                  StaticText, 0xADDR, {{41.0, 211.7}, {77.7, 15.7}}, label: 'Your box'
+                  StaticText, 0xADDR, {{40.0, 235.4}, {321.7, 46.7}}, label: 'https://0123abcd0123abcd0123abcd0123abcd.boxes.mantaui.com'
+                  StaticText, 0xADDR, {{40.0, 314.4}, {200.3, 15.7}}, label: 'Match the code on your desktop'
+                  StaticText, 0xADDR, {{40.0, 338.1}, {148.7, 48.0}}, identifier: 'onboarding-confirm-code', label: 'K7  Q2'
+                  Button, 0xADDR, {{24.0, 426.0}, {354.0, 42.0}}, label: 'Link this phone'
+                  Button, 0xADDR, {{142.0, 492.0}, {118.0, 31.7}}, label: 'Codes don't match'
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 357.3}, {3.0, 451.7}}
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 357.3}, {3.0, 451.7}}
+Path to element:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0xADDR, pid: PID, label: 'MantaUI'
+  }
+

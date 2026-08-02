@@ -1,0 +1,32 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+    Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+              ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'onboarding-root'
+                Other, 0xADDR, {{0.0, 62.0}, {402.0, 462.7}}
+                  StaticText, 0xADDR, {{0.0, 94.0}, {239.7, 34.7}}, label: 'M, Pair your phone, Connect this device to your box.'
+                    StaticText, 0xADDR, {{9.3, 102.3}, {13.3, 18.0}}, label: 'M'
+                    StaticText, 0xADDR, {{44.0, 94.0}, {112.0, 18.0}}, label: 'Pair your phone'
+                    StaticText, 0xADDR, {{44.0, 113.0}, {195.7, 15.7}}, label: 'Connect this device to your box.'
+                  StaticText, 0xADDR, {{24.0, 184.7}, {184.3, 33.7}}, label: 'Enter the code'
+                  StaticText, 0xADDR, {{24.0, 226.3}, {354.0, 42.7}}, label: 'Read the six digits off your desktop, or run `manta pair` on the box.'
+                  TextField, 0xADDR, {{24.0, 293.0}, {354.0, 56.0}}, identifier: 'onboarding-otp', placeholderValue: '000000'
+                  TextField, 0xADDR, {{24.0, 361.0}, {354.0, 46.0}}, identifier: 'onboarding-verify', placeholderValue: 'Verification (optional, K7Q2)'
+                  Button, 0xADDR, {{24.0, 419.0}, {248.0, 15.7}}, label: 'My box isn't reachable from the internet'
+                  Button, 0xADDR, {{24.0, 458.7}, {354.0, 42.0}}, label: 'Continue', Disabled
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 380.3}, {3.0, 428.7}}
+                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 380.3}, {3.0, 428.7}}
+Path to element:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0xADDR, pid: PID, label: 'MantaUI'
+  }
+
