@@ -30,6 +30,14 @@ const ROOT_VARIABLES = [
   ["weight-medium", "500"], ["weight-semibold", "600"],
   ["prose-lh", "1.55"], ["ui-lh", "1.45"],
   ["step-row-y", "7px"], ["step-dot", "6px"],
+  // §7 session-list metrics (BET-595) — must track gen-swift-tokens.mjs
+  // TYPE_MAP/LAYOUT_MAP so the widened generator's lookups resolve in the
+  // test fixture.
+  ["font-size-row-name", "15.5px"],
+  ["tracking-list-heading", "-0.015"], ["tracking-row-name", "-0.01"],
+  ["list-row-min-h", "62px"], ["list-row-radius", "20px"],
+  ["list-row-margin", "2px"],
+  ["list-group-above", "22px"], ["list-group-below", "6px"],
 ];
 
 function cssFor(prefix) {

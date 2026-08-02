@@ -91,9 +91,20 @@ const TYPE_MAP = {
   display: "font-size-display", confirm: "font-size-confirm", otp: "font-size-otp",
   medium: "weight-medium", semibold: "weight-semibold",
   proseLineHeight: "prose-lh", uiLineHeight: "ui-lh",
+  // §7 session-list row name size + the two unitless em tracking multipliers
+  // (heading and row name) off the type grid (BET-595).
+  rowName: "font-size-row-name",
+  headingTracking: "tracking-list-heading",
+  rowNameTracking: "tracking-row-name",
 };
-// Off-grid layout paddings the mockup fixes (§8 / transcript-mockup.html).
-const LAYOUT_MAP = { stepRowY: "step-row-y", stepDot: "step-dot" };
+// Off-grid layout paddings the mockup fixes (§8 / transcript-mockup.html) plus
+// the §7 session-list row/group metrics (BET-595).
+const LAYOUT_MAP = {
+  stepRowY: "step-row-y", stepDot: "step-dot",
+  listRowMinH: "list-row-min-h", listRowRadius: "list-row-radius",
+  listRowMargin: "list-row-margin",
+  listGroupAbove: "list-group-above", listGroupBelow: "list-group-below",
+};
 
 // CSS allows a leading-dot decimal (".035"); Swift requires a leading zero
 // ("0.035"). Normalize so the emitted Swift literals always compile.
