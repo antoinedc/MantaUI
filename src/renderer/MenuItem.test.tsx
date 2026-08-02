@@ -166,7 +166,7 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
 
   it("renders the dropdown surface and the normal Fork / Compact / Clear rows with MenuItem chrome", () => {
     openMenu();
-    const surface = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    const surface = h!.container.querySelector(".manta-session-menu-dropdown") as HTMLElement;
     expect(surface.getAttribute("role")).toBe("menu");
     expect(surface.className).toContain("bg-bg-elev");
     expect(surface.className).toContain("shadow-md");

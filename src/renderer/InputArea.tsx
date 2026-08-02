@@ -209,7 +209,7 @@ export function InputArea({
     [models, modelOverride, defaultModel],
   );
   return (
-    <div className="shrink-0" ref={rowRef}>
+    <div className="manta-composer shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
           composer). Hold to record, release to insert the transcript into
           the composer for review. Positioned + sized by `.mobile-ptt-fab` in

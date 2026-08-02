@@ -2652,16 +2652,33 @@ plumbing of its own.
 
 ## Mobile CSS hook-class contract (BET-415) — RETIRED (BET-559)
 
-BET-559 deleted `mobile/mobile.css` and the web/PWA client that consumed it;
-the `manta-*` hook classes it defined became inert desktop no-ops. BET-578
-stripped all of the dead hook classes from the shared components (InputArea,
-ModelPicker, ComposerParts, ContextBar, SessionHeader). The only `manta-*`
-classes still stamped are the ones with **live desktop CSS** in
-`src/renderer/index.css` (`manta-composer-input-row`, `manta-loading-divider`)
-— those are real desktop styles, not mobile hooks, and must stay.
+BET-559 deleted `mobile/mobile.css` and the web/PWA client that consumed it.
 
-Do not reintroduce `manta-*` classes as CSS hooks: there is no mobile client
-selecting on them anymore.
+BET-578 stripped the hook classes that were genuinely dead (no mobile CSS, no
+desktop CSS, and no other consumer): `manta-composer-meta/-trust/-textarea`
+(InputArea), `manta-session-toolbar` (ComposerParts), `manta-ctx-track` and
+`manta-stale-full/-min` (ContextBar), `manta-session-crumb/-branch` and the
+bare `manta-session-menu` root + `manta-session-mode-toggle` hook (SessionHeader),
+and the bare `manta-model-picker` root (ModelPicker).
+
+The rest of the `manta-*` classes are **not** inert and were kept: the desktop
+visual gate (`tests/visual/screens.mjs`) uses them as popup-trigger selectors
+and surface-coverage markers (`assertSurfacesClosed` scans `[aria-haspopup]`
+elements for the `manta-` prefix). Do not strip these without reconciling the
+gate first:
+
+- `manta-composer` (InputArea wrapper) — gate region
+- `manta-model-picker-btn`, `manta-model-dropdown`, `manta-effort-picker-btn`,
+  `manta-effort-dropdown` (ModelPicker) — gate actions/regions + coverage
+- `manta-session-header`, `manta-ctx-pill`, `manta-ctx-popover`,
+  `manta-session-menu-trigger`, `manta-session-menu-dropdown` (SessionHeader) —
+  gate regions + coverage
+- `manta-composer-input-row`, `manta-loading-divider`, `manta-recording` —
+  live desktop CSS in `src/renderer/index.css`
+- `manta-folder-picker` (FolderPickerModal) — gate region/snapshot
+
+Do not reintroduce `manta-*` classes as **mobile** CSS hooks: there is no
+mobile client selecting on them anymore.
 
 ## Testing
 

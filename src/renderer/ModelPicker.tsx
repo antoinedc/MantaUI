@@ -155,7 +155,7 @@ export function ModelPicker({
       <div className={separatePills ? "relative" : ""}>
         <button
           className={
-            "truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
+            "manta-model-picker-btn truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
             (separatePills ? "rounded-lg border border-border-strong bg-card" : "")
           }
           aria-haspopup="listbox"
@@ -177,7 +177,7 @@ export function ModelPicker({
             variants show up in the effort button). */}
         {modelOpen && (
           <div
-            className="absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-md text-meta"
+            className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-md text-meta"
           >
             <button
               onClick={() => {
@@ -241,7 +241,7 @@ export function ModelPicker({
         <div className={separatePills ? "relative" : ""}>
           <button
             className={
-              "truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
+              "manta-effort-picker-btn truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
               (separatePills
                 ? "rounded-lg border border-border-strong bg-card"
                 : "border-l border-border-strong") +
@@ -272,7 +272,7 @@ export function ModelPicker({
               variants plus a "Default" (no variant) row. */}
           {variantOpen && variants.length > 0 && (
             <div
-              className="absolute left-0 bottom-full mb-1 z-20 min-w-[160px] rounded border border-border bg-bg-elev shadow-md text-meta"
+              className="manta-effort-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[160px] rounded border border-border bg-bg-elev shadow-md text-meta"
             >
               <button
                 onClick={() => {

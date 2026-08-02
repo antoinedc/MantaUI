@@ -112,7 +112,7 @@ export function SessionHeader({
 
   return (
     <div
-      className="flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
+      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
       style={{ WebkitAppRegion: "drag" } as CSSProperties}
     >
       {/* Breadcrumb — project / window (the cwd path was dropped, BET-459) */}
@@ -280,7 +280,7 @@ function ContextPill({
         // The button is the interactive host (click + popover + hover fill);
         // the pill chrome itself lives on the Pill below. `rounded-full`
         // keeps the resting-transparent hover fill capsule-shaped.
-        "text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
+        "manta-ctx-pill text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
         (stale ? "" : "hover:bg-fill-hover")
       }
       aria-haspopup="dialog"
@@ -305,7 +305,7 @@ function ContextPill({
 
       {open && (
         <span
-          className="absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-bg-elev shadow-md text-meta text-text"
+          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-bg-elev shadow-md text-meta text-text"
           // Stop the pill's onClick from toggling when interacting with the
           // popover contents (it's inside the button element).
           onClick={(e) => e.stopPropagation()}
@@ -506,12 +506,13 @@ function SessionMenu({
       <IconButton
         icon={<MoreHorizontal />}
         label="Session actions"
+        hook="manta-session-menu-trigger"
         onClick={() => setOpen((v) => !v)}
         ariaHaspopup="menu"
         ariaExpanded={open}
       />
       {open && (
-        <Dropdown>
+        <Dropdown hook="manta-session-menu-dropdown">
           {hasMode && (
             <>
               <div className="px-3 pt-1 pb-0.5 text-label text-text-faint select-none" role="presentation">
