@@ -33,6 +33,7 @@ import {
   parentPath,
   worktreeBadge,
 } from "./folderPicker";
+import { Modal } from "./Modal";
 
 type Props = {
   // The initial path the picker opens at. Usually "~" or the project's cwd.
@@ -229,11 +230,8 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
   const crumbs = breadcrumbs(path);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
-      <div
-        className="manta-folder-picker w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col bg-bg-elev border border-border rounded-lg shadow-lg overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal size="lg" padded={false} tall onDismiss={onCancel} label="Select folder">
+      <div className="manta-folder-picker flex flex-col flex-1 min-h-0">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div className="text-body font-semibold text-text">Select folder</div>
@@ -454,6 +452,6 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
           </>
         )}
       </div>
-    </div>
+    </Modal>
   );
 }

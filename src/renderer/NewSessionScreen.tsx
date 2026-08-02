@@ -29,6 +29,7 @@ import { useStore } from "./store";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
+import { Modal } from "./Modal";
 import { Card } from "./Card";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { worktreeName } from "./folderPicker";
@@ -579,8 +580,8 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
       )}
 
       {fanOutWorktrees && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-lg shadow-lg p-4 space-y-3">
+        <Modal size="md" label="Fan-out confirmed">
+          <div className="space-y-3">
             <div className="text-body font-semibold text-text">Fan-out confirmed</div>
             <div className="text-meta text-text-muted">
               Creating one session with {fanOutWorktrees.length} windows (one per
@@ -611,7 +612,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

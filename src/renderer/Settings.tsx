@@ -12,6 +12,7 @@ import {
   Mic,
 } from "lucide-react";
 import { useStore } from "./store";
+import { Modal } from "./Modal";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -871,30 +872,30 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
       {confirmRemove && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-remove-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-lg border border-border bg-bg-soft p-5 space-y-4">
-            <h3 id="confirm-remove-title" className="text-title font-semibold">Remove this box?</h3>
+        <Modal size="md" label="Remove this box?">
+          <div className="space-y-4">
+            <h3 className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
               <button onClick={removeBox} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Remove</button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
       {confirmReset && (
-        <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-reset-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-lg border border-border bg-bg-soft p-5 space-y-4">
-            <h3 id="confirm-reset-title" className="text-title font-semibold">Reset all settings?</h3>
+        <Modal size="md" label="Reset all settings?">
+          <div className="space-y-4">
+            <h3 className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
               <button onClick={resetAll} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Reset</button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

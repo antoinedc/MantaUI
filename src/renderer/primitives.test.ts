@@ -9,6 +9,7 @@
 //   1a. no `className` escape hatch  (epic standing decision 3)
 //   1b. two-adopter rule             (epic standing decision 2)
 //   1c. no raw colour / off-grid px  (the drift that started the epic)
+//   D4. chrome-ownership allowlist   (BET-588: a class belongs to one primitive)
 //
 // The per-component `@ts-expect-error` guards in each primitive's OWN test are
 // compile-time and stronger; this file is the net that catches a primitive
@@ -186,6 +187,36 @@ describe("M527 primitive rules", () => {
         });
       }
     }
+  });
+
+  describe("D4 — chrome-ownership allowlist (BET-588)", () => {
+    // Chrome that belongs to exactly one primitive. A call site that contains
+    // one of these has re-implemented that primitive inline — the failure mode
+    // this epic exists to close (BET-580). Add a row when a primitive lands;
+    // never add a file to a row to make a red test green.
+    const CHROME_OWNERS: Record<string, string[]> = {
+      "bg-black/40": ["Modal.tsx"], // the modal overlay tint
+      "shadow-lg": ["Modal.tsx"], // window-level floating surface
+    };
+
+    it("no non-owner file contains a primitive's owned chrome", () => {
+      const offenders: string[] = [];
+      for (const file of rendererFiles()) {
+        if (file.endsWith(".test.ts") || file.endsWith(".test.tsx")) continue;
+        const content = readFileSync(path.join(RENDERER, file), "utf8");
+        for (const [chrome, owners] of Object.entries(CHROME_OWNERS)) {
+          if (!content.includes(chrome)) continue;
+          if (owners.includes(file)) continue;
+          offenders.push(
+            `${file} contains "${chrome}" (owned only by ${owners.join(", ")})`,
+          );
+        }
+      }
+      expect(
+        offenders,
+        `chrome-ownership (BET-588): ${offenders.join("; ") || "none"}`,
+      ).toEqual([]);
+    });
   });
 
   describe("1c — no raw colour / off-grid px in the primitive's own code", () => {
