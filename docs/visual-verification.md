@@ -267,14 +267,30 @@ drift names the offending file, and **blocks** on any difference (no more
 `continue-on-error: true`). A determinism regression fails loudly as itself
 instead of as a mystery diff on someone's unrelated PR.
 
-> **The committed shots are CI's render, not yours.** Four of them (`shot-hero`,
-> `shot-approvals`, `shot-phone-session`, `shot-sync`) render differently on a
-> developer machine than on the runner — a GPU/fontconfig path difference that
-> BET-537 could not reconcile and that no flag fixed. CI is canonical because
-> these are published assets and the runner is the only environment reproducible
-> across people. **Running `npm run shots` locally will show a diff on those
-> four; do not commit it.** To change them deliberately, regenerate on CI and
-> commit the artifact's bytes (see BET-542).
+> **Four shots have no canonical bytes, and the gate no longer pretends they
+> do.** `shot-hero`, `shot-approvals`, `shot-phone-session` and `shot-sync`
+> render differently on a developer machine than on the runner — a
+> GPU/fontconfig path difference BET-537 could not reconcile. BET-542 concluded
+> from that "CI is canonical", but **CI is not one renderer, it is two**:
+> measured 2026-08-02, the runners produce two variants of those four shots and
+> a job lands on one or the other. The same committed set passed three
+> consecutive PRs and then failed a branch differing from `main` by a single CSS
+> comment, with the byte sizes swapped back exactly. So no regeneration —
+> local, Mac, or CI — can produce bytes that always match, and the long
+> BET-444 / BET-517 / BET-537 / BET-542 / BET-575 loop was people trying.
+>
+> The gate now compares those four with a **measured absolute pixel budget**
+> (`scripts/shots-compare.mjs`) instead of byte equality; the other three keep
+> exact byte equality, because they are byte-identical on every runner. The
+> variance is a few hundred pixels of glyph hinting at text edges; the weakest
+> real defect class the loop must catch covers ~25x more, so the budget sits
+> between the two with headroom at both ends and both bounds are asserted in
+> `scripts/shots-compare.test.mjs`.
+>
+> Practically: **you may now regenerate these on any machine and commit the
+> result** — the budget absorbs the variant difference. What you must not do is
+> widen a budget to make a red gate green. If a budget is genuinely exceeded,
+> that is a real render change; regenerate deliberately and say why.
 
 ## What the first run taught us (BET-443 → BET-447)
 

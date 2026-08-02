@@ -240,17 +240,31 @@ jobs:
               echo "::error::The capture pipeline itself produced different bytes across two identical runs. Investigate the browser/capture before merging; do not regenerate the committed set."
               exit 1
             fi
-            # STALENESS CHECK — reached only when the two runs are byte-identical,
-            # so a diff here is genuinely the committed set being stale.
+            # STALENESS CHECK — reached only when the two runs are byte-identical
+            # ON THIS RUNNER. That is NOT the same as byte-identical across
+            # runners: four of the seven shots render in two variants depending
+            # on which runner instance the job lands on (measured 2026-08-02 —
+            # the same committed set passed #476/#477/#478 and then failed a
+            # branch that differed from main by one CSS comment, with the byte
+            # sizes swapped back exactly). A byte comparison is therefore
+            # unsatisfiable for those four, which is what produced the BET-517 /
+            # BET-537 / BET-542 / BET-575 loop. scripts/shots-compare.mjs keeps
+            # exact byte equality for the three stable shots and applies a
+            # measured absolute pixel budget to the four variant ones.
             echo "::group::Post-capture shot diff against the committed set"
             git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
             git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
             git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
             echo "::endgroup::"
-            if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
-              echo "::error file=website/shot-*.webp::COMMITTED SHOTS ARE STALE — the fresh deterministic capture differs from the committed set. Run 'npm run shots' locally and commit the regenerated website/shot-*.webp + website/hero-poster.webp."
-              exit 1
-            fi
+            CMP="$(mktemp -d "$RUNNER_TEMP/shots-compare.XXXXXX")"
+            mkdir -p "$CMP/committed" "$CMP/regenerated"
+            for f in website/shot-*.webp website/hero-poster.webp; do
+              [ -f "$f" ] || continue
+              # HEAD is the committed set; the working tree holds run 2's output.
+              git show "HEAD:$f" > "$CMP/committed/$(basename "$f")" 2>/dev/null || true
+              cp "$f" "$CMP/regenerated/$(basename "$f")"
+            done
+            node scripts/shots-compare.mjs "$CMP"
           else
             echo "PR touches neither the renderer, website/, the shot-capture scripts, nor the lockfile — the shots this gate owns cannot have gone stale from it. Skipping (main coverage is the shots job in dep-audit-nightly.yml)."
           fi
