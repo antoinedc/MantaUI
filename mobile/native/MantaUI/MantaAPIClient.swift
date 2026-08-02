@@ -213,6 +213,80 @@ final class MantaAPIClient: Sendable {
         try await call("fs:list-dirs", args: [partial], as: [String].self) ?? []
     }
 
+    // MARK: - Composer extras (S5 / BET-597)
+
+    /// `opencode:models` — models from CONNECTED providers only (no API keys).
+    func models() async throws -> [OpencodeModel] {
+        try await call("opencode:models", args: [], as: [OpencodeModel].self) ?? []
+    }
+
+    /// `opencode:default-model` — the configured global default, or nil when
+    /// opencode picks its own.
+    func defaultModel() async throws -> OpencodeModelID? {
+        try await call("opencode:default-model", args: [], as: OpencodeModelID.self)
+    }
+
+    /// `opencode:compact-session` — free context for the voice `compact` action.
+    func compactSession(sessionId: String) async throws {
+        _ = try await callVoid("opencode:compact-session", args: [sessionId])
+    }
+
+    /// Upload raw bytes to `POST /api/upload?session=<project>` with the
+    /// `X-Filename` header (unchanged endpoint, already serving the desktop).
+    /// Returns the remote absolute path the box stored.
+    func upload(project: String, filename: String, data: Data) async throws -> String {
+        let query = URLQueryItem(name: "session", value: project)
+        var url = serverURL.appendingPathComponent("api").appendingPathComponent("upload")
+        url.append(queryItems: [query])
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let encodedName = filename.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? filename
+        request.setValue(encodedName, forHTTPHeaderField: "X-Filename")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+
+        let (dataOut, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        guard let object = (try JSONSerialization.jsonObject(with: dataOut) as? [String: Any]) else {
+            throw MantaError.transport("invalid upload envelope")
+        }
+        if let error = object["error"] as? String, !error.isEmpty {
+            throw MantaError.server(error)
+        }
+        guard let path = object["path"] as? String, !path.isEmpty else {
+            throw MantaError.transport("upload returned no path")
+        }
+        return path
+    }
+
+    /// `voice:transcribe` — ship recorded audio (base64 over the JSON RPC
+    /// wire, as the desktop shim does) to the box's Groq transcription.
+    /// Returns the transcribed text, or nil when the clip was empty.
+    func voiceTranscribe(data: Data, mime: String) async throws -> String? {
+        let input: [String: Any] = [
+            "buffer": data.base64EncodedString(),
+            "mime": mime,
+        ]
+        try await Task.sleep(nanoseconds: 0)
+        let result: [String: JSONValue]? = try await call("voice:transcribe", args: [input], as: [String: JSONValue].self)
+        return ChatJSON.string(result?["text"])
+    }
+
+    /// `voice:classify-command` — route a transcript through the box's rules +
+    /// (fallback) LLM classifier. Returns the structured action.
+    func voiceClassifyCommand(transcript: String, useLlmFallback: Bool? = nil) async throws -> VoiceClassifyResult? {
+        var input: [String: Any] = ["transcript": transcript]
+        if let useLlmFallback { input["useLlmFallback"] = useLlmFallback }
+        let envelope: VoiceClassifyEnvelope? = try await call("voice:classify-command", args: [input], as: VoiceClassifyEnvelope.self)
+        return envelope?.action
+    }
+
     /// `git:list-worktrees` — git worktree fan-out detection for a folder.
     func listWorktrees(_ cwd: String) async throws -> [MantaWorktree] {
         try await call("git:list-worktrees", args: [cwd], as: [MantaWorktree].self) ?? []
@@ -279,3 +353,10 @@ final class MantaAPIClient: Sendable {
 }
 
 private struct VoidResult: Decodable {}
+
+/// The `voice:classify-command` reply is `{ action, source }` — the action is
+/// the structured `VoiceAction`; `source` ("rules" | "llm" | "none") is
+/// diagnostic only and discarded here (the device never interprets).
+private struct VoiceClassifyEnvelope: Decodable {
+    var action: VoiceClassifyResult?
+}

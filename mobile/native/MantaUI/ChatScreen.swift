@@ -19,19 +19,24 @@ import SwiftUI
 
 struct ChatScreen: View {
     let title: String
+    let projectName: String
     @ObservedObject var eventStore: MantaEventStore
     @StateObject private var store: ChatSessionStore
+    @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
-    init(sessionId: String, title: String, eventStore: MantaEventStore) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore) {
         self.title = title
+        self.projectName = projectName
         self.eventStore = eventStore
+        let api = MantaAPIClient.live()
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
-            api: MantaAPIClient.live()
+            api: api
         ))
+        _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -50,7 +55,18 @@ struct ChatScreen: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom) { bottomCards }
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 0) {
+                bottomCards
+                ComposerView(
+                    sessionId: store.sessionId,
+                    projectName: projectName,
+                    api: MantaAPIClient.live(),
+                    store: store,
+                    modelStore: modelStore
+                )
+            }
+        }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {
                 ChatSubagentScreen(
