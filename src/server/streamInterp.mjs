@@ -30,17 +30,14 @@ import {
   selectActiveTodos,
   selectVisibleTodos,
   applyQuestionEvent,
-  hydrateQuestion,
   isAssistantTurnComplete,
   registerChildSessionFromCreated,
   extractSubagentInfo,
-  collectChildSessionIds,
   countRunningSubagents,
   shouldAutoRename,
   countUserTurns,
   buildTitlePromptInput,
   buildTitleInstruction,
-  sanitizeGeneratedTitle,
   ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 
@@ -233,20 +230,3 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
 function messagesOf(st) {
   return [...st.msgByMsgId.values()];
 }
-
-export const __private = {
-  newSessionState,
-  messagesOf,
-};
-
-// Re-export the shared functions this module drives, so the server can use the
-// box-side interpretation logic directly (DoD: "imported by the server").
-export const interp = {
-  classifyFinish,
-  computeContextBreakdown,
-  computeStaleCache,
-  selectActiveTodos,
-  selectVisibleTodos,
-  hydrateQuestion,
-  ASSUMED_CONTEXT_TOKENS,
-};
