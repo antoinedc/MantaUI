@@ -74,7 +74,56 @@ export function registerMountedTerminal(
 // across Claude Sonnet 4.5 and older — generous enough that the bar
 // doesn't lie too aggressively in the dark, conservative enough that
 // the user is warned well before any actual provider would refuse.
-export const ASSUMED_CONTEXT_TOKENS = 200_000;
+// ===== Box-side stream interpretation (BET-551) =====
+// Moved to ../shared/streamInterpretation.mjs (§17). chatUtils re-exports so
+// the renderer keeps one implementation while it migrates to consuming the
+// box's interpreted events (S1b).
+export {
+  ASSUMED_CONTEXT_TOKENS,
+  resolveContextLimit,
+  classifyFinish,
+  describeTruncation,
+  findFlushBoundary,
+  mergeBufferedDeltas,
+  selectCacheTtlMs,
+  classifyCacheAge,
+  selectLastAssistantCompletion,
+  STALE_CACHE_MIN_TOKENS,
+  computeStaleCache,
+  computeContextBreakdown,
+  isTerminalTodo,
+  allTodosTerminal,
+  selectActiveTodos,
+  VISIBLE_TODOS_CAP,
+  selectVisibleTodos,
+  isSelfFilteringLifecycleEvent,
+  registerChildSessionFromCreated,
+  shouldDropEventForSessionFilter,
+  applyQuestionEvent,
+  hydrateQuestion,
+  isAssistantTurnComplete,
+  extractSubagentInfo,
+  collectChildSessionIds,
+  countRunningSubagents,
+  summarizeChildSession,
+  isAssistantTurnInProgress,
+  AUTO_RENAME_EVERY_N_TURNS,
+  shouldAutoRename,
+  countUserTurns,
+  buildTitlePromptInput,
+  sanitizeGeneratedTitle,
+  buildTitleInstruction,
+} from "../shared/streamInterpretation.mjs";
+export type {
+  TruncationKind,
+  PendingDelta,
+  StaleCacheResult,
+  ContextSegment,
+  ContextBreakdown,
+  QuestionLike,
+  SubagentInfo,
+} from "../shared/streamInterpretation.mjs";
+
 
 // Resolve the effective context window in tokens for an active model. Reads
 // `limit.context` off the OpencodeModel (which mirrors the provider's real
@@ -84,13 +133,6 @@ export const ASSUMED_CONTEXT_TOKENS = 200_000;
 //
 // Accepts the minimal `{ limit?: { context?: number } } | null` shape so
 // callers don't have to import OpencodeModel here.
-export function resolveContextLimit(
-  model: { limit?: { context?: number } } | null | undefined,
-): number {
-  const c = model?.limit?.context;
-  if (typeof c === "number" && Number.isFinite(c) && c > 0) return c;
-  return ASSUMED_CONTEXT_TOKENS;
-}
 
 // Compact "Nk" display for a model's context window (e.g. 200_000 → "200k").
 // Returns null for a missing/non-positive limit so callers can omit the
@@ -121,38 +163,10 @@ export function formatModelContextSize(
 //                    Distinct because the fix is different (retry with
 //                    higher max output) AND silently fatal if missed.
 // - null           → not a truncation we care about.
-export type TruncationKind = "output-cap" | "context-wall" | "tool-cutoff";
 
-export function classifyFinish(
-  finish: string | null | undefined,
-  opts?: { lastPartIsToolUse?: boolean },
-): TruncationKind | null {
-  if (!finish) return null;
-  const f = finish.toLowerCase();
-
-  // Anthropic-native: explicit "I ran out of context window mid-generation".
-  if (f === "model_context_window_exceeded") return "context-wall";
-
-  // Output-cap family. Anthropic: "max_tokens". OpenAI: "length".
-  // Gemini: "MAX_TOKENS" (lowercased above). When the last assistant
-  // block was a tool_use, we know the JSON is half-written and the
-  // tool call is unusable — promote to "tool-cutoff" so the user gets
-  // a more specific message and we can offer a retry later.
-  if (f === "max_tokens" || f === "length") {
-    return opts?.lastPartIsToolUse ? "tool-cutoff" : "output-cap";
-  }
-
-  // Everything else ("end_turn", "stop", "tool_use", "tool_calls",
-  // "stop_sequence", "pause_turn", "refusal", etc.) is not a truncation.
-  return null;
-}
 
 // Human-readable description of a truncation. Returns { label, hint } so
 // the badge can render a short label and the tooltip a longer hint.
-export function describeTruncation(kind: TruncationKind): {
-  label: string;
-  hint: string;
-} {
   switch (kind) {
     case "output-cap":
       return {
@@ -296,63 +310,6 @@ export function cssVar(name: string): string {
 //
 // Pure + tested in chatUtils.test.ts.
 
-export function findFlushBoundary(buffer: string): number {
-  if (!buffer) return -1;
-  let lastBoundary = -1;
-  let inCode = false;
-  let i = 0;
-  while (i < buffer.length) {
-    // Check for ``` fence (open or close). The opencode stream uses
-    // standard markdown; backtick-only code blocks don't appear in the
-    // assistant's narration outside of explicit ``` fences.
-    if (
-      buffer[i] === "`" &&
-      buffer[i + 1] === "`" &&
-      buffer[i + 2] === "`"
-    ) {
-      const wasInCode = inCode;
-      inCode = !inCode;
-      // If we just CLOSED a code block, look for the newline that
-      // terminates the closing fence line. Everything up to and
-      // including that newline is now a safe flush point.
-      if (wasInCode && !inCode) {
-        let j = i + 3;
-        while (j < buffer.length && buffer[j] !== "\n") j++;
-        if (j < buffer.length) {
-          // We have the trailing newline of the close fence — include
-          // it in the flush.
-          lastBoundary = j + 1;
-          i = j + 1;
-          continue;
-        }
-        // Closing fence present but no trailing newline yet — the
-        // model is still emitting the next line; don't flush here.
-        return lastBoundary;
-      }
-      // Opened a code block — keep walking.
-      i += 3;
-      continue;
-    }
-    // Paragraph break (`\n\n`) OUTSIDE a code block is a flush point.
-    // Inside a code block, blank lines are part of the code; don't
-    // flush there.
-    if (!inCode && buffer[i] === "\n" && buffer[i + 1] === "\n") {
-      lastBoundary = i + 2;
-      // Skip past the doubled newline; subsequent characters may form
-      // another paragraph that flushes even deeper.
-      i += 2;
-      // Coalesce more consecutive newlines into the same boundary
-      // (\n\n\n etc. — rare but harmless).
-      while (i < buffer.length && buffer[i] === "\n") {
-        lastBoundary = i + 1;
-        i++;
-      }
-      continue;
-    }
-    i++;
-  }
-  return lastBoundary;
-}
 
 // Merge a map of buffered delta strings (partID → text) into the
 // messages array. Pure — produces a new array if any change applies,
@@ -364,19 +321,7 @@ export function findFlushBoundary(buffer: string): number {
 // expected to fall back to a refetch when a delta arrives ahead of the
 // part's `message.part.updated` snapshot.
 
-export type PendingDelta = {
-  messageID: string;
-  field: string;
-  text: string;
-};
 
-export function mergeBufferedDeltas<M extends {
-  info: { id: string };
-  parts: Array<Record<string, unknown> & { id: string }>;
-}>(
-  messages: M[] | null | undefined,
-  buffer: Map<string, PendingDelta>,
-): { messages: M[] | null | undefined; unmatched: string[] } {
   if (!messages || buffer.size === 0) {
     return { messages, unmatched: [] };
   }
@@ -451,9 +396,6 @@ export function mergeBufferedDeltas<M extends {
 // the cache for this session). On a normal warm turn that's the bulk
 // of the context.
 
-export function selectCacheTtlMs(ttl: "5m" | "1h"): number {
-  return ttl === "1h" ? 60 * 60_000 : 5 * 60_000;
-}
 
 // Sidebar/mobile "time since last message" label (BET-119). Floors to the
 // coarsest unit that still fits so the label stays short ("3m", "1h", "2d").
@@ -476,83 +418,14 @@ export function formatAge(elapsedMs: number): string {
 // re-warms the full prefix). Thresholds are 50%/90% of ttlMs, matching the
 // feature spec — NOT the same thresholds as `computeStaleCache`'s 100%
 // (fully-expired) gate, which drives a different UI (the "/clear" pill).
-export function classifyCacheAge(
-  lastMessageAt: number,
-  now: number,
-  ttlMs: number,
-): "fresh" | "aging" | "stale" {
-  const elapsed = Math.max(0, now - lastMessageAt);
-  if (elapsed < 0.5 * ttlMs) return "fresh";
-  if (elapsed < 0.9 * ttlMs) return "aging";
-  return "stale";
-}
 
-export function selectLastAssistantCompletion(
-  messages:
-    | Array<{
-        info: {
-          role: string;
-          time?: { completed?: number; [k: string]: unknown };
-        };
-      }>
-    | null
-    | undefined,
-): number | null {
-  if (!messages || messages.length === 0) return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.info.role !== "assistant") continue;
-    const c = m.info.time?.completed;
-    if (typeof c === "number" && c > 0) return c;
-  }
-  return null;
-}
 
 // Minimum cached-token threshold below which we suppress the pill. 5k is
 // roughly the largest a low-overhead session could be and still feel
 // "throwaway" — at that size a re-warm is ~$0.02 on Sonnet and not worth
 // nagging about. Above 5k the warning carries real value.
-export const STALE_CACHE_MIN_TOKENS = 5_000;
 
-export type StaleCacheResult = {
-  isStale: boolean;
-  idleMs: number;
-  staleTokens: number;
-  ttlMs: number;
-};
 
-export function computeStaleCache(input: {
-  lastCompleted: number | null;
-  now: number;
-  ttlMs: number;
-  cachedTokens: number;
-  minCacheTokens?: number;
-  running?: boolean;
-}): StaleCacheResult {
-  const min = input.minCacheTokens ?? STALE_CACHE_MIN_TOKENS;
-  const idleMs =
-    input.lastCompleted != null
-      ? Math.max(0, input.now - input.lastCompleted)
-      : 0;
-  const tokens = Math.max(0, Math.round(input.cachedTokens));
-  // Never report stale while a turn is running — the cache is being
-  // actively touched (writes count as touches) and a "/clear to save"
-  // suggestion is meaningless until the turn ends.
-  if (input.running) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
-  }
-  // Need a completed turn to know when staleness started; need real
-  // cached tokens to make the warning actionable.
-  if (input.lastCompleted == null || tokens < min) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
-  }
-  return {
-    isStale: idleMs >= input.ttlMs,
-    idleMs,
-    staleTokens: tokens,
-    ttlMs: input.ttlMs,
-  };
-}
 
 // ===== Context window breakdown =====
 //
@@ -582,63 +455,8 @@ export function computeStaleCache(input: {
 // counts. Clamps to never exceed 100% total (very over-context turns
 // would otherwise overflow the bar visually).
 
-export type ContextSegment = "fresh" | "cacheRead" | "cacheWrite";
 
-export type ContextBreakdown = {
-  // Raw counts. Always non-negative, ints.
-  freshInput: number;
-  cacheRead: number;
-  cacheWrite: number;
-  // Total input tokens that consume the context window this request.
-  totalInput: number;
-  // Percent of `limit` used, clamped to [0, 100], rounded.
-  pct: number;
-  // Per-segment percentages of `limit` (NOT of totalInput) so the segmented
-  // bar can render them as proportional slices that visually sum to `pct`.
-  // Clamped so their sum never exceeds 100 (the last segment absorbs the
-  // clamp when over-context).
-  segments: { kind: ContextSegment; pct: number }[];
-};
 
-export function computeContextBreakdown(
-  tokens: {
-    input?: number;
-    cache?: { read?: number; write?: number };
-  } | null | undefined,
-  limit: number,
-): ContextBreakdown {
-  const freshInput = Math.max(0, Math.round(tokens?.input ?? 0));
-  const cacheRead = Math.max(0, Math.round(tokens?.cache?.read ?? 0));
-  const cacheWrite = Math.max(0, Math.round(tokens?.cache?.write ?? 0));
-  const totalInput = freshInput + cacheRead + cacheWrite;
-  const safeLimit = limit > 0 ? limit : ASSUMED_CONTEXT_TOKENS;
-  const rawPct = (totalInput / safeLimit) * 100;
-  const pct = Math.min(100, Math.round(rawPct));
-
-  // Compute segment percentages with the same clamp envelope. Convert
-  // each bucket to its share of the LIMIT (not totalInput) so the
-  // segmented bar's filled portion equals `pct` exactly.
-  const segFresh = (freshInput / safeLimit) * 100;
-  const segRead = (cacheRead / safeLimit) * 100;
-  const segWrite = (cacheWrite / safeLimit) * 100;
-  // Render order: fresh (uncached, paid full rate) | cache.write (warm-up,
-  // paid full rate + surcharge) | cache.read (cheap, paid ~10%). Putting
-  // cache.write between fresh and cache.read groups the "expensive" buckets
-  // visually on the left so the bar reads left→right as cost-decreasing.
-  const segments: { kind: ContextSegment; pct: number }[] = [
-    { kind: "fresh", pct: segFresh },
-    { kind: "cacheWrite", pct: segWrite },
-    { kind: "cacheRead", pct: segRead },
-  ];
-  // Clamp the sum to `pct` (handles both rounding drift and over-context
-  // overflow): scale down proportionally if we'd exceed 100%.
-  const sum = segments.reduce((a, s) => a + s.pct, 0);
-  if (sum > 100 && sum > 0) {
-    const scale = 100 / sum;
-    for (const s of segments) s.pct *= scale;
-  }
-  return { freshInput, cacheRead, cacheWrite, totalInput, pct, segments };
-}
 
 export type TypeaheadCommandRow = {
   name: string;
@@ -676,19 +494,12 @@ export function dedupeAgainstBuiltins<T extends TypeaheadCommandRow>(
  * values are "completed" and "cancelled". Anything else (pending,
  * in_progress, blocked, …) keeps the list visible in the chat panel.
  */
-export function isTerminalTodo(t: Record<string, unknown>): boolean {
-  const s = String(t.status ?? "").toLowerCase();
-  return s === "completed" || s === "cancelled";
-}
 
 /**
  * True when every todo in a list is terminal AND the list is non-empty —
  * the trigger condition for hiding the ActiveTodos card after the user
  * submits their next prompt. Empty lists return false (no work to dismiss).
  */
-export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean {
-  return todos.length > 0 && todos.every(isTerminalTodo);
-}
 
 /**
  * Decide which todo list the ActiveTodos card should render, or null to hide.
@@ -709,25 +520,11 @@ export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean
  * transcript scan resurfaced the PRIOR non-empty list — the card never
  * cleared. `liveTodos` being a non-null array (even `[]`) is the signal.
  */
-export function selectActiveTodos(
-  liveTodos: Array<Record<string, unknown>> | null | undefined,
-  transcriptTodos: Array<Record<string, unknown>> | null | undefined,
-  dismissed: boolean,
-): Array<Record<string, unknown>> | null {
-  if (dismissed) return null;
-  if (liveTodos != null) {
-    // Present (even if empty) = authoritative. Empty = cleared = hide.
-    return liveTodos.length > 0 ? liveTodos : null;
-  }
-  if (transcriptTodos && transcriptTodos.length > 0) return transcriptTodos;
-  return null;
-}
 
 /** Maximum todo rows the ActiveTodos card renders before collapsing the
  * tail into a "+ N pending & M done" summary line. 5 keeps the card from
  * dominating the chat scroll on long checklists while still showing the
  * full in-progress context. */
-export const VISIBLE_TODOS_CAP = 5;
 
 /**
  * Pick which todo rows the ActiveTodos card should render and how many were
@@ -749,14 +546,6 @@ export const VISIBLE_TODOS_CAP = 5;
  * can be truncated too — they spill into `hiddenPending` since the user
  * cares "there's still work to start" more than the precise sub-status.)
  */
-export function selectVisibleTodos(
-  todos: Array<Record<string, unknown>>,
-  cap: number = VISIBLE_TODOS_CAP,
-): {
-  visible: Array<Record<string, unknown>>;
-  hiddenPending: number;
-  hiddenDone: number;
-} {
   const inProgress: Array<Record<string, unknown>> = [];
   const pending: Array<Record<string, unknown>> = [];
   const done: Array<Record<string, unknown>> = [];
@@ -812,29 +601,11 @@ export function formatHiddenTodosSummary(
  * Pure + exported so the exemption set is asserted by tests and can't
  * silently regress when the guard is touched.
  */
-export function isSelfFilteringLifecycleEvent(type: string): boolean {
-  return (
-    type === "question.asked" ||
-    type === "question.replied" ||
-    type === "question.rejected" ||
-    type === "permission.asked" ||
-    type === "permission.replied" ||
-    type === "permission.rejected"
-  );
-}
 
 /**
  * Minimal event shape consumed by the per-session filter helpers below.
  * Matches OpencodeEvent's relevant fields without dragging the type in.
  */
-type FilterEvent = {
-  type: string;
-  properties?: {
-    sessionID?: string;
-    info?: { id?: string; parentID?: string };
-    [k: string]: unknown;
-  };
-};
 
 /**
  * If `ev` is a `session.created` event whose new session is a CHILD of
@@ -853,19 +624,6 @@ type FilterEvent = {
  * Mutates `childSessionIds` in place; returns whether a registration
  * happened so callers can assert/trace it.
  */
-export function registerChildSessionFromCreated(
-  ev: FilterEvent,
-  viewedSessionId: string,
-  childSessionIds: Set<string>,
-): boolean {
-  if (ev.type !== "session.created") return false;
-  const info = ev.properties?.info;
-  if (!info || info.parentID !== viewedSessionId) return false;
-  if (typeof info.id !== "string" || info.id.length === 0) return false;
-  if (childSessionIds.has(info.id)) return false;
-  childSessionIds.add(info.id);
-  return true;
-}
 
 /**
  * Per-session early-return guard for `onOpencodeEvent`.
@@ -887,18 +645,6 @@ export function registerChildSessionFromCreated(
  * Pure + exported so the guard contract is tested and can't silently
  * regress when the routing is touched.
  */
-export function shouldDropEventForSessionFilter(
-  ev: FilterEvent,
-  viewedSessionId: string,
-  childSessionIds: Set<string>,
-): boolean {
-  if (isSelfFilteringLifecycleEvent(ev.type)) return false;
-  const evSessionID = ev.properties?.sessionID;
-  if (typeof evSessionID !== "string" || evSessionID.length === 0) return false;
-  if (evSessionID === viewedSessionId) return false;
-  if (childSessionIds.has(evSessionID)) return false;
-  return true;
-}
 
 /**
  * Apply a question.* lifecycle event to the pending-questions list.
@@ -924,78 +670,7 @@ export function shouldDropEventForSessionFilter(
  * Filtered to the viewed session. Pure (prev list + event → next list) so
  * the contract is unit-tested and can't silently regress again.
  */
-export type QuestionLike = {
-  id: string; // canonical: tool.callID when present (unifies event+transcript)
-  sessionID: string;
-  questions: unknown[];
-  tool?: { messageID: string; callID: string };
-  // The opencode `que_…` request id from the asked event, when present.
-  // Kept ALONGSIDE the callID-keyed `id` so a replied/rejected event that
-  // echoes only the `que_` id can still clear a callID-keyed card.
-  requestId?: string;
-};
 
-export function applyQuestionEvent(
-  prev: QuestionLike[],
-  eventType: string,
-  properties: Record<string, unknown> | undefined,
-  viewedSessionId: string,
-): QuestionLike[] {
-  const p = properties ?? {};
-  const sessionID = typeof p.sessionID === "string" ? p.sessionID : "";
-  const tool = p.tool as { messageID?: string; callID?: string } | undefined;
-  // Canonical id = the tool callID when present (stable across re-asks);
-  // fall back to the event's own `que_…` id. The `que_` is preserved
-  // separately as `requestId` because opencode's reply/reject API accepts
-  // ONLY that form (verified: server rejects a callID with HTTP 400).
-  const callID = typeof tool?.callID === "string" ? tool.callID : "";
-  const id = callID || (typeof p.id === "string" ? p.id : "");
-
-  if (eventType === "question.replied" || eventType === "question.rejected") {
-    // The replied/rejected event's id field is not guaranteed to match the
-    // id we stored on `asked` (asked is keyed on tool.callID for transcript
-    // unification; replied may carry `que_…`/requestID instead). Match
-    // defensively on ANY id form the event exposes so the card always
-    // clears, regardless of which identifier opencode echoes back.
-    const ids = new Set(
-      [
-        p.id,
-        p.requestID,
-        p.callID,
-        tool?.callID,
-        tool?.messageID,
-      ].filter((x): x is string => typeof x === "string" && x.length > 0),
-    );
-    if (ids.size === 0) return prev;
-    return prev.filter(
-      (q) =>
-        !ids.has(q.id) &&
-        !(q.requestId !== undefined && ids.has(q.requestId)) &&
-        !(q.tool && (ids.has(q.tool.callID) || ids.has(q.tool.messageID))),
-    );
-  }
-  if (eventType === "question.asked") {
-    if (!id) return prev; // need a stable key to store/dedupe
-    // Only the viewed session's own questions are accepted (BET-418 §A):
-    // background-job children no longer route asks into the parent's panel —
-    // a job is created with a pre-flight permission ruleset and never asks.
-    if (sessionID !== viewedSessionId) return prev;
-    if (!Array.isArray(p.questions)) return prev;
-    const next: QuestionLike = {
-      id,
-      sessionID,
-      questions: p.questions as unknown[],
-      tool:
-        tool?.messageID && tool?.callID
-          ? { messageID: tool.messageID, callID: tool.callID }
-          : undefined,
-      requestId: typeof p.id === "string" ? p.id : undefined,
-    };
-    const without = prev.filter((q) => q.id !== id); // dedupe re-asks
-    return [...without, next];
-  }
-  return prev;
-}
 
 /**
  * Normalize a server `GET /question` response row into the renderer's
@@ -1010,27 +685,6 @@ export function applyQuestionEvent(
  * Pure + exported so the contract is tested and can't silently regress
  * when either shape changes.
  */
-export function hydrateQuestion(server: {
-  id: string;
-  sessionID: string;
-  questions: unknown[];
-  tool?: { messageID: string; callID: string };
-}): QuestionLike {
-  // Dedup key prefers tool.callID (matches applyQuestionEvent so a live
-  // event arriving after GET hydrate updates the same row instead of
-  // duplicating it). Falls back to `que_…` when no tool info is present.
-  const id =
-    typeof server.tool?.callID === "string" && server.tool.callID.length > 0
-      ? server.tool.callID
-      : server.id;
-  return {
-    id,
-    sessionID: server.sessionID,
-    questions: server.questions,
-    tool: server.tool,
-    requestId: server.id, // the `que_…` — what opencode's reply API requires
-  };
-}
 
 /**
  * Build the `string[][]` reply payload for a Question tool request from the
@@ -1166,26 +820,6 @@ export function detectCommandFromText(
 // set it true. Driving the spinner ON from the transcript would race the
 // optimistic send path (setRunning(true) before the user message lands in
 // any refetch) and live `session.status {busy}` events.
-export function isAssistantTurnComplete(
-  messages:
-    | Array<{
-        info: {
-          role: string;
-          // `completed?` is the only field read; the open member keeps the
-          // type assignable from the real OpencodeMessageInfo.time (which
-          // also carries `created`) and from test fixtures.
-          time?: { completed?: number; [k: string]: unknown };
-        };
-      }>
-    | null
-    | undefined,
-): boolean {
-  if (!messages || messages.length === 0) return true;
-  const last = messages[messages.length - 1];
-  if (last.info.role !== "assistant") return false;
-  const completed = last.info.time?.completed;
-  return typeof completed === "number" && completed > 0;
-}
 
 // ===== Subagent (Task tool / child session) helpers =====
 //
@@ -1211,43 +845,14 @@ export function isAssistantTurnComplete(
  * `StepFinishPart.tokens` is required, with `input`/`output`/`reasoning`/
  * `cache` keys) — declared here so the helpers don't need a tactical cast.
  */
-type SubagentPart = {
-  type?: string;
-  tool?: string;
-  state?: {
-    status?: string;
-    title?: string;
-    output?: string;
-    input?: Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    time?: { start?: number; end?: number };
-  };
-  // step-finish parts only.
-  tokens?: { input?: number; output?: number };
-};
 
 /** Minimal message shape the helpers consume. */
-type SubagentMessage = { parts?: SubagentPart[] };
 
 /**
  * Structured view of a single subagent invocation, extracted from the parent's
  * task tool part. Returns null when the part isn't a task tool call or doesn't
  * carry a child session id yet (some pending parts haven't been stamped).
  */
-export type SubagentInfo = {
-  childSessionId: string;
-  // From state.input
-  agent: string;                 // subagent_type, e.g. "explore"
-  description: string;           // human-readable summary
-  prompt: string;                // full prompt sent to the child
-  // From state
-  status: "pending" | "running" | "completed" | "error" | "unknown";
-  title: string | null;          // opencode-generated short label
-  output: string | null;         // child's final text (only when completed)
-  truncated: boolean;            // state.metadata.truncated
-  durationMs: number | null;     // end - start when both stamps exist
-  model: { providerID: string; modelID: string } | null;
-};
 
 /**
  * Extract subagent info from any part. Returns null when:
@@ -1259,46 +864,6 @@ export type SubagentInfo = {
  * Defensive against the loose `OpencodePart` type ({ [k: string]: unknown });
  * every field is narrowed at read time.
  */
-export function extractSubagentInfo(part: SubagentPart): SubagentInfo | null {
-  if (!part || part.type !== "tool" || part.tool !== "task") return null;
-  const state = part.state ?? {};
-  const meta = (state.metadata ?? {}) as Record<string, unknown>;
-  const childSessionId =
-    typeof meta.sessionId === "string" && meta.sessionId.length > 0
-      ? meta.sessionId
-      : null;
-  if (!childSessionId) return null;
-  const input = (state.input ?? {}) as Record<string, unknown>;
-  const status = ((): SubagentInfo["status"] => {
-    const s = typeof state.status === "string" ? state.status : "";
-    if (s === "pending" || s === "running" || s === "completed" || s === "error") return s;
-    return "unknown";
-  })();
-  const time = state.time ?? {};
-  const durationMs =
-    typeof time.start === "number" && typeof time.end === "number" && time.end >= time.start
-      ? time.end - time.start
-      : null;
-  const modelRaw = meta.model as Record<string, unknown> | undefined;
-  const model =
-    modelRaw &&
-    typeof modelRaw.providerID === "string" &&
-    typeof modelRaw.modelID === "string"
-      ? { providerID: modelRaw.providerID, modelID: modelRaw.modelID }
-      : null;
-  return {
-    childSessionId,
-    agent: typeof input.subagent_type === "string" ? input.subagent_type : "subagent",
-    description: typeof input.description === "string" ? input.description : "",
-    prompt: typeof input.prompt === "string" ? input.prompt : "",
-    status,
-    title: typeof state.title === "string" ? state.title : null,
-    output: typeof state.output === "string" ? state.output : null,
-    truncated: meta.truncated === true,
-    durationMs,
-    model,
-  };
-}
 
 /**
  * Walk a transcript and collect every child session id mentioned in any task
@@ -1308,21 +873,6 @@ export function extractSubagentInfo(part: SubagentPart): SubagentInfo | null {
  *
  * Safe with undefined / null / empty inputs.
  */
-export function collectChildSessionIds(
-  messages: SubagentMessage[] | null | undefined,
-): Set<string> {
-  const out = new Set<string>();
-  if (!messages) return out;
-  for (const m of messages) {
-    const parts = m?.parts;
-    if (!parts) continue;
-    for (const p of parts) {
-      const info = extractSubagentInfo(p);
-      if (info) out.add(info.childSessionId);
-    }
-  }
-  return out;
-}
 
 /**
  * Count task tool parts whose status is "running" (or "pending"). Live status
@@ -1335,30 +885,6 @@ export function collectChildSessionIds(
  * inferred from child SSE events ("running" | "idle"). When a child id isn't
  * in the map, we fall back to the transcript status (running/pending count).
  */
-export function countRunningSubagents(
-  messages: SubagentMessage[] | null | undefined,
-  liveStatus?: Map<string, "running" | "idle"> | null,
-): number {
-  if (!messages) return 0;
-  let n = 0;
-  for (const m of messages) {
-    const parts = m?.parts;
-    if (!parts) continue;
-    for (const p of parts) {
-      const info = extractSubagentInfo(p);
-      if (!info) continue;
-      const live = liveStatus?.get(info.childSessionId);
-      if (live === "idle") continue;
-      if (live === "running") {
-        n++;
-        continue;
-      }
-      // No live signal — fall back to transcript status.
-      if (info.status === "running" || info.status === "pending") n++;
-    }
-  }
-  return n;
-}
 
 /**
  * Lightweight summary of a child session's transcript, for the collapsed
@@ -1369,9 +895,6 @@ export function countRunningSubagents(
  * Returns zeros for an empty/null transcript so callers can render
  * unconditionally without guarding.
  */
-export function summarizeChildSession(
-  messages: SubagentMessage[] | null | undefined,
-): { toolCount: number; lastToolName: string | null; tokens: number } {
   let toolCount = 0;
   let lastToolName: string | null = null;
   let tokens = 0;
@@ -1417,23 +940,6 @@ export function summarizeChildSession(
 // assistant turn for it yet, so there is nothing to abort. (That is the
 // queued-prompt case; it resolves when opencode starts the turn and emits
 // `session.status {busy}`.) Empty transcript → false.
-export function isAssistantTurnInProgress(
-  messages:
-    | Array<{
-        info: {
-          role: string;
-          time?: { completed?: number; [k: string]: unknown };
-        };
-      }>
-    | null
-    | undefined,
-): boolean {
-  if (!messages || messages.length === 0) return false;
-  const last = messages[messages.length - 1];
-  if (last.info.role !== "assistant") return false;
-  const completed = last.info.time?.completed;
-  return !(typeof completed === "number" && completed > 0);
-}
 
 // ===== Scroll-pin classification =====
 //
@@ -1618,31 +1124,20 @@ export function isDrainAbortError(
 // path spawns a throwaway opencode session (~9s), so we don't run it every
 // turn — every Nth turn keeps the cost occasional while still tracking topic
 // shifts within a long session.
-export const AUTO_RENAME_EVERY_N_TURNS = 5;
 
 // Hard cap on characters fed to the summarizer. The model only needs the gist;
 // shipping the whole transcript wastes tokens and latency. We take the most
 // RECENT text so the name tracks where the work has moved, not where it began.
-const TITLE_INPUT_MAX_CHARS = 2000;
 
 // Max length of the final window name. tmux truncates long names in the status
 // line and our sidebar; a 3-6 word title should never approach this, but we
 // clamp defensively so a misbehaving model can't write an essay into the name.
-const TITLE_MAX_CHARS = 48;
 
 /**
  * Should an auto-rename fire at this user-turn count? True on every Nth
  * completed user turn (1-indexed), i.e. turns 5, 10, 15… for N=5. Turn 0
  * (no user turns yet) never fires. Pure so the cadence is unit-testable.
  */
-export function shouldAutoRename(
-  userTurnCount: number,
-  everyN: number = AUTO_RENAME_EVERY_N_TURNS,
-): boolean {
-  if (everyN <= 0) return false;
-  if (userTurnCount <= 0) return false;
-  return userTurnCount % everyN === 0;
-}
 
 /**
  * Count completed user turns in a transcript. A "turn" is a user-role message
@@ -1650,36 +1145,10 @@ export function shouldAutoRename(
  * messages (command expansions, tool stubs) and empty placeholders don't
  * count toward the rename cadence.
  */
-export function countUserTurns(
-  messages: { info: { role: string }; parts: OpencodePartLike[] }[] | null,
-): number {
-  if (!messages) return 0;
-  let n = 0;
-  for (const m of messages) {
-    if (m.info.role !== "user") continue;
-    if (extractTextFromParts(m.parts).trim().length > 0) n += 1;
-  }
-  return n;
-}
 
 // Minimal structural shape we read off a part — avoids importing OpencodePart
 // here and keeps the helpers usable from tests with plain literals.
-type OpencodePartLike = {
-  type: string;
-  text?: string;
-  synthetic?: boolean;
-  ignored?: boolean;
-};
 
-function extractTextFromParts(parts: OpencodePartLike[]): string {
-  const out: string[] = [];
-  for (const p of parts) {
-    if (p.type !== "text" && p.type !== "reasoning") continue;
-    if (p.synthetic || p.ignored) continue;
-    if (typeof p.text === "string" && p.text.trim()) out.push(p.text);
-  }
-  return out.join("\n");
-}
 
 /**
  * Build the summarizer input string from a transcript: the most recent
@@ -1687,23 +1156,6 @@ function extractTextFromParts(parts: OpencodePartLike[]): string {
  * KEEPING THE TAIL (the latest work). Returns "" when there's nothing to
  * summarize (caller should skip the rename). Pure + tested.
  */
-export function buildTitlePromptInput(
-  messages: { info: { role: string }; parts: OpencodePartLike[] }[] | null,
-): string {
-  if (!messages) return "";
-  const lines: string[] = [];
-  for (const m of messages) {
-    const role = m.info.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const text = extractTextFromParts(m.parts).trim();
-    if (!text) continue;
-    lines.push(`${role === "user" ? "User" : "Assistant"}: ${text}`);
-  }
-  const joined = lines.join("\n");
-  if (joined.length <= TITLE_INPUT_MAX_CHARS) return joined;
-  // Keep the tail — the most recent work is what the name should reflect.
-  return joined.slice(joined.length - TITLE_INPUT_MAX_CHARS);
-}
 
 /**
  * Sanitize a model-generated title into a safe 3-6 word tmux window name.
@@ -1714,664 +1166,6 @@ export function buildTitlePromptInput(
  * the window name — the rename IPC rejects empty names anyway). Pure +
  * tested.
  */
-export function sanitizeGeneratedTitle(raw: string | null | undefined): string {
-  if (!raw) return "";
-  let s = raw.trim();
-  // Drop a leading "Title:" / "Name:" preamble the model sometimes adds.
-  s = s.replace(/^\s*(title|name)\s*[:\-]\s*/i, "");
-  // Strip markdown emphasis / code fences / surrounding quotes.
-  s = s.replace(/[`*_#]/g, "");
-  s = s.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "");
-  // Keep only the first line (models occasionally explain on a second line).
-  s = s.split(/\r?\n/)[0] ?? "";
-  // Drop trailing sentence punctuation.
-  s = s.replace(/[.!?,;:]+$/g, "");
-  // Collapse internal whitespace, take at most six words. Preserve case.
-  const words = s.trim().split(/\s+/).filter(Boolean).slice(0, 6);
-  let out = words.join(" ").trim();
-  if (out.length > TITLE_MAX_CHARS) {
-    const window = out.slice(0, TITLE_MAX_CHARS);
-    const lastSpace = window.lastIndexOf(" ");
-    out = (lastSpace > 0 ? window.slice(0, lastSpace) : window).trim();
-  }
-  return out;
-}
-
-// The instruction sent to the throwaway opencode session. Kept here (not in
-// the main process) so the renderer and tests share one source of truth.
-export function buildTitleInstruction(conversation: string): string {
-  return (
-    "You are titling a work session. Reply with ONLY a short descriptive " +
-    "title of 3 to 6 words that names the concrete task, feature, or bug " +
-    "being worked on in this conversation. Sentence case. No trailing " +
-    "punctuation, no quotes, no explanation. Be specific — prefer 'Fix SSE " +
-    "reconnect after sleep' or 'Sidebar session age indicator' over vague " +
-    "titles like 'Code fixes' or 'Debugging session'. Title the CURRENT " +
-    "focus, weighting the most recent messages:\n\n" +
-    conversation
-  );
-}
-
-// describeCron — best-effort human-readable label for a 5-field cron
-// expression, for the ScheduledTasksCard. Covers the common shapes the model
-// emits; falls back to the raw expression for anything it doesn't recognize.
-// Pure + never throws. cron fields: minute hour day-of-month month day-of-week.
-export function describeCron(expr: string, recurring = true): string {
-  const raw = (expr ?? "").trim();
-  const f = raw.split(/\s+/);
-  if (f.length !== 5) return raw || "(invalid)";
-  const [min, hour, dom, month, dow] = f;
-
-  const pad = (n: string) => (n.length === 1 ? `0${n}` : n);
-  const isNum = (s: string) => /^\d+$/.test(s);
-  const time = () =>
-    isNum(min) && isNum(hour) ? `${hour}:${pad(min)}` : null;
-
-  const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const dowLabel = (s: string): string | null => {
-    if (s === "1-5") return "weekdays";
-    if (s === "0,6" || s === "6,0" || s === "0,7") return "weekends";
-    if (isNum(s)) {
-      const n = Number(s) % 7; // 7 → 0 (Sunday)
-      return DOW_NAMES[n] ?? null;
-    }
-    return null;
-  };
-
-  // every-N-minutes: "*/N * * * *"
-  const stepMin = /^\*\/(\d+)$/.exec(min);
-  if (stepMin && hour === "*" && dom === "*" && month === "*" && dow === "*") {
-    const n = Number(stepMin[1]);
-    return `every ${n} min`;
-  }
-  // hourly: "M * * * *"
-  if (isNum(min) && hour === "*" && dom === "*" && month === "*" && dow === "*") {
-    return min === "0" ? "hourly" : `hourly at :${pad(min)}`;
-  }
-  // every-N-hours: "M */N * * *"
-  const stepHour = /^\*\/(\d+)$/.exec(hour);
-  if (isNum(min) && stepHour && dom === "*" && month === "*" && dow === "*") {
-    return `every ${Number(stepHour[1])}h`;
-  }
-
-  const t = time();
-  // weekday/specific-day at time: "M H * * DOW"
-  if (t && dom === "*" && month === "*" && dow !== "*") {
-    const d = dowLabel(dow);
-    if (d) return `${d} ${t}`;
-  }
-  // daily at time: "M H * * *"
-  if (t && dom === "*" && month === "*" && dow === "*") {
-    return recurring ? `daily ${t}` : `once at ${t}`;
-  }
-  // day-of-month at time: "M H DOM * *"
-  if (t && isNum(dom) && month === "*" && dow === "*") {
-    return `monthly on the ${dom}${ordinal(Number(dom))} at ${t}`;
-  }
-
-  return raw; // unrecognized — show the raw cron
-}
-
-function ordinal(n: number): string {
-  const s = ["th", "st", "nd", "rd"];
-  const v = n % 100;
-  return s[(v - 20) % 10] ?? s[v] ?? s[0];
-}
-
-// --- Next-run computation (mirrors src/server/schedule.mjs cron semantics) ---
-//
-// The renderer computes the next fire time client-side because ScheduledJob has
-// no nextRun field. These two helpers are a faithful port of `parseField` +
-// `cronMatches` from the server so the displayed time matches when the server
-// will actually fire. cron is interpreted in LOCAL time (same as the box). Pure
-// + never throws.
-
-// Returns the set of allowed values for one cron field, or null for "*"
-// (wildcard), or undefined for an unparseable field. Port of schedule.mjs.
-function cronFieldSet(field: string, min: number, max: number): Set<number> | null | undefined {
-  if (field === "*") return null;
-  const allowed = new Set<number>();
-  for (const part of field.split(",")) {
-    let step = 1;
-    let body = part;
-    const slash = part.indexOf("/");
-    if (slash !== -1) {
-      body = part.slice(0, slash);
-      step = Number(part.slice(slash + 1));
-      if (!Number.isInteger(step) || step < 1) return undefined;
-    }
-    let lo: number;
-    let hi: number;
-    if (body === "*") {
-      lo = min;
-      hi = max;
-    } else if (body.includes("-")) {
-      const [a, b] = body.split("-");
-      lo = Number(a);
-      hi = Number(b);
-    } else {
-      lo = hi = Number(body);
-    }
-    if (!Number.isInteger(lo) || !Number.isInteger(hi)) return undefined;
-    if (lo < min || hi > max || lo > hi) return undefined;
-    for (let v = lo; v <= hi; v += step) allowed.add(v);
-  }
-  return allowed;
-}
-
-// Does `expr` fire at `date` (LOCAL time, minute granularity)? Port of
-// schedule.mjs cronMatches, including vixie either-match for DOM+DOW.
-function cronMatchesLocal(expr: string, date: Date): boolean {
-  const fields = String(expr).trim().split(/\s+/);
-  if (fields.length !== 5) return false;
-  const min = cronFieldSet(fields[0], 0, 59);
-  const hour = cronFieldSet(fields[1], 0, 23);
-  const dom = cronFieldSet(fields[2], 1, 31);
-  const month = cronFieldSet(fields[3], 1, 12);
-  let dow = cronFieldSet(fields[4], 0, 7);
-  if (
-    min === undefined || hour === undefined || dom === undefined ||
-    month === undefined || dow === undefined
-  )
-    return false;
-  if (dow && dow.has(7)) dow = new Set([...dow].map((d) => (d === 7 ? 0 : d)));
-
-  if (min && !min.has(date.getMinutes())) return false;
-  if (hour && !hour.has(date.getHours())) return false;
-  if (month && !month.has(date.getMonth() + 1)) return false;
-
-  const domRestricted = dom !== null;
-  const dowRestricted = dow !== null;
-  const dmonth = date.getDate();
-  const wday = date.getDay();
-  if (domRestricted && dowRestricted) return dom!.has(dmonth) || dow!.has(wday);
-  if (domRestricted) return dom!.has(dmonth);
-  if (dowRestricted) return dow!.has(wday);
-  return true;
-}
-
-// Next epoch-ms at which `expr` fires strictly AFTER `from` (default now).
-// Searches minute-by-minute up to ~366 days ahead (covers every 5-field cron,
-// including "0 0 29 2 *"). Returns null if the expression is invalid or no
-// match is found within the horizon. LOCAL time, matching the server poller.
-export function nextCronRun(expr: string, from: number = Date.now()): number | null {
-  const fields = String(expr ?? "").trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  // Validate up front so a bad field doesn't burn the whole search loop.
-  if (
-    cronFieldSet(fields[0], 0, 59) === undefined ||
-    cronFieldSet(fields[1], 0, 23) === undefined ||
-    cronFieldSet(fields[2], 1, 31) === undefined ||
-    cronFieldSet(fields[3], 1, 12) === undefined ||
-    cronFieldSet(fields[4], 0, 7) === undefined
-  )
-    return null;
-
-  // Start at the next whole minute after `from` (seconds zeroed) — a match at
-  // the current minute is "now/just-fired", not "next".
-  const d = new Date(from);
-  d.setSeconds(0, 0);
-  d.setMinutes(d.getMinutes() + 1);
-  const HORIZON_MIN = 366 * 24 * 60;
-  for (let i = 0; i < HORIZON_MIN; i++) {
-    if (cronMatchesLocal(expr, d)) return d.getTime();
-    d.setMinutes(d.getMinutes() + 1);
-  }
-  return null;
-}
-
-// Compact relative + absolute label for a job's next run, e.g.
-// "in 4m", "in 2h", "tomorrow 09:00", "Mon 14:30", "Mar 3". Returns "" when
-// there's no upcoming run (invalid cron, or a one-shot already past).
-export function describeNextRun(
-  expr: string,
-  recurring = true,
-  from: number = Date.now(),
-): string {
-  const next = nextCronRun(expr, from);
-  if (next == null) return "";
-  // A non-recurring job that has no future match (its single time is in the
-  // past) returns null above; if it DOES have a future match we still show it.
-  void recurring;
-
-  const deltaMs = next - from;
-  const mins = Math.round(deltaMs / 60_000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const nd = new Date(next);
-  const hhmm = `${pad(nd.getHours())}:${pad(nd.getMinutes())}`;
-
-  if (mins < 1) return "in <1m";
-  if (mins < 60) return `in ${mins}m`;
-  if (mins < 60 * 6) {
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return m ? `in ${h}h ${m}m` : `in ${h}h`;
-  }
-
-  // Same calendar day → just the time.
-  const fromD = new Date(from);
-  const sameDay =
-    nd.getFullYear() === fromD.getFullYear() &&
-    nd.getMonth() === fromD.getMonth() &&
-    nd.getDate() === fromD.getDate();
-  if (sameDay) return `today ${hhmm}`;
-
-  const tomorrow = new Date(from);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const isTomorrow =
-    nd.getFullYear() === tomorrow.getFullYear() &&
-    nd.getMonth() === tomorrow.getMonth() &&
-    nd.getDate() === tomorrow.getDate();
-  if (isTomorrow) return `tomorrow ${hhmm}`;
-
-  // Within a week → weekday + time. Beyond → month + day.
-  const DOW_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const MON_NAMES = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-  ];
-  if (deltaMs < 7 * 24 * 60 * 60_000) {
-    return `${DOW_NAMES[nd.getDay()]} ${hhmm}`;
-  }
-  return `${MON_NAMES[nd.getMonth()]} ${nd.getDate()} ${hhmm}`;
-}
-
-// ===== Optimistic user-message reconciliation =====
-//
-// When the user sends a prompt, ChatPanel immediately appends a synthetic
-// "optimistic" user message (id `optimistic-user-<timestamp>`) so the UI
-// shows the bubble instantly. The real user message arrives a few hundred
-// ms later via SSE (`message.updated` → `spliceMessage`). If `spliceMessage`
-// does a blind insert (because the real id doesn't match the optimistic id),
-// BOTH messages render briefly — the visible "double bubble" flicker.
-//
-// `reconcileOptimisticUser` is the single source of truth for stripping the
-// optimistic placeholder the moment the canonical server message arrives.
-// It is called from `spliceMessage`'s insert path: if the incoming message
-// is role "user" AND the previous messages contain an `optimistic-user-*`
-// entry, that entry is dropped before the real message is appended.
-//
-// Pure + exported so the contract is unit-tested and can't silently regress.
-
-/**
- * Strip any optimistic user placeholder from `prev` that belongs to the same
- * send as `incoming`. Returns a new array (or `prev` unchanged) so React
- * skips the re-render when nothing changed.
- *
- * Rules:
- *   - Only fires for `incoming.info.role === "user"`. Assistant / system
- *     messages never trigger reconciliation (they have no optimistic twin).
- *   - Drops every message whose id starts with `optimistic-user-`. In
- *     practice there is at most one per send, but we scan all of them
- *     defensively — a prior run that failed to reconcile could have left
- *     a stale one behind.
- *   - Returns `prev` unchanged when there is no optimistic entry to drop,
- *     so the caller's splice can proceed with the canonical array.
- */
-export function reconcileOptimisticUser<M extends { info: { id: string; role: string } }>(
-  prev: M[] | null | undefined,
-  incoming: M,
-): M[] | null | undefined {
-  if (incoming.info.role !== "user") return prev;
-  if (!prev || prev.length === 0) return prev;
-  // Scan for any optimistic placeholder. If none found, return the original
-  // reference so the caller's splice operates on the canonical array.
-  const next = prev.filter((m) => !m.info.id.startsWith("optimistic-user-"));
-  if (next.length === prev.length) return prev; // no optimistic entry to drop
-  return next;
-}
-
-// ===== Live tool output =====
-//
-// A tool part's *final* output lands in `state.output`, but that field only
-// exists once `state.status === "completed"` (see opencode's `ToolStateRunning`
-// vs `ToolStateCompleted` schemas — Running has no `output`). While a tool is
-// still running, opencode streams incremental stdout into
-// `state.metadata.output` instead, growing it via `message.part.updated`
-// events. Verified live against a long bash: `metadata.output` ticks up
-// `line-1\n` → `line-1\nline-2\n` → … before `status` flips to "completed".
-//
-// `resolveToolOutput` is the single source of truth every tool body uses so a
-// long-running command shows its latest lines as it works (instead of an empty
-// "· running" body) and the same ctrl+o expand mechanism applies. It prefers
-// the final `state.output` when present (completed / error), and falls back to
-// the live `state.metadata.output` while running. Returns "" when neither is a
-// non-empty string.
-export function resolveToolOutput(state: {
-  output?: unknown;
-  metadata?: Record<string, unknown> | undefined;
-} | null | undefined): string {
-  if (!state) return "";
-  if (typeof state.output === "string" && state.output.length > 0) {
-    return state.output;
-  }
-  const meta = state.metadata;
-  const live = meta && typeof meta.output === "string" ? meta.output : "";
-  return live;
-}
-
-// ---------------------------------------------------------------------------
-// Client liveness watchdog (BET-115 fix A)
-//
-// A half-open WebSocket is undetectable from `readyState` alone — it stays
-// "OPEN" even when the underlying path is dead (tunnel restart, sleep/wake,
-// NAT timeout), so the browser never fires onclose/onerror and the shared
-// reconnect controller never retries. The server sends an app-level
-// `{kind:"heartbeat"}` frame every 15s (src/server/events.mjs); the renderer
-// stamps `lastFrameAt` on every frame it receives (heartbeat or real) and a
-// watchdog interval calls this pure decision function to decide whether the
-// connection is stale enough to force a reconnect even though the socket
-// still LOOKS open.
-// ---------------------------------------------------------------------------
-
-/**
- * Decide whether the events WebSocket should be force-reconnected.
- *
- * Only fires when the controller believes it's `connected` — a socket that's
- * already `connecting`/`reconnecting`/`closed` is already on the recovery
- * path and doesn't need the watchdog to intervene. `thresholdMs` is the
- * caller's staleness bound (BET-115 spec: 45s = 3 missed 15s heartbeats).
- */
-export function shouldForceReconnect(
-  state: ConnectionStateName,
-  lastFrameAt: number,
-  now: number,
-  thresholdMs: number,
-): boolean {
-  if (state !== "connected") return false;
-  return now - lastFrameAt > thresholdMs;
-}
-
-/**
- * Decide whether a Capacitor `appStateChange` event should trigger an SSE
- * WebSocket reconnect (BET-177 §4.2 — native lifecycle hardening).
- *
- * iOS suspends sockets while the app is backgrounded. On resume (the
- * inactive→active transition) the resume-watchdog needs to force a reconnect
- * + resync so any state missed during the suspend gets recovered. The
- * suspend transition (active→inactive) is a no-op — iOS is about to kill the
- * socket anyway, and a redundant reconnect would just race the suspend.
- *
- * Pure: takes only the boolean iOS sends, returns whether to reconnect.
- * Tested in chatUtils.test.ts. Wired into MobileApp.tsx (the only context
- * with Capacitor present); desktop / PWA / frozen web client never call it
- * because getCapacitorApp(window) returns null there.
- */
-export function shouldReconnectOnAppStateChange(isActive: boolean): boolean {
-  return isActive === true;
-}
-
-// ---------------------------------------------------------------------------
-// Bounded-concurrency fan-out (BET-135)
-//
-// The store's startup fan-outs (`replayChatAttention`,
-// `backfillLastMessageTimes`) used `Promise.all` over every chat session /
-// directory, firing every opencode request in one unbounded burst. With many
-// sessions this hammers opencode and makes the whole app feel sluggish right
-// after the session list loads. `runWithConcurrency` caps how many `fn`
-// calls are in flight at once while still resolving once every item has
-// settled (success or failure) — callers keep the exact same "run for every
-// item, don't stop on one failure" semantics, just scheduled more gently.
-// ---------------------------------------------------------------------------
-
-/**
- * Run `fn` over every item in `items`, at most `limit` concurrently.
- * Resolves once every item has settled. A rejecting `fn` is swallowed
- * per-item (matching the callers' existing best-effort try/catch bodies)
- * so one failure can't abort the rest of the batch.
- */
-export async function runWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<void>,
-): Promise<void> {
-  let i = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) {
-      const idx = i++;
-      if (idx >= items.length) return;
-      try {
-        await fn(items[idx]);
-      } catch {
-        /* per-item failure is non-fatal — isolate and continue the batch */
-      }
-    }
-  });
-  await Promise.all(workers);
-}
-
-// ---------------------------------------------------------------------------
-// Version-skew guard (BET-225 stage 3)
-// ---------------------------------------------------------------------------
-//
-// The renderer's UpdateBar component has two variants:
-//   - "ok"       → no banner
-//   - "outdated" → non-dismissible "this app is out of date" banner
-//
-// `chooseUpdateSkewVariant` picks the variant purely from the two version
-// strings the renderer already has on hand (the desktop's own version from
-// `getClientVersion()` + the server's `minClient` from `getServerVersion()`).
-// Pure: no DOM, no Electron, no network. Tested in chatUtils.test.ts.
-//
-// Treats missing/empty inputs as "no skew signal yet" → "ok", so a renderer
-// that's mid-bootstrap (versions not fetched yet) never spuriously flashes
-// the blocking banner. Both inputs run through `isClientTooOld`, which itself
-// treats malformed versions as "0.0.0" — see src/shared/versionCompare.mjs.
-//
-// The helper is intentionally a string literal union (not a boolean) so the
-// test surface is the exact "two variants" contract the UpdateBar component
-// encodes — extending the set later (e.g. a "warn" tier for non-blocking
-// deprecation hints) is a deliberate choice, not a happy accident.
-export type UpdateSkewVariant = "ok" | "outdated";
-
-export function chooseUpdateSkewVariant(
-  clientVersion: string | null | undefined,
-  minClient: string | null | undefined,
-): UpdateSkewVariant {
-  if (!clientVersion || !minClient) return "ok";
-  return isClientTooOld(clientVersion, minClient) ? "outdated" : "ok";
-}
-
-// ===== Composer arrow-key: history vs caret navigation =====
-//
-// The OLD logic scanned for `\n` before/after the caret to decide "first/last
-// line". That is blind to SOFT WRAP: a long single line with no `\n` wraps to
-// multiple rows, so a caret on visual row 2 wrongly triggered history. The DOM
-// measures the caret's VISUAL row (see caretRowInfo in InputArea) and passes it
-// here; these pure predicates decide whether the arrow cycles history.
-export type CaretRow = {
-  atFirstRow: boolean; // caret on the topmost visual row
-  atLastRow: boolean;  // caret on the bottommost visual row
-};
-
-// True when ArrowUp should navigate prompt history (caret on first visual row).
-// False → caller must let the browser move the caret up one row (no preventDefault).
-export function arrowUpNavigatesHistory(row: CaretRow): boolean {
-  return row.atFirstRow;
-}
-
-// True when ArrowDown should navigate prompt history (caret on last visual row).
-export function arrowDownNavigatesHistory(row: CaretRow): boolean {
-  return row.atLastRow;
-}
-
-// ===== Subscription provider connect flow (BET-312) =====
-//
-// Pure helpers for the ConnectProvider state machine. The component itself
-// lives in src/renderer/ConnectProvider.tsx; these helpers are the testable
-// bits it composes from. Kept here (rather than inlined in the component) so
-// every "what does state X mean?" / "has the poll expired yet?" decision
-// pins against a unit test instead of an integration one. The renderer's
-// existing test suite is pure-only; adding DOM-testing infra would be out of
-// scope for this epic.
-
-// State machine phases the connect card can be in. Mirrors the
-// `idle -> starting -> (waiting | needsCode | needsKey) -> applying -> done |
-// failed` transition graph from BET-312; BET-354 adds `needsClaudeLogin`
-// for the in-app Claude connect flow. The transition graph is now:
-//   starting -> (waiting | needsCode | needsKey | needsClaudeLogin) ->
-//               applying -> done | failed
-//
-//   needsClaudeLogin (BET-354):
-//     Active during an in-app Claude OAuth. `ptySessionKey` is the
-//     server-generated id (consumed by the existing pty bus) the renderer
-//     mounts a Terminal pane for. `startedAt` is the server-side timestamp
-//     the renderer passes back to the claude-status poll for the
-//     credentials-file mtime check. `url` is extracted from the live
-//     stream so the user gets a clickable "Open in browser" button
-//     without the terminal filling the card. `inputError` re-arms a
-//     failed submit. `preExisting` flips to true on a "pre-existing"
-//     poll result so the card can show the distinct copy
-//     ("Claude is already signed in. Restart didn't help…") instead of
-//     hanging in `waiting`.
-export type ConnectPhase =
-  | { kind: "starting" }
-  | { kind: "waiting"; url: string; instructions: string; methodIndex: number }
-  | {
-      kind: "needsCode";
-      url: string;
-      instructions: string;
-      methodIndex: number;
-      inputError?: string;
-    }
-  | { kind: "needsKey"; consoleUrl: string | null; inputError?: string }
-  | {
-      kind: "needsClaudeLogin";
-      ptySessionKey: string;
-      startedAt: number;
-      cwd: string;
-      url: string;
-      inputError?: string;
-      preExisting?: boolean;
-    }
-  | {
-      // BET-421 §E: the `claude` CLI is not on the box. The card spawns the
-      // official installer over the pty bus (launcher `claude-cli-install`)
-      // and polls `opencodeClaudeCliStatus()` until the binary appears. On
-      // success it re-fires `{action:"start"}` to enter `needsClaudeLogin`
-      // using the SAME server-side sessionKey (startClaudeLogin only stamps
-      // metadata + backs up credentials; it does not spawn, so the key is
-      // still valid). On failure the user gets Try again / Use a different
-      // model / Install manually.
-      kind: "installingClaudeCli";
-      ptySessionKey: string;
-      // The sessionKey the server already minted for the eventual
-      // `needsClaudeLogin` — reused after install so we don't double-mint.
-      loginSessionKey: string;
-      startedAt: number;
-      cwd: string;
-    }
-  | {
-      // BET-354: `restarted` is true when the server already called
-      // `restartOpencode()` for this transition (the Claude "completed"
-      // path). When true, the `applying` effect skips the renderer's
-      // own restart call — a second restart would flap opencode-serve
-      // and drop every in-flight opencode turn across the box. The
-      // Codex / Kimi paths leave `restarted` undefined (treated as
-      // false) so they still trigger the renderer's restart — that one
-      // is the only restart for those flows.
-      kind: "applying";
-      restartConfirmed: boolean;
-      restarted?: boolean;
-    }
-  | { kind: "done" }
-  | { kind: "failed"; message: string; reason?: "claude-cli-install" };
-
-/**
- * Pull the device code out of an opencode OAuth instructions string, e.g.
- * `"Enter code: TOQR-BUA7Z"` → `"TOQR-BUA7Z"`. Returns null when the string
- * has no recognisable code (no "code" anchor or no code-shaped token after
- * it), in which case the UI shows `instructions` verbatim with no copy
- * button. Empty / non-string input → null.
- *
- * The match is anchored to a `code:` / `code ` cue (case-insensitive) so a
- * sentence like "the user has not entered a code" does not pick up its
- * inline "code" as a token.
- */
-export function parseDeviceCode(instructions: string): string | null {
-  if (typeof instructions !== "string" || instructions.length === 0) return null;
-  const m = instructions.match(/\bcode[:\s]+([A-Z0-9]+-[A-Z0-9]+)/i);
-  return m ? m[1] : null;
-}
-
-/**
- * BET-421 §D: when parseDeviceCode returns null (the provider reformatted
- * the sentence and the chip would silently vanish), point the user at the
- * verbatim instructions block instead of rendering an empty code slot.
- * Returns the hint string the waiting card renders under the URL; null when
- * a code WAS parsed (caller shows the chip instead).
- */
-export function deviceCodeFallback(instructions: string): string | null {
-  if (parseDeviceCode(instructions) !== null) return null;
-  if (typeof instructions === "string" && instructions.trim().length > 0) {
-    return "The code is in the message below — copy it from there.";
-  }
-  return null;
-}
-
-/**
- * BET-421 §D: format the remaining time on a device-code poll as
- * "M:SS remaining". Clamped at 0; NaN-safe. Pure so the countdown display
- * is unit-testable.
- */
-export function formatRemaining(
-  startedAt: number,
-  now: number,
-  limitMs: number,
-): string {
-  if (
-    !Number.isFinite(startedAt) ||
-    !Number.isFinite(now) ||
-    !Number.isFinite(limitMs)
-  ) {
-    return "0:00 remaining";
-  }
-  const ms = Math.max(0, limitMs - (now - startedAt));
-  const totalSec = Math.ceil(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")} remaining`;
-}
-
-/**
- * BET-421 §D: derive an opencode provider `id` from a human-readable name.
- * Lowercase, ASCII alphanumeric + hyphens only, collapsed whitespace →
- * single hyphen, trimmed leading/trailing hyphens. Non-ASCII chars are
- * dropped (opencode ids are ASCII-safe keys persisted in opencode.jsonc).
- * Returns "" for an empty/whitespace-only name so the caller can gate the
- * save button. Pure so the derivation is unit-testable.
- */
-export function slugifyProviderId(name: string): string {
-  if (typeof name !== "string") return "";
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug;
-}
-
-/**
- * BET-421 §D: shared validator for the custom-provider add form used by BOTH
- * the onboarding step (ProvidersStep) and Settings → Accounts (ProvidersCard).
- * The id is DERIVED from the name (slugifyProviderId), so the form never asks
- * for it — this validator gates on name + baseURL, not id. Returns the reason
- * the draft is invalid, or null when it's submittable. Pure so both call sites
- * share one source of truth and the validator is unit-testable.
- */
-export function customProviderDraftError(draft: {
-  name: string;
-  baseURL: string;
-}): string | null {
-  if (!draft.name.trim()) return "Name is required.";
-  if (!slugifyProviderId(draft.name)) {
-    return "Name must contain a letter or digit.";
-  }
-  if (!draft.baseURL.trim()) return "Base URL is required.";
-  if (!/^https?:\/\//i.test(draft.baseURL.trim())) {
-    return "Base URL must start with http:// or https://.";
-  }
-  return null;
-}
 
 /**
  * Single source of user-facing status text for every phase of the connect
