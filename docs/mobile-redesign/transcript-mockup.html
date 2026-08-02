@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mobile transcript v2 — B refined + subagents</title>
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<!--
+  THE SPEC for the mobile transcript. This file is the design contract, not a
+  picture of one — read docs/visual-verification.md before editing it.
+
+  It loads the app's REAL token stylesheet above, so every colour, spacing step,
+  radius and type stack resolves to the same variable the app uses at runtime. A
+  mockup that hardcodes its own hexes is a picture, and it drifts the moment a
+  token is retuned.
+
+  SCOPE. Four columns, left to right:
+    1. B refined      — the AGREED transcript direction (DECISIONS.md §8)
+    2. Subagents S1   — inline expand        (REJECTED, kept for reasoning)
+    3. Subagents S2   — drill-in screen      (CHOSEN — §8a)
+    4. Subagents S3   — sheet                (REJECTED, kept for reasoning)
+  Plus, below: session-list treatments L1 (CHOSEN — §7.1a) and L2 (rejected).
+
+  The rejected columns are deliberately preserved. §8a's reasoning is only
+  legible beside the alternatives it beat; deleting them makes the decision look
+  arbitrary to the next reader.
+
+  Served copies at /pages/transcript-density and /pages/transcript-v2 EXPIRE.
+  This file does not. It is the durable reference.
+-->
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin:0; background: var(--canvas); color: var(--tx1);
+         font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+  .page { padding: var(--sp-5) var(--sp-4) var(--sp-12); }
+  h1 { font-size:24px; line-height:1.25; margin:0 0 var(--sp-2); letter-spacing:-0.01em; }
+  h3 { font-size:17px; line-height:1.3; margin:var(--sp-8) 0 var(--sp-2); }
+  .lede { color:var(--tx3); font-size:14px; line-height:1.5; margin:0 0 var(--sp-5); max-width:64ch; }
+  .lede strong { color:var(--tx2); font-weight:600; }
+  .rail { display:flex; gap:var(--sp-5); overflow-x:auto; padding-bottom:var(--sp-4); }
+  .col { flex:0 0 auto; width:390px; }
+  .colhead { margin-bottom:var(--sp-3); }
+  .colhead h2 { font-size:17px; line-height:1.3; margin:0 0 4px; }
+  .tag { display:inline-block; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+         color:var(--tx4); font-weight:600; margin-bottom:6px; }
+  .rec { color:var(--ok); }
+  .colhead p { margin:0; font-size:12px; line-height:1.45; color:var(--tx3); }
+
+  .phone { border:1px solid var(--border); border-radius:var(--r-xl); overflow:hidden;
+           background:var(--canvas); box-shadow:var(--shadow-lg); height:700px;
+           display:flex; flex-direction:column; position:relative; }
+  .hdr { display:flex; align-items:center; gap:var(--sp-2); padding:var(--sp-2) var(--sp-3);
+         border-bottom:1px solid var(--border-subtle); background:var(--panel); flex:0 0 auto; }
+  .hdr .back { color:var(--accent-tx); font-size:15px; }
+  .hdr .ttl { font-size:13px; font-weight:600; }
+  .hdr .crumb { font-size:11px; color:var(--tx4); }
+  .hdr .sp { margin-left:auto; color:var(--tx4); font-size:15px; }
+  .scroll { overflow-y:auto; padding:var(--sp-3); flex:1 1 auto; }
+  .composer { flex:0 0 auto; border-top:1px solid var(--border-subtle); background:var(--panel);
+              padding:var(--sp-2) var(--sp-3); display:flex; gap:var(--sp-2);
+              font-size:13px; color:var(--tx4); }
+  .composer .box { flex:1; }
+
+  /* user = full-bleed band, no role label */
+  .user { background:var(--fill); border-left:2px solid var(--accent);
+          border-radius:0 var(--r-md) var(--r-md) 0;
+          margin:0 calc(var(--sp-3) * -1) var(--sp-4); padding:var(--sp-3) var(--sp-3);
+          color:var(--tx1); font-size:15px; line-height:1.5; font-weight:500; }
+  .prose { font-size:15px; line-height:var(--prose-lh); color:var(--tx1); margin-bottom:var(--sp-3); }
+  .prose code { font-family:var(--font-mono); font-size:13px; background:var(--fill);
+                padding:1px 4px; border-radius:var(--r-xs); color:var(--tx2); }
+  .dot { width:6px; height:6px; border-radius:var(--r-full); flex:0 0 auto; }
+  .dot.ok{background:var(--ok);} .dot.run{background:var(--accent);}
+
+  .steps { border:1px solid var(--border-subtle); border-radius:var(--r-md);
+           background:var(--panel); overflow:hidden; margin:0 0 var(--sp-3); }
+  .step { display:flex; align-items:center; gap:var(--sp-2); padding:7px var(--sp-3);
+          font-size:13px; border-bottom:1px solid var(--border-subtle); }
+  .step:last-child{border-bottom:0;}
+  .step .vb { font-weight:600; color:var(--tx2); flex:0 0 auto; }
+  .step .tgt { font-family:var(--font-mono); font-size:12px; color:var(--tx4);
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 auto; min-width:0; }
+  .step .ms { font-size:11px; color:var(--tx4); flex:0 0 auto; }
+  .group { display:flex; align-items:center; gap:var(--sp-2); padding:7px var(--sp-3);
+           font-size:12px; color:var(--tx4); }
+  .out { font-family:var(--font-mono); font-size:12px; line-height:1.5; color:var(--tx3);
+         background:var(--inset); padding:var(--sp-2) var(--sp-3);
+         border-bottom:1px solid var(--border-subtle); white-space:pre; overflow-x:auto; }
+
+  /* subagent row — distinguished from a tool by the agent glyph + count */
+  .agent { display:flex; align-items:center; gap:var(--sp-2); padding:9px var(--sp-3);
+           font-size:13px; border-bottom:1px solid var(--border-subtle); }
+  .agent:last-child{border-bottom:0;}
+  .agent .gl { width:16px; height:16px; border-radius:var(--r-xs); background:var(--accent-soft);
+               color:var(--accent-tx); font-size:10px; display:flex; align-items:center;
+               justify-content:center; font-weight:700; flex:0 0 auto; }
+  .agent .nm { font-weight:600; color:var(--tx1); flex:1 1 auto; min-width:0;
+               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .agent .st { font-size:11px; color:var(--tx4); flex:0 0 auto; }
+  .agent .chev { color:var(--tx4); font-size:14px; flex:0 0 auto; }
+  .agent.live .nm { color:var(--tx1); }
+
+  .nest { background:var(--inset); border-bottom:1px solid var(--border-subtle); }
+  .nest .step { padding-left:calc(var(--sp-3) + 20px); border-bottom:1px solid var(--border-subtle); }
+  .nest .step:last-child{border-bottom:0;}
+
+  .sheet { position:absolute; left:0; right:0; bottom:0; height:64%;
+           background:var(--panel); border-top:1px solid var(--border);
+           border-radius:var(--r-xl) var(--r-xl) 0 0; box-shadow:var(--shadow-lg);
+           display:flex; flex-direction:column; }
+  .sheet .grab { width:36px; height:4px; border-radius:var(--r-full); background:var(--border-strong);
+                 margin:var(--sp-2) auto; flex:0 0 auto; }
+  .sheet .sh { padding:0 var(--sp-3) var(--sp-2); border-bottom:1px solid var(--border-subtle); }
+  .sheet .sh .t { font-size:14px; font-weight:600; }
+  .sheet .sh .s { font-size:11px; color:var(--tx4); }
+  .sheet .body { overflow-y:auto; padding:var(--sp-3); flex:1 1 auto; }
+  .scrim { position:absolute; inset:0; background:rgba(0,0,0,.45); }
+
+  .note { margin-top:var(--sp-3); font-size:12px; line-height:1.5; color:var(--tx3); }
+  .note b{color:var(--tx2);} .win{color:var(--ok);} .cost{color:var(--warn);}
+  .two { display:flex; gap:var(--sp-2); }
+  .two .phone { width:186px; height:700px; }
+  .two .phone .scroll{padding:var(--sp-2);} .two .user{margin:0 -8px var(--sp-3); font-size:13px;}
+  .two .prose{font-size:13px;} .two .step,.two .agent{font-size:11px; padding:6px var(--sp-2);}
+  .two .step .tgt{font-size:10px;} .two .hdr .ttl{font-size:11px;} .two .hdr .crumb{font-size:9px;}
+
+  .glabel{font-size:15px;font-weight:600;letter-spacing:-0.015em;color:var(--tx2);margin:var(--sp-5) 0 6px;padding-left:var(--sp-3);}
+  .glabel:first-child{margin-top:0;}
+  .row{display:flex;align-items:center;gap:var(--sp-2);min-height:56px;padding:0 var(--sp-3);
+       border-radius:var(--r-xl);margin-bottom:2px;}
+  .row:first-of-type{background:var(--fill);}
+  .rw{flex:1 1 auto;min-width:0;}
+  .rn{font-size:15.5px;font-weight:500;letter-spacing:-0.01em;color:var(--tx1);
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .rs{font-size:12px;font-weight:500;color:var(--tx4);margin-top:1px;}
+  .tm{font-size:11px;font-weight:500;font-family:var(--font-mono);color:var(--tx4);flex:0 0 auto;}
+  .badge{font-size:11px;font-weight:600;color:var(--accent-tx);background:var(--accent-soft);
+         padding:2px 7px;border-radius:var(--r-full);flex:0 0 auto;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Mobile transcript v2</h1>
+  <p class="lede">
+    Option B with the role labels removed. <strong>The user turn is now a full-bleed band</strong> —
+    it runs edge to edge with an accent edge, so the separation from the response comes from the
+    band itself rather than from a caption above it. Below: four ways to handle
+    <strong>subagents</strong>, which the spec does not cover at all today.
+  </p>
+
+  <div class="rail">
+    <div class="col">
+      <div class="colhead"><div class="tag">Agreed direction</div><h2>B — refined</h2>
+        <p>No "You" / "Claude" captions. User turn is a full-bleed accent band. Machinery collapses; prose breathes.</p></div>
+      <div class="phone">
+        <div class="hdr"><span class="back">‹</span><div><div class="ttl">main</div><div class="crumb">manta · chat</div></div><span class="sp">···</span></div>
+        <div class="scroll">
+          <div class="user">check bet-520 and see if it's blocked correctly</div>
+          <div class="prose">Checking its metadata and the blocker chain.</div>
+          <div class="steps"><div class="step"><span class="dot ok"></span><span class="vb">Ran</span><span class="tgt">multica issue get BET-520</span><span class="ms">0.4s</span></div></div>
+          <div class="prose">Blocked correctly — <code>waiting_on</code> names both PoC issues, so the sweep clears it once they land.</div>
+          <div class="user">now check pr 429</div>
+          <div class="prose">That PR is +551/−42 across 18 files.</div>
+          <div class="steps">
+            <div class="step"><span class="dot ok"></span><span class="vb">Ran</span><span class="tgt">gh pr view 429 --json files</span><span class="ms">0.9s</span></div>
+            <div class="out">{"a":551,"d":42,"f":[
+  "pr-body.md",
+  "src/main/auth.ts",</div>
+            <div class="group">▾ collapse · 6 more lines</div>
+          </div>
+          <div class="steps"><div class="group">▸ 4 steps · read 3 files, 1 search</div></div>
+          <div class="prose">Half sit in <code>src/renderer/mobile/</code> — but <code>setupLogic</code> and <code>pairPayload</code> are imported by desktop.</div>
+        </div>
+        <div class="composer"><span class="box">Queue a message…</span><span>🎙</span></div>
+      </div>
+      <p class="note"><b class="win">Change from v1</b> two captions per turn removed (~44px each turn); the band reads as "you said this" without a label.</p>
+    </div>
+
+    <div class="col">
+      <div class="colhead"><div class="tag">Subagents · S1</div><h2>Inline expand</h2>
+        <p>Desktop parity. The agent row expands in place; its steps indent under it.</p></div>
+      <div class="phone">
+        <div class="hdr"><span class="back">‹</span><div><div class="ttl">main</div><div class="crumb">manta · chat</div></div><span class="sp">···</span></div>
+        <div class="scroll">
+          <div class="user">audit the three sweeps and fix what's broken</div>
+          <div class="prose">Fanning out — one agent per sweep so they run in parallel.</div>
+          <div class="steps">
+            <div class="agent"><span class="gl">A</span><span class="nm">Audit unblock sweep</span><span class="st">done</span><span class="chev">▸</span></div>
+            <div class="agent"><span class="gl">A</span><span class="nm">Audit unstick sweep</span><span class="st">done</span><span class="chev">▾</span></div>
+            <div class="nest">
+              <div class="step"><span class="dot ok"></span><span class="vb">Read</span><span class="tgt">multica-unstick.mjs</span><span class="ms">0.2s</span></div>
+              <div class="step"><span class="dot ok"></span><span class="vb">Ran</span><span class="tgt">node --test unstick</span><span class="ms">1.8s</span></div>
+              <div class="step"><span class="dot ok"></span><span class="vb">Edit</span><span class="tgt">multica-unstick.mjs</span><span class="ms">0.3s</span></div>
+            </div>
+            <div class="agent live"><span class="gl">A</span><span class="nm">Audit pr-closed sweep</span><span class="st">running 1m12s</span><span class="chev">▸</span></div>
+          </div>
+          <div class="prose">Two are back. The third is still reading the close-on-merge workflow.</div>
+        </div>
+        <div class="composer"><span class="box">Queue a message…</span><span>🎙</span></div>
+      </div>
+      <p class="note"><b class="win">Wins</b> one mental model with tool rows; no navigation.
+        <br/><b class="cost">Costs</b> a long child transcript pushes the parent far off screen; nesting past one level is unreadable at 390px.</p>
+    </div>
+
+    <div class="col">
+      <div class="colhead"><div class="tag">Subagents · S2 <span class="rec">· recommended</span></div><h2>Drill-in screen</h2>
+        <p>The agent row is a navigation row. Tap pushes a screen with the child's own transcript; back returns.</p></div>
+      <div class="two">
+        <div class="phone">
+          <div class="hdr"><span class="back">‹</span><div><div class="ttl">main</div><div class="crumb">manta · chat</div></div><span class="sp">···</span></div>
+          <div class="scroll">
+            <div class="user">audit the three sweeps</div>
+            <div class="prose">Fanning out — one agent per sweep.</div>
+            <div class="steps">
+              <div class="agent"><span class="gl">A</span><span class="nm">unblock sweep</span><span class="st">done</span><span class="chev">›</span></div>
+              <div class="agent"><span class="gl">A</span><span class="nm">unstick sweep</span><span class="st">done</span><span class="chev">›</span></div>
+              <div class="agent live"><span class="gl">A</span><span class="nm">pr-closed sweep</span><span class="st">1m12s</span><span class="chev">›</span></div>
+            </div>
+            <div class="prose">Two back, one running.</div>
+          </div>
+          <div class="composer"><span class="box">Message…</span></div>
+        </div>
+        <div class="phone">
+          <div class="hdr"><span class="back">‹</span><div><div class="ttl">unstick sweep</div><div class="crumb">subagent · done</div></div><span class="sp">···</span></div>
+          <div class="scroll">
+            <div class="prose">Read the sweep and its tests, found the backoff gap.</div>
+            <div class="steps">
+              <div class="step"><span class="dot ok"></span><span class="vb">Read</span><span class="tgt">unstick.mjs</span></div>
+              <div class="step"><span class="dot ok"></span><span class="vb">Ran</span><span class="tgt">node --test</span></div>
+              <div class="step"><span class="dot ok"></span><span class="vb">Edit</span><span class="tgt">unstick.mjs</span></div>
+            </div>
+            <div class="prose">Added the two-hour guard; tests green.</div>
+          </div>
+          <div class="composer"><span class="box">read-only</span></div>
+        </div>
+      </div>
+      <p class="note"><b class="win">Wins</b> no nested scrolling (the thing touch handles worst); the app is already a drill-down shell, so this is a third level of an existing pattern; a child gets a real header with its own status; nesting is free — a sub-subagent is just another push.
+        <br/><b class="cost">Costs</b> you leave the parent to read it; needs a route + live status on the row.</p>
+    </div>
+
+    <div class="col">
+      <div class="colhead"><div class="tag">Subagents · S3</div><h2>Sheet</h2>
+        <p>Tap opens a half-height sheet over the parent. Drag to full, flick to dismiss.</p></div>
+      <div class="phone">
+        <div class="hdr"><span class="back">‹</span><div><div class="ttl">main</div><div class="crumb">manta · chat</div></div><span class="sp">···</span></div>
+        <div class="scroll">
+          <div class="user">audit the three sweeps</div>
+          <div class="prose">Fanning out — one agent per sweep.</div>
+          <div class="steps">
+            <div class="agent"><span class="gl">A</span><span class="nm">unblock sweep</span><span class="st">done</span></div>
+            <div class="agent"><span class="gl">A</span><span class="nm">unstick sweep</span><span class="st">done</span></div>
+          </div>
+        </div>
+        <div class="scrim"></div>
+        <div class="sheet">
+          <div class="grab"></div>
+          <div class="sh"><div class="t">unstick sweep</div><div class="s">subagent · done · 3 steps · 2.3s</div></div>
+          <div class="body">
+            <div class="prose">Read the sweep and its tests, found the backoff gap.</div>
+            <div class="steps">
+              <div class="step"><span class="dot ok"></span><span class="vb">Read</span><span class="tgt">unstick.mjs</span></div>
+              <div class="step"><span class="dot ok"></span><span class="vb">Ran</span><span class="tgt">node --test</span></div>
+            </div>
+            <div class="prose">Added the two-hour guard; tests green.</div>
+          </div>
+        </div>
+      </div>
+      <p class="note"><b class="win">Wins</b> parent stays visible behind; dismissal is a flick; §8 already establishes sheets as the pattern.
+        <br/><b class="cost">Costs</b> a sheet is for a short task, not a long transcript; nesting a second sheet is not a thing; still a scroll inside a scroll.</p>
+    </div>
+  </div>
+
+  <h3>Why the agent row is not a tool row</h3>
+  <p class="lede">
+    A tool call is one action with one output. A subagent is <strong>a session</strong> — it streams, has its
+    own steps, its own tokens, and can still be running when the parent has moved on. So it gets a distinct
+    glyph, a name rather than a command, a live duration, and a chevron that means "there is more here" rather
+    than "expand this output". Concurrency is the part a tool row cannot express: three agents running at once
+    is normal, and the row has to show that without three spinners fighting for attention.
+  </p>
+
+  <h3>Session list — subagents</h3>
+  <p class="lede">
+    <strong>The desktop pattern does not port.</strong> BET-414 deliberately removed the visible
+    <code>·N</code> count from the sidebar row — "no trailing glyphs/counts, the subagent count is folded
+    into the dot's title tooltip only". That is a <strong>hover</strong> affordance, and there is no hover
+    on a phone. So mobile needs its own answer rather than a copy. Two candidates, using slots §7.1
+    already defines.
+  </p>
+  <div class="rail">
+    <div class="col">
+      <div class="colhead"><div class="tag">List · L1 <span class="rec">· recommended</span></div><h2>Subtitle carries it</h2>
+        <p>The subtitle is already the "what's happening" line. When agents run, it says so. No new anatomy.</p></div>
+      <div class="phone" style="height:420px">
+        <div class="hdr"><div><div class="ttl">Sessions</div><div class="crumb">3 projects</div></div><span class="sp">···</span></div>
+        <div class="scroll">
+          <div class="glabel">Manta</div>
+          <div class="row"><span class="dot run"></span><div class="rw"><div class="rn">main</div><div class="rs">running · 3 agents</div></div><span class="tm">2m</span></div>
+          <div class="row"><span class="dot ok" style="background:var(--warn)"></span><div class="rw"><div class="rn">docs</div><div class="rs">needs you</div></div><span class="tm">24m</span></div>
+          <div class="row"><span class="dot" style="background:var(--tx4)"></span><div class="rw"><div class="rn">spike</div></div><span class="tm">1d</span></div>
+          <div class="glabel">Ethernal</div>
+          <div class="row"><span class="dot run"></span><div class="rw"><div class="rn">api</div><div class="rs">running · opus 4.8</div></div><span class="tm">40s</span></div>
+        </div>
+      </div>
+      <p class="note"><b class="win">Wins</b> zero new anatomy — §7.1 already defines the subtitle and its grammar ("running · opus 4.8"); reads without decoding a glyph; degrades to the model name when no agents run.
+      <br/><b class="cost">Costs</b> the model name is displaced while agents run.</p>
+    </div>
+    <div class="col">
+      <div class="colhead"><div class="tag">List · L2</div><h2>Count badge</h2>
+        <p>A pill in the timer slot. Preserves the subtitle, adds a scannable number.</p></div>
+      <div class="phone" style="height:420px">
+        <div class="hdr"><div><div class="ttl">Sessions</div><div class="crumb">3 projects</div></div><span class="sp">···</span></div>
+        <div class="scroll">
+          <div class="glabel">Manta</div>
+          <div class="row"><span class="dot run"></span><div class="rw"><div class="rn">main</div><div class="rs">running · opus 4.8</div></div><span class="badge">3⌁</span></div>
+          <div class="row"><span class="dot ok" style="background:var(--warn)"></span><div class="rw"><div class="rn">docs</div><div class="rs">needs you</div></div><span class="tm">24m</span></div>
+          <div class="row"><span class="dot" style="background:var(--tx4)"></span><div class="rw"><div class="rn">spike</div></div><span class="tm">1d</span></div>
+          <div class="glabel">Ethernal</div>
+          <div class="row"><span class="dot run"></span><div class="rw"><div class="rn">api</div><div class="rs">running · opus 4.8</div></div><span class="tm">40s</span></div>
+        </div>
+      </div>
+      <p class="note"><b class="win">Wins</b> keeps the model name; a number is faster to scan than a phrase.
+      <br/><b class="cost">Costs</b> it takes the timer slot, so elapsed time disappears exactly when the session is most active; a bare glyph needs learning.</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>

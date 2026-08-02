@@ -636,6 +636,11 @@ it carries everything rather than a subset.
   also removes the need for the caption above it.
 - **Assistant text**: full width, `tx1`, 15px/`--prose-lh`, margin-bottom
   `--sp-3`.
+- **Visual reference:** [`transcript-mockup.html`](./transcript-mockup.html) in
+  this directory — the agreed direction plus the rejected subagent and
+  session-list alternatives, kept so the decisions below are legible beside
+  what they beat. It links the real `tokens.css`. Served previews expire; that
+  file does not.
 - **Machinery collapses; prose does not.** This is the rule the transcript is
   built on, and it is what separates this design from the official Claude app.
   That app is spacious because it assumes **prose**. A coding session is mostly
@@ -1215,6 +1220,9 @@ link.
 |---|---|
 | This document | `docs/mobile-redesign/DECISIONS.md` |
 | Visual companion | `docs/mobile-redesign/mockup.html` |
+| Transcript + subagent spec | `docs/mobile-redesign/transcript-mockup.html` (§8, §8a, §7.1a) |
+| Mobile implementation epic | BET-550 (server migration → Swift client) |
+| Desktop design epic | BET-565 (continuation of BET-527, primitives shipped) |
 | Desktop redesign epic | BET-406, design record at `/pages/manta-redesign` |
 | The stack spike | BET-431 (BET-432 … BET-438) |
 | Current mobile client | `src/renderer/mobile/` |
