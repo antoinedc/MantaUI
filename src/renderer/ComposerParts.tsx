@@ -141,7 +141,7 @@ export function TypeaheadPopup({
 }) {
   return (
     <div
-      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-card text-meta font-mono"
+      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-bg-soft text-meta font-mono"
       style={{ boxShadow: "var(--shadow-md)" }}
     >
       {rows.length === 0 && (

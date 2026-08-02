@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import resolveConfig from "tailwindcss/resolveConfig.js";
 // @ts-expect-error — plain .js config, no types.
 import tailwindConfig from "../../tailwind.config.js";
+
+const resolvedTheme = resolveConfig(tailwindConfig).theme;
 
 /**
  * A Tailwind utility whose scale key does not exist compiles to NOTHING.
@@ -67,6 +70,117 @@ function usedUtilities(): Map<string, string[]> {
   return used;
 }
 
+/** Non-colour `bg-*` utilities that are NOT background-colour classes. */
+const BG_NON_COLOUR_PREFIXES = [
+  "clip",
+  "cover",
+  "contain",
+  "center",
+  "top",
+  "bottom",
+  "left",
+  "right",
+  "repeat",
+  "no-repeat",
+  "fixed",
+  "local",
+  "scroll",
+  "auto",
+  "none",
+  "gradient",
+  "origin",
+  "blend",
+  "opacity",
+];
+
+/** `bg-…` classes used in the renderer, keyed by their scale name. */
+const BG_RE = /(?<![-\w])bg-([A-Za-z0-9./\[\]-]+)/g;
+
+function usedBgClasses(): Map<string, string[]> {
+  const used = new Map<string, string[]>();
+  for (const file of sourceFiles(RENDERER_DIR)) {
+    const text = readFileSync(file, "utf8");
+    for (const [, raw] of text.matchAll(BG_RE)) {
+      if (raw.startsWith("[")) continue; // arbitrary value bypasses the scale
+      const value = raw.replace(/\/.*$/, ""); // drop any /opacity suffix
+      if (BG_NON_COLOUR_PREFIXES.some((p) => value === p || value.startsWith(`${p}-`)))
+        continue;
+      const files = used.get(value) ?? [];
+      if (!files.includes(file)) files.push(file);
+      used.set(value, files);
+    }
+  }
+  return used;
+}
+
+/**
+ * Flatten `theme.backgroundColor` into the set of valid `bg-<name>` suffix
+ * names. A nested key named `DEFAULT` takes its parent's name; any other
+ * nested key is `parent-<key>`; the root-level colour families are the
+ * top-level parents.
+ */
+function backgroundColorNames(): Set<string> {
+  const names = new Set<string>();
+  const walk = (node: Record<string, unknown>, prefix: string) => {
+    for (const [k, v] of Object.entries(node)) {
+      const name = k === "DEFAULT" ? prefix : prefix ? `${prefix}-${k}` : k;
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        walk(v as Record<string, unknown>, name);
+      } else {
+        names.add(name);
+      }
+    }
+  };
+  walk(resolvedTheme.backgroundColor as Record<string, unknown>, "");
+  return names;
+}
+
+/** Spacing axes, ordered so the longest alternative matches first. */
+const SPACING_AXES = [
+  "gap-x",
+  "gap-y",
+  "gap",
+  "px",
+  "py",
+  "pt",
+  "pb",
+  "pl",
+  "pr",
+  "p",
+  "mx",
+  "my",
+  "mt",
+  "mb",
+  "ml",
+  "mr",
+  "m",
+  "space-x",
+  "space-y",
+];
+const SPACING_RE = new RegExp(
+  `(?<![\\-\\w])(${SPACING_AXES.join("|")})-([A-Za-z0-9./\\[\\]-]+)`,
+  "g",
+);
+const MARGIN_AXES = new Set(["mx", "my", "mt", "mb", "ml", "mr", "m"]);
+
+/** Spacing utilities used in the renderer, keyed by `axis--value`. */
+function usedSpacingClasses(): Map<string, string[]> {
+  const used = new Map<string, string[]>();
+  for (const file of sourceFiles(RENDERER_DIR)) {
+    const text = readFileSync(file, "utf8");
+    for (const [, axis, raw] of text.matchAll(SPACING_RE)) {
+      if (raw.startsWith("[")) continue; // arbitrary value bypasses the scale
+      const value = raw.replace(/\/.*$/, ""); // drop any /opacity suffix
+      if (value === "auto" && MARGIN_AXES.has(axis)) continue; // auto is valid for margins
+      const key = `${axis}::${value}`;
+      const files = used.get(key) ?? [];
+      if (!files.includes(file)) files.push(file);
+      used.set(key, files);
+    }
+  }
+  return used;
+}
+
 describe("tailwind dimension scales", () => {
   it("emits every w-* / h-* utility the renderer uses", () => {
     const scales: Record<string, Record<string, string>> = {
@@ -102,5 +216,46 @@ describe("tailwind dimension scales", () => {
         `theme.${scale} lost a non-numeric key`,
       ).toEqual(expect.arrayContaining(["full", "screen", "min", "max"]));
     }
+  });
+
+  it("resolves every bg-* colour utility the renderer uses", () => {
+    const valid = backgroundColorNames();
+    const unresolved: string[] = [];
+    for (const [value, files] of usedBgClasses()) {
+      if (!valid.has(value)) {
+        const where = files
+          .map((f) => f.replace(`${RENDERER_DIR}/`, ""))
+          .join(", ");
+        unresolved.push(`bg-${value} (used in ${where})`);
+      }
+    }
+
+    expect(
+      unresolved,
+      `These classes are in the markup but compile to nothing — the key is ` +
+        `missing from theme.backgroundColor in tailwind.config.js:\n` +
+        unresolved.map((u) => `  ${u}`).join("\n"),
+    ).toEqual([]);
+  });
+
+  it("resolves every spacing utility the renderer uses", () => {
+    const spacing = resolvedTheme.spacing as Record<string, string>;
+    const unresolved: string[] = [];
+    for (const [key, files] of usedSpacingClasses()) {
+      const value = key.split("::")[1];
+      if (!(value in spacing)) {
+        const where = files
+          .map((f) => f.replace(`${RENDERER_DIR}/`, ""))
+          .join(", ");
+        unresolved.push(`${key} (used in ${where})`);
+      }
+    }
+
+    expect(
+      unresolved,
+      `These classes are in the markup but compile to nothing — the key is ` +
+        `missing from theme.spacing in tailwind.config.js:\n` +
+        unresolved.map((u) => `  ${u}`).join("\n"),
+    ).toEqual([]);
   });
 });

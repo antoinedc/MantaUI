@@ -516,14 +516,14 @@ function SessionMenu({
         <Dropdown hook="manta-session-menu-dropdown">
           {hasMode && (
             <>
-              <div className="px-3 pt-1 pb-0.5 text-label text-text-faint select-none" role="presentation">
+              <div className="px-3 pt-1 pb-px text-label text-text-faint select-none" role="presentation">
                 Mode
               </div>
               {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
               {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
               {availableLaunchers && availableLaunchers.length > 0 && (
                 <>
-                  <div className="px-3 pt-2 pb-0.5 text-label text-text-faint select-none" role="presentation">
+                  <div className="px-3 pt-2 pb-px text-label text-text-faint select-none" role="presentation">
                     AI-CLI
                   </div>
                   {availableLaunchers.map((l) =>
