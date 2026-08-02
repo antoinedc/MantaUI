@@ -352,3 +352,88 @@ there is no copy of a transcript renderer anywhere.
   broader "emit :root spacing/radius/easing" token work BET-574 already covers,
   and the generator now reads both `data-theme` colours and `:root` metrics with
   no second source of truth.
+
+## S2 — onboarding + pairing joiner screen (BET-594)
+
+The S1 transport core (MantaAPIClient, KeychainCredentialStore) let a paired
+device reach the box; S2 adds the way a fresh install gets there. Implements
+DECISIONS.md §5.3/§5.4/§5.6 and the §6.2 two-sided four-character confirm as a
+SwiftUI flow, gated at the app root by pair state.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `MantaPairingModels.swift` | Pure pairing logic — a Swift port of the shared contract (`claim.mjs`, `pairPayload.ts`, `setupLogic.ts`): code normalization / 6-digit gate, four-char verify normalization, box-id + server-URL validation with the private-listener gate, the pair-payload parser, and claim-outcome classification. Pure (no HTTP/view/Keychain). |
+| `MantaAuthClient.swift` | The `/auth/claim` client: POSTs `{pairing_code, verify?, name?}` to the box's `/auth/claim`, classifies the outcome, persists on success. |
+| `MantaOnboarding.swift` | The flow (`MantaOnboardingFlow` ObservableObject) + screens: Manual "Enter the code", Link confirm ("Link this phone?" + the four-char confirm), Linking progress, the §5.4 typed failure screens (expired / codes-don't-match / unreachable / rate-limited / server-error), and the §5.6 iOS notification-priming screen. |
+| `MantaAppRoot.swift` | App gate: fresh (unpaired) install → onboarding; paired → main destination (the S3 session list replaces the S4 content shell). `MANTA_SCENE` scenes bypass the gate so the S4b measurement fixtures and the new `onboarding-*` screens stay reachable. |
+| `MantaUITests/MantaPairingTests.swift` | 28 pure-logic tests (codes, verify, box/server validation, payload parser incl. private-URL gate + 7-digit reject, claim classification). |
+| `MantaUITests/MantaAuthClientTests.swift` | 4 URLProtocol-mocked claim tests: request shape (path, POST, body incl. verify/name), success → Keychain persistence, wrong-code does not persist, network → unreachable. |
+
+### Routing
+
+- **Fresh install** (no credentials): `MantaAppRoot` → `MantaOnboardingRoot` →
+  JSON `Manual` entry. Verified live: launch with empty Keychain + no
+  `MantaScene` renders `onboarding-root`/"Enter the code" (not the transcript
+  fixture).
+- **Paired**: `RootView` content shell (S3 replaces it with the session list);
+  `MantaEventStore.start()` connects the live `/events` stream.
+- **Scan / paste / deep-link path**: `receive(payload:)` parses the pair link
+  (`box`+`code`+`verify`), shows the confirm screen when a `verify` is present
+  (claim WITH it → distinct Stage-2 device, §6.2), else links directly. The
+  claim target is the payload's explicit server URL, else the box-derived
+  `https://<boxId>.boxes.mantaui.com`.
+- **Desktop-free manual path**: six digits (+ optional verify + server URL via
+  the "not reachable" link). §5.2.9's "the server resolves the box from the six
+  digits alone" is **not realizable against the current per-box `/auth/claim`** —
+  the claim must be POSTed to a specific box's hostname, so the manual path
+  requires a reachable server URL. Flagged in the BET-594 hand-off comment; the
+  primary scan path (satisfies "fresh install pairs with a real box") derives
+  the host from the payload's boxId.
+
+### Determinism — onboarding captures
+
+Each `onboarding-*` scene is one `capture.sh` run (pinned iPhone 17 Pro, iOS
+26.5, fixed status bar, reduced motion, convergent-frame guard):
+
+```
+OUT_DIR=... SCENE=entry   SCENE_MODE=onboarding-entry             ./mobile/native/capture.sh
+OUT_DIR=... SCENE=confirm SCENE_MODE=onboarding-confirm           ./mobile/native/capture.sh
+OUT_DIR=... SCENE=notif   SCENE_MODE=onboarding-notifications     ./mobile/native/capture.sh
+OUT_DIR=... SCENE=expired SCENE_MODE=onboarding-failure-expired   ./mobile/native/capture.sh
+```
+
+Committed baselines: `baseline/onboarding-{entry,confirm,notifications,
+failure-expired}.{png,hierarchy.txt}`. Reproducibility quoted (confirm scene,
+two consecutive runs `ob-confirm` vs `ob-confirm3`):
+
+```
+hierarchy leg: IDENTICAL (byte-for-byte)
+screenshot leg: 1206x2622 vs 1206x2622 (dims match)
+cmp ob-confirm3/confirm.png ob-confirm/confirm.png → byte-identical
+```
+
+The S4b parent fixture still reproduces after the scene default became explicit
+(`SCENE_MODE=parent`): its hierarchy content (transcript, agent rows, roll-up)
+is unchanged — only the redaction placeholder spelling in the *committed*
+baseline differs (`0xADDRR`/`PIDPID` there reflect a pre-existing
+double-redaction, not a rendering change).
+
+### Honesty notes
+
+- A live end-to-end pair against a remote box is **not** exercised here: the
+  macos agent cannot mint a pairing code (`manta pair` is loopback-only on the
+  box) and must not pair with production hosts. The claim wiring is instead
+  proven deterministically by the URLProtocol-mocked `MantaAuthClientTests`
+  (request shape, classification, Keychain persistence) plus the 28 pure-logic
+  tests. "Fresh install pairs with a real box" is left to the S3 human/CI
+  verification once a box is reachable from device.
+- The `linking` progress screen's spinner is a SwiftUI `ProgressView`; under
+  reduced motion it still animates, so it is intentionally NOT part of a
+  committed deterministic baseline (the three static linking-stage rows are,
+  and the unit tests cover the flow transitions).
+- iOS notification authorization is requested but the app never gates any
+  functionality on it (§5.6): accepting and denying both land on the main
+  destination; only a quiet Settings reminder distinguishes them (S8 push wires
+  the actual APNs fan-out).

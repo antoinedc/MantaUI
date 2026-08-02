@@ -52,7 +52,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${DEVICE_NAME:=iPhone 17 Pro}"
 : "${RUNTIME_IOS:=26.5}"
 : "${SCENE:=screen}"
-: "${SCENE_MODE:=}"
+# The capture scenes are EXPLICIT since S2 (BET-594): the app root gates a
+# real fresh install into the onboarding flow, so the measurement fixtures are
+# only reachable through a non-empty scene. "parent" = the S4b transcript
+# parent, "child" = the subagent drill-in, "onboarding-*" = the S2 joiner
+# screens.
+: "${SCENE_MODE:=parent}"
 : "${OUT_DIR:=$REPO_ROOT/mobile/native/.capture-out}"
 : "${BUILD_DIR:=$REPO_ROOT/mobile/native/.build}"
 
