@@ -2809,8 +2809,8 @@ neither can itself go quiet:
 | `scripts/multica-unstick.mjs` (`multica-unstick.yml`) | every 15 min | an agent-assigned `todo`/`in_progress`/`in_review` issue with nothing in flight and a terminal (or missing) run → re-dispatched to whoever owes the next move |
 
 The two are complementary and never act on the same issue: unblock owns
-`blocked` and changes STATUS; unstick owns the live statuses and changes
-ASSIGNMENT. Unstick's routing mirrors the pipeline — implementer → reviewer,
+`blocked` and changes STATUS (plus the one assignment `next_owner` declares —
+see below); unstick owns the live statuses and changes ASSIGNMENT. Unstick's routing mirrors the pipeline — implementer → reviewer,
 reviewer → PM, stalled PM → re-run — and it refuses to act on human-assigned
 issues, on anything with a run in flight, or twice on one issue inside two
 hours. All the judgement is the pure `decideUnstick` / `screenIssue` pair,
@@ -2821,6 +2821,42 @@ work between them.** A STATUS change dispatches nothing (only an assignment or a
 comment does), so when unblock flips a `blocked` issue to `todo` it fixes the
 label and starts nobody. The `todo` rule re-fires that issue's existing
 assignment ~30 minutes later, which is what actually restarts the epic.
+
+**Sequencing a chain of children — `next_owner`, NOT a pre-assignment.**
+Assigning an issue DISPATCHES A RUN immediately, whatever its status (verified
+live 2026-08-02: assigning a `blocked` issue started an agent on it seconds
+later). So "who owns this next" and "start now" used to be the same act, leaving
+a PM sequencing an epic only two bad options — start an agent before its
+prerequisite exists, or leave the issue owned by nobody. **An unassigned issue is
+invisible to BOTH sweeps** (unblock only writes status; unstick skips anything
+not agent-assigned), so option two is a permanent silent stall: it is exactly
+how BET-556..559 sat untouched while the iOS epic stopped dead. Parking the
+issue on a HUMAN is the same dead end — unstick deliberately never pages an
+agent about work a person has taken.
+
+The fix is to keep the two apart. A queued child carries:
+
+```
+status:      blocked
+waiting_on:  "BET-555 (S3a) must be done — …"     ← its real blockers
+next_owner:  "macos"                               ← who starts it, later
+```
+
+unblock assigns `next_owner` at the moment the blockers clear, which is the one
+moment dispatch-on-assign is correct. No `next_owner` → status-only, exactly as
+before. An unresolvable name does NOT release the issue: it stays `blocked`
+(and so stays in scope for a corrected value) rather than becoming an unowned
+`todo` no sweep will ever revisit. Logic is the pure `resolveNextOwner`,
+unit-tested in `scripts/multica-unblock.test.mjs`.
+
+**`waiting_on` is machine-read — cite ONLY real blockers in it.** Every issue
+key in that field is a blocker. Naming the parent epic for context ("per BET-550
+stage order") deadlocks the child permanently: the epic cannot go `done` until
+its children do. Self-references are dropped; a parent's key is
+indistinguishable from a blocker's and is not. Rationale and stage ordering go
+in the DESCRIPTION. Always `node scripts/multica-unblock.mjs --dry-run
+--verbose` after editing a note — it prints the resolved blocker list per issue,
+which is how this trap was caught.
 
 **These are backstops, not the mechanism.** Agents are still required to hand
 off explicitly (`.multica/skills/manta-pr-workflow/SKILL.md` step 10); the sweep

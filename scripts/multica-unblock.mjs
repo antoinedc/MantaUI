@@ -20,6 +20,38 @@
  * named in `waiting_on`, and if ALL of them are terminal (`done`/`cancelled`),
  * flip the issue to `todo`.
  *
+ * OWNERSHIP ON RELEASE — the `next_owner` key
+ * -------------------------------------------
+ * Assigning an issue DISPATCHES A RUN immediately, whatever its status. That
+ * made "who owns this next" and "start now" the same act, so a PM sequencing an
+ * epic could only start an agent too early or leave the issue owned by nobody —
+ * and an unassigned `todo` is invisible to BOTH sweeps (this one only writes
+ * `status`; unstick skips anything not agent-assigned). BET-556..559 sat silent
+ * that way while the iOS epic stalled.
+ *
+ * So a blocked issue may also carry `next_owner` (an agent name). This sweep
+ * assigns it at the moment the blockers clear — the one moment when
+ * dispatch-on-assign is the correct behaviour:
+ *
+ *   status: blocked
+ *   waiting_on: "BET-555 (S3a) must be done — …"
+ *   next_owner: "macos"
+ *
+ * An issue with no `next_owner` behaves exactly as before (status only), so
+ * nothing that predates the key changes behaviour.
+ *
+ * FOOTGUN — `waiting_on` is machine-read, so cite ONLY real blockers
+ * -----------------------------------------------------------------
+ * EVERY issue key in `waiting_on` is treated as a blocker. Citing a parent epic
+ * for context ("… per BET-550 stage order") therefore deadlocks the issue
+ * permanently: the epic cannot go `done` until its children do, and the child
+ * now waits on the epic. Self-references are dropped for exactly this reason,
+ * but a parent's key is indistinguishable from a blocker's. Put stage ordering
+ * and rationale in the DESCRIPTION; keep `waiting_on` to the keys that must
+ * actually finish first. (Caught by `--dry-run` on 2026-08-02, which reported
+ * `waiting on BET-558, BET-550` for BET-559 — always dry-run after editing a
+ * note.)
+ *
  * The same sweep also runs a second, opt-in pass (BET-506): for every `done`
  * issue carrying BOTH `deliverable_branch` and `deliverable_paths` metadata, it
  * verifies the declared file(s) actually exist on that branch (via git against
@@ -29,8 +61,9 @@
  * declaration are never touched.
  *
  * SCOPE — deliberately conservative
- *   - Only ever moves `blocked` → `todo`. It never blocks, closes, reassigns or
- *     reprioritises anything.
+ *   - Only ever moves `blocked` → `todo`, and only ever assigns the agent the
+ *     issue itself named in `next_owner`. It never blocks, closes, reprioritises
+ *     anything, and never picks an owner of its own accord.
  *   - An issue with no `waiting_on`, or whose note names no BET key, is LEFT
  *     ALONE. We cannot know why a human blocked it, so we do not guess.
  *   - A blocker key that cannot be fetched is treated as NOT done, so a
@@ -193,6 +226,60 @@ export function decideUnblock(issue, statusByKey) {
   return { unblock: true, reason: `all of ${blockers.join(", ")} done`, blockers };
 }
 
+/**
+ * Resolve the agent that should OWN an issue the moment it is unblocked.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * Assigning an issue DISPATCHES A RUN immediately, whatever its status —
+ * verified live 2026-08-02 by assigning a `blocked` issue and watching an agent
+ * start on it seconds later. So "who owns this next" and "start now" were the
+ * same act, and a PM sequencing an epic had only two bad options:
+ *
+ *   - assign the next child anyway → an agent starts work whose prerequisite
+ *     does not exist yet;
+ *   - leave it unassigned (or park it on a human) → NOTHING ever starts it.
+ *     `multica-unblock` only ever writes `status`, and `multica-unstick` skips
+ *     anything not agent-assigned, so an unassigned `todo` is invisible to both
+ *     sweeps. This is exactly how BET-556..559 sat silent while the iOS epic
+ *     stalled: correctly labelled, owned by nobody, seen by nothing.
+ *
+ * `next_owner` splits the two apart. The PM records the intended owner as
+ * metadata and does NOT assign; this sweep assigns it at the moment the
+ * blockers clear — which is precisely when dispatch-on-assign is the correct
+ * behaviour. Assignment recovers its single honest meaning: start now.
+ *
+ * An unresolvable name deliberately does NOT unblock. A typo'd or renamed agent
+ * is a declaration error, and releasing it anyway would produce the exact
+ * silent stall this key exists to prevent — an unassigned `todo` no sweep will
+ * ever look at again, since it has left the `blocked` list for good. Staying
+ * blocked keeps it in scope, so a corrected `next_owner` (or a restored agent
+ * name) is picked up on the next tick, and it stays visibly blocked on the
+ * board instead of masquerading as ready work nobody has taken.
+ *
+ * @param {{metadata?:{next_owner?:string}}} issue
+ * @param {Map<string,string>} agentIdByName lower-cased agent name → agent id
+ * @returns {{assign:false, reason:string} |
+ *           {assign:false, unresolved:string, reason:string} |
+ *           {assign:true, id:string, name:string, reason:string}}
+ */
+export function resolveNextOwner(issue, agentIdByName) {
+  const raw = issue?.metadata?.next_owner;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return { assign: false, reason: "no next_owner declared" };
+  }
+  const name = raw.trim();
+  const id = agentIdByName?.get?.(name.toLowerCase());
+  if (!id) {
+    return {
+      assign: false,
+      unresolved: name,
+      reason: `next_owner \`${name}\` is not an agent in this workspace`,
+    };
+  }
+  return { assign: true, id, name, reason: `next_owner \`${name}\`` };
+}
+
 /* ------------------------------------------------------------------ *
  * IO below this line. Everything above is pure and unit-tested.
  * ------------------------------------------------------------------ */
@@ -263,6 +350,21 @@ export async function run({
   );
   const blocked = listed.issues ?? [];
   if (blocked.length > 0) {
+    // Agent names → ids, resolved live so a renamed or newly added agent needs
+    // no code change (same approach as multica-unstick). Only fetched when
+    // something is actually blocked, and only used for `next_owner`.
+    const agentIdByName = new Map();
+    try {
+      const agents = await api(base, token, `/agents?workspace_id=${workspace}`, {}, fetchImpl);
+      for (const a of Array.isArray(agents) ? agents : (agents.agents ?? [])) {
+        if (a?.name && a?.id) agentIdByName.set(String(a.name).toLowerCase(), a.id);
+      }
+    } catch (e) {
+      // A failed agent list must not unblock anything into an unowned `todo`,
+      // so every next_owner simply fails to resolve and its issue stays blocked.
+      console.log(`::warning::could not list agents (${e.message}) — next_owner assignment is unavailable this tick`);
+    }
+
     // Resolve every referenced blocker once. Unresolvable = READ, warn + continue.
     const statusByKey = new Map();
     const needed = new Set(blocked.flatMap((i) => parseBlockerKeys(i?.metadata?.waiting_on)));
@@ -285,12 +387,25 @@ export async function run({
         if (verbose) console.log(`  · ${id} stays blocked (${reason})`);
         continue;
       }
+
+      // An issue that names an owner we cannot resolve stays blocked — see
+      // resolveNextOwner. Releasing it would strand it as an unassigned `todo`
+      // that has left this sweep's scope and that unstick will not touch.
+      const owner = resolveNextOwner(issue, agentIdByName);
+      if (owner.unresolved) {
+        console.log(`::warning::${id} stays blocked — ${owner.reason}`);
+        continue;
+      }
+      const handoff = owner.assign ? `, hand to ${owner.name}` : "";
+
       if (dryRun) {
-        console.log(`  → ${id} WOULD unblock (${reason})`);
+        console.log(`  → ${id} WOULD unblock (${reason}${handoff})`);
         unblocked++;
         continue;
       }
       try {
+        // Status first: if the assignment then fails we have an unowned `todo`
+        // and a red job, not an agent already running on a `blocked` issue.
         await api(
           base,
           token,
@@ -298,11 +413,25 @@ export async function run({
           { method: "PUT", body: JSON.stringify({ status: "todo" }) },
           fetchImpl,
         );
-        console.log(`  → ${id} unblocked (${reason})`);
+        if (owner.assign) {
+          // This is the dispatch. Assignment starts a run immediately, which is
+          // exactly right here — the blockers are done and the work can start.
+          await api(
+            base,
+            token,
+            `/issues/${id}?workspace_id=${workspace}`,
+            {
+              method: "PUT",
+              body: JSON.stringify({ assignee_id: owner.id, assignee_type: "agent" }),
+            },
+            fetchImpl,
+          );
+        }
+        console.log(`  → ${id} unblocked (${reason}${handoff})`);
         unblocked++;
       } catch (e) {
         // Fail the job on a failed WRITE; keep sweeping the rest of the batch.
-        console.error(`Failed to set ${id} todo (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
+        console.error(`Failed to release ${id} (HTTP ${e.status ?? "?"}): ${e.body ?? e.message}`);
         writeFailed = true;
       }
     }

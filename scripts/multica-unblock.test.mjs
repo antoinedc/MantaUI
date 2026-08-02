@@ -6,6 +6,7 @@ import {
   TERMINAL_STATUSES,
   parseDeliverablePaths,
   decideDeliverable,
+  resolveNextOwner,
 } from "./multica-unblock.mjs";
 
 describe("parseBlockerKeys", () => {
@@ -144,6 +145,69 @@ describe("decideUnblock", () => {
   test("tolerates a malformed issue object", () => {
     assert.equal(decideUnblock({}, new Map()).unblock, false);
     assert.equal(decideUnblock(null, new Map()).unblock, false);
+  });
+});
+
+describe("resolveNextOwner", () => {
+  // The live workspace shape at the time this key was introduced.
+  const agents = new Map([
+    ["manta-dev", "ab49c3e2"],
+    ["manta-pm", "df781c72"],
+    ["macos", "e6d7e43d"],
+  ]);
+
+  test("resolves the agent named in next_owner", () => {
+    const r = resolveNextOwner({ metadata: { next_owner: "macos" } }, agents);
+    assert.equal(r.assign, true);
+    assert.equal(r.id, "e6d7e43d");
+    assert.equal(r.name, "macos");
+  });
+
+  test("is case- and whitespace-insensitive on the declared name", () => {
+    const r = resolveNextOwner({ metadata: { next_owner: "  Manta-Dev " } }, agents);
+    assert.equal(r.assign, true);
+    assert.equal(r.id, "ab49c3e2");
+  });
+
+  test("no next_owner is not an error — the issue releases unowned, as before", () => {
+    const r = resolveNextOwner({ metadata: {} }, agents);
+    assert.equal(r.assign, false);
+    assert.equal(r.unresolved, undefined);
+    assert.match(r.reason, /no next_owner/);
+  });
+
+  test("an empty or blank next_owner counts as absent, not as a typo", () => {
+    for (const v of ["", "   "]) {
+      const r = resolveNextOwner({ metadata: { next_owner: v } }, agents);
+      assert.equal(r.assign, false);
+      assert.equal(r.unresolved, undefined);
+    }
+  });
+
+  test("REGRESSION: an unknown agent must NOT release the issue", () => {
+    // Releasing on a typo strands the issue as an unassigned `todo` that has
+    // left the blocked list for good — the exact silent stall (BET-556..559)
+    // this key exists to prevent. It must stay blocked and stay in scope.
+    const r = resolveNextOwner({ metadata: { next_owner: "better-ui-dev" } }, agents);
+    assert.equal(r.assign, false);
+    assert.equal(r.unresolved, "better-ui-dev");
+    assert.match(r.reason, /not an agent/);
+  });
+
+  test("a human name is not an agent — never assign a person automatically", () => {
+    const r = resolveNextOwner({ metadata: { next_owner: "Antoine" } }, agents);
+    assert.equal(r.assign, false);
+    assert.equal(r.unresolved, "Antoine");
+  });
+
+  test("tolerates malformed issues and a missing agent map", () => {
+    assert.equal(resolveNextOwner(null, agents).assign, false);
+    assert.equal(resolveNextOwner({}, agents).assign, false);
+    assert.equal(resolveNextOwner({ metadata: { next_owner: 42 } }, agents).assign, false);
+    // An agent list that failed to load must never resolve an owner.
+    const r = resolveNextOwner({ metadata: { next_owner: "macos" } }, new Map());
+    assert.equal(r.assign, false);
+    assert.equal(r.unresolved, "macos");
   });
 });
 
