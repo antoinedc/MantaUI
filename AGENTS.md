@@ -1958,18 +1958,16 @@ agent blocks — so a not-yet-registered model still shows up.
 
 ## iOS release / TestFlight (Codemagic — the WORKING mechanism)
 
-The iOS app (the native SwiftUI client in `mobile/native/`) ships to TestFlight
-via **Codemagic CI**, configured by **`codemagic.yaml`** at the repo root. This
+The iOS app (the Capacitor wrapper in `mobile/ios/`) ships to TestFlight via
+**Codemagic CI**, configured by **`codemagic.yaml`** at the repo root. This
 section is the hard-won record of what works and — just as important — the dead
-ends, so nobody re-walks them. (Restored in BET-601 after BET-559 removed it
-with the retired Capacitor wrapper; the pipeline now builds the native app.)
+ends, so nobody re-walks them.
 
 **TL;DR of the pipeline:** push a git tag `ios-v*` → Codemagic clones the repo,
-runs xcodegen against `mobile/native/project.yml` (source of truth →
-`MantaUI.xcodeproj`), **creates its own distribution cert + App Store profile
-via the App Store Connect API key** from a PERSISTENT private key, archives the
-`MantaUI` scheme, and uploads to TestFlight. No Mac in the loop. The box can
-drive the whole thing (trigger + monitor) over the Codemagic + ASC REST APIs.
+builds the web bundle, syncs Capacitor, pods, **creates its own distribution
+cert + App Store profile via the App Store Connect API key**, archives the
+`App` scheme, and uploads to TestFlight. No Mac in the loop. The box can drive
+the whole thing (trigger + monitor) over the Codemagic + ASC REST APIs.
 
 ### Why Codemagic, NOT Xcode Cloud (do not retry Xcode Cloud)
 
@@ -1993,28 +1991,25 @@ disconnecting/reconnecting the GitHub source. The `action_required` /
 emails were all downstream of this one auth failure (the ITMS-90035 signature
 errors specifically came from Xcode Cloud's throwaway **ad-hoc / development**
 side-exports, which are red herrings — the app-store export signed correctly).
-**Do not reintroduce an Xcode Cloud workflow.** The Capacitor wrapper it left
-stale files in (`mobile/ios/…`) was itself deleted in BET-559; the native app it
-replaced uses Codemagic's `app-store-connect` CLI + `xcode-project`, which
-authenticate and upload reliably — no Xcode Cloud auth path.
-
+**Do not reintroduce an Xcode Cloud workflow.** The stale files it left
+(`mobile/ios/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme` and
+`mobile/ios/App/ci_scripts/ci_post_clone.sh`) are harmless leftovers; the
+shared scheme is still needed by Codemagic, the `ci_scripts/` post-clone is
+Xcode-Cloud-only and unused by Codemagic (safe to delete).
 
 ### App Store Connect facts (constants used everywhere)
 
 - **App name**: MantaUI. **ASC app Apple ID**: `6792363427`.
 - **Bundle id**: `com.antoinedc.mantaui` (was `com.antoinedc.MantaUI` originally —
   renamed before anything shipped; the id is permanent post-release). Set in
-  `mobile/native/project.yml` `PRODUCT_BUNDLE_IDENTIFIER` (xcodegen generates it
-  into the pbxproj's Debug+Release configs).
-- **On-device display name**: MantaUI (`PRODUCT_NAME` /
-  `INFOPLIST_KEY_CFBundleDisplayName` in `mobile/native/project.yml`;
-  `INFOPLIST_FILE: MantaUI/Info.plist`).
-- **Xcode target/scheme**: `MantaUI` (defined in `mobile/native/project.yml`;
-  xcodegen generates the scheme). This is the scheme name Codemagic's
-  `ios-testflight` workflow archives.
-- **Version source**: `MARKETING_VERSION` lives in `mobile/native/project.yml`
-  (both Debug+Release via xcodegen). This is what `ios-release-tag.yml` reads to
-  create the `ios-v<version>` tag, so bump it there to ship.
+  `capacitor.config.json` `appId`, the iOS `PRODUCT_BUNDLE_IDENTIFIER` (both
+  Debug+Release configs), and the Android `applicationId`/`namespace`/
+  `MainActivity` package.
+- **On-device display name**: MantaUI (`CFBundleDisplayName` in
+  `mobile/ios/App/App/Info.plist` + `appName` in `capacitor.config.json`).
+- **Xcode target/scheme**: `App` (Capacitor convention — internal only, NOT
+  user-visible; do NOT rename it, that path throws "already taken by your team"
+  and breaks the scheme/pods/ci_scripts wiring).
 - **Team ID (seedId)**: `FSQ3HS4Z24`.
 
 ### Signing — the crux, and every trap in order
@@ -2023,10 +2018,8 @@ iOS code signing was THE blocker (every archive failure traced to it). The
 final working model, in `codemagic.yaml`'s "Set up code signing" step:
 
 1. `keychain initialize`
-2. **Materialize the PERSISTENT RSA private key** from the `ios_signing` env
-   group's `CERTIFICATE_PRIVATE_KEY` into `/tmp/dist_key` (chmod 600). One stable
-   key ⇒ one stable distribution cert reused across builds. (Per-build throwaway
-   keys were REMOVED after the ios-v1.0.8 outage — see the root-cause lesson.)
+2. **Generate an RSA private key ON the build machine**
+   (`ssh-keygen -t rsa -b 2048 -m PEM -f /tmp/dist_key -q -N ""`).
 3. **Create a distribution cert FROM that key** via the ASC API key
    (`app-store-connect certificates create --type IOS_DISTRIBUTION
    --certificate-key=@file:/tmp/dist_key --save`), falling back to
@@ -2047,11 +2040,8 @@ only usable by whoever holds its **private key**. Every early failure
 requires a provisioning profile`) came from a cert whose private key was NOT on
 the Codemagic build machine. A cert created out-of-band (e.g. via the ASC API
 from the box, with the key on the box) is **worthless to Codemagic**. The build
-machine must HOLD the key and create the cert from it (steps 2→3 above) — this
-is the single most important thing in this section. The key is the PERSISTENT
-`CERTIFICATE_PRIVATE_KEY` (ios_signing group) so the same cert is reused across
-builds; never switch back to a per-build throwaway key (see the ios-v1.0.8 note
-below).
+machine MUST generate the key and create the cert from it. This is step 2→3
+above and is the single most important thing in this section.
 
 **Dead ends that were tried and REMOVED (do not reintroduce):**
 - A declarative `environment: ios_signing:` block → resolves signing at
@@ -2061,13 +2051,11 @@ below).
   Xcode project → the profile Codemagic installs on the machine isn't named
   that, so xcodebuild errors "No profile … matching 'MantaUI App Store'".
   Let `use-profiles` set the specifier instead.
-- `CODE_SIGN_STYLE = Automatic` in the project → **do NOT rely on Automatic
-  signing to resolve profiles.** The native `mobile/native/project.yml` sets
-  `CODE_SIGN_STYLE: Automatic`; leave it that way — the "Set up code signing"
-  step's `xcode-project use-profiles` flips the generated project to Manual with
-  the fetched App Store profile at build time. The failure mode was Automatic
-  WITHOUT `use-profiles` (expecting Xcode to auto-pick a profile), which errors
-  "No profile … matching". Don't hand-edit project.yml to Manual.
+- `CODE_SIGN_STYLE = Automatic` in the project → conflicts with Codemagic's
+  Manual signing. The project's target Release config is now
+  `CODE_SIGN_STYLE = Manual` + `DEVELOPMENT_TEAM = FSQ3HS4Z24` +
+  `CODE_SIGN_IDENTITY[sdk=iphoneos*] = "Apple Distribution"` (no hardcoded
+  profile specifier — `use-profiles` fills it).
 - `--export-options-plist /tmp/export_options.plist` → wrong path;
   `use-profiles` writes it to `$CM_BUILD_DIR/export_options.plist`. Both the
   `use-profiles` and `build-ipa` calls must use the SAME `$CM_BUILD_DIR` path.
@@ -2092,8 +2080,8 @@ Codemagic's API.
 `codemagic.yaml`'s `triggering:` builds on git tag `ios-v*`. The box can:
 - **Trigger by tag**: push `ios-v<version>` (the `ios-release-tag.yml` GitHub
   Actions workflow auto-creates `ios-v<MARKETING_VERSION>` on merge to main —
-  reads `MARKETING_VERSION` from `mobile/native/project.yml`; idempotent, only
-  tags a new version; `workflow_dispatch` force-tags with a build suffix).
+  reads `MARKETING_VERSION` from `project.pbxproj`; idempotent, only tags a new
+  version; `workflow_dispatch` force-tags with a build suffix).
 - **Trigger by Codemagic API** (what was used during bring-up — does NOT need a
   tag, good for iterating):
   ```
@@ -2142,11 +2130,9 @@ Beta App Review of the first build.
 ### Versioning
 
 `MARKETING_VERSION` (CFBundleShortVersionString) lives in
-`mobile/native/project.yml` (xcodegen writes it to both Debug+Release configs of
-the generated pbxproj). Bump it there to ship a new TestFlight version; the
-auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
+`project.pbxproj` (both Debug+Release). Bump it to ship a new TestFlight
+version; the auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
 number) — Codemagic/ASC handle uniqueness. First shipped version: `1.0.1`.
-Current native source has `0.1.0` (pre-first-release).
 
 ## Release & CD pipeline — TAG-DRIVEN, one manual step
 
@@ -2181,7 +2167,7 @@ the ONE monorepo; the tag prefix is what routes.
 
 **How to cut a release (all targets):**
 ```
-# iOS — bump MARKETING_VERSION in mobile/native/project.yml first, merge, then:
+# iOS — bump MARKETING_VERSION in project.pbxproj first, merge, then:
 git tag ios-v1.0.8 && git push origin ios-v1.0.8
 # (the ios-release-tag.yml workflow also AUTO-tags ios-v<MARKETING_VERSION> on
 #  merge to main, so iOS often needs no manual tag — just the version bump.)
@@ -2420,6 +2406,35 @@ it impossible rather than unlikely. The mac-desktop build's overlay
 (`electron-builder.staging.yml`, created in BET-370) changes appId +
 productName + URL scheme + update-feed URL + dmg filename so staging can
 install side-by-side with prod on the same Mac.
+
+### Staging TEST BOX — disposable, reset it freely
+
+`dev@135.181.255.249` (Hetzner `ubuntu-2gb-hel1-1`) is a **throwaway staging
+box** used to test the installer, pairing, and the mobile/desktop clients
+end-to-end against a real box that is NOT anyone's working machine. **It carries
+no work worth keeping: wipe it, re-install it, revoke its tokens, restart its
+services, change its config — no coordination needed.** Do NOT do any of that to
+the dev box (`dev@157.90.224.92`) or the prod box.
+
+- Installed the normal user way (`curl mantaui.com/install.sh | bash`), so it
+  is a plain box install at `~/manta` (runtime node at
+  `~/manta/runtime/node/bin/node`), NOT a git clone of this repo. There is no
+  `~/projects/better-ui` on it.
+- Services are `systemd --user`: `manta-server` (127.0.0.1:8787) and
+  `opencode-serve`. Restart with `systemctl --user restart manta-server`.
+- Public ingress is the standard gateway path: `~/.manta/ingress.json` is
+  `{"mode":"public"}` and `~/.manta/auth.json` carries `gateway_host`
+  `<box_id>.boxes.mantaui.com` — i.e. the box is reachable from a phone /
+  simulator over HTTPS with no tunnel. `GET /` returns **401** from outside;
+  that is the auth gate working, not a broken box.
+- Pair a client against it by minting a code ON the box —
+  `ssh dev@135.181.255.249 'curl -s http://127.0.0.1:8787/auth/pair'` — then
+  entering the code plus the `https://<box_id>.boxes.mantaui.com` server URL in
+  the client. `/auth/pair` is loopback-only by design, so the SSH hop is
+  mandatory.
+- Its SSH host key changes whenever it is reimaged. A
+  `REMOTE HOST IDENTIFICATION HAS CHANGED` warning for this IP is expected —
+  `ssh-keygen -R 135.181.255.249` and reconnect.
 
 ### Prod box topology (why deploys are shaped this way)
 
