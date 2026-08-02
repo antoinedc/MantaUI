@@ -97,10 +97,6 @@ import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
-// The web client is the React renderer built by `npm run build:mobile` into
-// mobile/www/ (index.html + hashed /assets/* + PWA manifest/icons). The old
-// vanilla src/server/public/ client was removed 2026-05-17.
-const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 
 const bus = createBus();
 // Box-side stream interpretation (BET-551): interprets the opencode stream on
@@ -973,10 +969,6 @@ const handleRequest = async (req, res) => {
     return handleRpcRequest(rpcHandlers, channel, req, res);
   }
 
-  if (req.method === "GET" && (path === "/" || path === "/index.html")) {
-    return serveFile(res, join(PUBLIC_DIR, "index.html"));
-  }
-
   if (req.method === "GET" && path === "/api/projects") {
     try {
       const projects = await tmux.listProjects();
@@ -1736,28 +1728,18 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // ---------- Web Push ----------
-  // GET  /push/vapid       → { key }            (public VAPID key for subscribe)
-  // POST /push/subscribe   body = PushSubscription JSON
-  // POST /push/unsubscribe body = { endpoint }
+  // ---------- Native push (APNs) ----------
   // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
   //                        the session the user is actively viewing)
   // POST /push/desktop-presence body = { visible }  (desktop Electron heartbeat;
   //                        suppress mobile "done" while active on desktop)
-  // POST /push/register-apns body = { token }  (BET-181: iOS Capacitor app
-  //                        registers its APNs device token. Same Bearer gate
-  //                        as every other /push/* route. Server-side mirror of
-  //                        the /rpc/push:register-apns IPC channel so curl /
+  // POST /push/register-apns body = { token }  (BET-181: iOS app registers its
+  //                        APNs device token. Same Bearer gate as every other
+  //                        /push/* route. Server-side mirror of the
+  //                        /rpc/push:register-apns IPC channel so curl /
   //                        integration tests can drive it without a renderer.)
-  if (req.method === "GET" && path === "/push/vapid") {
-    try {
-      const key = await push.getVapidPublic();
-      respondJson(res, 200, { key });
-    } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
-    }
-    return;
-  }
+  // BET-559: the Web Push routes (/push/vapid, /push/subscribe,
+  // /push/unsubscribe) served the retired mobile PWA and are deleted with it.
   if (req.method === "POST" && path.startsWith("/push/")) {
     let body;
     try {
@@ -1768,11 +1750,7 @@ const handleRequest = async (req, res) => {
     }
     try {
       let result = { ok: true };
-      if (path === "/push/subscribe") {
-        result = await push.addSubscription(body);
-      } else if (path === "/push/unsubscribe") {
-        result = await push.removeSubscription(body?.endpoint);
-      } else if (path === "/push/focus") {
+      if (path === "/push/focus") {
         result = push.setFocus({
           sessionId: body?.sessionId,
           visible: body?.visible,
@@ -1815,26 +1793,9 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // Static fallback for the React + PWA bundle in mobile/www/. All backend
-  // routes (/events, /rpc/*, /api/*) were matched above, so this
-  // only ever sees client asset / SPA-route requests. An existing file
-  // (hashed /assets/*, /manifest.webmanifest, /icons/*) is served with its
-  // MIME; anything else falls back to index.html so client-side routing /
-  // deep links work. safeJoin() blocks path traversal.
-  if (req.method === "GET") {
-    const target = safeJoin(PUBLIC_DIR, decodeURIComponent(path));
-    if (target) {
-      try {
-        if ((await stat(target)).isFile()) {
-          return serveFile(res, target);
-        }
-      } catch {
-        // not an existing file → fall through to SPA index
-      }
-    }
-    return serveFile(res, join(PUBLIC_DIR, "index.html"));
-  }
-
+  // BET-559: the web/PWA client bundle is retired, so there is no static SPA
+  // fallback to serve. Any GET that reached here matches no backend route —
+  // 404 it. The server no longer hosts a web client.
   res.writeHead(404, { "content-type": "text/plain" });
   res.end("not found");
 };

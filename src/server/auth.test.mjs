@@ -122,15 +122,14 @@ test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook deliver
 // isPublicAssetPath
 // ----------------------------------------------------------------------------
 
-test("isPublicAssetPath allows the SPA shell + PWA assets", () => {
-  assert.equal(isPublicAssetPath("/"), true);
-  assert.equal(isPublicAssetPath("/index.html"), true);
-  assert.equal(isPublicAssetPath("/sw.js"), true);
+test("isPublicAssetPath only exempts the favicon (web/PWA client retired, BET-559)", () => {
   assert.equal(isPublicAssetPath("/favicon.ico"), true);
-  assert.equal(isPublicAssetPath("/manifest.webmanifest"), true);
-  assert.equal(isPublicAssetPath("/assets/index-abc123.js"), true);
-  assert.equal(isPublicAssetPath("/icons/icon-192.png"), true);
-  // data/control routes are NOT public assets
+  assert.equal(isPublicAssetPath("/"), false);
+  assert.equal(isPublicAssetPath("/index.html"), false);
+  assert.equal(isPublicAssetPath("/sw.js"), false);
+  assert.equal(isPublicAssetPath("/manifest.webmanifest"), false);
+  assert.equal(isPublicAssetPath("/assets/index-abc123.js"), false);
+  assert.equal(isPublicAssetPath("/icons/icon-192.png"), false);
   assert.equal(isPublicAssetPath("/api/projects"), false);
   assert.equal(isPublicAssetPath("/rpc/tmux"), false);
   assert.equal(isPublicAssetPath("/events"), false);
@@ -380,8 +379,10 @@ test("authorize allows exempt + preflight + public-asset paths without a token",
   assert.equal(eng.authorize({ method: "GET", path: "/pair/logo.png" }).ok, true);
   assert.equal(eng.authorize({ method: "POST", path: "/hook/abcd" }).ok, true);
   assert.equal(eng.authorize({ method: "GET", path: "/pages/foo" }).ok, true);
-  assert.equal(eng.authorize({ method: "GET", path: "/" }).ok, true);
-  assert.equal(eng.authorize({ method: "GET", path: "/assets/x.js" }).ok, true);
+  // BET-559: the web/PWA client is retired, so the SPA shell ("/") and its
+  // Vite /assets/* bundle are no longer public assets — they are gated now.
+  assert.equal(eng.authorize({ method: "GET", path: "/" }).ok, false);
+  assert.equal(eng.authorize({ method: "GET", path: "/assets/x.js" }).ok, false);
   // /auth/status is NOT exempt → gated
   assert.equal(eng.authorize({ method: "GET", path: "/auth/status" }).ok, false);
   // /pair/other is NOT exempt — narrow allowlist

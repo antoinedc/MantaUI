@@ -173,8 +173,7 @@ jobs:
         with:
           node-version: 20
 
-      # devDeps are needed by pack.mjs's `npm run build:mobile` step (vite
-      # builds the mobile/www bundle that gets embedded in the tarball).
+      # devDeps are needed by pack.mjs for its vendored-node + staging steps.
       - run: npm ci
 
       - name: pack ${{ matrix.arch }}

@@ -2,7 +2,7 @@
 // pack.mjs — build a self-contained, versioned release tarball the VPS
 // installer downloads.
 //
-//   node scripts/release/pack.mjs [--out dist] [--skip-build] [--arch x64|arm64|darwin-arm64]
+//   node scripts/release/pack.mjs [--out dist] [--arch x64|arm64|darwin-arm64]
 //
 // Produces a per-arch tarball + per-arch manifest sidecar in `dist/`. ONE
 // invocation builds ONE arch (`--arch x64`, `arm64`, or `darwin-arm64`); the
@@ -22,7 +22,7 @@
 //                                    nodejs.org — same Node binary + npm the
 //                                    box will use, so node-pty's native ABI
 //                                    matches the runtime that runs it)
-//     src/, scripts/, mobile/www/,   the allowlisted box surface
+//     src/, scripts/,                 the allowlisted box surface
 //     package.json, package-lock.json
 //     node_modules/                  prebuilt production deps (--omit=dev),
 //                                    with node-pty's native binding already in
@@ -116,7 +116,6 @@ const INCLUDE = [
   "src",
   "scripts",
   "docs/opencode-tools",
-  "mobile/www",
   "package.json",
   "package-lock.json",
   "README.md",
@@ -340,21 +339,9 @@ async function main() {
   const outManifest = join(REPO_ROOT, args.outDir, `manta-${version}-${ARCH}.txt`);
   const cacheDir = join(REPO_ROOT, args.outDir, ".cache");
 
-  // 1. Build the renderer bundle unless told to skip (CI may pre-build).
-  if (!args.skipBuild) {
-    log("Building renderer bundle (npm run build:mobile)…");
-    const r = spawnSync("npm", ["run", "build:mobile"], {
-      cwd: REPO_ROOT,
-      stdio: "inherit",
-    });
-    if (r.status !== 0) die("build:mobile failed");
-  } else {
-    log("Skipping build:mobile (--skip-build).");
-  }
-
-  if (!existsSync(join(REPO_ROOT, "mobile", "www", "index.html"))) {
-    die("mobile/www/index.html missing — the renderer bundle must be built before packing");
-  }
+  // BET-559: the renderer web-bundle (build:mobile → mobile/www) was the served
+  // PWA client. It is retired — the box no longer builds or ships a web
+  // bundle, so there is nothing to build before staging.
 
   // 2. Stage the allowlisted paths under manta-<version>/.
   log(`Staging release into ${stageDir}…`);

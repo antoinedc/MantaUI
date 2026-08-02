@@ -8,9 +8,11 @@
  * hero-poster.webp from frame 0 of the rendered video").
  *
  * Pipeline:
- *   1. Build the renderer bundle (mobile/www/) with `vite build --config
- *      electron.vite.config.mobile.ts` so the browser can serve the demo URL.
- *   2. Spin up a tiny local static server rooted at mobile/www/.
+ *   1. Build the renderer bundle (out/renderer/) with `npm run build`
+ *      (electron-vite) so the browser can serve the demo URL. BET-559: the
+ *      web/PWA bundle build (electron.vite.config.mobile.ts → mobile/www) is
+ *      retired; the desktop renderer build serves both the gates and shots.
+ *   2. Spin up a tiny local static server rooted at out/renderer/.
  *   3. Launch Chromium against system Chrome (`/usr/bin/google-chrome`) and
  *      visit `?demo&desktop` / `?demo&mobile` per shot.
  *   4. Wait on stable DOM selectors (NEVER a fixed timeout), capture each
@@ -67,7 +69,7 @@ import { LAUNCH_OPTIONS } from "./visual/harness.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const RENDERER_DIR = join(ROOT, "mobile/www");
+const RENDERER_DIR = join(ROOT, "out", "renderer");
 const WEBSITE_DIR = join(ROOT, "website");
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
@@ -161,8 +163,9 @@ function startServer(rootDir) {
 }
 
 async function buildRenderer() {
-  if (!existsSync(RENDERER_DIR)) mkdirSync(RENDERER_DIR, { recursive: true });
-  await run("npx", ["vite", "build", "--config", "electron.vite.config.mobile.ts"]);
+  // BET-559: desktop renderer build via electron-vite (the web/PWA bundle build
+  // that produced mobile/www/ is retired).
+  await run("npm", ["run", "build"]);
 }
 
 // Navigate, wait on the readiness selector, run per-shot actions, then

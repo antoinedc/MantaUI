@@ -1,9 +1,8 @@
-// push.mjs — Web Push (VAPID) for the mobile PWA + APNs native push for the
-// iOS Capacitor app (BET-181, supplementary delivery leg; the Web Push
-// VAPID leg stays for the frozen PWA build).
+// push.mjs — native (APNs) push for the iOS client, fanned out via the hosted
+// gateway (BET-181, BET-199, BET-201).
 //
-// Sends notifications to home-screen-installed PWAs for the events a user
-// can't otherwise see when the app is backgrounded/closed:
+// Sends notifications for the events a user can't otherwise see when the app
+// is backgrounded/closed:
 //   - permission.asked   → "Permission needed" (blocking; always notify)
 //   - question.asked     → "Question"          (blocking; always notify)
 //   - session.error      → "Error"             (always notify, EXCEPT a
@@ -13,41 +12,31 @@
 //   - session.idle       → "Claude is done"    (only if the session was busy
 //                          AND the user isn't actively viewing that session)
 //
-// iOS (16.4+) delivers Web Push only to a PWA added to the home screen, and
-// REQUIRES that every received push results in a visible notification — so we
-// decide whether to notify on the SERVER (here) rather than silently dropping
-// in the service worker. Focus-suppression for the "done" case relies on the
-// client POSTing /push/focus on visibility / session changes.
+// BET-559: the Web Push (VAPID) leg that served the retired mobile PWA was
+// removed along with the PWA itself. This file is APNs-only now.
 //
-// APNs is the second delivery leg for native iOS Capacitor apps. The box no
-// longer holds APNs credentials (the .p8 lives on the hosted gateway, see
-// src/gateway/apns.mjs, BET-199); this file owns the box-side device-token
-// store (APNS_TOKENS_PATH / addApnsToken / removeApnsToken) and fans every
-// registered token out to the gateway via POST ${GATEWAY_BASE}/push (BET-201).
-// Same routing decisions, same suppression. 410 / BadDeviceToken /
+// The box no longer holds APNs credentials (the .p8 lives on the hosted
+// gateway, see src/gateway/apns.mjs, BET-199); this file owns the box-side
+// device-token store (APNS_TOKENS_PATH / addApnsToken / removeApnsToken) and
+// fans every registered token out to the gateway via POST ${GATEWAY_BASE}/push
+// (BET-201). Same routing decisions, same suppression. 410 / BadDeviceToken /
 // Unregistered prune the token (the gateway classifies and reports; this file
 // owns the prune side-effect). A stale or rotated token never makes a
 // successful delivery without first being re-registered by the app.
 //
 // State persists under ~/.manta/ alongside config.json:
-//   vapid.json      — generated VAPID keypair (stable across restarts so
-//                     existing subscriptions keep working)
-//   push-subs.json  — array of PushSubscription JSON objects
 //   apns-tokens.json — array of { token, registeredAt } objects (kind:"apns")
 //
 // The pure classifier `classifyPushEvent` is exported for unit tests; the
 // stateful glue (busy-set tracking, focus, subscription IO, actual send)
-// lives in firePush / the subscription helpers.
+// lives in firePush / the fan-out helpers.
 
-import webpush from "web-push";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 const DIR = statePath();
-const VAPID_PATH = join(DIR, "vapid.json");
-const SUBS_PATH = join(DIR, "push-subs.json");
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
 
 // (APNs signing + HTTP/2 lives in src/gateway/apns.mjs — BET-199. Boxes no
@@ -59,65 +48,6 @@ const VAPID_SUBJECT = "mailto:app@mantaui.com";
 // Atomic reads/writes route through jsonStore.mjs (single source of truth for
 // the temp-file-then-rename dance). `writeJsonAtomic` takes already-serialized
 // bytes and creates the parent dir, matching the old per-store copy.
-
-// ---------------------------------------------------------------------------
-// VAPID keys — load once, generate + persist on first run.
-// ---------------------------------------------------------------------------
-
-let _vapid = null;
-
-async function ensureVapid() {
-  if (_vapid) return _vapid;
-  _vapid = readJsonSync(VAPID_PATH, null);
-  if (!_vapid?.publicKey || !_vapid?.privateKey) {
-    _vapid = webpush.generateVAPIDKeys();
-    try {
-      await writeJsonAtomic(VAPID_PATH, JSON.stringify(_vapid, null, 2));
-    } catch (e) {
-      console.warn("[push] failed to persist VAPID keys:", e?.message ?? e);
-    }
-  }
-  webpush.setVapidDetails(VAPID_SUBJECT, _vapid.publicKey, _vapid.privateKey);
-  return _vapid;
-}
-
-/** The VAPID public key the client needs for pushManager.subscribe(). */
-export async function getVapidPublic() {
-  const v = await ensureVapid();
-  return v.publicKey;
-}
-
-// ---------------------------------------------------------------------------
-// Subscription store
-// ---------------------------------------------------------------------------
-
-async function loadSubs() {
-  const arr = readJsonSync(SUBS_PATH, []);
-  return Array.isArray(arr) ? arr : [];
-}
-
-async function saveSubs(subs) {
-  await writeJsonAtomic(SUBS_PATH, JSON.stringify(subs, null, 2));
-}
-
-/** Add (or replace by endpoint) a PushSubscription. */
-export async function addSubscription(sub) {
-  if (!sub?.endpoint) throw new Error("subscription missing endpoint");
-  const subs = await loadSubs();
-  const next = subs.filter((s) => s.endpoint !== sub.endpoint);
-  next.push(sub);
-  await saveSubs(next);
-  return { ok: true, count: next.length };
-}
-
-/** Remove a subscription by endpoint (client unsubscribed, or it went dead). */
-export async function removeSubscription(endpoint) {
-  if (!endpoint) return { ok: true, count: (await loadSubs()).length };
-  const subs = await loadSubs();
-  const next = subs.filter((s) => s.endpoint !== endpoint);
-  if (next.length !== subs.length) await saveSubs(next);
-  return { ok: true, count: next.length };
-}
 
 // ---------------------------------------------------------------------------
 // APNs device-token store (BET-181)
@@ -677,49 +607,13 @@ export async function fireNotify({ message, title, urgent, sessionID } = {}) {
 }
 
 async function sendPush(payload) {
-  // APNs is the PRIMARY (native iOS) leg and MUST NOT be gated on the Web Push
-  // (PWA) leg. Previously this function awaited webpush.sendNotification for
-  // every subscription BEFORE calling sendApnsFanout. A single stale Apple Web
-  // Push endpoint (web.push.apple.com) hangs its request, which starved/delayed
-  // the APNs fanout — so high-frequency automatic events (done/question/error)
-  // almost never reached the native device, while the occasional `notify` won
-  // the race. Fire APNs first and unconditionally; run Web Push independently
-  // so it can never block or drop the native push. Neither leg's failure
-  // affects the other.
+  // APNs is now the ONLY delivery leg (BET-559 removed the Web Push/VAPID leg
+  // along with the retired PWA). Fire it and surface failures as warnings so a
+  // gateway/HTTP error never throws out of the notification path.
   const apnsLeg = sendApnsFanout(payload).catch((e) =>
     console.warn("[push] apns fanout failed:", e?.message ?? e),
   );
-  const webLeg = sendWebPush(payload).catch((e) =>
-    console.warn("[push] web push leg failed:", e?.message ?? e),
-  );
-  await Promise.allSettled([apnsLeg, webLeg]);
-}
-
-// Web Push (VAPID) delivery leg — kept for the frozen PWA build. Independent
-// of APNs: isolated here so a hung/stale endpoint can't block native pushes.
-async function sendWebPush(payload) {
-  await ensureVapid();
-  const subs = await loadSubs();
-  if (subs.length === 0) return;
-  const body = JSON.stringify(payload);
-  await Promise.all(
-    subs.map(async (s) => {
-      try {
-        // Bound the send: a stale Apple Web Push endpoint can hang its request
-        // indefinitely. web-push accepts a per-call `timeout` (ms) — cap it so
-        // a dead PWA endpoint can't keep the caller's await pending forever.
-        await webpush.sendNotification(s, body, { timeout: 10_000 });
-      } catch (e) {
-        // 404/410 = subscription gone (PWA uninstalled / expired). Prune it.
-        const code = e?.statusCode;
-        if (code === 404 || code === 410) {
-          await removeSubscription(s.endpoint).catch(() => {});
-        } else {
-          console.warn("[push] send failed:", code ?? "", e?.message ?? e);
-        }
-      }
-    }),
-  );
+  await apnsLeg;
 }
 
 // ---------------------------------------------------------------------------

@@ -189,16 +189,14 @@ export function isLocalDirectRequest({ remoteAddress, headers } = {}) {
 // is deliberately an allowlist of the shell's own static surface, NOT a blanket
 // "GET is public": unknown data routes still fall through to the gate.
 //
-// Covered: the entry HTML ("/", "/index.html"), Vite's content-hashed bundle
-// (/assets/*), the PWA manifest + service worker + icons, and favicon.
+// BET-559: the web/PWA client that used to be served at / (SPA shell, Vite
+// /assets/*, /sw.js, /manifest.webmanifest, /icons/*) is retired and the
+// server no longer hosts it, so those paths are no longer public assets. Only
+// the favicon (still served by index.mjs) and the unauthenticated bootstrap
+// routes remain exempt.
 export function isPublicAssetPath(path) {
   if (typeof path !== "string") return false;
-  if (path === "/" || path === "/index.html") return true;
-  if (path === "/sw.js") return true;
   if (path === "/favicon.ico") return true;
-  if (path === "/manifest.webmanifest" || path === "/manifest.json") return true;
-  if (path.startsWith("/assets/")) return true;
-  if (path.startsWith("/icons/")) return true;
   return false;
 }
 

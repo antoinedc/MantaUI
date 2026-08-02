@@ -33,8 +33,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Repo root, resolved from this file so callers never guess a cwd. */
 export const ROOT = resolve(__dirname, "../..");
 
-/** Where `vite build --config electron.vite.config.mobile.ts` puts the SPA. */
-export const RENDERER_DIR = join(ROOT, "mobile/www");
+/** Where `npm run build` (electron-vite) puts the desktop renderer SPA. */
+export const RENDERER_DIR = join(ROOT, "out", "renderer");
 
 /**
  * Chromium launch options. Every flag is load-bearing:
