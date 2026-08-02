@@ -123,6 +123,14 @@ final class MantaOpenSessionUITests: XCTestCase {
         print("PAIRDRIVE open-row=\(row.label)")
         row.tap()
         sleep(6)
-        print("PAIRDRIVE opened")
+        // The runner tears the app down the moment the test ends, so a
+        // host-side `simctl io screenshot` always catches Springboard instead.
+        // Capture from inside the test and drop the PNG in the runner's own
+        // container, which the driver plugin globs for on the host.
+        let shot = XCUIScreen.main.screenshot()
+        let out = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("manta-open-session.png")
+        try? shot.pngRepresentation.write(to: out)
+        print("PAIRDRIVE opened shot=\(out.path)")
     }
 }
