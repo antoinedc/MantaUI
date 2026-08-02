@@ -53,6 +53,7 @@ struct ComposerView: View {
     /// Measured height of the input. See MultilineTextView: a scroll-enabled
     /// UITextView has no intrinsic height, so the composer must give it one.
     @State private var inputHeight: CGFloat = Metrics.type.display
+    @State private var showModelPicker = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -86,6 +87,9 @@ struct ComposerView: View {
         .padding(.vertical, Metrics.spacing.sp2)
         .background(tokens.canvas.ignoresSafeArea())
         .overlay(alignment: .top) { divider }
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerSheet(modelStore: modelStore)
+        }
         .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
         .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
             handleDocument(result)
@@ -111,27 +115,8 @@ struct ComposerView: View {
     // MARK: - Model pill
 
     private var modelPill: some View {
-        Menu {
-            Button {
-                modelStore.setOverride(nil)
-            } label: {
-                Label(settingIsDefault ? "Default (in use)" : "Default", systemImage: settingIsDefault ? "checkmark" : "circle")
-            }
-            if modelStore.models.isEmpty {
-                Text("No models")
-            } else {
-                ForEach(ChatModel.groups(modelStore.models), id: \.provider) { group in
-                    Section(group.provider) {
-                        ForEach(group.models, id: \.id) { model in
-                            Button {
-                                modelStore.setOverride(OpencodeModelID(providerID: model.providerID, modelID: model.id))
-                            } label: {
-                                Label(model.name, systemImage: isActive(model) ? "checkmark" : "circle")
-                            }
-                        }
-                    }
-                }
-            }
+        Button {
+            showModelPicker = true
         } label: {
             HStack(spacing: Metrics.spacing.sp1) {
                 Image(systemName: "sparkles")
@@ -139,23 +124,22 @@ struct ComposerView: View {
                 Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
                     .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                     .lineLimit(1)
+                if let variant = modelStore.variant, !variant.isEmpty {
+                    Text("·")
+                        .font(.system(size: Metrics.type.small))
+                    Text(variant.capitalized)
+                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .lineLimit(1)
+                }
             }
             .foregroundColor(tokens.accentTx)
             .padding(.horizontal, Metrics.spacing.sp2)
             .padding(.vertical, Metrics.spacing.sp1)
             .background(tokens.accentSoft, in: Capsule())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("Model picker")
         .accessibilityIdentifier("model-picker")
-    }
-
-    private var settingIsDefault: Bool {
-        modelStore.override == nil
-    }
-
-    private func isActive(_ model: OpencodeModel) -> Bool {
-        guard let active = modelStore.active else { return false }
-        return active.providerID == model.providerID && active.modelID == model.id
     }
 
     // MARK: - Attach
