@@ -1223,7 +1223,7 @@ link.
 | Transcript + subagent spec | `docs/mobile-redesign/transcript-mockup.html` (§8, §8a, §7.1a) |
 | Mobile implementation epic | BET-550 (server migration → Swift client) |
 | Desktop design epic | BET-565 (continuation of BET-527, primitives shipped) |
-| Desktop redesign epic | BET-406, design record at `/pages/manta-redesign` |
+| Desktop redesign epic | BET-406 (shipped) → BET-565. Design record archived at `docs/screens/redesign-spec.html` — the served `/pages/manta-redesign` copy expires. |
 | The stack spike | BET-431 (BET-432 … BET-438) |
 | Current mobile client | `src/renderer/mobile/` |
 | The CSS override layer that dies | `src/renderer/mobile/mobile.css` |
