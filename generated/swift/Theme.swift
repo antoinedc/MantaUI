@@ -22,6 +22,7 @@ struct Tokens {
     let accentTx: Color
     let accentSolid: Color
     let onAccent: Color
+    let accentSoft: Color
     let ok: Color
     let warn: Color
     let danger: Color
@@ -57,6 +58,7 @@ struct Tokens {
         let accentTx: Color = Color(hex: "#1F55D6")
         let accentSolid: Color = Color(hex: "#1F55D6")
         let onAccent: Color = Color(hex: "#FFFFFF")
+        let accentSoft: Color = Color(hex: "#1F55D6")
         let ok: Color = Color(hex: "#0A7A53")
         let warn: Color = Color(hex: "#8A5A08")
         let danger: Color = Color(hex: "#BE2F3C")
@@ -68,7 +70,7 @@ struct Tokens {
             raised: raised, inset: inset,
             borderSubtle: borderSubtle, border: border, borderStrong: borderStrong,
             tx1: tx1, tx2: tx2, tx3: tx3, tx4: tx4,
-            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent,
+            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent, accentSoft: accentSoft,
             ok: ok, warn: warn, danger: danger, info: info,
             fill: fill, fillActive: fillActive,
         )
@@ -91,6 +93,7 @@ struct Tokens {
         let accentTx: Color = Color(hex: "#7BA0FF")
         let accentSolid: Color = Color(hex: "#5A88FF")
         let onAccent: Color = Color(hex: "#0B1020")
+        let accentSoft: Color = Color(hex: "#1740AE")
         let ok: Color = Color(hex: "#3DD9A4")
         let warn: Color = Color(hex: "#F0A934")
         let danger: Color = Color(hex: "#FF6B7A")
@@ -102,7 +105,7 @@ struct Tokens {
             raised: raised, inset: inset,
             borderSubtle: borderSubtle, border: border, borderStrong: borderStrong,
             tx1: tx1, tx2: tx2, tx3: tx3, tx4: tx4,
-            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent,
+            accent: accent, accentTx: accentTx, accentSolid: accentSolid, onAccent: onAccent, accentSoft: accentSoft,
             ok: ok, warn: warn, danger: danger, info: info,
             fill: fill, fillActive: fillActive,
         )

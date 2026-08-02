@@ -225,3 +225,130 @@ render images; a human should eyeball the PNG once.
   anticipated ("S4a re-records against real components").
 - The Dynamic Island mask rect is measured **for this pinned device**; a harness
   run on a different device must re-measure and update the preset.
+
+## S4b — subagent agent row + drill-in screen (BET-558)
+
+Built on S4a's components per §8a. A **subagent is a session, not a tool call**:
+it is a navigation row (never a step row) that PUSHES a child screen. Both the
+parent and every child render through ONE shared `TranscriptView` — there is no
+second transcript renderer.
+
+### What changed
+
+| Surface | Change |
+|---|---|
+| `gen-swift-tokens.mjs` | Now also emits `accentSoft` (`--accent-soft`, already in `tokens.css` light+dark) — the §8a 16px agent-glyph tile colour. Regenerated `Theme.swift`; `--check` green. |
+| `TranscriptComponents.swift` | `SubagentRowView` (glyph tile + 600 `tx1` task name + live status + `›` chevron), `SubagentScreen` (child with its own header, read-only), `SubagentHeader`, `TranscriptView` (the single renderer), and `StepGroupRow` so the grouped container mixes step + agent rows (§8a "inside the same grouped container"). |
+| `RootView.swift` | `NavigationStack` push (never an inline expansion or a sheet), parent scroll preserved, running child keeps streaming while open; optional `MANTA_SCENE=child` harness entry. |
+| `capture.sh` / UI test | `SCENE_MODE` drives a second stable scene (the child drill-in). Scene delivered to BOTH capture legs via the app's own `UserDefaults` (the hierarchy leg's XCUITest runner does not inherit the shell env). |
+
+### The design decisions from §8a, as built
+
+- **Agent row** in the same grouped container as step rows: 16px `accentSoft`
+  tile (`Metrics.spacing.sp4`), name 600 `tx1` (`Metrics.type.small` + semibold)
+  — a task name, never a command — a live duration while running (`twoXS`
+  `tx4`), and a `›` chevron meaning "there is more here", not "expand this
+  output".
+- **Push, not inline/sheet**: `NavigationStack` value navigation. The parent
+  stays in the stack, so its scroll position is untouched by a visit; a pushed
+  child stays alive in the stack (the structural precondition for
+  streaming-while-open — see the honesty note on why live streaming is
+  deferred this stage). Nesting is free — a sub-subagent is another push.
+- **Child header**: task name + `subagent · running 1m12s` / `subagent · done`
+  as the 500 `tx4` subtitle (§8 two-line header), with a back chevron. No
+  trailing affordance — the child is read-only in v1 (no composer, no write
+  affordance).
+- **Child transcript**: rendered via the SAME `TranscriptView` (UserBand,
+  AssistantProse, StepGroupView) as the parent — not a copy.
+
+### Determinism proof — two scenes, two runs each, quoted
+
+Each scene is one `capture.sh` invocation; two runs per scene:
+
+```
+# parent scene
+OUT_DIR=/tmp/s4b-parent1 ./mobile/native/capture.sh
+OUT_DIR=/tmp/s4b-parent2 ./mobile/native/capture.sh
+# child scene
+OUT_DIR=/tmp/s4b-child1 SCENE_MODE=child ./mobile/native/capture.sh
+OUT_DIR=/tmp/s4b-child2 SCENE_MODE=child ./mobile/native/capture.sh
+```
+
+`node mobile/native/measure.mjs <A> <B> --mask dynamic-island`:
+
+```
+=== PARENT ===
+hierarchy leg: IDENTICAL (byte-for-byte)
+screenshot leg: 1206x2622 vs 1206x2622 (dims match)
+masks applied: [415,42 375x78]
+differing pixels (absolute): 0
+max channel delta outside mask (absolute): 0
+VERDICT: PASS
+
+=== CHILD ===
+hierarchy leg: IDENTICAL (byte-for-byte)
+screenshot leg: 1206x2622 vs 1206x2622 (dims match)
+masks applied: [415,42 375x78]
+differing pixels (absolute): 0
+max channel delta outside mask (absolute): 0
+VERDICT: PASS
+```
+
+Both scenes are fully deterministic: 0 differing pixels, byte-identical
+hierarchies. Committed baselines: `baseline/screen.{png,hierarchy.txt}` (the
+parent transcript, now with agent rows) and `baseline/child.{png,hierarchy.txt}`
+(the drill-in screen).
+
+### Geometry — measured per element (parent scene, accessibility hierarchy)
+
+```
+agent-row 1   {{0,248},{402,30}}   glyph tile 16px `accentSoft` at x 12 (--sp-3); name 13px/600 tx1 at {36,255.2}; status 'done' 11px tx4 at {349.7,256.3}; chevron '›' at {384,255.2}
+agent-row 2   {{0,279},{402,30}}   same treatment
+agent-row 3   {{0,310},{402,30}}   'pr-closed sweep' · status '1m12s' (live duration) at {343.7,318.3}
+step-rows     {{-0.5,247.5},{403,93}}  the grouped container — panel bg, hairline border-subtle between the three agent rows, radius --r-md
+```
+
+### Geometry — measured per element (child scene, accessibility hierarchy)
+
+```
+subagent-scene   full screen, identifier 'subagent-scene'
+subagent-header  {{12,70},{273,34}}   back chevron '‹' button at {12,70} (id 'subagent-back'); title 'pr-closed sweep' 13px/600 tx1 at {163.8,72}; subtitle 'subagent · running 1m12s' 11px tx4 at {147.7,88.7}
+ScrollView       {{0,112},{402,762}}  child transcript below the header
+assistant-prose  'Reading the close-on-merge workflow and its CI posture.'  {{12,112},{316,44.3}}
+step-rows        two S4a step rows ('Read multica-close-on-merge.yml 0.3s', 'Ran node scripts/multica-unblock.mjs --dry-run 1.8s')
+assistant-prose  'The sweep flips a blocked issue to todo the moment its blockers clear.'
+```
+
+The child transcript renders through the VERY SAME components as the parent —
+there is no copy of a transcript renderer anywhere.
+
+### Honesty notes
+
+- The **status is a live duration while running** (§8a) is represented in the
+  fixture by fixed text ("1m12s"), exactly as S4a's `.running` step rows use
+  fixed durations. A real per-second tick would change the status text every
+  frame and defeat the settled-frame convergence guard the harness is built on.
+- **Streaming-while-open is intentionally deferred — the child renders a FROZEN
+  snapshot today.** `SubagentScreen` takes the session's `[TranscriptBlock]` as
+  a plain value, so the transcript does not update while the screen is open.
+  This is correct for S4b: it is a fixture/measurement stage with no live
+  subagent data source, and neither the parent nor anything else streams in the
+  fixture. The §8a requirement is not silently claimed here — when a real,
+  observable subagent store lands (a later stage), `SubagentScreen`'s transcript
+  argument is the SINGLE seam to rewire to that source; the push structure keeps
+  the child alive in the stack, so once that seam reads a live source the same
+  view streams without a second renderer being introduced.
+- The agent **glyph tile** is rendered as an empty 16px `accentSoft` tile. §8a
+  names the tile but not a glyph; an initial/icon inside it would be a design
+  decision beyond the spec, so the fixture stays faithful to what §8a states.
+- The back chevron (`‹`) and row chevron (`›`) are text glyphs at token sizes
+  (`Metrics.type.body` / `Metrics.type.small`); the CSS-mockup's 14px chevron
+  has no `:root` counterpart, so it is resolved through the nearest tokens
+  rather than a hardcoded 14.
+- Colour/typography/radius are visible only in the screenshot leg; the authoring
+  agent (macos) cannot render images, so a human should eyeball
+  `baseline/screen.png` and `baseline/child.png` once.
+- The `accentSoft` token is the one generator addition this issue needed; the
+  broader "emit :root spacing/radius/easing" token work BET-574 already covers,
+  and the generator now reads both `data-theme` colours and `:root` metrics with
+  no second source of truth.

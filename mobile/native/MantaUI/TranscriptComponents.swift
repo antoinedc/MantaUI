@@ -143,9 +143,26 @@ struct StepRowView: View {
     }
 }
 
+// A row inside a grouped container is either a one-action tool call or an
+// agent session. §8a: "A subagent is not a tool call, and must not be styled
+// as one" — it is a session, so it lives in the same grouped container as the
+// step rows (so a turn reads as one sequence) but is rendered as a
+// navigation row, not a step.
+enum StepGroupRow: Identifiable {
+    case step(ToolStep)
+    case subagent(SubagentSession)
+
+    var id: UUID {
+        switch self {
+        case .step(let step): return step.id
+        case .subagent(let agent): return agent.id
+        }
+    }
+}
+
 enum StepGroupContent {
-    case rows([ToolStep])
-    case rollup(summary: String, rows: [ToolStep])
+    case rows([StepGroupRow])
+    case rollup(summary: String, rows: [StepGroupRow])
 }
 
 struct StepGroupView: View {
@@ -156,8 +173,8 @@ struct StepGroupView: View {
     var body: some View {
         Group {
             switch content {
-            case .rows(let steps):
-                rowsOverride(steps)
+            case .rows(let rows):
+                rowsView(rows)
             case .rollup(let summary, let rows):
                 VStack(spacing: 0) {
                     Button(action: { rollupExpanded.toggle() }) {
@@ -175,7 +192,7 @@ struct StepGroupView: View {
                     }
                     .buttonStyle(.plain)
                     if rollupExpanded {
-                        rowsOverride(rows)
+                        rowsView(rows)
                     }
                 }
             }
@@ -190,15 +207,238 @@ struct StepGroupView: View {
     }
 
     @ViewBuilder
-    private func rowsOverride(_ steps: [ToolStep]) -> some View {
+    private func rowsView(_ rows: [StepGroupRow]) -> some View {
         VStack(spacing: 0) {
-            ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
-                StepRowView(step: step, tokens: tokens)
-                if index < steps.count - 1 {
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                rowView(row)
+                if index < rows.count - 1 {
                     tokens.borderSubtle.frame(height: Metrics.spacing.spPx)
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: StepGroupRow) -> some View {
+        switch row {
+        case .step(let step):
+            StepRowView(step: step, tokens: tokens)
+        case .subagent(let agent):
+            SubagentRowView(agent: agent, tokens: tokens)
+        }
+    }
+}
+
+// MARK: - Subagents (§8a) — a drill-in screen, not an inline expansion
+//
+// A subagent is a session, not a tool call: it streams, owns its own steps and
+// tokens, and can still be running after the parent has moved on. §8a's row is
+// `[agent glyph] [name] [live status] [chevron]` inside the same grouped
+// container as the step rows; tapping PUSHES a screen (its own header + its own
+// transcript, rendered with exactly the parent's components), never an inline
+// expansion or a sheet. The child screen is read-only in v1.
+
+enum SubagentStatus: Hashable {
+    case running
+    case done
+}
+
+struct SubagentSession: Identifiable, Hashable {
+    let id: UUID
+    let taskName: String
+    let status: SubagentStatus
+    // Live duration (e.g. "1m12s") while running; nil when done.
+    let duration: String?
+    let transcript: [TranscriptBlock]
+
+    init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock]) {
+        self.id = UUID()
+        self.taskName = taskName
+        self.status = status
+        self.duration = duration
+        self.transcript = transcript
+    }
+
+    // Navigation values are compared by identity, never by deep transcript
+    // equality (which would also recurse). The transcript is content the
+    // destination view reads, not something that defines the route.
+    static func == (lhs: SubagentSession, rhs: SubagentSession) -> Bool {
+        lhs.id == rhs.id
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    /// The row's status text: a live duration while running, `done` otherwise.
+    var statusText: String {
+        switch status {
+        case .running: return duration ?? ""
+        case .done: return "done"
+        }
+    }
+
+    /// The child header's subtitle (§8a): `subagent · running 1m12s` or
+    /// `subagent · done`. Pure content, not a design literal.
+    var subtitle: String {
+        switch status {
+        case .running: return "subagent · running \(duration ?? "")"
+        case .done: return "subagent · done"
+        }
+    }
+}
+
+// The single transcript renderer shared by the parent and every child screen.
+// A subagent's transcript renders through EXACTLY the same components as the
+// parent (§8a) — the whole point of the drill-in is that a child is a session,
+// not a different kind of thing. There is deliberately no second renderer.
+struct TranscriptView: View {
+    let blocks: [TranscriptBlock]
+    let tokens: Tokens
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(blocks.indices, id: \.self) { i in
+                blockView(blocks[i])
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: TranscriptBlock) -> some View {
+        switch block {
+        case .user(let text):
+            UserBand(text: text, tokens: tokens)
+                .padding(.bottom, Metrics.spacing.sp4)
+        case .prose(let text):
+            AssistantProse(text: text, tokens: tokens)
+        case .steps(let content):
+            StepGroupView(content: content, tokens: tokens)
+                .padding(.bottom, Metrics.spacing.sp3)
+        }
+    }
+}
+
+enum TranscriptBlock {
+    case user(String)
+    case prose(String)
+    case steps(StepGroupContent)
+}
+
+// §8a agent-row treatment: `[agent glyph] [name] [live status] [chevron]`.
+// The glyph is a 16px `accent-soft` tile; the name is 600 weight `tx1` — a task
+// name, never a command; the status is a live duration while running; the
+// chevron means "there is more here", not "expand this output". A tap pushes
+// the child screen rather than expanding inline.
+struct SubagentRowView: View {
+    let agent: SubagentSession
+    let tokens: Tokens
+
+    var body: some View {
+        NavigationLink(value: agent) {
+            HStack(spacing: Metrics.spacing.sp2) {
+                RoundedRectangle(cornerRadius: Metrics.radius.xs)
+                    .fill(tokens.accentSoft)
+                    .frame(width: Metrics.spacing.sp4, height: Metrics.spacing.sp4)
+                Text(agent.taskName)
+                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(agent.statusText)
+                    .font(.system(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
+                Text("›")
+                    .font(.system(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx4)
+            }
+            .padding(.vertical, Metrics.type.stepRowY)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent-row")
+    }
+}
+
+// The child drill-in screen (§8a). Its own header (task name + the
+// `subagent · running 1m12s` / `subagent · done` subtitle) above its OWN
+// transcript, rendered with the parent's components via TranscriptView.
+// Read-only in v1: no composer, no prompt entry, no write affordance. Pushing
+// it (not an inline expansion or a sheet) leaves the parent's scroll position
+// untouched and keeps the child alive in the stack. NOTE: the transcript is a
+// frozen `agent.transcript` value this fixture stage — live streaming while
+// open is deferred until a real observable subagent store exists; this view's
+// transcript input is the single seam to rewire to that source then (see
+// mobile/native/FINDINGS.md).
+struct SubagentScreen: View {
+    let agent: SubagentSession
+    let tokens: Tokens
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SubagentHeader(
+                title: agent.taskName,
+                subtitle: agent.subtitle,
+                onBack: { dismiss() },
+                tokens: tokens
+            )
+            ScrollView {
+                TranscriptView(blocks: agent.transcript, tokens: tokens)
+            }
+        }
+        .background(tokens.canvas.ignoresSafeArea())
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("subagent-scene")
+    }
+}
+
+// The child's two-line centred header (§8): task name (600 `tx1`, ellipsised)
+// with the `subagent · …` status as a 500 `tx4` subtitle beneath, and a back
+// chevron on the leading edge. No trailing affordance — the child is read-only.
+struct SubagentHeader: View {
+    let title: String
+    let subtitle: String
+    let onBack: () -> Void
+    let tokens: Tokens
+
+    var body: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            Button(action: onBack) {
+                Text("‹")
+                    .font(.system(size: Metrics.type.body))
+                    .foregroundColor(tokens.accent)
+                    .padding(Metrics.spacing.sp2)
+                    .contentShape(Rectangle())
+                    .accessibilityIdentifier("subagent-back")
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            VStack(spacing: Metrics.spacing.spPx) {
+                Text(title)
+                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx1)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(subtitle)
+                    .font(.system(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.tx4)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("subagent-header")
     }
 }
 

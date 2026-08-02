@@ -23,7 +23,7 @@ const TOKENS = [
   "canvas", "panel", "card", "raised", "inset",
   "borderSubtle", "border", "borderStrong",
   "tx1", "tx2", "tx3", "tx4",
-  "accent", "accentTx", "accentSolid", "onAccent",
+  "accent", "accentTx", "accentSolid", "onAccent", "accentSoft",
   "ok", "warn", "danger", "info",
   "fill", "fillActive",
 ];
@@ -34,7 +34,7 @@ const GROUPS = [
   ["raised", "inset"],
   ["borderSubtle", "border", "borderStrong"],
   ["tx1", "tx2", "tx3", "tx4"],
-  ["accent", "accentTx", "accentSolid", "onAccent"],
+  ["accent", "accentTx", "accentSolid", "onAccent", "accentSoft"],
   ["ok", "warn", "danger", "info"],
   ["fill", "fillActive"],
 ];
@@ -236,6 +236,7 @@ struct Tokens {
     let accentTx: Color
     let accentSolid: Color
     let onAccent: Color
+    let accentSoft: Color
     let ok: Color
     let warn: Color
     let danger: Color

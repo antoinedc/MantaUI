@@ -6,29 +6,50 @@ Element subtree:
         Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
           Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
             Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
-              ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'transcript-fixture'
-                Other, 0xADDR, {{0.0, 62.0}, {402.0, 314.3}}
-                  Other, 0xADDR, {{0.0, 62.0}, {402.0, 42.0}}, identifier: 'user-band'
-                    StaticText, 0xADDR, {{12.0, 74.0}, {327.3, 18.0}}, label: 'check bet-520 and see if it's blocked correctly'
-                  Other, 0xADDR, {{12.0, 120.0}, {308.7, 18.0}}, identifier: 'assistant-prose'
-                    StaticText, 0xADDR, {{12.0, 120.0}, {308.7, 18.0}}, label: 'Checking its metadata and the blocker chain.'
-                  Other, 0xADDR, {{-0.5, 149.5}, {403.0, 30.7}}, identifier: 'step-rows'
-                    Button, 0xADDR, {{0.0, 150.0}, {402.0, 29.7}}, label: 'Ran, multica issue get BET-520, 0.4s'
-                      StaticText, 0xADDR, {{26.0, 157.0}, {24.3, 15.7}}, label: 'Ran'
-                      StaticText, 0xADDR, {{58.3, 157.7}, {185.7, 14.3}}, label: 'multica issue get BET-520'
-                      StaticText, 0xADDR, {{367.3, 158.2}, {22.7, 13.3}}, label: '0.4s'
-                  Other, 0xADDR, {{12.0, 191.7}, {336.0, 44.3}}, identifier: 'assistant-prose'
-                    StaticText, 0xADDR, {{12.0, 191.7}, {336.0, 44.3}}, label: 'Blocked correctly — waiting_on names both PoC issues, so the sweep clears it once they land.'
-                  Other, 0xADDR, {{0.0, 248.0}, {402.0, 42.0}}, identifier: 'user-band'
-                    StaticText, 0xADDR, {{12.0, 260.0}, {126.0, 18.0}}, label: 'now check pr 429'
-                  Other, 0xADDR, {{12.0, 306.0}, {244.7, 18.0}}, identifier: 'assistant-prose'
-                    StaticText, 0xADDR, {{12.0, 306.0}, {244.7, 18.0}}, label: 'That PR is +551/−42 across 18 files.'
-                  Other, 0xADDR, {{-0.5, 347.5}, {403.0, 29.3}}, identifier: 'step-rows'
-                    Button, 0xADDR, {{0.0, 348.0}, {402.0, 28.3}}, label: '▸ 4 steps · read 3 files, 1 search'
-                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
-                  Other, 0xADDR, {{396.0, 528.7}, {3.0, 280.3}}
-                Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
-                  Other, 0xADDR, {{396.0, 528.7}, {3.0, 280.3}}
+              Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                        ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'transcript-fixture'
+                          Other, 0xADDR, {{0.0, 62.0}, {402.0, 386.7}}
+                            Other, 0xADDR, {{0.0, 62.0}, {402.0, 42.0}}, identifier: 'user-band'
+                              StaticText, 0xADDR, {{12.0, 74.0}, {327.3, 18.0}}, label: 'check bet-520 and see if it's blocked correctly'
+                            Other, 0xADDR, {{12.0, 120.0}, {308.7, 18.0}}, identifier: 'assistant-prose'
+                              StaticText, 0xADDR, {{12.0, 120.0}, {308.7, 18.0}}, label: 'Checking its metadata and the blocker chain.'
+                            Other, 0xADDR, {{-0.5, 149.5}, {403.0, 30.7}}, identifier: 'step-rows'
+                              Button, 0xADDR, {{0.0, 150.0}, {402.0, 29.7}}, label: 'Ran, multica issue get BET-520, 0.4s'
+                                StaticText, 0xADDR, {{26.0, 157.0}, {24.3, 15.7}}, label: 'Ran'
+                                StaticText, 0xADDR, {{58.3, 157.7}, {185.7, 14.3}}, label: 'multica issue get BET-520'
+                                StaticText, 0xADDR, {{367.3, 158.2}, {22.7, 13.3}}, label: '0.4s'
+                            Other, 0xADDR, {{12.0, 191.7}, {345.0, 44.3}}, identifier: 'assistant-prose'
+                              StaticText, 0xADDR, {{12.0, 191.7}, {345.0, 44.3}}, label: 'Blocked correctly — waiting_on names both PoC issues. Now fanning out to audit the three sweeps.'
+                            Other, 0xADDR, {{-0.5, 247.5}, {403.0, 93.0}}, identifier: 'step-rows'
+                              Other, 0xADDR, {{0.0, 248.0}, {402.0, 30.0}}, identifier: 'agent-row'
+                                Button, 0xADDR, {{0.0, 248.0}, {402.0, 30.0}}, label: 'unblock sweep, done, ›'
+                                  StaticText, 0xADDR, {{36.0, 255.2}, {94.3, 15.7}}, label: 'unblock sweep'
+                                  StaticText, 0xADDR, {{349.7, 256.3}, {26.3, 13.3}}, label: 'done'
+                                  StaticText, 0xADDR, {{384.0, 255.2}, {6.0, 15.7}}, label: '›'
+                              Other, 0xADDR, {{0.0, 279.0}, {402.0, 30.0}}, identifier: 'agent-row'
+                                Button, 0xADDR, {{0.0, 279.0}, {402.0, 30.0}}, label: 'unstick sweep, done, ›'
+                                  StaticText, 0xADDR, {{36.0, 286.2}, {90.3, 15.7}}, label: 'unstick sweep'
+                                  StaticText, 0xADDR, {{349.7, 287.3}, {26.3, 13.3}}, label: 'done'
+                                  StaticText, 0xADDR, {{384.0, 286.2}, {6.0, 15.7}}, label: '›'
+                              Other, 0xADDR, {{0.0, 310.0}, {402.0, 30.0}}, identifier: 'agent-row'
+                                Button, 0xADDR, {{0.0, 310.0}, {402.0, 30.0}}, label: 'pr-closed sweep, 1m12s, ›'
+                                  StaticText, 0xADDR, {{36.0, 317.2}, {105.0, 15.7}}, label: 'pr-closed sweep'
+                                  StaticText, 0xADDR, {{343.7, 318.3}, {32.3, 13.3}}, label: '1m12s'
+                                  StaticText, 0xADDR, {{384.0, 317.2}, {6.0, 15.7}}, label: '›'
+                            Other, 0xADDR, {{12.0, 352.0}, {356.0, 44.3}}, identifier: 'assistant-prose'
+                              StaticText, 0xADDR, {{12.0, 352.0}, {356.0, 44.3}}, label: 'Two are back. The third is still reading the close-on-merge workflow.'
+                            Other, 0xADDR, {{-0.5, 407.8}, {403.0, 29.3}}, identifier: 'step-rows'
+                              Button, 0xADDR, {{0.0, 408.3}, {402.0, 28.3}}, label: '▸ 4 steps · read 3 files, 1 search'
+                          Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                            Other, 0xADDR, {{396.0, 456.3}, {3.0, 352.7}}
+                          Other, 0xADDR, {{369.0, 62.0}, {30.0, 750.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                            Other, 0xADDR, {{396.0, 456.3}, {3.0, 352.7}}
+                Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
 Path to element:
  →Application, 0xADDR, pid: PID, label: 'MantaUI'
 Query chain:
