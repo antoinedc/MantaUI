@@ -23,7 +23,14 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip"] as const;
+
+// A primitive component whose implementation lives in a differently-named
+// module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
+// shell and must not diverge, BET-615), so both map to the one file. The
+// two-adopter count for each is the set of files that import the `./Chip`
+// module, which is how the rule stays honest for two components in one source.
+const COMPONENT_FILE: Record<string, string> = { SplitChip: "Chip" };
 
 const RENDERER = fileURLToPath(new URL(".", import.meta.url));
 
@@ -49,7 +56,7 @@ function rendererFiles(): string[] {
 }
 
 function source(p: string): string {
-  return readFileSync(path.join(RENDERER, `${p}.tsx`), "utf8");
+  return readFileSync(path.join(RENDERER, `${COMPONENT_FILE[p] ?? p}.tsx`), "utf8");
 }
 
 /** Return the balanced `{ ... }` starting at `openIdx` (must be a `{`). */
@@ -85,11 +92,18 @@ function propsLiteral(content: string, component: string): string | null {
   return null;
 }
 
-/** Impoter filenames for `p` per the epic's rule (excludes own source + test). */
+/** Importer filenames for `p` per the epic's rule (excludes own source + test).
+ *  Matches by MODULE import (any named export from `./<file>`), not by a
+ *  single export name — Chip.tsx exports two components (Chip + SplitChip),
+ *  and each is "adopted" by a file that imports the module either way, so the
+ *  two-adopter count for both resolves to the same 2 files (ModelPicker +
+ *  NewSessionScreen). For single-export modules this is equivalent to the old
+ *  brace-name match. */
 function importers(p: string): string[] {
-  const re = new RegExp(`import\\s*\\{[^}]*\\b${p}\\b[^}]*\\}\\s*from\\s*["'][^"']*\\/${p}["']`);
+  const file = COMPONENT_FILE[p] ?? p;
+  const re = new RegExp(`from\\s*["'][^"']*\\/${file}["']`);
   return rendererFiles().filter((f) => {
-    if (f === `${p}.tsx` || f === `${p}.test.tsx`) return false;
+    if (f === `${file}.tsx` || f === `${file}.test.tsx`) return false;
     return re.test(readFileSync(path.join(RENDERER, f), "utf8"));
   });
 }
@@ -148,6 +162,12 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // are the other spec pixel values in the BUTTON_BASE constant — all three
   // are real values from the redesign spec's button definition, not drift.
   Button: [5, 6, 14],
+  // Chip / SplitChip share one source file with one chrome contract (BET-615):
+  // 29px hit area (h-[29px]), 11px inline padding (px-[11px]) and a 6px gap
+  // (gap-[6px]). Both names carry the same allowlist because rule 1c scans
+  // the shared Chip.tsx for each, so both need the values listed.
+  Chip: [6, 11, 29],
+  SplitChip: [6, 11, 29],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -205,6 +225,7 @@ describe("M527 primitive rules", () => {
       "shadow-lg": ["Modal.tsx"], // window-level floating surface
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
       "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
+      "h-[29px]": ["Chip.tsx"], // chip hit-area height — the one off-grid value both Chip + SplitChip carry (BET-615)
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {
