@@ -588,7 +588,14 @@ export function useSseBus(params: {
         const messageID = String(
           props.messageID ?? part?.messageID ?? info?.id ?? "",
         );
+        // First-token-latency instrumentation (BET-553 / §17) — the raw path.
+        // The raw `opencode` stream is the OTHER text source besides the box's
+        // interpreted `stream.flush`; both are timed so the numbers are
+        // comparable (see the interpreted flush case). `markRendered` marks the
+        // splice-invoked commit; true paint timing is captured by the probe.
+        markFirstToken("raw", sessionId);
         spliceMessage(messageID);
+        markRendered("raw", sessionId);
       }
 
       // Primary drain trigger — the real step boundary the deployed opencode
