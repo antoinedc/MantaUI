@@ -58,7 +58,7 @@ vi.mock("remotion", async (importOriginal) => {
 
 // Pre-warm the import so cold-cache module resolution (the dynamic
 // `import("./Hero")` chain transitively pulls in @renderer/App +
-// @renderer/mobile/MobileApp + their CSS — 2.8–5s on first run) does not
+// @renderer/App + its CSS — 2.8–5s on first run) does not
 // eat into the per-test timeout budget. Subsequent tests reuse the cached
 // module.
 const heroModule = await import("./Hero");

@@ -22,20 +22,10 @@ import { pinDemoClock } from "./clock";
 // doesn't carry the demo fixture (verified at PR-time by checking
 // out/renderer/ chunk sizes before/after).
 //
-// `?demo` works on every entry path (desktop + mobile/web): the URL is
-// parsed before we branch on preload presence, and the demoApi install
-// short-circuits both the desktop chooseDesktopTransport AND the mobile
-// installHttpTransport flows below. setWindowApi is the same seam
-// transportInstall.ts exposes; no parallel install path is added (per the
-// ticket's "use the existing seam" rule).
-//
-// Shell override (BET-302 review): `?demo` alone used to always render
-// <MobileApp/> in a browser because the only branch was `isMobile =
-// !preload`, and a browser never has an Electron preload. The override
-// (`?demo&desktop` / `?demo&mobile`) is applied ONLY inside bootDemo() so
-// BET-303's desktop hero is reachable from `?demo` in a browser. The real
-// boot path's isMobile derivation is unchanged — that's production
-// transport selection.
+// `?demo` parses the URL before any transport selection and installs the
+// demoApi via the same transportInstall seam. BET-559: the renderer is
+// desktop-only, so `?demo` always renders <App/> — the old mobile-shell
+// override that could force <MobileApp/> (BET-302) is gone with it.
 //
 // Reading config requires the preload's async configGet(), so entry is async.
 // We render the desktop <App/> only after the transport is chosen, so no
