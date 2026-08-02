@@ -47,7 +47,7 @@ export type SessionStatus = "run" | "att" | "idle" | "ok" | "default";
 // The rest is the spec'd row chrome, with ALL metrics token-referenced so the
 // [data-density] ancestor owns them (C2).
 const ROW_BASE =
-  "group relative flex cursor-pointer items-center gap-2 rounded-lg mb-1 " +
+  "group relative flex cursor-pointer items-center gap-2 rounded-md mb-1 " +
   "min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] " +
   "transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1";
 

@@ -86,7 +86,7 @@ export function ContextBar({
       title={breakdownLines.join("\n")}
     >
       <span
-        className="inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
+        className="inline-block w-24 h-3 rounded-xs overflow-hidden align-middle"
         style={{
           backgroundColor: "var(--card)",
           backgroundImage: `radial-gradient(circle, ${dot} 1.2px, transparent 1.4px)`,
@@ -126,7 +126,7 @@ export function ContextBar({
         // user message will pay full rate + surcharge to re-warm exactly
         // these tokens; /clear avoids the bill entirely.
         <span
-          className="tabular-nums text-label font-mono font-medium px-2 rounded-sm shrink-0"
+          className="tabular-nums text-label font-mono font-medium px-2 rounded-xs shrink-0"
           style={{
             color: CACHE_WRITE_COLOR,
             backgroundColor: `${CACHE_WRITE_COLOR}1f`,

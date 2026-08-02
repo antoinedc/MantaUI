@@ -15,8 +15,8 @@
 
 import type { ReactNode } from "react";
 
-const CARD_CHROME = "rounded-xl border border-border bg-bg-soft px-4 py-3";
-const CARD_DANGER_CHROME = "rounded-xl border border-danger bg-danger-bg px-4 py-3";
+const CARD_CHROME = "rounded-lg border border-border bg-bg-soft px-4 py-3";
+const CARD_DANGER_CHROME = "rounded-lg border border-danger bg-danger-bg px-4 py-3";
 
 export function Card({
   danger = false,

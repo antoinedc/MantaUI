@@ -168,7 +168,7 @@ export function ProcessPanel({
         <div
           ref={logRef}
           style={{ height: logHeight, overflowY: "auto" }}
-          className="rounded-md bg-bg-elev px-3 py-2 text-meta font-mono whitespace-pre-wrap"
+          className="rounded-sm bg-bg-elev px-3 py-2 text-meta font-mono whitespace-pre-wrap"
         >
           {logLines.join("\n")}
         </div>
@@ -181,7 +181,7 @@ export function ProcessPanel({
           <button
             type="button"
             onClick={() => void onCopyDiagnostics()}
-            className="px-3 py-2 rounded-md text-meta"
+            className="px-3 py-2 rounded-sm text-meta"
             style={{ border: `1px solid ${DANGER}`, color: DANGER }}
           >
             {copyLabel}

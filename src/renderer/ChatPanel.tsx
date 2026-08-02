@@ -1921,7 +1921,7 @@ export function ChatPanel({
       {/* drop event (overlay shouldn't intercept it). */}
       {dragHover && (
         <div
-          className="absolute inset-2 z-30 pointer-events-none rounded-lg border-2 border-dashed flex items-center justify-center"
+          className="absolute inset-2 z-30 pointer-events-none rounded-md border-2 border-dashed flex items-center justify-center"
           style={{
             borderColor: "var(--accent)",
             backgroundColor: "var(--accent-bg)",
@@ -2172,7 +2172,7 @@ export function ChatPanel({
       {/* that dispatches `manta-open-subscriptions` — a no-op until the */}
       {/* Settings → AI → Subscriptions card lands (BET-314). */}
       {sendError && (
-        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded break-words flex items-start gap-2">
+        <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
           <span className="flex-1">⚠ {sendError}</span>
           {authReconnect && (
             <button

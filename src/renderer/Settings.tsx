@@ -127,7 +127,7 @@ function SegmentedField({ entry, value, onApply }: {
   return (
     <div className="space-y-1">
       <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
-      <div role="group" aria-label={entry.label} className="inline-flex rounded-lg border border-border overflow-hidden">
+      <div role="group" aria-label={entry.label} className="inline-flex rounded-md border border-border overflow-hidden">
         {entry.options?.map((opt) => {
           const selected = value === opt.value;
           return (
@@ -543,16 +543,16 @@ export function Settings({ onClose }: { onClose: () => void }) {
               {opencodeVersion && (<><span className="text-text-faint"> · </span>opencode <span className="font-medium text-text">{opencodeVersion}</span></>)}
             </div>
             {store.updatePrompt && (
-              <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
+              <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
                 <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{store.updatePrompt.releaseName || store.updatePrompt.version}</span></span>
-                <button onClick={() => { void window.api.autoUpdateInstall(); }} className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium">Restart to update</button>
+                <button onClick={() => { void window.api.autoUpdateInstall(); }} className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium">Restart to update</button>
               </div>
             )}
           </GroupCard>
           <GroupCard title="Danger zone" danger>
             <div className="flex items-start justify-between gap-4">
               <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
-              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
+              <button onClick={() => setConfirmReset(true)} className="shrink-0 px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Reset all settings…</button>
             </div>
           </GroupCard>
         </>
@@ -591,7 +591,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
             <AddPhonePanel />
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
-              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
+              <button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} className="text-body px-4 py-2 rounded-xs border border-border text-text-muted hover:text-text shrink-0">Run setup again</button>
             </div>
           </GroupCard>
 
@@ -621,7 +621,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
           <GroupCard title="Danger zone" danger>
             <div className="flex items-center justify-between">
               <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
-              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="shrink-0 text-body px-4 py-2 rounded border border-danger text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed">
+              <button onClick={() => setConfirmRemove(true)} disabled={removingBox} className="shrink-0 text-body px-4 py-2 rounded-xs border border-danger text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed">
                 {removingBox ? "Removing…" : "Remove box"}
               </button>
             </div>
@@ -676,10 +676,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
             ) : (
               <div className="space-y-2">
                 {plugins.map((p) => (
-                  <div key={p.name} className="border border-border rounded p-3 bg-bg-soft space-y-1">
+                  <div key={p.name} className="border border-border rounded-xs p-3 bg-bg-soft space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="text-body font-medium text-text">{p.name}</span>
-                      {p.valid ? <span className="text-meta px-2 py-px rounded bg-ok-bg text-ok">valid</span> : <span className="text-meta px-2 py-px rounded bg-danger-bg text-danger break-all">parse error: {p.error}</span>}
+                      {p.valid ? <span className="text-meta px-2 py-px rounded-xs bg-ok-bg text-ok">valid</span> : <span className="text-meta px-2 py-px rounded-xs bg-danger-bg text-danger break-all">parse error: {p.error}</span>}
                       <span className="ml-auto text-meta text-text-faint">{p.stepCount} step{p.stepCount === 1 ? "" : "s"}{p.timeoutMs != null ? ` · ${formatTimeout(p.timeoutMs)}` : ""}</span>
                     </div>
                     {p.description && <div className="text-meta text-text-muted">{p.description}</div>}
@@ -688,14 +688,14 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             )}
-            <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text">Open plugins folder</button>
+            <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded-xs border border-border text-text-muted hover:text-text">Open plugins folder</button>
           </GroupCard>
           <GroupCard title="Skill registries">
             <div className="text-body text-text-faint">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>
             <div className="space-y-2">
               {registryUrls.map((url) => (
                 <div key={url} className="flex items-center gap-2">
-                  <code className="flex-1 text-body bg-bg-soft border border-border rounded px-3 py-2 text-text-muted truncate">{url}</code>
+                  <code className="flex-1 text-body bg-bg-soft border border-border rounded-xs px-3 py-2 text-text-muted truncate">{url}</code>
                   <button onClick={() => onRemoveRegistry(url)} className="text-body text-text-faint hover:text-text px-2 inline-flex items-center" aria-label="Remove registry URL"><X size={14} aria-hidden="true" /></button>
                 </div>
               ))}
@@ -704,7 +704,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="flex-1">
                 <Field placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} />
               </div>
-              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
+              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
             </div>
           </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
@@ -798,7 +798,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   id={`tab-${tab.id}`}
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={onRailKeyDown}
-                  className={`w-full flex items-center gap-2 text-left px-3 py-2 rounded-lg text-body transition-colors ${
+                  className={`w-full flex items-center gap-2 text-left px-3 py-2 rounded-md text-body transition-colors ${
                     activeTab === tab.id ? "bg-raised text-text font-semibold" : "text-text-faint hover:text-text hover:bg-fill-hover"
                   }`}
                 >
@@ -820,7 +820,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <Field placeholder="Find a setting…" value={query} onChange={(e) => setQuery(e.target.value)} ariaLabel="Search settings" mono={false} leading={<Search size={14} aria-hidden="true" />} inputRef={searchRef} />
             </div>
           </div>
-          <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
+          <button onClick={onClose} className="text-text-muted hover:text-text text-body px-3 py-2 rounded-xs hover:bg-bg-elev transition-colors inline-flex items-center" aria-label="Close settings"><X size={16} aria-hidden="true" /></button>
           <div className="titlebar-inset-right" />
         </div>
 
@@ -828,11 +828,11 @@ export function Settings({ onClose }: { onClose: () => void }) {
           {/* The ONE restart affordance (BET-420). Sits above the panel so it
               is visible regardless of which section is active. */}
           {restartNeeded && (
-            <div role="status" className="mb-4 flex items-center gap-3 rounded-lg border border-warn/40 bg-warn-bg px-4 py-3">
+            <div role="status" className="mb-4 flex items-center gap-3 rounded-md border border-warn/40 bg-warn-bg px-4 py-3">
               <span className="flex-1 text-body text-text">
                 An opencode restart is needed to apply recent model or endpoint changes. Restarting interrupts all running sessions.
               </span>
-              <button onClick={() => void performRestart()} disabled={restarting} className="shrink-0 px-3 py-2 text-body rounded bg-warn-bg border border-warn text-warn hover:bg-warn/20 disabled:opacity-40">
+              <button onClick={() => void performRestart()} disabled={restarting} className="shrink-0 px-3 py-2 text-body rounded-xs bg-warn-bg border border-warn text-warn hover:bg-warn/20 disabled:opacity-40">
                 {restarting ? "Restarting…" : "Restart opencode"}
               </button>
               <button onClick={() => setRestartNeeded(false)} disabled={restarting} className="shrink-0 px-2 py-2 text-body text-text-muted hover:text-text disabled:opacity-40">Later</button>
@@ -872,12 +872,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
       {confirmRemove && (
         <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-remove-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-xl border border-border bg-bg-soft p-5 space-y-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-bg-soft p-5 space-y-4">
             <h3 id="confirm-remove-title" className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={removeBox} className="px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Remove</button>
+              <button onClick={removeBox} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Remove</button>
             </div>
           </div>
         </div>
@@ -886,12 +886,12 @@ export function Settings({ onClose }: { onClose: () => void }) {
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
       {confirmReset && (
         <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-reset-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-xl border border-border bg-bg-soft p-5 space-y-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-bg-soft p-5 space-y-4">
             <h3 id="confirm-reset-title" className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">
               <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
-              <button onClick={resetAll} className="px-4 py-2 text-body rounded border border-danger text-danger hover:bg-danger/10">Reset</button>
+              <button onClick={resetAll} className="px-4 py-2 text-body rounded-xs border border-danger text-danger hover:bg-danger/10">Reset</button>
             </div>
           </div>
         </div>

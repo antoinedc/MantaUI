@@ -1080,7 +1080,7 @@ function GroupHeader({
       role="treeitem"
       aria-expanded={!isCollapsed}
       tabIndex={focused ? 0 : -1}
-      className="group flex items-center gap-1 px-1 py-1 rounded text-micro font-semibold uppercase text-text-muted hover:text-text cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
+      className="group flex items-center gap-1 px-1 py-1 rounded-xs text-micro font-semibold uppercase text-text-muted hover:text-text cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
       onClick={onToggle}
     >
       <span className="w-3 flex items-center justify-center text-text-quiet">
@@ -1166,7 +1166,7 @@ function CommandPalette({
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-lg shadow-lg overflow-hidden"
+        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-md shadow-lg overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
@@ -1239,7 +1239,7 @@ function RenameInput({
         else if (e.key === "Escape") onCancel();
       }}
       onBlur={onCommit}
-      className={`flex-1 bg-bg border border-accent px-1 py-0 text-meta rounded focus:outline-none ${
+      className={`flex-1 bg-bg border border-accent px-1 py-0 text-meta rounded-xs focus:outline-none ${
         size === "project" ? "font-semibold normal-case tracking-normal" : ""
       }`}
     />
@@ -1256,7 +1256,7 @@ function ConfirmDelete({
   onCancel: () => void;
 }) {
   return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded bg-bg-soft border border-border space-y-2">
+    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded-xs bg-bg-soft border border-border space-y-2">
       <div className="text-meta text-text-muted">Close {label}?</div>
       <div className="flex flex-wrap gap-1">
         <button
@@ -1264,7 +1264,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onKill();
           }}
-          className="text-meta px-2 py-px rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded-xs bg-danger-bg text-danger hover:bg-danger-bg"
           title="kill the tmux session/window on the remote"
         >
           Kill on server
@@ -1293,7 +1293,7 @@ function ConfirmWorktreeDirty({
   onKeep: () => void;
 }) {
   return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded bg-bg-soft border border-border space-y-2">
+    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded-xs bg-bg-soft border border-border space-y-2">
       <div className="text-meta text-text-muted">
         <code className="break-all">{worktreePath}</code> has uncommitted
         changes. Removing the worktree will permanently delete that work.
@@ -1305,7 +1305,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-meta px-2 py-px rounded bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded-xs bg-danger-bg text-danger hover:bg-danger-bg"
           title="git worktree remove --force (discards uncommitted changes)"
         >
           Remove

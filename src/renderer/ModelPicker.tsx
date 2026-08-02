@@ -148,7 +148,7 @@ export function ModelPicker({
         "overflow-visible min-w-0 " +
         (separatePills
           ? "inline-flex items-center gap-2"
-          : "inline-flex items-stretch rounded-lg border border-border-strong bg-bg-soft")
+          : "inline-flex items-stretch rounded-md border border-border-strong bg-bg-soft")
       }
     >
       {/* Model button — friendly name + Sparkles icon, opens the model list. */}
@@ -156,7 +156,7 @@ export function ModelPicker({
         <button
           className={
             "manta-model-picker-btn truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
-            (separatePills ? "rounded-lg border border-border-strong bg-bg-soft" : "")
+            (separatePills ? "rounded-md border border-border-strong bg-bg-soft" : "")
           }
           aria-haspopup="listbox"
           aria-expanded={modelOpen}
@@ -177,7 +177,7 @@ export function ModelPicker({
             variants show up in the effort button). */}
         {modelOpen && (
           <div
-            className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded border border-border bg-bg-elev shadow-md text-meta"
+            className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded-xs border border-border bg-bg-elev shadow-md text-meta"
           >
             <button
               onClick={() => {
@@ -243,7 +243,7 @@ export function ModelPicker({
             className={
               "manta-effort-picker-btn truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
               (separatePills
-                ? "rounded-lg border border-border-strong bg-bg-soft"
+                ? "rounded-md border border-border-strong bg-bg-soft"
                 : "border-l border-border-strong") +
               (effortDisabled ? " cursor-not-allowed" : "")
             }
@@ -272,7 +272,7 @@ export function ModelPicker({
               variants plus a "Default" (no variant) row. */}
           {variantOpen && variants.length > 0 && (
             <div
-              className="manta-effort-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[160px] rounded border border-border bg-bg-elev shadow-md text-meta"
+              className="manta-effort-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[160px] rounded-xs border border-border bg-bg-elev shadow-md text-meta"
             >
               <button
                 onClick={() => {

@@ -4,7 +4,7 @@
 // M527).
 //
 // As with Card, the primitive's "tokens" are class names that map through
-// tailwind.config.js to the design tokens (rounded → --r-xs 4px, p-1 → 4px
+// tailwind.config.js to the design tokens (rounded-xs → --r-xs 4px, p-1 → 4px
 // hit-area padding, text-text-faint → --tx3, hover:text-text → --tx1, the
 // arbitrary hover:bg-fill-hover → --fill-hover, outline-accent →
 // --accent). jsdom loads no stylesheet, so the contract is asserted on the
@@ -21,7 +21,7 @@ import { SessionHeader } from "./SessionHeader";
 // The exact chrome string IconButton owns (no className escape hatch means
 // every call site renders exactly this).
 const CHROME =
-  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded-xs p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 function buttonEl(h: Harness): HTMLButtonElement {
   const el = h.container.querySelector("button") as HTMLButtonElement;
@@ -43,11 +43,11 @@ describe("IconButton", () => {
   it("renders the square hit area, --r-xs radius, resting tx3→tx1 hover and --fill-hover bg per the contract", () => {
     h = mount(<IconButton label="Switch" icon={<Terminal />} />);
     const el = buttonEl(h);
-    // Square hit area (p-1) + --r-xs radius (rounded) + resting --tx3
+    // Square hit area (p-1) + --r-xs radius (rounded-xs) + resting --tx3
     // (text-text-faint) → --tx1 (hover:text-text) on hover with --fill-hover
     // bg, plus the --accent focus ring. All pinned as the exact class string.
     expect(el.className).toBe(CHROME);
-    expect(el.className).toContain("rounded");
+    expect(el.className).toContain("rounded-xs");
     expect(el.className).toContain("p-1");
     expect(el.className).toContain("text-text-faint");
     expect(el.className).toContain("hover:text-text");

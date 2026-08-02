@@ -3,7 +3,7 @@
 // Component tests for the Card chrome primitive (BET-531, stage 2 of M527).
 //
 // The primitive's "tokens" are class names that map through tailwind.config.js
-// to the design tokens (rounded-xl → --r-lg 12px, border-border → --border,
+// to the design tokens (rounded-lg → --r-lg 12px, border-border → --border,
 // bg-bg-soft → --card via the card-rgb channel, px-4/py-3 → sp-4/sp-3). jsdom
 // loads no stylesheet, so the contract is asserted on the exact class strings
 // — a retune of Card's chrome fails here immediately.
@@ -20,11 +20,11 @@ import { Card } from "./Card";
 import { PermissionCard, QuestionCard } from "./Cards";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 
-const CHROME = "rounded-xl border border-border bg-bg-soft px-4 py-3";
-const DANGER_CHROME = "rounded-xl border border-danger bg-danger-bg px-4 py-3";
+const CHROME = "rounded-lg border border-border bg-bg-soft px-4 py-3";
+const DANGER_CHROME = "rounded-lg border border-danger bg-danger-bg px-4 py-3";
 
 function chromeEl(h: Harness): HTMLElement {
-  const el = h.container.querySelector("div.rounded-xl") as HTMLElement;
+  const el = h.container.querySelector("div.rounded-lg") as HTMLElement;
   expect(el).toBeTruthy();
   return el;
 }

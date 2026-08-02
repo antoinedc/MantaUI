@@ -305,7 +305,7 @@ function ContextPill({
 
       {open && (
         <span
-          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-bg-elev shadow-md text-meta text-text"
+          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-80 rounded-md border border-border bg-bg-elev shadow-md text-meta text-text"
           // Stop the pill's onClick from toggling when interacting with the
           // popover contents (it's inside the button element).
           onClick={(e) => e.stopPropagation()}
@@ -321,7 +321,7 @@ function ContextPill({
             <SegmentedBar
               segments={segments}
               segColor={segColor}
-              className="inline-block w-full h-3 rounded overflow-hidden"
+              className="inline-block w-full h-3 rounded-xs overflow-hidden"
             />
           </div>
 
@@ -375,7 +375,7 @@ function ContextPill({
                   setOpen(false);
                   onClear();
                 }}
-                className="px-2 py-px rounded text-bg text-meta font-medium"
+                className="px-2 py-px rounded-xs text-bg text-meta font-medium"
                 style={{ backgroundColor: "var(--warn)" }}
               >
                 Clear session
@@ -402,7 +402,7 @@ function LegendRow({
   return (
     <div className="flex items-center gap-2">
       <span
-        className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
+        className="inline-block w-2.5 h-2.5 rounded-xs shrink-0"
         style={{ backgroundColor: color }}
       />
       <span className="text-text min-w-0">{label}</span>

@@ -231,7 +231,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
       <div
-        className="manta-folder-picker w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col bg-bg-elev border border-border rounded-xl shadow-lg overflow-hidden"
+        className="manta-folder-picker w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col bg-bg-elev border border-border rounded-lg shadow-lg overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -265,14 +265,14 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
             <div className="flex gap-2">
               <button
                 onClick={() => onSelect(fanOut.cwd)}
-                className="text-meta px-3 py-2 border border-border text-text-muted hover:text-text rounded"
+                className="text-meta px-3 py-2 border border-border text-text-muted hover:text-text rounded-xs"
               >
                 Just this folder
               </button>
               {onFanOut && (
                 <button
                   onClick={() => onFanOut(fanOut.cwd, fanOut.worktrees)}
-                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90"
+                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90"
                 >
                   One per worktree
                 </button>
@@ -290,7 +290,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
             {/* Path field with ghost-text completion + the design's Go button */}
             <div className="px-4 py-3 border-b border-border">
               <div className="flex gap-2">
-                <div className="relative flex-1 min-w-0 bg-bg-soft border border-border rounded focus-within:border-accent">
+                <div className="relative flex-1 min-w-0 bg-bg-soft border border-border rounded-xs focus-within:border-accent">
                   {suggestion && suggestion.startsWith(path) && (
                     <div
                       aria-hidden
@@ -335,13 +335,13 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                     }}
                     spellCheck={false}
                     autoComplete="off"
-                    className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded focus:outline-none font-mono"
+                    className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded-xs focus:outline-none font-mono"
                   />
                 </div>
                 <button
                   onClick={goNavigate}
                   type="button"
-                  className="shrink-0 px-4 text-meta border border-border rounded bg-bg-soft text-text hover:bg-bg-soft"
+                  className="shrink-0 px-4 text-meta border border-border rounded-xs bg-bg-soft text-text hover:bg-bg-soft"
                 >
                   Go
                 </button>
@@ -352,7 +352,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
               <div className="flex items-center flex-wrap gap-px mt-2 text-label">
                 <button
                   onClick={() => setPath("~")}
-                  className="inline-flex items-center px-1 py-px rounded text-text-faint hover:text-text"
+                  className="inline-flex items-center px-1 py-px rounded-xs text-text-faint hover:text-text"
                   title="Home"
                   aria-label="Home"
                 >
@@ -368,7 +368,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                     <button
                       onClick={() => setPath(c)}
                       className={
-                        "px-1 py-px rounded " +
+                        "px-1 py-px rounded-xs " +
                         (i === crumbs.length - 1
                           ? "font-semibold text-text"
                           : "text-text-faint hover:text-text-muted")
@@ -399,7 +399,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                       same as the breadcrumbs / up-arrow. */}
                   <button
                     onClick={goUp}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded text-text-muted hover:bg-bg-soft"
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs text-text-muted hover:bg-bg-soft"
                     title={parentPath(path)}
                   >
                     <ArrowUp size={14} className="shrink-0" aria-hidden="true" />
@@ -413,7 +413,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                         key={r.full}
                         onClick={() => descend(r.full)}
                         className={
-                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded " +
+                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs " +
                           (r.dimmed ? "text-text-quiet" : "text-text-muted") +
                           " hover:bg-bg-soft"
                         }
@@ -445,7 +445,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
                 </button>
                 <button
                   onClick={() => void select()}
-                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90"
+                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90"
                 >
                   Select folder
                 </button>

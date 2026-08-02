@@ -234,7 +234,7 @@ export function InputArea({
           padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row mx-4 mb-2 rounded-xl border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
+          "manta-composer-input-row mx-4 mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
           (voiceActive
             ? "manta-recording"
             : refreshing
@@ -383,7 +383,7 @@ export function InputArea({
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "px-2 py-px rounded inline-flex items-center gap-2 " +
+            "px-2 py-px rounded-xs inline-flex items-center gap-2 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-faint hover:text-text-muted")

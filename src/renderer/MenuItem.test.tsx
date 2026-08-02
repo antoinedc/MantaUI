@@ -6,7 +6,7 @@
 // As with Card/Field/Pill/IconButton, the primitive's "tokens" are class
 // names that map through tailwind.config.js to the design tokens
 // (bg-bg-elev → --panel, border-border → --border, shadow-md → --shadow-md,
-// rounded-lg → --r-md, bg-bg-soft → --card, text-text → --tx1,
+// rounded-md → --r-md, bg-bg-soft → --card, text-text → --tx1,
 // text-danger → --danger, bg-danger-bg → --danger-bg, text-accent → --accent,
 // text-label → 13px, px-2/py-2 → sp-2/sp-2). jsdom loads no stylesheet, so
 // the contract is asserted on the exact class strings — a retune of the
@@ -32,7 +32,7 @@ describe("Dropdown — the shared dropdown surface", () => {
     h = mount(<Dropdown>hello</Dropdown>);
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.getAttribute("role")).toBe("menu");
-    expect(el.className).toContain("rounded-lg");
+    expect(el.className).toContain("rounded-md");
     expect(el.className).toContain("border");
     expect(el.className).toContain("border-border");
     expect(el.className).toContain("bg-bg-elev");

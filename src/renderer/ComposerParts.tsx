@@ -36,7 +36,7 @@ export function SessionToolbar({
     <span className="flex items-center gap-2 text-meta">
       <button
         onClick={onSchedules}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center gap-1"
         title="View / cancel scheduled tasks"
         aria-label="schedules"
       >
@@ -49,7 +49,7 @@ export function SessionToolbar({
       </button>
       <button
         onClick={onSecrets}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center"
+        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
         title="Manage secrets the agent can use (values never enter the chat)"
         aria-label="secrets"
       >
@@ -57,7 +57,7 @@ export function SessionToolbar({
       </button>
       <button
         onClick={onWebhooks}
-        className="px-2 py-px rounded text-text-faint hover:text-text-muted inline-flex items-center"
+        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
         title="View / revoke inbound webhooks (external events that wake this session)"
         aria-label="webhooks"
       >
@@ -95,7 +95,7 @@ export function AttachmentStrip({
         return (
           <span
             key={a.id}
-            className={`rounded-md border px-2 py-px flex items-center gap-1 bg-bg-elev ${color}`}
+            className={`rounded-sm border px-2 py-px flex items-center gap-1 bg-bg-elev ${color}`}
             title={a.status === "error" ? a.errorMsg : a.remotePath}
           >
             {a.status === "uploading" && (
@@ -141,7 +141,7 @@ export function TypeaheadPopup({
 }) {
   return (
     <div
-      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-bg-soft text-meta font-mono shadow-md"
+      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-lg border border-border bg-bg-soft text-meta font-mono shadow-md"
     >
       {rows.length === 0 && (
         <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>

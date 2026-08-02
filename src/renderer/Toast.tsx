@@ -73,14 +73,14 @@ export function Toast({ toast, onDismiss }: ToastProps) {
   return (
     <div
       role="status"
-      className="w-full max-w-[420px] rounded-xl border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md"
+      className="w-full max-w-[420px] rounded-lg border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md"
     >
       <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{toast.message}</span>
       {toast.action && (
         <button
           onClick={toast.action.onClick}
           disabled={toast.action.disabled}
-          className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
+          className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
         >
           {toast.action.label}
         </button>

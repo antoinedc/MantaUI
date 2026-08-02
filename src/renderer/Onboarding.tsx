@@ -344,7 +344,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             />
             <div
               role="alert"
-              className="rounded-md border px-4 py-3 text-body"
+              className="rounded-sm border px-4 py-3 text-body"
               style={{ borderColor: DANGER, color: DANGER }}
             >
               {verifyError.message}
@@ -353,7 +353,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               <button
                 type="button"
                 onClick={() => void runVerify()}
-                className="px-4 py-2 rounded-md text-body font-medium"
+                className="px-4 py-2 rounded-sm text-body font-medium"
                 style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
               >
                 Try again
@@ -365,7 +365,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                   setVerifyError(null);
                   setPos(2);
                 }}
-                className="px-4 py-2 rounded-md text-body font-medium"
+                className="px-4 py-2 rounded-sm text-body font-medium"
                 style={{ border: `1px solid ${ACCENT}`, color: ACCENT }}
               >
                 Back to the provider step
@@ -373,7 +373,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               <button
                 type="button"
                 onClick={() => void copyVerifyDiagnostics()}
-                className="px-4 py-2 rounded-md text-body font-medium"
+                className="px-4 py-2 rounded-sm text-body font-medium"
                 style={{ border: `1px solid ${DANGER}`, color: DANGER }}
               >
                 Copy diagnostics
@@ -416,7 +416,7 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
       </p>
       <button
         onClick={onOpen}
-        className="inline-flex items-center gap-2 px-6 py-3 rounded-md text-body font-medium text-on-accent"
+        className="inline-flex items-center gap-2 px-6 py-3 rounded-sm text-body font-medium text-on-accent"
         style={{ background: ACCENT_SOLID }}
       >
         Open Manta

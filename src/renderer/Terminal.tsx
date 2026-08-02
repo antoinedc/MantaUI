@@ -452,7 +452,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
         onMouseDown={() => termRef.current?.focus()}
       />
       {(dragOver || uploading) && (
-        <div className="absolute inset-2 z-10 flex items-center justify-center rounded-md border-2 border-dashed border-accent bg-bg/70 text-text text-sm pointer-events-none">
+        <div className="absolute inset-2 z-10 flex items-center justify-center rounded-sm border-2 border-dashed border-accent bg-bg/70 text-text text-sm pointer-events-none">
           {uploading ? "Uploading…" : "Drop to share with Claude"}
         </div>
       )}

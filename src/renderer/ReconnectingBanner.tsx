@@ -51,7 +51,7 @@ export function ReconnectingBanner({ state, onRetryNow }: ReconnectingBannerProp
       </span>
       <button
         onClick={onRetryNow}
-        className="shrink-0 rounded bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
+        className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
         title="Reset backoff and reconnect immediately"
       >
         Retry now

@@ -164,7 +164,7 @@ describe("formatTokens", () => {
     expect(formatTokens(10_000)).toBe("10k tokens");
   });
 
-  it("shows rounded k at 100k and above", () => {
+  it("shows rounded-xs k at 100k and above", () => {
     expect(formatTokens(100_000)).toBe("100k tokens");
     expect(formatTokens(123_456)).toBe("123k tokens");
     expect(formatTokens(200_000)).toBe("200k tokens");
@@ -186,7 +186,7 @@ describe("formatBytes", () => {
     expect(formatBytes(1023)).toBe("1023 B");
   });
 
-  it("formats KB with one decimal under 10, rounded above", () => {
+  it("formats KB with one decimal under 10, rounded-xs above", () => {
     expect(formatBytes(1024)).toBe("1 KB");
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(20 * 1024)).toBe("20 KB");
@@ -274,7 +274,7 @@ describe("ctxStageColor", () => {
 // ===== formatModelContextSize =====
 
 describe("formatModelContextSize", () => {
-  it("formats a context limit as a rounded 'Nk' string", () => {
+  it("formats a context limit as a rounded-xs 'Nk' string", () => {
     expect(formatModelContextSize(1_000_000)).toBe("1000k");
     expect(formatModelContextSize(200_000)).toBe("200k");
     expect(formatModelContextSize(1_500)).toBe("2k");

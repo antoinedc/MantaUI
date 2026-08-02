@@ -59,7 +59,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
   return (
     <div
       ref={cardRef}
-      className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
@@ -70,7 +70,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
         {jobs.length > 0 && <span className="text-text-faint">· {jobs.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
           aria-label="Close"
         >
@@ -108,7 +108,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
                 </div>
                 <button
                   onClick={() => onDelete(j.id)}
-                  className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
+                  className="shrink-0 px-2 py-px rounded-xs text-danger hover:bg-danger-bg border border-danger/30 text-label"
                   title="Cancel this scheduled task"
                 >
                   Cancel
@@ -161,7 +161,7 @@ export const WebhooksCard = memo(function WebhooksCard({
   return (
     <div
       ref={cardRef}
-      className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
@@ -172,7 +172,7 @@ export const WebhooksCard = memo(function WebhooksCard({
         {hooks.length > 0 && <span className="text-text-faint">· {hooks.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close (or click outside)"
           aria-label="Close"
         >
@@ -226,7 +226,7 @@ export const WebhooksCard = memo(function WebhooksCard({
                 </div>
                 <button
                   onClick={() => onDelete(h.id)}
-                  className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 text-label"
+                  className="shrink-0 px-2 py-px rounded-xs text-danger hover:bg-danger-bg border border-danger/30 text-label"
                   title="Revoke this webhook (further POSTs will 404)"
                 >
                   Revoke
@@ -302,7 +302,7 @@ export const SecretsCard = memo(function SecretsCard({
 
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-2">
@@ -313,7 +313,7 @@ export const SecretsCard = memo(function SecretsCard({
         {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
         <button
           onClick={onClose}
-          className="ml-auto px-1 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-1 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
           aria-label="Close"
         >
@@ -331,14 +331,14 @@ export const SecretsCard = memo(function SecretsCard({
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            className={`min-w-0 flex-1 rounded border bg-bg px-2 py-1 font-mono text-text outline-none ${
+            className={`min-w-0 flex-1 rounded-xs border bg-bg px-2 py-1 font-mono text-text outline-none ${
               key && !keyValid ? "border-danger/60" : "border-border"
             }`}
           />
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as SecretScope)}
-            className="rounded border border-border bg-bg px-2 py-1 text-text outline-none"
+            className="rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
             title="shared = every session · project = every chat in this workspace · session = only this chat"
           >
             <option value="shared">shared</option>
@@ -360,19 +360,19 @@ export const SecretsCard = memo(function SecretsCard({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="w-full rounded border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
+          className="w-full rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
         />
         <div className="flex flex-wrap gap-2">
           <input
             value={hint}
             onChange={(e) => setHint(e.target.value)}
             placeholder="hint for the agent (optional, e.g. 'git push token')"
-            className="min-w-0 flex-1 rounded border border-border bg-bg px-2 py-1 text-text outline-none"
+            className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
           />
           <button
             onClick={submit}
             disabled={!canSave}
-            className="shrink-0 px-2 py-1 rounded border disabled:opacity-40"
+            className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40"
             style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
             title="Store this secret on the box"
           >
@@ -425,7 +425,7 @@ export const SecretsCard = memo(function SecretsCard({
               </div>
               <button
                 onClick={() => onDelete(s.id)}
-                className="shrink-0 px-2 py-px rounded text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
+                className="shrink-0 px-2 py-px rounded-xs text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
                 title="Delete this secret"
                 aria-label="Delete this secret"
               >
@@ -467,7 +467,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
   }, [approval.id]);
   return (
     <div
-      className="rounded-md border bg-bg-elev px-3 py-2 text-meta"
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-1">
@@ -478,7 +478,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
         <span className="text-text-faint truncate">· {approval.name}</span>
         <button
           onClick={onDecline}
-          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Not now (decline)"
           aria-label="Not now"
         >
@@ -496,7 +496,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
               {editing ? (
                 <>
                   <input
-                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-2 py-px font-mono text-text"
+                    className="flex-1 min-w-0 rounded-xs border border-border bg-bg-soft px-2 py-px font-mono text-text"
                     value={t.permission}
                     onChange={(e) =>
                       setTools((prev) =>
@@ -506,7 +506,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
                     placeholder="permission"
                   />
                   <input
-                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-2 py-px font-mono text-text"
+                    className="flex-1 min-w-0 rounded-xs border border-border bg-bg-soft px-2 py-px font-mono text-text"
                     value={t.pattern}
                     onChange={(e) =>
                       setTools((prev) =>
@@ -517,7 +517,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
                   />
                   <button
                     onClick={() => setTools((prev) => prev.filter((_, j) => j !== i))}
-                    className="shrink-0 px-1 rounded text-danger hover:bg-danger-bg border border-danger/30"
+                    className="shrink-0 px-1 rounded-xs text-danger hover:bg-danger-bg border border-danger/30"
                     title="Remove"
                   >
                     <X size={12} aria-hidden="true" />
@@ -546,7 +546,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
       <div className="flex items-center gap-2">
         <button
           onClick={() => onApprove(tools)}
-          className="px-3 py-1 rounded text-bg font-medium"
+          className="px-3 py-1 rounded-xs text-bg font-medium"
           style={{ backgroundColor: "var(--accent)" }}
           title="Start the job with this access"
         >
@@ -554,13 +554,13 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
         </button>
         <button
           onClick={() => setEditing((v) => !v)}
-          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft"
+          className="px-2 py-1 rounded-xs border border-border-strong text-text hover:bg-bg-soft"
         >
           {editing ? "Done editing" : "Edit access"}
         </button>
         <button
           onClick={onDecline}
-          className="px-2 py-1 rounded text-text-faint hover:text-text-muted"
+          className="px-2 py-1 rounded-xs text-text-faint hover:text-text-muted"
         >
           Not now
         </button>
@@ -612,7 +612,7 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
       <div className="flex items-center gap-2 mt-2">
         <button
           onClick={onGoToParent}
-          className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
+          className="px-2 py-1 rounded-xs border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
           title="Go to the parent session"
         >
           <ArrowLeft size={12} aria-hidden="true" /> Go to parent
@@ -620,7 +620,7 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
         {!terminal && (
           <button
             onClick={onStop}
-            className="px-2 py-1 rounded text-warn hover:bg-warn-bg border border-warn/30 inline-flex items-center gap-1"
+            className="px-2 py-1 rounded-xs text-warn hover:bg-warn-bg border border-warn/30 inline-flex items-center gap-1"
             title="Stop this job"
           >
             <Square size={12} aria-hidden="true" /> Stop

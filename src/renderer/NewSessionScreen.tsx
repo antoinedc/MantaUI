@@ -408,7 +408,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         <div className="flex items-center gap-2 self-start">
           <button
             onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-lg border border-border bg-bg-soft shadow-sm text-body text-text hover:border-border-strong"
+            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-md border border-border bg-bg-soft shadow-sm text-body text-text hover:border-border-strong"
             title={cwd || "Select folder"}
           >
             <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
@@ -416,7 +416,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" />
           </button>
 
-          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-bg-soft shadow-sm text-body overflow-hidden">
+          <div className="inline-flex items-center h-9 rounded-md border border-border bg-bg-soft shadow-sm text-body overflow-hidden">
             {wantWorktree && isGitRepo ? (
               // BET-417 §A: "Ticking worktree makes the branch field
               // editable." The typed value is passed as `name` to
@@ -466,7 +466,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             can grow downward without moving it. */}
         <div
           className={
-            "manta-composer-input-row rounded-xl border bg-bg-soft flex items-start gap-2 px-4 py-3 " +
+            "manta-composer-input-row rounded-lg border bg-bg-soft flex items-start gap-2 px-4 py-3 " +
             (voiceRecording
               ? "manta-recording"
               : "border-border")
@@ -495,7 +495,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                   ? "Start a session"
                   : "Describe a task to start"
             }
-            className="shrink-0 w-9 h-9 rounded-lg border border-border bg-bg-elev text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
+            className="shrink-0 w-9 h-9 rounded-md border border-border bg-bg-elev text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
           >
             {sending ? (
               <Loader2 size={16} className="animate-spin" aria-hidden="true" />
@@ -580,7 +580,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
       {fanOutWorktrees && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-xl shadow-lg p-4 space-y-3">
+          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-lg shadow-lg p-4 space-y-3">
             <div className="text-body font-semibold text-text">Fan-out confirmed</div>
             <div className="text-meta text-text-muted">
               Creating one session with {fanOutWorktrees.length} windows (one per
@@ -598,7 +598,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               <button
                 onClick={() => void submitFanOut(cwd, fanOutWorktrees)}
                 disabled={sending}
-                className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded hover:opacity-90 disabled:opacity-50"
+                className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90 disabled:opacity-50"
               >
                 {sending ? "Creating…" : "Create"}
               </button>

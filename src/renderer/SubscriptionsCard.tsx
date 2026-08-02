@@ -98,7 +98,7 @@ export function SubscriptionsCard() {
       {error && <div className="text-meta text-danger break-words">{error}</div>}
 
       {(statuses ?? []).map((s) => (
-        <div key={s.id} className="border border-border rounded p-2 space-y-2">
+        <div key={s.id} className="border border-border rounded-xs p-2 space-y-2">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
               <div className="text-body text-text truncate">
@@ -121,7 +121,7 @@ export function SubscriptionsCard() {
                   <button
                     onClick={() => void disconnect(s.id)}
                     disabled={busy !== null}
-                    className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded text-danger hover:text-danger disabled:opacity-40"
+                    className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded-xs text-danger hover:text-danger disabled:opacity-40"
                   >
                     {busy === s.id ? "…" : "Disconnect"}
                   </button>
@@ -137,7 +137,7 @@ export function SubscriptionsCard() {
                 <button
                   onClick={() => setDisconnectConfirmId(s.id)}
                   disabled={busy !== null || connectingId !== null}
-                  className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                  className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
                 >
                   Disconnect
                 </button>
@@ -149,7 +149,7 @@ export function SubscriptionsCard() {
                   setConnectingId(s.id);
                 }}
                 disabled={busy !== null || connectingId !== null}
-                className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
               >
                 Connect
               </button>

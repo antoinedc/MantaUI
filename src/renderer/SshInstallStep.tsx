@@ -594,7 +594,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               setTargetError(null);
             }}
             disabled={running || claimRunning}
-            className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+            className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
           >
             {hosts.map((h) => (
               <option key={h.alias} value={h.alias}>
@@ -610,7 +610,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             disabled={hostsLoading || running || claimRunning}
             aria-label="Refresh host list"
             title="Re-read ~/.ssh/config"
-            className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-md bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+            className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-sm bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
           >
             <svg
               viewBox="0 0 24 24"
@@ -642,7 +642,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             the list is ready. No second host control ever coexists with
             the select either way. */}
         {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
-          <div className="rounded-md border border-border bg-bg-soft p-4 space-y-3">
+          <div className="rounded-sm border border-border bg-bg-soft p-4 space-y-3">
             <div className="grid grid-cols-[1fr_90px] gap-3">
               <div className="flex flex-col gap-1">
                 <label
@@ -661,7 +661,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
               <div className="flex flex-col gap-1">
@@ -682,7 +682,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
             </div>
@@ -704,7 +704,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                     setTargetError(null);
                   }}
                   disabled={running || claimRunning}
-                  className="w-full rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
               </div>
               <div className="flex flex-col gap-1">
@@ -731,7 +731,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                       setTargetError(null);
                     }}
                     disabled={running || claimRunning}
-                    className="flex-1 min-w-0 rounded-md bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                    className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                   />
                   <button
                     type="button"
@@ -743,7 +743,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                       }
                     }}
                     disabled={running || claimRunning}
-                    className="shrink-0 px-3 py-2 rounded-md text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+                    className="shrink-0 px-3 py-2 rounded-sm text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
                   >
                     Browse
                   </button>
@@ -776,7 +776,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           <button
             onClick={startInstall}
             disabled={installDisabled}
-            className="px-4 py-2 rounded-md text-body font-medium disabled:opacity-50"
+            className="px-4 py-2 rounded-sm text-body font-medium disabled:opacity-50"
             style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
           >
             {running ? "Installing…" : "Install & pair"}
@@ -784,7 +784,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           {running && (
             <button
               onClick={cancelInstall}
-              className="px-4 py-2 rounded-md text-body font-medium"
+              className="px-4 py-2 rounded-sm text-body font-medium"
               style={{ border: `1px solid ${DANGER}`, color: DANGER }}
             >
               Cancel
@@ -801,7 +801,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
             {preflightFailure.failures.map((f, i) => (
               <li
                 key={i}
-                className="rounded-md px-3 py-2"
+                className="rounded-sm px-3 py-2"
                 style={{ border: `1px solid ${DANGER}`, color: DANGER }}
               >
                 <div className="font-medium">{f.cause}</div>
@@ -837,7 +837,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               attention until the user answers. */}
           {fingerprintPrompt && (
             <div
-              className="rounded-md p-4 space-y-3"
+              className="rounded-sm p-4 space-y-3"
               style={{ border: `1px solid ${ACCENT}` }}
             >
               <div className="text-body font-medium">Trust this host?</div>
@@ -846,7 +846,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                 {fingerprintPrompt.algo} key fingerprint is:
               </p>
               <code
-                className="block text-meta font-mono break-all rounded px-2 py-2 bg-bg-elev"
+                className="block text-meta font-mono break-all rounded-xs px-2 py-2 bg-bg-elev"
                 style={{ color: ACCENT }}
               >
                 {fingerprintPrompt.sha256}
@@ -859,14 +859,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               <div className="flex gap-2 pt-px">
                 <button
                   onClick={() => void trustHostDecision(true)}
-                  className="px-3 py-2 rounded-md text-body font-medium"
+                  className="px-3 py-2 rounded-sm text-body font-medium"
                   style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                 >
                   Trust &amp; continue
                 </button>
                 <button
                   onClick={() => void trustHostDecision(false)}
-                  className="px-3 py-2 rounded-md text-body font-medium"
+                  className="px-3 py-2 rounded-sm text-body font-medium"
                   style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                 >
                   Don't trust
@@ -880,7 +880,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               file for every ssh invocation in the rest of the flow. */}
           {passphrasePrompt && (
             <div
-              className="rounded-md p-4 space-y-3"
+              className="rounded-sm p-4 space-y-3"
               style={{ border: `1px solid ${ACCENT}` }}
             >
               <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
@@ -902,14 +902,14 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   onChange={(e) => setPassphraseInput(e.target.value)}
                   autoFocus
                   placeholder="Passphrase"
-                  className="w-full rounded-md px-3 py-2 text-body bg-bg-elev"
+                  className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
                   style={{ border: `1px solid ${ACCENT}` }}
                 />
                 <div className="flex gap-2 pt-px">
                   <button
                     type="submit"
                     disabled={passphraseInput.length === 0}
-                    className="px-3 py-2 rounded-md text-body font-medium disabled:opacity-40"
+                    className="px-3 py-2 rounded-sm text-body font-medium disabled:opacity-40"
                     style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
                   >
                     Unlock &amp; continue
@@ -917,7 +917,7 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
                   <button
                     type="button"
                     onClick={() => void submitPassphrase(false)}
-                    className="px-3 py-2 rounded-md text-body font-medium"
+                    className="px-3 py-2 rounded-sm text-body font-medium"
                     style={{ border: `1px solid ${DANGER}`, color: DANGER }}
                   >
                     Cancel
