@@ -19,8 +19,8 @@
 export type DemoLayout = "desktop" | "mobile";
 
 export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
-  if (params.has("desktop")) return "desktop";
-  if (params.has("mobile")) return "mobile";
+  if (params.get("desktop") !== null) return "desktop";
+  if (params.get("mobile") !== null) return "mobile";
   return null;
 }
 
@@ -40,7 +40,23 @@ export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
 // "version-skew" — minClient raised above the client so the non-dismissible
 //                  version-skew banner renders (the first non-happy-path
 //                  capture).
-export const DEMO_STATES = ["full", "empty", "version-skew"] as const;
+// "reconnecting"  — the events-WebSocket reports a degraded connection state
+//                  so the reconnecting banner renders (the top-severity bar).
+// "incompatible"  — the box is on a different major than the desktop so the
+//                  wire-contract incompatibility card renders.
+// "update-failed" — the desktop auto-update reports an integrity/permission
+//                  failure so the update-failed banner renders.
+// "server-update" — the box is older than the desktop on the same major so
+//                  the "Box needs an upgrade" (server-update) card renders.
+export const DEMO_STATES = [
+  "full",
+  "empty",
+  "version-skew",
+  "reconnecting",
+  "incompatible",
+  "update-failed",
+  "server-update",
+] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 
 /** `?demo&state=<name>`. An unknown or absent value falls back to "full", so

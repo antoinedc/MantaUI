@@ -149,6 +149,71 @@ export const SCREENS = [
     ],
   },
   {
+    // The reconnecting banner (top-severity bar) — driven by the demo state
+    // selector reporting a degraded events-WebSocket connection. No design
+    // exists; `null` is the registry's documented way to say so.
+    id: "session-reconnecting",
+    title: "Session view with the reconnecting banner (state)",
+    url: "/app/index.html?demo&desktop&state=reconnecting",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The incompatible (wire-contract) card — driven by the box being on a
+    // different major than the desktop. No design exists.
+    id: "session-incompatible",
+    title: "Session view with the incompatible banner (state)",
+    url: "/app/index.html?demo&desktop&state=incompatible",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The update-failed banner — driven by the fake transport reporting an
+    // auto-update integrity failure. No design exists.
+    id: "session-update-failed",
+    title: "Session view with the update-failed banner (state)",
+    url: "/app/index.html?demo&desktop&state=update-failed",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // The server-update "Box needs an upgrade" card — driven by the box being
+    // older than the desktop on the same major. No design exists.
+    id: "session-server-update",
+    title: "Session view with the server-update banner (state)",
+    url: "/app/index.html?demo&desktop&state=server-update",
+    ready: '[data-screen="session"]',
+    final: '[data-screen="session"]',
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
     // REGION ROWS for the session view (BET-468). The header strip and the
     // composer each own a small baseline, so two issues touching different
     // session components land in parallel instead of contending over
