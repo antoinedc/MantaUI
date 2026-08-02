@@ -40,7 +40,6 @@ describe("Chip", () => {
     void <Chip className="bg-red-500">x</Chip>;
     expect(true).toBe(true);
   });
-
   it("renders the shell + pad + rest chrome when off", () => {
     h = mount(<Chip>Hello</Chip>);
     expect(button(h).className).toBe(`${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST}`);
@@ -81,15 +80,7 @@ describe("SplitChip", () => {
 
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
     // @ts-expect-error — SplitChip must NOT accept className (M527 decision 3)
-    void (
-      <SplitChip
-        left={<>l</>}
-        right={<>r</>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        className="bg-red-500"
-      />
-    );
+    void <SplitChip left={<>l</>} right={<>r</>} onLeftClick={() => {}} onRightClick={() => {}} className="bg-red-500" />;
     expect(true).toBe(true);
   });
 
