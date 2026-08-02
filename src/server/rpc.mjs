@@ -625,6 +625,9 @@ export function buildHandlers({
         const id = String(req?.id ?? "");
         const entry = subscriptionProviders.findSubscriptionProvider(id);
         if (!entry) {
+          console.warn(
+            `[provider-auth] ${id}: not a known subscription provider — falling back to the API-key form`,
+          );
           return { action: "start", shape: "api-key" };
         }
         const auth = await oc.listProviderAuthMethods();
@@ -637,20 +640,48 @@ export function buildHandlers({
           // No OAuth / no usable method → the renderer switches to the
           // API-key form (Kimi path). Mirrors the "use the generic API-key
           // path" contract in resolveAuthMethod's docstring.
+          //
+          // For anthropic this almost always means the opencode-claude-auth
+          // plugin did not load (it is what advertises the "Switch Claude
+          // Code account" oauth method), so say so — this branch used to be
+          // silent and the resulting API-key prompt was undiagnosable.
+          console.warn(
+            `[provider-auth] ${id}: no auth method resolved from ${
+              methods ? `${methods.length} advertised method(s)` : "no /provider/auth entry"
+            } — falling back to the API-key form`,
+          );
           return { action: "start", shape: "api-key" };
         }
         const oauth = await oc.startProviderOauth(id, resolved.index);
-        if (!oauth?.ok) {
-          return {
-            action: "start",
-            shape: "api-key",
-          };
-        }
+        // A FRESH box has no ~/.claude/.credentials.json yet, and the Claude
+        // auth plugin's authorize() throws when it has no account to switch
+        // to (it indexes accounts[0] on an empty list). That is EXACTLY the
+        // state the claude-login flow exists to resolve — it runs
+        // `claude auth login` ON the box to CREATE those credentials — so
+        // returning the API-key form here was a catch-22: the only path that
+        // can connect a Claude subscription was unreachable until you were
+        // already connected. Every fresh box hit it.
+        //
+        // So do not bail on a failed authorize. Ask describeConnectShape with
+        // a null authorize response: for anthropic + a resolved oauth method
+        // it yields "claude-login" (pinned by
+        // `describeConnectShape(r, null, "anthropic")` in
+        // subscriptionProviders.test.mjs). A provider that genuinely has no
+        // OAuth to offer still falls through to the key form below.
+        const authorize = oauth?.ok ? oauth : null;
         const shape = subscriptionProviders.describeConnectShape(
           resolved,
-          oauth,
+          authorize,
           id,
         );
+        if (!authorize && shape !== "claude-login") {
+          console.warn(
+            `[provider-auth] ${id}: authorize failed (${
+              oauth?.error ?? "no response"
+            }) and shape=${shape} — falling back to the API-key form`,
+          );
+          return { action: "start", shape: "api-key" };
+        }
         // BET-354: when describeConnectShape returns "claude-login", we
         // also need to spawn `claude auth login` on the box. The renderer
         // will drive it via the existing pty bus + the new
@@ -663,8 +694,8 @@ export function buildHandlers({
         return {
           action: "start",
           shape,
-          url: oauth.url || undefined,
-          instructions: oauth.instructions || undefined,
+          url: authorize?.url || undefined,
+          instructions: authorize?.instructions || undefined,
           methodIndex: resolved.index,
         };
       }
