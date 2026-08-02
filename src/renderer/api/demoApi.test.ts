@@ -23,6 +23,7 @@ import { demoState } from "./demoFixture.js";
 import { demoApi } from "./demoApi.js";
 import {
   DEMO_STREAM_PHASES,
+  buildStreamAdvanceEnvelopes,
   installDemoStreamWindow,
   revealedAssistantPartCount,
   revealedTranscript,
@@ -230,6 +231,56 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
 
   it("exposes exactly the three named phases early/mid/late", () => {
     expect(DEMO_STREAM_PHASES).toEqual(["early", "mid", "late"]);
+  });
+
+  it("emits the box-derived interpreted envelopes for the in-flight turn (S1c — demo mirrors streamInterp.mjs)", () => {
+    // The demo owns its stream and, like the fixture, only ever emits raw
+    // `message.updated` for the in-flight turn — never a `session.status busy`.
+    // A real streamInterp over that sequence keeps `running` false and reports
+    // a not-complete turn, so the demo's interpreted envelopes must match:
+    // emitting `running:true` here would flip the composer to its running state
+    // and move every committed visual baseline. A `flush` for the assistant's
+    // text part is included so the interpreted text path + latency probe fires;
+    // that part is never revealed by the phase fractions, so the flush is
+    // unmatched/discarded and cannot shift a baseline.
+    const envs = buildStreamAdvanceEnvelopes(demoState.activeSessionId!);
+    const assistant = demoState.messages.find(
+      (m) => m.info.role === "assistant" && !m.info.time?.completed,
+    )!;
+    const textPart = assistant.parts.find(
+      (p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string",
+    )!;
+    expect(envs).toEqual([
+      {
+        sub: "flush",
+        sessionId: demoState.activeSessionId,
+        payload: {
+          messageID: assistant.info.id,
+          partID: (textPart as { id: string }).id,
+          field: "text",
+          text: (textPart as { text: string }).text,
+        },
+      },
+      { sub: "running", sessionId: demoState.activeSessionId, payload: { running: false } },
+      {
+        sub: "turnComplete",
+        sessionId: demoState.activeSessionId,
+        payload: { complete: false, running: false },
+      },
+    ]);
+  });
+
+  it("exposes the last latency measurement on the window handle in the stream state (S1c §17)", () => {
+    // The harness window handle must expose `latency` so the first-token→
+    // rendered number is readable/reproducible outside the app — not just held
+    // in module-private state. Non-stream states still install nothing.
+    const win: { __mantaDemoStream?: { latency?: unknown } } = {};
+    const set = installDemoStreamWindow("stream", win);
+    expect(set).toBe(true);
+    expect(typeof win.__mantaDemoStream?.latency).toBe("object");
+    // And a non-stream state installs nothing (no latency surface either).
+    const win2: { __mantaDemoStream?: unknown } = {};
+    expect(installDemoStreamWindow("full", win2)).toBe(false);
   });
 
   it("installs the window handle ONLY in the stream state — undefined elsewhere (DoD 5)", () => {

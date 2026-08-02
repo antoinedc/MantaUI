@@ -38,6 +38,7 @@ import type { AvailableLauncher, OpencodeMessage, WorktreeInfo } from "../../sha
 import { demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
+import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
 
 // Resolved once at module load — the demo transport is only ever imported
 // from bootDemo(), which has already decided we are in demo mode. The state
@@ -104,6 +105,11 @@ let streamStep: number = DEMO_STREAM_PHASE_STEPS.early;
 let streamPending = false;
 let streamServed = false;
 const opencodeListeners = new Set<(ev: unknown) => void>();
+// Box-derived interpreted event subscribers (stream.running, stream.turnComplete…).
+// Mirrors httpApi's `onStreamEvent` (`/events` `kind:"stream"`), delivering the
+// `{ sub, sessionId, payload }` envelope so useSseBus's interpreted consumer
+// (S1b) is exercised by the demo too, not just a live box.
+const streamListeners = new Set<(ev: { sub: string; sessionId: string; payload: unknown }) => void>();
 
 function phaseForStep(step: number): string {
   const entries = Object.entries(DEMO_STREAM_PHASE_STEPS);
@@ -146,10 +152,66 @@ export function revealedTranscript(step: number): OpencodeMessage[] {
   return shown;
 }
 
+/** The in-flight assistant's text part (the one a real box would stream via
+ *  `stream.flush`). Never revealed by the phase fractions (see
+ *  `revealedAssistantPartCount`), so a flush for it is always *unmatched* in
+ *  the renderer and its text is discarded — exercising the interpreted
+ *  `stream.flush` path + latency instrumentation without moving any baseline. */
+function streamTextFlushPayload(): { messageID: string; partID: string; text: string } {
+  const assistant = demoState.messages.find(
+    (m) => m.info.role === "assistant" && !m.info.time?.completed,
+  );
+  const textPart = assistant?.parts.find(
+    (p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string",
+  );
+  return {
+    messageID: assistant?.info?.id ?? "",
+    partID: (textPart as { id?: string } | undefined)?.id ?? "",
+    text: (textPart as { text?: string } | undefined)?.text ?? "",
+  };
+}
+
+/** The box-derived interpreted envelopes that a real streamInterp would emit
+ *  for the demo's raw event sequence on a phase advance: the streaming `flush`
+ *  for the in-flight assistant's text, a `running` and a not-complete
+ *  `turnComplete`. The demo owns the stream and, like the fixture, only ever
+ *  emits `message.updated` for the in-flight turn — it never emits a
+ *  `session.status busy`, so the interpreter's `running` flag stays `false`.
+ *  Mirroring that exact semantics (rather than hand-asserting `running:true`)
+ *  is what keeps the demo's rendered state identical to the committed
+ *  baseline: the composer stays in its idle state, the assistant turn reports
+ *  `complete:false`, and the flush's text targets a part the phases never
+ *  reveal (so it is applied to nothing). Pure so the emission shape is
+ *  assertable without booting React. */
+export function buildStreamAdvanceEnvelopes(
+  sessionId: string,
+): Array<{ sub: string; sessionId: string; payload: unknown }> {
+  const flush = streamTextFlushPayload();
+  return [
+    {
+      sub: "flush",
+      sessionId,
+      payload: {
+        messageID: flush.messageID,
+        partID: flush.partID,
+        field: "text",
+        text: flush.text,
+      },
+    },
+    { sub: "running", sessionId, payload: { running: false } },
+    { sub: "turnComplete", sessionId, payload: { complete: false, running: false } },
+  ];
+}
+
 /** `advance()` — move the stepped stream to its next named phase and tell
- *  every live assembler subscriber the in-flight message grew, so the
- *  rendered transcript follows without a navigation. No-op once `late` is
- *  reached. */
+ *  every live subscriber the in-flight message grew, so the rendered
+ *  transcript follows without a navigation. No-op once `late` is reached.
+ *
+ *  The demo mirrors the box here: it emits BOTH the raw opencode event that
+ *  reveals new canonical message parts (the box forwards the raw stream; the
+ *  renderer's spliceMessage → opencodeMessage refetch is how new tool parts
+ *  appear on a live box too) AND the box-derived interpreted envelopes
+ *  (running / turnComplete) consumed via onStreamEvent. */
 function streamAdvance(): void {
   const next = nextPhaseStep(streamStep);
   if (next == null) return;
@@ -157,19 +219,28 @@ function streamAdvance(): void {
   streamPending = true;
   streamServed = false;
   const assistant = demoState.messages.find((m) => m.info.role === "assistant");
+  const sessionId = demoState.activeSessionId;
   const ev = {
     type: "message.updated",
     properties: {
-      sessionID: demoState.activeSessionId,
+      sessionID: sessionId,
       messageID: assistant?.info?.id ?? "",
     },
   };
   for (const cb of opencodeListeners) cb(ev);
+  for (const env of buildStreamAdvanceEnvelopes(sessionId)) {
+    for (const cb of streamListeners) cb(env);
+  }
 }
 
 /** Install the harness window handle. Exported+pure so a test can assert the
  *  "undefined in every state except stream" contract without booting React or
- *  re-pointing window.location. Returns whether the flag was set. */
+ *  re-pointing window.location. Returns whether the flag was set.
+ *
+ *  Besides the phase-stepping surface it exposes `latency` — the most recent
+ *  first-token→rendered measurement from firstTokenLatency — so a probe or
+ *  the visual harness can read the number the demo actually produced (BET-553
+ *  §17), rather than the number being unreproducible from outside. */
 export function installDemoStreamWindow(
   state: DemoState,
   win: { __mantaDemoStream?: unknown },
@@ -187,6 +258,9 @@ export function installDemoStreamWindow(
     get served() {
       return streamServed;
     },
+    get latency() {
+      return lastMeasurement();
+    },
   };
   return true;
 }
@@ -196,6 +270,17 @@ export function installDemoStreamWindow(
 // keeps it out of every other demo state — no production path can reach it.
 if (typeof window !== "undefined") {
   installDemoStreamWindow(DEMO_STATE, window);
+}
+
+// The demo build is the consumer that makes the "logs the measurement to the
+// console" claim in firstTokenLatency.ts true: every completed first-token
+// measurement (interpreted flush or raw opencode event) is printed, so the §17
+// number is observable in a demo run and reproducible by a probe reading it.
+if (DEMO_STATE === "stream" && typeof window !== "undefined") {
+  onMeasurement(({ path, ms }) => {
+    // eslint-disable-next-line no-console
+    console.info(`[demo first-token-latency] ${path}: ${ms.toFixed(2)} ms`);
+  });
 }
 
 // ===========================================================================
@@ -310,12 +395,20 @@ const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
   return () => {};
 };
 
-// Box-interpreted stream events (BET-551 / §17) never reach the demo: the
-// demo fixture drives the `stream` state through onOpencodeEvent
-// (message.updated → splice) instead, and the Proxy fallback would also serve
-// a benign no-op. Declared explicitly so the coverage test records the
-// subscription as intentionally stubbed rather than silently absent.
-const onStreamEvent = (_cb: unknown): (() => void) => () => {};
+// Box-interpreted stream events (BET-551 / §17). In the `stream` state the
+// demo registers the renderer's onStreamEvent consumer and drives it with the
+// same derived envelopes the box emits on advance (see buildStreamAdvanceEnvelopes),
+// so the renderer's interpreted consumption path (useSseBus's `stream.*`
+// switch, added S1b) is exercised by the demo too. Every other state is the
+// pre-existing no-op — the Proxy fallback would also serve one.
+const onStreamEvent = (cb: (ev: unknown) => void): (() => void) => {
+  if (isStream) {
+    streamListeners.add(cb as (ev: { sub: string; sessionId: string; payload: unknown }) => void);
+    return () =>
+      streamListeners.delete(cb as (ev: { sub: string; sessionId: string; payload: unknown }) => void);
+  }
+  return () => {};
+};
 
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
