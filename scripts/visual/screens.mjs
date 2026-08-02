@@ -391,6 +391,42 @@ export const SCREENS = [
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
+    // Folder picker — the LAST designed screen with no mockup and no gate
+    // (BET-562). Opened by the same click a person makes: the folder chip on
+    // the new-session welcome screen. The zero-project demo state reaches it
+    // with one click and no session setup. The picker is local component
+    // state, not a route, so `snapshot` (not `ready`) is the structure root —
+    // `ready` only gates boot and would otherwise record the welcome text
+    // node, a one-line "contract" that would accept any regression.
+    id: "folder-picker",
+    title: "Folder picker modal (opened from the new-session folder chip)",
+    url: "/app/index.html?demo&desktop&state=empty",
+    ready: '[data-screen="welcome"]',
+    final: ".manta-folder-picker",
+    snapshot: ".manta-folder-picker",
+    actions: async (page) => {
+      // Click the folder chip to open the picker…
+      await page
+        .locator('[data-screen="welcome"]')
+        .getByRole("button", { name: "Home" })
+        .click();
+      await page.waitForSelector(".manta-folder-picker", { state: "visible" });
+      // …then click one folder row. The empty-state path is literally "~",
+      // which Playwright serialises as `textbox: ~` — YAML's null literal,
+      // which its aria snapshot rejects with "Node value should be a string
+      // or a sequence". Descending a level (a real user gesture) puts a real
+      // path in the field so the structure contract rooted at the modal
+      // round-trips (BET-562).
+      await page
+        .locator(".manta-folder-picker")
+        .getByRole("button", { name: "projects" })
+        .click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: "docs/screens/folder-picker/mockup.html",
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
+  },
+  {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes
     // (BET-467). It is closed in every other captured state, so without this
     // row the launcher entries appear in no capture at all — the gap that let

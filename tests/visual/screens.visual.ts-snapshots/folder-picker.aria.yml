@@ -1,0 +1,13 @@
+- text: Choose a folder
+- button "Close"
+- textbox: ~/projects/
+- button "Go up one level"
+- button "~"
+- button "projects"
+- button ".."
+- button "ethernal"
+- button "marketing"
+- button "infra"
+- text: not a git repo
+- button "Cancel"
+- button "Select folder"

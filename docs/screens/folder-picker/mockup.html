@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Folder picker / file browser</title>
+
+<!--
+  THE SPEC for the folder picker. This file is the design contract, not a
+  picture of one. Read docs/visual-verification.md before editing.
+
+  Extracted from the redesign spec §07 (docs/screens/redesign-spec.html, the
+  committed archive) and re-graded onto the app's on-grid token scale. The
+  spec's demo values that exist only to frame the block inside the spec page
+  (height:520px frame, width:min(540px,100%)) are stripped; the modal itself
+  is kept. Off-grid values inside the modal (see the spec-notes paragraph at
+  the bottom) are REPORTED, not transcribed, so the implementer is never
+  put between two rules.
+
+  Placeholder content (the path, the breadcrumbs, and the folder list) matches
+  the state the visual registry captures: the demo empty state, where the
+  picker is opened from the new-session welcome screen's "Home" chip and
+  descended one level into ~/projects. Descending is a registry requirement,
+  not decoration — the empty-state path is literally "~", which Playwright
+  serialises as `textbox: ~`, and "~" is YAML's null literal, so its aria
+  snapshot rejects it ("Node value should be a string or a sequence"). A real
+  path keeps the structure contract rooted at the modal round-trippable. The
+  app's own fixture listing is rendered here so the side-by-side has nothing
+  to subtract.
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* Only layout for the mockup shell + the modal. Everything visual comes
+     from tokens; spacing is on the app's 4px grid (var(--sp-*)); radii are
+     on the app's scale (var(--r-*)). */
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--canvas);
+    color: var(--tx1);
+    font-family: "Inter Variable", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column;
+  }
+
+  /* Backdrop — matches the app's dimmed overlay, so the mockup and the app
+     capture read the same. In normal flow (not fixed) so the spec-note
+     below appears in the full-page capture, same as the welcome mockup. */
+  .backdrop {
+    flex: 1; background: rgb(0 0 0 / .4);
+    display: flex; align-items: center; justify-content: center; padding: var(--sp-5);
+  }
+
+  /* --- THE MODAL -------------------------------------------------------- */
+  .picker {
+    width: min(540px, 100%); background: var(--card);
+    border: 1px solid var(--border); border-radius: var(--r-xl);
+    box-shadow: var(--shadow-lg); overflow: hidden;
+    display: flex; flex-direction: column; max-height: 80vh;
+  }
+
+  /* Header */
+  .hdr {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: var(--sp-4) var(--sp-5) var(--sp-3);
+  }
+  .hdr h2 {
+    margin: 0; font: 600 17px/1.3 var(--font-sans); color: var(--tx1);
+  }
+  .btn-close {
+    width: 28px; height: 28px; display: grid; place-items: center;
+    border: 1px solid transparent; border-radius: var(--r-sm);
+    background: transparent; color: var(--tx3); cursor: pointer;
+  }
+  .btn-close:hover { background: var(--fill-hover); color: var(--tx1); }
+
+  /* Path field + Go — the loudest control on the screen (accent focus ring). */
+  .pathrow {
+    display: flex; gap: var(--sp-2);
+    padding: 0 var(--sp-5) var(--sp-3);
+  }
+  .pathfield {
+    flex: 1; min-width: 0; height: 36px; padding: 0 var(--sp-3);
+    display: flex; align-items: center;
+    border: 1px solid var(--accent);
+    box-shadow: 0 0 0 var(--sp-1) var(--accent-bg);
+    border-radius: var(--r-md); background: var(--canvas);
+    font: 400 13px/1 var(--font-mono); color: var(--tx1);
+  }
+  .btn-go {
+    height: 36px; padding: 0 var(--sp-4); border: 1px solid var(--border);
+    border-radius: var(--r-md); background: var(--panel); color: var(--tx1);
+    font: 500 13px/1 var(--font-sans); cursor: pointer;
+  }
+  .btn-go:hover { background: var(--fill-hover); }
+
+  /* Breadcrumbs — clickable path, one level up per chevron. */
+  .crumbs {
+    display: flex; align-items: center; gap: var(--sp-px);
+    padding: 0 var(--sp-5) var(--sp-3);
+    font: 500 13px/1 var(--font-sans); color: var(--tx3);
+    flex-wrap: wrap;
+  }
+  .crumbs .cr { display: inline-flex; align-items: center; gap: var(--sp-px); }
+  .crumbs .cr svg { color: var(--tx4); flex: none; }
+  .crumbs .cur { color: var(--tx1); font-weight: 600; }
+  .btn-crumb {
+    padding: var(--sp-px) var(--sp-1); border: none; background: transparent;
+    border-radius: var(--r-xs); color: inherit; font: inherit; cursor: pointer;
+  }
+  .btn-crumb:hover { background: var(--fill-hover); }
+
+  /* Folder list — the discovery path. Grows vertically; scrolls. */
+  .list {
+    margin: 0 var(--sp-5); border: 1px solid var(--border-subtle);
+    border-radius: var(--r-md); background: var(--canvas);
+    max-height: 208px; overflow-y: auto; padding: var(--sp-1);
+  }
+  .fr {
+    display: flex; align-items: center; gap: var(--sp-2);
+    width: 100%; padding: var(--sp-2) var(--sp-2); text-align: left;
+    font: 500 13px/1 var(--font-sans); color: var(--tx1);
+    border: none; background: transparent; border-radius: var(--r-sm);
+    cursor: pointer;
+  }
+  .fr svg { color: var(--tx3); flex: none; }
+  .fr:hover { background: var(--fill-hover); }
+  .fr.dim { color: var(--tx4); }
+  .fr.dim svg { color: var(--tx4); }
+  .fr .tag { margin-left: auto; flex: none; }
+
+  .tag {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    height: 20px; padding: 0 var(--sp-2);
+    border-radius: var(--r-full); background: var(--accent-bg);
+    color: var(--accent-tx); font: 500 11px/1 var(--font-sans);
+  }
+
+  /* Footer — git state left, actions right. */
+  .ftr {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-5) var(--sp-3);
+  }
+  .ftr .state {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font: 500 12px/1 var(--font-mono); color: var(--tx4);
+  }
+  .btn {
+    height: 32px; padding: 0 var(--sp-4); border: 1px solid var(--border);
+    border-radius: var(--r-md); background: var(--panel); color: var(--tx2);
+    font: 500 13px/1 var(--font-sans); cursor: pointer;
+  }
+  .btn:hover { background: var(--fill-hover); }
+  .btn.ghost { background: transparent; }
+  .btn.pri {
+    background: var(--accent-solid); border-color: var(--accent-solid);
+    color: var(--on-accent); font-weight: 600;
+  }
+  .btn.pri:hover { background: color-mix(in srgb, var(--accent-solid) 90%, var(--tx1)); }
+
+  .spec-note {
+    padding: var(--sp-3) var(--sp-5) var(--sp-8);
+    font-size: 13px; color: var(--tx3); line-height: 1.6;
+  }
+  .spec-note code {
+    font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+    font-size: 12px; background: var(--panel); padding: 1px 4px; border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<!-- data-screen is the visual harness's handle on this screen. -->
+<div class="backdrop" data-screen="folder-picker-mockup">
+  <div class="picker">
+
+    <!-- Header -->
+    <div class="hdr">
+      <h2>Select folder</h2>
+      <button class="btn-close" aria-label="Close">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+
+    <!-- Path field + Go -->
+    <div class="pathrow">
+      <div class="pathfield">~/projects</div>
+      <button class="btn-go" type="button">Go</button>
+    </div>
+
+    <!-- Breadcrumbs (fixture state: descended into ~/projects) -->
+    <div class="crumbs">
+      <span class="cr">
+        <svg class="xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+        <span class="cr">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          <button class="btn-crumb" title="~">~</button>
+        </span>
+        <span class="cr">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          <button class="btn-crumb cur" title="~/projects">projects</button>
+        </span>
+      </span>
+    </div>
+
+    <!-- Folder list — fixture listing inside ~/projects -->
+    <div class="list">
+      <button class="fr dim" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <span>..</span>
+      </button>
+      <button class="fr" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <span>ethernal</span>
+      </button>
+      <button class="fr" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <span>marketing</span>
+      </button>
+      <button class="fr" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <span>infra</span>
+      </button>
+    </div>
+
+    <!-- Footer -->
+    <div class="ftr">
+      <span class="state">not a git repo</span>
+      <button class="btn ghost" type="button">Cancel</button>
+      <button class="btn pri" type="button">Select folder</button>
+    </div>
+
+  </div>
+</div>
+
+<p class="spec-note">
+  <strong>Spec notes — the parts a screenshot cannot express.</strong>
+  Everything in the modal is <strong>left-aligned to the modal's own left
+  edge</strong>; nothing is centred. The modal itself is <strong>centred on
+  the dimmed backdrop</strong> (like every dialog). The path field is
+  <strong>full-modal-width</strong> with an accent border + pinned focus ring
+  (4px of <code>--accent-bg</code>), so it is the control the eye lands on;
+  the primary <code>Select folder</code> button (filled accent) is the single
+  loudest action, right-aligned in the footer with <code>Cancel</code> (ghost)
+  beside it. The breadcrumbs sit directly under the path field, left-aligned,
+  one level up per chevron; the current crumb is the only one at full text
+  weight. The folder list <strong>grows vertically</strong> — it is the only
+  scroll region, clamped by the modal's <code>max-height</code> — and
+  <code>node_modules</code> + dot-folders render <strong>dimmed, not
+  hidden</strong>, so nothing becomes unreachable (shown in the home state;
+  the captured <code>~/projects</code> state has no dimmed rows, only the
+  dimmed <code>..</code>). The design's <code>Go</code> button is part of the
+  discovery affordance the current app ships without (a divergence, recorded
+  in <code>conformance.md</code>).
+  <br/><br/>
+  <strong>Off-grid values in the design — reported, not transcribed.</strong>
+  The source uses a 34px path-field height and a 9px list-row vertical
+  padding, both off the app's 4px grid; the mockup re-grades them to 36px and
+  8px. The list <code>max-height: 222px</code> is likewise off-grid (used only
+  to fit the spec's 520px frame); the mockup uses 208px here and the real
+  size is the modal max-height's concern, not a fixed list height. The 12.5px
+  breadcrumb/row font is off the app's text scale and reads as 13px here. A
+  real implementation should keep its own on-grid values and resolve these
+  against the acceptance rules.
+</p>
+
+</body>
+</html>
