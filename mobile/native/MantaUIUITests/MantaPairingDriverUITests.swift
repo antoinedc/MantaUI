@@ -21,25 +21,21 @@ final class MantaPairingDriverUITests: XCTestCase {
     }
 
     func testPairAgainstLiveBox() throws {
-        // Credentials reach the runner through a JSON drop at /tmp/manta-pair.json
-        // INSIDE the simulator (the host writes it to the device's own
-        // data/tmp). `xcodebuild`'s TEST_RUNNER_* env passthrough does NOT
-        // reach a UI-test runner here — verified empty — so the file is the
-        // supported channel, with the env kept as a fallback.
+        // Credentials reach the runner through MantaPairFixture, which the driver
+        // plugin overwrites immediately before `xcodebuild test`. A UI test cannot
+        // read the host filesystem, and TEST_RUNNER_* env passthrough does NOT
+        // reach the runner on this toolchain (verified empty), so the compiler is
+        // the channel; env is kept as a fallback.
         let env = ProcessInfo.processInfo.environment
         var code = env["MANTA_PAIR_CODE"] ?? ""
         var server = env["MANTA_PAIR_SERVER"] ?? ""
-        if code.isEmpty || server.isEmpty,
-           let data = FileManager.default.contents(atPath: "/tmp/manta-pair.json"),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-            code = json["code"] ?? code
-            server = json["server"] ?? server
-        }
+        if code.isEmpty { code = MantaPairFixture.code }
+        if server.isEmpty { server = MantaPairFixture.server }
         // The plugin's job log is head-capped, so the ONE thing that must
         // always be greppable is whether the credentials arrived.
         print("PAIRDRIVE input code-digits=\(code.count) server=\(server.isEmpty ? "MISSING" : server)")
         guard !code.isEmpty, !server.isEmpty else {
-            throw XCTSkip("PAIRDRIVE SKIP: no pairing code/server (env and /tmp/manta-pair.json both empty)")
+            throw XCTSkip("PAIRDRIVE SKIP: no pairing code/server (MantaPairFixture is empty and no env override)")
         }
 
         let app = XCUIApplication()
