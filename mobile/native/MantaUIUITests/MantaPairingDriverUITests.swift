@@ -123,13 +123,22 @@ final class MantaOpenSessionUITests: XCTestCase {
         // row by coordinate. A named row matters because a chat-mode window
         // and a plain tmux window land on completely different screens.
         let wanted = ProcessInfo.processInfo.environment["MANTA_OPEN_ROW"] ?? MantaPairFixture.openRow
-        let named = app.staticTexts[wanted]
-        if !wanted.isEmpty, named.waitForExistence(timeout: 5), named.isHittable {
-            print("PAIRDRIVE open-row=\(wanted)")
-            named.tap()
-        } else {
+        let hops = wanted.split(separator: "|").map(String.init)
+        if hops.isEmpty {
             print("PAIRDRIVE open-row=first-by-coordinate")
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28)).tap()
+        }
+        // Each hop is one push (session row, then e.g. a subagent row), so a
+        // drill-in can be driven end to end rather than only the first screen.
+        for hop in hops {
+            let target = app.staticTexts[hop]
+            guard target.waitForExistence(timeout: 10) else {
+                print("PAIRDRIVE open-miss=\(hop)")
+                break
+            }
+            target.tap()
+            print("PAIRDRIVE open-row=\(hop)")
+            sleep(3)
         }
         sleep(6)
         // The runner tears the app down the moment the test ends, so a

@@ -173,9 +173,9 @@ enum StepGroupRow: Identifiable {
     case step(ToolStep)
     case subagent(SubagentSession)
 
-    var id: UUID {
+    var id: String {
         switch self {
-        case .step(let step): return step.id
+        case .step(let step): return step.id.uuidString
         case .subagent(let agent): return agent.id
         }
     }
@@ -265,7 +265,14 @@ enum SubagentStatus: Hashable {
 }
 
 struct SubagentSession: Identifiable, Hashable {
-    let id: UUID
+    /// STABLE across rebuilds — the child opencode session id when there is
+    /// one. It used to be a fresh `UUID()` minted in `init`, and the transcript
+    /// is re-derived from scratch on every streamed event, so the value pushed
+    /// onto the NavigationStack stopped matching anything in the current
+    /// transcript within milliseconds. That is what made a tap on a subagent
+    /// row land on the wrong screen and reveal the right one only after going
+    /// back: navigation identity has to outlive a re-render.
+    let id: String
     let taskName: String
     let status: SubagentStatus
     // Live duration (e.g. "1m12s") while running; nil when done.
@@ -277,7 +284,8 @@ struct SubagentSession: Identifiable, Hashable {
     let childSessionId: String?
 
     init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock], childSessionId: String? = nil) {
-        self.id = UUID()
+        // Fixtures carry no child session, so they fall back to the task name.
+        self.id = childSessionId ?? "task:\(taskName)"
         self.taskName = taskName
         self.status = status
         self.duration = duration
