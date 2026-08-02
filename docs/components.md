@@ -79,6 +79,7 @@ that vanishes. Adopter counts below are **web** adopters only.
 
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
+| Button | `src/renderer/Button.tsx` | 2 — `Settings.tsx`, `FolderPickerModal.tsx` | `tone: default\|primary\|ghost\|danger` (required, no default — the bare base is abstract, C4); `disabled`; `type`; `title`; `children`; `hook`. No `size` prop — one size only (the spec has no `.btn.sm` rule). |
 | Card | `src/renderer/Card.tsx` | 3 — `Cards.tsx`, `Settings.tsx`, `NewSessionScreen.tsx` | `danger` (optional); `header`/`actions` slots |
 | Modal | `src/renderer/Modal.tsx` | 4 — `Sidebar.tsx`, `NewSessionScreen.tsx`, `Settings.tsx`, `FolderPickerModal.tsx` | `size: sm\|md\|lg`; `padded`; `tall`; `onDismiss`; `label` |
 | IconButton | `src/renderer/IconButton.tsx` | 2 — `SessionHeader.tsx`, `NewSessionScreen.tsx` | `size: md\|lg\|xl` (`xl` has a single adopting file, `NewSessionScreen.tsx`, by design — it is a size on an existing primitive, not a new primitive, so the two-adopter rule does not gate it); `ariaHaspopup`/`ariaExpanded`/`hook` |
