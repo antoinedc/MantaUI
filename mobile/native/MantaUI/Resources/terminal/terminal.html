@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  terminal.html — the WKWebView terminal surface (BET-598 / S6).
+
+  Hosts the existing xterm.js terminal (the same one the desktop owns) as a
+  full-bleed webview per DECISIONS.md §9: the webview is deliberately the box
+  around the text, never a terminal emulator. All the native work — the key
+  row, the floating glass bar, pinch zoom, sticky modifiers, hardware-keyboard
+  pass-through, the geometry header — lives in Swift around this page.
+
+  The WebSocket to the box is owned by NATIVE code (URLSessionWebSocketTask),
+  so this page never opens a socket itself and has no mixed-content/origin
+  concerns. Native pushes PTY bytes in via `window.__manta.write(b64)`; the
+  page reports input + live geometry + selection to native via the
+  `manta` script-message handler.
+
+  xterm, its addons and the CSS are vendored siblings of this file
+  (xterm.js / xterm-addon-fit.js / xterm.css), committed as app resources.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<style>
+  /* ---- xterm.css (vendored, inlined so the page is self-contained ---- */
+  .xterm { cursor: text; position: relative; user-select: none; -ms-user-select: none; -webkit-user-select: none; }
+  .xterm.focus, .xterm:focus { outline: none; }
+  .xterm .xterm-helpers { position: absolute; top: 0; z-index: 5; }
+  .xterm .xterm-helper-textarea { padding: 0; border: 0; margin: 0; position: absolute; opacity: 0; left: -9999em; top: 0; width: 0; height: 0; z-index: -5; white-space: nowrap; overflow: hidden; resize: none; }
+  .xterm .composition-view { background: #000; color: #FFF; display: none; position: absolute; white-space: nowrap; z-index: 1; }
+  .xterm .composition-view.active { display: block; }
+  .xterm .xterm-viewport { background-color: #000; overflow-y: scroll; cursor: default; position: absolute; right: 0; left: 0; top: 0; bottom: 0; }
+  .xterm .xterm-screen { position: relative; }
+  .xterm .xterm-screen canvas { position: absolute; left: 0; top: 0; }
+  .xterm .xterm-scroll-area { visibility: hidden; }
+  .xterm-char-measure-element { display: inline-block; visibility: hidden; position: absolute; top: 0; left: -9999em; line-height: normal; }
+  .xterm.enable-mouse-events { cursor: default; }
+  .xterm.xterm-cursor-pointer, .xterm .xterm-cursor-pointer { cursor: pointer; }
+  .xterm.column-select.focus { cursor: crosshair; }
+  .xterm .xterm-accessibility:not(.debug), .xterm .xterm-message { position: absolute; left: 0; top: 0; bottom: 0; right: 0; z-index: 10; color: transparent; pointer-events: none; }
+  .xterm .xterm-accessibility-tree:not(.debug) *::selection { color: transparent; }
+  .xterm .xterm-accessibility-tree { user-select: text; white-space: pre; }
+  .xterm .live-region { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  .xterm-dim { opacity: 1 !important; }
+  .xterm-underline-1 { text-decoration: underline; }
+  .xterm-underline-2 { text-decoration: double underline; }
+  .xterm-underline-3 { text-decoration: wavy underline; }
+  .xterm-underline-4 { text-decoration: dotted underline; }
+  .xterm-underline-5 { text-decoration: dashed underline; }
+  .xterm-overline { text-decoration: overline; }
+  .xterm-overline.xterm-underline-1 { text-decoration: overline underline; }
+  .xterm-overline.xterm-underline-2 { text-decoration: overline double underline; }
+  .xterm-overline.xterm-underline-3 { text-decoration: overline wavy underline; }
+  .xterm-overline.xterm-underline-4 { text-decoration: overline dotted underline; }
+  .xterm-overline.xterm-underline-5 { text-decoration: overline dashed underline; }
+  .xterm-strikethrough { text-decoration: line-through; }
+  .xterm-screen .xterm-decoration-container .xterm-decoration { z-index: 6; position: absolute; }
+  .xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer { z-index: 7; }
+  .xterm-decoration-overview-ruler { z-index: 8; position: absolute; top: 0; right: 0; pointer-events: none; }
+  .xterm-decoration-top { z-index: 2; position: relative; }
+
+  /* ---- app chrome ---- */
+  html, body { height: 100%; margin: 0; padding: 0; background: #000; overflow: hidden; -webkit-user-select: none; }
+  #term { position: absolute; inset: 0; padding: 2px; }
+  #pinch-layer { position: absolute; inset: 0; z-index: 1; display: none; }
+  body.pinch #pinch-layer { display: block; }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<div id="pinch-layer"></div>
+<script src="xterm.js"></script>
+<script src="xterm-addon-fit.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var DEFAULT_FONT = 15;
+  var container = document.getElementById('term');
+
+  function initialFont() {
+    var stored = window.__MANTA_FONT__;
+    if (typeof stored === 'number' && stored >= 8 && stored <= 40) return stored;
+    return DEFAULT_FONT;
+  }
+
+  var term = new Terminal({
+    scrollback: 6000,
+    cursorBlink: true,
+    fontFamily: 'Menlo, Monaco, "SF Mono", monospace',
+    fontSize: initialFont(),
+    fontWeight: 'normal',
+    fontWeightBold: 'bold',
+    theme: { background: '#000000', foreground: '#e2e2e2', cursor: '#aaaaaa' },
+    allowProposedApi: true
+  });
+
+  var fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(container);
+
+  function post(msg) {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.manta) {
+      try { window.webkit.messageHandlers.manta.postMessage(msg); } catch (e) { /* handler not ready */ }
+    }
+  }
+
+  function reportGeometry() {
+    post({ type: 'geometry', cols: term.cols, rows: term.rows, fontSize: term.options.fontSize });
+  }
+
+  function doFit() {
+    try { fit.fit(); } catch (e) { /* container hidden */ }
+  }
+
+  function sendData(s) {
+    if (!s) return;
+    post({ type: 'data', data: s });
+  }
+
+  // ---- native API surface (called via evaluateJavaScript) ----
+  window.__manta = {
+    // Append bytes from the box. Base64 → UTF-8; a single chunk may split a
+    // multibyte rune, so retain a fragment and stitch it on the next write.
+    write: function (b64) {
+      var text;
+      try {
+        var bin = atob(b64);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var frag = window.__manta._frag || '';
+        text = frag + new TextDecoder('utf-8').decode(bytes);
+        window.__manta._frag = '';
+      } catch (e) {
+        return;
+      }
+      // Avoid splitting a trailing surrogate / decoding a partial rune: keep
+      // any unfinished trailing byte sequence for the next write.
+      var tail = 0;
+      for (var j = text.length - 1; j >= 0 && j > text.length - 5; j--) {
+        var code = text.charCodeAt(j);
+        if (code >= 0xDC00 && code <= 0xDFFF) { tail = j; break; }
+      }
+      if (tail > 0) { window.__manta._frag = text.slice(tail); text = text.slice(0, tail); }
+      if (text) term.write(text);
+      window.__manta._pendingWrite = false;
+    },
+    setFontSize: function (px) {
+      px = Math.max(8, Math.min(40, Number(px) || DEFAULT_FONT));
+      term.options.fontSize = px;
+      requestAnimationFrame(doFit);
+      reportGeometry();
+    },
+    getFontSize: function () { return term.options.fontSize; },
+    fit: function () { requestAnimationFrame(doFit); reportGeometry(); },
+    focus: function () { term.focus(); },
+    getGeometry: function () { return { cols: term.cols, rows: term.rows }; },
+    paste: function (text) { if (text) term.paste(text); },
+    // Selection → native (native handles clipboard + native handles).
+    getSelection: function () { return term.getSelection ? term.getSelection() : ''; },
+    clearSelection: function () { if (term.clearSelection) term.clearSelection(); },
+    selectAllText: function () { if (term.selectAll) term.selectAll(); },
+    _frag: '',
+    reply: {}
+  };
+
+  // ---- input from the shell's own textarea (when it has focus) ----
+  term.onData(function (data) { sendData(data); });
+
+  // ---- live geometry ----
+  term.onResize(function () { reportGeometry(); });
+  window.addEventListener('resize', function () { doFit(); reportGeometry(); });
+  window.addEventListener('orientationchange', function () { setTimeout(function() { doFit(); reportGeometry(); }, 50); });
+
+  // ---- selection (long-press select → native copy) ----
+  if (term.onSelectionChange) {
+    term.onSelectionChange(function () {
+      if (term.hasSelection && term.hasSelection()) {
+        var sel = term.getSelection();
+        if (sel) post({ type: 'selection', text: sel });
+      }
+    });
+  }
+
+  // ---- pinch-to-zoom handled in native via WKUIDelegate; expose a helper so
+  // the native side can announce the resulting size after it changes font. ----
+  window.__manta.queuePinch = function (px) { window.__manta._pinchPx = px; };
+
+  // ---- readiness: geometry + fit once the page is laid out ----
+  window.addEventListener('load', function () {
+    requestAnimationFrame(function () { doFit(); reportGeometry(); term.focus(); });
+  });
+  requestAnimationFrame(function () { doFit(); reportGeometry(); });
+})();
+</script>
+</body>
+</html>
