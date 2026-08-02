@@ -14,7 +14,9 @@ import UIKit
 // error: expired, codes-don't-match, unreachable, rate-limited, server-error.
 //
 // Every value resolves through the GENERATED tokens (Tokens.scheme(_:) + the
-// theme-independent Metrics). No colour/spacing/radius/weight literal appears.
+// theme-independent Metrics). No colour/spacing/radius/size/weight literal
+// appears — the display/confirm/OTP sizes resolve through the generated
+// Metrics.type.{display,confirm,otp} tokens (BET-594).
 // ===========================================================================
 
 // MARK: - Flow state
@@ -355,7 +357,7 @@ struct MantaManualEntryView: View {
     private func header(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             Text(title)
-                .font(.system(size: 28, weight: mantaFontWeight(Metrics.type.semibold)))
+                .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                 .foregroundColor(tokens.tx1)
             Text(subtitle)
                 .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
@@ -376,7 +378,7 @@ struct MantaConfirmView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Link this phone?")
-                    .font(.system(size: 28, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("It'll be able to run commands on the machine below.")
                     .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
@@ -397,7 +399,7 @@ struct MantaConfirmView: View {
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.tx2)
                     Text(displayVerify)
-                        .font(.system(size: 40, weight: mantaFontWeight(Metrics.type.semibold), design: .monospaced))
+                        .font(.system(size: Metrics.type.confirm, weight: mantaFontWeight(Metrics.type.semibold), design: .monospaced))
                         .foregroundColor(tokens.tx1)
                         .accessibilityIdentifier("onboarding-confirm-code")
                 }
@@ -442,7 +444,7 @@ struct MantaLinkingView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Linking")
-                    .font(.system(size: 28, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("A couple of seconds.")
                     .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
@@ -491,7 +493,7 @@ struct MantaFailureView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text(content.heading)
-                    .font(.system(size: 28, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text(content.subtitle)
                     .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
@@ -567,7 +569,7 @@ struct MantaNotificationsView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Know when it needs you")
-                    .font(.system(size: 28, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("Agents stop for permission, ask questions, and finish while you're somewhere else. This is the point of having Manta on your phone.")
                     .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
@@ -683,7 +685,7 @@ private struct OTPField: View {
 
     var body: some View {
         TextField(placeholder, text: $value)
-            .font(.system(size: 26, weight: mantaFontWeight(Metrics.type.medium), design: .monospaced))
+            .font(.system(size: Metrics.type.otp, weight: mantaFontWeight(Metrics.type.medium), design: .monospaced))
             .keyboardType(.numberPad)
             .multilineTextAlignment(.center)
             .tracking(Metrics.spacing.sp2)

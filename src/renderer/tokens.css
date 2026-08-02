@@ -118,6 +118,16 @@
   --weight-semibold: 600;
   --step-row-y: 7px;
   --step-dot: 6px;
+
+  /* S2 onboarding display sizes (BET-594). The pairing flow's headings, the
+     two-sided four-char confirm code, and the six-digit OTP resolve their font
+     sizes through these so a retune is one edit in the token source and the
+     generated Swift client reads the same values (additive — unused by the web
+     renderer, so no visual change there; mirrors how --step-row-y/--step-dot
+     were added for the transcript atoms). */
+  --font-size-display: 28px;
+  --font-size-confirm: 40px;
+  --font-size-otp: 26px;
 }
 
 /* Density scope (BET-544). Session-row metrics live on [data-density], NOT
