@@ -49,7 +49,6 @@ import {
   hasConnectedProvider,
   pickVerifyLabels,
   verifyStageLabels,
-  type VerifyApi,
   type VerifyProgress,
   type VerifyStageIndex,
 } from "./onboardingVerify";
@@ -173,7 +172,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     let providerLabel = "your provider";
     let modelLabel: string | undefined;
     try {
-      const status = await (window.api as unknown as VerifyApi).opencodeProviderAuth({
+      const status = await window.api.opencodeProviderAuth({
         action: "status",
       });
       const cfg = useStore.getState().configSnapshot();
@@ -190,7 +189,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setVerifyElapsed(0);
     setVerifyProgress({ stage: 0, status: "running" });
     const outcome = await verifyOnboarding({
-      api: window.api as unknown as VerifyApi,
+      api: window.api,
       providerLabel,
       modelLabel,
       onProgress: (p) => setVerifyProgress(p),
@@ -221,7 +220,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     let connected = false;
     try {
       await refreshAndInstallTransport();
-      connected = await hasConnectedProvider(window.api as unknown as VerifyApi);
+      connected = await hasConnectedProvider(window.api);
     } catch (e) {
       console.warn("[manta] post-pair pre-flight failed; advancing anyway:", e);
     }

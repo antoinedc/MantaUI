@@ -582,7 +582,7 @@ export function buildHandlers({
         return { ok: false, error: e?.message ? String(e.message) : String(e) };
       }
     },
-    "opencode:delete-session-raw": async ({ sessionId }) => {
+    "opencode:delete-session-raw": async (sessionId) => {
       try {
         await oc.deleteSessionRaw(sessionId);
         return { ok: true };
