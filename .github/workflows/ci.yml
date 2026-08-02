@@ -155,9 +155,10 @@ jobs:
       #    ruleset), so a failed diff here blocks the PR, which is exactly
       #    what BET-341 asked for. No new required-context, no ruleset edit.
       #
-      #    Cost: `npm run shots` builds the renderer (~10s), captures 6 shots
-      #    (~10-15s) and composites shot-sync (~2s) — ~25-30s per PR. The
-      #    node_modules cache above is reused; only the capture cost is new.
+      #    Cost: `npm run shots` builds the renderer (~10s), captures 3
+      #    desktop shots (~10-15s) — ~25s per PR. BET-559 removed the phone
+      #    shots and the shot-sync composite (the web/PWA client is retired).
+      #    The node_modules cache above is reused; only the capture cost is new.
       #
       #    PR-only on purpose: a push to main has already cleared this gate
       #    when the PR was merged, so re-running here would just measure
@@ -242,8 +243,9 @@ jobs:
             fi
             # STALENESS CHECK — reached only when the two runs are byte-identical
             # ON THIS RUNNER. That is NOT the same as byte-identical across
-            # runners: four of the seven shots render in two variants depending
-            # on which runner instance the job lands on (measured 2026-08-02 —
+            # runners: two of the remaining shots (hero, approvals) render in
+            # two variants depending on which runner instance the job lands on
+            # (measured 2026-08-02 —
             # the same committed set passed #476/#477/#478 and then failed a
             # branch that differed from main by one CSS comment, with the byte
             # sizes swapped back exactly). A byte comparison is therefore

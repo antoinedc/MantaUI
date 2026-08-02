@@ -18,17 +18,23 @@ const shot = (over = {}) => ({
 });
 
 describe("policyFor", () => {
-  test("grants a budget only to the four measured environment-sensitive shots", () => {
-    for (const n of ["shot-approvals.webp", "shot-hero.webp", "shot-sync.webp", "shot-phone-session.webp"]) {
+  test("grants a budget only to the measured environment-sensitive shots", () => {
+    for (const n of ["shot-approvals.webp", "shot-hero.webp"]) {
       assert.equal(policyFor(n).kind, "budget", `${n} should have a budget`);
     }
   });
 
-  test("the three stable shots keep exact byte equality", () => {
+  test("the stable shots keep exact byte equality", () => {
     // Measured byte-identical across both runner variants — no tolerance is
     // warranted and granting one would only reduce coverage.
-    for (const n of ["hero-poster.webp", "shot-phone-list.webp", "shot-terminal.webp"]) {
+    for (const n of ["hero-poster.webp", "shot-terminal.webp"]) {
       assert.equal(policyFor(n).kind, "exact", `${n} must stay exact`);
+    }
+  });
+
+  test("BET-559: removed phone shots have no stale budget or exact entry", () => {
+    for (const n of ["shot-phone-list.webp", "shot-phone-session.webp", "shot-sync.webp"]) {
+      assert.equal(policyFor(n).kind, "exact", `${n} must not carry a stale policy`);
     }
   });
 
