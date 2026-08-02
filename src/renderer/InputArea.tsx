@@ -353,7 +353,6 @@ export function InputArea({
             onOpen={onOpenModels}
             onSelect={onSelectModel}
             labelOverride={shortLabel}
-            separatePills
             alwaysShowEffort
             effortAccent
           />

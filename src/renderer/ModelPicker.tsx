@@ -1,10 +1,12 @@
 // ===== Model picker (model ▸ effort split) =====
 //
-// Two buttons in one bordered group (BET-415):
+// One SplitChip control (BET-615): the model name/button on the left, the
+// active variant (effort) on the right — the composer's single split control.
 //   - Left:  a friendly model name (m.name) with a Sparkles icon + dropdown.
-//   - Right: the active variant, title-cased, with its own dropdown — only
-//            rendered when the active model has variants. A model with no
-//            variants collapses to the single model button.
+//   - Right: the active variant, title-cased, with its own dropdown. The spec
+//            has ONE split control, not two pills — the left/right are always
+//            both present inside the shared SplitChip shell. `rightAccent`
+//            colours the effort side (the screen's one accent element).
 //
 // Variants are whatever the provider returns (m.variants); no fixed vocabulary,
 // no mapping table. The variant label is title-cased for display only — the
@@ -16,6 +18,7 @@ import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { formatModelContextSize } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
+import { SplitChip } from "./Chip";
 
 export function ModelPicker({
   modelLabel,
@@ -27,7 +30,6 @@ export function ModelPicker({
   onSelect,
   defaultLabel = null,
   labelOverride = null,
-  separatePills = false,
   alwaysShowEffort = false,
   effortAccent = false,
 }: {
@@ -50,18 +52,13 @@ export function ModelPicker({
   // Both are no-ops for callers that don't pass them (ChatPanel).
   defaultLabel?: string | null;
   labelOverride?: string | null;
-  // Welcome-screen layout toggles (the design shows the model pill and the
-  // effort pill as two SEPARATE pills, with the effort pill as the one
-  // accent-coloured element). ChatPanel doesn't pass any of these.
-  //   - `separatePills`: render model and effort as two distinct pills
-  //     (own border, gap between) instead of one joined bordered group.
-  //   - `alwaysShowEffort`: render the effort pill even when the active
-  //     model exposes no variants (shown as a non-interactive accent
-  //     placeholder in that case, per the UI-only rule).
-  //   - `effortAccent`: colour the effort pill text with the accent token
-  //     (the spec-note's "only accent element on the screen").
-  separatePills?: boolean;
+  // Welcome-screen layout toggle: force the SplitChip on even when the active
+  // model exposes no variants (the right segment is then non-interactive —
+  // nothing to select — but still present so the screen's one accent element
+  // per the mockup spec-notes is never absent). ChatPanel passes none of these.
   alwaysShowEffort?: boolean;
+  // Colour the right (effort) segment with the accent token via SplitChip's
+  // `rightAccent` — the spec-note's "only accent element on the screen".
   effortAccent?: boolean;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
@@ -70,7 +67,7 @@ export function ModelPicker({
 
   // Click-away to dismiss either dropdown. Using mousedown (not click) so we
   // close before an inner button's onClick re-toggles. The hook closes both
-  // dropdowns on outside-click or Escape; the caller's toggle buttons are
+  // dropdowns on outside-click or Escape; the SplitChip's toggle buttons are
   // inside rootRef so they don't trigger the dismiss.
   useClickAway(rootRef, modelOpen || variantOpen, () => {
     setModelOpen(false);
@@ -114,10 +111,10 @@ export function ModelPicker({
   const activeVariantId = modelOverride?.variant ?? undefined;
   const activeVariant = variants.find((v) => v.id === activeVariantId) ?? null;
 
-  // Effort pill visibility/state. `alwaysShowEffort` forces the pill on even
-  // when the active model exposes no variant list — in that case it is
-  // non-interactive (nothing to select) but still present so the screen's
-  // one accent element (per the mockup spec-notes) is never absent.
+  // Effort visibility/state. `alwaysShowEffort` forces the SplitChip on even
+  // when the active model exposes no variant list — in that case the right
+  // segment is non-interactive (nothing to select) but still present so the
+  // screen's one accent element (per the mockup spec-notes) is never absent.
   const showEffort = alwaysShowEffort || variants.length > 0;
   const effortDisabled = variants.length === 0;
   // Label reflects the user's selected variant; with no selectable variants
@@ -127,8 +124,6 @@ export function ModelPicker({
     : variants.length > 0
       ? "Default"
       : "High";
-  const effortTextClass = effortAccent ? "" : "text-text-muted";
-  const effortTextColor = effortAccent ? "var(--accent-tx)" : undefined;
 
   // Friendly display name for the model button. Falls back through the same
   // precedence as the old label: override → default → last-used → stub.
@@ -142,176 +137,146 @@ export function ModelPicker({
       : activeModel?.name ?? modelLabel ?? "opencode");
 
   return (
-    <div
-      ref={rootRef}
-      className={
-        "overflow-visible min-w-0 " +
-        (separatePills
-          ? "inline-flex items-center gap-2"
-          : "inline-flex items-stretch rounded-md border border-border-strong bg-bg-soft")
-      }
-    >
-      {/* Model button — friendly name + Sparkles icon, opens the model list. */}
-      <div className={separatePills ? "relative" : ""}>
-        <button
-          className={
-            "manta-model-picker-btn truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
-            (separatePills ? "rounded-md border border-border-strong bg-bg-soft" : "")
+    <div ref={rootRef} className="overflow-visible min-w-0 relative">
+      {showEffort && (
+        <SplitChip
+          left={
+            <span className="flex items-center gap-1 truncate">
+              <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
+              <span className="truncate max-w-[140px]">{modelDisplayName}</span>
+              <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
+            </span>
           }
-          aria-haspopup="listbox"
-          aria-expanded={modelOpen}
-          onClick={() => {
+          right={
+            <span className="flex items-center gap-1 truncate">
+              <span className="truncate max-w-[80px]">{effortLabel}</span>
+              <ChevronDown
+                size={13}
+                aria-hidden="true"
+                className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`}
+              />
+            </span>
+          }
+          onLeftClick={() => {
             if (!modelOpen) onOpen();
             setVariantOpen(false);
             setModelOpen((v) => !v);
           }}
-          title="Pick model for next prompt"
-        >
-          <Sparkles size={12} aria-hidden="true" className="shrink-0 text-accent" />
-          <span className="truncate max-w-[140px]">{modelDisplayName}</span>
-          <ChevronDown size={12} aria-hidden="true" className="shrink-0 text-text-faint" />
-        </button>
+          onRightClick={() => {
+            if (effortDisabled) return;
+            setModelOpen(false);
+            setVariantOpen((v) => !v);
+          }}
+          rightAccent={effortAccent}
+          popup
+          leftTitle="Pick model for next prompt"
+          rightTitle={
+            effortDisabled
+              ? "This model has no effort / variant setting"
+              : "Pick effort / variant"
+          }
+        />
+      )}
 
-        {/* Model dropdown — provider-grouped list. Selecting a row sets the
-            per-session override; the variant is cleared (the new model's own
-            variants show up in the effort button). */}
-        {modelOpen && (
-          <div
-            className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded-xs border border-border bg-bg-elev shadow-md text-meta"
-          >
-            <button
-              onClick={() => {
-                onSelect(null);
-                setModelOpen(false);
-              }}
-              className={
-                "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
-                (modelOverride == null ? "text-text" : "text-text-muted")
-              }
-            >
-              <span className="mr-1" style={{ color: modelOverride == null ? "var(--accent)" : "transparent" }}>●</span>
-              Server default
-            </button>
-            {!groups && (
-              <div className="px-2 py-2 text-text-faint">Loading…</div>
-            )}
-            {groups?.length === 0 && (
-              <div className="px-2 py-2 text-text-faint">No models</div>
-            )}
-            {groups?.map(([providerID, ms]) => (
-              <div key={providerID} className="py-1">
-                <div className="px-2 py-px text-micro font-semibold uppercase text-text-faint">
-                  {providerID}
-                </div>
-                {ms.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => {
-                      // Selecting a model clears any variant — the new model's
-                      // own variants surface in the effort button.
-                      onSelect({ providerID: m.providerID, modelID: m.id });
-                      setModelOpen(false);
-                    }}
-                    className={
-                      "w-full text-left px-2 py-px hover:bg-bg-soft flex justify-between gap-2 " +
-                      (isActive(m) ? "text-text" : "text-text-muted")
-                    }
-                  >
-                    <span className="truncate flex items-center gap-1">
-                      <span style={{ color: isActive(m) ? "var(--accent)" : "transparent" }}>●</span>
-                      <span>{m.name}</span>
-                    </span>
-                    {formatModelContextSize(m.limit?.context) ? (
-                      <span className="text-text-faint text-meta shrink-0">
-                        {formatModelContextSize(m.limit?.context)}
-                      </span>
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Effort / variant button — the design's one accent element. Normally
-          rendered only when the active model has variants; `alwaysShowEffort`
-          forces it on (non-interactive when there is nothing to select). */}
-      {showEffort && (
-        <div className={separatePills ? "relative" : ""}>
+      {/* Model dropdown — provider-grouped list. Selecting a row sets the
+          per-session override; the variant is cleared (the new model's own
+          variants show up in the effort segment). */}
+      {modelOpen && (
+        <div className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded-xs border border-border bg-bg-elev shadow-md text-meta">
           <button
-            className={
-              "manta-effort-picker-btn truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
-              (separatePills
-                ? "rounded-md border border-border-strong bg-bg-soft"
-                : "border-l border-border-strong") +
-              (effortDisabled ? " cursor-not-allowed" : "")
-            }
-            aria-haspopup="listbox"
-            aria-expanded={variantOpen}
             onClick={() => {
-              if (effortDisabled) return;
+              onSelect(null);
               setModelOpen(false);
-              setVariantOpen((v) => !v);
             }}
-            disabled={effortDisabled}
-            title={
-              effortDisabled
-                ? "This model has no effort / variant setting"
-                : "Pick effort / variant"
+            className={
+              "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
+              (modelOverride == null ? "text-text" : "text-text-muted")
             }
-            style={effortTextColor ? { color: effortTextColor } : undefined}
           >
-            <span className={`truncate max-w-[80px] ${effortTextClass}`}>
-              {effortLabel}
-            </span>
-            <ChevronDown size={12} aria-hidden="true" className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`} />
+            <span className="mr-1" style={{ color: modelOverride == null ? "var(--accent)" : "transparent" }}>●</span>
+            Server default
           </button>
-
-          {/* Variant / effort dropdown — flat list of the active model's
-              variants plus a "Default" (no variant) row. */}
-          {variantOpen && variants.length > 0 && (
-            <div
-              className="manta-effort-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[160px] rounded-xs border border-border bg-bg-elev shadow-md text-meta"
-            >
-              <button
-                onClick={() => {
-                  onSelect({
-                    providerID: activeModel!.providerID,
-                    modelID: activeModel!.id,
-                  });
-                  setVariantOpen(false);
-                }}
-                className={
-                  "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
-                  (activeVariantId == null ? "text-text" : "text-text-muted")
-                }
-              >
-                <span className="mr-1" style={{ color: activeVariantId == null ? "var(--accent)" : "transparent" }}>●</span>
-                Default
-              </button>
-              {variants.map((v) => (
+          {!groups && (
+            <div className="px-2 py-2 text-text-faint">Loading…</div>
+          )}
+          {groups?.length === 0 && (
+            <div className="px-2 py-2 text-text-faint">No models</div>
+          )}
+          {groups?.map(([providerID, ms]) => (
+            <div key={providerID} className="py-1">
+              <div className="px-2 py-px text-micro font-semibold uppercase text-text-faint">
+                {providerID}
+              </div>
+              {ms.map((m) => (
                 <button
-                  key={v.id}
+                  key={m.id}
                   onClick={() => {
-                    onSelect({
-                      providerID: activeModel!.providerID,
-                      modelID: activeModel!.id,
-                      variant: v.id,
-                    });
-                    setVariantOpen(false);
+                    // Selecting a model clears any variant — the new model's
+                    // own variants surface in the effort segment.
+                    onSelect({ providerID: m.providerID, modelID: m.id });
+                    setModelOpen(false);
                   }}
                   className={
-                    "w-full text-left px-2 py-px hover:bg-bg-soft " +
-                    (isActive(activeModel!, v.id) ? "text-text" : "text-text-muted")
+                    "w-full text-left px-2 py-px hover:bg-bg-soft flex justify-between gap-2 " +
+                    (isActive(m) ? "text-text" : "text-text-muted")
                   }
                 >
-                  <span style={{ color: isActive(activeModel!, v.id) ? "var(--accent)" : "transparent" }}>●</span>{" "}
-                  {titleCase(v.id)}
+                  <span className="truncate flex items-center gap-1">
+                    <span style={{ color: isActive(m) ? "var(--accent)" : "transparent" }}>●</span>
+                    <span>{m.name}</span>
+                  </span>
+                  {formatModelContextSize(m.limit?.context) ? (
+                    <span className="text-text-faint text-meta shrink-0">
+                      {formatModelContextSize(m.limit?.context)}
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>
-          )}
+          ))}
+        </div>
+      )}
+
+      {/* Variant / effort dropdown — flat list of the active model's variants
+          plus a "Default" (no variant) row. */}
+      {variantOpen && variants.length > 0 && (
+        <div className="manta-effort-dropdown absolute right-0 bottom-full mb-1 z-20 min-w-[160px] rounded-xs border border-border bg-bg-elev shadow-md text-meta">
+          <button
+            onClick={() => {
+              onSelect({
+                providerID: activeModel!.providerID,
+                modelID: activeModel!.id,
+              });
+              setVariantOpen(false);
+            }}
+            className={
+              "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
+              (activeVariantId == null ? "text-text" : "text-text-muted")
+            }
+          >
+            <span className="mr-1" style={{ color: activeVariantId == null ? "var(--accent)" : "transparent" }}>●</span>
+            Default
+          </button>
+          {variants.map((v) => (
+            <button
+              key={v.id}
+              onClick={() => {
+                onSelect({
+                  providerID: activeModel!.providerID,
+                  modelID: activeModel!.id,
+                  variant: v.id,
+                });
+                setVariantOpen(false);
+              }}
+              className={
+                "w-full text-left px-2 py-px hover:bg-bg-soft " +
+                (isActive(activeModel!, v.id) ? "text-text" : "text-text-muted")
+              }
+            >
+              <span style={{ color: isActive(activeModel!, v.id) ? "var(--accent)" : "transparent" }}>●</span>{" "}
+              {titleCase(v.id)}
+            </button>
+          ))}
         </div>
       )}
     </div>
