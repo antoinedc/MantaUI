@@ -73,11 +73,16 @@ if (typeof window !== "undefined" && DEMO_STATE === "reconnecting") {
 // `window.__mantaDemoStream` so the visual harness can advance it phase by
 // phase between captures.
 //
-// The three phases are NAMED (early/mid/late), not numeric, and sit at the
-// same fractions the native PoC uses (spike/native-visual/capture.sh→
-// HierarchyDumpUITests.swift: a 60-tick stream sampled at ticks 8/17/26,
-// i.e. 13%/28%/43%). Mirrored here by revealing ceil of that fraction of the
-// in-flight message's parts as the stream advances 8→17→26.
+// The three phases are NAMED (early/mid/late), not numeric. They sit at the
+// same 60-tick scale as the native PoC (spike/native-visual/capture.sh→
+// HierarchyDumpUITests.swift), but the raw native sample points (8/17/26)
+// only ever revealed reasoning+tools — the assistant's text part (the last
+// of the seven in-flight parts) needs the fraction to reach the whole
+// message, which no native point does. BET-569 widens the points to 14/26/34
+// so the revealed counts land on [2,3,4] of the seven part slots and the
+// flushed text part IS visible across every captured phase — otherwise the
+// interpreted `stream.flush` path renders in no baseline and a flush-boundary
+// regression ships a green gate.
 //
 // Design difference from native (deliberate, do not "fix"): on a device the
 // app-under-test raises SHOT markers mid-stream, because there is no control
@@ -89,11 +94,32 @@ if (typeof window !== "undefined" && DEMO_STATE === "reconnecting") {
 // ===========================================================================
 
 /** Total stream positions — mirrors the native 60-tick stream so the phase
- *  fractions below are literally the native ones, not invented for web. */
+ *  fractions below are literally on the native scale, not invented for web. */
 const DEMO_STREAM_TOTAL = 60;
 
-/** The three named phase boundaries, at native ticks 8/17/26 of 60. */
-const DEMO_STREAM_PHASE_STEPS = { early: 8, mid: 17, late: 26 } as const;
+/** The three named phase boundaries, at ticks 14/26/34 of 60.
+ *  (The native 8/17/26 points are here widened so the revealed count reaches
+ *  the assistant's text part in every phase — see the header comment.) */
+const DEMO_STREAM_PHASE_STEPS = { early: 14, mid: 26, late: 34 } as const;
+
+/** The order in which the in-flight assistant's parts are revealed as the
+ *  stream advances. Deliberately NOT the fixture's canonical index order:
+ *  the assistant's text part is the LAST of the seven settled parts, so a
+ *  canonical prefix reveal would only surface it once all seven are shown.
+ *  The mid-stream reveal instead surfaces the flushed text early (right
+ *  after reasoning) so every captured phase renders the assistant's text —
+ *  the part that `stream.flush` → `applyStreamFlush` feeds. A wrong
+ *  flush-boundary / half-rendered-code-fence regression in the interpreted
+ *  text path can no longer hide behind a reasoning/tool-only baseline. */
+const DEMO_STREAM_REVEAL_ORDER = [
+  "prt_a1_reasoning", // hidden by default (Ctrl+O), first to appear
+  "prt_a1_text", // the assistant's partial reply — flushed text (BET-569)
+  "prt_a1_todo",
+  "prt_a1_read",
+  "prt_a1_edit",
+  "prt_a1_bash",
+  "prt_a1_step_finish",
+] as const;
 
 /** Ordered phase names — the registry's `phases` field, and the harness's
  *  advance cadence. */
@@ -127,24 +153,26 @@ function nextPhaseStep(step: number): number | null {
   return null;
 }
 
-/** How many parts of the in-flight assistant message are revealed at a given
- *  stream position — the native fraction applied to the fixture's part count. */
+/** How many of the in-flight assistant's parts are revealed at a given
+ *  stream position — the stream fraction applied to the reveal order's part
+ *  count. The reveal ORDER (not the fixture's index order) is what decides
+ *  WHICH parts those are; see `DEMO_STREAM_REVEAL_ORDER`. */
 export function revealedAssistantPartCount(step: number): number {
-  const assistant = demoState.messages.find(
-    (m) => m.info.role === "assistant" && !m.info.time?.completed,
+  return Math.round(
+    (Math.min(step, DEMO_STREAM_TOTAL) / DEMO_STREAM_TOTAL) * DEMO_STREAM_REVEAL_ORDER.length,
   );
-  const n = assistant?.parts.length ?? 0;
-  return Math.round((Math.min(step, DEMO_STREAM_TOTAL) / DEMO_STREAM_TOTAL) * n);
 }
 
 /** The transcript the demo serves at a stream position: every settled message
- *  unchanged, plus the in-flight assistant message truncated to the revealed
- *  part count. `demoState.messages` stays the full settled transcript — this
- *  is a read-only view over it, not a mutation. */
+ *  unchanged, plus the in-flight assistant message limited to the parts whose
+ *  ids fall within the first `revealedAssistantPartCount(step)` of the reveal
+ *  order, presented in canonical order. `demoState.messages` stays the full
+ *  settled transcript — this is a read-only view over it, not a mutation. */
 export function revealedTranscript(step: number): OpencodeMessage[] {
+  const revealed = new Set<string>(DEMO_STREAM_REVEAL_ORDER.slice(0, revealedAssistantPartCount(step)));
   const shown = demoState.messages.map((m) =>
     m.info.role === "assistant" && !m.info.time?.completed
-      ? { ...m, parts: m.parts.slice(0, revealedAssistantPartCount(step)) }
+      ? { ...m, parts: m.parts.filter((p) => revealed.has(p.id)) }
       : m,
   );
   // Rebuild the array (never alias demoState.messages) so a consumer holding
@@ -153,10 +181,11 @@ export function revealedTranscript(step: number): OpencodeMessage[] {
 }
 
 /** The in-flight assistant's text part (the one a real box would stream via
- *  `stream.flush`). Never revealed by the phase fractions (see
- *  `revealedAssistantPartCount`), so a flush for it is always *unmatched* in
- *  the renderer and its text is discarded — exercising the interpreted
- *  `stream.flush` path + latency instrumentation without moving any baseline. */
+ *  `stream.flush`). Now revealed by the phase fractions (see
+ *  `DEMO_STREAM_REVEAL_ORDER`), so the demo's flush for it lands on the
+ *  rendered part — exercising the interpreted `stream.flush` consumption
+ *  (`applyStreamFlush`) + latency instrumentation with flushed text actually
+ *  in the frame, which is the gap BET-569 closes. */
 function streamTextFlushPayload(): { messageID: string; partID: string; text: string } {
   const assistant = demoState.messages.find(
     (m) => m.info.role === "assistant" && !m.info.time?.completed,

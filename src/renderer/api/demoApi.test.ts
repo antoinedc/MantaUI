@@ -200,10 +200,26 @@ describe("demoApi — Proxy fallback", () => {  it("explicit methods return the 
 
 describe("demo stream state (BET-560) — stepped transcript reveal", () => {
   it("reveals a strictly increasing number of the in-flight assistant's parts at early/mid/late", () => {
-    const [early, mid, late] = [8, 17, 26].map(revealedAssistantPartCount);
+    const [early, mid, late] = [14, 26, 34].map(revealedAssistantPartCount);
     expect(early).toBeGreaterThan(0);
     expect(early).toBeLessThan(mid);
     expect(mid).toBeLessThan(late);
+  });
+
+  it("reveals the assistant's text part in early/mid/late (BET-569 — flushed text must render in the gate)", () => {
+    // The fixture's text part is the LAST of seven canonical parts, so a
+    // prefix-by-index reveal would never show it within the phase fraction.
+    // The reveal ORDER surfaces it early; every phase's served transcript
+    // must therefore contain the text part.
+    for (const step of [14, 26, 34]) {
+      const shown = revealedTranscript(step);
+      const assistant = shown.find(
+        (m) => m.info.role === "assistant" && !m.info.time?.completed,
+      )!;
+      expect(
+        assistant.parts.some((p) => p.type === "text" && (p as { text?: string }).text),
+      ).toBe(true);
+    }
   });
 
   it("is a read-only view over the settled transcript (never truncates the fixture, never aliases it)", () => {
@@ -211,7 +227,7 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
     const settledAssistantParts = all.find(
       (m) => m.info.role === "assistant" && !m.info.time?.completed,
     )!.parts.length;
-    for (const step of [8, 17, 26]) {
+    for (const step of [14, 26, 34]) {
       const got = revealedTranscript(step);
       expect(got.length).toBe(all.length);
       for (const m of got) {
@@ -241,8 +257,8 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
     // emitting `running:true` here would flip the composer to its running state
     // and move every committed visual baseline. A `flush` for the assistant's
     // text part is included so the interpreted text path + latency probe fires;
-    // that part is never revealed by the phase fractions, so the flush is
-    // unmatched/discarded and cannot shift a baseline.
+    // that part is now revealed by the phase fractions (BET-569), so the flush
+    // lands on the rendered part.
     const envs = buildStreamAdvanceEnvelopes(demoState.activeSessionId!);
     const assistant = demoState.messages.find(
       (m) => m.info.role === "assistant" && !m.info.time?.completed,
