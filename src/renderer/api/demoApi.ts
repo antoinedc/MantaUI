@@ -34,9 +34,9 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
-import type { AvailableLauncher } from "../../shared/types.js";
+import type { AvailableLauncher, OpencodeMessage } from "../../shared/types.js";
 import { demoState } from "./demoFixture.js";
-import { pickDemoState } from "../demoLayout.js";
+import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 
 // Resolved once at module load — the demo transport is only ever imported
@@ -61,6 +61,141 @@ if (typeof window !== "undefined" && DEMO_STATE === "reconnecting") {
     attempt: 2,
     backoffMs: 5000,
   });
+}
+
+// ===========================================================================
+// Stream state (BET-560) — the mid-stream capture harness.
+//
+// In every other state the demo serves the FULL settled transcript. In the
+// `stream` state it serves the same transcript INCREMENTALLY — a few parts
+// of the in-flight assistant message at a time — and exposes
+// `window.__mantaDemoStream` so the visual harness can advance it phase by
+// phase between captures.
+//
+// The three phases are NAMED (early/mid/late), not numeric, and sit at the
+// same fractions the native PoC uses (spike/native-visual/capture.sh→
+// HierarchyDumpUITests.swift: a 60-tick stream sampled at ticks 8/17/26,
+// i.e. 13%/28%/43%). Mirrored here by revealing ceil of that fraction of the
+// in-flight message's parts as the stream advances 8→17→26.
+//
+// Design difference from native (deliberate, do not "fix"): on a device the
+// app-under-test raises SHOT markers mid-stream, because there is no control
+// over the stream. On web the demo transport OWNS the stream, so phases are
+// driven from the fixture instead — `advance()` emits the `message.updated`
+// events the real transcript assembler consumes, so the assembled result is
+// exercised over time, not just in its settled end state. No marker plumbing
+// in shipped product code.
+// ===========================================================================
+
+/** Total stream positions — mirrors the native 60-tick stream so the phase
+ *  fractions below are literally the native ones, not invented for web. */
+const DEMO_STREAM_TOTAL = 60;
+
+/** The three named phase boundaries, at native ticks 8/17/26 of 60. */
+const DEMO_STREAM_PHASE_STEPS = { early: 8, mid: 17, late: 26 } as const;
+
+/** Ordered phase names — the registry's `phases` field, and the harness's
+ *  advance cadence. */
+export const DEMO_STREAM_PHASES = ["early", "mid", "late"] as const;
+
+/** Module state for the stepped stream. Only ever read/written when
+ *  DEMO_STATE === "stream". */
+let streamStep: number = DEMO_STREAM_PHASE_STEPS.early;
+let streamPending = false;
+let streamServed = false;
+const opencodeListeners = new Set<(ev: unknown) => void>();
+
+function phaseForStep(step: number): string {
+  const entries = Object.entries(DEMO_STREAM_PHASE_STEPS);
+  let current = entries[0][0];
+  for (const [name, s] of entries) {
+    if (step >= s) current = name;
+  }
+  return current;
+}
+
+function nextPhaseStep(step: number): number | null {
+  for (const s of Object.values(DEMO_STREAM_PHASE_STEPS)) {
+    if (s > step) return s;
+  }
+  return null;
+}
+
+/** How many parts of the in-flight assistant message are revealed at a given
+ *  stream position — the native fraction applied to the fixture's part count. */
+export function revealedAssistantPartCount(step: number): number {
+  const assistant = demoState.messages.find(
+    (m) => m.info.role === "assistant" && !m.info.time?.completed,
+  );
+  const n = assistant?.parts.length ?? 0;
+  return Math.round((Math.min(step, DEMO_STREAM_TOTAL) / DEMO_STREAM_TOTAL) * n);
+}
+
+/** The transcript the demo serves at a stream position: every settled message
+ *  unchanged, plus the in-flight assistant message truncated to the revealed
+ *  part count. `demoState.messages` stays the full settled transcript — this
+ *  is a read-only view over it, not a mutation. */
+export function revealedTranscript(step: number): OpencodeMessage[] {
+  const shown = demoState.messages.map((m) =>
+    m.info.role === "assistant" && !m.info.time?.completed
+      ? { ...m, parts: m.parts.slice(0, revealedAssistantPartCount(step)) }
+      : m,
+  );
+  // Rebuild the array (never alias demoState.messages) so a consumer holding
+  // the earlier snapshot can't count on identity.
+  return shown;
+}
+
+/** `advance()` — move the stepped stream to its next named phase and tell
+ *  every live assembler subscriber the in-flight message grew, so the
+ *  rendered transcript follows without a navigation. No-op once `late` is
+ *  reached. */
+function streamAdvance(): void {
+  const next = nextPhaseStep(streamStep);
+  if (next == null) return;
+  streamStep = next;
+  streamPending = true;
+  streamServed = false;
+  const assistant = demoState.messages.find((m) => m.info.role === "assistant");
+  const ev = {
+    type: "message.updated",
+    properties: {
+      sessionID: demoState.activeSessionId,
+      messageID: assistant?.info?.id ?? "",
+    },
+  };
+  for (const cb of opencodeListeners) cb(ev);
+}
+
+/** Install the harness window handle. Exported+pure so a test can assert the
+ *  "undefined in every state except stream" contract without booting React or
+ *  re-pointing window.location. Returns whether the flag was set. */
+export function installDemoStreamWindow(
+  state: DemoState,
+  win: { __mantaDemoStream?: unknown },
+): boolean {
+  if (state !== "stream") return false;
+  win.__mantaDemoStream = {
+    steps: DEMO_STREAM_PHASES.length,
+    get phase() {
+      return phaseForStep(streamStep);
+    },
+    advance: streamAdvance,
+    get pending() {
+      return streamPending;
+    },
+    get served() {
+      return streamServed;
+    },
+  };
+  return true;
+}
+
+// Install only in the `stream` demo state. The demo transport is only ever
+// loaded by bootDemo (never in production), and the `stream` guard is what
+// keeps it out of every other demo state — no production path can reach it.
+if (typeof window !== "undefined") {
+  installDemoStreamWindow(DEMO_STATE, window);
 }
 
 // ===========================================================================
@@ -103,7 +238,30 @@ const onStatusEvent = (
 const forActiveSession = <T>(sessionId: string | undefined, value: T[]): Promise<T[]> =>
   Promise.resolve(!sessionId || sessionId === demoState.activeSessionId ? value : []);
 
-const opencodeMessages = (sessionId: string) => forActiveSession(sessionId, demoState.messages);
+const isStream = DEMO_STATE === "stream";
+
+const opencodeMessages = (sessionId: string) =>
+  forActiveSession(
+    sessionId,
+    // In the `stream` state the transport serves the transcript incrementally
+    // instead of whole — the harness's initial capture sees the `early` phase
+    // here, and later phases arrive via advance()'s message.updated events.
+    isStream ? revealedTranscript(streamStep) : demoState.messages,
+  );
+
+// The targeted single-message read the transcript assembler's splice uses.
+// In the `stream` state this returns the message as revealed at the CURRENT
+// stream position, so a message.updated event causes the rendered copy to
+// grow one phase at a time. Served marks the phase as applied so the harness
+// knows not to screenshot while the splice debounce is still pending.
+const opencodeMessage = (_sessionId: string, messageId: string) => {
+  const list = isStream ? revealedTranscript(streamStep) : demoState.messages;
+  const hit = list.find((m) => m.info.id === messageId) ?? null;
+  if (isStream && hit && !hit.info.time?.completed) {
+    streamServed = true;
+  }
+  return Promise.resolve(hit);
+};
 
 // The renderer uses `opencodeMessagesCached` as a fast first paint; a null
 // cache miss means "fall through to opencodeMessages". Match that exact
@@ -140,7 +298,17 @@ const opencodeOpenStream = (_sessionId: string): Promise<void> =>
 const opencodeCloseStream = (_sessionId: string): Promise<void> =>
   Promise.resolve();
 
-const onOpencodeEvent = (_cb: (ev: unknown) => void): (() => void) => () => {};
+// In the `stream` state this keeps the registered assembler subscribers so
+// advance() can push message.updated events into them (the demo OWNs the
+// stream, so it drives the phases from the fixture rather than raising
+// markers from inside the app). Every other state is the pre-existing no-op.
+const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
+  if (isStream) {
+    opencodeListeners.add(cb);
+    return () => opencodeListeners.delete(cb);
+  }
+  return () => {};
+};
 
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
@@ -227,6 +395,7 @@ export const explicitMethods = {
   onStatusEvent,
   opencodeMessages,
   opencodeMessagesCached,
+  opencodeMessage,
   opencodePermissions,
   opencodeQuestions,
   opencodeVcsBranch,

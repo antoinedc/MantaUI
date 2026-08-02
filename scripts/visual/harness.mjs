@@ -242,3 +242,53 @@ export async function preparePage(page, { url, readySelector, finalSelector, act
     () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
   );
 }
+
+/**
+ * Await a settled, phase-applied frame before a mid-stream capture.
+ *
+ * For a phased row the demo advances its stepped stream via
+ * window.__mantaDemoStream.advance(), which emits a `message.updated` SSE
+ * event the REAL transcript assembler consumes → a 300ms-debounced splice.
+ * Screenshotting immediately would hit the pre-splice (still the PREVIOUS
+ * phase) frame, and two identical pre-splice frames would "converge" early —
+ * so every phase would capture the same image. We therefore FIRST wait,
+ * deterministically, for the demo to report the phase applied
+ * (`pending` → `served`): the same async-settle idea as preparePage awaiting
+ * `document.fonts.ready`, never a blind timeout.
+ *
+ * Then the convergence guard, ported from the native
+ * spike/native-visual/capture.sh behaviour:
+ *   1. Two consecutive identical frames before a capture is kept — without
+ *      it you capture a frame mid-paint.
+ *   2. No retry-until-pass — if the frame never settles, the run FAILS
+ *      LOUDLY naming the phase, rather than silently recording a wrong frame.
+ *
+ * The bounded y2k of frame comparisons is what decides "converged vs broken",
+ * and it is the ONE implementation every phased capture calls.
+ */
+export async function awaitStableFrame(page, phase) {
+  await page.waitForFunction(
+    () => {
+      // Absent window handle (never a stream state) or no pending advance:
+      // nothing to wait for. Otherwise hold until the assembler has applied it.
+      const s = window.__mantaDemoStream;
+      return !s || !s.pending || s.served === true;
+    },
+    { timeout: 10_000 },
+  );
+
+  const MAX_ATTEMPTS = 12;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const a = await page.screenshot();
+    // Yield between captures so any in-flight layout/paint reaches the
+    // framebuffer — same proven settle primitive as preparePage.
+    await page.evaluate(
+      () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+    );
+    const b = await page.screenshot();
+    if (a.equals(b)) return;
+  }
+  throw new Error(
+    `frame never converged for phase "${phase}" after ${MAX_ATTEMPTS} attempts`,
+  );
+}

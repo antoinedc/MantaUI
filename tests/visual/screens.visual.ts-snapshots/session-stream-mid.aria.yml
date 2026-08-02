@@ -1,0 +1,63 @@
+- complementary:
+  - heading "Workspace" [level=2]
+  - button "Search sessions"
+  - button "+"
+  - tree "Sessions":
+    - treeitem "ethernal + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Add CSV export Pin":
+      - text: ""
+      - button "Pin"
+    - treeitem /Refactor auth middleware [\d,.]+[bkmBKM]+ Pin/:
+      - text: ""
+      - button "Pin"
+    - treeitem /Investigate \d+[hmsp]+ in \/api\/v1\/orders [\d,.]+[bkmBKM]+ Pin/:
+      - text: ""
+      - button "Pin"
+    - treeitem "marketing + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Landing page copy now Pin":
+      - text: ""
+      - button "Pin"
+    - treeitem "Build pipeline Pin":
+      - text: ""
+      - button "Pin"
+    - treeitem "infra + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Deploy new billing service Pin" [selected]:
+      - text: ""
+      - button "Pin"
+  - button "Settings…"
+- main:
+  - text: infra / Deploy new billing service feat/orders-csv-export
+  - button "7%"
+  - button "Terminal"
+  - button "Session actions"
+  - text: "/› Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. ⎿ ■ Add \\/api\\/v1\\/orders\\/export\\.csv endpoint ☐ Test with \\d+-row synthetic dataset ☐ Update API docs ✓ Inspect existing \\/orders route \\+ filter parser ✓ Confirm streaming response helper signature Question Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - radio "Match the JSON shape"
+  - text: Customer-friendly
+  - radio "Customer-friendly"
+  - text: Custom (specify in notes)
+  - radio "Custom (specify in notes)"
+  - textbox "Or type your own answer…"
+  - separator
+  - button "Dismiss"
+  - button "Submit" [disabled]
+  - text: Run a shell command? bash
+  - button "Allow once"
+  - button "Always allow alembic upgrade *"
+  - button "Reject"
+  - textbox "Try something… (@ files · / commands · tab insert · ⏎ send)":
+    - /placeholder: Try something…  (@ files · / commands · tab insert · ⏎ send)
+  - button "Opus 4.7"
+  - button "High" [disabled]
+  - button "schedules"
+  - button "secrets"
+  - button "webhooks"
+  - button "Permissions on — click to bypass"

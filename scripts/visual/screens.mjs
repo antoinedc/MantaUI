@@ -37,6 +37,11 @@
  *             pixel baseline, but conformance review will report it as
  *             unspecified. Prefer filing the mockup.
  *
+ *   phases    Optional string[] of phase names. When present the row is
+ *             captured ONCE PER PHASE, advancing the demo stream between
+ *             captures, producing <id>-<phase>.{aria.yml,png}. Requires the
+ *             row's url to select a stepped demo state.
+ *
  *   region    Optional CSS selector for the element to capture instead of the
  *             full page. When set, the pixel assertion captures page.locator(
  *             region) rather than the full-page render, so a component can own
@@ -77,6 +82,7 @@
  *   region?: string,
  *   mockupRegion?: string,
  *   surfacesClosed?: string[],
+ *   phases?: string[],
  *   actions?: (page: any) => Promise<void>,
  *   viewport: { width: number, height: number },
  *   mockup: string | null,
@@ -210,6 +216,42 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    // PHRASED ROW (BET-560) — the mid-stream capture harness. This row's url
+    // selects the stepped `stream` demo state, which serves the transcript a
+    // few parts at a time and exposes window.__mantaDemoStream. The capture
+    // loop advances that stream between phases and produces ONE structure +
+    // pixel baseline PER PHASE (`session-stream-{early,mid,late}.{aria.yml,png}`),
+    // so a transcript-interpretation migration that flushes at the wrong
+    // boundary, jitters markdown mid-stream or half-renders a code fence can
+    // no longer ship a byte-identical settled baseline undetected.
+    id: "session-stream",
+    title: "Session view — mid-stream transcript, early/mid/late phases",
+    url: "/app/index.html?demo&desktop&state=stream",
+    ready: '[data-screen="session"]',
+    // Same navigation as the `session` row — the default demo view opens an
+    // empty welcome session, so we click into the transcript-bearing one.
+    final: "text=Run a shell command?",
+    phases: ["early", "mid", "late"],
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    // No design exists for a mid-stream frame — `null` is the registry's
+    // documented way to say so; the row still gets structure + pixels.
+    mockup: null,
+    // Same navigated session shell as the `session` row (ctx-pill, pickers,
+    // session menu all present but closed).
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },

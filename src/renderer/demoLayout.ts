@@ -48,6 +48,13 @@ export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
 //                  failure so the update-failed banner renders.
 // "server-update" — the box is older than the desktop on the same major so
 //                  the "Box needs an upgrade" (server-update) card renders.
+// "stream"       — the transcript is served incrementally (not whole). The
+//                  demo transport replays demoState.messages a few parts at a
+//                  time and exposes window.__mantaDemoStream so the visual
+//                  harness can advance it phase by phase (early/mid/late).
+//                  This is the state the mid-stream capture harness (BET-560)
+//                  drives to prove the transcript assembler produces the same
+//                  result over time, not just in its settled end state.
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -56,6 +63,7 @@ export const DEMO_STATES = [
   "incompatible",
   "update-failed",
   "server-update",
+  "stream",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 

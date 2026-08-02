@@ -5,6 +5,19 @@ declare global {
   interface Window {
     api: Api;
     __mantaPreload: MantaPreload | null;
+    // BET-560 — demo-only stepped-stream handle, installed ONLY in the
+    // `?demo&desktop&state=stream` fixture state by demoApi. Absent in every
+    // other state and in every production path (the demo transport is only
+    // ever loaded by bootDemo). The visual harness reads `pending`/`served`
+    // to wait out the assembler's splice debounce and drives `advance()` to
+    // move the transcript between the early/mid/late phase captures.
+    __mantaDemoStream?: {
+      steps: number;
+      phase: string;
+      advance: () => void;
+      pending: boolean;
+      served: boolean;
+    };
   }
   // Build-time injected Axiom credentials (electron.vite.config.ts +
   // electron.vite.config.mobile.ts `define`). Empty string → shipping is
