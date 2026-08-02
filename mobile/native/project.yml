@@ -33,6 +33,24 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: YES
+  # The UI test bundle is the hierarchy-dump leg of the native capture harness.
+  # It launches the app and prints the accessibility tree (see capture.sh and
+  # MantaUIHierarchyCaptureUITests). It exists to be driven by capture.sh, not
+  # by hand in Xcode.
+  MantaUIUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MantaUIUITests
+    dependencies:
+      - target: MantaUI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MantaUI
+        CODE_SIGN_STYLE: Automatic
 schemes:
   MantaUI:
     build:
@@ -42,3 +60,6 @@ schemes:
       config: Debug
     archive:
       config: Release
+    test:
+      targets:
+        - MantaUIUITests
