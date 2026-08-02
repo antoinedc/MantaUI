@@ -441,9 +441,10 @@ export function useSseBus(params: {
           | undefined;
         const type = status?.type;
         if (type === "retry") {
-          // The box emits stream.running only for busy/working, so a retry
-          // still sets running here directly (unchanged from pre-S1b).
-          setRunning(true);
+          // Running on a retry comes from the box's stream.running (the box
+          // treats retry as running — see streamInterp session.status). This
+          // raw handler only surfaces the retry banner/message; it must not
+          // set running itself, or it would race the box value.
           setRetryInfo({
             attempt: status?.attempt ?? 0,
             message: status?.message ?? "",

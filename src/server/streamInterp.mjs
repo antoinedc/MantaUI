@@ -161,7 +161,10 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
       }
       case "session.status": {
         const type = evt.properties?.type;
-        st.running = type === "busy" || type === "working";
+        // retry is a live turn for the renderer's running indicator (matches
+        // pre-S1b renderer semantics) — the box is the single source of truth,
+        // so it must report the same value the renderer's raw handler does.
+        st.running = type === "busy" || type === "working" || type === "retry";
         emit(sid, "running", { running: st.running });
         return;
       }

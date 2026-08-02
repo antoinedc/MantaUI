@@ -183,6 +183,17 @@ test("session.idle emits turnComplete true", () => {
   assert.equal(ev.payload.complete, true);
 });
 
+test("session.status retry reports running true (parity with pre-S1b renderer)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, type: "retry" },
+  });
+  const ev = events.find((e) => e.sub === "running");
+  assert.ok(ev);
+  assert.equal(ev.payload.running, true);
+});
+
 test("interpret ignores events with no session id", () => {
   const { interp, events } = make();
   interp.interpret({ type: "message.part.delta", properties: { part: { id: "x" } } });
