@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { COMPONENTS } from "./components.mjs";
+import { COMPONENTS, SHADOW_TOKENS } from "./components.mjs";
 import { ROOT } from "./harness.mjs";
 
 // The redesign spec is the source of truth for the companion: every candidate
@@ -66,6 +66,28 @@ const themePanel = (c, theme) => `
     </div>
   </div>`;
 
+// The C5 shadow comparison. For each step of the scale, in one theme, the same
+// surface rendered with the app's value beside the spec's value, labels + both
+// declarations printed underneath. Reuses the same .tp[data-theme] panel so it
+// needs no second rendering path; only the box-shadow differs, never the
+// surface background/border/radius.
+const shadowPanel = (theme) => `
+  <div class="tp" data-theme="${theme}" data-density="comfortable">
+    <div class="tlabel">${theme} — shadow scale</div>
+    <div class="shgrid">
+      ${SHADOW_TOKENS.map((t) => `
+        <div class="shcell">
+          <div class="vn">--shadow-${t.key}</div>
+          <div class="shrow">
+            <div class="shsurf" style="box-shadow:${t.app[theme]}"><span class="shsrc">app</span></div>
+            <div class="shsurf" style="box-shadow:${t.spec[theme]}"><span class="shsrc">spec</span></div>
+          </div>
+          <div class="shdec"><code>app</code> ${esc(t.app[theme])}</div>
+          <div class="shdec"><code>spec</code> ${esc(t.spec[theme])}</div>
+        </div>`).join("")}
+    </div>
+  </div>`;
+
 const page = `<!doctype html><html data-theme="light"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MantaUI — component companion (from the redesign spec)</title>
@@ -97,6 +119,19 @@ const page = `<!doctype html><html data-theme="light"><head><meta charset="utf-8
   pre{margin:0;padding:0 16px 14px;overflow:auto;font:11.5px/1.6 var(--font-mono);color:var(--tx3)}
   .note{border:1px solid var(--border);border-radius:var(--r-md);padding:12px 14px;margin:0 0 22px;font-size:13px;color:var(--tx2);line-height:1.6}
   .note b{color:var(--tx1)} .note code{font-family:var(--font-mono);font-size:12px;color:var(--accent-tx)}
+  /* C5 shadow comparison — same .tp[data-theme] panels as the components, the
+     only difference between app/spec surfaces is the box-shadow. */
+  .shcmp{border:1px solid var(--border-subtle);border-radius:var(--r-lg);margin:0 0 22px;background:var(--panel);overflow:hidden}
+  .shcmp>header{display:flex;align-items:baseline;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border-subtle);flex-wrap:wrap}
+  .shcmp h2{margin:0;font-size:15px}
+  .shcmp header p{margin:0;font-size:12px;color:var(--tx3);line-height:1.5}
+  .shgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+  .shcell{padding:12px 14px 16px}
+  .shrow{display:flex;gap:12px}
+  .shsurf{flex:1;height:92px;border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card);display:flex;align-items:flex-end;padding:10px}
+  .shsrc{font:500 10px/1 var(--font-mono);color:var(--tx3);text-transform:uppercase;letter-spacing:.07em}
+  .shdec{font:11px/1.5 var(--font-mono);color:var(--tx3);margin-top:8px;white-space:pre-wrap;word-break:break-word}
+  .shdec code{font:500 10.5px/1 var(--font-mono);color:var(--accent-tx);text-transform:uppercase}
   @media(max-width:980px){.themes{grid-template-columns:1fr}}
 </style></head><body>
 ${sprite}
@@ -104,6 +139,13 @@ ${sprite}
 <div class="chead">
   <h1>Component companion</h1>
   <p>Every candidate primitive from the redesign spec, rendered with the spec's own CSS, in <b>both themes side by side</b>. Each card shows how often the pattern appears in the spec and what exists in the app today.</p>
+</div>
+<div class="shcmp" id="shadow-c5">
+  <header>
+    <h2>C5 — the shadow scale, app vs spec</h2>
+    <p>The one open token divergence (docs/components.md C5). Each surface is the same card; only the box-shadow differs.</p>
+  </header>
+  <div class="themes">${shadowPanel("light")}${shadowPanel("dark")}</div>
 </div>
 <div class="note">
   <b>Token audit — the spec and <code>src/renderer/tokens.css</code> agree.</b> Dark 29/29 identical, light 29/32, root 18/21 (those 3 are whitespace and font-stack fallbacks). The spec defines <b>no token the app lacks</b>. The one real divergence is the shadow scale: <code>--shadow-sm/md/lg</code> differ in both themes — light <code>--shadow-md</code> is <code>0 4px 12px</code> plus a second layer in the app vs <code>0 8px 24px</code> single-layer in the spec. A design decision, not drift to fix silently.

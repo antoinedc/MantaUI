@@ -94,3 +94,54 @@ export const COMPONENTS = [
   { id: "eyebrow", name: "Eyebrow", cls: "eyebrow", app: "none",
     variants: [["default", `<div class="eyebrow">Section label</div>`]] },
 ];
+
+/**
+ * SHADOW_TOKENS — the data behind the companion's C5 shadow-comparison block.
+ *
+ * This is the ONE open token divergence (docs/components.md C5): the
+ * shadow scale differs between the redesign spec and
+ * `src/renderer/tokens.css` in both themes. The companion renders each
+ * surface twice — once with the app's value, once with the spec's — with
+ * both declarations printed underneath, so the owner can settle C5 from
+ * evidence rather than from a claims table.
+ *
+ * `app` = the declaration currently in `src/renderer/tokens.css` (dark from
+ * `:root`, light from `[data-theme="light"]`); `spec` = the declaration in
+ * `docs/screens/redesign-spec.html`. Keeping them side-by-side here is what
+ * lets the generator show the divergence without a second rendering path.
+ */
+export const SHADOW_TOKENS = [
+  {
+    key: "sm",
+    app: {
+      dark: "0 1px 2px rgb(0 0 0 / 0.18), 0 1px 3px rgb(0 0 0 / 0.12)",
+      light: "0 1px 2px rgb(26 24 21 / 0.06), 0 1px 3px rgb(26 24 21 / 0.05)",
+    },
+    spec: {
+      dark: "0 1px 2px rgba(0,0,0,.4)",
+      light: "0 1px 2px rgba(26,24,21,.06)",
+    },
+  },
+  {
+    key: "md",
+    app: {
+      dark: "0 4px 12px rgb(0 0 0 / 0.22), 0 2px 4px rgb(0 0 0 / 0.14)",
+      light: "0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05)",
+    },
+    spec: {
+      dark: "0 8px 24px rgba(0,0,0,.5)",
+      light: "0 8px 24px rgba(26,24,21,.10)",
+    },
+  },
+  {
+    key: "lg",
+    app: {
+      dark: "0 20px 56px rgb(0 0 0 / 0.45), 0 4px 12px rgb(0 0 0 / 0.30)",
+      light: "0 20px 56px rgb(26 24 21 / 0.16), 0 4px 12px rgb(26 24 21 / 0.08)",
+    },
+    spec: {
+      dark: "0 20px 56px rgba(0,0,0,.6)",
+      light: "0 20px 56px rgba(26,24,21,.14)",
+    },
+  },
+];
