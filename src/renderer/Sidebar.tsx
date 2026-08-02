@@ -11,6 +11,7 @@ import type { ReactElement, ReactNode } from "react";
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs } from "./clock";
+import { Modal } from "./Modal";
 import type { Project, TmuxWindow } from "../shared/types";
 import {
   classifyCacheAge,
@@ -1161,14 +1162,7 @@ function CommandPalette({
     inputRef.current?.focus();
   }, []);
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/40"
-      onClick={onClose}
-    >
-      <div
-        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-md shadow-lg overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal size="sm" padded={false} onDismiss={onClose} label="Command palette">
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
           <Search size={14} className="text-text-faint" aria-hidden="true" />
           <input
@@ -1209,8 +1203,7 @@ function CommandPalette({
             ))
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
