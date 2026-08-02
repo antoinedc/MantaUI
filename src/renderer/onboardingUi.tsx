@@ -131,7 +131,7 @@ export function StepFooter({
       <button
         type="button"
         onClick={onBack}
-        className="inline-flex items-center gap-2 px-4 py-3 rounded-md text-body text-text-muted hover:text-text transition-colors"
+        className="inline-flex items-center gap-2 px-4 py-3 rounded-sm text-body text-text-muted hover:text-text transition-colors"
       >
         <ArrowLeft />
         Back
@@ -140,7 +140,7 @@ export function StepFooter({
         type="button"
         onClick={onContinue}
         disabled={continueDisabled}
-        className="inline-flex items-center gap-2 px-5 py-3 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
+        className="inline-flex items-center gap-2 px-5 py-3 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
         style={{ background: ACCENT_SOLID }}
       >
         {continueLabel}

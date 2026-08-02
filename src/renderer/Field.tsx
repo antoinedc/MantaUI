@@ -8,7 +8,7 @@
 // Chrome contract (BET-529 inventory, settled in this cell):
 //   - surface `--card` (`bg-bg-soft`), edge `--border-strong`
 //     (`border-border-strong` — inputs/controls take border-strong, NOT
-//     `--border`), focus `--accent`, radius `--r-md` 8px (`rounded-lg`).
+//     `--border`), focus `--accent`, radius `--r-md` 8px (`rounded-md`).
 //   - padding sp-3 / sp-4 → **12px vertical / 16px horizontal** (`py-3 px-4`).
 //     Settles the spec's Applied-spec "12px / 14px" (off-grid, misnamed):
 //     `sp-3` is the vertical step (12px), `sp-4` the horizontal (16px), same
@@ -63,7 +63,7 @@ type FieldProps = {
   inputRef?: Ref<HTMLInputElement>;
 };
 
-const INPUT_BASE = "w-full bg-bg-soft border border-border-strong rounded-lg text-body text-text focus:outline-none focus:border-accent";
+const INPUT_BASE = "w-full bg-bg-soft border border-border-strong rounded-md text-body text-text focus:outline-none focus:border-accent";
 const LABEL_CLS = "block text-micro font-semibold uppercase text-text-muted";
 const META_CLS = "text-meta text-text-faint";
 

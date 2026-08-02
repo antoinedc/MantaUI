@@ -145,7 +145,7 @@ export function ProvidersStep({
           const isConnecting = connectingId === s.id;
           const anyConnecting = connectingId !== null;
           return (
-            <div key={s.id} className="border border-border rounded p-3 space-y-2">
+            <div key={s.id} className="border border-border rounded-xs p-3 space-y-2">
               <div className="flex items-center gap-2">
                 <div className="flex-1 min-w-0">
                   <div className="text-body text-text truncate">
@@ -173,7 +173,7 @@ export function ProvidersStep({
                   <button
                     onClick={() => setConnectingId(s.id)}
                     disabled={anyConnecting}
-                    className="px-3 py-2 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                    className="px-3 py-2 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
                   >
                     Connect
                   </button>

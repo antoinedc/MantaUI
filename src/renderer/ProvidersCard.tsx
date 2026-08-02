@@ -131,7 +131,7 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
       {globalError && <div className="text-meta text-danger">{globalError}</div>}
 
       {(endpoints ?? []).map((ep) => (
-        <div key={ep.id} className="border border-border rounded p-2 space-y-1">
+        <div key={ep.id} className="border border-border rounded-xs p-2 space-y-1">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
               <div className="text-body text-text truncate">{ep.name}</div>
@@ -140,7 +140,7 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
             <button
               onClick={() => refresh(ep)}
               disabled={busy === ep.id}
-              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+              className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               {busy === ep.id ? "…" : "Refresh"}
             </button>
@@ -183,16 +183,16 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
       {/* Mobile-only restart banner (desktop routes through the panel banner
           via onRestartNeeded, so this never renders on desktop). */}
       {!onRestartNeeded && restartNeeded && (
-        <div className="flex items-center gap-2 text-meta bg-bg-soft border border-border rounded p-2">
+        <div className="flex items-center gap-2 text-meta bg-bg-soft border border-border rounded-xs p-2">
           <span className="flex-1 text-text-muted">
             Restart opencode now to apply? (interrupts active sessions)
           </span>
           <button onClick={applyRestart} disabled={restarting}
-            className="px-2 py-1 bg-accent/20 border border-accent rounded text-text disabled:opacity-40">
+            className="px-2 py-1 bg-accent/20 border border-accent rounded-xs text-text disabled:opacity-40">
             {restarting ? "Restarting…" : "Apply Now"}
           </button>
           <button onClick={() => setRestartNeeded(false)} disabled={restarting}
-            className="px-2 py-1 border border-border rounded text-text-muted disabled:opacity-40">
+            className="px-2 py-1 border border-border rounded-xs text-text-muted disabled:opacity-40">
             Apply Later
           </button>
         </div>

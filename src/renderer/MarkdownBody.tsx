@@ -176,12 +176,12 @@ const MD_COMPONENTS: MarkdownComponents = {
       {children}
     </td>
   ),
-  // Images: max-width 100%, rounded, --border-subtle (BET-413).
+  // Images: max-width 100%, curved corners, --border-subtle (BET-413).
   img: ({ src, alt }) => (
     <img
       src={typeof src === "string" ? src : undefined}
       alt={alt ?? ""}
-      className="max-w-full rounded"
+      className="max-w-full rounded-xs"
       style={{ border: "1px solid var(--border-subtle)" }}
     />
   ),
@@ -332,7 +332,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
     countLines(cleaned) > CODEBLOCK_MAX_LINES;
 
   return (
-    <div className="rounded border border-border bg-bg-soft overflow-hidden relative">
+    <div className="rounded-xs border border-border bg-bg-soft overflow-hidden relative">
       {lang && (
         <div className="px-2 py-px text-micro uppercase text-text-faint border-b border-border bg-bg-elev pr-8">
           {lang}
@@ -340,7 +340,7 @@ export const CodeBlock = memo(function CodeBlock({ lang, body }: { lang?: string
       )}
       <CopyButton
         text={cleaned}
-        className="absolute top-1 right-1 z-10 text-micro uppercase text-text-faint hover:text-text px-1 rounded"
+        className="absolute top-1 right-1 z-10 text-micro uppercase text-text-faint hover:text-text px-1 rounded-xs"
       />
       {tooLarge ? (
         <pre

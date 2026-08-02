@@ -6,7 +6,7 @@
 // As with Card/Field/Pill/IconButton/MenuItem, the primitive's "tokens" are
 // class names that map through tailwind.config.js to the design tokens
 // (min-h-[var(--row-h)] → --row-h, px-[var(--row-px)] → --row-px,
-// rounded-lg → --r-md, mb-1 → --sp-1 (4px), bg-raised → --raised,
+// rounded-md → --r-md, mb-1 → --sp-1 (4px), bg-raised → --raised,
 // text-text-muted → --tx2, text-text → --tx1, text-text-quiet → --tx4,
 // text-label → 13px, text-micro → 11px, font-mono, tabular-nums,
 // bg-warn/bg-danger/bg-accent/bg-ok, ring-accent-bg/ring-danger-bg).
@@ -36,7 +36,7 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(el.className).toContain("flex");
     expect(el.className).toContain("items-center");
     expect(el.className).toContain("gap-2");
-    expect(el.className).toContain("rounded-lg");
+    expect(el.className).toContain("rounded-md");
     expect(el.className).toContain("mb-1");
     // Resting: hover fill, no selection surface/marker.
     expect(el.className).toContain("hover:bg-fill-hover");

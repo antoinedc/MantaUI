@@ -80,7 +80,7 @@ export function AddPhonePanel() {
       ) : pairing.ok ? (
         <div className="space-y-4">
           <div className="flex items-start gap-4">
-            <div className="bg-white p-2 rounded border border-border shrink-0">
+            <div className="bg-white p-2 rounded-xs border border-border shrink-0">
               <PairingQR
                 boxId={pairing.boxId}
                 pairingCode={pairing.pairingCode}
@@ -108,7 +108,7 @@ export function AddPhonePanel() {
           <button
             onClick={() => void mint()}
             disabled={minting}
-            className="text-body px-4 py-2 rounded border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
+            className="text-body px-4 py-2 rounded-xs border border-border text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {minting ? "Refreshing…" : "Refresh code"}
           </button>

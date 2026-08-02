@@ -259,3 +259,68 @@ describe("tailwind dimension scales", () => {
     ).toEqual([]);
   });
 });
+
+/** `rounded(-…)?` only when NOT preceded by another word char or a hyphen. */
+const ROUNDED_RE = /(?<![-\w])rounded(-[A-Za-z0-9[\]/.-]+)?/g;
+
+/** Scalar `rounded-<key>` classes used in the renderer, keyed by scale name. */
+function usedRadiusClasses(): Map<string, string[]> {
+  const used = new Map<string, string[]>();
+  for (const file of sourceFiles(RENDERER_DIR)) {
+    const text = readFileSync(file, "utf8");
+    for (const [, suffix] of text.matchAll(ROUNDED_RE)) {
+      if (!suffix) continue; // bare `rounded` — handled by the bare check below
+      if (suffix.includes("[")) continue; // arbitrary value bypasses the scale
+      const key = suffix.slice(1); // drop the leading '-'
+      const files = used.get(key) ?? [];
+      if (!files.includes(file)) files.push(file);
+      used.set(key, files);
+    }
+  }
+  return used;
+}
+
+describe("tailwind border radius scale", () => {
+  it("resolves every rounded-* class the renderer uses", () => {
+    const radius = resolvedTheme.borderRadius as Record<string, string>;
+    const unresolved: string[] = [];
+    for (const [key, files] of usedRadiusClasses()) {
+      if (!(key in radius)) {
+        const where = files
+          .map((f) => f.replace(`${RENDERER_DIR}/`, ""))
+          .join(", ");
+        unresolved.push(`rounded-${key} (used in ${where})`);
+      }
+    }
+
+    expect(
+      unresolved,
+      `These classes are in the markup but compile to nothing — the key is ` +
+        `missing from theme.borderRadius in tailwind.config.js:\n` +
+        unresolved.map((u) => `  ${u}`).join("\n"),
+    ).toEqual([]);
+  });
+
+  it("fails on a bare `rounded` with no explicit scale step", () => {
+    const bare: { file: string; key: string }[] = [];
+    for (const file of sourceFiles(RENDERER_DIR)) {
+      const text = readFileSync(file, "utf8");
+      for (const [, suffix] of text.matchAll(ROUNDED_RE)) {
+        if (!suffix) {
+          bare.push({
+            file: file.replace(`${RENDERER_DIR}/`, ""),
+            key: suffix as string,
+          });
+        }
+      }
+    }
+
+    expect(
+      bare,
+      `theme.borderRadius has no DEFAULT key, so a bare \`rounded\` names no ` +
+        `radius step and compiles to nothing — rename it to an explicit step ` +
+        `(\`rounded-xs\` … \`rounded-full\`) in:\n` +
+        bare.map((b) => `  ${b.file}`).join("\n"),
+    ).toEqual([]);
+  });
+});

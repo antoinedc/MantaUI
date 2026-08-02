@@ -6,7 +6,7 @@
 // family can only drift if IconButton itself is retuned.
 //
 // Chrome contract (BET-529 inventory): square hit area (`p-1` → 24px md /
-// 28px lg), radius `--r-xs` (`rounded`), resting icon `--tx3` → `--tx1` on
+// 28px lg), radius `--r-xs` (`rounded-xs`), resting icon `--tx3` → `--tx1` on
 // hover with `--fill-hover` bg, accent focus ring, 16px md icon / 20px lg
 // standalone. C1 (validated constraints): the hover sets a background, so it
 // also sets the matching foreground (`hover:text-text`); the resting state
@@ -26,7 +26,7 @@ import type { ReactElement } from "react";
 import { cloneElement } from "react";
 
 const CHROME =
-  "inline-flex items-center justify-center rounded p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center rounded-xs p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 export function IconButton({
   label,

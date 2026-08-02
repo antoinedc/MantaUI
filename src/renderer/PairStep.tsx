@@ -215,7 +215,7 @@ function ManualPairForm({
             }}
             aria-invalid={serverUrlInvalid}
             aria-describedby={serverUrlInvalid ? "pair-host-err" : undefined}
-            className="w-full rounded-md bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-sm bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
             style={{ borderColor: serverUrlInvalid ? DANGER : undefined }}
           />
           {serverUrlInvalid && (
@@ -252,7 +252,7 @@ function ManualPairForm({
               setError(null);
             }}
             aria-invalid={boxIdLooksBad}
-            className="w-full rounded-md bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-sm bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
             style={{ borderColor: boxIdLooksBad ? DANGER : undefined }}
           />
         </div>
@@ -277,7 +277,7 @@ function ManualPairForm({
               setCode(v);
               setError(null);
             }}
-            className="w-full rounded-md bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-sm bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
           />
         </div>
 
@@ -303,7 +303,7 @@ function ManualPairForm({
               setVerifyCode(v);
               setError(null);
             }}
-            className="w-full rounded-md bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
+            className="w-full rounded-sm bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
           />
         </div>
       </div>
@@ -320,7 +320,7 @@ function ManualPairForm({
       <div className="flex items-center justify-between gap-3 pt-1">
         <p className="text-meta text-text-faint">
           Run{" "}
-          <code className="rounded bg-bg px-2 py-px text-label font-mono text-text-muted">
+          <code className="rounded-xs bg-bg px-2 py-px text-label font-mono text-text-muted">
             manta pair
           </code>{" "}
           on the box to get a code.
@@ -328,7 +328,7 @@ function ManualPairForm({
         <button
           type="submit"
           disabled={!connectEnabled}
-          className="inline-flex items-center gap-2 px-5 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
+          className="inline-flex items-center gap-2 px-5 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
           style={{ background: ACCENT_SOLID }}
         >
           {submitting ? "Connecting…" : "Connect"}

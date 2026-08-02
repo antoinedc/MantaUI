@@ -544,13 +544,13 @@ export function ConnectProvider({
   }, [safeSetPhase]);
 
   return (
-    <div className="rounded-md border bg-bg-elev px-3 py-2 text-meta space-y-2">
+    <div className="rounded-sm border bg-bg-elev px-3 py-2 text-meta space-y-2">
       <div className="flex items-center gap-2">
         <span className="text-text">Connect {label}</span>
         <span className="text-text-faint">{connectPhaseLabel(phase)}</span>
         <button
           onClick={onCancel}
-          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
           aria-label="Close"
         >
@@ -738,7 +738,7 @@ export function ConnectProvider({
               <summary className="text-text-faint cursor-pointer hover:text-text-muted">
                 Show what's happening on the box
               </summary>
-              <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
+              <div className="rounded-xs border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
                 <Terminal
                   sessionKey={phase.ptySessionKey}
                   cwd={phase.cwd}
@@ -776,14 +776,14 @@ export function ConnectProvider({
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={retry}
-                className="px-2 py-1 rounded text-meta"
+                className="px-2 py-1 rounded-xs text-meta"
                 style={{ background: "var(--accent-solid)", color: "var(--on-accent)" }}
               >
                 Try again
               </button>
               <button
                 onClick={onCancel}
-                className="px-2 py-1 rounded text-meta"
+                className="px-2 py-1 rounded-xs text-meta"
                 style={{ border: "1px solid var(--accent)", color: "var(--accent)" }}
               >
                 Use a different model
@@ -792,7 +792,7 @@ export function ConnectProvider({
                 href="https://claude.ai"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="px-2 py-1 rounded text-meta inline-flex items-center"
+                className="px-2 py-1 rounded-xs text-meta inline-flex items-center"
                 style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }}
               >
                 Install manually
@@ -801,7 +801,7 @@ export function ConnectProvider({
           ) : (
             <button
               onClick={retry}
-              className="px-2 py-1 border border-border rounded text-text-muted hover:text-text"
+              className="px-2 py-1 border border-border rounded-xs text-text-muted hover:text-text"
             >
               Retry
             </button>
@@ -855,7 +855,7 @@ function WaitingBlockBody({
         <div className="text-label font-medium text-text-faint mb-1">Step 2 — enter the code</div>
         {code ? (
           <div className="flex items-center gap-2">
-            <code className="font-mono text-text bg-bg px-2 py-px rounded">{code}</code>
+            <code className="font-mono text-text bg-bg px-2 py-px rounded-xs">{code}</code>
             <CopyButton text={code} />
           </div>
         ) : fallback ? (
@@ -931,12 +931,12 @@ const CredentialInput = memo(function CredentialInput({
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="min-w-0 flex-1 rounded border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
+          className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
         />
         <button
           onClick={() => void submit()}
           disabled={!canSubmit}
-          className="shrink-0 px-2 py-1 rounded border disabled:opacity-40 border-border text-text-muted hover:text-text"
+          className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40 border-border text-text-muted hover:text-text"
         >
           {submitting ? "…" : submitLabel}
         </button>
@@ -1058,7 +1058,7 @@ function ClaudeLoginBlock({
             <summary className="text-text-faint cursor-pointer hover:text-text-muted">
               Show what's happening on the box
             </summary>
-            <div className="rounded border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
+            <div className="rounded-xs border border-border overflow-hidden h-40 bg-[var(--inset)] mt-1">
               <Terminal
                 sessionKey={ptySessionKey}
                 cwd={cwd}

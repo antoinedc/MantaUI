@@ -172,7 +172,7 @@ const UserCommandBar = memo(function UserCommandBar({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-baseline gap-2 w-full text-left hover:bg-bg-elev/40 -mx-1 px-1 rounded transition-colors"
+        className="flex items-baseline gap-2 w-full text-left hover:bg-bg-elev/40 -mx-1 px-1 rounded-xs transition-colors"
         title={expanded ? "Collapse" : "Show expanded prompt"}
       >
         <span className="text-text-quiet select-none shrink-0">›</span>
@@ -255,7 +255,7 @@ export const MessageRow = memo(function MessageRow({
     </div>
   );
 
-  // User message: rendered as a single rounded gray bar so it reads as a
+  // User message: rendered as a single gray bar with curved corners so it reads as a
   // distinct "you said this" block instead of just text with a `>` prefix.
   // `›` is the dim left marker; continuation lines wrap inside the bar.
   // FileParts attached to the message render as chips ABOVE the bar so
@@ -282,7 +282,7 @@ export const MessageRow = memo(function MessageRow({
               return (
                 <span
                   key={p.id}
-                  className="rounded-md border border-border-strong px-2 py-px bg-bg-elev text-text-muted truncate max-w-[260px]"
+                  className="rounded-sm border border-border-strong px-2 py-px bg-bg-elev text-text-muted truncate max-w-[260px]"
                   title={url}
                 >
                   {filename}
@@ -359,7 +359,7 @@ export const MessageRow = memo(function MessageRow({
               {/* coherent with CompactionCard / RetryCard / QuestionCard, */}
               {/* the existing "something needs your attention" color. */}
               <span
-                className="rounded-md border px-2 py-px text-label inline-flex items-center gap-1"
+                className="rounded-sm border px-2 py-px text-label inline-flex items-center gap-1"
                 style={{
                   borderColor: "rgb(var(--warn-rgb) / 0.33)",
                   backgroundColor: "var(--warn-bg)",

@@ -906,7 +906,7 @@ export function App() {
             <button
               type="button"
               onClick={() => setMode(mode === "terminal" ? "chat" : "terminal")}
-              className="text-text-faint hover:text-text hover:bg-fill-hover rounded p-1 inline-flex items-center ml-auto"
+              className="text-text-faint hover:text-text hover:bg-fill-hover rounded-xs p-1 inline-flex items-center ml-auto"
               style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
               title={`Switch to ${mode === "terminal" ? "Chat" : "Terminal"}`}
               aria-label={mode === "terminal" ? "Chat" : "Terminal"}

@@ -201,17 +201,17 @@ describe("Pill migration — Recommended option tag (BET-534 two-adopter rule)",
     ],
   };
 
-  it("Recommended tag renders through Pill's accent chrome with the --r-full radius (was rounded-sm)", () => {
+  it("Recommended tag renders through Pill's accent chrome with the --r-full radius (was rounded-xs)", () => {
     h = mount(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} />);
     const pill = Array.from(h.container.querySelectorAll("span.rounded-full")).find(
       (el) => el.textContent === "Recommended",
     ) as HTMLElement;
     expect(pill).toBeTruthy();
     // The intended delta is exactly the radius: --r-full replaces --r-sm
-    // (rounded-sm), while the accent surface, --accent foreground and the
+    // (rounded-xs), while the accent surface, --accent foreground and the
     // label size are preserved.
     expect(pill.className).toContain("rounded-full");
-    expect(pill.className).not.toContain("rounded-sm");
+    expect(pill.className).not.toContain("rounded-xs");
     expect(pill.className).toContain("bg-accent-bg");
     expect(pill.className).toContain("text-accent");
     expect(pill.className).toContain("text-label");

@@ -4,7 +4,7 @@
 //
 // The primitive's "tokens" are class names that map through tailwind.config.js
 // to the design tokens (bg-bg-soft → --card, border-border-strong →
-// --border-strong, rounded-lg → --r-md 8px, focus:border-accent → --accent,
+// --border-strong, rounded-md → --r-md 8px, focus:border-accent → --accent,
 // py-3/px-4 → sp-3 12px / sp-4 16px, text-text-muted → --tx2,
 // text-text-faint → --tx3, font-mono → the mono stack). jsdom loads no
 // stylesheet, so the contract is asserted on the exact class strings — a
@@ -15,7 +15,7 @@ import { mount, type Harness } from "./testHarness";
 import { Field } from "./Field";
 
 const INPUT_BASE =
-  "w-full bg-bg-soft border border-border-strong rounded-lg text-body text-text focus:outline-none focus:border-accent";
+  "w-full bg-bg-soft border border-border-strong rounded-md text-body text-text focus:outline-none focus:border-accent";
 const INSET = "px-4 py-3";
 const LABEL = "block text-micro font-semibold uppercase text-text-muted";
 const META = "text-meta text-text-faint";
@@ -37,11 +37,11 @@ describe("Field", () => {
     h = mount(<Field id="f" label="Path" value="~/proj" onChange={() => {}} />);
     const el = inputEl(h.container);
     expect(el.className).toContain(INPUT_BASE);
-    // surface --card, edge --border-strong, radius --r-md (rounded-lg),
+    // surface --card, edge --border-strong, radius --r-md (rounded-md),
     // padding sp-3/sp-4 (py-3 px-4), mono value.
     expect(el.className).toContain("bg-bg-soft");
     expect(el.className).toContain("border-border-strong");
-    expect(el.className).toContain("rounded-lg");
+    expect(el.className).toContain("rounded-md");
     expect(el.className).toContain(INSET);
     expect(el.className).toContain("font-mono");
     // focus --accent edge.

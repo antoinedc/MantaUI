@@ -94,6 +94,20 @@ export default {
       md: "var(--shadow-md)",
       lg: "var(--shadow-lg)",
     },
+    // The six token steps ARE the scale (tokens.css:69-81, BET-451). Declared
+    // at theme level so Tailwind's stock radii cannot be used by accident, and
+    // so `rounded-lg` in code means the same 12px as `--r-lg` in a mockup.
+    // There is deliberately NO `DEFAULT` key: a bare `rounded` names no step,
+    // and the bare class usages are renamed to `rounded-xs` in this change.
+    borderRadius: {
+      none: "0",
+      xs: "var(--r-xs)",
+      sm: "var(--r-sm)",
+      md: "var(--r-md)",
+      lg: "var(--r-lg)",
+      xl: "var(--r-xl)",
+      full: "var(--r-full)",
+    },
     extend: {
       colors: {
         bg: {

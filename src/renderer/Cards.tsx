@@ -50,7 +50,7 @@ function AskCardShell({
         header={
           <>
             <span
-              className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-lg shrink-0"
+              className="inline-flex items-center justify-center w-[30px] h-[30px] rounded-md shrink-0"
               style={{ backgroundColor: badgeBg, color: badgeColor }}
             >
               {badge}
@@ -85,7 +85,7 @@ export function RetryCard({
   const body = info.action?.message || info.message;
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
+      className="rounded-sm border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -104,7 +104,7 @@ export function RetryCard({
             href={info.action.link}
             target="_blank"
             rel="noreferrer noopener"
-            className="inline-block px-2 py-px rounded border border-border-strong text-text hover:bg-bg-soft"
+            className="inline-block px-2 py-px rounded-xs border border-border-strong text-text hover:bg-bg-soft"
           >
             {info.action.label || "Open"}
           </a>
@@ -125,7 +125,7 @@ export function CompactionCard({
   const firstLine = state.text.split("\n").find((s) => s.trim()) ?? "";
   return (
     <div
-      className="rounded-md border bg-bg-elev px-4 py-3 text-meta"
+      className="rounded-sm border bg-bg-elev px-4 py-3 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
       <div className="flex items-center gap-2 mb-3">
@@ -208,7 +208,7 @@ export function PermissionCard({
     <>
       <button
         onClick={() => onReply("once")}
-        className="px-3 py-1 rounded-lg text-on-accent text-meta font-medium"
+        className="px-3 py-1 rounded-md text-on-accent text-meta font-medium"
         style={{ backgroundColor: "var(--accent-solid)" }}
       >
         Allow once
@@ -217,14 +217,14 @@ export function PermissionCard({
         <button
           onClick={() => onReply("always")}
           title={`Always allow ${alwaysScope}`}
-          className="px-3 py-1 rounded-lg border border-border-strong text-text hover:bg-bg-soft text-meta"
+          className="px-3 py-1 rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta"
         >
           Always allow <span className="text-text-faint">{alwaysScope}</span>
         </button>
       ) : null}
       <button
         onClick={() => onReply("reject")}
-        className="ml-auto px-3 py-1 rounded-lg text-muted hover:text-danger hover:bg-danger-bg text-meta"
+        className="ml-auto px-3 py-1 rounded-md text-muted hover:text-danger hover:bg-danger-bg text-meta"
       >
         Reject
       </button>
@@ -241,7 +241,7 @@ export function PermissionCard({
       body={
         detail ? (
           // The literal command in its own mono well — only for permissions.
-          <div className="rounded-lg bg-inset border border-border-subtle px-3 py-[9px] font-mono text-text break-all">
+          <div className="rounded-md bg-inset border border-border-subtle px-3 py-[9px] font-mono text-text break-all">
             {detail}
           </div>
         ) : null
@@ -366,7 +366,7 @@ export function QuestionCard({
                       <label
                         key={opt.origLabel}
                         className={
-                          "flex items-start gap-2 rounded-md px-2 py-1 cursor-pointer border text-meta transition-colors " +
+                          "flex items-start gap-2 rounded-sm px-2 py-1 cursor-pointer border text-meta transition-colors " +
                           (isSelected
                             ? "border-accent bg-accent-bg"
                             : "border-border hover:bg-bg-soft")
@@ -375,7 +375,7 @@ export function QuestionCard({
                       >
                         <span
                           className={
-                            "inline-flex items-center justify-center w-4 h-4 rounded border shrink-0 mt-px " +
+                            "inline-flex items-center justify-center w-4 h-4 rounded-xs border shrink-0 mt-px " +
                             (isSelected
                               ? "bg-accent-solid border-transparent text-on-accent"
                               : "border-border-strong")
@@ -426,7 +426,7 @@ export function QuestionCard({
                       handleSubmit();
                     }
                   }}
-                  className="mt-2 w-full rounded border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
+                  className="mt-2 w-full rounded-xs border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
                 />
               </div>
             ))}
@@ -439,7 +439,7 @@ export function QuestionCard({
         <>
           <button
             onClick={onReject}
-            className="ml-auto px-3 py-1 rounded-lg text-muted hover:text-danger hover:bg-danger-bg text-meta"
+            className="ml-auto px-3 py-1 rounded-md text-muted hover:text-danger hover:bg-danger-bg text-meta"
             title="Dismiss this question"
           >
             Dismiss
@@ -448,7 +448,7 @@ export function QuestionCard({
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className="px-3 py-1 rounded-lg text-on-accent text-meta font-medium disabled:opacity-40"
+            className="px-3 py-1 rounded-md text-on-accent text-meta font-medium disabled:opacity-40"
             style={{ backgroundColor: "var(--accent-solid)" }}
           >
             Submit

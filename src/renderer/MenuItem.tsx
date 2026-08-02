@@ -8,7 +8,7 @@
 //
 // Chrome contract (BET-529 inventory):
 //   - dropdown surface: `--panel`/`bg-bg-elev`, `--border` edge,
-//     `--shadow-md`, `--r-md` (8px / `rounded-lg`), `py-1`.
+//     `--shadow-md`, `--r-md` (8px / `rounded-md`), `py-1`.
 //   - item label 13px `--tx1` (`text-label text-text`), padding `sp-2/sp-2`
 //     (`px-2 py-2`), hover `--card` (`bg-bg-soft`), icon 14px.
 //   - variants danger (`--danger` + hover `--danger-bg`) and active
@@ -88,7 +88,7 @@ export function Dropdown({
       role="menu"
       className={
         `${hook ? `${hook} ` : ""}` +
-        "absolute right-0 top-full mt-1 z-30 min-w-[11.25rem] rounded-lg border border-border bg-bg-elev shadow-md py-1"
+        "absolute right-0 top-full mt-1 z-30 min-w-[11.25rem] rounded-md border border-border bg-bg-elev shadow-md py-1"
       }
     >
       {children}

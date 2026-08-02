@@ -270,7 +270,7 @@ export function ModelsCard() {
       {/* Saved & active default banner — reads from the store, NOT local
           edits, so it stays in sync with what's actually persisted. */}
       <div
-        className={`flex items-center gap-2 bg-bg-soft border border-border rounded px-3 py-2 ${
+        className={`flex items-center gap-2 bg-bg-soft border border-border rounded-xs px-3 py-2 ${
           savedDefault ? "" : "text-text-faint italic"
         }`}
       >
@@ -298,10 +298,10 @@ export function ModelsCard() {
         placeholder="Search models by name, provider, capability…"
         value={searchQuery}
         onChange={(e) => setSearchQuery(e.target.value)}
-        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded focus:outline-none focus:border-accent"
+        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent"
       />
 
-      <div className="border border-border rounded overflow-x-auto">
+      <div className="border border-border rounded-xs overflow-x-auto">
         <table className="w-full text-body">
           <thead>
             <tr className="border-b border-border">
@@ -355,7 +355,7 @@ export function ModelsCard() {
                       <span className="text-meta text-text-faint">{m.providerID}</span>
                       {ctxSize && <span className="text-meta text-text-faint">{ctxSize}</span>}
                       {info && (
-                        <span className={`px-2 py-px rounded text-meta ${TIER_CLASS[info.tier]}`}>
+                        <span className={`px-2 py-px rounded-xs text-meta ${TIER_CLASS[info.tier]}`}>
                           {info.tier}
                         </span>
                       )}

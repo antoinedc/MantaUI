@@ -148,7 +148,7 @@ export function CustomProviderForm({
 
   if (compact) {
     return (
-      <div className="border border-dashed border-border rounded p-2 space-y-1">
+      <div className="border border-dashed border-border rounded-xs p-2 space-y-1">
         <div className="text-micro font-semibold uppercase text-text-faint">
           Add endpoint
         </div>
@@ -173,7 +173,7 @@ export function CustomProviderForm({
           value={apiKey}
           disabled={busy}
           onChange={(e) => setApiKey(e.target.value)}
-          className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded"
+          className="w-full bg-bg-soft border border-border px-2 py-1 text-meta rounded-xs"
         />
         {derivedId && (
           <div className="text-micro text-text-faint">
@@ -194,7 +194,7 @@ export function CustomProviderForm({
             <button
               onClick={() => void probe()}
               disabled={busy || draftErr !== null}
-              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               {busy ? "Probing…" : "Probe"}
             </button>
@@ -202,7 +202,7 @@ export function CustomProviderForm({
             <button
               onClick={() => void save()}
               disabled={busy || checked.size === 0}
-              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               {busy ? "Saving…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
             </button>
@@ -213,7 +213,7 @@ export function CustomProviderForm({
   }
 
   return (
-    <div className="rounded-md border border-border bg-bg-soft p-3 space-y-3">
+    <div className="rounded-sm border border-border bg-bg-soft p-3 space-y-3">
       <div className="text-micro font-semibold uppercase text-text-faint">
         Add a custom provider
       </div>
@@ -264,7 +264,7 @@ export function CustomProviderForm({
             type="button"
             onClick={() => void probe()}
             disabled={busy || draftErr !== null}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
             style={{ background: ACCENT_SOLID }}
           >
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
@@ -275,7 +275,7 @@ export function CustomProviderForm({
             type="button"
             onClick={() => void save()}
             disabled={busy || checked.size === 0}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
             style={{ background: ACCENT_SOLID }}
           >
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
@@ -303,7 +303,7 @@ function ModelList({
       <div className="text-meta text-text-muted">
         {models.length} model{models.length === 1 ? "" : "s"} found — uncheck any you don't want.
       </div>
-      <div className="max-h-40 overflow-auto rounded border border-border bg-bg p-2 space-y-1">
+      <div className="max-h-40 overflow-auto rounded-xs border border-border bg-bg p-2 space-y-1">
         {models.map((m) => (
           <label
             key={m.id}

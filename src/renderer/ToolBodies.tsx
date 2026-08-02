@@ -40,7 +40,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
     <div className="relative">
       <CopyButton
         text={output}
-        className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded"
+        className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded-xs"
       />
       <pre
         ref={preRef}
@@ -49,7 +49,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
           pinnedRef.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 8;
         }}
-        className="text-code font-mono bg-bg-soft border border-border rounded px-2 py-1 pr-8 max-h-64 overflow-auto whitespace-pre"
+        className="text-code font-mono bg-bg-soft border border-border rounded-xs px-2 py-1 pr-8 max-h-64 overflow-auto whitespace-pre"
       >
         <code>{output}</code>
       </pre>
@@ -230,7 +230,7 @@ function CollapsibleCode({ body, maxLines }: { body: string; maxLines: number })
   const shown = overflow ? lines.slice(0, maxLines).join("\n") : body;
   const hiddenCount = lines.length - maxLines;
   return (
-    <div className="text-code font-mono bg-bg-soft border border-border rounded">
+    <div className="text-code font-mono bg-bg-soft border border-border rounded-xs">
       <pre className="px-2 py-1 overflow-x-auto max-w-full whitespace-pre">
         <code>{shown}</code>
       </pre>
@@ -254,7 +254,7 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
   const shown = overflow ? paths.slice(0, maxLines) : paths;
   const hiddenCount = paths.length - maxLines;
   return (
-    <div className="text-code font-mono bg-bg-soft border border-border rounded">
+    <div className="text-code font-mono bg-bg-soft border border-border rounded-xs">
       <div className="px-2 py-1 overflow-x-auto max-w-full">
         {shown.map((p, i) => (
           <div key={i} className="text-text-muted whitespace-pre">

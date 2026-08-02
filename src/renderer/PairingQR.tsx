@@ -93,7 +93,7 @@ export function PairingQR({
 
   if (!dataUrl) {
     return (
-      <div className="w-[200px] h-[200px] bg-bg-soft border border-border rounded flex items-center justify-center text-meta text-text-muted">
+      <div className="w-[200px] h-[200px] bg-bg-soft border border-border rounded-xs flex items-center justify-center text-meta text-text-muted">
         Generating…
       </div>
     );
