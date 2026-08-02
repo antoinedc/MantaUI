@@ -61,9 +61,9 @@ The real rule that survives: **if a primitive sets a background that differs fro
 
 The bare `.pill` sets only padding, radius and font — no background, no colour — and **0 of its 81 uses in the spec omit a modifier**. Rendered bare it is invisible text. A primitive whose base is abstract must make the variant a **required prop with no default**, not an optional one.
 
-### C5 — The shadow scale is an open design decision. Do not silently pick a side.
+### C5 — The shadow scale follows the spec. (SETTLED 2026-08-02, BET-563)
 
-`--shadow-sm/md/lg` differ between the redesign spec and `src/renderer/tokens.css` in both themes (light `--shadow-md`: app `0 4px 12px` + a second layer vs spec `0 8px 24px` single-layer). Every other token agrees — dark 29/29, light 29/32. If your primitive needs a shadow, use the token and **report the divergence**; do not change `tokens.css` and do not hardcode the spec's value.
+BET-563's owner decision was option **(a) — the spec wins**, so `--shadow-sm/md/lg` in `src/renderer/tokens.css` were changed to the redesign spec's values in both themes (e.g. light `--shadow-md` is now the spec's single-layer `0 8px 24px`, not the app's two-layer form). The spec and `tokens.css` are now in agreement — dark 29/29, light 29/32. Use the token as normal; there is no longer a divergence to report or a side to pick.
 
 ## Inventory
 

@@ -143,12 +143,12 @@ ${sprite}
 <div class="shcmp" id="shadow-c5">
   <header>
     <h2>C5 — the shadow scale, app vs spec</h2>
-    <p>The one open token divergence (docs/components.md C5). Each surface is the same card; only the box-shadow differs.</p>
+    <p>Settled by owner decision (BET-563): the spec won, and <code>src/renderer/tokens.css</code> now carries the spec's values. Each surface is the same card; only the box-shadow differs.</p>
   </header>
   <div class="themes">${shadowPanel("light")}${shadowPanel("dark")}</div>
 </div>
 <div class="note">
-  <b>Token audit — the spec and <code>src/renderer/tokens.css</code> agree.</b> Dark 29/29 identical, light 29/32, root 18/21 (those 3 are whitespace and font-stack fallbacks). The spec defines <b>no token the app lacks</b>. The one real divergence is the shadow scale: <code>--shadow-sm/md/lg</code> differ in both themes — light <code>--shadow-md</code> is <code>0 4px 12px</code> plus a second layer in the app vs <code>0 8px 24px</code> single-layer in the spec. A design decision, not drift to fix silently.
+  <b>Token audit — the spec and <code>src/renderer/tokens.css</code> agree.</b> Dark 29/29 identical, light 29/32, root 18/21 (those 3 are whitespace and font-stack fallbacks). The spec defines <b>no token the app lacks</b>. The former shadow-scale divergence (light <code>--shadow-md</code> was <code>0 4px 12px</code> plus a second layer in the app vs <code>0 8px 24px</code> single-layer in the spec) is resolved — BET-563 chose option (a), adopting the spec's single-layer values in both themes. The two surfaces below should now render identically.
 </div>
 ${COMPONENTS.map((c) => `
 <div class="comp" id="${c.id}">
