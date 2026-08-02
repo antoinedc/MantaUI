@@ -4,7 +4,7 @@ App vs `docs/screens/folder-picker/mockup.html`, from `npm run visual:compare fo
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-02 (BET-567)
+Last reviewed: 2026-08-02 (a47e3f7)
 
 ## Captured state
 
