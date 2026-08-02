@@ -23,6 +23,7 @@ import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher } from "../shared/types";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
+import { Tag } from "./Tag";
 import { Dropdown, MenuItem } from "./MenuItem";
 
 // Cache-segment colors — same palette as ContextBar so the header pill and
@@ -127,13 +128,12 @@ export function SessionHeader({
 
       {/* Branch chip — session state, lives in the header not the composer. */}
       {branch && (
-        <span
-          className="text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1"
+        <Tag
+          icon={<GitBranch size={12} aria-hidden="true" className="shrink-0" />}
           title={`Current branch: ${branch}`}
         >
-          <GitBranch size={14} aria-hidden="true" className="shrink-0" />
-          <span className="truncate">{branch}</span>
-        </span>
+          <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
+        </Tag>
       )}
 
       {/* Right group — context pill, mode toggle, session menu (8px items).
