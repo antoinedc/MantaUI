@@ -59,6 +59,7 @@ import { CopyButton } from "./CopyButton";
 import { Terminal } from "./Terminal";
 import { useStore } from "./store";
 import { ProcessPanel } from "./ProcessPanel";
+import { Callout } from "./Callout";
 
 // Poll cadences (BET-312, BET-354): 3s for both the device-code wait and
 // the post-restart readiness poll. BET-354 adds a 1s tick for the
@@ -767,7 +768,7 @@ export function ConnectProvider({
 
       {phase.kind === "failed" && (
         <div className="space-y-2">
-          <div className="text-danger break-words">{phase.message}</div>
+          <Callout tone="danger">{phase.message}</Callout>
           {phase.reason === "claude-cli-install" ? (
             // BET-421 §E.4: three actions — Try again, Use a different
             // model (Codex/Kimi/custom need no binary — this is the

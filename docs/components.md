@@ -90,3 +90,5 @@ that vanishes. Adopter counts below are **web** adopters only.
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
 | MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` — **single-surface waiver** (owner-approved, BET-549) | `variant: normal\|danger\|active` |
 | SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` — **single-surface exemption** (owner-approved, BET-546) | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |
+| Toggle | `src/renderer/Toggle.tsx` | 2 call sites in 1 file — `Settings.tsx` (`chatAutoAllow`, `allowAgentPush`) — **single-surface case** (both boolean switch rows live in the one settings form, BET-614) | `checked`; `onChange`; `disabled`; `ariaLabel`; `id` |
+| Callout | `src/renderer/Callout.tsx` | 2 — `Onboarding.tsx`, `ConnectProvider.tsx` | `tone: info\|ok\|warn\|danger` (required, no default — the bare base is abstract, C4); `children` |
