@@ -89,8 +89,17 @@ jobs:
           # Scope is the SHOT ARTIFACTS this gate owns (website/shot-*.webp +
           # hero-poster.webp), matching the PR gate; the npm test step
           # regenerates website/sitemap.xml so it is deliberately excluded.
-          if ! git diff --exit-code --quiet -- website/shot-*.webp website/hero-poster.webp; then
-            echo "::error::main's committed website/shot-*.webp are stale. The PR drift gate never runs on main, so only this scheduled check covers them. Fix: run 'npm run shots' on main and commit the regenerated website/shot-*.webp + website/hero-poster.webp."
-            git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
-            exit 1
-          fi
+          #
+          # Same comparator as the PR gate, for the same reason: four of the
+          # seven shots render in two runner-dependent variants, so a byte
+          # comparison here would fail roughly half the nightlies on main and
+          # train everyone to ignore it. See scripts/shots-compare.mjs.
+          git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
+          CMP="$(mktemp -d "$RUNNER_TEMP/shots-compare.XXXXXX")"
+          mkdir -p "$CMP/committed" "$CMP/regenerated"
+          for f in website/shot-*.webp website/hero-poster.webp; do
+            [ -f "$f" ] || continue
+            git show "HEAD:$f" > "$CMP/committed/$(basename "$f")" 2>/dev/null || true
+            cp "$f" "$CMP/regenerated/$(basename "$f")"
+          done
+          node scripts/shots-compare.mjs "$CMP"
