@@ -31,12 +31,13 @@
  */
 
 import { test, expect } from "@playwright/test";
-import { chromium, type Browser } from "@playwright/test";
+import { chromium, type Browser, type Page } from "@playwright/test";
 import {
   LAUNCH_OPTIONS,
   RENDERER_DIR,
   assertRendererFresh,
   ROOT,
+  awaitStableFrame,
   preparePage,
   startStaticServer,
 } from "../../scripts/visual/harness.mjs";
@@ -68,6 +69,49 @@ test.afterAll(async () => {
   server?.close();
 });
 
+/**
+ * Shared, single-copy assertion path — a phased row MUST reuse these, never
+ * get its own copies. Each takes a `name` so a phased row can badge every
+ * capture with its phase (`<id>-<phase>`), producing one structure + one
+ * pixel baseline per phase.
+ */
+async function assertStructure(page: Page, screen: { snapshot?: string; region?: string; ready: string }, name: string) {
+  await expect(page.locator(screen.snapshot ?? screen.region ?? screen.ready)).toMatchAriaSnapshot({
+    name: `${name}.aria.yml`,
+  });
+}
+
+async function assertPixels(page: Page, screen: { region?: string }, name: string) {
+  if (screen.region) {
+    await expect(page.locator(screen.region)).toHaveScreenshot(`${name}.png`, {
+      animations: "disabled",
+    });
+  } else {
+    await expect(page).toHaveScreenshot(`${name}.png`, {
+      fullPage: true,
+      animations: "disabled",
+    });
+  }
+}
+
+async function assertSurfacesClosed(page: Page, screen: { surfacesClosed?: string[] }, id: string) {
+  const closed = await page.evaluate(() =>
+    [...document.querySelectorAll("[aria-haspopup]")]
+      .filter((el) => el.getAttribute("aria-expanded") !== "true")
+      .map((el) => [...el.classList].find((c) => c.startsWith("manta-")) ?? "")
+      .filter(Boolean)
+      .sort(),
+  );
+  expect(
+    closed,
+    `surface coverage for "${id}": closed triggers ${JSON.stringify(closed)} ` +
+      `vs surfacesClosed ${JSON.stringify(screen.surfacesClosed ?? [])}. ` +
+      "A NEW entry = a popup trigger no capture opens (add a row that opens it, " +
+      "or record it here as unverified). A MISSING entry = a row now opens it " +
+      "(delete the class from this row's list).",
+  ).toEqual(screen.surfacesClosed ?? []);
+}
+
 for (const screen of SCREENS) {
   test.describe(`screen: ${screen.id}`, () => {
     test(`${screen.id} — structure and pixels match the baseline`, async () => {
@@ -86,57 +130,27 @@ for (const screen of SCREENS) {
           actions: screen.actions,
         });
 
-        // 1. Structure — text snapshot, readable in a PR diff. Rooted at
-        // `snapshot` when the screen declares one: `ready` gates BOOT, which
-        // for an action-driven screen is a different element from the one
-        // being captured (see screens.mjs). Precedence is
-        // `snapshot ?? region ?? ready` — a region row without `snapshot` is
-        // rooted at its region, because the component being cropped IS the
-        // structure contract under review.
-        await expect(page.locator(screen.snapshot ?? screen.region ?? screen.ready)).toMatchAriaSnapshot({
-          name: `${screen.id}.aria.yml`,
-        });
-
-        // 2. Pixels — a region row compares the declared element against its
-        // own small baseline (only that component's drift re-records it);
-        // every other row compares the full page against its approved
-        // baseline. Both are against the app's own past, never a mockup.
-        if (screen.region) {
-          await expect(page.locator(screen.region)).toHaveScreenshot(`${screen.id}.png`, {
-            animations: "disabled",
-          });
+        if (screen.phases) {
+          // A phased row captures the SAME screen once per phase, advancing
+          // the demo's stepped stream between captures and asserting
+          // structure + pixels per phase, inside THIS one test.
+          for (let i = 0; i < screen.phases.length; i++) {
+            const phase = screen.phases[i];
+            if (i > 0) {
+              await page.evaluate(() => (window as any).__mantaDemoStream.advance());
+              await awaitStableFrame(page, phase);
+            }
+            await assertStructure(page, screen, `${screen.id}-${phase}`);
+            await assertPixels(page, screen, `${screen.id}-${phase}`);
+          }
+          // Surface coverage is a per-row property, asserted once (not
+          // re-asserted per phase — the popups don't change between phases).
+          await assertSurfacesClosed(page, screen, screen.id);
         } else {
-          await expect(page).toHaveScreenshot(`${screen.id}.png`, {
-            fullPage: true,
-            animations: "disabled",
-          });
+          await assertStructure(page, screen, screen.id);
+          await assertPixels(page, screen, screen.id);
+          await assertSurfacesClosed(page, screen, screen.id);
         }
-
-        // 3. Surface coverage — which popup triggers this capture leaves closed.
-        // A trigger declares itself with aria-haspopup (Change 1); `aria-expanded`
-        // tells open from closed. Identity is the element's `manta-*` hook class,
-        // which is already a stable contract (AGENTS.md) — do NOT key on the
-        // accessible name, which is the model name / percentage and changes with
-        // the fixture.
-        const closed = await page.evaluate(() =>
-          [...document.querySelectorAll("[aria-haspopup]")]
-            .filter((el) => el.getAttribute("aria-expanded") !== "true")
-            .map((el) => [...el.classList].find((c) => c.startsWith("manta-")) ?? "")
-            .filter(Boolean)
-            .sort(),
-        );
-        expect(
-          closed,
-          // Two directions, opposite meanings:
-          //   new entry  → someone added a popup trigger no capture opens. Either
-          //                add a row that opens it, or record the class here.
-          //   missing entry → someone added a row that opens it. Delete the class.
-          `surface coverage for "${screen.id}": closed triggers ${JSON.stringify(closed)} ` +
-            `vs surfacesClosed ${JSON.stringify(screen.surfacesClosed ?? [])}. ` +
-            "A NEW entry = a popup trigger no capture opens (add a row that opens it, " +
-            "or record it here as unverified). A MISSING entry = a row now opens it " +
-            "(delete the class from this row's list).",
-        ).toEqual(screen.surfacesClosed ?? []);
       } finally {
         await context.close();
       }
