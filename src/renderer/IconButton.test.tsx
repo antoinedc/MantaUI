@@ -18,10 +18,14 @@ import { mount, type Harness } from "./testHarness";
 import { IconButton } from "./IconButton";
 import { SessionHeader } from "./SessionHeader";
 
-// The exact chrome string IconButton owns (no className escape hatch means
-// every call site renders exactly this).
+// The exact chrome string IconButton owns for the md (default) size. Padding
+// and radius live in SIZE_CHROME and vary by size (md/lg rounded-xs p-1, xl
+// rounded-md p-2); the rest of the chrome is shared — no className escape
+// hatch means every call site renders exactly these classes.
 const CHROME =
-  "inline-flex items-center justify-center rounded-xs p-1 text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+  "inline-flex items-center justify-center text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent rounded-xs p-1";
+const CHROME_XL =
+  "inline-flex items-center justify-center text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent rounded-md p-2";
 
 function buttonEl(h: Harness): HTMLButtonElement {
   const el = h.container.querySelector("button") as HTMLButtonElement;
@@ -76,6 +80,15 @@ describe("IconButton", () => {
     expect(iconSize(h)).toBe("16");
     h.rerender(<IconButton label="A" icon={<Terminal />} size="lg" />);
     expect(iconSize(h)).toBe("20");
+  });
+
+  it("renders the xl size (36px hit area, --r-md radius, 20px icon) for a standalone control row", () => {
+    h = mount(<IconButton label="A" icon={<Terminal />} size="xl" />);
+    const el = buttonEl(h);
+    expect(iconSize(h)).toBe("20");
+    expect(el.className).toBe(CHROME_XL);
+    expect(el.className).toContain("rounded-md");
+    expect(el.className).toContain("p-2");
   });
 
   it("passes menu semantics through for a trigger-style icon button", () => {
