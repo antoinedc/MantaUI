@@ -107,8 +107,9 @@
      their sizes and weights through these so a retune is one edit across
      desktop and the generated Swift client. The sizes are the §8-specified
      transcript values (15 body / 13 step / 12 mono / 11 meta), NOT an off-grid
-     guess; --step-row-y is the step-row / rollup vertical padding the mockup
-     fixes at 7px, which sits off the spacing grid and so gets a name here. */
+     guess; --step-row-y and --step-dot are the step-row / rollup vertical
+     padding (7px) and the status-dot size (6px) the mockup fixes off the
+     spacing grid, so they get names here instead of being hardcoded. */
   --font-size-body: 15px;
   --font-size-small: 13px;
   --font-size-xs: 12px;
@@ -116,6 +117,7 @@
   --weight-medium: 500;
   --weight-semibold: 600;
   --step-row-y: 7px;
+  --step-dot: 6px;
 }
 
 /* Density scope (BET-544). Session-row metrics live on [data-density], NOT

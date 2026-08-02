@@ -148,12 +148,13 @@ struct TypeMetrics {
     let proseLineHeight: CGFloat
     let uiLineHeight: CGFloat
     let stepRowY: CGFloat
+    let stepDot: CGFloat
 }
 
 enum Metrics {
     static let spacing = Spacing(sp0: 0, spPx: 1, sp1: 4, sp2: 8, sp3: 12, sp4: 16, sp5: 20, sp6: 24, sp8: 32, sp10: 40, sp12: 48)
     static let radius = Radius(xs: 4, sm: 6, md: 8, lg: 12, xl: 16, full: 999)
-    static let type = TypeMetrics(sans: "Inter Variable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", mono: "JetBrains Mono Variable, JetBrains Mono, SF Mono, Menlo, Consolas, monospace", body: 15, small: 13, xs: 12, twoXS: 11, medium: 500, semibold: 600, proseLineHeight: 1.55, uiLineHeight: 1.45, stepRowY: 7)
+    static let type = TypeMetrics(sans: "Inter Variable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", mono: "JetBrains Mono Variable, JetBrains Mono, SF Mono, Menlo, Consolas, monospace", body: 15, small: 13, xs: 12, twoXS: 11, medium: 500, semibold: 600, proseLineHeight: 1.55, uiLineHeight: 1.45, stepRowY: 7, stepDot: 6)
 }
 
 extension Color {

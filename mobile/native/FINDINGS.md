@@ -150,6 +150,24 @@ bubble, no hardcoded design literal** — `TranscriptComponents.swift` has no
 colour/spacing/radius/size/weight literal; the only numerics are the generated
 token lookups.
 
+### Micro-token resolution (review returned, 2026-08-02)
+
+A re-read by `manta-reviewer` flagged two residual literals in the S4a
+fixture as inconsistent with the "no hardcoded literal" claim: the 6px status
+dot and a 9px rollup chevron glyph. Both resolved in the same direction as
+`--step-row-y`:
+
+- **6px status dot → `--step-dot`** added to tokens.css `:root`, emitted into
+  `Metrics.type.stepDot`; the circle now sizes from it.
+- **9px chevron → removed.** The mockup's roll-up is the literal `▸` at 12px
+  mono (`.group`), not a separate glyph; the component rendered an SF Symbol on
+  top of the `▸` already in the summary string, duplicating it. The image is
+  gone; the roll-up row is now the `▸ 4 steps · …` 12px mono `tx4` text alone,
+  matching the mockup exactly.
+
+The FINDINGS claim is now accurate as written: the only numerics in the app
+source are generated-token lookups.
+
 ### Token generation (the non-colour surface)
 
 `gen-swift-tokens.mjs` now also parses tokens.css `:root` and emits a
@@ -188,7 +206,7 @@ step-rows 1     {{-0.5,149.5},{403,30.7}}  1px hairline stroke; row {{0,150},{40
   verb Ran      tx2 13px; target 'multica issue get BET-520' mono 12px tx4; duration '0.4s' tx4
 assistant-prose {{12,191.7},{336,44.3}}  wrapped 2-line prose at 15px/1.55
 user-band 2     {{0,248},{402,42}}   full-bleed again
-step-rows 2     rollup Button '▸ 4 steps · read 3 files, 1 search' {{0,348},{402,28.3}}, 12px mono, chevron
+step-rows 2     rollup Button '▸ 4 steps · read 3 files, 1 search' {{0,348},{402,28.3}}, 12px mono
 ```
 
 Colour, typography and the 2px accent edge and trailing radius are visible only

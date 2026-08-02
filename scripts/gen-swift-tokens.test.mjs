@@ -26,7 +26,7 @@ const ROOT_VARIABLES = [
   ["font-size-xs", "12px"], ["font-size-2xs", "11px"],
   ["weight-medium", "500"], ["weight-semibold", "600"],
   ["prose-lh", "1.55"], ["ui-lh", "1.45"],
-  ["step-row-y", "7px"],
+  ["step-row-y", "7px"], ["step-dot", "6px"],
 ];
 
 function cssFor(prefix) {

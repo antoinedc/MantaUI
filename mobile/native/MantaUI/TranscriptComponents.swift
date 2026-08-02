@@ -102,7 +102,7 @@ struct StepRowView: View {
                 HStack(spacing: Metrics.spacing.sp2) {
                     Circle()
                         .fill(dotColor)
-                        .frame(width: 6, height: 6)
+                        .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
                     Text(step.verb)
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.tx2)
@@ -161,18 +161,17 @@ struct StepGroupView: View {
             case .rollup(let summary, let rows):
                 VStack(spacing: 0) {
                     Button(action: { rollupExpanded.toggle() }) {
-                        HStack(spacing: Metrics.spacing.sp2) {
-                            Image(systemName: rollupExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
-                            Text(summary)
-                                .lineLimit(1)
-                        }
-                        .font(.system(size: Metrics.type.xs, design: .monospaced))
-                        .foregroundColor(tokens.tx4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, Metrics.type.stepRowY)
-                        .padding(.horizontal, Metrics.spacing.sp3)
-                        .contentShape(Rectangle())
+                        // The roll-up chevron is the leading `▸` already in the
+                        // summary string (mockup `.group`), rendered at 12px
+                        // mono — no separate glyph, no extra size literal.
+                        Text(summary)
+                            .lineLimit(1)
+                            .font(.system(size: Metrics.type.xs, design: .monospaced))
+                            .foregroundColor(tokens.tx4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, Metrics.type.stepRowY)
+                            .padding(.horizontal, Metrics.spacing.sp3)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     if rollupExpanded {

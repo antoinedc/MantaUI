@@ -90,7 +90,7 @@ const TYPE_MAP = {
   proseLineHeight: "prose-lh", uiLineHeight: "ui-lh",
 };
 // Off-grid layout paddings the mockup fixes (§8 / transcript-mockup.html).
-const LAYOUT_MAP = { stepRowY: "step-row-y" };
+const LAYOUT_MAP = { stepRowY: "step-row-y", stepDot: "step-dot" };
 
 // CSS allows a leading-dot decimal (".035"); Swift requires a leading zero
 // ("0.035"). Normalize so the emitted Swift literals always compile.
