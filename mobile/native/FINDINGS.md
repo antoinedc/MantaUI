@@ -437,3 +437,62 @@ double-redaction, not a rendering change).
   functionality on it (§5.6): accepting and denying both land on the main
   destination; only a quiet Settings reminder distinguishes them (S8 push wires
   the actual APNs fan-out).
+
+## S3 — session list, actions, and session creation (BET-595)
+
+S1 transport + S2 pairing landed the ability to reach a box; S3 is the first
+screen a paired user sees: the §7.1 session list with §7.2 actions (tap opens,
+swipe-left delete with full-swipe commit, swipe-right pin, long-press context
+menu Rename · Pin · Fork · Delete), §7.3 delete semantics (idle → immediate +
+5 s undo holding the RPC; running → confirm naming what is interrupted), §7.4
+user-disableable haptics, and §7.6 (every gesture is also in the context menu).
+Plus the owner override on §5.5: session creation with a folder, optional
+worktree fan-out, first message creates the session.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `SessionModels.swift` | Codable models matching the `tmux:list` / `git:list-worktrees` shapes + PURE logic: §7.1a subtitle table, §7.1 status dot, row timer `elapsed`/`runningDuration` (the §7.3 confirm copy), pin identity, §7.3 `PendingDelete` undo-window expiry, folder-path + worktree helpers (folderPicker.ts ports), model label, haptics taxonomy. |
+| `MantaAPIClient.swift` (extended) | The tmux / fs / git / config RPC surface the list needs: `projects`, `newSession`, `newWindow`, `killWindow`, `deleteSession` (chat + window), `renameWindow`, `selectWindow`, `forkSession`, `listDirs`, `listWorktrees`, `configGet`/`configUpdate`. |
+| `SessionListStore.swift` | ObservableObject behind the list: refresh on demand + reconnect, per-row live status merged from the S1b event store (`running`, subagents, model), attention (needs-you), pins + haptics flag via config, §7.3 delete-with-undo, running-duration tracking. |
+| `SessionListView.swift` | The §7.1 grouped list, rows, swipes, context menu, running-delete confirm, 5 s undo toast, floating search-plus glass capsule (creates a session), tap → §8 screen seam (chat is S4). |
+| `SessionCreateSheet.swift` / `FolderPickerView.swift` | Creation flow: name, folder (full-height picker over `fs:list-dirs`), optional worktree fan-out (`git:list-worktrees`), then the first-message composer creates the session and sends the prompt. |
+| `tokens.css` / `gen-swift-tokens.mjs` / `Theme.swift` | Additive §7 token metrics (`--list-row-*`, `--list-group-*`, `--font-size-row-name`, `--tracking-*`) emitted into `Metrics.type`, so no session-list value is a hardcoded literal. |
+| `MantaUITests/SessionModelsTests.swift` | 24 pure-logic tests (subtitle/dot/timer/pin/undo/model/folder/worktree). |
+
+### Verification
+
+- The full MantaUITests suite passes: 91 tests, 0 failures (67 inherited from
+  S1a/S1b/S2 + 24 new), on the pinned iPhone 17 Pro (iOS 26.5).
+- The app builds for the iOS Simulator destination (`BUILD SUCCEEDED`) and
+  launches on the simulator without crashing (a fresh install shows the §5
+  onboarding gate, as `MantaAppRoot` intends).
+- `node scripts/gen-swift-tokens.mjs --check` is green; `gen-swift-tokens.test.mjs`
+  updated for the new tokens and passes.
+
+### Honesty notes
+
+- **A live end-to-end list against a real box is not exercised.** As in S2, the
+  macos agent cannot mint a pairing code (loopback-only) and must not pair with
+  production hosts, so "the list reflects a real box" is verified structurally
+  (the RPC surface mirrors httpApi exactly, the models decode the server shapes)
+  and by the pure-logic tests, not by a live round trip. That stays a
+  human/CI-on-device check once a box is reachable.
+- **The `needs you` (attention) dot/subtitle** keyed on `question.asked` /
+  `permission.asked` raw frames from the S1b stream. Those events fire only
+  while the box is streaming — the store tracks them live; there is no
+  attention state without a live stream.
+- **The running turn timer** starts when the box's interpreted stream state
+  flips a session to running. Without a live stream the timer slot is empty;
+  the subtitle/dot still reflect the last known state.
+- **The row timer / running duration resolve from the event store's `running`
+  flag**; the exact §7.1 elapsed and §7.3 "running N minutes" wording are
+  driven by whatever running-turn timing the box publishes (as in S4's chat
+  header).
+- **The chat screen** that tap opens is S4's — this stage delivers the list,
+  its actions, and creation. The tap target is a single `navigationDestination`
+  seam (`SessionScreenPlaceholder`), so S4 replaces one screen, not the shell.
+- **Model labels** are data-faithful: known Anthropic ids collapse to friendly
+  names ("claude-opus-4-7" → "opus 4.7"); anything unknown shows the raw
+  modelID (never invented).

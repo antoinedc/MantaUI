@@ -7,7 +7,17 @@ struct MantaUIApp: App {
     // chat transcript, subagents) and owns reconnect + degraded mode. When a
     // box is paired (serverUrl + boxToken in the Keychain) it connects live;
     // otherwise start() no-ops into a closed state without spinning.
-    @StateObject private var store = MantaEventStore()
+    //
+    // S3: the session-list store drives the §7.1 list, deriving live row
+    // status from the event store and persisting pin/haptics through config.
+    @StateObject private var store: MantaEventStore
+    @StateObject private var sessionStore: SessionListStore
+
+    init() {
+        let event = MantaEventStore()
+        _store = StateObject(wrappedValue: event)
+        _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -16,7 +26,11 @@ struct MantaUIApp: App {
             // the /events stream and bounds to whatever S4 mounts.
             MantaAppRoot()
                 .environmentObject(store)
-                .task { store.start() }
+                .environmentObject(sessionStore)
+                .task {
+                    store.start()
+                    sessionStore.bindResync()
+                }
         }
     }
 }

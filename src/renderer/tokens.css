@@ -119,6 +119,22 @@
   --step-row-y: 7px;
   --step-dot: 6px;
 
+  /* Session-list anatomy (BET-595 §7). The row min-height, row corner radius,
+     row gap, group-header margins and the row-name size/tracking are off the
+     spacing / type grid, so they get names here instead of being hardcoded in
+     the Swift client. The two tracking values are UNITLESS em multipliers
+     (SwiftUI tracking is measured in points; the list view resolves them
+     against its font size). Additive — unused by the web app, no visual
+     change there. */
+  --list-row-min-h: 62px;
+  --list-row-radius: 20px;
+  --list-row-margin: 2px;
+  --list-group-above: 22px;
+  --list-group-below: 6px;
+  --font-size-row-name: 15.5px;
+  --tracking-list-heading: -0.015;
+  --tracking-row-name: -0.01;
+
   /* S2 onboarding display sizes (BET-594). The pairing flow's headings, the
      two-sided four-char confirm code, and the six-digit OTP resolve their font
      sizes through these so a retune is one edit in the token source and the

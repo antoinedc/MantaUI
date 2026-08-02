@@ -19,6 +19,14 @@ final class MantaAPIClient: Sendable {
         self.session = session
     }
 
+    /// A client bound to the paired box stored in the Keychain. Used by the
+    /// session-list surface, which is only reachable after pairing. A paired
+    /// Keychain always carries a serverURL; the placeholder is an unreachable
+    /// fallback (no token → the call 401s rather than ever succeeding).
+    static func live() -> MantaAPIClient {
+        MantaAPIClient(serverURL: KeychainCredentialStore.shared.serverURL ?? URL(string: "https://127.0.0.1")!)
+    }
+
     func listSessions(directory: String? = nil) async throws -> [OpencodeSessionListItem] {
         let args: [Any] = directory.map { [$0] } ?? []
         return try await call("opencode:list-sessions", args: args, as: [OpencodeSessionListItem].self) ?? []
@@ -114,6 +122,111 @@ final class MantaAPIClient: Sendable {
 
     func abort(sessionId: String) async throws {
         _ = try await callVoid("opencode:abort", args: [sessionId])
+    }
+
+    // MARK: - Session list + creation (S3 / BET-595)
+
+    /// `tmux:list` — the grouped session list (projects → windows).
+    func projects() async throws -> [MantaProject] {
+        try await call("tmux:list", args: [], as: [MantaProject].self) ?? []
+    }
+
+    /// `tmux:new-session` — create a new project (tmux session).
+    func newSession(_ input: NewSessionInput) async throws -> [MantaProject] {
+        let dict: [String: Any] = [
+            "name": input.name,
+            "cwd": input.cwd,
+            "windowName": input.windowName,
+            "createDir": input.createDir,
+            "chatMode": input.chatMode,
+        ]
+        return try await call("tmux:new-session", args: [dict], as: [MantaProject].self) ?? []
+    }
+
+    /// `tmux:new-window` — create a new session (window) in an existing project.
+    /// A chat-mode window becomes a live opencode session the moment its first
+    /// message is sent.
+    func newWindow(_ input: NewWindowInput) async throws -> [MantaProject] {
+        var dict: [String: Any] = [
+            "sessionName": input.sessionName,
+            "windowName": input.windowName,
+            "chatMode": input.chatMode,
+        ]
+        if let cwd = input.cwd { dict["cwd"] = cwd }
+        return try await call("tmux:new-window", args: [dict], as: [MantaProject].self) ?? []
+    }
+
+    /// `tmux:kill-window` — delete a session (a row in the list).
+    func killWindow(_ input: KillWindowInput) async throws {
+        let dict: [String: Any] = [
+            "sessionName": input.sessionName,
+            "windowIndex": input.windowIndex,
+        ]
+        _ = try await callVoid("tmux:kill-window", args: [dict])
+    }
+
+    /// `opencode:delete-session` — delete a chat session AND its tmux window
+    /// (the desktop path). Used when the row has an opencode session id.
+    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
+        let dict: [String: Any] = [
+            "sessionId": sessionId,
+            "sessionName": sessionName,
+            "windowIndex": windowIndex,
+        ]
+        _ = try await callVoid("opencode:delete-session", args: [dict])
+    }
+
+    /// `opencode:fork-session` — fork a chat session into a new window (§7.2
+    /// long-press Fork). `messageID` is optional (fork at head when absent).
+    func forkSession(sessionId: String, sessionName: String, windowName: String, cwd: String? = nil, messageID: String? = nil) async throws {
+        var dict: [String: Any] = [
+            "sessionId": sessionId,
+            "sessionName": sessionName,
+            "windowName": windowName,
+        ]
+        if let cwd { dict["cwd"] = cwd }
+        if let messageID { dict["messageID"] = messageID }
+        _ = try await callVoid("opencode:fork-session", args: [dict])
+    }
+
+    /// `tmux:rename-window` — rename a session (the row's name).
+    func renameWindow(session: String, index: Int, newName: String) async throws {
+        let dict: [String: Any] = [
+            "sessionName": session,
+            "windowIndex": index,
+            "newName": newName,
+        ]
+        _ = try await callVoid("tmux:rename-window", args: [dict])
+    }
+
+    /// `tmux:select-window` — make a window the active one in its project.
+    func selectWindow(session: String, index: Int) async throws {
+        let dict: [String: Any] = [
+            "sessionName": session,
+            "windowIndex": index,
+        ]
+        _ = try await callVoid("tmux:select-window", args: [dict])
+    }
+
+    /// `fs:list-dirs` — directory path completion for the folder picker.
+    func listDirs(_ partial: String) async throws -> [String] {
+        try await call("fs:list-dirs", args: [partial], as: [String].self) ?? []
+    }
+
+    /// `git:list-worktrees` — git worktree fan-out detection for a folder.
+    func listWorktrees(_ cwd: String) async throws -> [MantaWorktree] {
+        try await call("git:list-worktrees", args: [cwd], as: [MantaWorktree].self) ?? []
+    }
+
+    /// `config:update` — persist a config patch (e.g. `pinnedWindows`,
+    /// `hapticsEnabled`). Returns the merged config object.
+    func configUpdate(_ patch: [String: Any]) async throws -> [String: JSONValue]? {
+        try await call("config:update", args: [patch], as: [String: JSONValue].self)
+    }
+
+    /// `config:get` — read the full config (e.g. `pinnedWindows`, `hapticsEnabled`).
+    func configGet() async throws -> [String: JSONValue]? {
+        try await call("config:get", args: [], as: [String: JSONValue].self)
     }
 
     // MARK: - Transport + envelope

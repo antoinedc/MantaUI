@@ -13,6 +13,7 @@ import SwiftUI
 @MainActor
 struct MantaAppRoot: View {
     @EnvironmentObject private var store: MantaEventStore
+    @EnvironmentObject private var sessionStore: SessionListStore
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var flow: MantaOnboardingFlow
     @State private var paired: Bool
@@ -55,10 +56,12 @@ struct MantaAppRoot: View {
                 // measurement scenes stay reachable (S4b parent/child baseline).
                 RootView()
             } else if paired {
-                // Paired → main destination. S3 replaces this content shell
-                // with the session list; S4 wires it to live data.
-                RootView()
+                // Paired → main destination (S3): the session list. S4 wires
+                // tap-open's chat to live data; S3 delivers the list, its
+                // actions, and creation.
+                SessionListView(store: sessionStore)
                     .onAppear { store.start() }
+                    .task { await sessionStore.refresh() }
             } else {
                 MantaOnboardingRoot(flow: flow, tokens: tokens)
                     .onAppear {
