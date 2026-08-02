@@ -294,14 +294,51 @@ each independently buildable + testable, each ≤ one agent run**:
   `--stage 1, 2, 3…` so a slice that imports another slice's output sits in a
   later stage and won't dispatch until its prerequisite is merged. Independent
   slices share a stage only if they don't share a write surface.
-- **Stages are the ONLY dependency mechanism you should reach for.** Do not
-  express ordering by setting an issue `blocked` with a prose `waiting_on` note
-  — that note is a snapshot written once, nothing re-reads it when the blocker
-  lands, and the issue then sits blocked forever. This is not hypothetical:
-  BET-297 stayed `blocked` describing BET-294/BET-295 as "in_progress" for an
-  hour after both had merged, stalling the whole website epic until a human
-  asked why nothing was moving. If work is dependency-ordered, it belongs under
-  a parent with `--stage`, full stop.
+- **Stages are the mechanism of choice for PLANNED decomposition.** When you cut
+  a milestone into slices up front, order them with `--stage`; the barrier wakes
+  you when a stage finishes and you dispatch the next. That is the path that
+  needs no prose and no sweep.
+  > **CORRECTED 2026-08-02.** This bullet used to read "stages are the ONLY
+  > dependency mechanism… do not express ordering with a `blocked` +
+  > `waiting_on` note, nothing re-reads it and the issue sits blocked forever",
+  > citing BET-297. That was true when it was written and is **false now** — it
+  > also contradicted the very next bullet. `scripts/multica-unblock.mjs` runs
+  > hourly AND after every merge, re-reads `waiting_on`, and clears the issue
+  > when every key it names is `done`. BET-297 is the bug that motivated
+  > building that sweep, not evidence against using it. Believing this bullet
+  > left follow-ups filed outside a staged parent with nowhere to go, because
+  > the one tool that fits them looked forbidden.
+- **For an issue filed OUTSIDE a staged parent — a follow-up, a device check, a
+  discovered defect — `blocked` + `waiting_on` is the correct tool, not a
+  workaround.** Stages only order slices you planned together; a follow-up
+  discovered mid-flight has no stage to belong to. Give it a resolvable
+  `waiting_on` and it self-clears exactly like a staged slice.
+- **NO ORPHAN ISSUES (HARD).** Every issue you file or touch must leave your
+  hands reachable by something. Exactly one of these must be true:
+  1. it has a `--stage` under a parent you are driving, **or**
+  2. it is assigned to an agent (`todo`/`in_progress`/`in_review` — the unstick
+     sweep can then re-dispatch it), **or**
+  3. it is `blocked` with a `waiting_on` naming real keys **and** a `next_owner`
+     naming an **agent**, **or**
+  4. it is assigned to a human (see "Human-blocked issues" below).
+
+  An issue that is unstaged **and** unassigned **and** unblocked is reachable by
+  **nothing**: `multica-unblock.mjs` only looks at `blocked`, and
+  `multica-unstick.mjs` only looks at agent-assigned `todo`/`in_progress`/
+  `in_review`. It will sit untouched forever and no alarm will fire. Live
+  example: BET-577 sat `backlog`, unstaged and unassigned, for two days while
+  every staged sibling completed. Before you finish a wake, list the issues you
+  filed this run and confirm each one satisfies a numbered case above.
+  > This also bounds the "park it unassigned + `follow-up` label" instruction in
+  > the Merge-gate section: parking is case 2 with YOU as the owner, so the
+  > parked item is only reachable while you keep waking. If you are about to go
+  > idle with parked items, they need a real owner or a `waiting_on`.
+- **`next_owner` resolves AGENT names only.** `resolveNextOwner` looks the name
+  up in the workspace's agent list; a member's name does not resolve, and the
+  sweep then leaves the issue **blocked forever** with only a `::warning::`.
+  For work that a person must do, leave `next_owner` unset and assign the human
+  directly — with no `next_owner` the sweep does a status-only `blocked`→`todo`
+  flip and the human keeps ownership.
 - **If you must block an unstaged issue, write the note so it can be
   reconciled.** `scripts/multica-unblock.mjs` (hourly, and after every merge)
   clears a `blocked` issue once every issue key named in its `waiting_on` is
