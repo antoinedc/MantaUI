@@ -3,10 +3,11 @@
 #
 # Builds the bundles then runs the full Playwright suite against them. The
 # suite has two projects: `electron` (launches the built app via `out/`) and
-# `visual` (serves the built renderer via `mobile/www`, verified fresh by
-# scripts/visual/harness.mjs -> assertRendererFresh). So both bundles must be
-# built here before `npx playwright test`. This is a HARD gate — exits non-zero
-# on any failure.
+# `visual` (serves the built renderer via `out/renderer`, verified fresh by
+# scripts/visual/harness.mjs -> assertRendererFresh). BET-559: the desktop
+# renderer build serves the visual project now that the web/PWA bundle is
+# retired, so `npm run build` produces everything the suite needs. This is a
+# HARD gate — exits non-zero on any failure.
 #
 # Designed to run on self-hosted CI runners. Requires:
 #   - Node.js 20+
@@ -21,11 +22,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "==> Building Electron bundles..."
+echo "==> Building Electron bundles (the visual project serves out/renderer)..."
 npm run build
-
-echo "==> Building mobile renderer (the visual project needs mobile/www)..."
-npm run build:mobile
 
 echo
 echo "==> Running Playwright e2e smoke tests..."

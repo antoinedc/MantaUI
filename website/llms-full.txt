@@ -650,7 +650,7 @@ MantaMantaUI
 
           A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
 
-      Manta UI phone session list with mixed session statuses
+      Manta UI session with live tool output
 
       Honest comparison
       ## How Manta compares
@@ -944,7 +944,7 @@ It overlaps with both, on a different bet. They run agents on your Mac and give 
 
           A phone client that cannot approve a permission also cannot unblock an agent. The work still waits until you get back to your laptop, which defeats the point of carrying it around.
 
-      Manta UI phone session list with mixed session statuses
+      Manta UI session with live tool output
 
       Honest comparison
       ## How Manta compares

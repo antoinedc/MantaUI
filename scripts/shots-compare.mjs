@@ -5,14 +5,12 @@
  * WHY THIS EXISTS — the byte gate was unsatisfiable
  * -------------------------------------------------
  * The drift gate compared `website/shot-*.webp` byte-for-byte against the
- * committed set. For four of the seven shots that comparison cannot be
+ * committed set. For two of the shots that comparison cannot be
  * satisfied, because GitHub's runners render them in TWO variants and a given
  * job lands on one or the other:
  *
  *   shot-approvals    122820 bytes  <->  122898 bytes
  *   shot-hero         165382        <->  165406
- *   shot-phone-session 59696        <->  59704
- *   shot-sync         189474        <->  189474 (same size, different bytes)
  *
  * Measured 2026-08-02: main carried variant A and passed on three consecutive
  * PRs (#476, #477, #478); it was then replaced with variant B from a failing
@@ -33,13 +31,13 @@
  * hinting flipping at text edges, not diffuse antialiasing. Measured between
  * the two variants (pixels whose max channel delta exceeds 32):
  *
- *   shot-approvals 285   shot-hero 136   shot-sync 136   shot-phone-session 112
- *   hero-poster / shot-phone-list / shot-terminal: 0 — byte-identical always
+ *   shot-approvals 285   shot-hero 136
+ *   shot-terminal / hero-poster: 0 — byte-identical always
  *
  * That is 0.0055% of a 5.18M-pixel shot. The weakest REAL defect the epic
  * records detecting (BET-550: a colour-only change, the hardest class) covers
  * 0.142% of subpixels — twenty-five times more. So an absolute pixel budget
- * sits comfortably between them, and the three stable shots keep exact byte
+ * sits comfortably between them, and the stable shots keep exact byte
  * equality with no tolerance at all.
  *
  * Budgets are an ABSOLUTE PIXEL COUNT, never a ratio, and are MEASURED rather
@@ -90,9 +88,9 @@ export const SHOT_POLICY = {
   // would silently eat the headroom.
   "shot-approvals.webp": { maxChangedPixels: 4000, observed: 706, pixels: 5_184_000 },
   "shot-hero.webp": { maxChangedPixels: 4000, observed: 383, pixels: 5_184_000 },
-  "shot-sync.webp": { maxChangedPixels: 4000, observed: 795, pixels: 6_678_000 },
-  // Smaller frame, so a smaller budget keeps the same distance from 0.142%.
-  "shot-phone-session.webp": { maxChangedPixels: 1200, observed: 177, pixels: 1_339_344 },
+  // BET-559 removed the phone web-client shots (shot-phone-list,
+  // shot-phone-session, shot-sync) and their entries here with the retired
+  // client.
 };
 
 /**

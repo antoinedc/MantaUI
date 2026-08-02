@@ -15,11 +15,15 @@ import {
   type WindowStatus,
 } from "../../shared/types.js";
 import type { Api } from "../../shared/api.js";
+// BET-559: httpApi used to pull these claim helpers through the (now-retired)
+// mobile shell's pairingLogic re-export. The shared, process-boundary-safe
+// origin is src/shared/claim.mjs — desktop main (src/main/auth.ts) and the
+// renderer classify the /auth/claim outcome the same way, from the one source.
 import {
   classifyClaimResult,
   networkFailure,
-  type ClaimResult,
-} from "../mobile/pairingLogic.js";
+  type ClaimOutcome,
+} from "../../shared/claim.mjs";
 import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
@@ -168,18 +172,19 @@ export function clearClientToken(): void {
 
 /**
  * Exchange a 6-digit pairing code for the box_token via POST /auth/claim, and
- * classify the outcome into a typed {@link ClaimResult}. The claim endpoint is
+ * classify the outcome into a typed {@link ClaimOutcome}. The claim endpoint is
  * one of the two unauthenticated bootstrap routes (see src/server/auth.mjs), so
  * this does NOT attach the Bearer header. On success the token is persisted
  * here (single write-site) before the result is returned.
  *
- * Pure classification lives in pairingLogic.classifyClaimResult; this function
- * owns only the fetch + the transport-level error → networkFailure() mapping.
+ * Pure classification lives in shared/claim.mjs (classifyClaimResult); this
+ * function owns only the fetch + the transport-level error → networkFailure()
+ * mapping.
  */
 export async function submitPairingCode(
   code: string,
   verify?: string,
-): Promise<ClaimResult> {
+): Promise<ClaimOutcome> {
   return claimAgainst(serverBase(), code, verify);
 }
 
@@ -218,7 +223,7 @@ async function claimAgainst(
   base: string,
   code: string,
   verify?: string,
-): Promise<ClaimResult> {
+): Promise<ClaimOutcome> {
   const url = `${base.replace(/\/+$/, "")}/auth/claim`;
   let res: Response;
   try {

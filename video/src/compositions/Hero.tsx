@@ -2,8 +2,9 @@
 //
 // Drives the renderer inside Remotion: at each frame, evaluate the
 // time-varying `applyDemoStateAt(t)` fixture (a still is one evaluation of a
-// time-varying fixture) and render the renderer's own `<App />` (desktop) and
-// `<MobileApp />` (phone) at scaled positions on a 1920x1080 canvas.
+// time-varying fixture) and render the renderer's own `<App />` on the desktop
+// (and, while the retired web-mobile-client's shell is gone, <App/> again as a
+// placeholder in the phone frame) at scaled positions on a 1920x1080 canvas.
 //
 // Six beats per BET-304:
 //   1. Desktop. User submits a task. Agent begins, tool calls streaming.
@@ -26,13 +27,11 @@ import {
 } from "remotion";
 import { useEffect } from "react";
 import { App } from "@renderer/App";
-import { MobileApp } from "@renderer/mobile/MobileApp";
 import { applyDemoStateAt, DEMO_T0, HERO_BEATS } from "@renderer/api/demoFixture";
 import { useStore } from "@renderer/store";
 import { DemoBootstrap } from "../demoBootstrap";
 
 import "@renderer/index.css";
-import "@renderer/mobile/mobile.css";
 
 // 1920x1080 @ 30fps gives 1500 frames over 50 seconds. Anything in 50–70s is
 // in spec (acceptance criterion "Sequence duration lands in the 50–70s
@@ -310,8 +309,10 @@ export const Hero: React.FC = () => {
           overflow: "hidden",
         }}
       >
-        {/* Inner screen — MobileApp renders at native 393x852, scaled to
-            fit 416x852 (centre-of-bezel). */}
+        {/* Inner screen — BET-559: the mobile web-client shell (MobileApp) is
+            retired, so the phone frame now renders the desktop <App/> as a
+            placeholder. A native-Swift-app mockup should replace this when the
+            native client has a renderable surface (see BET-559 follow-up). */}
         <div
           style={{
             position: "absolute",
@@ -325,7 +326,7 @@ export const Hero: React.FC = () => {
           }}
         >
           <DemoBootstrap>
-            <MobileApp />
+            <App />
           </DemoBootstrap>
         </div>
         {/* Notch */}

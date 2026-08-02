@@ -1,7 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
-import { MobileApp } from "./mobile/MobileApp";
 // BET-413: self-host the two typefaces. Both are bundled by Vite (same-origin),
 // so no CSP change is needed — the CSP in index.html blocks remote fonts, and
 // these never leave our origin. Inter Variable for language (sans default),
@@ -9,13 +8,10 @@ import { MobileApp } from "./mobile/MobileApp";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
-import "./mobile/mobile.css";
-import { httpApi } from "./api/httpApi";
-import { initRendererLogging } from "./log";
 import type { Api } from "../shared/api";
+import { initRendererLogging } from "./log";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
-import { pickDemoLayout } from "./demoLayout";
 import { applyTheme } from "./theme";
 import { pinDemoClock } from "./clock";
 
@@ -26,20 +22,10 @@ import { pinDemoClock } from "./clock";
 // doesn't carry the demo fixture (verified at PR-time by checking
 // out/renderer/ chunk sizes before/after).
 //
-// `?demo` works on every entry path (desktop + mobile/web): the URL is
-// parsed before we branch on preload presence, and the demoApi install
-// short-circuits both the desktop chooseDesktopTransport AND the mobile
-// installHttpTransport flows below. setWindowApi is the same seam
-// transportInstall.ts exposes; no parallel install path is added (per the
-// ticket's "use the existing seam" rule).
-//
-// Shell override (BET-302 review): `?demo` alone used to always render
-// <MobileApp/> in a browser because the only branch was `isMobile =
-// !preload`, and a browser never has an Electron preload. The override
-// (`?demo&desktop` / `?demo&mobile`) is applied ONLY inside bootDemo() so
-// BET-303's desktop hero is reachable from `?demo` in a browser. The real
-// boot path's isMobile derivation is unchanged — that's production
-// transport selection.
+// `?demo` parses the URL before any transport selection and installs the
+// demoApi via the same transportInstall seam. BET-559: the renderer is
+// desktop-only, so `?demo` always renders <App/> — the old mobile-shell
+// override that could force <MobileApp/> (BET-302) is gone with it.
 //
 // Reading config requires the preload's async configGet(), so entry is async.
 // We render the desktop <App/> only after the transport is chosen, so no
@@ -48,10 +34,13 @@ import { pinDemoClock } from "./clock";
 // The genuine Electron preload bridge is exposed by src/preload/index.ts under
 // `__mantaPreload` (a read-only contextBridge property). We NEVER write to that
 // name; instead we install our own writable `window.api` below, so http mode
-// can swap it for the httpApi client. On the mobile/web build there is no
-// preload at all → `__mantaPreload` is undefined → mobile path.
+// can swap it for the httpApi client.
+//
+// BET-559: the renderer is the DESKTOP app only. The mobile web client (the
+// shell that used to branch on `!preload`) is retired — a browser without a
+// preload is now only reachable through `?demo` for the visual gates and
+// marketing shots, which never run the real boot path.
 const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
-const isMobile = !preload;
 
 // Demo mode (BET-302): parsed once at module load so the demo branch is
 // reachable from inside boot() without re-parsing the URL.
@@ -83,28 +72,18 @@ async function bootDemo(): Promise<void> {
   // It also just makes the demo read correctly: "14m", not "990d".
   const { DEMO_T0 } = await import("./api/demoFixture");
   pinDemoClock(DEMO_T0);
-  // Shell override: `?demo&desktop` / `?demo&mobile` force a layout
-  // independent of preload presence. Without an override we fall back to
-  // isMobile (the production transport-selection flag). The override is
-  // applied ONLY here — the real boot path below keeps its isMobile-based
-  // selection unchanged so production transport selection is not perturbed.
-  const layout = pickDemoLayout(
-    new URLSearchParams(window.location.search),
-  );
-  const renderDesktop = layout === "desktop" || (layout === null && !isMobile);
   // Initialize renderer logging AFTER window.api is wired so configGet
   // works. The demo branch makes logging a no-op (no real token), but we
   // still call it for parity with the real boot path so future log-target
-  // side effects don't diverge. Tag follows the rendered shell so logs and
-  // UI agree.
-  void initRendererLogging(renderDesktop ? "desktop" : "mobile");
+  // side effects don't diverge.
+  void initRendererLogging("desktop");
   // BET-409: demo has no config — default to "system" so the demo shell still
   // follows the OS (and re-themes live) without needing a configGet.
   applyTheme();
-  // Same React render as the real paths — the demoApi satisfies the Api
-  // contract, so App / MobileApp render identically against the fixture.
+  // Same React render as the real path — the demoApi satisfies the Api
+  // contract, so App renders identically against the fixture.
   ReactDOM.createRoot(document.getElementById("root")!).render(
-    <React.StrictMode>{renderDesktop ? <App /> : <MobileApp />}</React.StrictMode>,
+    <React.StrictMode><App /></React.StrictMode>,
   );
 }
 
@@ -151,11 +130,13 @@ async function boot(): Promise<void> {
     return;
   }
 
-  if (!isMobile && preload) {
-    // Desktop: default window.api to the real preload bridge, then let the
-    // transport chooser swap it to httpApi if the config is paired (http mode).
-    // Because `window.api` is now main-owned (not the contextBridge property),
-    // this default install + the http-mode swap are both legal assignments.
+  // Desktop: default window.api to the real preload bridge, then let the
+  // transport chooser swap it to httpApi if the config is paired (http mode).
+  // Because `window.api` is now main-owned (not the contextBridge property),
+  // this default install + the http-mode swap are both legal assignments.
+  // BET-559: the renderer is desktop-only now — there is no web-client
+  // fallback path to install the http shim into.
+  if (preload) {
     setWindowApi(preload);
     await chooseDesktopTransport(preload);
     // chooseDesktopTransport already assigned window.__mantaPreload.
@@ -163,22 +144,10 @@ async function boot(): Promise<void> {
     // works — but BEFORE React mounts so early-render errors still ship.
     // Fire-and-forget; initRendererLogging is no-op when no token is set.
     void initRendererLogging("desktop");
-  } else {
-    // Mobile/web: install the shim (no preload to preserve).
-    setWindowApi(httpApi);
-    // Mobile reads config (and thus shareAnalytics) via the same httpApi
-    // configGet; no MobileSettings UI per the spec — preference is set
-    // once on desktop. Mobile always ships regardless.
-    void initRendererLogging("mobile");
-    // BET-409: apply "system" immediately so a light-OS phone doesn't flash
-    // the dark HTML default before the (async, post-pairing) configGet lands.
-    // The store's applyConfig re-applies the box's configured theme once
-    // MobileApp's refresh() resolves.
-    applyTheme();
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
-    <React.StrictMode>{isMobile ? <MobileApp /> : <App />}</React.StrictMode>,
+    <React.StrictMode><App /></React.StrictMode>,
   );
 }
 

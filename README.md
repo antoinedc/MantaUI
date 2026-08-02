@@ -44,7 +44,7 @@ To install from git:
 
 ```bash
 git clone git@github.com:antoinedc/MantaUI.git ~/manta
-cd ~/manta && npm install && npm run build:mobile
+cd ~/manta && npm install
 npm run mobile     # server on 0.0.0.0:8787
 npm run pair       # mint a pairing code
 ```
@@ -178,10 +178,10 @@ secrets, webhooks, serve-page, Web Push, APNs fanout via gateway.
 terminates TLS and reverse-proxies
 `<box_id>.boxes.mantaui.com` to `127.0.0.1:8787`. The desktop app
 (`src/main`, `src/preload`, `src/renderer`) is a thin client plus OS
-bridges. The mobile client (`mobile/www`) is a native iPhone app or
-any browser, same React code as desktop. `manta-gateway`
-(`src/gateway/`) runs on our infra for hosted push fanout and DNS
-automation.
+bridges. The mobile client is a native iOS app (see `mobile/native`,
+built from the shared chat logic; BET-559 retired the web/PWA client that
+used to be served from `mobile/www`). `manta-gateway` (`src/gateway/`)
+runs on our infra for hosted push fanout (APNs) and DNS automation.
 
 Installer: downloads a self-contained tarball that ships a vendored
 Node runtime plus prebuilt production `node_modules`. The box only
@@ -217,7 +217,6 @@ npm install
 npm run typecheck
 npm test              # vitest (renderer) plus node:test (server, gateway, scripts)
 npm run dev           # main-process and preload changes need a full restart, not HMR
-npm run build:mobile  # rebuild mobile bundle after renderer changes
 ```
 
 See `AGENTS.md` for the full architecture, IPC contract, and release

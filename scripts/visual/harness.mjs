@@ -33,8 +33,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Repo root, resolved from this file so callers never guess a cwd. */
 export const ROOT = resolve(__dirname, "../..");
 
-/** Where `vite build --config electron.vite.config.mobile.ts` puts the SPA. */
-export const RENDERER_DIR = join(ROOT, "mobile/www");
+/** Where `npm run build` (electron-vite) puts the desktop renderer SPA. */
+export const RENDERER_DIR = join(ROOT, "out", "renderer");
 
 /**
  * Chromium launch options. Every flag is load-bearing:
@@ -103,7 +103,7 @@ const MIME = {
 /**
  * Refuse to run against a stale build.
  *
- * The visual project serves `mobile/www/`, which is a BUILD ARTIFACT. Run
+ * The visual project serves `out/renderer/`, which is a BUILD ARTIFACT. Run
  * the Playwright project without rebuilding and it happily verifies the
  * previous bundle — a green run that proves nothing. That is not theoretical:
  * it is exactly what happened the first time this harness was exercised
@@ -111,7 +111,7 @@ const MIME = {
  * the edit).
  *
  * So: compare the newest renderer source against the built entry point and
- * fail loudly if the build is behind. The npm scripts chain `build:mobile`,
+ * fail loudly if the build is behind. The npm scripts chain `npm run build`,
  * but nothing stops a human or a CI step from calling playwright directly.
  */
 export function assertRendererFresh() {

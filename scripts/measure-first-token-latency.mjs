@@ -2,7 +2,7 @@
 // text" measurement for BET-553 (see docs/mobile-redesign/DECISIONS.md §17).
 //
 // Not a gate: a one-off measurement probe, run via `node scripts/measure-first-token-latency.mjs`
-// after `npm run build:mobile`. It drives the `stream` demo state and reads the
+// after `npm run build` (the desktop renderer build; BET-559 retired the web bundle). It drives the `stream` demo state and reads the
 // number the committed instrumentation actually produced:
 //
 //   - instrumented ms per path — `window.__mantaDemoStream.latency` is populated

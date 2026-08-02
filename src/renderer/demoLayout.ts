@@ -1,28 +1,11 @@
-// demoLayout.ts — pure helper for the demo-mode shell override (BET-302).
+// demoLayout.ts — demo-mode fixture-state selector.
 //
-// `?demo` in a browser used to always render <MobileApp/> because the only
-// branch was `isMobile = !preload`, and a browser never has an Electron
-// preload. That made BET-303's desktop hero unreachable from `?demo` alone.
-// This helper adds an explicit override that lives ONLY inside demo mode
-// (bootDemo); the real boot path's isMobile derivation is unchanged because
-// that is production transport selection.
-//
-// Resolves the override from URL search params. Returning null means "no
-// override — caller falls back to its production isMobile flag", so the
-// override never affects how the real (non-demo) boot path picks a layout.
-//
-// Conflict resolution: when both `desktop` and `mobile` are set, `desktop`
-// wins. The screenshot harness (BET-303) is the harder-reach consumer
-// (desktop in a browser needs the explicit override; mobile in Electron
-// is the default behaviour without any flag), so we bias toward it.
-
-export type DemoLayout = "desktop" | "mobile";
-
-export function pickDemoLayout(params: URLSearchParams): DemoLayout | null {
-  if (params.get("desktop") !== null) return "desktop";
-  if (params.get("mobile") !== null) return "mobile";
-  return null;
-}
+// BET-559: the renderer is the desktop app only; the mobile web-client shell
+// it used to branch to is retired. The `?demo` URL override that once chose
+// between <App/> and <MobileApp/> is gone with it — demo mode always renders
+// the desktop <App/>. What remains here is the fixture-state selector, which
+// is still the one named way to choose which demo transport state the visual
+// harness / marketing shots capture.
 
 // Which fixture state the demo transport serves.
 //

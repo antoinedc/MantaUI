@@ -8,16 +8,16 @@
  * hero-poster.webp from frame 0 of the rendered video").
  *
  * Pipeline:
- *   1. Build the renderer bundle (mobile/www/) with `vite build --config
- *      electron.vite.config.mobile.ts` so the browser can serve the demo URL.
- *   2. Spin up a tiny local static server rooted at mobile/www/.
- *   3. Launch Chromium against system Chrome (`/usr/bin/google-chrome`) and
- *      visit `?demo&desktop` / `?demo&mobile` per shot.
+ *   1. Build the renderer bundle (out/renderer/) with `npm run build`
+ *      (electron-vite) so the browser can serve the demo URL. BET-559: the
+ *      web/PWA bundle build and the phone web-client are retired, so only
+ *      desktop screenshots remain (the native iPhone app's art is BET-577).
+ *   2. Spin up a tiny local static server rooted at out/renderer/.
+ *   3. Launch Chromium against the Playwright-bundled browser and visit
+ *      `?demo&desktop` per shot.
  *   4. Wait on stable DOM selectors (NEVER a fixed timeout), capture each
  *      shot, then encode to `.webp` at quality 82.
- *   5. Composite `shot-sync.webp` (desktop hero + phone list, side-by-side)
- *      with sharp.
- *   6. Extract frame 0 of `website/hero.mp4` (the BET-304 stage-2 render)
+ *   5. Extract frame 0 of `website/hero.mp4` (the BET-304 stage-2 render)
  *      to `website/hero-poster.webp` via ffmpeg. The same sharp pipeline
  *      re-encodes to webp for size parity with the rest of the site assets.
  *
@@ -41,15 +41,12 @@
  *   | shot-hero.webp          | desktop 1440x900  | ?demo&desktop, infra session |
  *   | shot-approvals.webp     | desktop 1440x900  | ?demo&desktop, infra session, scrolled to cards |
  *   | shot-terminal.webp      | desktop 1440x900  | ?demo&desktop, marketing/Build pipeline |
- *   | shot-phone-list.webp    | phone 393x852    | ?demo&mobile   |
- *   | shot-phone-session.webp | phone 393x852    | ?demo&mobile, infra session |
- *   | shot-sync.webp          | composite        | both           |
  *   | hero-poster.webp        | 1920x1080      | ffmpeg -ss 0 -i hero.mp4 (BET-322) |
  *
  * Usage:
  *   node scripts/shots.mjs [--skip-build] [--serve-dir <path>]
  *
- * --skip-build reuses the existing mobile/www/ build. The default is to
+ * --skip-build reuses the existing out/renderer/ build. The default is to
  * rebuild — caller scripts (CI) can skip when the bundle hasn't changed.
  *
  * Exit codes:
@@ -58,39 +55,22 @@
  */
 
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { createReadStream, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { dirname, extname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { LAUNCH_OPTIONS } from "./visual/harness.mjs";
+// One browser recipe (scripts/visual/harness.mjs): the static server, the
+// NO_ANIMATION_CSS override, and preparePage are shared with the visual gate,
+// not copied (BET-559 dedupe).
+import { LAUNCH_OPTIONS, startStaticServer, preparePage } from "./visual/harness.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const RENDERER_DIR = join(ROOT, "mobile/www");
+const RENDERER_DIR = join(ROOT, "out", "renderer");
 const WEBSITE_DIR = join(ROOT, "website");
 const MAX_SIZE_KB = 250;
 const WEBP_QUALITY = 82;
 const POSTER_MAX_SIZE_KB = 250;
-
-// CSS injected via `addStyleTag` per page. Two effects:
-//   - Disable the sidebar running-dot pulse + every other CSS animation
-//     so a screenshot never catches a mid-pulse frame.
-//   - Hide the xterm.js blinking cursor so the terminal shot is stable.
-// WebGL/non-determinism for the terminal shot is now handled in the
-// renderer itself (`src/renderer/Terminal.tsx` skips the `WebglAddon` for
-// `?demo` builds), so this CSS stays narrow.
-const NO_ANIMATION_CSS = `
-*, *::before, *::after {
-  animation: none !important;
-  animation-duration: 0s !important;
-  animation-delay: 0s !important;
-  transition: none !important;
-  transition-duration: 0s !important;
-  caret-color: transparent !important;
-}
-.xterm-cursor { opacity: 0 !important; }
-`;
 
 function log(msg) {
   process.stdout.write(`[shots] ${msg}\n`);
@@ -113,104 +93,13 @@ async function run(cmd, args, opts = {}) {
   if (code !== 0) throw new Error(`${cmd} exited with code ${code}`);
 }
 
-// Minimal static server — only the extensions our build emits.
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript",
-  ".mjs": "application/javascript",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".png": "image/png",
-  ".svg": "image/svg+xml",
-  ".webp": "image/webp",
-  ".wasm": "application/wasm",
-  ".ico": "image/x-icon",
-  ".webmanifest": "application/manifest+json",
-};
-
-function startServer(rootDir) {
-  const server = createServer((req, res) => {
-    try {
-      let urlPath = decodeURIComponent(new URL(req.url, "http://x").pathname);
-      if (urlPath === "/") urlPath = "/index.html";
-      const filePath = join(rootDir, urlPath);
-      if (!filePath.startsWith(rootDir)) {
-        res.writeHead(403);
-        res.end("forbidden");
-        return;
-      }
-      if (!existsSync(filePath)) {
-        res.writeHead(404);
-        res.end("not found");
-        return;
-      }
-      const mime = MIME[extname(filePath).toLowerCase()] ?? "application/octet-stream";
-      res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
-      createReadStream(filePath).pipe(res);
-    } catch (e) {
-      res.writeHead(500);
-      res.end(`server error: ${e.message}`);
-    }
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const port = server.address().port;
-      resolve({ server, port });
-    });
-  });
-}
+// Minimal static server + MIME table were the shots.mjs copies of
+// harness.mjs's; shots now uses harness's startStaticServer (see bottom).
 
 async function buildRenderer() {
-  if (!existsSync(RENDERER_DIR)) mkdirSync(RENDERER_DIR, { recursive: true });
-  await run("npx", ["vite", "build", "--config", "electron.vite.config.mobile.ts"]);
-}
-
-// Navigate, wait on the readiness selector, run per-shot actions, then
-// settle for the final stable selector. Both selectors must be DOM elements
-// that exist after render — never a fixed timeout.
-async function prepareShot(page, shot) {
-  await page.goto(`${shot.baseURL}/${shot.urlQuery}`, {
-    waitUntil: "domcontentloaded",
-    timeout: 30_000,
-  });
-  // Boot/transport-install settles after the React commit; wait for the
-  // shared "everything is rendered" selector before doing anything else.
-  await page.waitForSelector(shot.readySelector, { state: "visible", timeout: 30_000 });
-  if (shot.beforeScreenshot) {
-    await shot.beforeScreenshot(page);
-  }
-  // Inject the animation/cursor overrides AFTER the user-perceived UI is
-  // up, so the override applies to the same paint as the screenshot.
-  await page.addStyleTag({ content: NO_ANIMATION_CSS });
-  // Final stable selector — never a timeout. The screenshot captures the
-  // DOM as it is at this moment.
-  await page.waitForSelector(shot.finalSelector, { state: "visible", timeout: 30_000 });
-  // Per-shot settle. Two effects:
-  //  - Wait on `document.fonts.ready` so the font set is loaded before
-  //    the screenshot reads the framebuffer. (xterm.js does its own
-  //    font measurement; if the JetBrains-Mono webfont isn't loaded
-  //    yet, glyphs render against the fallback and pixel hashes differ.)
-  //  - Wait up to 5s of `networkidle` so any post-mode-switch image
-  //    fetch has settled. Some shots hold SSE streams open that never
-  //    go idle — the timeout absorbs that.
-  //  - Two rAFs: minimum frames needed for the addStyleTag override
-  //    + any in-flight layout to land in the GPU framebuffer.
-  await page.evaluate(async () => {
-    if (document.fonts && document.fonts.ready) {
-      try { await document.fonts.ready; } catch {}
-    }
-  });
-  try {
-    await page.waitForLoadState("networkidle", { timeout: 5_000 });
-  } catch {
-    // Some shots have SSE streams that never go idle — ignore.
-  }
-  await page.evaluate(
-    () =>
-      new Promise((r) =>
-        requestAnimationFrame(() => requestAnimationFrame(r)),
-      ),
-  );
+  // BET-559: desktop renderer build via electron-vite (the web/PWA bundle build
+  // that produced mobile/www/ is retired).
+  await run("npm", ["run", "build"]);
 }
 
 // Common "open the sidebar row for project X" interaction. The desktop
@@ -224,15 +113,6 @@ async function clickDesktopSession(page, windowName) {
   await row.click();
 }
 
-async function clickMobileSession(page, projectName, windowName) {
-  // Mobile uses aria-label="Open <project> / <window>" on the row button.
-  await page.getByRole("button", { name: new RegExp(`Open ${projectName}\\s*/\\s*${escapeRegExp(windowName)}`, "i") }).click();
-}
-
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 async function captureShot(browser, baseURL, shot, outPath) {
   const ctx = await browser.newContext({
     viewport: shot.viewport,
@@ -242,10 +122,16 @@ async function captureShot(browser, baseURL, shot, outPath) {
     storageState: undefined,
   });
   const page = await ctx.newPage();
-  shot.baseURL = baseURL;
   try {
     log(`→ ${shot.name}`);
-    await prepareShot(page, shot);
+    // Shared page-prep recipe imported from harness.mjs (goto → ready →
+    // actions → settle → final → fonts → networkidle → 2 rAF).
+    await preparePage(page, {
+      url: `${baseURL}/${shot.urlQuery}`,
+      readySelector: shot.readySelector,
+      finalSelector: shot.finalSelector,
+      actions: shot.beforeScreenshot,
+    });
     const buffer = await page.screenshot({
       type: "png",
       fullPage: false,
@@ -378,57 +264,11 @@ const SHOTS = [
       await modeToggle.click();
     },
   },
-  {
-    name: "shot-phone-list.webp",
-    viewport: { width: 393, height: 852 },
-    urlQuery: "?demo&mobile",
-    readySelector: "text=Refactor auth middleware",
-    finalSelector: "text=Build pipeline",
-  },
-  {
-    name: "shot-phone-session.webp",
-    viewport: { width: 393, height: 852 },
-    urlQuery: "?demo&mobile",
-    readySelector: "text=Refactor auth middleware",
-    // The composer textarea is the bottom-anchored input; once it renders
-    // we know the chat panel mount completed and the demo transcript has
-    // been laid out.
-    finalSelector: 'textarea',
-    beforeScreenshot: async (page) => {
-      await clickMobileSession(page, "infra", "Deploy new billing service");
-    },
-  },
 ];
 
-async function composeSync(heroPath, phonePath, outPath) {
-  // Desktop hero on the left, phone list on the right. Both shots are
-  // already at 2x device-pixel-ratio; the output is also high-DPI. The
-  // phone shot is letterboxed (or pillarboxed) to match the hero's height
-  // by re-rendering on a #0B1020 background to match the renderer's
-  // `bg-bg` token.
-  const heroMeta = await sharp(heroPath).metadata();
-  const phoneMeta = await sharp(phonePath).metadata();
-  const phoneScale = heroMeta.height / phoneMeta.height;
-  const phoneW = Math.round(phoneMeta.width * phoneScale);
-  const phoneResized = await sharp(phonePath)
-    .resize({ width: phoneW, height: heroMeta.height, fit: "fill" })
-    .webp({ quality: WEBP_QUALITY })
-    .toBuffer();
-  await sharp({
-    create: {
-      width: heroMeta.width + phoneW,
-      height: heroMeta.height,
-      channels: 3,
-      background: { r: 11, g: 16, b: 32 },
-    },
-  })
-    .composite([
-      { input: heroPath, top: 0, left: 0 },
-      { input: phoneResized, top: 0, left: heroMeta.width },
-    ])
-    .webp({ quality: WEBP_QUALITY })
-    .toFile(outPath);
-}
+// BET-559: the web/PWA phone client is retired, so there are no phone shots
+// (`shot-phone-list` / `shot-phone-session`) or the hero+phone `shot-sync`
+// composite. The native iPhone app's marketing art is tracked in BET-577.
 
 // Extract frame 0 of `hero.mp4` to `hero-poster.webp` (BET-322). The video
 // is rendered by `npm run video` (Remotion, see video/package.json); the
@@ -525,10 +365,9 @@ async function main() {
   }
 
   if (!skipBuild) {
-    // Default flow: rebuild the renderer bundle. This creates
-    // `mobile/www/` from scratch on a fresh clone, so we deliberately
-    // don't pre-check the serve-dir here — build is the source of
-    // truth for "the bundle exists".
+    // Default flow: rebuild the renderer bundle (out/renderer/) from scratch
+    // on a fresh clone, so we deliberately don't pre-check the serve-dir here
+    // — build is the source of truth for "the bundle exists".
     await buildRenderer();
   } else {
     // Skip-build is a debugging aid that reuses an existing bundle.
@@ -540,7 +379,7 @@ async function main() {
     }
   }
 
-  const { server, port } = await startServer(serveDir);
+  const { server, port } = await startStaticServer({ "/": serveDir });
   const baseURL = `http://127.0.0.1:${port}`;
   log(`serving ${serveDir} on ${baseURL}`);
 
@@ -559,22 +398,10 @@ async function main() {
   }
   log(`chromium ${browserVersion} via ${chromium.executablePath()}`);
 
-  const producedPaths = {};
   try {
     for (const shot of SHOTS) {
       const outPath = join(WEBSITE_DIR, shot.name);
       await captureShot(browser, baseURL, shot, outPath);
-      producedPaths[shot.name] = outPath;
-    }
-
-    const heroSrc = producedPaths["shot-hero.webp"];
-    const phoneSrc = producedPaths["shot-phone-list.webp"];
-    if (heroSrc && phoneSrc) {
-      const syncOut = join(WEBSITE_DIR, "shot-sync.webp");
-      await composeSync(heroSrc, phoneSrc, syncOut);
-      producedPaths["shot-sync.webp"] = syncOut;
-    } else {
-      fail("cannot compose shot-sync.webp: hero or phone source missing");
     }
 
     // Hero video poster (BET-304 stage 2 / BET-322). Extract frame 0 of
@@ -587,7 +414,6 @@ async function main() {
     if (existsSync(heroVideo)) {
       try {
         await extractPoster(heroVideo, posterOut);
-        producedPaths["hero-poster.webp"] = posterOut;
       } catch (e) {
         fail(`hero-poster.webp extraction failed: ${e.message}`);
       }
@@ -602,9 +428,6 @@ async function main() {
       "shot-hero.webp",
       "shot-approvals.webp",
       "shot-terminal.webp",
-      "shot-phone-list.webp",
-      "shot-phone-session.webp",
-      "shot-sync.webp",
       "hero-poster.webp",
     ]) {
       const p = join(WEBSITE_DIR, name);
