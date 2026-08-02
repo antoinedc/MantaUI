@@ -106,3 +106,23 @@ final class MantaSystemAlertUITests: XCTestCase {
         print("PAIRDRIVE alert-answered=none")
     }
 }
+
+// Opens the first session row so the screenshot after this run shows the
+// terminal/chat screen rather than the list — i.e. it exercises the box
+// connection past the session list (websocket attach for a TUI window).
+final class MantaOpenSessionUITests: XCTestCase {
+
+    func testOpenFirstSession() {
+        let app = XCUIApplication()
+        app.launch()
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS ''")).firstMatch
+        guard row.waitForExistence(timeout: 15) else {
+            print("PAIRDRIVE open=no-rows")
+            return
+        }
+        print("PAIRDRIVE open-row=\(row.label)")
+        row.tap()
+        sleep(6)
+        print("PAIRDRIVE opened")
+    }
+}
