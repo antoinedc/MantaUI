@@ -34,8 +34,8 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
-import type { AvailableLauncher, OpencodeMessage } from "../../shared/types.js";
-import { demoState } from "./demoFixture.js";
+import type { AvailableLauncher, OpencodeMessage, WorktreeInfo } from "../../shared/types.js";
+import { demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 
@@ -313,6 +313,16 @@ const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
 
+// Folder picker listing (BET-562). Without these the Proxy fallback resolves
+// null and the picker's folder list renders a raw "Cannot read properties of
+// null" error in the empty-state capture. The listing is fictional (see
+// demoFixture); worktrees are empty so the footer reads "not a git repo".
+const fsListDirs = (partial: string): Promise<string[]> =>
+  Promise.resolve(demoFsListDirs(partial));
+
+const gitListWorktrees = (cwd: string): Promise<WorktreeInfo[]> =>
+  Promise.resolve(demoGitListWorktrees(cwd));
+
 // Version guard (BET-225 stage 3 Part C + BET-357 §3). Pretend the client and
 // server are the aligned default unless the demo state needs a specific version
 // pair to drive a banner — the renderer reads these in an effect and derives
@@ -406,6 +416,8 @@ export const explicitMethods = {
   opencodeCloseStream,
   onOpencodeEvent,
   launchersList,
+  fsListDirs,
+  gitListWorktrees,
   getClientVersion,
   getServerVersion,
   onAutoUpdateError,

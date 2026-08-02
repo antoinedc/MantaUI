@@ -29,6 +29,7 @@ import type {
   Project,
   QuestionRequest,
   OpencodeSessionListItem,
+  WorktreeInfo,
 } from "../../shared/types.js";
 
 // 32-lowercase-hex — the boxId shape httpApi + transport.mjs validate against.
@@ -704,6 +705,36 @@ export const demoLaunchers: AvailableLauncher[] = [
   },
   { id: "codex", label: "Codex", flags: [] },
 ];
+
+// =============================================================================
+// Folder picker listing (BET-562). The folder picker modal is opened in the
+// demo empty state by clicking the "Home" chip; `fsListDirs`/`gitListWorktrees`
+// are NOT covered by the httpApi-shaped Proxy fallback (which resolves null
+// and would leave the list as a raw "Cannot read properties of null" error),
+// so the demo stubs a fictional home-directory listing. Fictional names only —
+// node_modules and the dot-folder are exercised deliberately so the dimmed
+// rows (isDimmedDir) appear in the capture and the mockup matches them.
+// =============================================================================
+export const demoHomeDirs = [
+  "~/backups",
+  "~/docker",
+  "~/docs",
+  "~/infra",
+  "~/marketing",
+  "~/node_modules",
+  "~/projects",
+  "~/scripts",
+  "~/.config",
+];
+
+export function demoFsListDirs(partial: string): string[] {
+  if (!partial) return [];
+  return demoHomeDirs.filter((d) => d.startsWith(partial));
+}
+
+export function demoGitListWorktrees(_cwd: string): WorktreeInfo[] {
+  return [];
+}
 
 // =============================================================================
 // Aggregate demo state — single import for demoApi.ts. Keeps the fixture file
