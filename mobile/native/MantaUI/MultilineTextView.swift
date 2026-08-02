@@ -34,11 +34,19 @@ final class ComposerTextController: ObservableObject {
 
 struct MultilineTextView: UIViewRepresentable {
     @Binding var text: String
+    /// Measured height of the text, clamped to [minHeight, maxHeight]. A
+    /// scroll-enabled UITextView reports NO intrinsic content size, so without
+    /// this the representable is a greedy view: SwiftUI hands it every point of
+    /// free space and the composer grows to the full screen — the field pinned
+    /// to the top with its own send/mic buttons stranded at the bottom. The
+    /// height is measured here and applied by the composer as a real frame.
+    @Binding var height: CGFloat
     @ObservedObject var controller: ComposerTextController
     var placeholder: String
     var font: UIFont
     var textColor: UIColor
     var placeholderColor: UIColor
+    var minHeight: CGFloat
     var maxHeight: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -55,7 +63,9 @@ struct MultilineTextView: UIViewRepresentable {
         view.delegate = context.coordinator
         view.accessibilityIdentifier = "composer-input"
         controller.textView = view
+        view.setContentHuggingPriority(.required, for: .vertical)
         updatePlaceholder(view)
+        DispatchQueue.main.async { recalculateHeight(view) }
         return view
     }
 
@@ -66,16 +76,22 @@ struct MultilineTextView: UIViewRepresentable {
         }
         if view.font != font { view.font = font }
         if view.textColor != textColor { view.textColor = textColor }
-        // Enforce the bounded max height so the input scrolls instead of
-        // pushing the whole composer off-screen on a long draft.
-        view.isScrollEnabled = neededScrolling(containerHeight: view.bounds.height)
         updatePlaceholder(view)
+        recalculateHeight(view)
     }
 
-    private func neededScrolling(containerHeight: CGFloat) -> Bool {
-        guard let view = controller.textView else { return false }
-        let size = view.sizeThatFits(CGSize(width: view.bounds.width, height: .greatestFiniteMagnitude))
-        return size.height > maxHeight
+    /// Measure, clamp, and publish. Above `maxHeight` the text view scrolls
+    /// instead of growing, so a long draft can never push the composer off
+    /// screen.
+    private func recalculateHeight(_ view: UITextView) {
+        let width = view.bounds.width
+        guard width > 0 else { return }
+        let fitted = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+        let clamped = min(max(fitted, minHeight), maxHeight)
+        view.isScrollEnabled = fitted > maxHeight
+        if abs(clamped - height) > 0.5 {
+            DispatchQueue.main.async { height = clamped }
+        }
     }
 
     private func updatePlaceholder(_ view: UITextView) {
@@ -105,6 +121,7 @@ struct MultilineTextView: UIViewRepresentable {
 
         func textViewDidChange(_ textView: UITextView) {
             parent.text = textView.text
+            parent.recalculateHeight(textView)
         }
     }
 }

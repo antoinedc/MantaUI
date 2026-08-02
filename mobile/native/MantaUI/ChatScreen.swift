@@ -79,7 +79,11 @@ struct ChatScreen: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
-        .overlay(alignment: .top) { header }
+        // The header is an INSET, not an overlay: as an overlay it floated on
+        // top of the transcript with nothing reserving its space, so the first
+        // rows sat underneath it and were clipped at rest, not just while
+        // scrolling.
+        .safeAreaInset(edge: .top) { header }
         .onAppear { store.start() }
         .onDisappear { store.stop() }
         .accessibilityElement(children: .contain)

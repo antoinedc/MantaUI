@@ -50,6 +50,9 @@ struct ComposerView: View {
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
+    /// Measured height of the input. See MultilineTextView: a scroll-enabled
+    /// UITextView has no intrinsic height, so the composer must give it one.
+    @State private var inputHeight: CGFloat = Metrics.type.display
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -64,14 +67,17 @@ struct ComposerView: View {
             HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
                 MultilineTextView(
                     text: $text,
+                    height: $inputHeight,
                     controller: controller,
                     placeholder: "Message…",
                     font: UIFont.systemFont(ofSize: Metrics.type.body),
                     textColor: UIColor(tokens.tx1),
                     placeholderColor: UIColor(tokens.tx4),
+                    minHeight: Metrics.type.display,
                     maxHeight: Metrics.type.display * 3
                 )
                 .frame(maxWidth: .infinity)
+                .frame(height: inputHeight)
                 if micAvailable { micButton }
                 sendButton
             }
@@ -90,7 +96,9 @@ struct ComposerView: View {
         .onAppear {
             modelStore.load()
             checkMicAvailability()
-            controller.focus()
+            // Deliberately NOT focusing the input here: raising the keyboard on
+            // entry hides most of the transcript you opened the session to
+            // read. Tapping the input is the way in, as in Messages.
         }
     }
 
