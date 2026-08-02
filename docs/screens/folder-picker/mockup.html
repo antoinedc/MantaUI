@@ -16,11 +16,16 @@
   the bottom) are REPORTED, not transcribed, so the implementer is never
   put between two rules.
 
-  Placeholder content (the path, the breadcrumb, and the folder list) matches
+  Placeholder content (the path, the breadcrumbs, and the folder list) matches
   the state the visual registry captures: the demo empty state, where the
-  picker is opened from the new-session welcome screen's "Home" chip at path
-  "~". The app's own fixture listing is rendered here so the side-by-side has
-  nothing to subtract.
+  picker is opened from the new-session welcome screen's "Home" chip and
+  descended one level into ~/projects. Descending is a registry requirement,
+  not decoration — the empty-state path is literally "~", which Playwright
+  serialises as `textbox: ~`, and "~" is YAML's null literal, so its aria
+  snapshot rejects it ("Node value should be a string or a sequence"). A real
+  path keeps the structure contract rooted at the modal round-trippable. The
+  app's own fixture listing is rendered here so the side-by-side has nothing
+  to subtract.
 -->
 
 <link rel="stylesheet" href="/src/renderer/tokens.css" />
@@ -181,22 +186,26 @@
 
     <!-- Path field + Go -->
     <div class="pathrow">
-      <div class="pathfield">~</div>
+      <div class="pathfield">~/projects</div>
       <button class="btn-go" type="button">Go</button>
     </div>
 
-    <!-- Breadcrumbs (fixture state: path ~ → single crumb) -->
+    <!-- Breadcrumbs (fixture state: descended into ~/projects) -->
     <div class="crumbs">
       <span class="cr">
         <svg class="xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
         <span class="cr">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
-          <button class="btn-crumb cur" title="~">~</button>
+          <button class="btn-crumb" title="~">~</button>
+        </span>
+        <span class="cr">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          <button class="btn-crumb cur" title="~/projects">projects</button>
         </span>
       </span>
     </div>
 
-    <!-- Folder list — fixture listing, dimmed rows kept (not hidden) -->
+    <!-- Folder list — fixture listing inside ~/projects -->
     <div class="list">
       <button class="fr dim" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
@@ -204,39 +213,15 @@
       </button>
       <button class="fr" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>backups</span>
-      </button>
-      <button class="fr" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>docker</span>
-      </button>
-      <button class="fr" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>docs</span>
-      </button>
-      <button class="fr" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>infra</span>
+        <span>ethernal</span>
       </button>
       <button class="fr" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
         <span>marketing</span>
       </button>
-      <button class="fr dim" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>node_modules</span>
-      </button>
       <button class="fr" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>projects</span>
-      </button>
-      <button class="fr" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>scripts</span>
-      </button>
-      <button class="fr dim" type="button">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-        <span>.config</span>
+        <span>infra</span>
       </button>
     </div>
 
@@ -262,9 +247,13 @@
   beside it. The breadcrumbs sit directly under the path field, left-aligned,
   one level up per chevron; the current crumb is the only one at full text
   weight. The folder list <strong>grows vertically</strong> — it is the only
-  scroll region, clamped by the modal's <code>max-height</code>, and
+  scroll region, clamped by the modal's <code>max-height</code> — and
   <code>node_modules</code> + dot-folders render <strong>dimmed, not
-  hidden</strong>, so nothing becomes unreachable.
+  hidden</strong>, so nothing becomes unreachable (shown in the home state;
+  the captured <code>~/projects</code> state has no dimmed rows, only the
+  dimmed <code>..</code>). The design's <code>Go</code> button is part of the
+  discovery affordance the current app ships without (a divergence, recorded
+  in <code>conformance.md</code>).
   <br/><br/>
   <strong>Off-grid values in the design — reported, not transcribed.</strong>
   The source uses a 34px path-field height and a 9px list-row vertical

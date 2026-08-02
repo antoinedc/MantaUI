@@ -405,14 +405,26 @@ export const SCREENS = [
     final: ".manta-folder-picker",
     snapshot: ".manta-folder-picker",
     actions: async (page) => {
+      // Click the folder chip to open the picker…
       await page
         .locator('[data-screen="welcome"]')
         .getByRole("button", { name: "Home" })
         .click();
+      await page.waitForSelector(".manta-folder-picker", { state: "visible" });
+      // …then click one folder row. The empty-state path is literally "~",
+      // which Playwright serialises as `textbox: ~` — YAML's null literal,
+      // which its aria snapshot rejects with "Node value should be a string
+      // or a sequence". Descending a level (a real user gesture) puts a real
+      // path in the field so the structure contract rooted at the modal
+      // round-trips (BET-562).
+      await page
+        .locator(".manta-folder-picker")
+        .getByRole("button", { name: "projects" })
+        .click();
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/folder-picker/mockup.html",
-    surfacesClosed: [],
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
   },
   {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes

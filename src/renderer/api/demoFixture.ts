@@ -713,7 +713,14 @@ export const demoLaunchers: AvailableLauncher[] = [
 // and would leave the list as a raw "Cannot read properties of null" error),
 // so the demo stubs a fictional home-directory listing. Fictional names only —
 // node_modules and the dot-folder are exercised deliberately so the dimmed
-// rows (isDimmedDir) appear in the capture and the mockup matches them.
+// rows (isDimmedDir) appear.
+//
+// The `~/projects` nesting exists so the captured state can descend ONE level
+// out of "~" (a real user gesture: clicking a folder row). The empty-state
+// path is literally "~", which Playwright serialises as `textbox: ~` — and
+// `~` is YAML's null literal, so Playwright's aria snapshot rejects it with
+// "Node value should be a string or a sequence". Descending to `~/projects`
+// puts a real path in the field and makes the structure round-trip (BET-562).
 // =============================================================================
 export const demoHomeDirs = [
   "~/backups",
@@ -727,9 +734,18 @@ export const demoHomeDirs = [
   "~/.config",
 ];
 
+export const demoProjectsDirs = [
+  "~/projects/ethernal",
+  "~/projects/marketing",
+  "~/projects/infra",
+];
+
 export function demoFsListDirs(partial: string): string[] {
   if (!partial) return [];
-  return demoHomeDirs.filter((d) => d.startsWith(partial));
+  const p = partial.endsWith("/") ? partial : `${partial}/`;
+  if (p === "~/") return demoHomeDirs;
+  if (p === "~/projects/") return demoProjectsDirs;
+  return [...demoHomeDirs, ...demoProjectsDirs].filter((d) => d.startsWith(partial));
 }
 
 export function demoGitListWorktrees(_cwd: string): WorktreeInfo[] {
