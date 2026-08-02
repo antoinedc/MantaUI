@@ -408,7 +408,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           <button
             onClick={() => setPickerOpen(true)}
             className="inline-flex items-center gap-1.5 h-9 pl-3 pr-2 rounded-lg border border-border bg-card text-meta text-text hover:border-border-strong"
-            title={cwd || "Choose a folder"}
+            title={cwd || "Select folder"}
           >
             <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
             <span className="truncate max-w-[200px] font-mono">{folderLabel}</span>
