@@ -250,13 +250,18 @@ struct SubagentSession: Identifiable, Hashable {
     // Live duration (e.g. "1m12s") while running; nil when done.
     let duration: String?
     let transcript: [TranscriptBlock]
+    /// The opencode child session this agent runs in, when known (S4). The
+    /// chat screen pushes a LIVE child screen bound to this session id
+    /// (BET-576); the S4b fixture leaves it nil (there is no child session).
+    let childSessionId: String?
 
-    init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock]) {
+    init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock], childSessionId: String? = nil) {
         self.id = UUID()
         self.taskName = taskName
         self.status = status
         self.duration = duration
         self.transcript = transcript
+        self.childSessionId = childSessionId
     }
 
     // Navigation values are compared by identity, never by deep transcript

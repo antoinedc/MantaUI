@@ -21,6 +21,7 @@ import UIKit
 
 struct SessionListView: View {
     @ObservedObject var store: SessionListStore
+    @EnvironmentObject private var eventStore: MantaEventStore
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
@@ -51,7 +52,11 @@ struct SessionListView: View {
             .overlay(alignment: .top) { errorBanner }
             .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
             .navigationDestination(item: $openTarget) { target in
-                SessionScreenPlaceholder(name: target.name)
+                if let sessionId = target.sessionId, !sessionId.isEmpty {
+                    ChatScreen(sessionId: sessionId, title: target.name, eventStore: eventStore)
+                } else {
+                    SessionScreenPlaceholder(name: target.name)
+                }
             }
         }
         .sheet(item: $confirmDeleteWindow) { target in confirmDeleteSheet(target: target) }
@@ -61,10 +66,11 @@ struct SessionListView: View {
                 mode: item.mode,
                 onClose: { createItem = nil },
                 onCreated: { project, index in
-                    let name = store.projects.first(where: { $0.tmuxSession == project })?
-                        .windows.first(where: { $0.index == index })?.name ?? "session"
+                    let window = store.projects.first(where: { $0.tmuxSession == project })?
+                        .windows.first(where: { $0.index == index })
+                    let name = window?.name ?? "session"
                     createItem = nil
-                    openTarget = SessionOpenTarget(project: project, windowIndex: index, name: name)
+                    openTarget = SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId)
                 }
             )
             .presentationDetents([.medium, .large])
@@ -116,7 +122,7 @@ struct SessionListView: View {
     @ViewBuilder
     private func row(project: MantaProject, window: MantaWindow) -> some View {
         Button {
-            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name)
+            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId)
         } label: {
             SessionRowContent(
                 window: window,
@@ -509,6 +515,7 @@ private struct SessionOpenTarget: Identifiable, Hashable {
     let project: String
     let windowIndex: Int
     let name: String
+    let sessionId: String?
 }
 
 /// The chat screen this row opens is S4's (chat wired to live data). This
