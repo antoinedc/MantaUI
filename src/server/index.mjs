@@ -40,6 +40,7 @@ import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import { createStreamInterpreter } from "./streamInterp.mjs";
 import { startOutboxPoller } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
@@ -102,6 +103,9 @@ const PROJECT_ROOT = join(__dirname, "..", "..");
 const PUBLIC_DIR = join(PROJECT_ROOT, "mobile", "www");
 
 const bus = createBus();
+// Box-side stream interpretation (BET-551): interprets the opencode stream on
+// the box and republishes derived events on THIS bus (single stream/endpoint).
+const streamInterp = createStreamInterpreter({ publish: (evt) => bus.publish(evt) });
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
@@ -396,6 +400,14 @@ try {
 
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
+  // Box-side stream interpretation (BET-551 / §17): derive interpreted events
+  // from the raw opencode stream and publish them on the SAME bus (no second
+  // stream/endpoint). Consumers (S1b) demux by `kind:"stream"`.
+  try {
+    streamInterp.interpret(evt);
+  } catch (e) {
+    console.warn("[stream-interp] interpret failed:", e?.message ?? e);
+  }
   // Track per-session busy state for the defer-until-idle queue shared by all
   // prompt senders (schedule, capability, peer, webhook). Cheap, runs for
   // every event; never throws into the pump.
@@ -467,8 +479,7 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
 });
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
-const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";
-const TAILNET_HOST = process.env.MANTA_TAILNET_HOST ?? "";
+const HOST = process.env.MANTA_MOBILE_HOST ?? "0.0.0.0";const TAILNET_HOST = process.env.MANTA_TAILNET_HOST ?? "";
 
 // ---------- static file serving ----------
 
