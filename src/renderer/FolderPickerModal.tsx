@@ -231,7 +231,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
       <div
-        className="manta-folder-picker w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col bg-bg-elev border border-border rounded-xl shadow-xl overflow-hidden"
+        className="manta-folder-picker w-[560px] max-w-[92vw] max-h-[80vh] flex flex-col bg-bg-elev border border-border rounded-xl shadow-lg overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

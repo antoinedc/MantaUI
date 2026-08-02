@@ -73,8 +73,7 @@ export function Toast({ toast, onDismiss }: ToastProps) {
   return (
     <div
       role="status"
-      className="w-full max-w-[420px] rounded-xl border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2"
-      style={{ boxShadow: "var(--shadow-md)" }}
+      className="w-full max-w-[420px] rounded-xl border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md"
     >
       <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{toast.message}</span>
       {toast.action && (
