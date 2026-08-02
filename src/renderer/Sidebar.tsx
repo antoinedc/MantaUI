@@ -1166,7 +1166,7 @@ function CommandPalette({
       onClick={onClose}
     >
       <div
-        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-lg shadow-xl overflow-hidden"
+        className="w-[420px] max-w-[90vw] bg-bg-elev border border-border rounded-lg shadow-lg overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">

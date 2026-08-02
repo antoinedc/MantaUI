@@ -84,6 +84,16 @@ export default {
     height: dimensionScale,
     minHeight: dimensionScale,
     maxHeight: dimensionScale,
+    // The token scale is the whole scale. Declared at theme level (not
+    // extend) so Tailwind's stock shadows — `shadow`, `shadow-xl`,
+    // `shadow-2xl`, `shadow-inner` — cannot be used by accident; only the
+    // three steps tokens.css defines exist.
+    boxShadow: {
+      none: "none",
+      sm: "var(--shadow-sm)",
+      md: "var(--shadow-md)",
+      lg: "var(--shadow-lg)",
+    },
     extend: {
       colors: {
         bg: {

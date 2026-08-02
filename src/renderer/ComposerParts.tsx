@@ -141,8 +141,7 @@ export function TypeaheadPopup({
 }) {
   return (
     <div
-      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-bg-soft text-meta font-mono"
-      style={{ boxShadow: "var(--shadow-md)" }}
+      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-xl border border-border bg-bg-soft text-meta font-mono shadow-md"
     >
       {rows.length === 0 && (
         <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>

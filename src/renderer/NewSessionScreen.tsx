@@ -579,7 +579,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
       {fanOutWorktrees && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-xl shadow-xl p-4 space-y-3">
+          <div className="w-[480px] max-w-[92vw] bg-bg-elev border border-border rounded-xl shadow-lg p-4 space-y-3">
             <div className="text-body font-semibold text-text">Fan-out confirmed</div>
             <div className="text-meta text-text-muted">
               Creating one session with {fanOutWorktrees.length} windows (one per
