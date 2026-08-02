@@ -146,9 +146,8 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     expect(els.length).toBe(2);
     const modeToggle = els[0];
     // Same chrome + same accessible name/title as the pre-migration button
-    // (aria-label names the mode you switch TO from chat: Terminal). The hook
-    // class is preserved for test/coverage identity.
-    expect(modeToggle.className).toBe(`manta-session-mode-toggle ${CHROME}`);
+    // (aria-label names the mode you switch TO from chat: Terminal).
+    expect(modeToggle.className).toBe(CHROME);
     expect(modeToggle.getAttribute("aria-label")).toBe("Terminal");
     expect(modeToggle.getAttribute("title")).toBe("Switch to Terminal");
     expect(modeToggle.querySelector("svg")?.getAttribute("width")).toBe("16");
@@ -158,7 +157,7 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     const trigger = els[1];
-    expect(trigger.className).toBe(`manta-session-menu-trigger ${CHROME}`);
+    expect(trigger.className).toBe(CHROME);
     expect(trigger.getAttribute("aria-label")).toBe("Session actions");
     expect(trigger.getAttribute("title")).toBe("Session actions");
     expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
@@ -169,8 +168,6 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
   it("does not inject arbitrary classes into the migrated call sites", () => {
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
-    expect(els.map((el) => el.className).sort()).toEqual(
-      [`manta-session-mode-toggle ${CHROME}`, `manta-session-menu-trigger ${CHROME}`].sort(),
-    );
+    expect(els.map((el) => el.className).sort()).toEqual([CHROME, CHROME].sort());
   });
 });

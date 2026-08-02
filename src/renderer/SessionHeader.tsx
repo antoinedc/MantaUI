@@ -112,13 +112,13 @@ export function SessionHeader({
 
   return (
     <div
-      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
+      className="flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
       style={{ WebkitAppRegion: "drag" } as CSSProperties}
     >
       {/* Breadcrumb — project / window (the cwd path was dropped, BET-459) */}
       {crumb && (
         <span
-          className="manta-session-crumb text-label text-text-faint shrink-0 truncate max-w-[200px]"
+          className="text-label text-text-faint shrink-0 truncate max-w-[200px]"
           title={crumb}
         >
           {crumb}
@@ -128,7 +128,7 @@ export function SessionHeader({
       {/* Branch chip — session state, lives in the header not the composer. */}
       {branch && (
         <span
-          className="manta-session-branch text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1"
+          className="text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1"
           title={`Current branch: ${branch}`}
         >
           <GitBranch size={14} aria-hidden="true" className="shrink-0" />
@@ -173,7 +173,6 @@ export function SessionHeader({
             icon={<Terminal />}
             label={modeLabel}
             title={`Switch to ${modeLabel}`}
-            hook="manta-session-mode-toggle"
             onClick={() => onModeChange(targetMode)}
           />
         )}
@@ -281,7 +280,7 @@ function ContextPill({
         // The button is the interactive host (click + popover + hover fill);
         // the pill chrome itself lives on the Pill below. `rounded-full`
         // keeps the resting-transparent hover fill capsule-shaped.
-        "manta-ctx-pill text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
+        "text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
         (stale ? "" : "hover:bg-fill-hover")
       }
       aria-haspopup="dialog"
@@ -294,7 +293,7 @@ function ContextPill({
         <SegmentedBar
           segments={segments}
           segColor={segColor}
-          className="manta-ctx-track inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
+          className="inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
         />
         <span
           className="tabular-nums font-mono font-semibold"
@@ -306,7 +305,7 @@ function ContextPill({
 
       {open && (
         <span
-          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-bg-elev shadow-md text-meta text-text"
+          className="absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-bg-elev shadow-md text-meta text-text"
           // Stop the pill's onClick from toggling when interacting with the
           // popover contents (it's inside the button element).
           onClick={(e) => e.stopPropagation()}
@@ -503,17 +502,16 @@ function SessionMenu({
   const hasMode = !!onModeChange;
 
   return (
-    <div ref={rootRef} className="manta-session-menu relative shrink-0">
+    <div ref={rootRef} className="relative shrink-0">
       <IconButton
         icon={<MoreHorizontal />}
         label="Session actions"
-        hook="manta-session-menu-trigger"
         onClick={() => setOpen((v) => !v)}
         ariaHaspopup="menu"
         ariaExpanded={open}
       />
       {open && (
-        <Dropdown hook="manta-session-menu-dropdown">
+        <Dropdown>
           {hasMode && (
             <>
               <div className="px-3 pt-1 pb-0.5 text-label text-text-faint select-none" role="presentation">

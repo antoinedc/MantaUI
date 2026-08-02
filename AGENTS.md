@@ -2652,45 +2652,16 @@ plumbing of its own.
 
 ## Mobile CSS hook-class contract (BET-415) — RETIRED (BET-559)
 
-BET-559 deleted `mobile/mobile.css` and the web/PWA client that consumed it.
-The `manta-*` hook classes still stamped on shared components are now inert
-(desktop no-ops with no CSS matching them); they are leftovers of the retired
-client and can be removed. The old contract text (each hook class was a stable
-contract reshaped by `.mobile`-scoped CSS) is preserved below for history.
+BET-559 deleted `mobile/mobile.css` and the web/PWA client that consumed it;
+the `manta-*` hook classes it defined became inert desktop no-ops. BET-578
+stripped all of the dead hook classes from the shared components (InputArea,
+ModelPicker, ComposerParts, ContextBar, SessionHeader). The only `manta-*`
+classes still stamped are the ones with **live desktop CSS** in
+`src/renderer/index.css` (`manta-composer-input-row`, `manta-loading-divider`)
+— those are real desktop styles, not mobile hooks, and must stay.
 
-The shared components expose these hook classes:
-
-| Hook class | Stamped in | Mobile rule | Purpose |
-|---|---|---|---|
-| `manta-composer` | `InputArea.tsx` (wrapper) | `flex-wrap`, positioning context for PTT FAB | Composer wrapper — lets its rows wrap + anchors the floating mic |
-| `manta-composer-input-row` | `InputArea.tsx` (input row) | `padding-right: 48px` | Reserves space for the mobile PTT mic icon at the right edge |
-| `manta-composer-meta` | `InputArea.tsx` (footer) | inner spans `flex-wrap` + `min-w-0` | Lets the model/effort + toolbar wrap on phone width |
-| `manta-composer-trust` | `InputArea.tsx` (trust line) | (inherits wrap from parent) | Trust toggle row |
-| `manta-composer-textarea` | `InputArea.tsx` (textarea) | `font-size: 16px` | Defeats iOS Safari auto-zoom on focus |
-| `manta-model-picker` | `ModelPicker.tsx` (root) | `max-width: 40vw` | Truncates long provider/model ids so the effort button + toolbar fit |
-| `manta-model-dropdown` | `ModelPicker.tsx` (model list) | `min-width: 0; max-width: calc(100vw - 32px)` | Clamps the hardcoded 240px min-width to phone width |
-| `manta-effort-dropdown` | `ModelPicker.tsx` (variant list) | (same clamp as model dropdown) | Variant/effort menu fits phone width |
-| `manta-session-toolbar` | `ComposerParts.tsx` (footer toolbar) | `display: none` | Hidden on mobile — actions live in the header ⋯ sheet |
-| `manta-session-branch` | `SessionHeader.tsx` (branch chip) | `flex-basis: 100%; max-width: 100%` | Branch chip gets its own line in the header |
-| `manta-session-crumb` | `SessionHeader.tsx` (breadcrumb) | (none — desktop + mobile row) | Project / window breadcrumb, dropped cwd, lives in the header |
-| `manta-session-mode-toggle` | `SessionHeader.tsx` (mode button) | (none — desktop + mobile row) | Chat ↔ Terminal icon toggle replacing the old `<select>` |
-| `manta-ctx-track` | `ContextBar.tsx` / `SessionHeader.tsx` (bar span) | `display: none` | Drops the dotted context bar, keeps the `%` digits |
-| `manta-ctx-pill` | `SessionHeader.tsx` (context pill) | (future mobile rule) | Clickable context pill in the header |
-| `manta-ctx-popover` | `SessionHeader.tsx` (popover) | (future mobile rule) | Context breakdown popover |
-| `manta-session-menu` | `SessionHeader.tsx` (menu root) | (future mobile rule) | Session actions menu (fork/compact/clear/delete) |
-| `manta-session-header` | `SessionHeader.tsx` (header bar) | (future mobile rule) | Session header bar |
-| `manta-stale-full` / `manta-stale-min` | `ContextBar.tsx` (stale pill) | full `display: none`; min `display: inline` | Tokens number only on phone; full copy is desktop-width |
-| `manta-loading-divider` | `InputArea.tsx` (refetch sweep) | `height: 2px` | 1px sweep is invisible at arm's length on phone DPI |
-| `manta-scroll-y` | `SessionListScreen.tsx`, `MobileSettings.tsx` | `overflow-x: hidden`; `.flex` child `min-width: 0` | Replaces the prior positional `[class*="overflow-auto"]` selectors — named hook on scroll containers so iOS rubber-band horizontal scroll is clamped |
-
-**Rules for adding a new hook class:**
-1. Stamp it on the shared component (desktop file) — it's a desktop no-op.
-2. Add the mobile rule in `mobile/mobile.css`, scoped under `.mobile-body` or `.mobile-screen`.
-3. Add a row to this table.
-4. **Never use a positional `[class*=…]` selector** — if you can't touch the
-   component, that's a gap to close, not a selector to add. The two prior
-   positional selectors (`[class*="overflow-auto"]`) were replaced by
-   `manta-scroll-y` in BET-415.
+Do not reintroduce `manta-*` classes as CSS hooks: there is no mobile client
+selecting on them anymore.
 
 ## Testing
 

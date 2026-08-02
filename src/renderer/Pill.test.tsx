@@ -137,7 +137,7 @@ describe("Pill migration — ContextPill call site (BET-534 two-adopter rule)", 
   }
 
   function pillSpan(): HTMLElement {
-    const btn = h!.container.querySelector("button.manta-ctx-pill") as HTMLElement;
+    const btn = h!.container.querySelector('button[aria-haspopup="dialog"]') as HTMLElement;
     expect(btn).toBeTruthy();
     // The Pill is the button's root child (the popover span only mounts when
     // open). Its chrome is the pill's, distinct from the button's interaction
@@ -167,7 +167,7 @@ describe("Pill migration — ContextPill call site (BET-534 two-adopter rule)", 
 
   it("does not inject arbitrary classes into the migrated context-pill call site", () => {
     h = renderHeader(false);
-    const btn = h!.container.querySelector("button.manta-ctx-pill") as HTMLElement;
+    const btn = h!.container.querySelector('button[aria-haspopup="dialog"]') as HTMLElement;
     // Button keeps only identity + the interactive wrapper (no old hand-rolled
     // pill chrome), and the Pill span carries only Pill-owned classes.
     expect(btn.className).not.toContain("inline-flex");

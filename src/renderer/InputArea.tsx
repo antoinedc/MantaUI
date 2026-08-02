@@ -209,7 +209,7 @@ export function InputArea({
     [models, modelOverride, defaultModel],
   );
   return (
-    <div className="manta-composer shrink-0" ref={rowRef}>
+    <div className="shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
           composer). Hold to record, release to insert the transcript into
           the composer for review. Positioned + sized by `.mobile-ptt-fab` in
@@ -323,7 +323,7 @@ export function InputArea({
           placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
           rows={1}
           spellCheck={false}
-          className="manta-composer-textarea flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono min-w-0"
+          className="flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
         {/* Inline mic on desktop — keyboard-driven, glyph-only feedback.
@@ -342,7 +342,7 @@ export function InputArea({
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
           transient status on the right. Branch + context pill moved to the
           SessionHeader; the footer now owns only composing controls. */}
-      <div className="manta-composer-meta px-4 py-1 flex items-center justify-between gap-3 flex-wrap">
+      <div className="px-4 py-1 flex items-center justify-between gap-3 flex-wrap">
         <span className="flex items-center gap-3 min-w-0 flex-wrap">
           <ModelPicker
             modelLabel={modelLabel}
@@ -379,7 +379,7 @@ export function InputArea({
       {/* Trust toggle — labelled control with a Shield icon (BET-415).
           Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
           config key. Danger colour when bypassing. */}
-      <div className="manta-composer-trust px-4 pb-3 flex items-center text-meta">
+      <div className="px-4 pb-3 flex items-center text-meta">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
