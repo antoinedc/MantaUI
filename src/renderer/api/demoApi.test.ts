@@ -21,6 +21,12 @@
 import { describe, it, expect } from "vitest";
 import { demoState } from "./demoFixture.js";
 import { demoApi } from "./demoApi.js";
+import {
+  DEMO_STREAM_PHASES,
+  installDemoStreamWindow,
+  revealedAssistantPartCount,
+  revealedTranscript,
+} from "./demoApi.js";
 
 // The three fictional project names. Mirrors the shot list in
 // `docs/specs/website-readme-revamp.md` section 6 — every screenshot /
@@ -152,8 +158,7 @@ describe("demo fixture — config (transport-mode resolver lands on 'http')", ()
   });
 });
 
-describe("demoApi — Proxy fallback", () => {
-  it("explicit methods return the fixture values", async () => {
+describe("demoApi — Proxy fallback", () => {  it("explicit methods return the fixture values", async () => {
     expect(await demoApi.configGet()).toBe(demoState.config);
     expect(await demoApi.tmuxList()).toEqual(demoState.projects);
     const messages = await demoApi.opencodeMessages(demoState.activeSessionId);
@@ -189,5 +194,50 @@ describe("demoApi — Proxy fallback", () => {
     expect(() =>
       (demoApi as unknown as { onWhatever(cb: () => void): () => void }).onWhatever(() => {}),
     ).not.toThrow();
+  });
+});
+
+describe("demo stream state (BET-560) — stepped transcript reveal", () => {
+  it("reveals a strictly increasing number of the in-flight assistant's parts at early/mid/late", () => {
+    const [early, mid, late] = [8, 17, 26].map(revealedAssistantPartCount);
+    expect(early).toBeGreaterThan(0);
+    expect(early).toBeLessThan(mid);
+    expect(mid).toBeLessThan(late);
+  });
+
+  it("is a read-only view over the settled transcript (never truncates the fixture, never aliases it)", () => {
+    const all = demoState.messages;
+    const settledAssistantParts = all.find(
+      (m) => m.info.role === "assistant" && !m.info.time?.completed,
+    )!.parts.length;
+    for (const step of [8, 17, 26]) {
+      const got = revealedTranscript(step);
+      expect(got.length).toBe(all.length);
+      for (const m of got) {
+        const orig = all.find((x) => x.info.id === m.info.id)!;
+        if (m.info.role === "assistant" && !m.info.time?.completed) {
+          expect(m.parts.length).toBeLessThan(orig.parts.length);
+        } else {
+          expect(m.parts.length).toBe(orig.parts.length);
+        }
+      }
+    }
+    // The fixture itself is untouched — only the served view is truncated.
+    expect(all.find((m) => m.info.role === "assistant" && !m.info.time?.completed)!.parts.length).toBe(
+      settledAssistantParts,
+    );
+  });
+
+  it("exposes exactly the three named phases early/mid/late", () => {
+    expect(DEMO_STREAM_PHASES).toEqual(["early", "mid", "late"]);
+  });
+
+  it("installs the window handle ONLY in the stream state — undefined elsewhere (DoD 5)", () => {
+    for (const state of ["full", "empty", "version-skew", "stream"] as const) {
+      const win: { __mantaDemoStream?: unknown } = {};
+      const set = installDemoStreamWindow(state, win);
+      expect(set).toBe(state === "stream");
+      expect("__mantaDemoStream" in win).toBe(state === "stream");
+    }
   });
 });
