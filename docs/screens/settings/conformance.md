@@ -4,7 +4,7 @@ App vs `docs/screens/settings/mockup.html`, from `npm run visual:compare setting
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-02 (9a17023)
+Last reviewed: 2026-08-02 (dc285c7)
 
 ## Open divergences
 

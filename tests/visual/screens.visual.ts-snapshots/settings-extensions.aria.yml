@@ -1,6 +1,6 @@
 - tabpanel "Extensions":
   - heading "Plugins" [level=5]
-  - checkbox "Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta."
+  - checkbox "Run plugins on this machine"
   - text: Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta. Loading…
   - button "Open plugins folder"
   - heading "Skill registries" [level=5]
