@@ -407,7 +407,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         <div className="flex items-center gap-2 self-start">
           <button
             onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-1.5 h-9 pl-3 pr-2 rounded-lg border border-border bg-card text-meta text-text hover:border-border-strong"
+            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-lg border border-border bg-bg-soft text-meta text-text hover:border-border-strong"
             title={cwd || "Select folder"}
           >
             <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
@@ -415,7 +415,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" />
           </button>
 
-          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-card text-meta overflow-hidden">
+          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-bg-soft text-meta overflow-hidden">
             {wantWorktree && isGitRepo ? (
               // BET-417 §A: "Ticking worktree makes the branch field
               // editable." The typed value is passed as `name` to
@@ -443,7 +443,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               </span>
             )}
             <label
-              className={`inline-flex items-center gap-1.5 pl-3 pr-3 self-stretch border-l border-border ${
+              className={`inline-flex items-center gap-2 pl-3 pr-3 self-stretch border-l border-border ${
                 worktreeChipEnabled ? "cursor-pointer" : "cursor-not-allowed opacity-50"
               }`}
               title={worktreeChipEnabled ? "Create in a fresh git worktree" : "not a git repository"}
@@ -465,7 +465,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             can grow downward without moving it. */}
         <div
           className={
-            "manta-composer-input-row rounded-xl border bg-card flex items-start gap-2 px-4 py-3 " +
+            "manta-composer-input-row rounded-xl border bg-bg-soft flex items-start gap-2 px-4 py-3 " +
             (voiceRecording
               ? "manta-recording"
               : "border-border")
@@ -494,7 +494,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                   ? "Start a session"
                   : "Describe a task to start"
             }
-            className="shrink-0 w-9 h-9 rounded-lg border border-border bg-panel text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
+            className="shrink-0 w-9 h-9 rounded-lg border border-border bg-bg-elev text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
           >
             {sending ? (
               <Loader2 size={16} className="animate-spin" aria-hidden="true" />

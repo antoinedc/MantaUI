@@ -872,7 +872,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
       {confirmRemove && (
         <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-remove-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 space-y-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-bg-soft p-5 space-y-4">
             <h3 id="confirm-remove-title" className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
@@ -886,7 +886,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
       {confirmReset && (
         <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-reset-title" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 space-y-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-bg-soft p-5 space-y-4">
             <h3 id="confirm-reset-title" className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">

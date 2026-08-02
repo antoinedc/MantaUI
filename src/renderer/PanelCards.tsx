@@ -478,7 +478,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
         <span className="text-text-faint truncate">· {approval.name}</span>
         <button
           onClick={onDecline}
-          className="ml-auto px-1.5 rounded text-text-faint hover:text-text-muted inline-flex items-center"
+          className="ml-auto px-2 rounded text-text-faint hover:text-text-muted inline-flex items-center"
           title="Not now (decline)"
           aria-label="Not now"
         >
@@ -492,11 +492,11 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
       ) : (
         <div className="flex flex-col gap-1 mb-1">
           {tools.map((t, i) => (
-            <div key={i} className="flex items-center gap-1.5">
+            <div key={i} className="flex items-center gap-2">
               {editing ? (
                 <>
                   <input
-                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-2 py-px font-mono text-text"
                     value={t.permission}
                     onChange={(e) =>
                       setTools((prev) =>
@@ -506,7 +506,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
                     placeholder="permission"
                   />
                   <input
-                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-1.5 py-0.5 font-mono text-text"
+                    className="flex-1 min-w-0 rounded border border-border bg-bg-soft px-2 py-px font-mono text-text"
                     value={t.pattern}
                     onChange={(e) =>
                       setTools((prev) =>
@@ -546,7 +546,7 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
       <div className="flex items-center gap-2">
         <button
           onClick={() => onApprove(tools)}
-          className="px-2.5 py-1 rounded text-bg font-medium"
+          className="px-3 py-1 rounded text-bg font-medium"
           style={{ backgroundColor: "var(--accent)" }}
           title="Start the job with this access"
         >
@@ -609,7 +609,7 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
       ) : (
         <div className="text-text-faint">{job.activity || "running…"}</div>
       )}
-      <div className="flex items-center gap-2 mt-1.5">
+      <div className="flex items-center gap-2 mt-2">
         <button
           onClick={onGoToParent}
           className="px-2 py-1 rounded border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"

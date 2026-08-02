@@ -7,10 +7,10 @@
 // that owns the panel chrome under the anchor.
 //
 // Chrome contract (BET-529 inventory):
-//   - dropdown surface: `--panel`/bg-elev (`bg-bg-elev`), `--border` edge,
+//   - dropdown surface: `--panel`/`bg-bg-elev`, `--border` edge,
 //     `--shadow-md`, `--r-md` (8px / `rounded-lg`), `py-1`.
 //   - item label 13px `--tx1` (`text-label text-text`), padding `sp-2/sp-2`
-//     (`px-2 py-2`), hover `--card` (bg-soft, `hover:bg-bg-soft`), icon 14px.
+//     (`px-2 py-2`), hover `--card` (`bg-bg-soft`), icon 14px.
 //   - variants danger (`--danger` + hover `--danger-bg`) and active
 //     (`--accent`).
 //

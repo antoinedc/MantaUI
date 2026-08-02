@@ -148,7 +148,7 @@ export function ModelPicker({
         "manta-model-picker overflow-visible min-w-0 " +
         (separatePills
           ? "inline-flex items-center gap-2"
-          : "inline-flex items-stretch rounded-lg border border-border-strong bg-card")
+          : "inline-flex items-stretch rounded-lg border border-border-strong bg-bg-soft")
       }
     >
       {/* Model button — friendly name + Sparkles icon, opens the model list. */}
@@ -156,7 +156,7 @@ export function ModelPicker({
         <button
           className={
             "manta-model-picker-btn truncate text-meta text-text hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
-            (separatePills ? "rounded-lg border border-border-strong bg-card" : "")
+            (separatePills ? "rounded-lg border border-border-strong bg-bg-soft" : "")
           }
           aria-haspopup="listbox"
           aria-expanded={modelOpen}
@@ -243,7 +243,7 @@ export function ModelPicker({
             className={
               "manta-effort-picker-btn truncate text-meta hover:bg-fill-hover flex items-center gap-1 px-2 py-1 " +
               (separatePills
-                ? "rounded-lg border border-border-strong bg-card"
+                ? "rounded-lg border border-border-strong bg-bg-soft"
                 : "border-l border-border-strong") +
               (effortDisabled ? " cursor-not-allowed" : "")
             }
