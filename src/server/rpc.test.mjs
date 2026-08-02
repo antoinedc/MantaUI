@@ -455,6 +455,59 @@ test("opencode:provider-auth start routes anthropic → claude-login shape (BET-
   assert.equal(typeof result.cwd, "string");
 });
 
+test("opencode:provider-auth start returns claude-login when authorize FAILS on a fresh box (BET-610)", async () => {
+  // THE fresh-box bug. A box that has never run `claude` has no
+  // ~/.claude/.credentials.json, so the opencode-claude-auth plugin's
+  // authorize() throws (it indexes accounts[0] on an empty list) and
+  // startProviderOauth comes back not-ok.
+  //
+  // The handler used to return shape:"api-key" here — a catch-22, because
+  // claude-login is the flow that RUNS `claude auth login` to create those
+  // very credentials. Every fresh box was therefore asked for an API key and
+  // could never connect a subscription at all.
+  //
+  // The authorize failure must NOT decide the shape: describeConnectShape is
+  // asked with a null response and still yields claude-login for anthropic.
+  const { deps } = makeDeps([]);
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: {
+      anthropic: [{ type: "oauth", label: "Switch Claude Code account" }],
+    },
+  });
+  deps.oc.startProviderOauth = async () => ({
+    ok: false,
+    error: "Cannot read properties of undefined (reading 'source')",
+  });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({
+    action: "start",
+    id: "anthropic",
+  });
+  assert.equal(result.shape, "claude-login",
+    `a fresh box must still get the Claude login terminal, not the API-key form; got ${JSON.stringify(result)}`);
+  assert.ok(typeof result.sessionKey === "string" && result.sessionKey.length > 0,
+    "claude-login must still stamp a sessionKey when authorize failed");
+});
+
+test("opencode:provider-auth start still falls back to api-key when authorize fails for a NON-claude provider (BET-610)", async () => {
+  // The counterpart: the relaxation above is anthropic-only. A provider whose
+  // shape is not claude-login and whose authorize failed genuinely has no
+  // OAuth to offer, so the key form remains correct.
+  const { deps } = makeDeps([]);
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: { openai: [{ type: "oauth", label: "ChatGPT headless" }] },
+  });
+  deps.oc.startProviderOauth = async () => ({ ok: false, error: "boom" });
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({
+    action: "start",
+    id: "openai",
+  });
+  assert.equal(result.shape, "api-key");
+});
+
 test("opencode:provider-auth start keeps oauth-auto for non-anthropic with empty url (BET-354)", async () => {
   // Belt-and-braces: an "empty url" response from opencode for a
   // non-anthropic provider is NOT the Claude-specific path — we fall
