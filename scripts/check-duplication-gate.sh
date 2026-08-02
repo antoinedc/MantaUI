@@ -38,7 +38,7 @@ IGNORE_FILE="scripts/duplication-gate-ignore.txt"
 MERGE_BASE="$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")"
 mapfile -t CHANGED < <(git diff --name-only --diff-filter=d "$MERGE_BASE"...HEAD 2>/dev/null \
   | grep -E '\.(ts|tsx|mjs)$' \
-  | grep -v '^mobile/www/' || true)
+  )
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then
   echo "duplication-gate: no scannable changed files — PASS"

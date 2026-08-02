@@ -6,7 +6,8 @@
 //
 // Reached from THREE places that must all agree on how an HTTP outcome maps to
 // a user-facing result:
-//   • the mobile/web client   (src/renderer/mobile/pairingLogic.ts re-exports)
+//   • the renderer httpApi     (the shared /auth/claim client — BET-559: the
+//                              mobile shell re-export was retired with it)
 //   • the desktop onboarding   (src/renderer/onboarding/PairStep.tsx via IPC)
 //   • the desktop main process (src/main/index.ts auth:claim handler — it does
 //                               the fetch, then classifies with these helpers)

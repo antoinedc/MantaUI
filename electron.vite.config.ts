@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 // `app.getVersion()` over the preload bridge, so this constant only matters
 // for the renderer-side no-preload code path. Bumping the package.json
 // version automatically propagates to every renderer build at the next
-// `npm run build` / `npm run build:mobile`.
+// `npm run build`.
 const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"));
 
 export default defineConfig({
@@ -54,10 +54,8 @@ export default defineConfig({
       // channel's URL scheme through `channelConfig(__MANTA_CHANNEL__)`.
       // Mirrors the main-process baking — same source (process.env), same
       // fallback ("prod"). The mobile renderer bundle bakes the SAME global
-      // (electron.vite.config.mobile.ts) so the ambient type is satisfied in
-      // both targets; mobile currently always uses the prod scheme because
-      // the mobile app does not yet have a channel concept (a separate
-      // effort per BET-373's out-of-scope list).
+      // BET-559: the mobile renderer target (electron.vite.config.mobile.ts) is
+      // retired; this constant only feeds the desktop renderer.
       __MANTA_CHANNEL__: JSON.stringify(process.env.MANTA_CHANNEL ?? "prod"),
     },
     build: {

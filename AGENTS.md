@@ -84,20 +84,19 @@ npm test              # vitest (renderer) + node:test (src/server/*.test.mjs)
 npm run test:server   # node:test only (src/server/)
 npm run test:watch    # vitest watch mode (renderer only)
 npm run dev           # main-process AND preload changes need a full Ctrl+C + restart
-npm run mobile        # mobile/web server on $MANTA_MOBILE_HOST:$MANTA_MOBILE_PORT (default 0.0.0.0:8787)
-npm run build:mobile  # Vite build of renderer → mobile/www/ (gitignored artifact; CI builds it on main)
+npm run mobile        # server on $MANTA_MOBILE_HOST:$MANTA_MOBILE_PORT (default 0.0.0.0:8787)
 ```
 
 The preload bundle is built once at dev-server start; renderer HMR alone won't
 pick up new `window.api` methods. If you add an IPC channel and don't see it
 on `window.api`, you didn't restart.
 
-**MOBILE CHANGES REACH DEVICES ONLY AFTER THE BUNDLE IS REBUILT ON MAIN — but
-you no longer rebuild/commit it by hand.** The mobile/web client is served as a
-**pre-built static bundle** from `mobile/www/` (`src/server/index.mjs`
-`PUBLIC_DIR`), NOT live source. As of 2026-07-10 `mobile/www/` is **gitignored**
-(NOT tracked on branches) — the whole dir is a Vite build artifact whose source
-is `src/renderer/` + `src/renderer/public/`.
+**BET-559 retired the mobile/web client and its bundle/publish pipeline.**
+The box no longer serves a web/PWA bundle, `src/server/index.mjs` no longer
+has a `PUBLIC_DIR`, and `build:mobile` / `mobile-bundle-deploy.yml` /
+self-update's bundle fetch are gone. The renderer (`src/renderer/`) is the
+desktop Electron app only; the native iOS client is `mobile/native`. The text
+below is the historical record of the retired bundle model.
 
 - **On a feature branch: just edit the source** (`ChatPanel.tsx`, `mobile.css`,
   `src/renderer/**`, the service worker under `src/renderer/public/`). Do NOT
@@ -360,12 +359,13 @@ re-offered every 3s.
   `onAgentFileReady` listener (mirror of `App.tsx`). Pure scan logic
   (`createOutboxScanner`, `listOutbox`) is tested in `src/server/outbox.test.mjs`.
 
-## Mobile / web client (`src/server/`)
+## Mobile / web client (`src/server/`) — BET-559: web client retired
 
-Node HTTP+WS server that runs **on the Linux box** (no SSH hop). The client
-is the full React renderer (`src/renderer/`) built into `mobile/www/` via
-`npm run build:mobile` and served statically. Use case: full MantaUI chat+terminal
-from a phone or browser with nothing installed on the device.
+Node HTTP+WS server that runs **on the Linux box** (no SSH hop). BET-559
+retired the web/PWA client that used to be served from `mobile/www/` (the
+React renderer built by `npm run build:mobile`) — the box no longer serves a
+web client. The native iOS client lives in `mobile/native` (Swift). The
+renderer (`src/renderer/`) is the DESKTOP Electron app only.
 
 **Server modules:**
 - `tmux.mjs` — tmux list/CRUD/config (pure, testable; `parseSessions` is
@@ -2650,13 +2650,13 @@ module-level singletons — each `createBusConsumer` call owns its own
 state. `desktopNotify.ts` is ~40 lines; `capExecutor.ts` adds zero SSE
 plumbing of its own.
 
-## Mobile CSS hook-class contract (BET-415)
+## Mobile CSS hook-class contract (BET-415) — RETIRED (BET-559)
 
-`mobile/mobile.css` reshapes shared desktop components for phone width via
-`manta-*` hook classes stamped on the elements it needs to target. These
-classes are **stable contracts** — renaming or removing one breaks the mobile
-layout silently. Every hook class must be a desktop no-op (no matching rule
-in `index.css`) so adding it never changes the desktop render.
+BET-559 deleted `mobile/mobile.css` and the web/PWA client that consumed it.
+The `manta-*` hook classes still stamped on shared components are now inert
+(desktop no-ops with no CSS matching them); they are leftovers of the retired
+client and can be removed. The old contract text (each hook class was a stable
+contract reshaped by `.mobile`-scoped CSS) is preserved below for history.
 
 The shared components expose these hook classes:
 

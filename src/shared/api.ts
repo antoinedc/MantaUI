@@ -323,12 +323,10 @@ export interface Api {
     cb: (payload: { id: string; status: string; activity?: string }) => void,
   ): () => void;
 
-  // APNs native-push registration (BET-181). The iOS Capacitor app calls this
-  // on startup (after permission grant) with the device token returned by
-  // @capacitor/push-notifications. The server upserts it into the apns-tokens
-  // registry (de-dupes on token value). Returns { ok, count }. No-op on
-  // non-iOS / pre-Capacitor environments — see src/renderer/mobile/nativePush.ts
-  // for the feature-detection guard.
+  // APNs native-push registration (BET-181). The native iOS app calls this on
+  // startup (after permission grant) with the device APNs token. The server
+  // upserts it into the apns-tokens registry (de-dupes on token value).
+  // Returns { ok, count }.
   pushRegisterApns(token: string): Promise<{ ok: boolean; count: number }>;
 
   // Auto-update (desktop-only). Main checks for updates on launch and pushes

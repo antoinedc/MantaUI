@@ -10,7 +10,7 @@
 # in .github/workflows/ci.yml (`|| true`), so a finding never fails CI.
 #
 # better-ui adaptations vs the leasebot original:
-#   - scans .ts/.tsx/.mjs (server modules are .mjs here), excludes mobile/www
+#   - scans .ts/.tsx/.mjs (server modules are .mjs here)
 #     build output and content-hashed assets
 #   - NO eslint section: this repo has no eslint config (the dep is present but
 #     unconfigured). If a flat config lands later, restore the diff-scoped lint
@@ -38,7 +38,7 @@ cd "$ROOT"
 MERGE_BASE="$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "$BASE_REF")"
 mapfile -t CHANGED < <(git diff --name-only --diff-filter=d "$MERGE_BASE"...HEAD 2>/dev/null \
   | grep -E '\.(ts|tsx|mjs)$' \
-  | grep -v '^mobile/www/' || true)
+  )
 
 echo "<!-- anti-spaghetti-report -->"
 echo "## Anti-spaghetti detector report"
@@ -51,7 +51,7 @@ echo "change the other'). Only act on duplication of the same business logic"
 echo "this PR introduced, or dead code it left behind._"
 echo
 echo "- Base ref: \`${BASE_REF}\` (merge-base \`$(git rev-parse --short "$MERGE_BASE" 2>/dev/null || echo '?')\`)"
-echo "- Changed \`.ts/.tsx/.mjs\` files (excl. mobile/www): **${#CHANGED[@]}**"
+echo "- Changed \`.ts/.tsx/.mjs\` files: **${#CHANGED[@]}**"
 echo
 
 if [ "${#CHANGED[@]}" -eq 0 ]; then

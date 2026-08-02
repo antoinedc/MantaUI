@@ -39,7 +39,8 @@ export default defineConfig({
     {
       // Visual verification: drives the demo-mode build in a browser and
       // compares structure + pixels against committed baselines. Needs
-      // `npm run build:mobile` to have run — the npm script chains it.
+      // `npm run build` (desktop renderer → out/renderer, BET-559) to have run —
+      // the npm script chains it.
       name: 'visual',
       testMatch: /.*\.visual\.ts/,
       retries: 0,

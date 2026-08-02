@@ -348,7 +348,7 @@ jobs:
       #    Same detectors, same blocking behaviour, no extra runner slot) ────
       #
       # gitleaks over the full history. The allowlist in .gitleaks.toml covers
-      # ONLY the built mobile/www bundles (verified false positives); real
+      # ONLY the built bundle outputs (verified false positives); real
       # source is fully scanned. THE reason this repo needs it: agents write
       # most commits now, and an agent pasting a live token into code or docs
       # must fail deterministically, not depend on reviewer attention.
