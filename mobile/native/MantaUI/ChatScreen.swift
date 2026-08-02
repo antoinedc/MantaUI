@@ -214,8 +214,6 @@ struct ChatSubagentScreen: View {
     let tokens: Tokens
     @Environment(\.dismiss) private var dismiss
 
-    private static let bottomAnchorID = "subagent-transcript-bottom"
-
     var body: some View {
         VStack(spacing: 0) {
             SubagentHeader(
@@ -224,32 +222,17 @@ struct ChatSubagentScreen: View {
                 onBack: { dismiss() },
                 tokens: tokens
             )
-            // `defaultScrollAnchor(.bottom)` alone is not enough here: the
-            // child transcript arrives AFTER the first layout, and a LazyVStack
-            // measures nothing until its rows materialise, so the anchor is
-            // applied against a near-empty content height. The offset then
-            // never corrects — which is the dead space that appeared above the
-            // child's first row. An explicit scroll to a bottom sentinel when
-            // the content changes settles it whatever order things arrive in.
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        TranscriptView(blocks: store.blocks, tokens: tokens)
-                        Color.clear
-                            .frame(height: 1)
-                            .id(Self.bottomAnchorID)
-                    }
-                }
-                .defaultScrollAnchor(.bottom)
-                .onChange(of: store.blocks.count) { _ in
-                    proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
-                }
-                .onAppear {
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
-                    }
+            // `.bottom` ALONE also aligns SHORT content to the bottom, which
+            // is what put a screenful of dead space above a subagent report
+            // that does not fill the view. Scoping the anchor to `.sizeChanges`
+            // keeps the useful half — the view sticks to the bottom as the
+            // child streams — while content that fits simply starts at the top.
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    TranscriptView(blocks: store.blocks, tokens: tokens)
                 }
             }
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
         }
         .background(tokens.canvas.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)
