@@ -274,3 +274,5 @@
   --shadow-md: 0 8px 24px rgb(26 24 21 / 0.10);
   --shadow-lg: 0 20px 56px rgb(26 24 21 / 0.14);
 }
+
+/* determinism probe — no visual effect; delete with this branch */
