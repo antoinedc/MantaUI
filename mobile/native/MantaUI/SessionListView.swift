@@ -33,6 +33,7 @@ struct SessionListView: View {
     @State private var confirmDeleteProject = ""
     @State private var confirmDeleteWindow: MantaWindow?
     @State private var deleteRunningText = ""
+    @State private var showSettings = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -47,6 +48,18 @@ struct SessionListView: View {
             }
             .navigationTitle("Sessions")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .foregroundColor(tokens.tx2)
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
             .refreshable { await store.refresh() }
             .safeAreaInset(edge: .bottom) { capsule }
             .overlay(alignment: .top) { errorBanner }
@@ -79,6 +92,9 @@ struct SessionListView: View {
                 }
             )
             .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(isPresented: $showSettings) {
+            SettingsScreen()
         }
     }
 

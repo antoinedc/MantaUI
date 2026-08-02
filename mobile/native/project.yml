@@ -18,6 +18,10 @@ targets:
       # Swift source of truth stays the generated file — never copied or
       # re-typed into this module.
       - path: ../../generated/swift/Theme.swift
+      # The settings schema is GENERATED (scripts/gen-swift-settings.mjs reads
+      # src/shared/settingsSchema.ts). Same policy: referenced by path, never
+      # copied or hand-edited.
+      - path: ../../generated/swift/SettingsSchema.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui

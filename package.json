@@ -20,6 +20,7 @@
     "test:watch": "vitest",
     "shots": "node scripts/shots.mjs",
     "gen:swift-tokens": "node scripts/gen-swift-tokens.mjs",
+    "gen:swift-settings": "node scripts/gen-swift-settings.mjs",
     "video": "cd video && npm install && npm run build",
     "visual": "npm run build && playwright test --project=visual",
     "visual:update": "npm run build && playwright test --project=visual --update-snapshots",

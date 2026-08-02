@@ -131,6 +131,18 @@ jobs:
       - name: Swift token drift gate — regenerate and diff against committed generated/swift/Theme.swift
         run: npm run gen:swift-tokens -- --check
 
+      # ── Swift settings-schema drift gate (BET-599) — keep
+      #    `generated/swift/SettingsSchema.swift` byte-identical to what
+      #    `scripts/gen-swift-settings.mjs` regenerates from
+      #    `src/shared/settingsSchema.ts` (the single source of truth for the
+      #    settings inventory). Same shape as the tokens gate above: a
+      #    device settings list that drifts from the schema is a silent
+      #    divergence, and adding a setting to the schema must surface it on
+      #    iOS without a hand-edited Swift list.
+      - name: Swift settings-schema drift gate — regenerate and diff against committed generated/swift/SettingsSchema.swift
+        run: npm run gen:swift-settings -- --check
+
+
       # ── REMOVED (BET-602): the two Playwright screenshot gates that used to
       #    run here — the `website/shot-*.webp` drift gate and the app-screen
       #    visual gate (`npm run visual`). Do not re-add either to this job
