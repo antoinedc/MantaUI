@@ -1176,6 +1176,62 @@ export type OpencodeEvent = {
   properties: Record<string, unknown>;
 };
 
+// ── Box-side interpreted stream events (BET-551 / §17) ──
+//
+// The box is now the single interpreter of the opencode session stream
+// (src/server/streamInterp.mjs). It publishes derived events on the existing
+// /events bus with `{ kind: "stream", sub, sessionId, payload }`, where `sub`
+// names the derivative and `payload` carries its typed value. The renderer
+// consumes these via `onStreamEvent` instead of re-deriving them from raw
+// `opencode` events (S1b). These types mirror the emissions in streamInterp.mjs.
+
+export type StreamFlushPayload = {
+  messageID: string;
+  partID: string;
+  field: "text" | "reasoning";
+  text: string;
+};
+
+export type StreamRunningPayload = { running: boolean };
+
+export type StreamTurnCompletePayload = { complete: boolean; running: boolean };
+
+export type StreamTodosPayload = {
+  active: Array<Record<string, unknown>> | null;
+  visible: { visible: Array<Record<string, unknown>>; hiddenPending: number; hiddenDone: number } | null;
+  allTerminal: boolean;
+  anyTerminal: boolean;
+};
+
+export type StreamTruncationPayload = {
+  kind: string;
+  label: string;
+  messageID?: string;
+};
+
+export type StreamQuestionsPayload = { questions: unknown[] };
+
+export type StreamSubagentChildPayload = { childSessionId: string };
+
+export type StreamSubagentPayload = Record<string, unknown>;
+
+export type StreamEnvelope = {
+  sub:
+    | "flush"
+    | "running"
+    | "turnComplete"
+    | "todos"
+    | "truncation"
+    | "questions"
+    | "subagent.child"
+    | "subagent"
+    | "context"
+    | "cache"
+    | "autoRename";
+  sessionId: string;
+  payload: unknown;
+};
+
 // Slash command exposed by opencode (`/init`, user-defined templates, etc.).
 // `template` is the raw prompt body opencode injects as the user message when
 // the command runs (with `$ARGUMENTS` / `$1` etc. substituted at run time).

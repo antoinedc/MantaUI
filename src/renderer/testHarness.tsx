@@ -25,7 +25,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { OpencodeEvent } from "../shared/types";
+import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
 
 // React 18's `act` warns unless this global is set. jsdom test env only.
@@ -35,11 +35,18 @@ import { useStore } from "./store";
 // A subscriber registered via the mocked `window.api.onOpencodeEvent`.
 type EventListener = (ev: OpencodeEvent) => void;
 
+// A subscriber registered via the mocked `window.api.onStreamEvent`.
+type StreamListener = (ev: StreamEnvelope) => void;
+
 // The controllable SSE bus the harness hands back so a test can push events
-// exactly as the main process would broadcast them.
+// exactly as the main process would broadcast them. `emit` drives the raw
+// opencode listener; `emitStream` drives the box-interpreted stream listener
+// (BET-551 / §17) with a `StreamEnvelope`.
 export type MockEventBus = {
   emit: (ev: OpencodeEvent) => void;
+  emitStream: (ev: StreamEnvelope) => void;
   listenerCount: () => number;
+  streamListenerCount: () => number;
 };
 
 // A recording of the window.api calls a test may want to assert on. The mock
@@ -58,6 +65,10 @@ function defaultApiImpl(): Record<string, unknown> {
     onOpencodeEvent: (fn: EventListener) => {
       busListeners.add(fn);
       return () => busListeners.delete(fn);
+    },
+    onStreamEvent: (fn: StreamListener) => {
+      streamListeners.add(fn);
+      return () => streamListeners.delete(fn);
     },
     opencodeOpenStream: () => Promise.resolve(),
     opencodeCloseStream: () => Promise.resolve(),
@@ -89,6 +100,7 @@ function defaultApiImpl(): Record<string, unknown> {
 // Shared listener set — a single bus per harness instance is enough for our
 // tests (they mount one ChatPanel). Recreated by installMockApi.
 let busListeners = new Set<EventListener>();
+let streamListeners = new Set<StreamListener>();
 
 // Install a mock `window.api` onto the jsdom window and return the bus +
 // recorder. `overrides` lets a test supply a specific resolved value or a
@@ -106,6 +118,7 @@ export function installMockApi(
   { absent = [] as string[] }: { absent?: string[] } = {},
 ): { api: MockApi; bus: MockEventBus } {
   busListeners = new Set<EventListener>();
+  streamListeners = new Set<StreamListener>();
   const calls: Record<string, unknown[][]> = {};
 
   const bus: MockEventBus = {
@@ -114,7 +127,11 @@ export function installMockApi(
       // we're iterating.
       for (const fn of Array.from(busListeners)) fn(ev);
     },
+    emitStream: (ev) => {
+      for (const fn of Array.from(streamListeners)) fn(ev);
+    },
     listenerCount: () => busListeners.size,
+    streamListenerCount: () => streamListeners.size,
   };
 
   const impl = { ...defaultApiImpl(), ...overrides };
@@ -216,5 +233,16 @@ export async function emitAndFlush(
   ev: OpencodeEvent,
 ): Promise<void> {
   act(() => bus.emit(ev));
+  await h.flush();
+}
+
+// Convenience: emit a box-interpreted stream event through the stream bus and
+// flush (BET-551 / §17).
+export async function emitStreamAndFlush(
+  bus: MockEventBus,
+  h: Harness,
+  ev: StreamEnvelope,
+): Promise<void> {
+  act(() => bus.emitStream(ev));
   await h.flush();
 }

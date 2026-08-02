@@ -175,7 +175,18 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         const props = evt.properties ?? {};
         const finish = typeof props.finish === "string" ? props.finish : null;
         const kind = classifyFinish(finish, { lastPartIsToolUse: props.lastPartIsToolUse });
-        if (kind) emit(sid, "truncation", { kind, label: describeTruncation(kind).label });
+        if (kind) {
+          // The renderer renders truncation per-message (finishByMessageId),
+          // so carry the step's messageID when the raw event provides one
+          // (S1b consumes this to stamp the badge on the right message).
+          const messageID =
+            typeof props.messageID === "string" ? props.messageID : undefined;
+          emit(sid, "truncation", {
+            kind,
+            label: describeTruncation(kind).label,
+            messageID,
+          });
+        }
         const tokens = props.tokens ?? props.usage;
         if (tokens) {
           const limit = resolveContextLimit(props.model) ?? ASSUMED_CONTEXT_TOKENS;

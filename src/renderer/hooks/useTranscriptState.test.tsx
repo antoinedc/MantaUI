@@ -14,6 +14,7 @@ import {
   resetStore,
   mount,
   emitAndFlush,
+  emitStreamAndFlush,
 } from "../testHarness";
 
 const PROPS = {
@@ -45,19 +46,19 @@ describe("useTranscriptState via ChatPanel", () => {
     expect(h.container.querySelector('[class*="transcript"]') || h.container.firstChild).not.toBeNull();
   });
 
-  it("handles message.part.delta events for active panel", async () => {
+  it("handles stream.flush events for active panel", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Emit a delta event for the active panel
-    await emitAndFlush(bus, h, {
-      type: "message.part.delta",
-      properties: {
-        sessionID: "ses_test",
-        partID: "part_1",
+    // Emit a box-flushed delta for the active panel (BET-551 / §17)
+    await emitStreamAndFlush(bus, h, {
+      sub: "flush",
+      sessionId: "ses_test",
+      payload: {
         messageID: "msg_1",
+        partID: "part_1",
         field: "text",
-        delta: "Hello",
+        text: "Hello",
       },
     });
 
@@ -65,7 +66,7 @@ describe("useTranscriptState via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles message.part.delta for inactive panel by setting refetchOwed", async () => {
+  it("handles stream.flush for inactive panel by setting refetchOwed", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
@@ -75,19 +76,19 @@ describe("useTranscriptState via ChatPanel", () => {
     });
     await h!.flush();
 
-    // Emit a delta event for the inactive panel
-    await emitAndFlush(bus, h, {
-      type: "message.part.delta",
-      properties: {
-        sessionID: "ses_test",
-        partID: "part_2",
+    // Emit a box-flushed delta for the inactive panel
+    await emitStreamAndFlush(bus, h, {
+      sub: "flush",
+      sessionId: "ses_test",
+      payload: {
         messageID: "msg_2",
+        partID: "part_2",
         field: "text",
-        delta: "World",
+        text: "World",
       },
     });
 
-    // Component should still be mounted (delta was suppressed, refetch owed).
+    // Component should still be mounted (flush was suppressed, refetch owed).
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 

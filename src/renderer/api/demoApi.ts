@@ -310,6 +310,13 @@ const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
   return () => {};
 };
 
+// Box-interpreted stream events (BET-551 / §17) never reach the demo: the
+// demo fixture drives the `stream` state through onOpencodeEvent
+// (message.updated → splice) instead, and the Proxy fallback would also serve
+// a benign no-op. Declared explicitly so the coverage test records the
+// subscription as intentionally stubbed rather than silently absent.
+const onStreamEvent = (_cb: unknown): (() => void) => () => {};
+
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
 
@@ -415,6 +422,7 @@ export const explicitMethods = {
   opencodeOpenStream,
   opencodeCloseStream,
   onOpencodeEvent,
+  onStreamEvent,
   launchersList,
   fsListDirs,
   gitListWorktrees,

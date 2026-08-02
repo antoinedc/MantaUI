@@ -53,6 +53,25 @@ test("session.next.step.ended emits truncation classification", () => {
   const tr = events.find((e) => e.sub === "truncation");
   assert.ok(tr);
   assert.equal(tr.payload.kind, "tool-cutoff");
+  // No messageID on the raw step → none forwarded (S1b consumes it when
+  // present to stamp the per-message truncation badge).
+  assert.equal(tr.payload.messageID, undefined);
+});
+
+test("session.next.step.ended passes messageID through on stream.truncation", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.next.step.ended",
+    properties: {
+      sessionID: SID,
+      messageID: "msg_trunc",
+      finish: "length",
+      tokens: { input: 100 },
+    },
+  });
+  const tr = events.find((e) => e.sub === "truncation");
+  assert.ok(tr);
+  assert.equal(tr.payload.messageID, "msg_trunc");
 });
 
 test("session.next.step.ended emits context breakdown and cache staleness", () => {

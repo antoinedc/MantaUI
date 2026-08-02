@@ -11,6 +11,7 @@ import {
   type PluginRegistryRow,
   type PtyEvent,
   type ServerUpdateAvailablePayload,
+  type StreamEnvelope,
   type WindowStatus,
 } from "../../shared/types.js";
 import type { Api } from "../../shared/api.js";
@@ -326,8 +327,13 @@ type Kind =
   | "agentFile"
   | "desktopNotify"
   | "serverUpdateAvailable"
-  | "delegate.updated";
+  | "delegate.updated"
+  | "stream";
 
+// Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
+// (see dispatchFrame), not just `payload` — the bus event carries the extra
+// routing fields every other kind discards. `on<T>` type-erases the payload,
+// so the consumers simply choose their own shape here.
 const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   opencode: new Set(),
   pty: new Set(),
@@ -337,6 +343,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   desktopNotify: new Set(),
   serverUpdateAvailable: new Set(),
   "delegate.updated": new Set(),
+  stream: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -431,13 +438,23 @@ const WATCHDOG_INTERVAL_MS = 15_000;
 function dispatchFrame(data: unknown) {
   lastFrameAt = Date.now();
   try {
-    const { kind, payload } = JSON.parse(data as string) as {
+    const { kind, payload, sub, sessionId } = JSON.parse(data as string) as {
       kind: Kind | "heartbeat";
       payload: unknown;
+      sub?: string;
+      sessionId?: string;
     };
     if (kind === "heartbeat") return; // liveness ping only — no listener, no demux
     const set = listeners[kind as Kind];
-    if (set) for (const fn of set) fn(payload);
+    if (!set) return;
+    // The `stream` kind wraps a derived sub-event: the box publishes
+    // `{ kind:"stream", sub, sessionId, payload }`. Every other kind is the
+    // flat `{ kind, payload }` envelope and dispatches `payload` alone. This
+    // keeps the stream consumer's `sub`/`sessionId` routing (useSseBus.scoped
+    // to the viewed session) intact without changing the other kinds' shape.
+    for (const fn of set) {
+      fn(kind === "stream" ? { sub, sessionId, payload } : payload);
+    }
   } catch {
     // non-JSON / control frame — ignore
   }
@@ -844,6 +861,11 @@ export const httpApi: Api = {
   opencodeCloseStream: (sessionId) =>
     rpcOptional(IPC.opencodeCloseStream, undefined, sessionId),
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
+  // Box-side interpreted stream events (BET-551 / §17). The dispatchFrame
+  // stream branch hands each listener a `{sub, sessionId, payload}` envelope
+  // (see the comment there); useSseBus scopes by `sessionId` and demuxes the
+  // derivative by `sub`.
+  onStreamEvent: (cb) => on<StreamEnvelope>("stream", cb),
 
   /**
    * The preload packs opencodePrompt args into a single object before invoking:

@@ -264,14 +264,10 @@ export function ChatPanel({
     prevScrollHeight,
     questionCardRef,
     wantQuestionScroll,
-    flushPendingDeltas,
-    scheduleFlush,
+    applyStreamFlush,
     scheduleRefetch,
     spliceMessage,
     toggleTaskExpand,
-    pendingDeltas,
-    oldestPendingAt,
-    FLUSH_MAX_AGE_MS,
   } = useTranscriptState({ sessionId, isActive });
 
   // ===== SSE bus state (extracted to useSseBus) =====
@@ -335,11 +331,7 @@ export function ChatPanel({
     childRefetchTimers,
     isActiveRef,
     refetchOwedWhileInactive,
-    pendingDeltas,
-    flushPendingDeltas,
-    scheduleFlush,
-    oldestPendingAt,
-    FLUSH_MAX_AGE_MS,
+    applyStreamFlush,
     // Active-model providerID for the auth-error banner (BET-316).
     // Per-session override (localStorage) wins over the persisted default;
     // null if neither is set — the banner then falls through to the
