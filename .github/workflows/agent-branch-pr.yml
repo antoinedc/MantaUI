@@ -32,6 +32,19 @@
 # Idempotent: fires on every push to the branch, and does nothing when a pull
 # request already exists in ANY state — a closed PR is a human decision and is
 # never reopened as a new one.
+#
+# GOTCHA — `on: push` reads the workflow file from the PUSHED BRANCH, not from
+# `main`. A branch cut from a `main` that predates this file therefore does not
+# trigger it, and its push is silently ignored. That is not hypothetical: it hit
+# BET-556 within minutes of this workflow landing — the branch had been cut
+# beforehand, so its deliverable stranded exactly like BET-555's and had to be
+# carried by hand. It self-resolves as branches are cut from a `main` that
+# carries the file, but for any branch older than this workflow use the
+# `workflow_dispatch` input, which runs `main`'s copy:
+#
+#   gh workflow run agent-branch-pr.yml -f branch=<branch>
+#
+# The same applies to any future branch-triggered workflow added here.
 name: Agent branch PR
 
 on:

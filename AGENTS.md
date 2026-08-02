@@ -2877,6 +2877,12 @@ there, leaving a green PR stuck as a draft). Two constraints on it:
 - **Multica links a PR by the key in its TITLE**, so the branch should be
   `multica/<KEY>-<slug>`; the key is otherwise recovered from commit subjects,
   and failing that the PR is opened unlinked with a warning.
+- **`on: push` reads the workflow file from the PUSHED BRANCH, not `main`** — so
+  a branch cut from a `main` that predates the workflow never triggers it. This
+  bit BET-556 minutes after the workflow landed. Self-resolving as branches move
+  forward; for an older branch use
+  `gh workflow run agent-branch-pr.yml -f branch=<branch>`, which runs `main`'s
+  copy. Applies to any branch-triggered workflow added here.
 
 **The 15-minute schedule is fiction — assume hours.** GitHub throttles cron
 hard: ticks 58-202 minutes apart on 2026-08-01, and a 66-minute gap on
