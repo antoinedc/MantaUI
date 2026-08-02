@@ -10,6 +10,12 @@ struct MantaUIApp: App {
     //
     // S3: the session-list store drives the §7.1 list, deriving live row
     // status from the event store and persisting pin/haptics through config.
+    //
+    // S8 (BET-600): the app delegate owns APNs registration + notification
+    // routing; MantaPushRouter carries a notification tap's sessionId to the
+    // session list so a push opens the session that fired it, not the list.
+    @UIApplicationDelegateAdaptor(MantaAppDelegate.self) private var appDelegate
+
     @StateObject private var store: MantaEventStore
     @StateObject private var sessionStore: SessionListStore
 
@@ -27,6 +33,7 @@ struct MantaUIApp: App {
             MantaAppRoot()
                 .environmentObject(store)
                 .environmentObject(sessionStore)
+                .environmentObject(MantaPushRouter.shared)
                 .task {
                     store.start()
                     sessionStore.bindResync()

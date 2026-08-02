@@ -186,4 +186,34 @@ final class MantaPairingTests: XCTestCase {
         let derived = MantaPairing.PairPayload(boxId: box, code: "123456", verify: nil, serverUrl: nil)
         XCTAssertEqual(MantaPairing.claimBaseURL(derived)?.absoluteString, "https://\(box).boxes.mantaui.com")
     }
+
+    // MARK: - S8 pairing-link routing (BET-600)
+
+    /// A pairing universal link (https associated-domain form) routed through
+    /// the S8 entry point stages a payload for the onboarding flow.
+    @MainActor
+    func testUniversalLinkRoutesPairingPayload() {
+        MantaPairingRouter.shared.pendingPayload = nil
+        let url = URL(string: "https://app.mantaui.com/m?box=\(box)&code=123456")!
+        XCTAssertTrue(MantaPairingRouter.route(url))
+        XCTAssertEqual(MantaPairingRouter.shared.pendingPayload?.boxId, box)
+        XCTAssertEqual(MantaPairingRouter.shared.pendingPayload?.code, "123456")
+    }
+
+    /// The custom scheme form routes identically (same parse contract).
+    @MainActor
+    func testCustomSchemeRoutesPairingPayload() {
+        MantaPairingRouter.shared.pendingPayload = nil
+        let url = URL(string: "manta://pair?box=\(box)&code=654321")!
+        XCTAssertTrue(MantaPairingRouter.route(url))
+        XCTAssertEqual(MantaPairingRouter.shared.pendingPayload?.code, "654321")
+    }
+
+    /// A non-pairing URL is not swallowed by the app.
+    @MainActor
+    func testNonPairingUrlNotRouted() {
+        MantaPairingRouter.shared.pendingPayload = nil
+        XCTAssertFalse(MantaPairingRouter.route(URL(string: "https://app.mantaui.com/other")!))
+        XCTAssertNil(MantaPairingRouter.shared.pendingPayload)
+    }
 }

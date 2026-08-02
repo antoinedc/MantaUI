@@ -22,6 +22,7 @@ import UIKit
 struct SessionListView: View {
     @ObservedObject var store: SessionListStore
     @EnvironmentObject private var eventStore: MantaEventStore
+    @EnvironmentObject private var pushRouter: MantaPushRouter
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
@@ -95,6 +96,30 @@ struct SessionListView: View {
         }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
+        }
+        // S8 (BET-600): a tapped notification opens the session that fired it,
+        // not the list. The push router carries the opencode sessionId; we turn
+        // it into the same openTarget the list rows use. onChange covers a
+        // warm launch (view already mounted), onAppear the cold-start case
+        // (the tap routed before the list appeared).
+        .onAppear { consumePushLink() }
+        .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+    }
+
+    // MARK: - Push deep-link (§S8)
+
+    private func consumePushLink() {
+        guard let sessionId = pushRouter.pendingSessionID, !sessionId.isEmpty else { return }
+        pushRouter.pendingSessionID = nil
+        // Resolve the row that fired the notification so the opened screen
+        // carries the right title/project; fall back to a bare session open
+        // (ChatScreen works off sessionId alone, so a not-yet-loaded list is
+        // still fine).
+        if let project = store.projects.first(where: { $0.windows.contains { $0.opencodeSessionId == sessionId } }),
+           let window = project.windows.first(where: { $0.opencodeSessionId == sessionId }) {
+            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId)
+        } else {
+            openTarget = SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId)
         }
     }
 
