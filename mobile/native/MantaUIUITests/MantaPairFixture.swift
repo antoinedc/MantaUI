@@ -15,4 +15,6 @@ import Foundation
 enum MantaPairFixture {
     static let code = ""
     static let server = ""
+    /// Row label the open-session drive should tap; empty taps the first row.
+    static let openRow = ""
 }

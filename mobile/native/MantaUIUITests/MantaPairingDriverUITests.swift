@@ -119,8 +119,18 @@ final class MantaOpenSessionUITests: XCTestCase {
         // reliably queryable as buttons; a normalized coordinate tap lands on
         // the first row under the "Sessions" title regardless of element type.
         _ = app.staticTexts["Sessions"].waitForExistence(timeout: 15)
-        print("PAIRDRIVE rows buttons=\(app.buttons.count) cells=\(app.cells.count) texts=\(app.staticTexts.count)")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28)).tap()
+        // MANTA_OPEN_ROW names the row to open; empty falls back to the first
+        // row by coordinate. A named row matters because a chat-mode window
+        // and a plain tmux window land on completely different screens.
+        let wanted = ProcessInfo.processInfo.environment["MANTA_OPEN_ROW"] ?? MantaPairFixture.openRow
+        let named = app.staticTexts[wanted]
+        if !wanted.isEmpty, named.waitForExistence(timeout: 5), named.isHittable {
+            print("PAIRDRIVE open-row=\(wanted)")
+            named.tap()
+        } else {
+            print("PAIRDRIVE open-row=first-by-coordinate")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28)).tap()
+        }
         sleep(6)
         // The runner tears the app down the moment the test ends, so a
         // host-side `simctl io screenshot` always catches Springboard instead.
