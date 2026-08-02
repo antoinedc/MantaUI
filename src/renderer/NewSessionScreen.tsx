@@ -532,6 +532,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             icon={<Paperclip />}
             label="Attach a file"
             title="Attaching files is not available when starting a session"
+            size="xl"
             disabled
           />
 
@@ -551,6 +552,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               icon={<Mic />}
               label="Dictate"
               title="Dictation needs a Groq API key in Settings"
+              size="xl"
               disabled
             />
           )}
