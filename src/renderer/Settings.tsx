@@ -14,6 +14,7 @@ import {
 import { useStore } from "./store";
 import { Modal } from "./Modal";
 import { Checkbox } from "./Checkbox";
+import { Toggle } from "./Toggle";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -98,6 +99,24 @@ function ToggleField({ entry, value, onApply }: {
   entry: SettingEntry; value: boolean; onApply: (v: boolean) => void;
 }) {
   const id = fieldId(entry);
+  // The two pure-boolean setting rows adopt the Toggle switch primitive
+  // (BET-614 stage 3): chatAutoAllow + allowAgentPush. A switch is for a
+  // single live on/off setting; the other `toggle`-schema entries keep the
+  // Checkbox (a checkbox in a form and a toggle for a live setting are
+  // different controls, both specced).
+  if (entry.id === "chatAutoAllow" || entry.id === "allowAgentPush") {
+    return (
+      <div className="space-y-1">
+        <div className="flex items-start gap-3 text-body">
+          <Toggle id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
+          <span>
+            {entry.label}
+            {entry.help && <span className="block text-meta text-text-faint mt-1">{entry.help}</span>}
+          </span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="space-y-1">
       <div className="flex items-start gap-3 text-body">

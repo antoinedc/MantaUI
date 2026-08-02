@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
@@ -143,7 +143,7 @@ function offendingLines(content: string, re: RegExp): string[] {
 // sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
 // in the desktop client — carried by the redesign spec — so it is a legitimate
 // one-web-surface primitive rather than a chrome-incompatible one.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem"]);
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -168,6 +168,15 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // the shared Chip.tsx for each, so both need the values listed.
   Chip: [6, 11, 29],
   SplitChip: [6, 11, 29],
+  // Toggle's verbatim spec chrome (BET-614 stage 3): the 2px knob offset
+  // (top-[2px]) and the 18px on-knob x-position (left-[18px] — 36px track
+  // minus 14px knob minus 2×2px padding). Real values from the redesign
+  // spec's `.sw` definition, not drift — the switch's hit-area/size resolve
+  // via w-9/h-5/w-3.5 so they need no entry.
+  Toggle: [2, 18],
+  // Callout's verbatim spec chrome (BET-614 stage 3): the 3px left accent
+  // bar (border-l-[3px]). The only off-grid px in CALLOUT_BASE.
+  Callout: [3],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -175,6 +184,8 @@ const SKIP_REASON: Record<string, string> = {
     "single-surface primitive: 1 web adopting file (Sidebar.tsx, the desktop session rail). Its only other session list lived in mobile/SessionListScreen, which the mobile-redesign deletes wholesale (DECISIONS.md §12) — so the two-adopter scan no longer counts it. Owner-approved formal exemption from the two-adopter rule (BET-546); the 2nd web adopter is deferred to the mobile-consolidation follow-up.",
   MenuItem:
     "single-surface primitive: 1 web adopting file (SessionHeader.tsx, the session menu / dropdown), which carries the menu/dropdown contract from the redesign spec. Its former second adopter was the mobile SessionScreen sheet, deleted wholesale by the mobile-redesign (DECISIONS.md §12), so it no longer counts as a web adopter. Owner-approved formal waiver (BET-549), recorded option A.",
+  Toggle:
+    "single-surface primitive: both boolean switch adopters (chatAutoAllow + allowAgentPush) are rows of the ONE settings form (Settings.tsx) — two call sites, one adopting file, so the file-counting two-adopter scan reads 1. The settings-toggle is a single surface (a live on/off setting in the settings panel); converting a second, unrelated file to satisfy the file-count would force the primitive into a UI where the spec doesn't place a switch. Recorded as a single-surface case like SessionRow/MenuItem, not a pending finding.",
 };
 
 describe("M527 primitive rules", () => {
@@ -226,6 +237,8 @@ describe("M527 primitive rules", () => {
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
       "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
       "h-[29px]": ["Chip.tsx"], // chip hit-area height — the one off-grid value both Chip + SplitChip carry (BET-615)
+      "left-[18px]": ["Toggle.tsx"], // toggle knob on-position — the switch's travel signature (BET-614)
+      "border-l-[3px]": ["Callout.tsx"], // the 3px callout accent bar (BET-614)
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {
