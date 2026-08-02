@@ -22,11 +22,16 @@ final class MantaPairingDriverUITests: XCTestCase {
 
     func testPairAgainstLiveBox() throws {
         let env = ProcessInfo.processInfo.environment
+        // Marker line: the plugin's job log is head-capped, so the ONE thing
+        // that must always be greppable is whether the credentials arrived.
+        let seen = env.keys.filter { $0.contains("MANTA_PAIR") }.sorted().joined(separator: ",")
+        print("PAIRDRIVE env-keys=[\(seen)]")
         guard let code = env["MANTA_PAIR_CODE"], !code.isEmpty,
               let server = env["MANTA_PAIR_SERVER"], !server.isEmpty
         else {
-            throw XCTSkip("MANTA_PAIR_CODE / MANTA_PAIR_SERVER not set — live pairing drive skipped")
+            throw XCTSkip("PAIRDRIVE SKIP: MANTA_PAIR_CODE / MANTA_PAIR_SERVER missing from the runner env")
         }
+        print("PAIRDRIVE start code-digits=\(code.count) server=\(server)")
 
         let app = XCUIApplication()
         app.launch()
@@ -61,12 +66,14 @@ final class MantaPairingDriverUITests: XCTestCase {
             usleep(300_000)
         }
         if failure.exists {
+            print("PAIRDRIVE FAIL \(failure.label)")
             XCTFail("pairing failed: \(failure.label)")
             return
         }
         XCTAssertTrue(notifications.exists, "neither the notifications primer nor a failure card appeared")
 
         app.buttons["Continue"].firstMatch.tap()
+        print("PAIRDRIVE PAIRED")
 
         print("AX-TREE-BEGIN")
         print(app.debugDescription)
