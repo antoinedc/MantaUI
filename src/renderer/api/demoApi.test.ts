@@ -234,17 +234,20 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
   });
 
   it("emits the box-derived interpreted envelopes for the in-flight turn (S1c — demo mirrors streamInterp.mjs)", () => {
-    // A phase advance on a still-running, unfinished assistant turn means the
-    // box would publish stream.running {running:true} and a not-complete
-    // stream.turnComplete. The demo's onStreamEvent drives these so the
-    // renderer's interpreted consumer (S1b) is exercised, not just a live box.
+    // The demo owns its stream and, like the fixture, only ever emits raw
+    // `message.updated` for the in-flight turn — never a `session.status busy`.
+    // A real streamInterp over that sequence keeps `running` false and reports
+    // a not-complete turn, so the demo's interpreted envelopes must match:
+    // emitting `running:true` here would flip the composer to its running state
+    // and move every committed visual baseline. These drive the demo's
+    // onStreamEvent so the renderer's interpreted consumer (S1b) is exercised.
     const envs = buildStreamAdvanceEnvelopes(demoState.activeSessionId!);
     expect(envs).toEqual([
-      { sub: "running", sessionId: demoState.activeSessionId, payload: { running: true } },
+      { sub: "running", sessionId: demoState.activeSessionId, payload: { running: false } },
       {
         sub: "turnComplete",
         sessionId: demoState.activeSessionId,
-        payload: { complete: false, running: true },
+        payload: { complete: false, running: false },
       },
     ]);
   });

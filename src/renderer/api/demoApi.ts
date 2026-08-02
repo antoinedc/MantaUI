@@ -151,17 +151,21 @@ export function revealedTranscript(step: number): OpencodeMessage[] {
   return shown;
 }
 
-/** The box-derived interpreted envelopes (mirror of streamInterp.mjs) that a
- *  phase advance emits for the still-in-flight assistant turn: the session is
- *  `running` and the turn is not `complete`. Pure so the emission shape is
- *  assertable in a unit test without booting React or re-pointing
- *  window.location. */
+/** The box-derived interpreted envelopes that a real streamInterp would emit
+ *  for the demo's raw event sequence on a phase advance. The demo owns the
+ *  stream and, like the fixture, only ever emits `message.updated` for the
+ *  in-flight turn — it never emits a `session.status busy`, so the
+ *  interpreter's `running` flag stays `false`. Mirroring that exact semantics
+ *  (rather than hand-asserting `running:true`) is what keeps the demo's
+ *  rendered state identical to the committed baseline: the composer stays in
+ *  its idle state and the in-flight assistant turn reports `complete:false`.
+ *  Pure so the emission shape is assertable without booting React. */
 export function buildStreamAdvanceEnvelopes(
   sessionId: string,
 ): Array<{ sub: string; sessionId: string; payload: unknown }> {
   return [
-    { sub: "running", sessionId, payload: { running: true } },
-    { sub: "turnComplete", sessionId, payload: { complete: false, running: true } },
+    { sub: "running", sessionId, payload: { running: false } },
+    { sub: "turnComplete", sessionId, payload: { complete: false, running: false } },
   ];
 }
 
