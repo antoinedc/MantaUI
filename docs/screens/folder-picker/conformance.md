@@ -4,7 +4,7 @@ App vs `docs/screens/folder-picker/mockup.html`, from `npm run visual:compare fo
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-02 (9a17023)
+Last reviewed: 2026-08-02 (BET-567)
 
 ## Captured state
 
@@ -24,22 +24,6 @@ and the mockup render the same words.
 
 ## Open divergences
 
-- **No explicit "Go" / discovery affordance — the design's headline.** §07
-  frames the whole point of replacing the ghost-text cwd input as adding a
-  *discovery* path, and the design adds a **Go** button beside the path field
-  (plus home-icon + chevron breadcrumbs as the navigation frame). The app's
-  modal already ships the folder **list** (`..` first, row badges, breadcrumbs,
-  dimmed noise) — the discovery data is present — but there is **no Go button**:
-  the only ways to move are clicking a folder row, clickable breadcrumbs, the
-  up-arrow, or Enter. So the app is short exactly the explicit "Go" trigger the
-  design uses to signpost the discovery path. Recorded, not fixed here — closing
-  it is separate work with its own baseline review.
-- **Header copy** — the app titles the modal "Choose a folder"; the design says
-  "Select folder".
-- **Breadcrumb treatment** — the design uses a home icon + inter-crumb chevrons
-  with the current crumb at full weight; the app renders an up-arrow
-  "Go up one level" button plus mono breadcrumb pills. Functionally
-  equivalent (both go up a level per click); visually different.
 - **Modal width** — the mockup is `min(540px, 100%)` (from the spec); the app is
   `w-[560px]`. Both on the 4px grid; ~20px apart.
 - **Path field** — the design shows a plain full-width path + focus ring + Go;
@@ -50,6 +34,17 @@ and the mockup render the same words.
 ## Accepted divergences
 
 _None recorded._
+
+## Closed divergences (BET-567)
+
+- **Go button** — the explicit `Go` trigger (§07) is now beside the path field,
+  browsing into the typed path. Closed.
+- **Header copy** — now "Select folder" (was "Choose a folder"). Closed.
+- **Breadcrumb treatment** — now home icon + inter-crumb chevrons with the
+  current crumb at full weight (was an up-arrow button + mono pills). Closed.
+  The `..` list row and the footer's primary action keep their existing form.
+- **Baseline** — `folder-picker` visual + aria baselines re-recorded to the new
+  render.
 
 ## Off-grid design values surfaced (reported, not transcribed)
 
