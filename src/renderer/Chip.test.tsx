@@ -162,4 +162,32 @@ describe("SplitChip", () => {
     expect(l.title).toBe("model");
     expect(r.title).toBe("effort");
   });
+
+  it("does NOT assume popup semantics: aria-haspopup is absent unless popup is opted in", () => {
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+      />,
+    );
+    const [l, r] = buttons();
+    expect(l.hasAttribute("aria-haspopup")).toBe(false);
+    expect(r.hasAttribute("aria-haspopup")).toBe(false);
+
+    h.unmount();
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+        popup
+      />,
+    );
+    const [pl, pr] = buttons();
+    expect(pl.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(pr.getAttribute("aria-haspopup")).toBe("listbox");
+  });
 });

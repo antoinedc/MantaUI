@@ -168,6 +168,7 @@ export function ModelPicker({
             setVariantOpen((v) => !v);
           }}
           rightAccent={effortAccent}
+          popup
           leftTitle="Pick model for next prompt"
           rightTitle={
             effortDisabled

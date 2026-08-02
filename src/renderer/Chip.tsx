@@ -69,6 +69,7 @@ export function SplitChip({
   leftTitle,
   rightTitle,
   hook,
+  popup = false,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
   left: ReactNode;
@@ -84,15 +85,24 @@ export function SplitChip({
   rightTitle?: string;
   /** A stable `manta-*` identity class for the call site (identity only, never chrome). */
   hook?: string;
+  /**
+   * OPT-IN popup semantics. SplitChip is a generic split control — its two
+   * segments are plain buttons and it does NOT assume either opens a popup.
+   * A caller whose segments genuinely toggle a listbox (e.g. ModelPicker)
+   * passes `popup` to add `aria-haspopup="listbox"` to both segment buttons;
+   * a non-popup adopter (e.g. a checkbox row) omits it.
+   */
+  popup?: boolean;
 }) {
+  const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
   const leftClass = `inline-flex items-center ${CHIP_PAD} h-full`;
   const rightClass = `inline-flex items-center ${CHIP_PAD} h-full border-l border-border${rightAccent ? " text-accent-tx font-semibold" : ""}`;
   return (
     <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
-      <button type="button" onClick={onLeftClick} title={leftTitle} aria-haspopup="listbox" className={leftClass}>
+      <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox}>
         {left}
       </button>
-      <button type="button" onClick={onRightClick} title={rightTitle} aria-haspopup="listbox" className={rightClass}>
+      <button type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox}>
         {right}
       </button>
     </div>

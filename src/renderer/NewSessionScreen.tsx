@@ -26,7 +26,7 @@ import {
   Paperclip,
 } from "lucide-react";
 import { useStore } from "./store";
-import { Chip, SplitChip } from "./Chip";
+import { Chip } from "./Chip";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
@@ -415,51 +415,38 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
           </Chip>
 
-          <SplitChip
-            left={
-              wantWorktree && isGitRepo ? (
-                // BET-417 §A: "Ticking worktree makes the branch field
-                // editable." The typed value is passed as `name` to
-                // gitAddWorktree, which deriveWorktree turns into the new
-                // branch name.
-                <span className="inline-flex items-center gap-1">
-                  <GitBranch size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
-                  <input
-                    value={worktreeBranch}
-                    onChange={(e) => setWorktreeBranch(e.target.value)}
-                    spellCheck={false}
-                    className="w-[100px] bg-transparent border-0 outline-none text-text font-mono focus:border-b focus:border-accent"
-                    placeholder="branch-name"
-                    aria-label="Worktree branch name"
-                  />
-                </span>
+          {/* Branch / worktree. The branch is a Chip (display) — or a plain,
+              un-nested input while worktree is being named (BET-417 §A). The
+              worktree toggle stays the Checkbox primitive. Neither the input
+              nor the checkbox is wrapped in a <button>: that keeps valid HTML
+              and avoids loading SplitChip's opt-in popup semantics onto a
+              non-popup control. */}
+          {wantWorktree && isGitRepo ? (
+            <input
+              value={worktreeBranch}
+              onChange={(e) => setWorktreeBranch(e.target.value)}
+              spellCheck={false}
+              className="h-8 w-[132px] rounded-md border border-border bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
+              placeholder="branch-name"
+              aria-label="Worktree branch name"
+            />
+          ) : (
+            <Chip onClick={() => {}} title="Current git branch">
+              <GitBranch size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
+              {branchName ? (
+                <span className="truncate max-w-[120px]">{branchName}</span>
               ) : (
-                <span className="inline-flex items-center gap-1">
-                  <GitBranch size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
-                  {branchName ? (
-                    <span className="truncate max-w-[120px]">{branchName}</span>
-                  ) : (
-                    <span className="text-text-faint">no branch</span>
-                  )}
-                </span>
-              )
-            }
-            right={
-              <Checkbox
-                checked={wantWorktree}
-                disabled={!worktreeChipEnabled}
-                onChange={(v) => setWantWorktree(v)}
-                label="worktree"
-                ariaLabel="Create in a fresh git worktree"
-              />
-            }
-            onLeftClick={() => {}}
-            onRightClick={() => {}}
-            rightTitle={
-              worktreeChipEnabled
-                ? "Create in a fresh git worktree"
-                : "not a git repository"
-            }
+                <span className="text-text-faint">no branch</span>
+              )}
+            </Chip>
+          )}
+
+          <Checkbox
+            checked={wantWorktree}
+            disabled={!worktreeChipEnabled}
+            onChange={(v) => setWantWorktree(v)}
+            label="worktree"
+            ariaLabel="Create in a fresh git worktree"
           />
         </div>
 
