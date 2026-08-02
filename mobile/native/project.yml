@@ -33,6 +33,21 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: YES
+  # S1a: the unit-test target. Hosted off the app target so the transport core
+  # (models, RPC client, Keychain store) is reachable via @testable import.
+  MantaUITests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MantaUITests
+    dependencies:
+      - target: MantaUI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
   # The UI test bundle is the hierarchy-dump leg of the native capture harness.
   # It launches the app and prints the accessibility tree (see capture.sh and
   # MantaUIHierarchyCaptureUITests). It exists to be driven by capture.sh, not
@@ -62,4 +77,5 @@ schemes:
       config: Release
     test:
       targets:
+        - MantaUITests
         - MantaUIUITests

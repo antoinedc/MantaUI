@@ -44,6 +44,17 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "4ECEFC7C72A2BCE14E074398"
+               BuildableName = "MantaUITests.xctest"
+               BlueprintName = "MantaUITests"
+               ReferencedContainer = "container:MantaUI.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "0A2210EB32D156B1FB712083"
                BuildableName = "MantaUIUITests.xctest"
                BlueprintName = "MantaUIUITests"
