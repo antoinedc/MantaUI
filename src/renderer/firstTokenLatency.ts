@@ -12,8 +12,8 @@
 //     emitting and the device receiving.
 // The instrumentation is shared, so whichever transport is active reports
 // through the same seam and the number is comparable. The demo build logs the
-// measurement to the console; `lastMeasurement()` lets a test / the visual
-// harness read it.
+// measurement to the console via an `onMeasurement` observer; `lastMeasurement()`
+// lets a test / the visual harness / a probe read it.
 //
 // Deliberately tiny + dependency-free: module-level start times keyed by
 // session, one real clock (`performance.now`), and a single last-measured
@@ -26,8 +26,23 @@ const starts: Record<LatencyPath, Map<string, number>> = {
   raw: new Map(),
 };
 
-let lastMs: number | null = null;
-let lastPath: LatencyPath | null = null;
+// Most recent completed measurement per path, so a consumer (the demo window
+// handle, a probe) can read BOTH the interpreted and raw numbers after a run
+// that fired both — not just whichever completed last.
+const lastByPath: Record<LatencyPath, number | null> = { interpreted: null, raw: null };
+
+// Observers fired with every completed measurement so a runtime consumer (the
+// demo build's console, the visual harness, a probe) can read/report the number
+// live. This is the "logs the measurement to the console" consumer — without
+// it, lastMeasurement() has no live reader.
+type MeasurementListener = (m: { path: LatencyPath; ms: number }) => void;
+const listeners = new Set<MeasurementListener>();
+
+/** Register a measurement observer. Returns an unsubscribe. */
+export function onMeasurement(cb: MeasurementListener): () => void {
+  listeners.add(cb);
+  return () => listeners.delete(cb);
+}
 
 /** Record the arrival of the first text chunk of a turn on a path. Only the
  *  FIRST arrival wins per (path, session) — the window is from first token to
@@ -50,20 +65,23 @@ export function markRendered(
   const t0 = starts[path].get(sessionId);
   if (t0 == null) return null;
   starts[path].delete(sessionId);
-  lastMs = now - t0;
-  lastPath = path;
-  return lastMs;
+  const ms = now - t0;
+  lastByPath[path] = ms;
+  for (const cb of listeners) cb({ path, ms });
+  return ms;
 }
 
-/** The most recent measurement (for tests / the visual harness). */
-export function lastMeasurement(): { path: LatencyPath | null; ms: number | null } {
-  return { path: lastPath, ms: lastMs };
+/** The most recent completed measurement per path (for tests / the visual
+ *  harness / a probe). */
+export function lastMeasurement(): { interpreted: number | null; raw: number | null } {
+  return { interpreted: lastByPath.interpreted, raw: lastByPath.raw };
 }
 
 /** Reset all state — used by tests and when a demo build re-mounts. */
 export function resetFirstTokenLatency(): void {
   starts.interpreted.clear();
   starts.raw.clear();
-  lastMs = null;
-  lastPath = null;
+  lastByPath.interpreted = null;
+  lastByPath.raw = null;
+  listeners.clear();
 }

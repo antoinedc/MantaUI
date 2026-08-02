@@ -38,6 +38,7 @@ import type { AvailableLauncher, OpencodeMessage, WorktreeInfo } from "../../sha
 import { demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
+import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
 
 // Resolved once at module load — the demo transport is only ever imported
 // from bootDemo(), which has already decided we are in demo mode. The state
@@ -151,19 +152,52 @@ export function revealedTranscript(step: number): OpencodeMessage[] {
   return shown;
 }
 
+/** The in-flight assistant's text part (the one a real box would stream via
+ *  `stream.flush`). Never revealed by the phase fractions (see
+ *  `revealedAssistantPartCount`), so a flush for it is always *unmatched* in
+ *  the renderer and its text is discarded — exercising the interpreted
+ *  `stream.flush` path + latency instrumentation without moving any baseline. */
+function streamTextFlushPayload(): { messageID: string; partID: string; text: string } {
+  const assistant = demoState.messages.find(
+    (m) => m.info.role === "assistant" && !m.info.time?.completed,
+  );
+  const textPart = assistant?.parts.find(
+    (p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string",
+  );
+  return {
+    messageID: assistant?.info?.id ?? "",
+    partID: (textPart as { id?: string } | undefined)?.id ?? "",
+    text: (textPart as { text?: string } | undefined)?.text ?? "",
+  };
+}
+
 /** The box-derived interpreted envelopes that a real streamInterp would emit
- *  for the demo's raw event sequence on a phase advance. The demo owns the
- *  stream and, like the fixture, only ever emits `message.updated` for the
- *  in-flight turn — it never emits a `session.status busy`, so the
- *  interpreter's `running` flag stays `false`. Mirroring that exact semantics
- *  (rather than hand-asserting `running:true`) is what keeps the demo's
- *  rendered state identical to the committed baseline: the composer stays in
- *  its idle state and the in-flight assistant turn reports `complete:false`.
- *  Pure so the emission shape is assertable without booting React. */
+ *  for the demo's raw event sequence on a phase advance: the streaming `flush`
+ *  for the in-flight assistant's text, a `running` and a not-complete
+ *  `turnComplete`. The demo owns the stream and, like the fixture, only ever
+ *  emits `message.updated` for the in-flight turn — it never emits a
+ *  `session.status busy`, so the interpreter's `running` flag stays `false`.
+ *  Mirroring that exact semantics (rather than hand-asserting `running:true`)
+ *  is what keeps the demo's rendered state identical to the committed
+ *  baseline: the composer stays in its idle state, the assistant turn reports
+ *  `complete:false`, and the flush's text targets a part the phases never
+ *  reveal (so it is applied to nothing). Pure so the emission shape is
+ *  assertable without booting React. */
 export function buildStreamAdvanceEnvelopes(
   sessionId: string,
 ): Array<{ sub: string; sessionId: string; payload: unknown }> {
+  const flush = streamTextFlushPayload();
   return [
+    {
+      sub: "flush",
+      sessionId,
+      payload: {
+        messageID: flush.messageID,
+        partID: flush.partID,
+        field: "text",
+        text: flush.text,
+      },
+    },
     { sub: "running", sessionId, payload: { running: false } },
     { sub: "turnComplete", sessionId, payload: { complete: false, running: false } },
   ];
@@ -201,7 +235,12 @@ function streamAdvance(): void {
 
 /** Install the harness window handle. Exported+pure so a test can assert the
  *  "undefined in every state except stream" contract without booting React or
- *  re-pointing window.location. Returns whether the flag was set. */
+ *  re-pointing window.location. Returns whether the flag was set.
+ *
+ *  Besides the phase-stepping surface it exposes `latency` — the most recent
+ *  first-token→rendered measurement from firstTokenLatency — so a probe or
+ *  the visual harness can read the number the demo actually produced (BET-553
+ *  §17), rather than the number being unreproducible from outside. */
 export function installDemoStreamWindow(
   state: DemoState,
   win: { __mantaDemoStream?: unknown },
@@ -219,6 +258,9 @@ export function installDemoStreamWindow(
     get served() {
       return streamServed;
     },
+    get latency() {
+      return lastMeasurement();
+    },
   };
   return true;
 }
@@ -228,6 +270,17 @@ export function installDemoStreamWindow(
 // keeps it out of every other demo state — no production path can reach it.
 if (typeof window !== "undefined") {
   installDemoStreamWindow(DEMO_STATE, window);
+}
+
+// The demo build is the consumer that makes the "logs the measurement to the
+// console" claim in firstTokenLatency.ts true: every completed first-token
+// measurement (interpreted flush or raw opencode event) is printed, so the §17
+// number is observable in a demo run and reproducible by a probe reading it.
+if (DEMO_STATE === "stream" && typeof window !== "undefined") {
+  onMeasurement(({ path, ms }) => {
+    // eslint-disable-next-line no-console
+    console.info(`[demo first-token-latency] ${path}: ${ms.toFixed(2)} ms`);
+  });
 }
 
 // ===========================================================================

@@ -17,6 +17,10 @@ declare global {
       advance: () => void;
       pending: boolean;
       served: boolean;
+      // BET-553 §17 — most recent first-token→rendered measurement per path
+      // (see firstTokenLatency.ts), exposed so a probe / harness can reproduce
+      // and quote the latency numbers the demo actually produced.
+      latency: { interpreted: number | null; raw: number | null };
     };
   }
   // Build-time injected Axiom credentials (electron.vite.config.ts +
