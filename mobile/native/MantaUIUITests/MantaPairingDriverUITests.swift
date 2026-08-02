@@ -115,13 +115,12 @@ final class MantaOpenSessionUITests: XCTestCase {
     func testOpenFirstSession() {
         let app = XCUIApplication()
         app.launch()
-        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS ''")).firstMatch
-        guard row.waitForExistence(timeout: 15) else {
-            print("PAIRDRIVE open=no-rows")
-            return
-        }
-        print("PAIRDRIVE open-row=\(row.label)")
-        row.tap()
+        // The rows combine their children for accessibility, so they are not
+        // reliably queryable as buttons; a normalized coordinate tap lands on
+        // the first row under the "Sessions" title regardless of element type.
+        _ = app.staticTexts["Sessions"].waitForExistence(timeout: 15)
+        print("PAIRDRIVE rows buttons=\(app.buttons.count) cells=\(app.cells.count) texts=\(app.staticTexts.count)")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.28)).tap()
         sleep(6)
         // The runner tears the app down the moment the test ends, so a
         // host-side `simctl io screenshot` always catches Springboard instead.
