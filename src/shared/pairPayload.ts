@@ -51,7 +51,7 @@
 // and isPrivateServerUrl (../../shared/transport.mjs — single source of
 // truth for the ranges; every other consumer imports it from there).
 
-import { normalizeCode } from "../../shared/claim.mjs";
+import { normalizeCode } from "./claim.mjs";
 import {
   isValidBoxToken,
   isPrivateServerUrl,

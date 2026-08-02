@@ -7,8 +7,8 @@ import {
   normalizeServerUrl,
   prefillFromPairLink,
 } from "./setupLogic";
-import { boxDirectUrl } from "../../shared/transport.mjs";
-import { CHANNELS, CHANNEL_IDS } from "../../shared/channel.mjs";
+import { boxDirectUrl } from "./transport.mjs";
+import { CHANNELS, CHANNEL_IDS } from "./channel.mjs";
 
 // BET-373 (review cycle 1): every channel's scheme, derived from the table
 // (not hardcoded) so a fourth channel automatically extends this coverage —

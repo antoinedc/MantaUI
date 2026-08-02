@@ -1,5 +1,5 @@
 import type { ChangeEvent } from "react";
-import { normalizeVerifyCode } from "./mobile/pairPayload";
+import { normalizeVerifyCode } from "../shared/pairPayload";
 
 type Props = {
   value: string;

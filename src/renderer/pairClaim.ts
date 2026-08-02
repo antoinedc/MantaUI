@@ -13,7 +13,7 @@
 //
 // The helper is intentionally non-pure (it touches window.api, the store,
 // and the httpApi transport swap), but the parts that ARE pure (claim input
-// shape, persisted server URL) live in renderer/mobile/setupLogic.ts and are
+// shape, persisted server URL) live in shared/setupLogic.ts and are
 // already tested in setupLogic.test.ts — single source of truth reused here.
 //
 // Side effects on success:
@@ -30,7 +30,7 @@ import { useStore } from "./store";
 import {
   buildSetupClaimInput,
   resolveSetupServerUrl,
-} from "./mobile/setupLogic";
+} from "../shared/setupLogic";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport } from "./transportInstall";
 import { networkFailure, type ClaimOutcome } from "../shared/claim.mjs";

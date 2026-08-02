@@ -1,5 +1,5 @@
-import { isSubmittableCode } from "../../shared/claim.mjs";
-import { boxDirectUrl, isValidBoxToken } from "../../shared/transport.mjs";
+import { isSubmittableCode } from "./claim.mjs";
+import { boxDirectUrl, isValidBoxToken } from "./transport.mjs";
 import { parsePairPayload } from "./pairPayload";
 
 export type SetupFields = {

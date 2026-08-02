@@ -37,7 +37,7 @@ import { boxDirectUrl } from "../shared/transport.mjs";
  * @param input    { serverUrl, boxId?, code } from the renderer. The mobile/web
  *                 client only ever supplies `serverUrl` (already-built by the
  *                 caller's `boxDirectUrl(boxId)` for the box form, see
- *                 src/renderer/mobile/setupLogic.ts); the desktop onboarding
+ *                 src/shared/setupLogic.ts); the desktop onboarding
  *                 paste-pair-link path may supply either `serverUrl` (direct
  *                 form) or `boxId` (box form). Exactly one of the two is
  *                 consumed.

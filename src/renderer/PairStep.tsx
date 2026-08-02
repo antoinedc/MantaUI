@@ -28,7 +28,7 @@ import {
   canConnectSetup,
   normalizeServerUrl,
   prefillFromPairLink,
-} from "./mobile/setupLogic";
+} from "../shared/setupLogic";
 import { VerifyCodeInput } from "./VerifyCodeInput";
 import { PairingCodeInput } from "./PairingCodeInput";
 import { isValidBoxToken } from "../shared/transport.mjs";
@@ -107,7 +107,7 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
 
 // Manual code-entry form. Extracted from PairStep so the disclosure can
 // mount it as a self-contained block. The pure validation/submit-gate lives
-// in renderer/mobile/setupLogic.ts (canConnectSetup / normalizeServerUrl);
+// in shared/setupLogic.ts (canConnectSetup / normalizeServerUrl);
 // this component is wiring + JSX only — no validation logic is duplicated
 // here (BET-382).
 //
