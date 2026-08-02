@@ -10,15 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const SNAPSHOTS = "tests/visual/screens.visual.ts-snapshots";
 
-const git = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-const gitStatus = (args) => {
-  try {
-    git(args);
-    return 0;
-  } catch (e) {
-    return e.status ?? 1;
-  }
-};
+const gitBuf = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "buffer" });
 
 /**
  * Freshness of conformance records (BET-564). A conformance record is
@@ -29,9 +21,22 @@ const gitStatus = (args) => {
  * written before the thing it claims to describe.
  *
  * Mechanism (git, not file mtimes — mtimes lie after a fresh clone):
- *   baselineChanged = last commit touching <id>-visual-linux.png
  *   recordSha       = the sha on the "Last reviewed" line
- *   FAIL           = baselineChanged is NOT an ancestor of recordSha
+ *   reviewedBlob    = the committed <id>-visual-linux.png at recordSha
+ *   FAIL            = reviewedBlob is missing or differs from the baseline on
+ *                     disk — the baseline moved (or appeared) after the review.
+ *
+ * We compare BLOB CONTENT at recordSha, NOT commit ancestry. Computing "the
+ * last commit that touched a path" via `git log -- <path>` is not
+ * deterministic on CI: GitHub checks out the pull-request MERGE ref and, in
+ * typecheck-test, additionally runs `git fetch --depth=1 origin main`, which
+ * grafts main's tip as a shallow root. A path-limited `git log` then treats
+ * that grafted root as having touched EVERY path (a root commit has no parent
+ * to diff against), so every baseline reported main's merge as its last change
+ * and every screen looked stale. Reading the blob reachable at recordSha needs
+ * no history walk, so it is immune to grafts — on the same refs it reproduces
+ * the ancestry result exactly (the baseline changed after the review if and
+ * only if its content at recordSha differs from today).
  *
  * Screens with `mockup: null` are skipped — no design, nothing to conform to,
  * no record expected. Screens without a committed baseline are skipped too
@@ -51,10 +56,10 @@ for (const screen of SCREENS) {
   const baseline = join(SNAPSHOTS, `${screen.id}-visual-linux.png`);
   const fullBaseline = join(REPO_ROOT, baseline);
 
-  let baselineSha;
+  let baselineBlob;
   try {
     accessSync(fullBaseline);
-    baselineSha = git(["log", "-1", "--format=%H", "--", baseline]);
+    baselineBlob = readFileSync(fullBaseline);
   } catch {
     // No committed baseline for this screen — nothing can have gone stale.
     continue;
@@ -78,16 +83,23 @@ for (const screen of SCREENS) {
     );
     const recordSha = match[1];
 
-    // exit 0 = ancestor (baseline moved before the review -> record is fresh),
-    // exit 1 = not an ancestor (baseline moved after the review -> stale),
-    // anything else = a sha we cannot resolve -> treat as stale, it cannot be
-    // proven current.
-    const ancestor = gitStatus(["merge-base", "--is-ancestor", baselineSha, recordSha]) === 0;
+    // Fresh = the committed baseline at the reviewed sha is byte-identical to
+    // the baseline on disk. STALE when it differs, or isn't reachable at
+    // recordSha at all (a baseline that did not exist at the review, or a sha
+    // we cannot resolve, cannot prove the record current). See the mechanism
+    // comment above for why this is ancestry-equivalent but graft-immune.
+    let reviewedBlob;
+    try {
+      reviewedBlob = gitBuf(["show", `${recordSha}:${baseline}`]);
+    } catch {
+      reviewedBlob = null;
+    }
+    const fresh = reviewedBlob !== null && reviewedBlob.equals(baselineBlob);
     assert.ok(
-      ancestor,
+      fresh,
       `conformance record for "${recordScreen}" is STALE: baseline ${screen.id} ` +
-        `last changed at ${baselineSha.slice(0, 9)}, but its record was reviewed at ` +
-        `${recordSha} (${recordPath}) — the baseline moved after the review, so the ` +
+        `differs from its committed state at the reviewed sha ${recordSha} ` +
+        `(${recordPath}) — the baseline moved after the review, so the ` +
         `record does not describe the screen as it exists now. Fix: run ` +
         `\`npm run visual:compare ${recordScreen}\`, reconcile ` +
         `\`docs/screens/${recordScreen}/conformance.md\`, and update its Last reviewed sha.`,
