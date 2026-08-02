@@ -111,18 +111,6 @@ jobs:
       - name: Install Pillow (scripts/*.py image generation)
         run: python3 -m pip install --quiet --disable-pip-version-check pillow
 
-      # ── ffmpeg — the drift gate runs `npm run shots`, which extracts
-      #    website/hero-poster.webp from hero.mp4 (scripts/shots.mjs). Same
-      #    class of breakage as Pillow above: the self-hosted runner had it,
-      #    and GitHub dropped ffmpeg from the ubuntu-24.04 image, so the step
-      #    died with "ffmpeg not found at /usr/bin/ffmpeg".
-      #    NOTE: shots.mjs hardcodes that absolute path rather than resolving
-      #    the binary from PATH. apt installs to /usr/bin so this works, but
-      #    the hardcode is still wrong (a Homebrew ffmpeg lands in
-      #    /opt/homebrew/bin and would not be found) — tracked separately
-      #    (BET-522 does not change shots.mjs). Shared with dep-audit-nightly.
-      - uses: ./.github/actions/install-ffmpeg
-
       - name: Typecheck
         run: npm run typecheck
 
@@ -143,208 +131,59 @@ jobs:
       - name: Swift token drift gate — regenerate and diff against committed generated/swift/Theme.swift
         run: npm run gen:swift-tokens -- --check
 
-      # ── Drift gate — keep `website/shot-*.webp` byte-identical to what
-      #    the live renderer paints today. BET-341 (follow-up from BET-303
-      #    review Nit #1) — when origin/main's renderer changes between
-      #    branch cut and merge, the committed shots go silently stale; this
-      #    catches it at PR time instead of post-merge.
+      # ── REMOVED (BET-602): the two Playwright screenshot gates that used to
+      #    run here — the `website/shot-*.webp` drift gate and the app-screen
+      #    visual gate (`npm run visual`). Do not re-add either to this job
+      #    without reading this first; both were deliberate removals, not an
+      #    oversight.
       #
-      #    Added as a STEP (not a new job) to keep logic co-located with the
-      #    required gate. `typecheck-
-      #    test` IS the required check (required-checks.json + the main
-      #    ruleset), so a failed diff here blocks the PR, which is exactly
-      #    what BET-341 asked for. No new required-context, no ruleset edit.
+      #    WHY. A pixel gate whose baselines are captured FROM the app detects
+      #    CHANGE, not CORRECTNESS: whatever ships becomes the definition of
+      #    correct on the next `--update-snapshots`. That is not theoretical
+      #    here. Three of this repo's own artifacts prove it:
       #
-      #    Cost: `npm run shots` builds the renderer (~10s), captures 3
-      #    desktop shots (~10-15s) — ~25s per PR. BET-559 removed the phone
-      #    shots and the shot-sync composite (the web/PWA client is retired).
-      #    The node_modules cache above is reused; only the capture cost is new.
+      #      - The welcome screen shipped with three surfaces that had NO
+      #        background at all (`bg-card` names a colour key that does not
+      #        exist, so it compiled to nothing — BET-583). The gate was green
+      #        throughout, because the baselines had been recorded from the
+      #        broken render.
+      #      - `docs/screens/welcome/conformance.md` read "no divergences",
+      #        reviewed the same day that screen was visibly wrong.
+      #      - `tests/visual/shadow.visual.ts`'s own header records that
+      #        BET-563's shadow-scale retune moved 0/20 baselines: the gate was
+      #        structurally blind to an entire token class, which is why a
+      #        separate shadow-only capture had to be hand-built.
       #
-      #    PR-only on purpose: a push to main has already cleared this gate
-      #    when the PR was merged, so re-running here would just measure
-      #    main against itself. PR is the only event where a stale set can
-      #    slip in.
+      #    The failure mode is worse with agents doing the work. Every issue
+      #    instructed the implementer to "regenerate the baselines", which means
+      #    accepting whatever was just rendered — so the gate laundered defects
+      #    into committed expectations and then reported green.
       #
-      #    This is BLOCKING again (BET-444). It was temporarily advisory
-      #    because Chrome 148 refused every loopback navigation (the captures
-      #    could not run at all) and then, after moving to Playwright's pinned
-      #    Chromium, two consecutive captures of the same UI were not
-      #    byte-identical. Both are fixed: shots.mjs now uses the shared
-      #    LAUNCH_OPTIONS (bundled Chromium pinned by package-lock.json). The gate
-      #    captures twice and compares the two runs for byte-identity: the first
-      #    `npm run shots` rebuilds + captures into the working tree, and a copy of
-      #    its output is stashed in $RUNNER_TEMP; the second runs again into the same
-      #    paths. If the two runs differ, the step fails as CAPTURE IS
-      #    NON-DETERMINISTIC — the committed set is not the problem. Only when the two
-      #    runs are byte-identical does the step diff the result against the committed
-      #    set, failing as COMMITTED SHOTS ARE STALE with the remedy to run
-      #    `npm run shots` and commit. A determinism regression fails HERE (as
-      #    itself), not as a mystery diff on some unrelated PR.
+      #    COST. 58 of the 1358 commits between 2026-06-01 and 2026-08-02 were
+      #    baseline or gate upkeep (~1 in 23); 82 touched snapshot files. Three
+      #    separate issues existed only to repair the gate itself (BET-537
+      #    non-deterministic capture on CI, BET-543 permanently-failing diff
+      #    artifact, BET-542 re-enabling exempted shots). It sat in the ONE
+      #    required job, so each flake blocked every open PR.
       #
-      # The pinned Chromium must be present BEFORE the drift gate captures.
-      # After the 2026-07-31 Chrome-148 failure the gate ran cold against
-      # whatever browser was already in the runner cache — the visual gate's
-      # browser install step sat AFTER this step — so a stale cache could
-      # launch a browser that paints differently from the committed set.
-      # The lockfile-pinned browser is installed here, first, so both this
-      # gate and the visual gate below drive the exact renderer the
-      # baselines were encoded under. Shared with the E2E job + dep-audit-nightly.
-      - uses: ./.github/actions/cache-playwright-browsers
-
-      - name: Drift gate — regenerate website/shot-*.webp and diff against the committed set
-        id: drift_gate
-        if: github.event_name == 'pull_request'
-        run: |
-          # A PR that touches none of the capture inputs cannot make the shots
-          # stale, and on a PR that can't affect them a red result would only
-          # inherit someone else's staleness. So run the gate only when the PR
-          # changes a file that feeds the capture — same mechanism as the
-          # conditional dependency audit in this job (diff against the merge
-          # base, gate on what the PR actually touched). The five paths are
-          # complete and specified by BET-518: the renderer paints the shots,
-          # website/ holds them, the two scripts capture them, and the lockfile
-          # pins the browser that renders them.
-          if git diff --name-only "$(git merge-base origin/main HEAD)" HEAD -- \
-               src/renderer/ website/ scripts/shots.mjs scripts/visual/harness.mjs package-lock.json | grep -q .; then
-            # First capture — rebuilds + renders into website/.
-            npm run shots
-            # Stash this run's output OUTSIDE the working tree ($RUNNER_TEMP) so
-            # the second run can't overwrite it and a stray copy can't show up in
-            # the git diff below. Scope is exactly the shot artifacts this gate
-            # owns (website/shot-*.webp + hero-poster.webp), never the whole
-            # website/ dir.
-            TMP="$(mktemp -d "$RUNNER_TEMP/shots-drift.XXXXXX")"
-            trap 'rm -rf "$TMP"' EXIT
-            cp website/shot-*.webp "$TMP"/ 2>/dev/null || true
-            [ -f website/hero-poster.webp ] && cp website/hero-poster.webp "$TMP"/
-            # Second capture — into the same paths as the first.
-            npm run shots
-            # Preserve run-2's freshly regenerated bytes to a durable temp dir so
-            # the drift-failure step can upload them on a staleness failure.
-            mkdir -p "$RUNNER_TEMP/shots-fail-regen"
-            cp website/shot-*.webp website/hero-poster.webp "$RUNNER_TEMP/shots-fail-regen"/ 2>/dev/null || true
-            # DETERMINISM CHECK — always first. A non-deterministic capture makes
-            # the staleness comparison meaningless, so it must be reported as
-            # itself before any diff against the committed set. Compare the
-            # stashed copy (run 1) to the freshly produced files (run 2) byte for
-            # byte; the committed set is not consulted or implicated.
-            NON_DET=""
-            for f in website/shot-*.webp website/hero-poster.webp; do
-              [ -f "$f" ] || continue
-              b="$(basename "$f")"
-              if [ ! -f "$TMP/$b" ] || ! cmp -s "$TMP/$b" "$f"; then
-                NON_DET="$NON_DET $b"
-              fi
-            done
-            if [ -n "$NON_DET" ]; then
-              echo "::error file=website/shot-*.webp::CAPTURE IS NON-DETERMINISTIC — two consecutive 'npm run shots' runs differ for:${NON_DET# }. The committed set is not the problem."
-              echo "::error::The capture pipeline itself produced different bytes across two identical runs. Investigate the browser/capture before merging; do not regenerate the committed set."
-              exit 1
-            fi
-            # STALENESS CHECK — reached only when the two runs are byte-identical
-            # ON THIS RUNNER. That is NOT the same as byte-identical across
-            # runners: two of the remaining shots (hero, approvals) render in
-            # two variants depending on which runner instance the job lands on
-            # (measured 2026-08-02 —
-            # the same committed set passed #476/#477/#478 and then failed a
-            # branch that differed from main by one CSS comment, with the byte
-            # sizes swapped back exactly). A byte comparison is therefore
-            # unsatisfiable for those four, which is what produced the BET-517 /
-            # BET-537 / BET-542 / BET-575 loop. scripts/shots-compare.mjs keeps
-            # exact byte equality for the three stable shots and applies a
-            # measured absolute pixel budget to the four variant ones.
-            echo "::group::Post-capture shot diff against the committed set"
-            git status --porcelain -- website/shot-*.webp website/hero-poster.webp || true
-            git diff --name-status -- website/shot-*.webp website/hero-poster.webp || true
-            git diff --stat -- website/shot-*.webp website/hero-poster.webp || true
-            echo "::endgroup::"
-            CMP="$(mktemp -d "$RUNNER_TEMP/shots-compare.XXXXXX")"
-            mkdir -p "$CMP/committed" "$CMP/regenerated"
-            for f in website/shot-*.webp website/hero-poster.webp; do
-              [ -f "$f" ] || continue
-              # HEAD is the committed set; the working tree holds run 2's output.
-              git show "HEAD:$f" > "$CMP/committed/$(basename "$f")" 2>/dev/null || true
-              cp "$f" "$CMP/regenerated/$(basename "$f")"
-            done
-            node scripts/shots-compare.mjs "$CMP"
-          else
-            echo "PR touches neither the renderer, website/, the shot-capture scripts, nor the lockfile — the shots this gate owns cannot have gone stale from it. Skipping (main coverage is the shots job in dep-audit-nightly.yml)."
-          fi
-
-      # ── Drift-failure evidence (BET-537) — make the failing bytes obtainable.
-      #    When the drift gate above fails, nobody can currently see WHAT the
-      #    runner rendered differently from the committed set — only `git diff
-      #    --stat` (byte sizes, not content) in the log. This step runs on the
-      #    drift step's failure and uploads BOTH byte sets (the freshly
-      #    regenerated shots left in the working tree and the committed ones
-      #    from HEAD) plus a per-shot pixel-diff image and machine diagnostics,
-      #    so the difference class can be named offline instead of guessed.
-      #    Scope: exactly this step + `if` check — the artifact is short-lived
-      #    (7d retention; artifact storage is 500 MB and shared, see AGENTS.md).
-      - name: Drift gate failure — gather regenerated + committed shot bytes
-        id: drift_gather
-        if: failure() && steps.drift_gate.outcome == 'failure'
-        run: |
-          ART="$RUNNER_TEMP/shots-drift-failure"
-          rm -rf "$ART" && mkdir -p "$ART/committed" "$ART/regenerated"
-          # Regenerated = run-2 output saved by the drift step before it restored
-          # the exempt shots (includes the four BET-537 chat shots, so the pair
-          # can be diffed offline even though the gate skips them).
-          cp "$RUNNER_TEMP/shots-fail-regen"/*.webp "$ART/regenerated"/ 2>/dev/null || true
-          # Committed = the pair from HEAD, so the two can be diffed offline.
-          for f in website/shot-*.webp website/hero-poster.webp; do
-            [ -f "$f" ] || continue
-            b="$(basename "$f")"
-            git show "HEAD:$f" > "$ART/committed/$b" 2>/dev/null || true
-          done
-          # Machine diagnostics to disambiguate font vs GPU vs scale vs timezone
-          # render differences.
-          { echo "== git HEAD =="; git rev-parse HEAD; fc-list 2>/dev/null | sort; \
-            node -e '
-              const { chromium } = require("playwright");
-              (async () => {
-                const c = await chromium.launch({ headless: true, args: ["--font-render-hinting=none"] });
-                console.log("chromium " + await c.version());
-                await c.close();
-              })().catch(() => {});
-            '; } > "$ART/machine.txt" 2>/dev/null || true
-          # Per-shot pixel diffs (regenerated vs committed) → report.txt + *.diff.png.
-          # The script creates diff/ itself (mkdirSync recursive) and writes
-          # report.txt, so no shell redirect to a pre-existing dir is needed.
-          node scripts/shots-drift-diff.mjs "$ART"
-
-      - name: Drift gate failure — upload shot byte sets
-        if: failure() && steps.drift_gate.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: shots-drift-failure-${{ github.event.pull_request.number || github.sha }}
-          path: ${{ runner.temp }}/shots-drift-failure/**/*
-          if-no-files-found: warn
-          retention-days: 7
-
-      # ── Visual gate — every screen in scripts/visual/screens.mjs is checked
-      #    for structure (accessibility-tree snapshot) and pixels (screenshot
-      #    vs committed baseline). See docs/visual-verification.md.
+      #    WHAT REPLACES THEM. Nothing, for the app screens — the correctness
+      #    tool is `npm run visual:compare <screen>`, which diffs the app
+      #    against the MOCKUP rather than against itself, and is advisory + run
+      #    on demand. For the marketing shots, nothing is lost: the identical
+      #    check already runs nightly on main in dep-audit-nightly.yml ("Shot
+      #    drift on main"), which catches a stale committed set without
+      #    blocking a PR.
       #
-      #    Why this is a STEP in the required job, not a new job: it shares the
-      #    app's checkout + Playwright install with the rest of the gate. It is
-      #    deterministic by construction — fixture-backed
-      #    demo transport, no network, animations disabled, selector-gated
-      #    waits, and Playwright's version-pinned Chromium (NOT system Chrome,
-      #    which auto-updates and would silently invalidate every baseline).
-      #    So it blocks, like the other gates here.
+      #    STILL AVAILABLE LOCALLY. `npm run visual`, `npm run visual:update`,
+      #    `npm run visual:compare`, `npm run shots` and every baseline under
+      #    tests/visual/ are untouched and runnable. Only the CI enforcement is
+      #    gone. Removing the two steps also let ffmpeg + the pinned-Chromium
+      #    install drop out of this job (both are still installed by the E2E
+      #    job and dep-audit-nightly, so the composite actions stay).
       #
-      #    Cost: builds the renderer (~13s) + ~3s per screen. The browser is
-      #    restored from the same Playwright cache the E2E job uses.
-      #
-      #    Baselines are regenerated deliberately with `npm run visual:update`
-      #    and reviewed as part of the diff — never auto-updated in CI, which
-      #    would make the gate unfalsifiable.
-      #
-      #    The pinned Chromium was installed above (before the drift gate), so
-      #    the visual gate reuses it from the shared cache.
-      - name: Visual gate (structure + pixel baselines)
-        run: npm run visual
+      #    Because both were STEPS in `typecheck-test` and not jobs of their
+      #    own, no required-context changed: required-checks.json and the `main`
+      #    ruleset are untouched.
 
       # ── Security gates (moved verbatim from security-gates.yml, now deleted.
       #    Same detectors, same blocking behaviour, no extra runner slot) ────
