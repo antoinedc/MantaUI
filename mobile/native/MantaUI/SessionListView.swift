@@ -349,39 +349,44 @@ struct SessionListView: View {
 
     // MARK: - Floating capsule (+ search) + create
 
+    // The search + create control FLOATS over the list on Liquid Glass, the
+    // system material for iOS 26 chrome. It used to be a flat
+    // `.ultraThinMaterial` rectangle spanning the full width, which reads as an
+    // opaque grey band with a hard seam — not glass, and visibly not a system
+    // control. Each element carries its own glass so the pill and the button
+    // are separate floating shapes, which is what `GlassEffectContainer` is
+    // for; there is no full-bleed backing plate any more.
     private var capsule: some View {
-        HStack(spacing: Metrics.spacing.sp3) {
-            HStack(spacing: Metrics.spacing.sp2) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: Metrics.type.xs))
-                    .foregroundColor(tokens.tx4)
-                TextField("Search sessions", text: $searchText)
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.tx1)
-            }
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.vertical, Metrics.spacing.sp2)
-            .overlay {
-                Capsule().stroke(tokens.borderSubtle, lineWidth: 1)
-            }
+        GlassEffectContainer(spacing: Metrics.spacing.sp3) {
+            HStack(spacing: Metrics.spacing.sp3) {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                    TextField("Search sessions", text: $searchText)
+                        .font(.system(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx1)
+                }
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp3)
+                .glassEffect(.regular.interactive(), in: .capsule)
 
-            Button {
-                SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
-                presentCreateMenu()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: Metrics.type.body, weight: .semibold))
-                    .foregroundColor(tokens.accentTx)
-                    .frame(width: 44, height: 44)
-                    .background(tokens.accentSolid, in: Circle())
+                Button {
+                    SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                    presentCreateMenu()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.accentTx)
+                        .frame(width: 44, height: 44)
+                }
+                .glassEffect(.regular.tint(tokens.accentSolid).interactive(), in: .circle)
+                .buttonStyle(.plain)
+                .accessibilityLabel("New")
             }
-            .accessibilityLabel("New")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.bottom, Metrics.spacing.sp2)
-        .background {
-            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
-        }
     }
 
     private func presentCreateMenu() {

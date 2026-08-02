@@ -12,7 +12,18 @@ targets:
     platform: iOS
     deploymentTarget: "26.0"
     sources:
+      # NOTE the exclude + folder pair below: the terminal page is loaded with
+      # `Bundle.main.url(forResource:"terminal", withExtension:"html",
+      # subdirectory:"terminal")`, which only resolves if the directory SURVIVES
+      # into the bundle. Listed as ordinary sources, xcodegen emits one file
+      # reference per file and Copy Bundle Resources FLATTENS them to the bundle
+      # root, so that lookup returned nil and the terminal screen rendered a
+      # black void. `type: folder` makes it a folder reference, copied whole.
       - path: MantaUI
+        excludes:
+          - "Resources/terminal"
+      - path: MantaUI/Resources/terminal
+        type: folder
       # The design tokens are GENERATED (scripts/gen-swift-tokens.mjs reads
       # src/renderer/tokens.css). Referenced by path from the app target so the
       # Swift source of truth stays the generated file — never copied or
