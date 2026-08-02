@@ -24,6 +24,9 @@ const ROOT_VARIABLES = [
   ["font-sans", '"Inter Variable"'], ["font-mono", '"JetBrains Mono Variable"'],
   ["font-size-body", "15px"], ["font-size-small", "13px"],
   ["font-size-xs", "12px"], ["font-size-2xs", "11px"],
+  // S2 onboarding display sizes (BET-594) — must track gen-swift-tokens.mjs
+  // TYPE_MAP so the widened generator's lookups resolve in the test fixture.
+  ["font-size-display", "28px"], ["font-size-confirm", "40px"], ["font-size-otp", "26px"],
   ["weight-medium", "500"], ["weight-semibold", "600"],
   ["prose-lh", "1.55"], ["ui-lh", "1.45"],
   ["step-row-y", "7px"], ["step-dot", "6px"],
