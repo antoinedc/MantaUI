@@ -156,8 +156,11 @@ struct TypeMetrics {
     let rowName: CGFloat
     let headingTracking: CGFloat
     let rowNameTracking: CGFloat
+    let chatTitle: CGFloat
+    let chatTitleTracking: CGFloat
     let stepRowY: CGFloat
     let stepDot: CGFloat
+    let chatHeaderBtn: CGFloat
     let listRowMinH: CGFloat
     let listRowRadius: CGFloat
     let listRowMargin: CGFloat
@@ -168,7 +171,7 @@ struct TypeMetrics {
 enum Metrics {
     static let spacing = Spacing(sp0: 0, spPx: 1, sp1: 4, sp2: 8, sp3: 12, sp4: 16, sp5: 20, sp6: 24, sp8: 32, sp10: 40, sp12: 48)
     static let radius = Radius(xs: 4, sm: 6, md: 8, lg: 12, xl: 16, full: 999)
-    static let type = TypeMetrics(sans: "Inter Variable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", mono: "JetBrains Mono Variable, JetBrains Mono, SF Mono, Menlo, Consolas, monospace", body: 15, small: 13, xs: 12, twoXS: 11, display: 28, confirm: 40, otp: 26, medium: 500, semibold: 600, proseLineHeight: 1.55, uiLineHeight: 1.45, rowName: 15.5, headingTracking: -0.015, rowNameTracking: -0.01, stepRowY: 7, stepDot: 6, listRowMinH: 62, listRowRadius: 20, listRowMargin: 2, listGroupAbove: 22, listGroupBelow: 6)
+    static let type = TypeMetrics(sans: "Inter Variable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif", mono: "JetBrains Mono Variable, JetBrains Mono, SF Mono, Menlo, Consolas, monospace", body: 15, small: 13, xs: 12, twoXS: 11, display: 28, confirm: 40, otp: 26, medium: 500, semibold: 600, proseLineHeight: 1.55, uiLineHeight: 1.45, rowName: 15.5, headingTracking: -0.015, rowNameTracking: -0.01, chatTitle: 14.5, chatTitleTracking: -0.01, stepRowY: 7, stepDot: 6, chatHeaderBtn: 38, listRowMinH: 62, listRowRadius: 20, listRowMargin: 2, listGroupAbove: 22, listGroupBelow: 6)
 }
 
 extension Color {

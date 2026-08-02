@@ -118,6 +118,9 @@
   --weight-semibold: 600;
   --step-row-y: 7px;
   --step-dot: 6px;
+  --chat-header-btn: 38px;
+  --font-size-chat-title: 14.5px;
+  --tracking-chat-title: -0.01;
 
   /* Session-list anatomy (BET-595 §7). The row min-height, row corner radius,
      row gap, group-header margins and the row-name size/tracking are off the

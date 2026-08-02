@@ -96,11 +96,15 @@ const TYPE_MAP = {
   rowName: "font-size-row-name",
   headingTracking: "tracking-list-heading",
   rowNameTracking: "tracking-row-name",
+  // §8 chat screen: the two-line header title + its em tracking (BET-596).
+  chatTitle: "font-size-chat-title",
+  chatTitleTracking: "tracking-chat-title",
 };
 // Off-grid layout paddings the mockup fixes (§8 / transcript-mockup.html) plus
 // the §7 session-list row/group metrics (BET-595).
 const LAYOUT_MAP = {
   stepRowY: "step-row-y", stepDot: "step-dot",
+  chatHeaderBtn: "chat-header-btn",
   listRowMinH: "list-row-min-h", listRowRadius: "list-row-radius",
   listRowMargin: "list-row-margin",
   listGroupAbove: "list-group-above", listGroupBelow: "list-group-below",

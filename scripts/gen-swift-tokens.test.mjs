@@ -38,6 +38,11 @@ const ROOT_VARIABLES = [
   ["list-row-min-h", "62px"], ["list-row-radius", "20px"],
   ["list-row-margin", "2px"],
   ["list-group-above", "22px"], ["list-group-below", "6px"],
+  // §8 chat-screen header metrics (BET-596) — must track gen-swift-tokens.mjs
+  // TYPE_MAP/LAYOUT_MAP so the widened generator's lookups resolve in the
+  // test fixture.
+  ["font-size-chat-title", "14.5px"], ["tracking-chat-title", "-0.01"],
+  ["chat-header-btn", "38px"],
 ];
 
 function cssFor(prefix) {

@@ -496,3 +496,99 @@ worktree fan-out, first message creates the session.
 - **Model labels** are data-faithful: known Anthropic ids collapse to friendly
   names ("claude-opus-4-7" → "opus 4.7"); anything unknown shows the raw
   modelID (never invented).
+
+## S4 — wire the chat screen to live data (BET-596)
+
+The chat screen the session list opens is no longer a placeholder. `ChatScreen`
+binds to a live, observable `ChatSessionStore` fed by the S1b `/events` stream
+plus the canonical `opencode:messages` transcript, and renders through the
+EXISTING §8/§8a components (`TranscriptView`, `UserBand`, `AssistantProse`,
+`StepGroupView`, `SubagentHeader`) — there is still no second transcript
+renderer. The retired web `SessionScreen.tsx` is the parity reference for the
+header copy only; the native chat does not port the React `ChatPanel` body.
+
+### What was built
+
+| File | Role |
+|---|---|
+| `ChatModels.swift` | The PURE mapping from the box's wire shapes to the block types: `opencode:messages` → `[TranscriptBlock]`, step-row verb/target/duration presentation, the §8 step rollup, task-part → subagent, and the §8 header subtitle. Unit-tested. |
+| `ChatSessionStore.swift` | The live ObservableObject: refetches the canonical transcript at turn boundaries, accumulates the running assistant text from `stream:flush`, and exposes running/turnComplete/context/todos/truncation/questions/permissions/subagents. Parent and children are each their own store (child = read-only). |
+| `ChatScreen.swift` | The view: §8 two-line header, the BET-481 scroll container, live Todos/Permission/Question cards (answerable), and the value-push subagent drill-in. |
+| `SessionListView.swift` | The tap target now carries the window's `opencodeSessionId` and opens `ChatScreen`; the placeholder remains only for foreign windows with no opencode session id. |
+| `TranscriptComponents.swift` | `SubagentSession` gains an optional `childSessionId` (the S4b fixture leaves it nil) so the live drill-in can be routed by session id. |
+| `tokens.css` / `gen-swift-tokens.mjs` / `Theme.swift` | Additive §8 chat-header tokens (`--chat-header-btn` 38, `--font-size-chat-title` 14.5, `--tracking-chat-title` -0.01) so no chat value is a hardcoded literal. `--check` green; generator test updated. |
+
+### Block-type provenance — mapping interpreted events onto the blocks
+
+Scope item 2 asks which block types the interpreted stream can produce. The
+honest answer (a documented finding, nothing invented):
+
+- `.prose` — **live** from `stream:flush` (the running assistant turn) AND
+  **canonical** from completed assistant messages.
+- `.steps` row / subagent rows — **canonical** from assistant tool parts;
+  agent rows' live status/child-id from `stream:subagent`.
+- `.user` — **canonical only.** No stream event produces a user block and none
+  is invented; the prompt comes from the persisted transcript.
+
+So a live conversation streams (`.prose` tail) on top of a canonical transcript
+(the `.user`/completed `.steps`/`.prose`), exactly the desktop model (transcript
+fetch + live events). While a turn streams, the mapper skips assistant messages
+whose `time.completed` is nil (the box itself keys turn completion on that) so
+the running text appears exactly once — as the in-progress tail, not also in the
+canonical list. This is the duplication guard.
+
+### Done-when verification
+
+- **Live streaming**: the store appends `stream:flush` text as the in-progress
+  `.prose`; scroll container is `ScrollView` + `LazyVStack` +
+  `.defaultScrollAnchor(.bottom)` — BET-481's measured container kept verbatim,
+  not re-measured, not replaced.
+- **Permissions + Questions answerable**: `PermissionCard` (Allow once / Allow
+  always / Reject) and `QuestionCard` (options + always-available free text +
+  Send / Reject) wire to the S1a RPCs on `MantaAPIClient`
+  (`permissionReply`, `questionReply`, `questionReject`) and unblock the agent.
+- **Subagent drill-in live (BET-576 folded in, issue closed here)**: pushing a
+  subagent pushes a `ChatSubagentScreen` bound to a LIVE `ChatSessionStore` for
+  the child session — the frozen `SubagentSession.transcript` fixture screen is
+  only used by the capture-harness scenes. `navigationDestination` for
+  `SubagentSession` is registered against the session list's own stack, so a
+  value-push keeps the parent in the stack and its scroll position is untouched
+  by a visit (child keeps streaming while open).
+- **Status/todos/context/truncation**: §8 header subtitle (`running · 2m · 8%` /
+  `idle`) from running + context pct; `TodosCard`, context/cache/truncation all
+  read the interpreted stream state.
+
+### Verification
+
+- Full `MantaUITests` suite: **111 tests, 0 failures** (99 inherited + 12 new
+  `ChatTranscriptTests`), pinned iPhone 17 Pro (iOS 26.5).
+- App builds for the iOS Simulator destination (`BUILD SUCCEEDED`).
+- `npm run typecheck` green; `node scripts/gen-swift-tokens.mjs --check` green;
+  `gen-swift-tokens.test.mjs` updated + passing (5/5).
+- The S4b capture harness still reproduces (parent scene `PASS`, deterministic)
+  — the fixture scenes are untouched by this wiring stage.
+
+Repo `npm test`: 1816 pass / 1 known environment failure
+(`capExecutor.test.ts` PATH passthrough asserts CI's `/usr/bin:/bin` and fails
+on a Mac with Homebrew on PATH — reproduced on the clean baseline before this
+change; passes on the Linux CI runner).
+
+### Honesty notes
+
+- **No live-box round trip.** As in S2/S3, the macos agent cannot mint a pairing
+  code (loopback-only) and must not pair with production hosts, so "a real
+  conversation streams into the phone" is verified structurally — the store
+  binds to the S1b stream state it was built to consume, the mapper is
+  unit-tested against real `opencode:messages` shapes — and stays a
+  human/CI-on-device check once a box is reachable from device.
+- **Permissions are polled (2.5 s) while the parent chat screen is active**
+  rather than consumed through the event store's single-owner `rawFrameHandler`;
+  questions arrive on the interpreted `stream:questions` sub. This deliberately
+  avoids stealing the session list's handler slot. The permission poll is a
+  device-side presentation concern only; it stops on `onDisappear`.
+- **The composer is out of scope (S5).** The phone streams a live conversation
+  and answers permissions/questions; sending prompts is S5.
+- **Child stores are read-only** (§8a v1): they stream their transcript but do
+  not poll permissions.
+- **`chat-header-btn`, `chat-title` values are additive to `:root`** and unused
+  by the web app, so no visual change there (same policy as `--step-dot`).
