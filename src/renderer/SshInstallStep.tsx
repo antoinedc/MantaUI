@@ -48,7 +48,6 @@ import type { ClaimOutcome } from "../shared/claim.mjs";
 const ACCENT = "var(--accent)";
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
 const DANGER = "var(--danger)";
-const OK_GREEN = "var(--ok)";
 
 // Keep the last N log lines only — main already caps its own tail at 200
 // (handlers.ts LOG_TAIL_MAX); the renderer needs its own cap too, or a long
@@ -930,12 +929,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         </ProcessPanel>
       )}
 
-      {/* Done / error / claim */}
-      {done && done.ok && !claimError && (
-        <section className="text-body" style={{ color: OK_GREEN }}>
-          Install finished successfully. {claimRunning ? "Pairing…" : ""}
-        </section>
-      )}
+      {/* In-flight claim only. There is no success message: a successful
+          claim advances onboarding to step 2, which unmounts this step. */}
+      {claimRunning && <section className="text-body">Pairing…</section>}
       {done && !done.ok && (
         <section
           className="text-body space-y-2"

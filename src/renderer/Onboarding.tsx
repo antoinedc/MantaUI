@@ -54,6 +54,7 @@ import {
   type VerifyStageIndex,
 } from "./onboardingVerify";
 import { installHttpTransport } from "./transportInstall";
+import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import { ProcessPanel } from "./ProcessPanel";
 import mantaMark from "./assets/manta-mark-128.png";
@@ -142,26 +143,22 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [verifyElapsed, setVerifyElapsed] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
-  // Pre-flight for everything that runs AFTER a successful pair: refresh
-  // the store from main's config + seed localStorage / swap window.api to
-  // httpApi. The SSH claim path persists credentials via main's commit()
-  // but does NOT seed localStorage or swap window.api to httpApi. Without
-  // this pre-flight, the window.api.opencode* / .opencodeProviderAuth calls
-  // in verify + hasConnectedProvider fail.
+  // Pre-flight for everything that runs AFTER a successful pair.
+  //
+  // Order is load-bearing: the transport swap MUST happen before
+  // store.refresh(). On the SSH auto-claim path the credentials are persisted
+  // by main and window.api is still the Electron preload bridge, which has no
+  // tmuxList — so refresh() would throw before the swap ever happened, and the
+  // wizard would never leave step 1.
+  //
+  // window.api.configGet() is what makes the freshly-minted boxToken visible
+  // here; it exists on BOTH transports. In http mode it returns the manta
+  // SERVER's config, which carries no pairing secrets, so the seed is null and
+  // the already-installed transport is correctly left alone.
   const refreshAndInstallTransport = useCallback(async () => {
+    const seed = desktopHttpClientSeed(await window.api.configGet());
+    if (seed) installHttpTransport(seed);
     await useStore.getState().refresh();
-    const cfg = useStore.getState().configSnapshot();
-    if (
-      typeof cfg.boxToken === "string" &&
-      cfg.boxToken.length > 0 &&
-      typeof cfg.serverUrl === "string" &&
-      cfg.serverUrl.length > 0
-    ) {
-      installHttpTransport({
-        manta_server: cfg.serverUrl.replace(/\/+$/, ""),
-        manta_token: cfg.boxToken,
-      });
-    }
   }, []);
 
   // The post-pair verify. Runs an ephemeral opencode session through three
@@ -214,9 +211,20 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   // Step 1 → step 2 (provider needed) OR step 1 → runVerify (provider
   // already connected). Detecting the latter before stepping forward keeps
   // the user from blinking through an empty step-2 frame.
+  //
+  // Failures are contained rather than propagated: this is invoked as
+  // `void onPaired()`, so a rejection here is silent and freezes the wizard on
+  // step 1 (BET pairing-stall bug). Pairing has already succeeded at this
+  // point, so we advance regardless — ProvidersStep surfaces its own load
+  // error if the box is still unreachable.
   const onPaired = useCallback(async () => {
-    await refreshAndInstallTransport();
-    const connected = await hasConnectedProvider(window.api as unknown as VerifyApi);
+    let connected = false;
+    try {
+      await refreshAndInstallTransport();
+      connected = await hasConnectedProvider(window.api as unknown as VerifyApi);
+    } catch (e) {
+      console.warn("[manta] post-pair pre-flight failed; advancing anyway:", e);
+    }
     if (connected) {
       await runVerify();
     } else {
