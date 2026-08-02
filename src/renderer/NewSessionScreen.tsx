@@ -29,6 +29,7 @@ import { useStore } from "./store";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
+import { Card } from "./Card";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
@@ -555,9 +556,9 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         </div>
 
         {error && (
-          <div className="text-meta text-danger bg-danger-bg border border-danger/30 rounded px-3 py-2 break-words">
-            {error}
-          </div>
+          <Card danger>
+            <span className="text-meta text-danger break-words">{error}</span>
+          </Card>
         )}
       </div>
 
