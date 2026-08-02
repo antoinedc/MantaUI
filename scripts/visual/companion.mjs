@@ -1,33 +1,54 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { COMPONENTS } from "./components.mjs";
+import { ROOT } from "./harness.mjs";
 
-// The redesign spec is the source of truth for the companion. Every candidate
+// The redesign spec is the source of truth for the companion: every candidate
 // primitive is rendered from the spec's own CSS, in both themes.
-const SPEC_URL =
-  "https://0d5784a7a43451f4ad70dd3d9ee5cf72.boxes.mantaui.com/pages/manta-redesign";
+//
+// IT IS READ FROM THE REPO, NOT FROM A URL. The spec used to be fetched from a
+// served page under /pages/, which expires — pages are swept at their TTL and
+// nothing in git holds them. That made this committed script, and the npm
+// command that runs it, carry a dead-by-a-certain-date dependency: after the
+// TTL `npm run visual:companion` would fail loudly (as designed) and the
+// owner's validation surface would simply be gone. An archived copy costs
+// 230 KB once and removes the fuse.
+//
+// `--source <url|path>` overrides it, which is how you refresh the archive
+// from a freshly served spec.
+const SPEC_PATH = join(ROOT, "docs/screens/redesign-spec.html");
 
-const v = process.argv.indexOf("--source");
-const sourceUrl =
-  v !== -1
-    ? process.argv[v + 1]
+const flagIdx = process.argv.indexOf("--source");
+const source =
+  flagIdx !== -1
+    ? process.argv[flagIdx + 1]
     : process.argv.find((a) => a.startsWith("--source="))?.slice("--source=".length) ??
-      SPEC_URL;
+      SPEC_PATH;
 
-// Fetch the spec. A non-200 or a network failure fails loudly with the URL and
-// exits 1 — a silently stale companion is worse than none. We deliberately do
-// NOT fall back to a cached copy.
-let res;
-try {
-  res = await fetch(sourceUrl);
-} catch (err) {
-  console.error(`companion: failed to fetch spec ${sourceUrl}: ${err.message}`);
-  process.exit(1);
+// One resolver for both shapes. A missing file or a non-200 fails loudly and
+// exits 1 — a silently stale companion is worse than none, and we deliberately
+// do NOT fall back to anything.
+let src;
+if (/^https?:\/\//.test(source)) {
+  let res;
+  try {
+    res = await fetch(source);
+  } catch (err) {
+    console.error(`companion: failed to fetch spec ${source}: ${err.message}`);
+    process.exit(1);
+  }
+  if (!res.ok) {
+    console.error(`companion: failed to fetch spec ${source} — HTTP ${res.status}`);
+    process.exit(1);
+  }
+  src = await res.text();
+} else {
+  if (!existsSync(source)) {
+    console.error(`companion: spec not found at ${source}`);
+    process.exit(1);
+  }
+  src = readFileSync(source, "utf8");
 }
-if (!res.ok) {
-  console.error(`companion: failed to fetch spec ${sourceUrl} — HTTP ${res.status}`);
-  process.exit(1);
-}
-const src = await res.text();
 
 const css = [...src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join("\n");
 const sprite = src.match(/<svg[^>]*(?:style="display:none"|hidden|aria-hidden="true")[^>]*>[\s\S]*?<\/svg>/)?.[0] ?? "";
