@@ -377,7 +377,12 @@ struct SessionListView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: Metrics.type.body, weight: .semibold))
-                        .foregroundColor(tokens.accentTx)
+                        // onAccent, NOT accentTx: accentTx is the accent colour
+                        // for text on a NEUTRAL background. Over a solid accent
+                        // fill it is the same colour in light mode, which is why
+                        // this button was a featureless blue disc. Every other
+                        // filled-accent control in the app already uses onAccent.
+                        .foregroundColor(tokens.onAccent)
                         .frame(width: 44, height: 44)
                 }
                 .glassEffect(.regular.tint(tokens.accentSolid).interactive(), in: .circle)
