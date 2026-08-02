@@ -27,7 +27,17 @@ struct SessionListView: View {
 
     @State private var searchText = ""
     @State private var createItem: CreateItem?
-    @State private var openTarget: SessionOpenTarget?
+    // ONE path-driven stack. It used to be a bare NavigationStack whose only
+    // destination was item-based (`navigationDestination(item:)`) while the
+    // subagent row inside the chat screen pushed a VALUE
+    // (`NavigationLink(value:)`). Mixing the two in one stack is what made a
+    // subagent tap resolve against the session destination — you landed back on
+    // the parent session and only saw the child after going back. Everything is
+    // a value push now, so each entry resolves against its own destination.
+    // NavigationPath, not a typed array: the stack carries TWO route types
+    // (a session target here, a subagent value pushed from inside the chat
+    // screen), and a typed path would silently swallow the second.
+    @State private var path = NavigationPath()
     @State private var renameTarget: MantaWindow?
     @State private var renameProject = ""
     @State private var renameValue = ""
@@ -39,7 +49,7 @@ struct SessionListView: View {
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if store.projects.isEmpty && !store.loading {
                     emptyState
@@ -65,7 +75,7 @@ struct SessionListView: View {
             .safeAreaInset(edge: .bottom) { capsule }
             .overlay(alignment: .top) { errorBanner }
             .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
-            .navigationDestination(item: $openTarget) { target in
+            .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
                     ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
                 } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
@@ -89,7 +99,7 @@ struct SessionListView: View {
                         .windows.first(where: { $0.index == index })
                     let name = window?.name ?? "session"
                     createItem = nil
-                    openTarget = SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId)
+                    path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
                 }
             )
             .presentationDetents([.medium, .large])
@@ -117,9 +127,9 @@ struct SessionListView: View {
         // still fine).
         if let project = store.projects.first(where: { $0.windows.contains { $0.opencodeSessionId == sessionId } }),
            let window = project.windows.first(where: { $0.opencodeSessionId == sessionId }) {
-            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId)
+            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId))
         } else {
-            openTarget = SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId)
+            path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
         }
     }
 
@@ -174,7 +184,7 @@ struct SessionListView: View {
     @ViewBuilder
     private func row(project: MantaProject, window: MantaWindow) -> some View {
         Button {
-            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId)
+            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
@@ -581,12 +591,24 @@ private struct CreateItem: Identifiable {
     let mode: SessionCreateMode
 }
 
-private struct SessionOpenTarget: Identifiable, Hashable {
-    let id = UUID()
+/// A route value, so its identity must be stable and derived from what it
+/// addresses — never a fresh UUID, which would make the same session push as a
+/// different destination every time it is constructed.
+private struct SessionOpenTarget: Hashable {
     let project: String
     let windowIndex: Int
     let name: String
     let sessionId: String?
+
+    static func == (lhs: SessionOpenTarget, rhs: SessionOpenTarget) -> Bool {
+        lhs.project == rhs.project && lhs.windowIndex == rhs.windowIndex && lhs.sessionId == rhs.sessionId
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(project)
+        hasher.combine(windowIndex)
+        hasher.combine(sessionId)
+    }
 }
 
 /// The chat screen this row opens is S4's (chat wired to live data). This
