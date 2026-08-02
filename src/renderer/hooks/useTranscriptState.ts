@@ -20,13 +20,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
 import {
-  findFlushBoundary,
   mergeBufferedDeltas,
   collectChildSessionIds,
   wasAtBottomBeforeCommit,
   classifyScrollForPin,
   reconcileOptimisticUser,
-  type PendingDelta,
 } from "../chatUtils";
 
 export type TranscriptState = {
@@ -49,17 +47,20 @@ export type TranscriptState = {
   prevScrollHeight: React.MutableRefObject<number>;
   questionCardRef: React.RefObject<HTMLDivElement>;
   wantQuestionScroll: React.MutableRefObject<boolean>;
-  flushPendingDeltas: (force: boolean) => number;
-  scheduleFlush: () => void;
+  // Apply one box-flushed delta (stream.flush) into the transcript
+  // (BET-551 / §17 — the box detects flush boundaries now). Returns the
+  // number of parts that didn't yet match a message, so useSseBus can refetch
+  // when a delta arrived ahead of its part snapshot.
+  applyStreamFlush: (d: {
+    partID: string;
+    messageID: string;
+    field: string;
+    text: string;
+  }) => number;
   scheduleRefetch: () => void;
   spliceMessage: (messageId: string) => void;
   fetchChildTranscript: (childId: string) => void;
   toggleTaskExpand: (childId: string) => void;
-  // Exposed for useSseBus — the delta buffer internals.
-  pendingDeltas: React.MutableRefObject<Map<string, PendingDelta>>;
-  flushTimer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>;
-  FLUSH_MAX_AGE_MS: number;
-  oldestPendingAt: React.MutableRefObject<number | null>;
 };
 
 export function useTranscriptState(params: {
@@ -86,10 +87,6 @@ export function useTranscriptState(params: {
   // so live output updates at a steady ~4Hz cap.
   const spliceFirstScheduledAt = useRef<Map<string, number>>(new Map());
   const SPLICE_MAX_WAIT_MS = 250;
-  const pendingDeltas = useRef<Map<string, PendingDelta>>(new Map());
-  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const FLUSH_MAX_AGE_MS = 250;
-  const oldestPendingAt = useRef<number | null>(null);
   const childSessionIds = useRef<Set<string>>(new Set());
   const [childMessages, setChildMessages] = useState<
     Map<string, OpencodeMessage[]>
@@ -116,38 +113,26 @@ export function useTranscriptState(params: {
     el.scrollTop = el.scrollHeight;
   }, []);
 
-  // Buffered text-delta flush
-  const flushPendingDeltas = useCallback((force: boolean): number => {
-    const buf = pendingDeltas.current;
-    if (buf.size === 0) return 0;
-    const toApply = new Map<string, PendingDelta>();
-    for (const [partID, d] of buf) {
-      if (force) {
-        toApply.set(partID, d);
-        continue;
-      }
-      const idx = findFlushBoundary(d.text);
-      if (idx <= 0) continue;
-      toApply.set(partID, { ...d, text: d.text.slice(0, idx) });
-      const remainder = d.text.slice(idx);
-      if (remainder.length > 0) {
-        buf.set(partID, { ...d, text: remainder });
-      } else {
-        buf.delete(partID);
-      }
-    }
-    if (force) buf.clear();
-    if (toApply.size === 0) return 0;
+  // Apply one box-flushed delta (stream.flush) into the transcript
+  // (BET-551 / §17). The box detects flush boundaries and emits the flushed
+  // chunk ready-to-merge, so there is no renderer-side buffering or boundary
+  // detection here — this just appends the chunk to the named part field and
+  // reports how many parts didn't match a known message (caller refetches).
+  const applyStreamFlush = useCallback((d: {
+    partID: string;
+    messageID: string;
+    field: string;
+    text: string;
+  }): number => {
     let unmatchedCount = 0;
     setMessages((prev) => {
       const { messages: next, unmatched } = mergeBufferedDeltas(
         prev,
-        toApply,
+        new Map([[d.partID, { messageID: d.messageID, field: d.field, text: d.text }]]),
       );
       unmatchedCount = unmatched.length;
       return next ?? prev;
     });
-    if (buf.size === 0) oldestPendingAt.current = null;
     return unmatchedCount;
   }, []);
 
@@ -172,26 +157,6 @@ export function useTranscriptState(params: {
         .finally(() => setRefreshing(false));
     }, 300);
   }, [sessionId, setRefreshing]);
-
-  const scheduleFlush = useCallback(() => {
-    if (flushTimer.current) return;
-    const now = Date.now();
-    const age =
-      oldestPendingAt.current != null ? now - oldestPendingAt.current : 0;
-    const delay = Math.max(0, Math.min(16, FLUSH_MAX_AGE_MS - age));
-    flushTimer.current = setTimeout(() => {
-      flushTimer.current = null;
-      const now2 = Date.now();
-      const aged =
-        oldestPendingAt.current != null &&
-        now2 - oldestPendingAt.current >= FLUSH_MAX_AGE_MS;
-      const unmatched = flushPendingDeltas(aged);
-      if (unmatched > 0) scheduleRefetch();
-      if (pendingDeltas.current.size > 0) {
-        scheduleFlush();
-      }
-    }, delay);
-  }, [flushPendingDeltas, scheduleRefetch]);
 
   const spliceMessage = useCallback((messageId: string) => {
     if (!messageId) {
@@ -321,7 +286,6 @@ export function useTranscriptState(params: {
   useEffect(() => {
     return () => {
       if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
-      if (flushTimer.current) clearTimeout(flushTimer.current);
       for (const t of spliceTimers.current.values()) clearTimeout(t);
       spliceTimers.current.clear();
     };
@@ -383,15 +347,10 @@ export function useTranscriptState(params: {
     prevScrollHeight,
     questionCardRef,
     wantQuestionScroll,
-    flushPendingDeltas,
-    scheduleFlush,
+    applyStreamFlush,
     scheduleRefetch,
     spliceMessage,
     fetchChildTranscript,
     toggleTaskExpand,
-    pendingDeltas,
-    flushTimer,
-    FLUSH_MAX_AGE_MS,
-    oldestPendingAt,
   };
 }

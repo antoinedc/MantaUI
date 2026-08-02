@@ -53,6 +53,25 @@ test("session.next.step.ended emits truncation classification", () => {
   const tr = events.find((e) => e.sub === "truncation");
   assert.ok(tr);
   assert.equal(tr.payload.kind, "tool-cutoff");
+  // No messageID on the raw step → none forwarded (S1b consumes it when
+  // present to stamp the per-message truncation badge).
+  assert.equal(tr.payload.messageID, undefined);
+});
+
+test("session.next.step.ended passes messageID through on stream.truncation", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.next.step.ended",
+    properties: {
+      sessionID: SID,
+      messageID: "msg_trunc",
+      finish: "length",
+      tokens: { input: 100 },
+    },
+  });
+  const tr = events.find((e) => e.sub === "truncation");
+  assert.ok(tr);
+  assert.equal(tr.payload.messageID, "msg_trunc");
 });
 
 test("session.next.step.ended emits context breakdown and cache staleness", () => {
@@ -162,6 +181,17 @@ test("session.idle emits turnComplete true", () => {
   const ev = events.find((e) => e.sub === "turnComplete");
   assert.ok(ev);
   assert.equal(ev.payload.complete, true);
+});
+
+test("session.status retry reports running true (parity with pre-S1b renderer)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, type: "retry" },
+  });
+  const ev = events.find((e) => e.sub === "running");
+  assert.ok(ev);
+  assert.equal(ev.payload.running, true);
 });
 
 test("interpret ignores events with no session id", () => {

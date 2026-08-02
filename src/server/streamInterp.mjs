@@ -161,7 +161,10 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
       }
       case "session.status": {
         const type = evt.properties?.type;
-        st.running = type === "busy" || type === "working";
+        // retry is a live turn for the renderer's running indicator (matches
+        // pre-S1b renderer semantics) — the box is the single source of truth,
+        // so it must report the same value the renderer's raw handler does.
+        st.running = type === "busy" || type === "working" || type === "retry";
         emit(sid, "running", { running: st.running });
         return;
       }
@@ -175,7 +178,18 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         const props = evt.properties ?? {};
         const finish = typeof props.finish === "string" ? props.finish : null;
         const kind = classifyFinish(finish, { lastPartIsToolUse: props.lastPartIsToolUse });
-        if (kind) emit(sid, "truncation", { kind, label: describeTruncation(kind).label });
+        if (kind) {
+          // The renderer renders truncation per-message (finishByMessageId),
+          // so carry the step's messageID when the raw event provides one
+          // (S1b consumes this to stamp the badge on the right message).
+          const messageID =
+            typeof props.messageID === "string" ? props.messageID : undefined;
+          emit(sid, "truncation", {
+            kind,
+            label: describeTruncation(kind).label,
+            messageID,
+          });
+        }
         const tokens = props.tokens ?? props.usage;
         if (tokens) {
           const limit = resolveContextLimit(props.model) ?? ASSUMED_CONTEXT_TOKENS;

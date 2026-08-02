@@ -14,6 +14,7 @@ import {
   resetStore,
   mount,
   emitAndFlush,
+  emitStreamAndFlush,
   type MockApi,
   type MockEventBus,
   type Harness,
@@ -48,20 +49,22 @@ describe("useSseBus via ChatPanel", () => {
     expect(bus.listenerCount()).toBeGreaterThan(0);
   });
 
-  it("transitions running state on session.status events", async () => {
+  it("transitions running state on stream.running events", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Simulate session going busy
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    // Simulate session going busy (BET-551 / §17 — running is box-derived)
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
 
     // Simulate session going idle
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "idle" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: false },
     });
 
     // Component should still be mounted without errors.
@@ -155,29 +158,28 @@ describe("useSseBus via ChatPanel", () => {
     expect(text).not.toContain("Reconnect");
   });
 
-  it("routes child-session events to scheduleChildRefetch when expanded", async () => {
+  it("routes child-session stream events to scheduleChildRefetch when expanded", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Emit a child session.created event to register the child
-    await emitAndFlush(bus, h, {
-      type: "session.created",
-      properties: {
-        sessionID: "ses_test",
-        info: { id: "child_123", parentID: "ses_test" },
-      },
+    // Emit a child registration (BET-551 — the box publishes subagent.child)
+    await emitStreamAndFlush(bus, h, {
+      sub: "subagent.child",
+      sessionId: "ses_test",
+      payload: { childSessionId: "child_123" },
     });
 
-    // Now emit a message.part.delta for the child session
-    // This should trigger scheduleChildRefetch if the child is expanded
-    await emitAndFlush(bus, h, {
-      type: "message.part.delta",
-      properties: {
-        sessionID: "child_123",
-        partID: "part_1",
+    // Now emit a stream.flush for the child session. This routes to
+    // scheduleChildRefetch if the child is expanded; either way the panel
+    // stays mounted.
+    await emitStreamAndFlush(bus, h, {
+      sub: "flush",
+      sessionId: "child_123",
+      payload: {
         messageID: "msg_1",
+        partID: "part_1",
         field: "text",
-        delta: "Hello from child",
+        text: "Hello from child",
       },
     });
 
@@ -253,17 +255,19 @@ describe("useSseBus via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles todo.updated events", async () => {
+  it("handles stream.todos events", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "todo.updated",
-      properties: {
-        sessionID: "ses_test",
-        todos: [
-          { content: "Task 1", status: "in_progress", priority: "high" },
-        ],
+    const todos = [{ content: "Task 1", status: "in_progress", priority: "high" }];
+    await emitStreamAndFlush(bus, h, {
+      sub: "todos",
+      sessionId: "ses_test",
+      payload: {
+        active: todos,
+        visible: { visible: todos, hiddenPending: 0, hiddenDone: 0 },
+        allTerminal: false,
+        anyTerminal: false,
       },
     });
 
@@ -320,23 +324,23 @@ describe("useSseBus via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles question events", async () => {
+  it("handles stream.questions events", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "question.asked",
-      properties: { sessionID: "ses_test" },
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: "ses_test",
+      payload: { questions: [] },
     });
-
-    await emitAndFlush(bus, h, {
-      type: "question.replied",
-      properties: { sessionID: "ses_test" },
-    });
-
-    await emitAndFlush(bus, h, {
-      type: "question.rejected",
-      properties: { sessionID: "ses_test" },
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: "ses_test",
+      payload: {
+        questions: [
+          { id: "que_1", sessionID: "ses_test", questions: [["pick one"]], requestId: "que_1" },
+        ],
+      },
     });
 
     // Component should still be mounted.
@@ -380,13 +384,14 @@ describe("useSseBus via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles session.idle", async () => {
+  it("handles stream.turnComplete (idle)", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "session.idle",
-      properties: { sessionID: "ses_test" },
+    await emitStreamAndFlush(bus, h, {
+      sub: "turnComplete",
+      sessionId: "ses_test",
+      payload: { complete: true, running: false },
     });
 
     // Component should still be mounted.
@@ -501,9 +506,10 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     h = await mountDrainHarness();
 
     // Turn is already running.
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
 
     // User submits a second message mid-turn — it queues instead of sending.
@@ -529,9 +535,10 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
   it("does not abort on a running (non-boundary) tool part", async () => {
     h = await mountDrainHarness();
 
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
     await queueASecondMessage(h.container);
     await h.flush();
@@ -560,9 +567,10 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
       },
     });
 
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
     await queueASecondMessage(h.container);
     await h.flush();
@@ -592,9 +600,10 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     h = await mountDrainHarness();
 
     // Turn running; queue a second message mid-turn.
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
     await queueASecondMessage(h.container);
     await h.flush();
@@ -609,10 +618,12 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
       },
     });
     // The abort flips the session idle → the drain effect submits the queued
-    // prompt. Emit the idle the abort would produce.
-    await emitAndFlush(bus, h, {
-      type: "session.idle",
-      properties: { sessionID: "ses_test" },
+    // prompt. Emit the turn-complete the abort would produce (BET-551 / §17
+    // — the box reports completion via stream.turnComplete).
+    await emitStreamAndFlush(bus, h, {
+      sub: "turnComplete",
+      sessionId: "ses_test",
+      payload: { complete: true, running: false },
     });
     await h.flush();
 
@@ -643,20 +654,20 @@ describe("useSseBus question.asked refetch gating (BET-418)", () => {
     h = null;
   });
 
-  it("does NOT refetch questions for the viewed session's own question.asked", async () => {
+  it("does NOT refetch questions for the viewed session's own stream.questions", async () => {
     ({ api, bus } = installMockApi());
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
     const before = (api.calls.opencodeQuestions ?? []).length;
 
-    await emitAndFlush(bus, h, {
-      type: "question.asked",
-      properties: {
-        sessionID: "ses_test",
-        id: "que_1",
-        tool: { messageID: "msg_1", callID: "toolu_1" },
-        questions: [["pick one"]],
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: "ses_test",
+      payload: {
+        questions: [
+          { id: "que_1", sessionID: "ses_test", questions: [["pick one"]], requestId: "que_1" },
+        ],
       },
     });
 
@@ -664,20 +675,20 @@ describe("useSseBus question.asked refetch gating (BET-418)", () => {
     expect(after).toBe(before);
   });
 
-  it("drops + does NOT refetch for a foreign (background-job child) session's question.asked", async () => {
+  it("drops + does NOT refetch for a foreign (background-job child) session's stream.questions", async () => {
     ({ api, bus } = installMockApi());
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
     const before = (api.calls.opencodeQuestions ?? []).length;
 
-    await emitAndFlush(bus, h, {
-      type: "question.asked",
-      properties: {
-        sessionID: "ses_child",
-        id: "que_child_live",
-        tool: { messageID: "msg_c", callID: "toolu_c" },
-        questions: [["pick one"]],
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: "ses_child",
+      payload: {
+        questions: [
+          { id: "que_child_live", sessionID: "ses_child", questions: [["pick one"]], requestId: "que_child_live" },
+        ],
       },
     });
 

@@ -16,6 +16,7 @@ import {
   resetStore,
   mount,
   emitAndFlush,
+  emitStreamAndFlush,
   type MockApi,
   type MockEventBus,
   type Harness,
@@ -526,16 +527,22 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "question.asked",
-      properties: {
-        sessionID: "ses_test",
-        id: "que_1",
+    await emitStreamAndFlush(bus, h, {
+      sub: "questions",
+      sessionId: "ses_test",
+      payload: {
         questions: [
           {
-            header: "Approach",
-            question: "Which approach?",
-            options: [{ label: "a" }, { label: "b" }],
+            id: "que_1",
+            sessionID: "ses_test",
+            requestId: "que_1",
+            questions: [
+              {
+                header: "Approach",
+                question: "Which approach?",
+                options: [{ label: "a" }, { label: "b" }],
+              },
+            ],
           },
         ],
       },
@@ -544,9 +551,10 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     expect(h.text()).toContain("Which approach?");
 
     // Turn is running.
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
 
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
@@ -570,9 +578,10 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "session.status",
-      properties: { sessionID: "ses_test", status: { type: "busy" } },
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
     });
 
     const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;

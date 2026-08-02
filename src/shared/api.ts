@@ -11,6 +11,7 @@ import type {
   OpencodeCommand,
   OpencodeEvent,
   OpencodeMessage,
+  StreamEnvelope,
   OpencodeModel,
   OpencodeProviderAuthRequest,
   OpencodeProviderAuthResult,
@@ -196,6 +197,10 @@ export interface Api {
   opencodeOpenStream(sessionId: string): Promise<void>;
   opencodeCloseStream(sessionId: string): Promise<void>;
   onOpencodeEvent(cb: (ev: OpencodeEvent) => void): () => void;
+  // Box-side interpreted stream events (BET-551 / §17). The box publishes
+  // derived `stream.*` events on the same /events bus; this subscription
+  // receives each `StreamEnvelope` for the transport-routed `stream` kind.
+  onStreamEvent(cb: (ev: StreamEnvelope) => void): () => void;
   opencodePrompt(
     sessionId: string,
     text: string,

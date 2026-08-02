@@ -54,18 +54,22 @@ import type {
   OpencodeMessage,
   PermissionRequest,
   QuestionRequest,
+  StreamEnvelope,
+  StreamFlushPayload,
+  StreamRunningPayload,
+  StreamTodosPayload,
+  StreamTruncationPayload,
+  StreamQuestionsPayload,
+  StreamSubagentChildPayload,
 } from "../../shared/types";
 import {
   shouldDropEventForSessionFilter,
-  registerChildSessionFromCreated,
   isDrainAbortError,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   collectChildSessionIds,
-  applyQuestionEvent,
   hydrateQuestion,
   authErrorAdvice,
-  type PendingDelta,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
@@ -143,11 +147,12 @@ export function useSseBus(params: {
   childRefetchTimers: React.MutableRefObject<Map<string, ReturnType<typeof setTimeout>>>;
   isActiveRef: React.MutableRefObject<boolean>;
   refetchOwedWhileInactive: React.MutableRefObject<boolean>;
-  pendingDeltas: React.MutableRefObject<Map<string, PendingDelta>>;
-  flushPendingDeltas: (force: boolean) => number;
-  scheduleFlush: () => void;
-  oldestPendingAt: React.MutableRefObject<number | null>;
-  FLUSH_MAX_AGE_MS: number;
+  applyStreamFlush: (d: {
+    partID: string;
+    messageID: string;
+    field: string;
+    text: string;
+  }) => number;
   // The session's active model's providerID (e.g. "anthropic", "openai",
   // "kimi-for-coding"). Drives the auth-error banner copy (BET-316) — when
   // a session.error is recognisably a credential failure on one of the
@@ -171,10 +176,7 @@ export function useSseBus(params: {
     expandedTasksRef,
     isActiveRef,
     refetchOwedWhileInactive,
-    pendingDeltas,
-    flushPendingDeltas,
-    scheduleFlush,
-    oldestPendingAt,
+    applyStreamFlush,
     providerID,
     submit,
     submitRef,
@@ -357,12 +359,6 @@ export function useSseBus(params: {
       const props = ev.properties ?? {};
       const evSessionID = typeof props.sessionID === "string" ? props.sessionID : "";
 
-      registerChildSessionFromCreated(
-        ev as { type: string; properties?: { info?: { id?: string; parentID?: string } } },
-        sessionId,
-        childSessionIds.current,
-      );
-
       if (shouldDropEventForSessionFilter(
         ev as { type: string; properties?: { sessionID?: string } },
         sessionId,
@@ -422,34 +418,10 @@ export function useSseBus(params: {
         return;
       }
 
-      if (ev.type === "message.part.delta") {
-        const partID = String(props.partID ?? "");
-        const messageID = String(props.messageID ?? "");
-        const field = String(props.field ?? "text");
-        const delta = String(props.delta ?? "");
-        if (!partID || !delta) return;
+      // NOTE: the viewed session's delta flush, running, todos, truncation and
+      // question interpretation all moved to the box (BET-551 / §17) and are
+      // consumed via the onStreamEvent subscription below — no longer here.
 
-        if (!isActiveRef.current) {
-          refetchOwedWhileInactive.current = true;
-          return;
-        }
-
-        const existing = pendingDeltas.current.get(partID);
-        if (existing && existing.field === field) {
-          existing.text += delta;
-        } else {
-          pendingDeltas.current.set(partID, { messageID, field, text: delta });
-        }
-        if (oldestPendingAt.current == null) {
-          oldestPendingAt.current = Date.now();
-        }
-        scheduleFlush();
-        return;
-      }
-
-      if (ev.type === "session.idle") {
-        setRunning(false);
-      }
       if (ev.type === "session.status") {
         const status = props.status as
           | {
@@ -468,9 +440,11 @@ export function useSseBus(params: {
             }
           | undefined;
         const type = status?.type;
-        if (type === "busy" || type === "retry") setRunning(true);
-        else if (type === "idle") setRunning(false);
         if (type === "retry") {
+          // Running on a retry comes from the box's stream.running (the box
+          // treats retry as running — see streamInterp session.status). This
+          // raw handler only surfaces the retry banner/message; it must not
+          // set running itself, or it would race the box value.
           setRetryInfo({
             attempt: status?.attempt ?? 0,
             message: status?.message ?? "",
@@ -535,7 +509,6 @@ export function useSseBus(params: {
       }
 
       if (ev.type === "session.next.step.ended") {
-        flushPendingDeltas(true);
         maybeDrainQueuedPrompt();
         // Update stepTokens
         const usage = props.usage as { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } | undefined;
@@ -552,16 +525,8 @@ export function useSseBus(params: {
             cost,
           });
         }
-        // Update finishByMessageId
-        const finish = props.finish as string | undefined;
-        if (finish) {
-          const messageID = String(props.messageID ?? "");
-          setFinishByMessageId((prev) => {
-            const next = new Map(prev);
-            next.set(messageID, finish as import("../chatUtils").TruncationKind);
-            return next;
-          });
-        }
+        // Truncation classification moved to the box → stream.truncation
+        // (consumed below); finishByMessageId is stamped there, not here.
       }
 
       if (ev.type.startsWith("session.next.compaction.")) {
@@ -590,13 +555,7 @@ export function useSseBus(params: {
         setBranch((prev) => b ?? prev);
       }
 
-      if (ev.type === "todo.updated") {
-        const todos = props.todos as Array<{ content: string; status: string; priority: string }> | undefined;
-        if (todos) {
-          setLiveTodos(todos);
-          setTodosDismissed(false);
-        }
-      }
+      // Todo interpretation moved to the box → stream.todos (consumed below).
 
       if (ev.type === "command.executed") {
         const messageID = String(props.messageID ?? "");
@@ -629,7 +588,6 @@ export function useSseBus(params: {
           props.messageID ?? part?.messageID ?? info?.id ?? "",
         );
         spliceMessage(messageID);
-        flushPendingDeltas(false);
       }
 
       // Primary drain trigger — the real step boundary the deployed opencode
@@ -656,20 +614,9 @@ export function useSseBus(params: {
         void refreshPermissions();
       }
 
-      if (ev.type === "question.asked" || ev.type === "question.replied" || ev.type === "question.rejected") {
-        // Payload-driven live update (restored from BET-64 refactor regression).
-        // Applying the event payload directly (a) hydrates `requestId` from the
-        // asked payload so submit can send the reply, and (b) upserts by callID
-        // so re-asks don't stack. Only the viewed session's own questions are
-        // accepted now (BET-418 §A) — background-job children no longer route
-        // here, so there is no related-id set to consult.
-        setQuestions((prev) =>
-          applyQuestionEvent(prev, ev.type, props, sessionId) as QuestionRequest[],
-        );
-        if (ev.type === "question.replied" || ev.type === "question.rejected") {
-          scheduleRefetch();
-        }
-      }
+      // Question interpretation moved to the box → stream.questions (consumed
+      // below). BET-418 semantics follow: a viewed session's own ask applies
+      // live from the payload (no refetch), a foreign/child ask never applies.
     });
 
     // Initial fetch. Arm `refreshing` here (not just in scheduleRefetch) so the
@@ -688,8 +635,85 @@ export function useSseBus(params: {
       scheduleRefetch();
     }).catch(() => { /* non-fatal */ }).finally(() => setRefreshing(false));
 
+    // Box-side interpreted stream events (BET-551 / §17). The box derives
+    // running, delta-flush, todos, truncation, questions and subagent/child
+    // state from the raw opencode stream and publishes them as `stream.*` —
+    // the renderer consumes those here instead of re-interpreting.
+    const offStream = window.api.onStreamEvent((ev: StreamEnvelope) => {
+      // A stream event scoped to a subagent child session (not this panel's
+      // own session) still needs the child's live-transcript routing — the
+      // same scheduleChildRefetch the raw-event child block above does.
+      if (ev.sessionId !== sessionId) {
+        if (
+          ev.sessionId &&
+          childSessionIds.current.has(ev.sessionId) &&
+          expandedTasksRef.current.has(ev.sessionId)
+        ) {
+          scheduleChildRefetch(ev.sessionId);
+        }
+        return;
+      }
+
+      switch (ev.sub) {
+        case "flush": {
+          const { messageID, partID, field, text } = ev.payload as StreamFlushPayload;
+          if (!partID || !messageID) return;
+          if (!isActiveRef.current) {
+            refetchOwedWhileInactive.current = true;
+            return;
+          }
+          // The box already flushed at a safe boundary; apply the chunk
+          // directly. Unmatched → the part snapshot isn't loaded yet.
+          const unmatched = applyStreamFlush({ messageID, partID, field, text });
+          if (unmatched > 0) scheduleRefetch();
+          return;
+        }
+        case "running":
+        case "turnComplete": {
+          setRunning((ev.payload as StreamRunningPayload).running);
+          return;
+        }
+        case "todos": {
+          const { active } = ev.payload as StreamTodosPayload;
+          if (active) {
+            setLiveTodos(active as Array<{ content: string; status: string; priority: string }>);
+            setTodosDismissed(false);
+          }
+          return;
+        }
+        case "truncation": {
+          const p = ev.payload as StreamTruncationPayload;
+          if (p.messageID && p.kind) {
+            setFinishByMessageId((prev) => {
+              const next = new Map(prev);
+              next.set(p.messageID as string, p.kind as import("../chatUtils").TruncationKind);
+              return next;
+            });
+          }
+          return;
+        }
+        case "questions": {
+          const { questions } = ev.payload as StreamQuestionsPayload;
+          if (Array.isArray(questions)) {
+            setQuestions(questions as QuestionRequest[]);
+          }
+          return;
+        }
+        case "subagent.child": {
+          const { childSessionId } = ev.payload as StreamSubagentChildPayload;
+          if (childSessionId) childSessionIds.current.add(childSessionId);
+          return;
+        }
+        default:
+          // context / cache / subagent / autoRename — consumed by other
+          // surfaces, not this panel's live transcript state.
+          return;
+      }
+    });
+
     return () => {
       off();
+      offStream();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
     };
   }, [sessionId]);
