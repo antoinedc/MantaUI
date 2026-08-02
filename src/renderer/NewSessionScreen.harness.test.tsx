@@ -73,8 +73,11 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     );
     await h.flush();
 
+    // The worktree toggle is now the Checkbox primitive (BET-589); its input
+    // carries the same accessible name it always did, so select it that way
+    // (the previous selector matched on the checkbox type attribute).
     const checkbox = h.container.querySelector(
-      'input[type="checkbox"]',
+      'input[aria-label="Create in a fresh git worktree"]',
     ) as HTMLInputElement;
     expect(checkbox).not.toBeNull();
     expect(checkbox.checked).toBe(false);

@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { X } from "lucide-react";
 import type { ProviderEndpoint, DiscoverResult } from "../shared/types";
 import { CustomProviderForm } from "./CustomProviderForm";
+import { Checkbox } from "./Checkbox";
 
 type Props = {
   /**
@@ -158,15 +159,15 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
             <div className="text-meta text-danger">{discoverError[ep.id]}</div>
           )}
           {(discovered[ep.id] ?? ep.enabledModels.map((id) => ({ id }))).map((m) => (
-            <label key={m.id} className="flex items-center gap-2 text-meta cursor-pointer">
-              <input
-                type="checkbox"
+            <div key={m.id} className="flex items-center gap-2 text-meta">
+              <Checkbox
                 checked={ep.enabledModels.includes(m.id)}
                 onChange={() => toggleModel(ep, m.id)}
                 disabled={busy === ep.id}
+                ariaLabel={m.id}
               />
               <span className="text-text-muted">{m.id}</span>
-            </label>
+            </div>
           ))}
         </div>
       ))}

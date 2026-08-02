@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox"] as const;
 
 const RENDERER = fileURLToPath(new URL(".", import.meta.url));
 
@@ -197,6 +197,7 @@ describe("M527 primitive rules", () => {
     const CHROME_OWNERS: Record<string, string[]> = {
       "bg-black/40": ["Modal.tsx"], // the modal overlay tint
       "shadow-lg": ["Modal.tsx"], // window-level floating surface
+      "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {

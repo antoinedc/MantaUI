@@ -82,6 +82,7 @@ that vanishes. Adopter counts below are **web** adopters only.
 | Card | `src/renderer/Card.tsx` | 3 — `Cards.tsx`, `Settings.tsx`, `NewSessionScreen.tsx` | `danger` (optional); `header`/`actions` slots |
 | Modal | `src/renderer/Modal.tsx` | 4 — `Sidebar.tsx`, `NewSessionScreen.tsx`, `Settings.tsx`, `FolderPickerModal.tsx` | `size: sm\|md\|lg`; `padded`; `tall`; `onDismiss`; `label` |
 | IconButton | `src/renderer/IconButton.tsx` | 2 — `SessionHeader.tsx`, `NewSessionScreen.tsx` | `size: md\|lg`; `ariaHaspopup`/`ariaExpanded`/`hook` |
+| Checkbox | `src/renderer/Checkbox.tsx` | 5 — `CustomProviderForm.tsx`, `ProvidersCard.tsx`, `ModelsCard.tsx`, `NewSessionScreen.tsx`, `Settings.tsx` | `checked`; `onChange`; `disabled`; `label`; `id`; `ariaLabel` |
 | Field | `src/renderer/Field.tsx` | 2 — `Settings.tsx`, `CustomProviderForm.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading`/`footer`/`disabled` |
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
 | MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` — **single-surface waiver** (owner-approved, BET-549) | `variant: normal\|danger\|active` |

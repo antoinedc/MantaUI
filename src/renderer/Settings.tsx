@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useStore } from "./store";
 import { Modal } from "./Modal";
+import { Checkbox } from "./Checkbox";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -98,13 +99,13 @@ function ToggleField({ entry, value, onApply }: {
   const id = fieldId(entry);
   return (
     <div className="space-y-1">
-      <label htmlFor={id} className="flex items-start gap-3 text-body cursor-pointer">
-        <input id={id} type="checkbox" checked={value} onChange={(e) => onApply(e.target.checked)} className="mt-px" />
+      <div className="flex items-start gap-3 text-body">
+        <Checkbox id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
         <span>
           {entry.label}
           {entry.help && <span className="block text-meta text-text-faint mt-1">{entry.help}</span>}
         </span>
-      </label>
+      </div>
     </div>
   );
 }
@@ -660,13 +661,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <>
           <GroupCard title="Plugins">
             {pluginsToggleEntry && <div className="space-y-1">
-              <label htmlFor={fieldId(pluginsToggleEntry)} className="flex items-start gap-3 text-body cursor-pointer">
-                <input id={fieldId(pluginsToggleEntry)} type="checkbox" checked={pluginsOn} onChange={(e) => void togglePlugins(e.target.checked)} className="mt-px" />
+              <div className="flex items-start gap-3 text-body">
+                <Checkbox id={fieldId(pluginsToggleEntry)} checked={pluginsOn} onChange={(v) => void togglePlugins(v)} ariaLabel={pluginsToggleEntry.label} />
                 <span>
                   {pluginsToggleEntry.label}
                   {pluginsToggleEntry.help && <span className="block text-meta text-text-faint mt-1">{pluginsToggleEntry.help}</span>}
                 </span>
-              </label>
+              </div>
             </div>}
             {pluginsError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
@@ -716,10 +717,10 @@ export function Settings({ onClose }: { onClose: () => void }) {
                   <div key={l.id} className="space-y-2">
                     <div className="text-body font-medium text-text">{l.label}</div>
                     {l.flags.map((f) => (
-                      <label key={f.key} className="flex items-start gap-3 text-body cursor-pointer">
-                        <input type="checkbox" checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(e) => setLauncherFlag(l.id, f.key, e.target.checked)} className="mt-px" />
+                      <div key={f.key} className="flex items-start gap-3 text-body">
+                        <Checkbox checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(v) => setLauncherFlag(l.id, f.key, v)} ariaLabel={f.label} />
                         <span>{f.label}</span>
-                      </label>
+                      </div>
                     ))}
                   </div>
                 ))}
