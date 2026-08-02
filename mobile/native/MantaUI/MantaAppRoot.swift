@@ -49,6 +49,7 @@ struct MantaAppRoot: View {
                         flow.onPaired = {
                             paired = true
                             store.start()
+                            MantaPushService.registerAfterPairing()
                         }
                     }
             } else if let scene, !scene.isEmpty {
@@ -68,8 +69,22 @@ struct MantaAppRoot: View {
                         flow.onPaired = {
                             paired = true
                             store.start()
+                            MantaPushService.registerAfterPairing()
                         }
                     }
+            }
+        }
+        // S8 (BET-600): a pairing link — either the manta:// custom scheme or
+        // the associated-domain universal link (https://app.mantaui.com/m/…)—
+        // is parsed and fed into the S2 onboarding flow. Delivery happens via
+        // onOpenURL (warm launch) and MantaPairingRouter (cold start through
+        // the app delegate's continue userActivity); both converge here.
+        .onOpenURL { url in
+            _ = MantaPairingRouter.route(url)
+        }
+        .onReceive(MantaPairingRouter.shared.$pendingPayload) { payload in
+            if let payload {
+                flow.receive(payload: payload)
             }
         }
     }

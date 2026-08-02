@@ -27,6 +27,12 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui
         PRODUCT_NAME: MantaUI
         GENERATE_INFOPLIST_FILE: YES
+        # S8 (BET-600): base Info.plist merged over the generated one — carries
+        # the `manta://` custom URL scheme so a pairing link opens the app.
+        INFOPLIST_FILE: MantaUI/Info.plist
+        # S8 (BET-600): push capability (aps-environment) + Associated Domains
+        # for the pairing universal link (applinks:app.mantaui.com).
+        CODE_SIGN_ENTITLEMENTS: MantaUI/MantaUI.entitlements
         INFOPLIST_KEY_CFBundleDisplayName: MantaUI
         INFOPLIST_KEY_NSMicrophoneUsageDescription: MantaUI uses the microphone for push-to-talk dictation and voice commands in chat.
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

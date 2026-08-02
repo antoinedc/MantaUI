@@ -303,6 +303,25 @@ final class MantaAPIClient: Sendable {
         try await call("config:get", args: [], as: [String: JSONValue].self)
     }
 
+    /// `POST /push/register-apns` — hand the APNs device token to the box
+    /// (server mirror of the /rpc/push:register-apns channel; both call
+    /// push.addApnsToken, see src/server/index.mjs). Fire-and-forget from the
+    /// push service; a failure here just means the box doesn't push to the
+    /// device (the token is re-sent on the next registration).
+    func registerApnsToken(_ token: String) async throws {
+        var request = URLRequest(url: serverURL.appendingPathComponent("push/register-apns"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let tokenValue = tokenProvider(), !tokenValue.isEmpty {
+            request.setValue("Bearer \(tokenValue)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
+        let (_, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+    }
+
     // MARK: - Transport + envelope
 
     static func makeRequest(serverURL: URL, channel: String, args: [Any], token: String?) throws -> URLRequest {

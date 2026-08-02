@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "FSQ3HS4Z24.com.antoinedc.mantaui"
+        ],
+        "components": [
+          {
+            "/": "/m/*",
+            "comment": "Pairing universal link — https://app.mantaui.com/m?... (S8 / BET-600)"
+          }
+        ]
+      }
+    ]
+  }
+}
