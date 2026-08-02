@@ -64,7 +64,7 @@ export async function claimBox(input: {
   // hostname (https://<boxId>.boxes.mantaui.com); when an explicit override is
   // supplied (BET-268 tailnet path), it's the user-entered URL after
   // normalization. Main's claimPairing dispatcher accepts either shape; using
-  // the pre-resolved URL mirrors the mobile client (renderer/mobile/
+  // the pre-resolved URL mirrors the mobile client (shared/
   // setupLogic.buildSetupClaimInput) and keeps `boxDirectUrl` as the single
   // source of truth for the default URL.
   const claimInput = buildSetupClaimInput({
