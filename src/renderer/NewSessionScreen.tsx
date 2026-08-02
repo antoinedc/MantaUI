@@ -31,6 +31,7 @@ import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
 import { Modal } from "./Modal";
 import { Card } from "./Card";
+import { Checkbox } from "./Checkbox";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
@@ -444,21 +445,20 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                 no branch
               </span>
             )}
-            <label
+            <div
               className={`inline-flex items-center gap-2 pl-3 pr-3 self-stretch border-l border-border ${
-                worktreeChipEnabled ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+                worktreeChipEnabled ? "" : "opacity-50"
               }`}
               title={worktreeChipEnabled ? "Create in a fresh git worktree" : "not a git repository"}
             >
-              <input
-                type="checkbox"
+              <Checkbox
                 checked={wantWorktree}
                 disabled={!worktreeChipEnabled}
-                onChange={(e) => setWantWorktree(e.target.checked)}
-                className="accent-accent"
+                onChange={(v) => setWantWorktree(v)}
+                ariaLabel="Create in a fresh git worktree"
               />
               <span className="text-text-muted">worktree</span>
-            </label>
+            </div>
           </div>
         </div>
 

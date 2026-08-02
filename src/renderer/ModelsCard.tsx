@@ -25,6 +25,7 @@ import { describeModel } from "../shared/modelGuide.mjs";
 import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
 import type { OpencodeModel } from "../shared/types";
+import { Checkbox } from "./Checkbox";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -36,47 +37,9 @@ const TIER_CLASS: Record<string, string> = {
   deep: "bg-accent-bg text-accent-tx",
 };
 
-// iOS-style toggle switch used by the Main + Sub columns. Consolidates the
-// two near-identical checkbox blocks (BET-215 reviewer nit, BET-219 follow-up).
-// The bound state, disabled flag, and an optional aria-label are the only
-// per-call-site differences; rendering is shared.
-interface SwitchProps {
-  checked: boolean;
-  disabled: boolean;
-  onChange: () => void;
-  "aria-label"?: string;
-}
-
-function Switch({ checked, disabled, onChange, "aria-label": ariaLabel }: SwitchProps) {
-  return (
-    <label className="inline-flex items-center cursor-pointer">
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onChange}
-        aria-label={ariaLabel}
-        className="peer sr-only"
-      />
-      <span
-        className={`w-[30px] h-[18px] rounded-full border transition-colors relative ${
-          checked
-            ? "bg-accent-soft/40 border-accent"
-            : "bg-bg border-border-strong"
-        }`}
-      >
-        <span
-          className={`absolute top-[2px] w-[12px] h-[12px] rounded-full transition-transform ${
-            checked
-              ? "translate-x-[12px] bg-accent-solid"
-              : "translate-x-[2px] bg-text-faint"
-          }`}
-        />
-      </span>
-    </label>
-  );
-}
-
+// The Main + Sub column toggles. Migrated to the Checkbox primitive (BET-589)
+// from the old iOS-style toggle switch; the bound state, disabled flag, and
+// an optional aria-label are the only per-call-site differences.
 export function ModelsCard() {
   const setStoreDefaultModel = useStore((s) => s.setDefaultModel);
   // Saved default echoed in the banner above the search. Mirror the SAVED
@@ -383,19 +346,19 @@ export function ModelsCard() {
                     />
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
-                    <Switch
+                    <Checkbox
                       checked={isMain}
                       disabled={isBusy}
                       onChange={() => void toggleMain(key, isMain)}
-                      aria-label={`Main availability for ${m.name}`}
+                      ariaLabel={`Main availability for ${m.name}`}
                     />
                   </td>
                   <td className="px-3 py-2 align-middle text-center">
-                    <Switch
+                    <Checkbox
                       checked={isSub}
                       disabled={isBusy}
                       onChange={() => void toggleSub(key, isSub)}
-                      aria-label={`Sub availability for ${m.name}`}
+                      ariaLabel={`Sub availability for ${m.name}`}
                     />
                   </td>
                 </tr>

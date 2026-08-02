@@ -26,6 +26,7 @@ import {
   customProviderDraftError,
 } from "./chatUtils";
 import { Field } from "./Field";
+import { Checkbox } from "./Checkbox";
 
 const ACCENT_SOLID = "var(--accent-solid)";
 const DANGER = "var(--danger)";
@@ -305,18 +306,18 @@ function ModelList({
       </div>
       <div className="max-h-40 overflow-auto rounded-xs border border-border bg-bg p-2 space-y-1">
         {models.map((m) => (
-          <label
+          <div
             key={m.id}
-            className="flex items-center gap-2 text-meta cursor-pointer"
+            className="flex items-center gap-2 text-meta"
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={checked.has(m.id)}
               onChange={() => onToggle(m.id)}
               disabled={disabled}
+              ariaLabel={m.id}
             />
             <span className="text-text-muted">{m.id}</span>
-          </label>
+          </div>
         ))}
       </div>
     </div>
