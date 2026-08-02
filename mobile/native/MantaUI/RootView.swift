@@ -11,8 +11,10 @@ import SwiftUI
 ///
 /// Nav is a `NavigationStack` push (never an inline expansion or a sheet): the
 /// parent stays in the stack, so its scroll position is untouched by a visit,
-/// and a child that is still running keeps streaming while it is open. The
-/// child screen is read-only in v1 (no composer / write affordance).
+/// and a pushed child stays alive (the structural precondition for live
+/// streaming, which is deferred until a real observable subagent store exists
+/// — see `mobile/native/FINDINGS.md`). The child screen is read-only in v1 (no
+/// composer / write affordance).
 ///
 /// Every value resolves through the GENERATED tokens — `Tokens.scheme(_:)`
 /// (colours, including `accentSoft` for the agent glyph) and `Metrics`

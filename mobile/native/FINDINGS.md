@@ -250,9 +250,10 @@ second transcript renderer.
   `tx4`), and a `›` chevron meaning "there is more here", not "expand this
   output".
 - **Push, not inline/sheet**: `NavigationStack` value navigation. The parent
-  stays in the stack, so its scroll position is untouched by a visit; a child
-  that is still running keeps streaming while it is open. Nesting is free — a
-  sub-subagent is another push.
+  stays in the stack, so its scroll position is untouched by a visit; a pushed
+  child stays alive in the stack (the structural precondition for
+  streaming-while-open — see the honesty note on why live streaming is
+  deferred this stage). Nesting is free — a sub-subagent is another push.
 - **Child header**: task name + `subagent · running 1m12s` / `subagent · done`
   as the 500 `tx4` subtitle (§8 two-line header), with a back chevron. No
   trailing affordance — the child is read-only in v1 (no composer, no write
@@ -326,12 +327,17 @@ there is no copy of a transcript renderer anywhere.
 - The **status is a live duration while running** (§8a) is represented in the
   fixture by fixed text ("1m12s"), exactly as S4a's `.running` step rows use
   fixed durations. A real per-second tick would change the status text every
-  frame and defeat the settled-frame convergence guard the harness is built
-  on. The runtime behaviour — a still-running child keeps streaming while its
-  screen is open — is made possible by the `NavigationStack` push (the child
-  stays in the stack, alive) and is enabled by the architecture; it cannot be
-  exercised in a static fixture that has no live data source, any more than the
-  parent's own streaming can.
+  frame and defeat the settled-frame convergence guard the harness is built on.
+- **Streaming-while-open is intentionally deferred — the child renders a FROZEN
+  snapshot today.** `SubagentScreen` takes the session's `[TranscriptBlock]` as
+  a plain value, so the transcript does not update while the screen is open.
+  This is correct for S4b: it is a fixture/measurement stage with no live
+  subagent data source, and neither the parent nor anything else streams in the
+  fixture. The §8a requirement is not silently claimed here — when a real,
+  observable subagent store lands (a later stage), `SubagentScreen`'s transcript
+  argument is the SINGLE seam to rewire to that source; the push structure keeps
+  the child alive in the stack, so once that seam reads a live source the same
+  view streams without a second renderer being introduced.
 - The agent **glyph tile** is rendered as an empty 16px `accentSoft` tile. §8a
   names the tile but not a glyph; an initial/icon inside it would be a design
   decision beyond the spec, so the fixture stays faithful to what §8a states.

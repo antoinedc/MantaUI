@@ -367,7 +367,11 @@ struct SubagentRowView: View {
 // transcript, rendered with the parent's components via TranscriptView.
 // Read-only in v1: no composer, no prompt entry, no write affordance. Pushing
 // it (not an inline expansion or a sheet) leaves the parent's scroll position
-// untouched; a child that is still running keeps streaming while open.
+// untouched and keeps the child alive in the stack. NOTE: the transcript is a
+// frozen `agent.transcript` value this fixture stage — live streaming while
+// open is deferred until a real observable subagent store exists; this view's
+// transcript input is the single seam to rewire to that source then (see
+// mobile/native/FINDINGS.md).
 struct SubagentScreen: View {
     let agent: SubagentSession
     let tokens: Tokens
