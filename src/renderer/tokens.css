@@ -60,11 +60,11 @@
      contained surfaces (composer input, popovers, menus); --shadow-md is
      reserved for floating panels that overlap content. Theme-aware so the
      lift reads on both canvases without re-tuning per surface. */
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.18), 0 1px 3px rgb(0 0 0 / 0.12);
-  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.22), 0 2px 4px rgb(0 0 0 / 0.14);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 0.5);
   /* --shadow-lg is the third step: a surface floating over the whole window
      (a modal, the folder picker), not merely over content. */
-  --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.45), 0 4px 12px rgb(0 0 0 / 0.30);
+  --shadow-lg: 0 20px 56px rgb(0 0 0 / 0.6);
 
   /* Corner radii (BET-451). A named scale, for the same reason spacing is one:
      a design that says `border-radius: 14px` forces an implementer to choose
@@ -254,7 +254,7 @@
   --accent-rgb: 46 107 255;
   --accent-soft-rgb: 31 85 214;
 
-  --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06), 0 1px 3px rgb(26 24 21 / 0.05);
-  --shadow-md: 0 4px 12px rgb(26 24 21 / 0.10), 0 2px 4px rgb(26 24 21 / 0.05);
-  --shadow-lg: 0 20px 56px rgb(26 24 21 / 0.16), 0 4px 12px rgb(26 24 21 / 0.08);
+  --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06);
+  --shadow-md: 0 8px 24px rgb(26 24 21 / 0.10);
+  --shadow-lg: 0 20px 56px rgb(26 24 21 / 0.14);
 }

@@ -94,3 +94,53 @@ export const COMPONENTS = [
   { id: "eyebrow", name: "Eyebrow", cls: "eyebrow", app: "none",
     variants: [["default", `<div class="eyebrow">Section label</div>`]] },
 ];
+
+/**
+ * SHADOW_TOKENS — the data behind the companion's C5 shadow-comparison block.
+ *
+ * C5 was the former open token divergence: the shadow scale differed between
+ * the redesign spec and `src/renderer/tokens.css` in both themes. BET-563
+ * settled it (owner chose option (a) — the spec wins), so `app` below now
+ * carries the same values the spec does and the companion's two surfaces
+ * render identically. The block is kept so a future drift (a re-tuned
+ * tokens.css shadow) shows up immediately as an app/spec mismatch.
+ *
+ * `app` = the declaration currently in `src/renderer/tokens.css` (dark from
+ * `:root`, light from `[data-theme="light"]`); `spec` = the declaration in
+ * `docs/screens/redesign-spec.html`.
+ */
+export const SHADOW_TOKENS = [
+  {
+    key: "sm",
+    app: {
+      dark: "0 1px 2px rgb(0 0 0 / 0.4)",
+      light: "0 1px 2px rgb(26 24 21 / 0.06)",
+    },
+    spec: {
+      dark: "0 1px 2px rgba(0,0,0,.4)",
+      light: "0 1px 2px rgba(26,24,21,.06)",
+    },
+  },
+  {
+    key: "md",
+    app: {
+      dark: "0 8px 24px rgb(0 0 0 / 0.5)",
+      light: "0 8px 24px rgb(26 24 21 / 0.10)",
+    },
+    spec: {
+      dark: "0 8px 24px rgba(0,0,0,.5)",
+      light: "0 8px 24px rgba(26,24,21,.10)",
+    },
+  },
+  {
+    key: "lg",
+    app: {
+      dark: "0 20px 56px rgb(0 0 0 / 0.6)",
+      light: "0 20px 56px rgb(26 24 21 / 0.14)",
+    },
+    spec: {
+      dark: "0 20px 56px rgba(0,0,0,.6)",
+      light: "0 20px 56px rgba(26,24,21,.14)",
+    },
+  },
+];
