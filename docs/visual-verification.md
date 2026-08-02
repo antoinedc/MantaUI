@@ -146,6 +146,10 @@ user gestures — a click a person could make — not for reaching into internal
    recorded in `docs/screens/<id>/conformance.md` with the "Last reviewed"
    line updated. A finding that lives only in a PR description is lost the
    moment the PR is merged.
+
+   **If your PR moves a baseline, update that screen's `Last reviewed` sha in
+   the same PR.** A record reviewed before the change it should describe is
+   worse than no record — it reads as current.
 5. **Any baseline this PR creates or re-records is in the PR body as an
    image.** Not a filename, not "regenerated" — the picture. A baseline is
    committed *evidence*, and a reviewer who cannot see it is approving a hash.

@@ -4,13 +4,11 @@ App vs `docs/screens/settings/mockup.html`, from `npm run visual:compare setting
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-01 (3802bc0)
+Last reviewed: 2026-08-02 (9a17023)
 
 ## Open divergences
 
-- **Extensions launcher card** — the heading text and card ordering of the
-  launcher card differ between `Settings.tsx` and the mockup's `.ext` panel.
-  `tracked: BET-473`
+_None recorded._
 
 ## Accepted divergences
 
