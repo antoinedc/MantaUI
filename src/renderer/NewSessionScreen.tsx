@@ -395,8 +395,8 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         {/* Heading — the only element centred on the screen; the chip row and
             the controls row below are both left-aligned to the composer. */}
         <div className="text-center space-y-1">
-          <h1 className="text-display font-semibold text-text">What's up next?</h1>
-          <p className="text-body text-text-muted">
+          <h1 className="text-display font-bold text-text">What's up next?</h1>
+          <p className="text-prose text-text-muted">
             Start a session on any folder your box can see.
           </p>
         </div>
@@ -407,7 +407,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         <div className="flex items-center gap-2 self-start">
           <button
             onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-lg border border-border bg-bg-soft text-meta text-text hover:border-border-strong"
+            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-lg border border-border bg-bg-soft shadow-sm text-body text-text hover:border-border-strong"
             title={cwd || "Select folder"}
           >
             <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
@@ -415,7 +415,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" />
           </button>
 
-          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-bg-soft text-meta overflow-hidden">
+          <div className="inline-flex items-center h-9 rounded-lg border border-border bg-bg-soft shadow-sm text-body overflow-hidden">
             {wantWorktree && isGitRepo ? (
               // BET-417 §A: "Ticking worktree makes the branch field
               // editable." The typed value is passed as `name` to
@@ -479,7 +479,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             onKeyDown={onKeyDown}
             placeholder="Describe a task or ask a question"
             rows={3}
-            className="flex-1 w-full bg-transparent border-0 text-body text-text outline-none resize-none placeholder:text-text-faint"
+            className="flex-1 w-full bg-transparent border-0 text-title text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
           />
 
