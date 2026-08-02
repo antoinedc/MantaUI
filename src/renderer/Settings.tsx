@@ -26,6 +26,7 @@ import { TtlToggle } from "./TtlToggle";
 import { Card } from "./Card";
 import { Field } from "./Field";
 import { Button } from "./Button";
+import { Eyebrow } from "./Eyebrow";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -257,9 +258,7 @@ function GroupCard({ title, danger = false, children }: {
 }) {
   return (
     <div>
-      {title && (
-        <h5 className="mb-3 text-micro font-semibold uppercase tracking-wide text-text-faint">{title}</h5>
-      )}
+      {title && <Eyebrow>{title}</Eyebrow>}
       <Card danger={danger}>
         <div className="space-y-4">{children}</div>
       </Card>
