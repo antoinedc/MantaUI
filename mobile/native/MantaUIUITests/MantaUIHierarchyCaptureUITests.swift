@@ -22,10 +22,11 @@ final class MantaUIHierarchyCaptureUITests: XCTestCase {
         app.launch()
 
         // Wait on a REAL rendered state, never a fixed timer — a timeout would
-        // trade a deterministic failure for an intermittent one. The foundation
-        // app renders its title text; that is the stable element to gate on.
-        let title = app.staticTexts["MantaUI"]
-        XCTAssertTrue(title.waitForExistence(timeout: 15), "MantaUI title did not appear")
+        // trade a deterministic failure for an intermittent one. S4a's spec
+        // fixture renders the transcript; the first full-bleed user band is its
+        // stable first element, so gate on that rather than the retired title.
+        let userBand = app.staticTexts["check bet-520 and see if it's blocked correctly"]
+        XCTAssertTrue(userBand.waitForExistence(timeout: 15), "transcript user band did not appear")
 
         print("AX-TREE-BEGIN")
         print(app.debugDescription)

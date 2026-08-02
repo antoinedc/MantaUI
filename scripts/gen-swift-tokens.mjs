@@ -55,9 +55,124 @@ function parseThemes(css) {
   return themes;
 }
 
+// Theme-independent metric/typography tokens live in the :root block, NOT in a
+// data-theme block. The Swift Values are resolved from exactly the tokens the
+// CSS names; a token with no counterpart here dies loudly rather than being
+// silently dropped.
+function parseRoot(css) {
+  const vars = {};
+  const re = /:root\s*\{([\s\S]*?)\}/g;
+  const m = re.exec(css);
+  if (!m) return vars;
+  const varRe = /--([a-zA-Z0-9-]+):\s*([^;]+);/g;
+  let v;
+  while ((v = varRe.exec(m[1]))) vars[v[1]] = v[2].trim();
+  return vars;
+}
+
+// Spacing scale: CSS --sp-N -> Swift field `spN` (--sp-px -> `spPx`).
+const SPACING_MAP = [
+  ["sp0", "sp-0"], ["spPx", "sp-px"], ["sp1", "sp-1"], ["sp2", "sp-2"],
+  ["sp3", "sp-3"], ["sp4", "sp-4"], ["sp5", "sp-5"], ["sp6", "sp-6"],
+  ["sp8", "sp-8"], ["sp10", "sp-10"], ["sp12", "sp-12"],
+];
+// Corner radii: --r-N -> Swift field `rN`.
+const RADIUS_MAP = [
+  ["xs", "r-xs"], ["sm", "r-sm"], ["md", "r-md"],
+  ["lg", "r-lg"], ["xl", "r-xl"], ["full", "r-full"],
+];
+// Typography: { swiftField: cssToken }. The sans/mono FAMILIES are declared
+// separately (typed String) below; this map is the numeric/weight/leading set.
+const TYPE_MAP = {
+  body: "font-size-body", small: "font-size-small",
+  xs: "font-size-xs", twoXS: "font-size-2xs",
+  medium: "weight-medium", semibold: "weight-semibold",
+  proseLineHeight: "prose-lh", uiLineHeight: "ui-lh",
+};
+// Off-grid layout paddings the mockup fixes (§8 / transcript-mockup.html).
+const LAYOUT_MAP = { stepRowY: "step-row-y" };
+
 // CSS allows a leading-dot decimal (".035"); Swift requires a leading zero
 // ("0.035"). Normalize so the emitted Swift literals always compile.
 const swiftNumber = (n) => (n.startsWith(".") ? "0" + n : n);
+
+// A metric value from a CSS token: either a pixel length ("12px") or a
+// unitless multiplier ("1.55"). Both become a CGFloat literal.
+function swiftCGFloat(value, name) {
+  const m = value.match(/^(-?[\d.]+)px$/);
+  if (m) return swiftNumber(m[1]);
+  if (/^-?[\d.]+$/.test(value)) return swiftNumber(value);
+  throw new Error(
+    `metric token '${name}' (value '${value}') is not a px length or unitless number`,
+  );
+}
+
+// A string value from a CSS token (a quoted font-family list) kept as a raw
+// Swift string (the comma-list kept intact; callers pick their face).
+function swiftString(value) {
+  return JSON.stringify(value.replace(/"/g, ""));
+}
+
+function typeValue(root, field, css) {
+  const v = root[css];
+  if (v === undefined) throw new Error(`type token '--${css}' missing from :root`);
+  if (css === "font-sans" || css === "font-mono") return swiftString(v);
+  return swiftCGFloat(v, css);
+}
+
+function metricsBody(root) {
+  const lines = [];
+
+  lines.push("struct Spacing {");
+  for (const [field, css] of SPACING_MAP) {
+    const v = root[css];
+    if (v === undefined) throw new Error(`spacing token '--${css}' missing from :root`);
+    lines.push(`    let ${field}: CGFloat`);
+  }
+  lines.push("}");
+  lines.push("");
+
+  lines.push("struct Radius {");
+  for (const [field, css] of RADIUS_MAP) {
+    const v = root[css];
+    if (v === undefined) throw new Error(`radius token '--${css}' missing from :root`);
+    lines.push(`    let ${field}: CGFloat`);
+  }
+  lines.push("}");
+  lines.push("");
+
+  lines.push("struct TypeMetrics {");
+  for (const css of ["font-sans", "font-mono"]) {
+    const v = root[css];
+    if (v === undefined) throw new Error(`type token '--${css}' missing from :root`);
+    lines.push(`    let ${css === "font-sans" ? "sans" : "mono"}: String`);
+  }
+  for (const [field, css] of Object.entries(TYPE_MAP)) {
+    const v = root[css];
+    if (v === undefined) throw new Error(`type token '--${css}' missing from :root`);
+    lines.push(`    let ${field}: ${css === "font-sans" || css === "font-mono" ? "String" : "CGFloat"}`);
+  }
+  for (const [field, css] of Object.entries(LAYOUT_MAP)) {
+    const v = root[css];
+    if (v === undefined) throw new Error(`layout token '--${css}' missing from :root`);
+    lines.push(`    let ${field}: CGFloat`);
+  }
+  lines.push("}");
+  lines.push("");
+
+  const spacingArgs = SPACING_MAP.map(([field, css]) => `${field}: ${swiftCGFloat(root[css], css)}`).join(", ");
+  const radiusArgs = RADIUS_MAP.map(([field, css]) => `${field}: ${swiftCGFloat(root[css], css)}`).join(", ");
+  const typeArgs = Object.entries({ sans: "font-sans", mono: "font-mono", ...TYPE_MAP, ...LAYOUT_MAP })
+    .map(([field, css]) => `${field}: ${typeValue(root, field, css)}`)
+    .join(", ");
+
+  lines.push("enum Metrics {");
+  lines.push(`    static let spacing = Spacing(${spacingArgs})`);
+  lines.push(`    static let radius = Radius(${radiusArgs})`);
+  lines.push(`    static let type = TypeMetrics(${typeArgs})`);
+  lines.push("}");
+  return lines.join("\n");
+}
 
 function swiftExpr(name, value) {
   const rgba = value.match(
@@ -95,6 +210,7 @@ function schemeBody(themeName, vars) {
 
 export function generate(css) {
   const themes = parseThemes(css);
+  const root = parseRoot(css);
 
   return `// GENERATED FILE — do not edit by hand.
 // Generated by scripts/gen-swift-tokens.mjs from src/renderer/tokens.css
@@ -142,6 +258,12 @@ ${schemeBody("light", themes.light)}
 
 ${schemeBody("dark", themes.dark)}
 }
+
+// ---- Theme-independent metric + typography tokens --------------------------
+// Generated from tokens.css :root. These are the non-colour half of the design
+// substrate: spacing scale, corner radii, type faces/sizes/weights and the
+// prose/UI leading. They are theme-independent (unlike the color Tokens).
+${metricsBody(root)}
 
 extension Color {
     init(hex: String, opacity: Double = 1) {

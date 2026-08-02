@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { generate, run } from "./gen-swift-tokens.mjs";
 
 // A minimal tokens.css covering every token the generator requires, for both
-// themes. Real `src/renderer/tokens.css` is never touched by these tests.
+// themes AND the :root metrics block. Real `src/renderer/tokens.css` is never
+// touched by these tests.
 const VARIABLES = [
   "canvas", "panel", "card", "raised", "inset",
   "border-subtle", "border", "border-strong",
@@ -13,9 +14,28 @@ const VARIABLES = [
   "fill", "fill-active",
 ];
 
+// :root metric/typography tokens the generator emits into the Metrics enum.
+const ROOT_VARIABLES = [
+  ["sp-0", "0"], ["sp-px", "1px"], ["sp-1", "4px"], ["sp-2", "8px"],
+  ["sp-3", "12px"], ["sp-4", "16px"], ["sp-5", "20px"], ["sp-6", "24px"],
+  ["sp-8", "32px"], ["sp-10", "40px"], ["sp-12", "48px"],
+  ["r-xs", "4px"], ["r-sm", "6px"], ["r-md", "8px"], ["r-lg", "12px"],
+  ["r-xl", "16px"], ["r-full", "999px"],
+  ["font-sans", '"Inter Variable"'], ["font-mono", '"JetBrains Mono Variable"'],
+  ["font-size-body", "15px"], ["font-size-small", "13px"],
+  ["font-size-xs", "12px"], ["font-size-2xs", "11px"],
+  ["weight-medium", "500"], ["weight-semibold", "600"],
+  ["prose-lh", "1.55"], ["ui-lh", "1.45"],
+  ["step-row-y", "7px"],
+];
+
 function cssFor(prefix) {
   const vars = VARIABLES.map((v) => `  --${v}: ${prefix}-${v};`).join("\n");
-  return `[data-theme="light"] {\n${vars}\n}\n\n[data-theme="dark"] {\n${vars}\n}\n`;
+  const root = ROOT_VARIABLES.map(([k, v]) => `  --${k}: ${v};`).join("\n");
+  return (
+    `:root {\n${root}\n}\n\n` +
+    `[data-theme="light"] {\n${vars}\n}\n\n[data-theme="dark"] {\n${vars}\n}\n`
+  );
 }
 
 const SAMPLE_CSS = cssFor("#A");
