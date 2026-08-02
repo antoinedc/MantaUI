@@ -25,28 +25,19 @@
 
 // ---------- Types injected from the renderer ----------
 
-// Minimal shape of window.api the verify path actually consumes. Declared
-// here as a type so the test fixture doesn't need to construct the whole
-// preload surface — see onboardingVerify.test.ts.
-export type VerifyApi = {
-  opencodeCreateEphemeralSession: (input: {
-    directory: string;
-    title?: string;
-  }) => Promise<{ ok: boolean; sessionId?: string; error?: string }>;
-  opencodeDeleteSessionRaw: (sessionId: string) => Promise<{ ok: boolean }>;
-  opencodePrompt: (
-    sessionId: string,
-    text: string,
-    modelOverride?: unknown,
-    attachments?: unknown,
-    mentions?: unknown,
-  ) => Promise<{ ok: boolean; error?: string }>;
-  opencodeMessages: (sessionId: string) => Promise<unknown>;
-  opencodeProviderAuth: (input: {
-    action: string;
-    [k: string]: unknown;
-  }) => Promise<unknown>;
-};
+// The minimal shape of window.api the verify path consumes — a Pick of the
+// canonical Api interface so a wrong assumption about any of these five
+// methods is a typecheck failure, not a silent runtime bug.
+import type { Api } from "../shared/api";
+
+export type VerifyApi = Pick<
+  Api,
+  | "opencodeCreateEphemeralSession"
+  | "opencodeDeleteSessionRaw"
+  | "opencodePrompt"
+  | "opencodeMessages"
+  | "opencodeProviderAuth"
+>;
 
 // A verify stage index (0-based) the caller feeds to ProcessPanel.activeIndex.
 export type VerifyStageIndex = 0 | 1 | 2;
@@ -128,18 +119,20 @@ export async function verifyOnboarding(deps: {
   const sessionId = created.sessionId;
 
   try {
-    // Stage 2 — send the probe prompt (credentials accepted by the provider).
+    // Stage 2 — send the probe prompt. opencodePrompt resolves with nothing
+    // on success and THROWS on failure — there is no return value to test.
     onProgress({ stage: 1, status: "running" });
-    const send = await deps.api.opencodePrompt(sessionId, probeText);
-    if (!send || send.ok === false) {
+    try {
+      await deps.api.opencodePrompt(sessionId, probeText);
+    } catch (e) {
       onProgress({ stage: 1, status: "error" });
+      const detail = e instanceof Error ? e.message : String(e);
       return {
         ok: false,
         failedStage: 1,
-        message:
-          send && typeof send.error === "string" && send.error.length > 0
-            ? `${deps.providerLabel} rejected the request: ${send.error}`
-            : `${deps.providerLabel} isn't ready. Reconnect the provider and try again.`,
+        message: detail
+          ? `${deps.providerLabel} rejected the request: ${detail}`
+          : `${deps.providerLabel} isn't ready. Reconnect the provider and try again.`,
       };
     }
 
