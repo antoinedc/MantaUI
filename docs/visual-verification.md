@@ -11,9 +11,22 @@ They fail for different reasons. Do not collapse them.
 
 | Layer | Question | Deterministic? | Blocks a merge? |
 |---|---|---|---|
-| 1. Structure | Are the right controls there, in the right order, correctly labelled? | yes | **yes** |
-| 2. Pixels | Did anything change that nobody meant to change? | yes | **yes** |
+| 1. Structure | Are the right controls there, in the right order, correctly labelled? | yes | no — see below |
+| 2. Pixels | Did anything change that nobody meant to change? | yes | no — see below |
 | 3. Conformance | Does it look like the design? | no — judgement | no, advisory |
+
+> **BET-602 — layers 1 and 2 no longer run in CI.** `npm run visual` was removed
+> from the required `typecheck-test` job, along with the marketing-shot drift
+> gate. The commands, the harness and every committed baseline still exist and
+> still work on demand; only the enforcement is gone. The reason is the trap
+> described in the next callout, which stopped being hypothetical: the welcome
+> screen shipped with three surfaces that had no background at all, and the gate
+> was green the whole time because the baselines had been recorded from the
+> broken render. Layer 3 — the only layer that compares against something
+> external — is now the whole of the visual process. The marketing shots are
+> still checked nightly on `main` (`dep-audit-nightly.yml`), just not per-PR.
+> Full rationale, with the numbers, is in the comment block that replaced the
+> steps in `.github/workflows/ci.yml`.
 
 **Layer 1 (structure)** snapshots the accessibility tree as YAML. A diff is
 readable in a PR: *"the model picker moved above the input"*, *"the attach
@@ -141,8 +154,7 @@ user gestures — a click a person could make — not for reaching into internal
    **An issue without one is not ready to implement** — that is the actual root
    cause of the composer defect, and no tooling substitutes for it.
 2. The screen is a row in `scripts/visual/screens.mjs`.
-3. `npm run visual` is green, with the baselines committed.
-4. `npm run visual:compare` has been run and its findings addressed, or
+3. `npm run visual:compare` has been run and its findings addressed, or
    recorded in `docs/screens/<id>/conformance.md` with the "Last reviewed"
    line updated. A finding that lives only in a PR description is lost the
    moment the PR is merged.
@@ -150,8 +162,11 @@ user gestures — a click a person could make — not for reaching into internal
    **If your PR moves a baseline, update that screen's `Last reviewed` sha in
    the same PR.** A record reviewed before the change it should describe is
    worse than no record — it reads as current.
-5. **Any baseline this PR creates or re-records is in the PR body as an
-   image.** Not a filename, not "regenerated" — the picture. A baseline is
+4. **Any baseline this PR creates or re-records is in the PR body as an
+   image.** Since BET-602 nothing in CI re-records one, so this only applies
+   when you deliberately run `npm run visual:update` — and it matters more now,
+   not less, because no gate will ever question the result.
+   Not a filename, not "regenerated" — the picture. A baseline is
    committed *evidence*, and a reviewer who cannot see it is approving a hash.
    This is the only step that can catch a baseline recorded from a broken
    render, and it is cheap: paste the PNG.
@@ -227,11 +242,15 @@ script import them.
 ## The marketing-shot drift gate (BET-341 / BET-444)
 
 `scripts/shots.mjs` captures the `website/shot-*.webp` marketing assets from the
-demo-mode build, exactly like the visual gate's baselines. Its drift gate lives
-in the REQUIRED `typecheck-test` job, so it must be both runnable **and**
-byte-deterministic — a flaky or dead capture would block every open PR.
+demo-mode build, exactly like the visual gate's baselines.
 
-It broke on 2026-07-31, three times, and is now fixed:
+**Since BET-602 this no longer runs per-PR.** The identical check runs nightly on
+`main` instead (`dep-audit-nightly.yml`, "Shot drift on main"), which still
+catches a stale committed set — one red nightly instead of one red PR each — with
+none of the blast radius described below. The history is kept because it is the
+clearest record of why a capture gate in a required job is expensive.
+
+It broke on 2026-07-31, three times, and was fixed:
 
 - **Chrome 148 killed the capture outright.** `shots.mjs` pinned
   `/usr/bin/google-chrome`, which began refusing every loopback navigation on
