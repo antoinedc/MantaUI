@@ -50,19 +50,28 @@ describe("verifyStageLabels", () => {
   });
 });
 
+// Run the success path — a reply arrives after the probe — and capture the
+// api, progress trace, and result. Shared by the success test and the
+// resolved-with-undefined REGRESSION test; keeps the invoke-and-assert
+// boilerplate in one place.
+async function runSuccessVerify() {
+  const api = makeApi({ opencodeMessages: messagesSequence() });
+  const progress: string[] = [];
+  const out = await verifyOnboarding({
+    api,
+    providerLabel: "Claude",
+    modelLabel: "claude-sonnet-4",
+    timeoutMs: 5_000,
+    pollIntervalMs: 1,
+    now: () => 0,
+    onProgress: (p) => progress.push(`${p.stage}:${p.status}`),
+  });
+  return { api, progress, out };
+}
+
 describe("verifyOnboarding", () => {
   it("reports stage progress and deletes the ephemeral session on success", async () => {
-    const api = makeApi({ opencodeMessages: messagesSequence() });
-    const progress: string[] = [];
-    const out = await verifyOnboarding({
-      api,
-      providerLabel: "Claude",
-      modelLabel: "claude-sonnet-4",
-      timeoutMs: 5_000,
-      pollIntervalMs: 1,
-      now: () => 0,
-      onProgress: (p) => progress.push(`${p.stage}:${p.status}`),
-    });
+    const { api, progress, out } = await runSuccessVerify();
     expect(out).toEqual({ ok: true });
     expect(progress).toEqual(["0:running", "1:running", "2:running", "2:done"]);
     expect(api.opencodeCreateEphemeralSession).toHaveBeenCalledWith({
@@ -115,17 +124,7 @@ describe("verifyOnboarding", () => {
   });
 
   it("REGRESSION: a resolved-with-undefined prompt is success, not a stage-1 failure", async () => {
-    const api = makeApi({ opencodeMessages: messagesSequence() });
-    const progress: string[] = [];
-    const out = await verifyOnboarding({
-      api,
-      providerLabel: "Claude",
-      modelLabel: "claude-sonnet-4",
-      timeoutMs: 5_000,
-      pollIntervalMs: 1,
-      now: () => 0,
-      onProgress: (p) => progress.push(`${p.stage}:${p.status}`),
-    });
+    const { progress, out } = await runSuccessVerify();
     expect(out).toEqual({ ok: true });
     expect(progress).toEqual(["0:running", "1:running", "2:running", "2:done"]);
   });
