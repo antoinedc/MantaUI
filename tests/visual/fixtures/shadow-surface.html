@@ -41,7 +41,15 @@
   }
   /* The themed-panel machinery re-used from the component companion: a
      [data-theme] scope with a comfortable density, exactly as
-     scripts/visual/companion.mjs renders its per-theme panels. */
+     scripts/visual/companion.mjs renders its per-theme panels.
+     The panel's own canvas is deliberately OVERRIDDEN to a fixed neutral
+     light ground: the dark theme's `--shadow-md` is black-on-near-black on
+     the theme's real dark canvas, so it would be invisible to a pixel gate
+     and a retune would move ~0 pixels. A pixel gate must SEE the shadow to
+     catch a change to it, so the surface is showcased on a light stage. The
+     THING under test — `--shadow-md` — still resolves from the live
+     tokens.css per [data-theme]; only the backdrop is a constant across
+     themes so both shadows are equally gatable. */
   .tp {
     box-sizing: border-box;
     width: 100%;
@@ -50,19 +58,19 @@
     align-items: center;
     justify-content: center;
     padding: 140px;
-    background: var(--canvas);
-    color: var(--tx1);
+    background: #ECE9E4;
   }
   /* The shadowed surface. Background/border/radius read tokens; ONLY the
      box-shadow differs from a plain card, so a shadow-scale change surfaces
-     here and nowhere else. */
+     here and nowhere else. The white card on the light stage makes both
+     themes' shadows clearly visible. */
   .shsurf {
     box-sizing: border-box;
     width: 420px;
     height: 300px;
-    border: 1px solid var(--border-subtle);
+    border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: var(--r-lg);
-    background: var(--card);
+    background: #FFFFFF;
     box-shadow: var(--shadow-md);
   }
 </style>

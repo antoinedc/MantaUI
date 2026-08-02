@@ -35,7 +35,6 @@ let browser: Browser | undefined;
 let baseURL = "";
 
 const THEMES = ["light", "dark"] as const;
-type Theme = (typeof THEMES)[number];
 
 const FIXTURE = "/tests/visual/fixtures/shadow-surface.html";
 
@@ -68,13 +67,13 @@ for (const theme of THEMES) {
       await surface.waitFor({ state: "visible", timeout: 30_000 });
 
       // Resolve the framed shadow to prove this is the themed panel under
-      // test and that the shadow is actually applied (an empty/`none` shadow
-      // would make the baseline worthless).
+      // test and that the `--shadow-md` token actually applied (an empty /
+      // `none` shadow — or a wrong-step sm/lg value — would make the baseline
+      // worthless). The theme difference itself is asserted by the two
+      // per-theme pixel baselines below, which render different resolutions
+      // of `--shadow-md` from tokens.css.
       const shadow = await surface.evaluate((el) => getComputedStyle(el).boxShadow);
-      expect(shadow, `--shadow-md resolved for ${theme}`).not.toBe("none");
-      expect(shadow, `theme drives the token for ${theme}`).toContain(
-        theme === "light" ? "rgb(26 24 21" : "rgb(0 0 0",
-      );
+      expect(shadow, `--shadow-md resolved for ${theme}`).toContain("0px 8px 24px");
 
       // Same settle primitive as preparePage — two rAFs so any in-flight
       // layout/paint reaches the framebuffer before the capture.
@@ -87,10 +86,20 @@ for (const theme of THEMES) {
         name: `shadow-${theme}.aria.yml`,
       });
       // Pixels: the surface + its shadow fill the frame, so a shadow-scale
-      // change fails this baseline.
+      // change fails this baseline. A shadow is a soft gradient, not a flat
+      // fill, so a retune moves pixels by modest deltas — the default
+      // per-pixel `threshold` (0.2 ≈ 51 levels) would swallow even a large
+      // shadow change. A low threshold (0.03 ≈ 8 levels) is safe HERE and
+      // only here: this frame has no text and no subpixel-AA glyphs, so the
+      // only pixels that can move are shadow or surface pixels, both of
+      // which a real scale change shifts by far more than ~8 levels.
+      // (Threshold 0.03 was chosen empirically as the smallest that still
+      // leaves the stable baseline green across repeated runs while catching
+      // a modest `--shadow-md` retune.)
       await expect(page).toHaveScreenshot(`shadow-surface-${theme}.png`, {
         fullPage: true,
         animations: "disabled",
+        threshold: 0.03,
       });
     } finally {
       await context.close();
