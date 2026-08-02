@@ -118,7 +118,7 @@ export function SessionHeader({
       {/* Breadcrumb — project / window (the cwd path was dropped, BET-459) */}
       {crumb && (
         <span
-          className="manta-session-crumb text-label text-text-faint shrink-0 truncate max-w-[200px]"
+          className="text-label text-text-faint shrink-0 truncate max-w-[200px]"
           title={crumb}
         >
           {crumb}
@@ -128,7 +128,7 @@ export function SessionHeader({
       {/* Branch chip — session state, lives in the header not the composer. */}
       {branch && (
         <span
-          className="manta-session-branch text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1"
+          className="text-text-faint font-mono shrink-0 truncate max-w-[200px] inline-flex items-center gap-1"
           title={`Current branch: ${branch}`}
         >
           <GitBranch size={14} aria-hidden="true" className="shrink-0" />
@@ -173,7 +173,6 @@ export function SessionHeader({
             icon={<Terminal />}
             label={modeLabel}
             title={`Switch to ${modeLabel}`}
-            hook="manta-session-mode-toggle"
             onClick={() => onModeChange(targetMode)}
           />
         )}
@@ -294,7 +293,7 @@ function ContextPill({
         <SegmentedBar
           segments={segments}
           segColor={segColor}
-          className="manta-ctx-track inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
+          className="inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
         />
         <span
           className="tabular-nums font-mono font-semibold"
@@ -503,7 +502,7 @@ function SessionMenu({
   const hasMode = !!onModeChange;
 
   return (
-    <div ref={rootRef} className="manta-session-menu relative shrink-0">
+    <div ref={rootRef} className="relative shrink-0">
       <IconButton
         icon={<MoreHorizontal />}
         label="Session actions"

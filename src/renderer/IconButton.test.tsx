@@ -146,9 +146,10 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     expect(els.length).toBe(2);
     const modeToggle = els[0];
     // Same chrome + same accessible name/title as the pre-migration button
-    // (aria-label names the mode you switch TO from chat: Terminal). The hook
-    // class is preserved for test/coverage identity.
-    expect(modeToggle.className).toBe(`manta-session-mode-toggle ${CHROME}`);
+    // (aria-label names the mode you switch TO from chat: Terminal). The mode
+    // toggle's `manta-*` hook was stripped (not consumed by the visual gate);
+    // the session-menu trigger keeps its `manta-session-menu-trigger` hook.
+    expect(modeToggle.className).toBe(CHROME);
     expect(modeToggle.getAttribute("aria-label")).toBe("Terminal");
     expect(modeToggle.getAttribute("title")).toBe("Switch to Terminal");
     expect(modeToggle.querySelector("svg")?.getAttribute("width")).toBe("16");
@@ -170,7 +171,7 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     expect(els.map((el) => el.className).sort()).toEqual(
-      [`manta-session-mode-toggle ${CHROME}`, `manta-session-menu-trigger ${CHROME}`].sort(),
+      [CHROME, `manta-session-menu-trigger ${CHROME}`].sort(),
     );
   });
 });

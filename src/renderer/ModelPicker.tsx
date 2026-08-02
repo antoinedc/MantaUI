@@ -145,7 +145,7 @@ export function ModelPicker({
     <div
       ref={rootRef}
       className={
-        "manta-model-picker overflow-visible min-w-0 " +
+        "overflow-visible min-w-0 " +
         (separatePills
           ? "inline-flex items-center gap-2"
           : "inline-flex items-stretch rounded-lg border border-border-strong bg-bg-soft")

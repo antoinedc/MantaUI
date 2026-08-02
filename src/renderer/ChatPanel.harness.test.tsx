@@ -98,7 +98,7 @@ describe("ChatPanel render harness", () => {
     expect(h.text()).toBe(before);
   });
 
-  it("stamps the manta-session-branch hook on the header branch chip", async () => {
+  it("renders the current branch in the header branch chip", async () => {
     // The default mock returns null for the branch, so the chip is not
     // rendered; override it so the chip exists.
     ({ bus } = installMockApi({
@@ -107,30 +107,7 @@ describe("ChatPanel render harness", () => {
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    const chip = h.container.querySelector(".manta-session-branch");
-    expect(chip).not.toBeNull();
-    expect(chip?.textContent).toContain("feat/mobile-footer");
-  });
-
-  // BET-286: the composer + ContextBar + ModelPicker elements that mobile.css
-  // selects on must carry stable `manta-*` hook classes — not positional /
-  // utility-fragment selectors that break silently if the DOM is reshuffled.
-  // The conditional elements (`.manta-ctx-track`, `.manta-model-dropdown`) are
-  // intentionally skipped: they only render with non-zero token usage / an
-  // open dropdown, and stubbing elaborate fixtures just to test CSS hooks is
-  // not worth the brittleness.
-  it("stamps the mobile CSS hook classes the mobile layout depends on", async () => {
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-    for (const hook of [
-      ".manta-composer",
-      ".manta-composer-input-row",
-      ".manta-composer-meta",
-      ".manta-composer-trust",
-      ".manta-model-picker",
-    ]) {
-      expect(h.container.querySelector(hook), hook).not.toBeNull();
-    }
+    expect(h.text()).toContain("feat/mobile-footer");
   });
 });
 

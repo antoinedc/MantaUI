@@ -86,9 +86,7 @@ export function ContextBar({
       title={breakdownLines.join("\n")}
     >
       <span
-        // `manta-ctx-track` is a styling hook — mobile.css hides the track
-        // (but not the % digits) on phones.
-        className="manta-ctx-track inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
+        className="inline-block w-24 h-3 rounded-[2px] overflow-hidden align-middle"
         style={{
           backgroundColor: "var(--card)",
           backgroundImage: `radial-gradient(circle, ${dot} 1.2px, transparent 1.4px)`,
@@ -144,10 +142,10 @@ export function ContextBar({
             "(Cache TTL is set by opencode; manta predicts staleness from the Settings → Prompt cache TTL value. If this fires at the wrong time, that setting probably doesn't match opencode's cache_control.ttl.)",
           ].join("\n")}
         >
-          <span className="manta-stale-full">
+          <span>
             ⚠ /clear to save {formatTokensCompact(staleCache.staleTokens)} tokens
           </span>
-          <span className="manta-stale-min hidden">
+          <span className="hidden">
             ⚠ {formatTokensCompact(staleCache.staleTokens)}
           </span>
         </span>
