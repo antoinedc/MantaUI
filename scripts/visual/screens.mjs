@@ -232,17 +232,26 @@ export const SCREENS = [
     title: "Session view — mid-stream transcript, early/mid/late phases",
     url: "/app/index.html?demo&desktop&state=stream",
     ready: '[data-screen="session"]',
-    final: '[data-screen="session"]',
+    // Same navigation as the `session` row — the default demo view opens an
+    // empty welcome session, so we click into the transcript-bearing one.
+    final: "text=Run a shell command?",
     phases: ["early", "mid", "late"],
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+    },
     viewport: DESKTOP_VIEWPORT,
     // No design exists for a mid-stream frame — `null` is the registry's
     // documented way to say so; the row still gets structure + pixels.
     mockup: null,
-    // Same no-click session shell as session-version-skew (which surfaces
-    // the closed picker + menu triggers without the click-only ctx pill).
+    // Same navigated session shell as the `session` row (ctx-pill, pickers,
+    // session menu all present but closed).
     surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
