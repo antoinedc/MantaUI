@@ -21,9 +21,19 @@ name: Multica Unstick
 # event fires for it, so a periodic scan is the only way a workflow can see it.
 # Scheduled every 15 minutes, but GitHub throttles cron heavily — ticks 58-202
 # minutes apart were observed on 2026-08-01. Treat this as the safety net, not
-# the mechanism: the timely trigger is the merge-event step in
-# multica-close-on-merge.yml, which runs this same script the moment an unblock
-# makes an issue eligible.
+# the mechanism.
+#
+# WHY ALSO ON pull_request: an implementer finishing does NOT merge anything, so
+# the merge-event trigger never fires for it and the cron was the only thing
+# left — which is how BET-555/566/569 all sat idle on 2026-08-02, finished, with
+# green PRs, waiting on a sweep whose last tick was 66 minutes earlier. Opening
+# a PR (or marking it ready) is the exact moment an implementer's work becomes
+# reviewable, so it is the right event to re-check the board on. Paired with
+# MULTICA_UNSTICK_PR_GRACE_MIN (3 min, vs the 30 the no-PR case still gets),
+# this routes a dropped hand-off in minutes instead of hours.
+#
+# A fork PR carries no secrets, so the job is skipped for one rather than
+# failing on a missing MULTICA_TOKEN.
 #
 # Failure policy: housekeeping must never break a pipeline. The script logs and
 # exits 0 on per-issue failures; the job itself is continue-on-error.
@@ -31,6 +41,8 @@ name: Multica Unstick
 on:
   schedule:
     - cron: "*/15 * * * *"
+  pull_request:
+    types: [opened, ready_for_review]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -49,6 +61,12 @@ concurrency:
 jobs:
   unstick:
     name: Re-dispatch dropped hand-offs
+    # A fork PR gets no secrets, so MULTICA_TOKEN would be empty and the script
+    # would exit 1 on every outside contribution. Same-repo agent PRs are the
+    # only ones this trigger is for.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

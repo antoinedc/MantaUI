@@ -25,6 +25,7 @@ const ROLES = new Map([
 
 const NOW = Date.parse("2026-07-27T08:00:00Z");
 const GRACE = 30 * 60_000;
+const PR_GRACE = 3 * 60_000;
 const BACKOFF = 120 * 60_000;
 
 const minsAgo = (m) => new Date(NOW - m * 60_000).toISOString();
@@ -48,9 +49,76 @@ const decide = (over = {}) =>
     roleById: ROLES,
     now: NOW,
     graceMs: GRACE,
+    prGraceMs: PR_GRACE,
     backoffMs: BACKOFF,
     ...over,
   });
+
+describe("pr grace — a live PR shortens the wait", () => {
+  // The 2026-08-02 stall: three issues finished within six minutes of each
+  // other, every one with a green PR and no hand-off, and the sweep would not
+  // look at any of them for another half hour.
+  const openPr = [{ state: "open" }];
+
+  test("routes a finished implementer with a PR after the SHORT grace", () => {
+    const r = decide({
+      runs: [{ status: "completed", completed_at: minsAgo(5) }],
+      pullRequests: openPr,
+    });
+    assert.equal(r.act, true);
+    assert.equal(r.role, "reviewer");
+  });
+
+  test("still waits out the short grace — a just-finished run is left alone", () => {
+    const r = decide({
+      runs: [{ status: "completed", completed_at: minsAgo(1) }],
+      pullRequests: openPr,
+    });
+    assert.equal(r.act, false);
+    assert.match(r.reason, /pr grace/);
+  });
+
+  test("REGRESSION: without a PR the long grace is unchanged", () => {
+    // The short grace is justified only by the PR proving the work is
+    // published. No PR, no shortcut.
+    const r = decide({
+      runs: [{ status: "completed", completed_at: minsAgo(5) }],
+      pullRequests: [],
+    });
+    assert.equal(r.act, false);
+    assert.match(r.reason, /5m cold/);
+    assert.doesNotMatch(r.reason, /pr grace/);
+  });
+
+  test("a draft PR counts — BET-569 died before marking its PR ready", () => {
+    const r = decide({
+      runs: [{ status: "failed", completed_at: minsAgo(5) }],
+      pullRequests: [{ state: "draft" }],
+    });
+    assert.equal(r.act, true);
+    assert.equal(r.role, "reviewer");
+  });
+
+  test("an in-flight run still wins over the short grace", () => {
+    const r = decide({
+      runs: [{ status: "running", started_at: minsAgo(1) }],
+      pullRequests: openPr,
+    });
+    assert.equal(r.act, false);
+    assert.match(r.reason, /run running/);
+  });
+
+  test("an absent prGraceMs falls back to the long grace", () => {
+    // Defensive: a caller that predates the option must not accidentally get a
+    // zero-length grace.
+    const r = decide({
+      runs: [{ status: "completed", completed_at: minsAgo(5) }],
+      pullRequests: openPr,
+      prGraceMs: undefined,
+    });
+    assert.equal(r.act, false);
+  });
+});
 
 describe("agentRole", () => {
   test("classifies the live MANTA mesh", () => {

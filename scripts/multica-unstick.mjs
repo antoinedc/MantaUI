@@ -63,6 +63,9 @@
  *   MULTICA_WORKSPACE_ID   optional — defaults to the MantaUI (BET) workspace
  *   MULTICA_API_BASE       optional — defaults to https://api.multica.ai
  *   MULTICA_UNSTICK_GRACE_MIN    optional — minutes a terminal run must be cold (default 30)
+ *   MULTICA_UNSTICK_PR_GRACE_MIN optional — the same, but for an issue with a
+ *                                live PR, where the run being terminal is
+ *                                unambiguous (default 3)
  *   MULTICA_UNSTICK_BACKOFF_MIN  optional — minutes between unsticks of one issue (default 120)
  *   MULTICA_UNSTICK_MAX_ACTIONS  optional — mutating actions per tick (default 5)
  *
@@ -198,6 +201,7 @@ export function screenIssue({ issue, roleById, now, backoffMs }) {
  *   roleById: Map<string,{name:string, role:string}>,
  *   now: number,
  *   graceMs: number,
+ *   prGraceMs?: number,
  *   backoffMs: number,
  * }} args
  * @returns {{act:false, reason:string} |
@@ -211,6 +215,7 @@ export function decideUnstick({
   roleById,
   now,
   graceMs,
+  prGraceMs,
   backoffMs,
 }) {
   const no = (reason) => ({ act: false, reason });
@@ -245,12 +250,32 @@ export function decideUnstick({
   // agent about a run that may have started seconds ago.
   if (settled == null) return no("latest run has no usable timestamp");
   const coldMs = now - settled;
-  if (coldMs < graceMs) return no(`latest run only ${Math.round(coldMs / 60000)}m cold`);
 
-  const mins = Math.round(coldMs / 60000);
   const hasPr = (Array.isArray(pullRequests) ? pullRequests : []).some((p) =>
     LIVE_PR_STATES.has(p?.state),
   );
+
+  // A live PR shortens the wait, and this is the difference between a hand-off
+  // routed in minutes and one routed hours later.
+  //
+  // The long grace guards against paging an agent whose run only LOOKS
+  // finished. But a terminal run plus a pull request is not ambiguous: the
+  // agent got far enough to publish its work, and the only thing still missing
+  // is the hand-off itself. The remaining risk is a few seconds of lag while
+  // the finishing agent's own status/assign writes land, which minutes covers.
+  //
+  // Observed 2026-08-02: BET-555/566/569 all finished within six minutes of
+  // each other, all three dropped the hand-off, and all three sat idle because
+  // the sweep would not look at them for another half hour — by which time the
+  // GitHub cron (nominally 15 minutes, observed 58-202) had not fired either.
+  const applicableGraceMs = hasPr && Number.isFinite(prGraceMs) ? prGraceMs : graceMs;
+  if (coldMs < applicableGraceMs) {
+    return no(
+      `latest run only ${Math.round(coldMs / 60000)}m cold${hasPr ? " (pr grace)" : ""}`,
+    );
+  }
+
+  const mins = Math.round(coldMs / 60000);
 
   if (issue.status === "todo") {
     // `todo` means the work has not started, so the current assignee is still
@@ -316,6 +341,9 @@ async function main() {
   const workspace = process.env.MULTICA_WORKSPACE_ID || DEFAULT_WORKSPACE;
   const base = process.env.MULTICA_API_BASE || DEFAULT_API_BASE;
   const graceMs = minutesEnv("MULTICA_UNSTICK_GRACE_MIN", 30);
+  // Shorter wait when the issue has a live PR — the run is terminal AND the
+  // work is published, so the hand-off is the only thing missing.
+  const prGraceMs = minutesEnv("MULTICA_UNSTICK_PR_GRACE_MIN", 3);
   const backoffMs = minutesEnv("MULTICA_UNSTICK_BACKOFF_MIN", 120);
   const maxActions = Number(process.env.MULTICA_UNSTICK_MAX_ACTIONS) || 5;
 
@@ -386,6 +414,7 @@ async function main() {
       roleById,
       now,
       graceMs,
+      prGraceMs,
       backoffMs,
     });
     if (!decision.act) {

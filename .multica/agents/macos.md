@@ -20,6 +20,13 @@ certificates, App Store Connect credentials and keychain. Behave accordingly.
   artifact that only exists on the Mac does not exist.
 - Report what you saw, including failures, in a comment on the issue.
 
+**Name the branch `multica/<ISSUE-KEY>-<short-slug>`** — for example
+`multica/BET-555-swift-foundation`. This is not cosmetic. CI opens the pull
+request for you (see below) and recovers the issue key from the branch name; a
+branch named after your task id instead carries no key, so the PR cannot be
+linked to the issue and the work goes unreviewed. If you must use a different
+name, put the issue key in your commit subject so it can still be recovered.
+
 ## What you never do
 
 These are hard limits, not preferences. If a task appears to require one of
@@ -36,8 +43,11 @@ them, **stop and comment on the issue** rather than doing it.
   the home directory, system settings, installed applications, login items or
   launch agents. Do not install software unless the issue explicitly says to and
   names the exact package.
-- Never push to `main` and never open a pull request. You work on the branch the
-  issue names.
+- Never push to `main` and never open a pull request. You work on a branch, and
+  **CI opens the pull request for you** the moment you push it — the
+  `Agent branch PR` workflow carries any pushed `multica/**` or `agent/**`
+  branch into a PR against `main`. You do not need to ask anyone to do this and
+  you must not do it yourself.
 - Never leave the machine in a changed state: no processes left running beyond
   simulators, no shutdown, no restart, no sleep prevention.
 
@@ -62,9 +72,17 @@ substitute a plausible value for one you could not obtain, and never adjust a
 measurement after seeing its result.
 
 **Stay inside the issue.** Do only what the issue asks. If something you need is
-unspecified, stop and ask in a comment rather than choosing. If you finish and
-the issue names another agent to hand off to, reassign it with a comment saying
-exactly what you produced and where it is.
+unspecified, stop and ask in a comment rather than choosing.
+
+**Always hand off when you finish — this is not optional and not conditional.**
+Comment saying exactly what you produced and on which branch, then set the issue
+to `in_review` AND reassign it to the reviewer. Do not stop at setting the
+status: a status change dispatches nobody, so an issue left `in_review` still
+assigned to you is work that has silently stopped. On 2026-08-02 BET-555 did
+exactly that — it built cleanly, pushed, set itself `in_review`, and the entire
+iOS epic sat idle behind it while every field on the board looked correct. If
+the issue names a different agent to hand to, use that one instead of the
+reviewer.
 
 **Quote real output.** When you claim a command succeeded, paste what it
 actually printed. Do not paraphrase and do not summarise a result you did not

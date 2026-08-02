@@ -2806,7 +2806,8 @@ neither can itself go quiet:
 | Sweep | Cadence | Fixes |
 |---|---|---|
 | `scripts/multica-unblock.mjs` (in `multica-close-on-merge.yml`) | hourly + after every merge | a `blocked` issue whose named blockers are all `done` → `todo` |
-| `scripts/multica-unstick.mjs` (`multica-unstick.yml`) | every 15 min | an agent-assigned `todo`/`in_progress`/`in_review` issue with nothing in flight and a terminal (or missing) run → re-dispatched to whoever owes the next move |
+| `scripts/multica-unstick.mjs` (`multica-unstick.yml`) | every 15 min (throttled — see below), plus on every PR opened / marked ready | an agent-assigned `todo`/`in_progress`/`in_review` issue with nothing in flight and a terminal (or missing) run → re-dispatched to whoever owes the next move |
+| `scripts/agent-branch-pr.mjs` (`agent-branch-pr.yml`) | on every push to `agent/**` or `multica/**` | a pushed agent branch with no pull request → one is opened for it |
 
 The two are complementary and never act on the same issue: unblock owns
 `blocked` and changes STATUS (plus the one assignment `next_owner` declares —
@@ -2857,6 +2858,35 @@ indistinguishable from a blocker's and is not. Rationale and stage ordering go
 in the DESCRIPTION. Always `node scripts/multica-unblock.mjs --dry-run
 --verbose` after editing a note — it prints the resolved blocker list per issue,
 which is how this trap was caught.
+
+**A branch is not a hand-off — CI opens the PR.** The `macos` worker is
+forbidden from opening pull requests (it runs on a daily-driver laptop holding
+signing certificates), and `.multica/agents/macos.md` declares the git branch to
+be "the hand-off medium" that the Linux agents consume. Nothing consumed it:
+BET-555 built cleanly, pushed `agent/macos/bbb581a9`, set itself `in_review`,
+and the iOS epic stalled behind a branch no one could review. `agent-branch-pr.yml`
+now carries ANY pushed `agent/**` / `multica/**` branch into a PR — which also
+covers a run that dies between its push and its hand-off (BET-569 died exactly
+there, leaving a green PR stuck as a draft). Two constraints on it:
+
+- **It must use `BUNDLE_PUSH_TOKEN`, not `GITHUB_TOKEN`.** GitHub suppresses
+  `pull_request` workflows for a PR opened with the default token, and `ci.yml`
+  runs only on `pull_request` + pushes to `main` — so such a PR would carry NO
+  checks while `typecheck-test` is the one required context. Permanently
+  unmergeable is a worse failure than the stranded branch it replaced.
+- **Multica links a PR by the key in its TITLE**, so the branch should be
+  `multica/<KEY>-<slug>`; the key is otherwise recovered from commit subjects,
+  and failing that the PR is opened unlinked with a warning.
+
+**The 15-minute schedule is fiction — assume hours.** GitHub throttles cron
+hard: ticks 58-202 minutes apart on 2026-08-01, and a 66-minute gap on
+2026-08-02 while three finished issues sat idle. `multica-unstick.yml` therefore
+also runs on `pull_request` `opened`/`ready_for_review` — an implementer
+finishing merges nothing, so the merge-event trigger never fires for it and the
+throttled cron was the only thing left. Paired with `MULTICA_UNSTICK_PR_GRACE_MIN`
+(3 min when the issue has a live PR, vs the 30 the no-PR case still gets, since
+a terminal run plus a published PR is unambiguous), a dropped hand-off now
+routes in minutes. Fork PRs carry no secrets, so the job skips them.
 
 **These are backstops, not the mechanism.** Agents are still required to hand
 off explicitly (`.multica/skills/manta-pr-workflow/SKILL.md` step 10); the sweep

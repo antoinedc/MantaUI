@@ -1,0 +1,86 @@
+# Carry an agent's pushed branch into a pull request.
+#
+# WHY THIS EXISTS
+# ---------------
+# `.multica/agents/macos.md` forbids the Mac worker from opening pull requests —
+# it runs on a daily-driver laptop holding signing certificates, so its brief is
+# deliberately narrow: build, capture, commit to a branch, report. The branch is
+# declared to be "the hand-off medium" and the Linux agents are expected to
+# consume it. Nothing did.
+#
+# On 2026-08-02 BET-555 built cleanly, pushed `agent/macos/bbb581a9`, set itself
+# `in_review` — and stopped. No pull request existed, so there was nothing to
+# review; `multica-unstick` duly routed it to the reviewer, who had nothing to
+# look at. The branch sat on the remote and the iOS epic stalled behind it while
+# every field on the board looked correct.
+#
+# This closes the gap without relaxing the Mac's limits: the worker still never
+# opens a PR, and the push it already performs is enough to produce one. It also
+# covers the general case — any agent whose run dies between its push and its
+# hand-off (BET-569 died exactly there, leaving a green PR stuck as a draft).
+#
+# WHY `BUNDLE_PUSH_TOKEN` AND NOT `GITHUB_TOKEN`
+# ----------------------------------------------
+# A pull request opened with the default `GITHUB_TOKEN` does NOT trigger
+# `pull_request` workflows — GitHub suppresses them to prevent recursion. Since
+# `ci.yml` runs only on `pull_request` and on pushes to `main`, such a PR would
+# carry NO checks, and `typecheck-test` is the one required context on `main`.
+# The PR would be permanently unmergeable — a worse failure than the stranded
+# branch it replaced. `BUNDLE_PUSH_TOKEN` is an admin-owned PAT (the same one
+# the retired mobile-bundle workflow used), so CI runs normally on the result.
+#
+# Idempotent: fires on every push to the branch, and does nothing when a pull
+# request already exists in ANY state — a closed PR is a human decision and is
+# never reopened as a new one.
+name: Agent branch PR
+
+on:
+  push:
+    branches:
+      - "agent/**"
+      - "multica/**"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to carry into a PR"
+        required: true
+        type: string
+      dry_run:
+        description: "Report what would be opened without acting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two pushes in quick succession must not race into two pull requests.
+  group: agent-branch-pr-${{ inputs.branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  carry:
+    name: Open a PR for a pushed agent branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The script compares the branch against origin/main, so it needs both
+          # refs and their history — a shallow single-branch clone cannot.
+          fetch-depth: 0
+
+      - name: Carry the branch
+        env:
+          # Falls back to GITHUB_TOKEN so the job still reports rather than
+          # failing outright if the PAT is ever rotated away; the PR it opens in
+          # that case will lack checks, which the log makes explicit.
+          GH_TOKEN: ${{ secrets.BUNDLE_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ inputs.branch || github.ref_name }}
+        run: |
+          if [ -z "${{ secrets.BUNDLE_PUSH_TOKEN }}" ]; then
+            echo "::warning::BUNDLE_PUSH_TOKEN is unset — a PR opened with GITHUB_TOKEN will not run CI and cannot be merged."
+          fi
+          node scripts/agent-branch-pr.mjs \
+            --branch "$BRANCH" \
+            ${{ (inputs.dry_run && '--dry-run') || '' }}
