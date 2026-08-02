@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Shadow-surface capture fixture</title>
+
+<!--
+  THE shadowed surface the visual gate captures (BET-571).
+
+  Background: BET-563 settled the elevation shadow scale, but every screen and
+  region the visual gate captured either (a) did not apply a shadow token at
+  all, or (b) cropped a region to an element's box, which EXCLUDES its
+  box-shadow (a shadow paints outside the border box, so a locator screenshot
+  of the element never shows it). A shadow-scale retune therefore moved 0/20
+  baselines — the gate could not catch a change to the very thing BET-563
+  changed.
+
+  This fixture closes that gap. It renders a large `--shadow-md` surface
+  (through the SAME themed-panel machinery the component companion uses:
+  `scripts/visual/companion.mjs`'s `.tp[data-theme][data-density]` panel +
+  `box-shadow:var(--shadow-md)`) on a plain canvas. The surface's shadow fills
+  a large fraction of the captured frame, so a future change to the shadow
+  scale moves well over the gate's 0.2% maxDiffPixelRatio instead of being
+  swallowed by a full-page composition shot.
+
+  Like every mockup, it loads the app's REAL token stylesheet, so `--shadow-md`
+  resolves to the live value in each theme:
+    light: 0 8px 24px rgb(26 24 21 / 0.10)   ([data-theme="light"], tokens.css)
+    dark : 0 8px 24px rgb(0 0 0 / 0.5)       (:root default, tokens.css)
+
+  The theme is driven by `?theme=light|dark`, defaulting to dark, and written
+  as `data-theme` on <html> — the attribute `tokens.css` keys on.
+-->
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+  }
+  /* The themed-panel machinery re-used from the component companion: a
+     [data-theme] scope with a comfortable density, exactly as
+     scripts/visual/companion.mjs renders its per-theme panels.
+     The panel's own canvas is deliberately OVERRIDDEN to a fixed neutral
+     light ground: the dark theme's `--shadow-md` is black-on-near-black on
+     the theme's real dark canvas, so it would be invisible to a pixel gate
+     and a retune would move ~0 pixels. A pixel gate must SEE the shadow to
+     catch a change to it, so the surface is showcased on a light stage. The
+     THING under test — `--shadow-md` — still resolves from the live
+     tokens.css per [data-theme]; only the backdrop is a constant across
+     themes so both shadows are equally gatable. */
+  .tp {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 140px;
+    background: #ECE9E4;
+  }
+  /* The shadowed surface. Background/border/radius read tokens; ONLY the
+     box-shadow differs from a plain card, so a shadow-scale change surfaces
+     here and nowhere else. The white card on the light stage makes both
+     themes' shadows clearly visible. */
+  .shsurf {
+    box-sizing: border-box;
+    width: 420px;
+    height: 300px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: var(--r-lg);
+    background: #FFFFFF;
+    box-shadow: var(--shadow-md);
+  }
+</style>
+</head>
+<body>
+  <div class="tp" data-density="comfortable">
+    <div class="shsurf" role="img" aria-label="shadow-md surface"></div>
+  </div>
+  <script>
+    var t = new URLSearchParams(location.search).get("theme");
+    if (t === "light" || t === "dark") {
+      document.documentElement.setAttribute("data-theme", t);
+    }
+  </script>
+</body>
+</html>
