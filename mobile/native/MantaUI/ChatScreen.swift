@@ -17,7 +17,36 @@ import SwiftUI
 // the generated tokens.
 // ===========================================================================
 
+/// Thin wrapper that owns WHICH opencode session the screen is showing.
+///
+/// Clearing a session does not end the conversation on screen — it starts a new
+/// opencode session in the same tmux window, and the user expects to stay
+/// exactly where they are with an empty transcript. The stores are built from
+/// the session id, so the id has to live one level ABOVE them: swapping it here
+/// rebuilds the content view (and its stores) in place. Popping back to the
+/// list instead, which is what this did before, both lost the user's place and
+/// left them reopening the OLD session id from a stale list.
 struct ChatScreen: View {
+    let sessionId: String
+    let title: String
+    let projectName: String
+    @ObservedObject var eventStore: MantaEventStore
+    @State private var currentSessionId: String?
+
+    var body: some View {
+        let sid = currentSessionId ?? sessionId
+        ChatScreenContent(
+            sessionId: sid,
+            title: title,
+            projectName: projectName,
+            eventStore: eventStore,
+            onCleared: { newId in currentSessionId = newId }
+        )
+        .id(sid)
+    }
+}
+
+private struct ChatScreenContent: View {
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
@@ -29,10 +58,14 @@ struct ChatScreen: View {
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore) {
+    /// Called with the NEW session id after a clear, so the wrapper can swap it.
+    let onCleared: (String) -> Void
+
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, onCleared: @escaping (String) -> Void) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
+        self.onCleared = onCleared
         let api = MantaAPIClient.live()
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
@@ -141,11 +174,15 @@ struct ChatScreen: View {
         }
     }
 
+    /// Clear = a fresh opencode session in the SAME window. Stay on the screen
+    /// and re-point it at the new id; the transcript comes back empty because
+    /// the session really is new.
     private func clearSession() async {
         guard let w = sessionWindow else { return }
-        _ = try? await MantaAPIClient.live().clearSession(
+        let newId = try? await MantaAPIClient.live().clearSession(
             sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
-        await MainActor.run { dismiss() }
+        guard let newId, !newId.isEmpty else { return }
+        await MainActor.run { onCleared(newId) }
     }
 
     private func forkSession() async {
