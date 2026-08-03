@@ -204,8 +204,7 @@ final class MantaAPIClient: Sendable {
     /// (not a repo, detached head, unreachable). Spawned locally by the box,
     /// so a terminal-side checkout is reflected on the next call.
     func vcsBranch(directory: String) async throws -> String? {
-        let result = try await call("opencode:vcs-branch", args: [directory], as: String?.self)
-        return result ?? nil
+        try await call("opencode:vcs-branch", args: [directory], as: String.self)
     }
 
     /// `tmux:rename-window` — rename a session (the row's name).
@@ -366,7 +365,14 @@ final class MantaAPIClient: Sendable {
         guard let result = object["result"], !(result is NSNull) else {
             return nil
         }
-        let resultData = try JSONSerialization.data(withJSONObject: result)
+        // `.fragmentsAllowed` is load-bearing, not defensive. A channel whose
+        // result is a bare string or number (opencode:vcs-branch returns
+        // "main") is a valid JSON FRAGMENT, and re-serialising one without this
+        // option does not fail gracefully — NSJSONSerialization raises
+        // NSInvalidArgumentException ("Invalid top-level type in JSON write"),
+        // an Objective-C exception that Swift cannot catch, so the whole app
+        // died the moment any such channel was called.
+        let resultData = try JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed])
         return try JSONDecoder().decode(type, from: resultData)
     }
 
