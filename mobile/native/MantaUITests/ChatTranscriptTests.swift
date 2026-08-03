@@ -190,6 +190,10 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(ChatHeaderSubtitle.text(running: true, elapsed: 0, contextPct: nil), "running · 0s")
     }
 
+    func testHeaderSubtitleIdleWithContext() {
+        XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: 12.6), "idle · 13%")
+    }
+
     func testHeaderSubtitleIdle() {
         XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: nil), "idle")
     }

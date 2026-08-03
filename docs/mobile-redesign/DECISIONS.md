@@ -615,7 +615,9 @@ it carries everything rather than a subset.
 - Native header, transparent, no large title. Custom two-line centred title:
   session name 14.5px/600 tracking −0.01em `tx1` with ellipsis; below it
   11px/500 `tx4` of the form "running · 2m · 8%", with the word "running" in
-  `accentTx` when busy, falling back to "idle".
+  `accentTx` when busy; when idle, `idle · N%` (the context number matters most
+  before sending, so it stays visible), collapsing to bare "idle" only when no
+  context is established yet.
 - Leading and trailing 38×38 circular glass buttons: ChevronLeft, MoreHorizontal.
 - **Session status lives in the header subtitle** — which is exactly where
   BET-406 phase 7 is moving it on desktop. The two clients converge.
