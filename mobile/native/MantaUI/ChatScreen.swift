@@ -20,15 +20,22 @@ import SwiftUI
 struct ChatScreen: View {
     let title: String
     let projectName: String
+    /// Folder whose git branch the overflow sheet header shows (D4). Nil when
+    /// the project couldn't be resolved — then no `⎇ <branch>` line renders.
+    let gitFolder: String?
     @ObservedObject var eventStore: MantaEventStore
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore) {
+    @State private var showOverflow = false
+    @State private var branch = ""
+
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, gitFolder: String? = nil) {
         self.title = title
         self.projectName = projectName
+        self.gitFolder = gitFolder
         self.eventStore = eventStore
         let api = MantaAPIClient.live()
         _store = StateObject(wrappedValue: ChatSessionStore(
@@ -40,6 +47,16 @@ struct ChatScreen: View {
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    /// Resolve the `⎇ <branch>` label (D4) for the overflow sheet header from
+    /// the session's git folder. Empty when the folder is unknown or not in a
+    /// repo — the sheet then carries only the session name.
+    private func loadBranch() async {
+        guard let gitFolder, !gitFolder.isEmpty else { return }
+        let api = MantaAPIClient.live()
+        let worktrees = try? await api.listWorktrees(gitFolder)
+        branch = WorktreeInfoLogic.gitStateLabel(worktrees)
+    }
 
     var body: some View {
         // ChatScreen is PUSHED within SessionListView's NavigationStack, so it
@@ -80,6 +97,12 @@ struct ChatScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
         .overlay(alignment: .top) { header }
+        .sheet(isPresented: $showOverflow) {
+            OverflowSheet(title: title, branch: branch, tokens: tokens)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .task { await loadBranch() }
         .onAppear { store.start() }
         .onDisappear { store.stop() }
         .accessibilityElement(children: .contain)
@@ -120,10 +143,21 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Trailing 38×38 glass button (§8) — a placeholder in S4 (the
-            // overflow sheet with fork/settings is a later stage).
-            Color.clear
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            // Trailing 38×38 glass button (§8) — opens the overflow sheet
+            // (BET-624 row 1). Stable identifier so the simulator capture
+            // driver (BET-625) can tap it.
+            Button {
+                showOverflow = true
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.tx1)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .accessibilityLabel("More options")
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("overflow-button")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -194,6 +228,54 @@ struct ChatScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { store.load() }
+    }
+}
+
+// MARK: - Overflow sheet (BET-624 row 1 shell)
+
+/// The overflow sheet (§8, DECISIONS.md:667-670) — row 1 of the epic builds
+/// the SHELL only: a real sheet that rests at half height, drags to full,
+/// flicks away, dims the screen behind proportionally, and shows the session
+/// name plus the git branch (D4) in its header. The content rows (attach ·
+/// scheduled tasks · secrets · …) land in build rows 2-4, so the body is an
+/// empty container those issues fill.
+struct OverflowSheet: View {
+    let title: String
+    let branch: String
+    let tokens: Tokens
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(tokens.canvas.ignoresSafeArea())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("overflow-sheet")
+    }
+
+    /// Session name, then `⎇ <branch>` beneath it (D4) — the branch lives in
+    /// the sheet header, not the two-line chat header.
+    private var header: some View {
+        VStack(spacing: Metrics.spacing.spPx) {
+            Text(title)
+                .font(.system(size: Metrics.type.chatTitle, weight: mantaFontWeight(Metrics.type.semibold)))
+                .kerning(Metrics.type.chatTitleTracking * Metrics.type.chatTitle)
+                .foregroundColor(tokens.tx1)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if !branch.isEmpty {
+                Text(branch)
+                    .font(.system(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.tx4)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp3)
+        .frame(maxWidth: .infinity)
     }
 }
 

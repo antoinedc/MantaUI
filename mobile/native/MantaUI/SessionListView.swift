@@ -67,7 +67,13 @@ struct SessionListView: View {
             .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
             .navigationDestination(item: $openTarget) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
+                    let project = store.projects.first(where: { $0.tmuxSession == target.project })
+                    let window = project?.windows.first(where: { $0.index == target.windowIndex })
+                    // The sheet's branch (D4) resolves against the session's
+                    // git folder — prefer the window's worktree, else the
+                    // project's default cwd.
+                    let gitFolder = window?.worktreePath ?? project?.defaultCwd
+                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, gitFolder: gitFolder)
                 } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
                           let window = project.windows.first(where: { $0.index == target.windowIndex }) {
                     // S6 (BET-598): a non-chat window opens the native
