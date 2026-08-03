@@ -4,18 +4,22 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (0a7b57e)
+Last reviewed: 2026-08-03 (PLACEHOLDER)
 
 ## Resolved
 
-BET-637 fixes the remaining transcript-frame divergences against the mockup:
-the user message was a full-width left-aligned tinted bar with a `›` marker that
-bled outside the column; it is now a right-aligned rounded bubble capped at 88%
-(`.umsg`). Assistant text blocks carried a `●` bullet in a left gutter; they are
-now plain paragraphs flush with the column (`.amsg`). And the reading column
-was padded 16px (inherited from the scroll container) while the composer and
-the working indicator sat at a different inset; all three now share one 28px
-left/right edge inside the 72ch measure (`.wrap` / `.comp-in`).
+BET-637 fixed the initial transcript-frame divergences against the mockup: the
+user message is a right-aligned rounded bubble capped at 88% (`.umsg`),
+assistant text blocks are plain paragraphs flush with the column (`.amsg`), and
+the reading column shares the primitive's 28px side inset.
+
+BET-646 supersedes part of that: the transcript column now runs the panel's
+**full width** (28px inset, no measure cap, no centring) by owner decision,
+while the composer stack and the user bubble keep the 72ch measure. The user
+bubble caps at `min(88%, var(--measure))` so a long message stops at the
+reading measure instead of spanning the window. The mockup and the app were
+updated together; the session baselines were regenerated and re-conformed to
+this record.
 
 **Every tool body now sits in the card's recessed well.** BET-636 boxed the
 tool call but left three of its bodies outside the well: the bash/read/grep
