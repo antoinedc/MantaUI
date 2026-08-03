@@ -4,7 +4,7 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (bba1139)
+Last reviewed: 2026-08-03 (f2b3cd2)
 
 ## Resolved
 
@@ -16,6 +16,27 @@ now plain paragraphs flush with the column (`.amsg`). And the reading column
 was padded 16px (inherited from the scroll container) while the composer and
 the working indicator sat at a different inset; all three now share one 28px
 left/right edge inside the 72ch measure (`.wrap` / `.comp-in`).
+
+**Every tool body now sits in the card's recessed well.** BET-636 boxed the
+tool call but left three of its bodies outside the well: the bash/read/grep
+connector output (unboxed, with the `⎿` corner glyph and a 16px gutter column
+that was blank on every row but one) and Glob/WebFetch (which drew their OWN
+`bg-bg-soft` bordered box, so a frame sat flush inside the card's frame). All
+three now render into `OutputWell variant="attached"`, so output shares the
+header's `px-3` inset, sits on the inset surface, and is separated from the
+header by the well's top border — one silhouette for collapsed and expanded
+cards alike. The `⎿` gutter is dropped with them: it existed to tie output to
+its header in the pre-card flat list, a job the card now does, and it left
+every output line misaligned with the header above it. It survives in the two
+places still drawn flat — the patch/file parts in `ToolCall.tsx` and
+`ActiveTodos`.
+
+**The hover timestamp clears the row instead of overlapping it.** At `-top-2`
+the 12px stamp ran from −8px to +4px relative to the row, i.e. its bottom 4px
+sat inside the row's first block. Invisible while that block was bare text;
+a visible collision once it became a bordered tool card (BET-636) or a user
+bubble (BET-637). It is now `-top-[18px]` — 6px of air on both sides inside
+the 24px `--turn-gap`.
 
 ## Accepted divergences
 
@@ -32,7 +53,6 @@ left/right edge inside the 72ch measure (`.wrap` / `.comp-in`).
   `animate-pulse` (1s ease-in-out) instead of the spec's `.tool-h .g.run` 1.4s
   ease-in-out keyframe (BET-636). Intentional: the primitive layer does not add
   a bespoke keyframe for one cadence.
-- **Unboxed connector output** — the bash/read/grep connector output keeps its
-  `⎿` shape unboxed at 12px size, deliberately NOT the recessed well
-  (BET-636). Only the generic tool output body and the unified diff sit in the
-  well.
+(The bash/read/grep connector output was listed here as an accepted divergence
+by BET-636 — kept unboxed with its `⎿` gutter at 12px. That is now resolved;
+see below.)
