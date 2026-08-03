@@ -85,7 +85,7 @@ struct SessionListView: View {
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
+                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path)
                 } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
                           let window = project.windows.first(where: { $0.index == target.windowIndex }) {
                     // S6 (BET-598): a non-chat window opens the native
@@ -634,7 +634,11 @@ private enum SheetRoute: Identifiable {
 /// A route value, so its identity must be stable and derived from what it
 /// addresses — never a fresh UUID, which would make the same session push as a
 /// different destination every time it is constructed.
-private struct SessionOpenTarget: Hashable {
+///
+/// Internal (not `private`) so the chat screen can push routes onto the same
+/// NavigationStack path — fork lands on the new session, and "Open terminal"
+/// routes to the terminal surface for the same window.
+struct SessionOpenTarget: Hashable {
     let project: String
     let windowIndex: Int
     let name: String

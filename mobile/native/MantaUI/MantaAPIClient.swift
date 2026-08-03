@@ -177,8 +177,10 @@ final class MantaAPIClient: Sendable {
     }
 
     /// `opencode:fork-session` — fork a chat session into a new window (§7.2
-    /// long-press Fork). `messageID` is optional (fork at head when absent).
-    func forkSession(sessionId: String, sessionName: String, windowName: String, cwd: String? = nil, messageID: String? = nil) async throws {
+    /// long-press Fork, and the chat overflow sheet). `messageID` is optional
+    /// (fork at head when absent). Returns the NEW session id so the caller
+    /// can navigate to the fork; nil when the box returns none.
+    func forkSession(sessionId: String, sessionName: String, windowName: String, cwd: String? = nil, messageID: String? = nil) async throws -> String? {
         var dict: [String: Any] = [
             "sessionId": sessionId,
             "sessionName": sessionName,
@@ -186,7 +188,8 @@ final class MantaAPIClient: Sendable {
         ]
         if let cwd { dict["cwd"] = cwd }
         if let messageID { dict["messageID"] = messageID }
-        _ = try await callVoid("opencode:fork-session", args: [dict])
+        let result: ForkSessionResult? = try await call("opencode:fork-session", args: [dict], as: ForkSessionResult.self)
+        return result?.newSessionId
     }
 
     /// `opencode:clear-session` — start a fresh opencode session in the same
@@ -410,6 +413,13 @@ final class MantaAPIClient: Sendable {
 }
 
 private struct VoidResult: Decodable {}
+
+/// The `opencode:fork-session` reply is `{ newSessionId, projects }`; only the
+/// new session id is consumed by callers (to navigate to the fork). The extra
+/// keys are ignored by decoding.
+private struct ForkSessionResult: Decodable {
+    let newSessionId: String?
+}
 
 private struct ClearSessionResult: Decodable {
     let newSessionId: String?
