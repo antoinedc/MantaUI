@@ -4,16 +4,16 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (4f1f85e)
+Last reviewed: 2026-08-03 (3a51961)
 
 ## Floating chat chrome (this change)
 
-The composer is a floating rounded input with the model chip above it. The
-HEADER is not floating: #558 briefly made it a row of translucent pills with
-no breadcrumb, which was a mobile treatment applied to desktop, and it was
-restored to a bordered 44px bar carrying **workspace / session** in 4f1f85e.
-That name is the header's primary job — one desktop window shows many
-sessions across many workspaces, and the branch chip does not identify one.
+#558 applied a mobile treatment to the desktop chrome: a floating
+translucent header with no breadcrumb, and a floating composer with the
+model chip moved above the input. Both were reverted — the header bar in
+4f1f85e, the composer meta row in 3a51961 — so the screen matches the
+reference again: a bordered header carrying **workspace / session**, and a
+composer whose meta row sits BELOW the input box.
 
 Baselines regenerated in 33dc528 for the three registry rows that share this
 record (`session`, `session-header`, `session-composer`), pixels and aria
@@ -44,10 +44,6 @@ Fixed here, and visible in the new `session` baseline:
 Recorded from `npm run visual:compare session` at 33dc528. These are app-vs-
 mockup deltas, all of them the app moving ahead of the drawing:
 
-- **Composer floats; header does not.** The mockup draws a bordered composer
-  panel with a meta row beneath it; the app draws a floating rounded input with
-  the model chip above. The header matches the mockup: opaque, bottom border,
-  breadcrumb present.
 - **Mode-toggle glyph dropped.** The mockup keeps a `>_` glyph beside the ⋯
   button. Removed by owner direction: it was a second control for a decision
   the ⋯ menu's own Mode section already owns, and it could only ever express

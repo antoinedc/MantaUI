@@ -181,29 +181,6 @@ html, body, #root {
   .manta-streaming > *:last-child::after { animation: none; }
 }
 
-/* Floating glass pill — used for header chips (branch, context, menu) and
-   the model picker chip above the composer. Frosted-glass: a semi-transparent
-   panel surface with backdrop-blur so the transcript content shows through.
-   Works on both dark and light themes because panel-rgb carries the right
-   per-theme value. */
-.manta-glass-pill {
-  background: rgb(var(--panel-rgb) / 0.72);
-  backdrop-filter: blur(12px) saturate(1.5);
-  -webkit-backdrop-filter: blur(12px) saturate(1.5);
-  border: 1px solid rgb(var(--border-rgb) / 0.55);
-  border-radius: var(--r-full);
-  box-shadow: var(--shadow-sm);
-}
-
-/* Floating composer shell — inherits the glass look with a stronger fill
-   so the input is clearly readable while the transcript shows through below. */
-.manta-float-composer {
-  background: rgb(var(--panel-rgb) / 0.85);
-  backdrop-filter: blur(16px) saturate(1.6);
-  -webkit-backdrop-filter: blur(16px) saturate(1.6);
-  box-shadow: var(--shadow-md);
-}
-
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
