@@ -414,8 +414,12 @@ struct SessionListView: View {
                         .foregroundColor(tokens.onAccent)
                         .frame(width: 44, height: 44)
                 }
-                .glassEffect(.regular.tint(tokens.accentSolid).interactive(), in: .circle)
-                .buttonStyle(.plain)
+                // The system's own glass BUTTON style, not a plain button with
+                // a glass effect layered over it: the layered version rendered
+                // correctly but ate the touch, so the button looked dead.
+                .buttonStyle(.glassProminent)
+                .tint(tokens.accentSolid)
+                .clipShape(.circle)
                 .accessibilityLabel("New")
             }
         }
