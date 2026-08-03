@@ -56,6 +56,16 @@
   --block-gap: var(--sp-3);
   --turn-gap: var(--sp-6);
 
+  /* Transcript gutter. The composer column keeps the spec's 28px inset; the
+     TRANSCRIPT column is wider because its left/right margin is not empty
+     space — it is where each turn's timestamp sits, out of the reading
+     column, level with the turn's first line (the stamp used to sit ABOVE
+     the row, which pushed every turn down by its own height for a label
+     nobody reads twice). 48px is the stamp's width at 10px plus the sp-2 it
+     stands off the content plus an edge margin; below that the stamp starts
+     colliding with the panel edge. */
+  --transcript-inset: 48px;
+
   /* Elevation shadows (BET-415). --shadow-sm is the resting lift for
      contained surfaces (composer input, popovers, menus); --shadow-md is
      reserved for floating panels that overlap content. Theme-aware so the

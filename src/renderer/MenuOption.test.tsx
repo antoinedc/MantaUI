@@ -69,6 +69,29 @@ describe("MenuOption", () => {
     expect(label?.className).not.toContain("text-accent-tx");
   });
 
+  it("gives pointer hover the SAME fill as the roving keyboard highlight", () => {
+    // Only the keyboard half used to be implemented, so a mouse user got no
+    // feedback at all on the model / effort menus.
+    h = mount(<MenuOption label="A" />);
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("hover:bg-fill-hover");
+    h.unmount();
+    h = mount(<MenuOption label="A" active />);
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("bg-fill-hover");
+  });
+
+  it("keeps the accent tint on a selected row instead of the grey hover fill (C1)", () => {
+    h = mount(<MenuOption label="A" selected />);
+    const cls = (h.container.firstElementChild as HTMLElement).className;
+    expect(cls).toContain("bg-accent-bg");
+    expect(cls).not.toContain("hover:bg-fill-hover");
+  });
+
+  it("separates rows so a highlight does not touch the row below", () => {
+    // 4px, the same gap the sidebar's session rows carry (SessionRow).
+    h = mount(<MenuOption label="A" />);
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("mb-1");
+  });
+
   it("reflects selection via aria-selected", () => {
     h = mount(<MenuOption label="A" selected />);
     expect((h.container.firstElementChild as HTMLElement).getAttribute("aria-selected")).toBe("true");

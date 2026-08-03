@@ -923,6 +923,26 @@ export function reconcileOptimisticUser<M extends { info: { id: string; role: st
 // the final `state.output` when present (completed / error), and falls back to
 // the live `state.metadata.output` while running. Returns "" when neither is a
 // non-empty string.
+/**
+ * Strip leading and trailing blank lines from a tool's output, for RENDERING
+ * only.
+ *
+ * Almost every command ends its output with a newline, and plenty end with
+ * several (git push, pytest). A tool body renders one row per line and gives an
+ * empty line a non-breaking height, so those invisible trailing lines became
+ * real vertical space inside the card — up to three blank rows hanging under
+ * the last line of output, which read as a padding bug in the card rather than
+ * as content. Trimming here rather than in `resolveToolOutput` keeps the
+ * resolver a data accessor: the raw string still carries whatever the process
+ * emitted (and the live-stream case still grows byte-for-byte), while the
+ * presenter decides not to draw the empty tail.
+ *
+ * Interior blank lines are preserved — they are part of the output's shape.
+ */
+export function trimOutputEdges(text: string): string {
+  return text.replace(/^(?:[ \t]*\r?\n)+/, "").replace(/(?:\r?\n[ \t]*)+$/, "");
+}
+
 export function resolveToolOutput(state: {
   output?: unknown;
   metadata?: Record<string, unknown> | undefined;

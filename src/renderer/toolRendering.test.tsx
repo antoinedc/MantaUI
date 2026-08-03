@@ -129,6 +129,21 @@ describe("tool card chrome", () => {
     expect(scrollers[0].tagName).toBe("PRE");
   });
 
+  it("does not pad the card with blank rows for a command's trailing newlines", () => {
+    installMockApi();
+    // `git push` (and pytest, and most commands) end their output with one or
+    // more newlines; each was rendering as a full-height blank row inside the
+    // well, which read as a padding bug at the bottom of the card.
+    const part = {
+      type: "tool",
+      tool: "bash",
+      state: { status: "completed", output: "To github.com\n  main -> main\n\n\n" },
+    } as unknown as OpencodePart;
+    h = mount(<ToolCall part={part} verbose={false} />);
+    const rows = Array.from(h.container.querySelectorAll("div.whitespace-pre-wrap"));
+    expect(rows.map((r) => r.textContent)).toEqual(["To github.com", "  main -> main"]);
+  });
+
   it("puts the copy button in the card header, not floating over the body", () => {
     installMockApi();
     h = mount(<ToolCall part={outputPart("hello")} verbose={false} />);

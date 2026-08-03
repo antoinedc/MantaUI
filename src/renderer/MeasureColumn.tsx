@@ -17,9 +17,12 @@
 //   - "measure" (default) — today's behaviour exactly: `max-width:
 //     var(--measure)` + `mx-auto` (the composer, the user bubble's container,
 //     and the pinned cards above the composer).
-//   - "full" — no cap and no centring; the 28px inset is preserved. The gutter
-//     is what makes this "full width of the panel" rather than "edge to edge"
-//     (the transcript column and the working indicator).
+//   - "full" — no cap and no centring, at the WIDER `--transcript-inset`
+//     gutter. The gutter is what makes this "full width of the panel" rather
+//     than "edge to edge" (the transcript column and the working indicator),
+//     and in the transcript it is load-bearing rather than decorative: the
+//     per-turn timestamp is positioned INTO it (see MessageRow), so narrowing
+//     it back to 28px would push the stamps off the panel edge.
 //
 // `stacked` picks the two spec forms within a width: true → flex column with
 // `--turn-gap` between children (the transcript); false → a plain block (the
@@ -46,9 +49,10 @@ export function MeasureColumn({
   const full = width === "full";
   return (
     <div
-      className={`w-full${full ? "" : " mx-auto"} px-[28px]${stacked ? " flex flex-col" : ""}`}
+      className={`w-full${full ? "" : " mx-auto"}${stacked ? " flex flex-col" : ""}`}
       style={{
         maxWidth: full ? undefined : "var(--measure)",
+        paddingInline: full ? "var(--transcript-inset)" : "28px",
         gap: stacked ? "var(--turn-gap)" : undefined,
       }}
     >

@@ -256,32 +256,45 @@ export const MessageRow = memo(function MessageRow({
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
-  // untouched. It labels the row from above: left for the assistant, right for
-  // the user's bubble.
+  // untouched.
   //
-  // IN FLOW, NOT ABSOLUTE (and not hover-gated). It used to be an absolutely
-  // positioned `-top-[18px]` overlay revealed on hover, which meant two
-  // problems: the stamp was invisible until you happened to point at the row,
-  // and its 6px of air had to be stolen out of the 24px `--turn-gap` — so it
-  // read as a glyph stuck to the top edge of the following card rather than a
-  // label for the turn. A persistent stamp is layout, so it participates in
-  // layout: the turn gap sits ABOVE it untouched and `--sp-1` separates it
-  // from the row's first block. Do not put it back in an absolute box — the
-  // negative offset only existed to avoid shifting a hidden element in.
+  // IN THE GUTTER, level with the row's first line — not above it. Two earlier
+  // shapes were wrong in opposite ways: an absolute `-top-[18px]` overlay read
+  // as a glyph stuck to the top edge of the following card, and an in-flow
+  // label above the row cost every turn a whole extra line of height for
+  // something you glance at once. Positioning it OUT of the reading column
+  // costs no layout at all, which is why `--transcript-inset` is wider than
+  // the composer's: the margin is the stamp's home. `right-full` / `left-full`
+  // means the offset is derived from the content edge, not a magic number that
+  // has to be kept in sync with the inset.
+  //
+  // Hover-gated on purpose. A timestamp on every row, always on, is a column
+  // of numbers down the side of a conversation nobody asked to read; the
+  // information is worth having on demand, not worth the permanent noise.
   //
   // Type: sans (it is chrome, not code — the transcript's mono is reserved for
-  // commands, paths and output), 11px, tabular so the digits don't jitter
-  // between rows.
+  // commands, paths and output), 10px, tabular so the digits don't jitter.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
-    <div className="flex flex-col" style={{ gap: "var(--sp-1)" }}>
+    <div className="group relative">
       {ts && (
-        <div
-          className={`select-none whitespace-nowrap text-[11px] leading-none tabular-nums text-text-faint${isUser ? " text-right" : ""}`}
+        <span
+          className={
+            "pointer-events-none absolute select-none whitespace-nowrap " +
+            "text-[10px] leading-none tabular-nums text-text-faint " +
+            "opacity-0 group-hover:opacity-100 transition-opacity " +
+            // The offset centres the 10px stamp on the row's FIRST LINE, and
+            // that line sits at a different depth per side: a user row always
+            // opens with the bubble (1px border + 11px padding + a 23px line
+            // box → centre ≈ 23px), while an assistant row opens with prose
+            // (centre ≈ 12px) or a tool-card header (centre ≈ 16px). One
+            // number cannot serve both, so each side gets its own.
+            (isUser ? "left-full ml-2 top-[18px]" : "right-full mr-2 top-[8px]")
+          }
           aria-hidden
         >
           {ts}
-        </div>
+        </span>
       )}
       {children}
     </div>

@@ -7,7 +7,7 @@
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
 import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { resolveToolOutput } from "./chatUtils";
+import { resolveToolOutput, trimOutputEdges } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
@@ -17,7 +17,7 @@ import { OutputWell } from "./OutputWell";
 // red/green/neutral. Otherwise we render it as a monospace code block,
 // truncated to a sensible height by default.
 export const ToolOutput = memo(function ToolOutput({
-  output,
+  output: raw,
   copy = false,
 }: {
   output: string;
@@ -30,6 +30,9 @@ export const ToolOutput = memo(function ToolOutput({
    */
   copy?: boolean;
 }) {
+  // Trailing newlines would otherwise render as blank rows padding the bottom
+  // of the well (see trimOutputEdges).
+  const output = trimOutputEdges(raw);
   const looksLikeDiff =
     /^---\s/.test(output) ||
     /\n---\s/.test(output) ||
@@ -144,7 +147,10 @@ export function BashBody({ state, verbose }: { state: ToolState; verbose: boolea
 // ToolCall.tsx (patch/file parts) and ActiveTodos is a different, still-flat
 // context and keeps its glyph.
 function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number }) {
-  const lines = body.split("\n");
+  // Trailing newlines would otherwise render as blank rows padding the bottom
+  // of the well — and worse, count against `maxLines`, so a 5-line budget
+  // could be spent showing three empty rows (see trimOutputEdges).
+  const lines = trimOutputEdges(body).split("\n");
   const visibleCount = Math.min(lines.length, maxLines);
   const hidden = lines.length - visibleCount;
   // Take the tail (latest lines), not the head.
@@ -254,7 +260,7 @@ export function WebFetchBody({ state }: { state: ToolState }) {
   const output = resolveToolOutput(state);
   return (
     <CollapsibleLines
-      lines={output ? output.split("\n") : []}
+      lines={output ? trimOutputEdges(output).split("\n") : []}
       maxLines={15}
       header={
         url ? (
