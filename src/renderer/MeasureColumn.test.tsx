@@ -45,4 +45,34 @@ describe("MeasureColumn", () => {
     expect(el.className).toBe("w-full mx-auto px-[28px] flex flex-col");
     expect(el.style.gap).toBe("var(--turn-gap)");
   });
+
+  it('renders the "full" variant uncapped and uncentred, keeping the 28px inset', () => {
+    h = mount(<MeasureColumn width="full">Hello</MeasureColumn>);
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toBe("w-full px-[28px]");
+    expect(el.style.maxWidth).toBe("");
+    expect(el.style.gap).toBe("");
+    expect(el.textContent).toBe("Hello");
+  });
+
+  it('keeps the turn-gap flex column under "full" when stacked', () => {
+    h = mount(
+      <MeasureColumn width="full" stacked>
+        <span>a</span>
+        <span>b</span>
+      </MeasureColumn>,
+    );
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toBe("w-full px-[28px] flex flex-col");
+    expect(el.style.maxWidth).toBe("");
+    expect(el.style.gap).toBe("var(--turn-gap)");
+  });
+
+  it('renders "measure" explicitly as today\'s capped+centred behaviour', () => {
+    h = mount(<MeasureColumn width="measure">Hello</MeasureColumn>);
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toBe("w-full mx-auto px-[28px]");
+    expect(el.style.maxWidth).toBe("var(--measure)");
+    expect(el.style.gap).toBe("");
+  });
 });
