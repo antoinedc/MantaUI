@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
@@ -198,6 +198,21 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // handling Button/Tag give their 12.5/11.5px labels. Real values from the
   // redesign spec's `.setrow` definition, not drift.
   SettingsRow: [2, 3, 5],
+  // StatusDot's verbatim spec chrome (BET-636): the 6px status dot
+  // (w-[6px] h-[6px]) — `.tool-h .g` from the session spec. The only off-grid
+  // value the dot carries.
+  StatusDot: [6],
+  // OutputWell's verbatim spec chrome (BET-636): the 9px standalone vertical
+  // padding (py-[9px], from `.ask-cmd`) and the decimal tail of the 12.5px
+  // mono size (text-[12.5px] → the `\d+px` scan reads it as 5, same handling
+  // Button/Tag give their decimal labels). Real values from `.tool-b` /
+  // `.ask-cmd`, not drift.
+  OutputWell: [9, 5],
+  // ToolCard's verbatim spec chrome (BET-636): the 9px header vertical padding
+  // (py-[9px], `.tool-h`), the 11px meta size (text-[11px], `.tool-h .r`), and
+  // the 12.5px mono header size (text-[12.5px] → reads as 5). Real values
+  // from `.tool`/`.tool-h`, not drift.
+  ToolCard: [9, 11, 5],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -272,6 +287,9 @@ describe("M527 primitive rules", () => {
       "text-[10.5px]": ["IconCard.tsx"], // the icon-card's mono label size (BET-614)
       "tracking-[.1em]": ["Eyebrow.tsx"], // the eyebrow's letter-spaced uppercase signature (BET-614)
       "last:border-b-0": ["SettingsRow.tsx"], // the settings-row trailing-border removal — the .setrow row-divider signature (BET-614)
+      "w-[6px]": ["StatusDot.tsx"], // the real 6px status dot — `.tool-h .g` (BET-636)
+      "bg-inset": ["OutputWell.tsx"], // the recessed output well — `.tool-b`/`.ask-cmd` (BET-636)
+      "text-[12.5px]": ["ToolCard.tsx", "OutputWell.tsx", "Button.tsx", "SettingsRow.tsx"], // the 12.5px mono chrome — ToolCard header + OutputWell well (BET-636), plus the pre-existing Button label and SettingsRow help which already owned it before this primitive tracked it
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {

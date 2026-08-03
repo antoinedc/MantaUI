@@ -4,25 +4,19 @@
 // per-tool body views:
 //   - AssistantPart: switches on part.type (text / reasoning / tool / patch /
 //     file) and delegates tool parts to ToolCall.
-//   - ToolCall: switches on the tool name and dispatches to a *Body renderer.
+//   - ToolCall: switches on the tool name and dispatches to a *Body renderer,
+//     wrapped in the ToolCard primitive (BET-636).
 //   - ToolOutput / UnifiedDiff / Collapsible*: shared output presenters.
-//   - TaskBody: subagent card that renders the child transcript inline using
-//     MessageRow (imported from ./MessageRow — an intentional module cycle that
-//     is safe because both references are used only at render time).
+//   - TaskCard: the subagent card (extracted to ./TaskCard, BET-636), which
+//     renders the child transcript inline using MessageRow (an intentional
+//     module cycle that is safe because both references are used only at
+//     render time).
 
-import { memo, useContext, useMemo } from "react";
+import { memo } from "react";
 import type { OpencodePart } from "../shared/types";
-import {
-  extractSubagentInfo,
-  formatDuration,
-  formatTokens,
-  resolveToolOutput,
-  summarizeChildSession,
-  cssVar,
-} from "./chatUtils";
-import { MetaBadge, TaskContext, type ToolState } from "./chatShared";
+import { resolveToolOutput, cssVar } from "./chatUtils";
+import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
-import { MessageRow } from "./MessageRow";
 import {
   BashBody,
   GlobBody,
@@ -33,26 +27,20 @@ import {
   UnifiedDiff,
   WebFetchBody,
 } from "./ToolBodies";
+import { ToolCard } from "./ToolCard";
+import { TaskCard } from "./TaskCard";
 
-// Verbose summary of an Edit/Write/MultiEdit diff: "Added 5 lines",
-// "Removed 3 lines", or "Added 5 lines, removed 3 lines". Replaces the
-// terse `+5 −3` header so the tool row reads more naturally at a glance.
-// First letter capitalized — only the lead verb, not both (natural prose).
+// Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
+// right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
+// when zero. The minus is U+2212 MINUS SIGN, matching the diff renderer's
+// existing convention. Callers place the two counts in a gap-spaced meta slot.
 export function formatFileDiff(additions: number, deletions: number): React.ReactNode {
-  const aLead = `Added ${additions} line${additions === 1 ? "" : "s"}`;
-  const dLead = `Removed ${deletions} line${deletions === 1 ? "" : "s"}`;
-  const dTail = `removed ${deletions} line${deletions === 1 ? "" : "s"}`;
-  if (additions > 0 && deletions > 0) {
-    return (
-      <>
-        <span className="text-ok">{aLead}</span>,{" "}
-        <span className="text-danger">{dTail}</span>
-      </>
-    );
-  }
-  if (additions > 0) return <span className="text-ok">{aLead}</span>;
-  if (deletions > 0) return <span className="text-danger">{dLead}</span>;
-  return null;
+  return (
+    <>
+      {additions > 0 && <span className="text-ok">+{additions}</span>}
+      {deletions > 0 && <span className="text-danger">−{deletions}</span>}
+    </>
+  );
 }
 
 // Bullet color/animation by part kind + tool status. Text gets grey; tools
@@ -186,8 +174,9 @@ export const AssistantPart = memo(function AssistantPart({
 // ===== Tool call rendering =====
 //
 // One `ToolCall` switches on `state.input.tool` and dispatches to per-tool
-// body renderers. Each body is small enough to inline; the shared header
-// (the `● Toolname(title)` line + status/diff stats) lives in ToolHeader.
+// body renderers. Each body is small enough to inline; the shared header —
+// the status dot, tool name + argument and the status/diff meta — lives in the
+// ToolCard primitive (BET-636).
 //
 // Add a new tool: write a `<ToolnameBody>` function, add a case in the switch.
 // Falls back to GenericBody when the tool is unrecognized.
@@ -212,37 +201,28 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
         ? ((meta.filediff as Record<string, unknown>).patch as string)
         : null;
 
-  const { color: bulletColor, pulse } = bulletStyle(part);
+  const status = state.status;
+  const tone = status === "completed" ? "ok" : status === "error" ? "error" : "running";
+  const summary =
+    filediff && (filediff.additions || filediff.deletions)
+      ? formatFileDiff(filediff.additions ?? 0, filediff.deletions ?? 0)
+      : null;
+  const running = status != null && status !== "completed";
+  const metaNode =
+    summary != null || running
+      ? (
+          <>
+            {summary}
+            {running && <span>{status}</span>}
+          </>
+        )
+      : undefined;
+
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
-      <div className="flex">
-        <span className="select-none w-4 shrink-0">
-          <span
-            className={pulse ? "animate-pulse" : ""}
-            style={{ color: bulletColor }}
-          >
-            ●{" "}
-          </span>
-        </span>
-        <div className="flex-1 min-w-0 font-mono">
-          <span className="text-text">{toolName}</span>
-          {state.title && (
-            <span className="text-text-muted">({state.title})</span>
-          )}
-          {filediff && (filediff.additions || filediff.deletions) ? (
-            <span className="text-text-faint ml-1">
-              {" · "}
-              {formatFileDiff(filediff.additions ?? 0, filediff.deletions ?? 0)}
-            </span>
-          ) : null}
-          {state.status && state.status !== "completed" && (
-            <span className="text-text-faint"> · {state.status}</span>
-          )}
-        </div>
-      </div>
-      <div className="ml-4">
+      <ToolCard tone={tone} name={toolName} arg={state.title} meta={metaNode}>
         <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
-      </div>
+      </ToolCard>
     </div>
   );
 });
@@ -261,7 +241,7 @@ function ToolBody({
   // Edit/Write/MultiEdit: prefer the unified diff (lives in metadata.diff).
   if (diffText) return <UnifiedDiff text={diffText} />;
 
-  // Per-tool body. Default fall-through is the generic monospace block.
+  // Per-tool body. Default fall-through is the generic output well.
   switch (tool) {
     case "read":
       return <ReadBody state={state} verbose={verbose} />;
@@ -278,7 +258,7 @@ function ToolBody({
     case "web_fetch":
       return <WebFetchBody state={state} />;
     case "task":
-      return <TaskBody state={state} />;
+      return <TaskCard state={state} />;
     default: {
       // Unknown tool — show output (if any) as a generic block. Falls back to
       // the live metadata.output stream while running so any long-running tool
@@ -289,178 +269,3 @@ function ToolBody({
   }
 }
 
-// Task (subagent) body. Collapsed by default to a one-line summary
-// (description · agent · status · duration · live tool count). On expand,
-// renders the child session's full transcript inline, indented under the
-// header with a left border accent so the nesting is visually unambiguous.
-//
-// The child transcript uses the SAME MessageRow components as the parent —
-// full fidelity, including tool calls, reasoning (Ctrl+O), text markdown,
-// active todos, etc. (Nested subagents would recurse for free because the
-// task tool case here just re-enters the same flow on the inner ToolBody.)
-//
-// Data sources:
-//   - The parent's task tool part (`state` prop here) gives us the headline
-//     metadata: status, title, duration, child id, agent type, model, output.
-//   - The child's transcript is fetched lazily on first expand via the
-//     `toggle` callback in TaskContext (registered by ChatPanel as
-//     `toggleTaskExpand`); subsequent SSE traffic for that child triggers
-//     a debounced re-fetch (also in ChatPanel) so the expanded card stays
-//     live.
-//   - Live status from child's session.idle/status events (in liveStatus
-//     map) overrides the parent's stale `state.status` for the badge.
-//
-// When no TaskContext is provided (defensive — shouldn't happen in
-// ChatPanel but might in a future test harness), renders the static
-// header + final output only, no expand affordance.
-function TaskBody({ state }: { state: ToolState }) {
-  const ctx = useContext(TaskContext);
-  const info = useMemo(
-    () => extractSubagentInfo({ type: "tool", tool: "task", state }),
-    [state],
-  );
-  // HOOK ORDER: every hook used by this component must run BEFORE the
-  // `!info` early return below. Previously `summary` was computed after
-  // the return, so a render that flipped from `info === null` (1 hook)
-  // to `info !== null` (2 hooks) crashed with "Rendered more hooks than
-  // during the previous render" and blanked the whole panel. Resolve
-  // `childMsgs` here (independent of `info`) so the memo's input is
-  // stable across both branches.
-  const childMsgsForSummary = info
-    ? ctx?.childMessages.get(info.childSessionId)
-    : undefined;
-  const summary = useMemo(
-    () => summarizeChildSession(childMsgsForSummary),
-    [childMsgsForSummary],
-  );
-  if (!info) {
-    // No child id yet (very brief window between tool-input.started and
-    // the first metadata write). Fall back to whatever output is present.
-    return state.output ? <ToolOutput output={state.output} /> : null;
-  }
-  const isExpanded = ctx?.expanded.has(info.childSessionId) ?? false;
-  const childMsgs = childMsgsForSummary;
-  const liveState = ctx?.liveStatus.get(info.childSessionId);
-  // Prefer live SSE status over the parent's transcript snapshot (which
-  // lags by one refetch cycle). Maps "running" → still going, "idle" →
-  // finished. The transcript status acts as the initial value before any
-  // live event lands AND the source of truth for completed/error.
-  const effectiveStatus =
-    liveState === "idle" && info.status === "running"
-      ? "completed"
-      : liveState === "running" && info.status === "completed"
-        ? "running"
-        : info.status;
-  const showThinking = ctx?.showThinking ?? false;
-
-  const statusColor =
-    effectiveStatus === "completed"
-      ? cssVar("--ok")
-      : effectiveStatus === "error"
-        ? cssVar("--danger")
-        : cssVar("--tx4"); // running / pending / unknown
-  const statusPulse = effectiveStatus === "running" || effectiveStatus === "pending";
-
-  const onToggle = ctx ? () => ctx.toggle(info.childSessionId) : null;
-
-  return (
-    <div className="text-meta text-text-muted flex flex-col" style={{ gap: "var(--sp-1)" }}>
-      {/* Header row: description + meta line. Click anywhere on the row to
-          toggle when context is available. */}
-      <div
-        className={
-          "flex items-start " +
-          (onToggle ? "cursor-pointer hover:text-text" : "")
-        }
-        onClick={onToggle ?? undefined}
-      >
-        <span className="select-none w-4 shrink-0 text-text-faint">
-          {onToggle ? (isExpanded ? "▾" : "▸") : "⎿"}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            {info.description && (
-              <span className="text-text truncate min-w-0">{info.description}</span>
-            )}
-            <MetaBadge title={`subagent: ${info.agent}`}>{info.agent}</MetaBadge>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-1 text-text-faint">
-            <span style={{ color: statusColor }} className={statusPulse ? "animate-pulse" : ""}>
-              ●
-            </span>
-            <span>{effectiveStatus}</span>
-            {summary.toolCount > 0 && (
-              <>
-                <span>·</span>
-                <span>
-                  {summary.toolCount} tool{summary.toolCount === 1 ? "" : "s"}
-                  {effectiveStatus === "running" && summary.lastToolName
-                    ? ` (${summary.lastToolName})`
-                    : ""}
-                </span>
-              </>
-            )}
-            {info.durationMs != null && (
-              <>
-                <span>·</span>
-                <span>{formatDuration(info.durationMs)}</span>
-              </>
-            )}
-            {summary.tokens > 0 && (
-              <>
-                <span>·</span>
-                <span>{formatTokens(summary.tokens)}</span>
-              </>
-            )}
-            {info.truncated && (
-              <>
-                <span>·</span>
-                {/* Matches the truncation badge elsewhere (warn token). */}
-                <span style={{ color: "var(--warn)" }}>⚠ truncated</span>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Expanded body: child transcript (full fidelity, indented + bordered)
-          followed by the final output. While loading, a small spinner. */}
-      {isExpanded && (
-        <div className="ml-4 pl-3 border-l-2 border-border flex flex-col" style={{ gap: "var(--sp-2)" }}>
-          {childMsgs && childMsgs.length > 0 && (
-            <div className="flex flex-col gap-2">
-              {childMsgs.map((m) => (
-                <MessageRow
-                  key={m.info.id}
-                  msg={m}
-                  showThinking={showThinking}
-                  // Subagent transcripts have their own footers; don't paint
-                  // turn-duration / persistent-todo / truncation overlays
-                  // designed for the top-level conversation.
-                  turnDurationMs={null}
-                  persistentTodos={null}
-                  truncation={null}
-                  commandInfo={null}
-                />
-              ))}
-            </div>
-          )}
-          {childMsgs && childMsgs.length === 0 && (
-            <div className="text-text-faint italic">
-              (no messages — subagent finished without producing a transcript)
-            </div>
-          )}
-          {/* Final output, shown below the transcript for completed runs.
-              Same visual treatment as the generic ToolOutput so users
-              recognize "this is what the subagent returned to its parent". */}
-          {info.output && effectiveStatus !== "running" && (
-            <div className="flex flex-col" style={{ gap: "var(--sp-1)" }}>
-              <div className="text-text-faint">Result:</div>
-              <ToolOutput output={info.output} />
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}

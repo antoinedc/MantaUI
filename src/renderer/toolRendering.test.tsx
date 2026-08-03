@@ -6,9 +6,8 @@
 // `./testHarness`.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { bulletStyle } from "./ToolCall";
 import { cssVar } from "./chatUtils";
-import { ToolCall } from "./ToolCall";
+import { bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
 import {
   installMockApi,
   mount,
@@ -55,6 +54,47 @@ describe("bulletStyle", () => {
     expect(bulletStyle(toolPart("running"))).toEqual({ color: cssVar("--tx4"), pulse: true });
     expect(bulletStyle(toolPart("pending"))).toEqual({ color: cssVar("--tx4"), pulse: true });
     expect(bulletStyle(toolPart(undefined))).toEqual({ color: cssVar("--tx4"), pulse: true });
+  });
+});
+
+describe("formatFileDiff", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("renders +N in ok and −N in danger when both are present", () => {
+    installMockApi();
+    h = mount(<>{formatFileDiff(38, 4)}</>);
+    const text = h.text() ?? "";
+    expect(text).toContain("+38");
+    expect(text).toContain("−4");
+    const ok = h.container.querySelector(".text-ok");
+    const danger = h.container.querySelector(".text-danger");
+    expect(ok?.textContent).toBe("+38");
+    expect(danger?.textContent).toBe("−4");
+  });
+
+  it("omits the −N count when deletions are zero", () => {
+    installMockApi();
+    h = mount(<>{formatFileDiff(20, 0)}</>);
+    expect(h.text()).toContain("+20");
+    expect(h.text()).not.toContain("−");
+  });
+
+  it("omits the +N count when additions are zero", () => {
+    installMockApi();
+    h = mount(<>{formatFileDiff(0, 3)}</>);
+    expect(h.text()).toContain("−3");
+    expect(h.text()).not.toContain("+");
+  });
+
+  it("renders nothing when both are zero", () => {
+    installMockApi();
+    h = mount(<>{formatFileDiff(0, 0)}</>);
+    expect(h.text() ?? "").toBe("");
   });
 });
 
