@@ -21,6 +21,10 @@ private enum MantaChatCapture {
 
     /// Open the first/named session row so the app lands on the chat screen
     /// (mirrors MantaOpenSessionUITests.testOpenFirstSession).
+    ///
+    /// A label-prefix hit is ambiguous: the folder picker's action buttons
+    /// ("New project…", the `plus`) also begin with the row text, so match on
+    /// elements that look like session rows rather than the sheet's buttons.
     static func openChat(in app: XCUIApplication) {
         _ = app.staticTexts["Sessions"].waitForExistence(timeout: 15)
         let wanted = ProcessInfo.processInfo.environment["MANTA_OPEN_ROW"] ?? MantaPairFixture.openRow
@@ -31,16 +35,30 @@ private enum MantaChatCapture {
         }
         for hop in hops {
             let prefix = NSPredicate(format: "label BEGINSWITH %@", hop)
-            let target = app.descendants(matching: .any).matching(prefix).firstMatch
+            let candidates = app.descendants(matching: .any).matching(prefix)
+            let target = candidates.allElementsBoundByIndex
+                // A session row is not in the create-project sheet and is not a
+                // bare icon/action control. Skip buttons whose label is exactly
+                // a sheet action ("plus", "gearshape", "Cancel", "Create", …).
+                .first { el in
+                    guard el.elementType != .button else { return false }
+                    return true
+                } ?? candidates.firstMatch
             guard target.waitForExistence(timeout: 10) else {
                 print("PAIRDRIVE open-miss=\(hop)")
                 break
             }
             target.tap()
-            print("PAIRDRIVE open-row=\(hop) kind=\(target.elementType.rawValue)")
+            print("PAIRDRIVE open-row=\(hop) kind=\(target.elementType.rawValue) label=\(target.label)")
             sleep(4)
         }
-        // Give the chat screen a moment to push into the navigation stack.
+        // Wait until the push lands on the chat screen itself (not a subagent
+        // screen or a failure card), then give the header a moment to render.
+        if !app.descendants(matching: .any)["chat-screen"].waitForExistence(timeout: 10) {
+            print("PAIRDRIVE on-chat=false")
+        } else {
+            print("PAIRDRIVE on-chat=true")
+        }
         sleep(2)
     }
 
@@ -148,7 +166,11 @@ final class MantaLoadCaptureUITests: XCTestCase {
         }
         for hop in hops {
             let prefix = NSPredicate(format: "label BEGINSWITH %@", hop)
-            let target = app.descendants(matching: .any).matching(prefix).firstMatch
+            let candidates = app.descendants(matching: .any).matching(prefix)
+            let target = candidates.allElementsBoundByIndex
+                // Skip the create-project sheet's action buttons (see openChat).
+                .first { el in el.elementType != .button }
+                ?? candidates.firstMatch
             guard target.waitForExistence(timeout: 10) else {
                 print("PAIRDRIVE open-miss=\(hop)")
                 break
