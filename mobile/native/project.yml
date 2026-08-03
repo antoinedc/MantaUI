@@ -6,6 +6,15 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+# PLCrashReporter captures what the OS would report but the phone will not hand
+# over: a Mac only receives a device's crash reports through a live Xcode
+# connection, and this device is used untethered. The report is written locally
+# on crash and uploaded to the box on the NEXT launch, so a crash is diagnosable
+# with no cable, no Xcode and no third-party service.
+packages:
+  CrashReporter:
+    url: https://github.com/microsoft/plcrashreporter
+    from: "1.11.1"
 targets:
   MantaUI:
     type: application
@@ -33,6 +42,9 @@ targets:
       # src/shared/settingsSchema.ts). Same policy: referenced by path, never
       # copied or hand-edited.
       - path: ../../generated/swift/SettingsSchema.swift
+    dependencies:
+      - package: CrashReporter
+        product: CrashReporter
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui
