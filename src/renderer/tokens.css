@@ -56,6 +56,16 @@
   --block-gap: var(--sp-3);
   --turn-gap: var(--sp-6);
 
+  /* Transcript gutter. The composer column keeps the spec's 28px inset; the
+     TRANSCRIPT column is wider because its left/right margin is not empty
+     space — it is where each turn's timestamp sits, out of the reading
+     column, level with the turn's first line (the stamp used to sit ABOVE
+     the row, which pushed every turn down by its own height for a label
+     nobody reads twice). 48px is the stamp's width at 10px plus the sp-2 it
+     stands off the content plus an edge margin; below that the stamp starts
+     colliding with the panel edge. */
+  --transcript-inset: 48px;
+
   /* Elevation shadows (BET-415). --shadow-sm is the resting lift for
      contained surfaces (composer input, popovers, menus); --shadow-md is
      reserved for floating panels that overlap content. Theme-aware so the
@@ -201,7 +211,14 @@
   --border-subtle: #222C49;
   --border: #33406B;
   --border-strong: #5E6C9B;
-  --tx1: #F2F5FA;
+  /* --tx1 is INK, not white. It was #F2F5FA (17.3:1 on canvas) — a hair off
+     pure white on a near-black canvas, which is the classic dark-theme
+     halation setup: the glyphs bloom and the copy reads as harsh rather than
+     crisp. Material, IBM Carbon and Apple all land body ink around 87-90% of
+     the pure value for exactly this reason. #E3E8F2 is ~15:1 — still far
+     above the 4.5:1 the gate enforces and above AAA — with the glare gone.
+     The lighter tiers are unchanged; only the top tier was overdriven. */
+  --tx1: #E3E8F2;
   --tx2: #BDC7DB;
   --tx3: #939FB8;
   --tx4: #6B7690;
@@ -239,7 +256,7 @@
   --panel-rgb: 15 21 38;
   --card-rgb: 21 28 51;
   --border-rgb: 51 64 107;
-  --tx1-rgb: 242 245 250;
+  --tx1-rgb: 227 232 242;
   --accent-rgb: 90 136 255;
   --accent-soft-rgb: 23 64 174;
 }
@@ -266,7 +283,20 @@
   --border-subtle: #E8E4DD;
   --border: #DAD5CC;
   --border-strong: #857C6E;
-  --tx1: #1A1815;
+  /* Same correction as dark's --tx1, and more of it, because the light theme
+     is where it showed: #1A1815 on this canvas is 16.8:1 — effectively black
+     ink, harder than anything a reading UI uses. The reference points all sit
+     well below it (Notion #37352F ≈ 11.7:1, GitHub #1F2328, Material's
+     87%-black ≈ #212121, Tailwind prose slate-700 ≈ 10:1): comfortable body
+     copy is ~10-13:1, not maximal. #33302B keeps the canvas's warm cast, lands
+     at 12.5:1 on canvas / 10.7:1 on the raised surface — AAA everywhere the
+     gate checks — and takes the glare out of long transcripts.
+
+     This one token is the whole fix: --tx1 is `text-text`, which is the
+     assistant's prose, the user bubble, markdown headings and body, tool-card
+     names and diff bodies. Retuning it moves every one of them at once, which
+     is the point of having a tier. */
+  --tx1: #33302B;
   --tx2: #48433C;
   --tx3: #665F55;
   --tx4: #8A8275;
@@ -302,7 +332,7 @@
   --panel-rgb: 242 240 236;
   --card-rgb: 255 255 255;
   --border-rgb: 218 213 204;
-  --tx1-rgb: 26 24 21;
+  --tx1-rgb: 51 48 43;
   --accent-rgb: 46 107 255;
   --accent-soft-rgb: 223 232 255;
 

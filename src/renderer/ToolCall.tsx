@@ -28,6 +28,7 @@ import {
   WebFetchBody,
 } from "./ToolBodies";
 import { ToolCard } from "./ToolCard";
+import { OutputWell } from "./OutputWell";
 import { TaskCard } from "./TaskCard";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
@@ -116,19 +117,32 @@ export const AssistantPart = memo(function AssistantPart({
   }
 
   // Patch (savepoint after one or more file edits): show the files touched.
+  //
+  // CARD, NOT A FLAT ROW. These three tail cases (patch / file / unrecognized
+  // part) used to render as bare `⎿ …` mono rows on the page background —
+  // the pre-BET-636 flat-list style. Next to a transcript where every machine
+  // action is a bordered card, a mono row of absolute paths hanging under the
+  // last card reads as tool output that escaped its container. They are the
+  // same kind of thing as a tool call, so they get the same chrome.
   if (part.type === "patch") {
     const files = ((part as Record<string, unknown>).files as string[] | undefined) ?? [];
     return (
-      <div className="flex text-text-faint text-code font-mono">
-        <span className="select-none w-4 shrink-0">
-          <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
-        </span>
-        <div className="flex-1 min-w-0">
-          {files.length === 0
-            ? "patched"
-            : `patched ${files.length} file${files.length === 1 ? "" : "s"}: ${files.join(", ")}`}
-        </div>
-      </div>
+      <ToolCard
+        tone="ok"
+        name="Patch"
+        arg={files.length === 0 ? undefined : `${files.length} file${files.length === 1 ? "" : "s"}`}
+        copyText={files.join("\n")}
+      >
+        {files.length > 0 && (
+          <OutputWell variant="attached">
+            {files.map((f) => (
+              <div key={f} className="whitespace-pre-wrap break-all text-text-muted">
+                {f}
+              </div>
+            ))}
+          </OutputWell>
+        )}
+      </ToolCard>
     );
   }
 
@@ -136,27 +150,10 @@ export const AssistantPart = memo(function AssistantPart({
   if (part.type === "file") {
     const filename = String((part as Record<string, unknown>).filename ?? "");
     const mime = String((part as Record<string, unknown>).mime ?? "");
-    return (
-      <div className="flex text-text-faint text-code font-mono">
-        <span className="select-none w-4 shrink-0">
-          <span style={{ color: "var(--accent)", opacity: 0.6 }}>⎿ </span>
-        </span>
-        <div className="flex-1 min-w-0">
-          <span className="text-text-muted">{filename || "(file)"}</span>
-          {mime && <span className="text-text-faint"> · {mime}</span>}
-        </div>
-      </div>
-    );
+    return <ToolCard tone="ok" name="File" arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`} />;
   }
 
-  return (
-    <div className="flex text-text-faint">
-      <span className="select-none w-4 shrink-0">
-        <span style={{ color: "var(--accent)", opacity: 0.5 }}>○ </span>
-      </span>
-      <div className="flex-1 min-w-0 text-code font-mono">[{part.type}]</div>
-    </div>
-  );
+  return <ToolCard name={part.type} />;
 });
 
 // ===== Tool call rendering =====
@@ -206,9 +203,22 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
         )
       : undefined;
 
+  // What the header's copy button yields: the diff for an edit, otherwise the
+  // tool's output (live `metadata.output` included, so a long-running command
+  // is copyable mid-run). `task` is excluded — its body is a nested card whose
+  // content is a whole child transcript, not one copyable blob.
+  const copyText =
+    rawTool === "task" ? "" : (diffText ?? resolveToolOutput(state));
+
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
-      <ToolCard tone={tone} name={toolName} arg={state.title} meta={metaNode}>
+      <ToolCard
+        tone={tone}
+        name={toolName}
+        arg={state.title}
+        meta={metaNode}
+        copyText={copyText || undefined}
+      >
         <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
       </ToolCard>
     </div>

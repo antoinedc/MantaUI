@@ -39,7 +39,9 @@
   - button "7%"
   - button "Terminal"
   - button "Session actions"
-  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py Read \\d+ lines \\(ctrl\\+o to expand\\) Added/"
+  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py/"
+  - button "Copy"
+  - text: /Read \d+ lines \(ctrl\+o to expand\) Added/
   - code: /export.csv
   - text: . It reuses the same filter query as
   - code: GET /orders

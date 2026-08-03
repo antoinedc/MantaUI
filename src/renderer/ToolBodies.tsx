@@ -7,7 +7,7 @@
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
 import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { resolveToolOutput } from "./chatUtils";
+import { resolveToolOutput, trimOutputEdges } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
@@ -16,7 +16,23 @@ import { OutputWell } from "./OutputWell";
 // with `--- ` or `@@`, or has multiple `@@` headers), each line is colored
 // red/green/neutral. Otherwise we render it as a monospace code block,
 // truncated to a sensible height by default.
-export const ToolOutput = memo(function ToolOutput({ output }: { output: string }) {
+export const ToolOutput = memo(function ToolOutput({
+  output: raw,
+  copy = false,
+}: {
+  output: string;
+  /**
+   * Render a copy affordance over the well. OFF by default: inside a tool card
+   * the copy button lives in the card HEADER (ToolCard's `copyText`), so a
+   * second one floating over the body would be a duplicate. Only the callers
+   * that render this well WITHOUT a card header around it (the subagent card's
+   * "Result:" block) turn it on.
+   */
+  copy?: boolean;
+}) {
+  // Trailing newlines would otherwise render as blank rows padding the bottom
+  // of the well (see trimOutputEdges).
+  const output = trimOutputEdges(raw);
   const looksLikeDiff =
     /^---\s/.test(output) ||
     /\n---\s/.test(output) ||
@@ -37,13 +53,24 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
     return <UnifiedDiff text={output} />;
   }
   // Plain code/text output — recessed well (12.5px mono), scroll on overflow.
+  //
+  // EXACTLY ONE scroll container. The well used to be given `maxHeight` (which
+  // is `max-h-64 overflow-y-auto`) while the `<pre>` inside it declared the
+  // same cap again, so the card carried two nested vertical scrollbars over
+  // identical content — and because a box with `overflow-y: auto` computes
+  // `overflow-x` to `auto` too, the inner `<pre>` also duplicated the well's
+  // horizontal scroller. The `<pre>` keeps the cap because it is the element
+  // the pin-to-bottom effect above measures; the well must therefore NOT be
+  // asked for one. Do not re-add `maxHeight` here.
   return (
     <div className="relative">
-      <CopyButton
-        text={output}
-        className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded-xs"
-      />
-      <OutputWell variant="attached" maxHeight>
+      {copy && (
+        <CopyButton
+          text={output}
+          className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded-xs"
+        />
+      )}
+      <OutputWell variant="attached">
         <pre
           ref={preRef}
           onScroll={(e) => {
@@ -51,7 +78,7 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
             pinnedRef.current =
               el.scrollHeight - el.scrollTop - el.clientHeight < 8;
           }}
-          className="pr-8 max-h-64 overflow-y-auto"
+          className={`max-h-64 overflow-y-auto${copy ? " pr-8" : ""}`}
         >
           <code>{output}</code>
         </pre>
@@ -120,7 +147,10 @@ export function BashBody({ state, verbose }: { state: ToolState; verbose: boolea
 // ToolCall.tsx (patch/file parts) and ActiveTodos is a different, still-flat
 // context and keeps its glyph.
 function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number }) {
-  const lines = body.split("\n");
+  // Trailing newlines would otherwise render as blank rows padding the bottom
+  // of the well — and worse, count against `maxLines`, so a 5-line budget
+  // could be spent showing three empty rows (see trimOutputEdges).
+  const lines = trimOutputEdges(body).split("\n");
   const visibleCount = Math.min(lines.length, maxLines);
   const hidden = lines.length - visibleCount;
   // Take the tail (latest lines), not the head.
@@ -230,7 +260,7 @@ export function WebFetchBody({ state }: { state: ToolState }) {
   const output = resolveToolOutput(state);
   return (
     <CollapsibleLines
-      lines={output ? output.split("\n") : []}
+      lines={output ? trimOutputEdges(output).split("\n") : []}
       maxLines={15}
       header={
         url ? (

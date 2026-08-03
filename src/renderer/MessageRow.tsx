@@ -43,9 +43,10 @@ import { nowMs } from "./clock";
 // send → first-token window is never silent. That is why there is no skeleton
 // placeholder here: the loader plus its verb IS the placeholder.
 //
-// Type split: the verb is 13px sans (`text-label`) because it is prose, while
-// the elapsed/token readout stays mono and tabular so the digits stop jittering
-// as they tick.
+// Type: all sans — the verb is prose and the elapsed/token readout is chrome,
+// not output, so neither wants the mono face the transcript reserves for
+// commands and tool output. `tabular-nums` (which Inter supports) is what stops
+// the digits jittering as they tick; the mono face was never doing that job.
 export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
   // Tick once per second to drive the elapsed-time re-render.
   const [, setTick] = useState(0);
@@ -81,7 +82,7 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
       <div className="flex items-center gap-2">
         <MantaLoader />
         <span className="text-label text-text-muted">{verb.current}…</span>
-        <span className="text-meta font-mono tabular-nums text-text-faint">
+        <span className="text-meta tabular-nums text-text-faint">
           {formatDuration(elapsedMs)}
           {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>}
         </span>
@@ -255,25 +256,41 @@ export const MessageRow = memo(function MessageRow({
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
-  // untouched. It sits at the row's top-left, absolutely positioned INSIDE the
-  // content box (left-0, not overflowing into the transcript's px-4 padding —
-  // that zone is clipped by the scroller's overflow). It stays out of the way
-  // (faint, fades in on hover) and never shifts the message layout.
+  // untouched.
   //
-  // The offset CLEARS the row's first block rather than overlapping it. At
-  // `-top-2` the 12px `leading-none` box ran from −8px to +4px, i.e. its
-  // bottom 4px sat INSIDE the block — invisible while the first block was
-  // bare text, but a visible collision once that block became a bordered
-  // tool card (BET-636) or a user bubble (BET-637). `-top-[18px]` puts the
-  // box at −18px..−6px: 6px of air under the stamp and 6px above it inside
-  // the 24px `--turn-gap`, so it reads as a label for the row rather than a
-  // glyph stuck to the card's top edge.
+  // IN THE GUTTER, level with the row's first line — not above it. Two earlier
+  // shapes were wrong in opposite ways: an absolute `-top-[18px]` overlay read
+  // as a glyph stuck to the top edge of the following card, and an in-flow
+  // label above the row cost every turn a whole extra line of height for
+  // something you glance at once. Positioning it OUT of the reading column
+  // costs no layout at all, which is why `--transcript-inset` is wider than
+  // the composer's: the margin is the stamp's home. `right-full` / `left-full`
+  // means the offset is derived from the content edge, not a magic number that
+  // has to be kept in sync with the inset.
+  //
+  // Hover-gated on purpose. A timestamp on every row, always on, is a column
+  // of numbers down the side of a conversation nobody asked to read; the
+  // information is worth having on demand, not worth the permanent noise.
+  //
+  // Type: sans (it is chrome, not code — the transcript's mono is reserved for
+  // commands, paths and output), 10px, tabular so the digits don't jitter.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
     <div className="group relative">
       {ts && (
         <span
-          className={`pointer-events-none absolute ${isUser ? "right-0" : "left-0"} -top-[18px] z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity`}
+          className={
+            "pointer-events-none absolute select-none whitespace-nowrap " +
+            "text-[10px] leading-none tabular-nums text-text-faint " +
+            "opacity-0 group-hover:opacity-100 transition-opacity " +
+            // The offset centres the 10px stamp on the row's FIRST LINE, and
+            // that line sits at a different depth per side: a user row always
+            // opens with the bubble (1px border + 11px padding + a 23px line
+            // box → centre ≈ 23px), while an assistant row opens with prose
+            // (centre ≈ 12px) or a tool-card header (centre ≈ 16px). One
+            // number cannot serve both, so each side gets its own.
+            (isUser ? "left-full ml-2 top-[18px]" : "right-full mr-2 top-[8px]")
+          }
           aria-hidden
         >
           {ts}
@@ -373,8 +390,11 @@ export const MessageRow = memo(function MessageRow({
       {/* (most common case: end-of-turn truncation). For mid-turn step */}
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
+      {/* Sans, not mono: this is a sentence about the turn ("Brewed for 40s"), */}
+      {/* not a command or a path. In mono it read as terminal output that had */}
+      {/* leaked into the transcript. */}
       {(turnDurationMs != null || truncation != null) && (
-        <div className="text-code font-mono text-text-muted">
+        <div className="text-label text-text-muted">
           {turnDurationMs != null && (
             <>
               {/* The finished turn keeps the mark the working row was built

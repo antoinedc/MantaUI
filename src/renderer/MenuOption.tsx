@@ -21,8 +21,12 @@
 import type { ReactNode } from "react";
 import { Check } from "lucide-react";
 
+// `mb-1` is the same 4px the sidebar's session rows carry between each other
+// (SessionRow's ROW_BASE). Without it the rows are flush, so a highlighted row
+// — keyboard or pointer — has its fill touching the fill boundary of the row
+// below and the two read as one block instead of one selected item.
 const OPT_BASE =
-  "flex w-full items-center gap-3 min-h-[34px] px-2 rounded-md text-left transition-colors duration-150";
+  "flex w-full items-center gap-3 min-h-[34px] px-2 mb-1 last:mb-0 rounded-md text-left transition-colors duration-150";
 
 export function MenuOption({
   selected = false,
@@ -57,7 +61,13 @@ export function MenuOption({
       onClick={onSelect}
       className={
         `${OPT_BASE} ${sub ? "min-h-[44px]" : ""} ` +
-        `${selected ? "bg-accent-bg" : active ? "bg-fill-hover" : ""}`
+        // Pointer hover gets the SAME fill as the roving keyboard highlight —
+        // they are one affordance ("this is the row you are about to choose")
+        // and only the keyboard half was implemented, so a mouse user got no
+        // feedback at all. `selected` keeps its accent tint on hover: the tint
+        // carries the accent foreground with it (C1), and swapping to the grey
+        // hover fill under the pointer would flip that contrast pairing.
+        `${selected ? "bg-accent-bg" : active ? "bg-fill-hover" : "hover:bg-fill-hover"}`
       }
     >
       <span

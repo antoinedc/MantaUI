@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
 // Component tests for the MeasureColumn reading-column chrome primitive
-// (BET-637). As with the other primitives, the "tokens" are class names that
-// map through tailwind.config.js to the design tokens (px-[28px] → 28px side
-// inset, maxWidth var(--measure) → the 72ch measure). jsdom loads no
-// stylesheet, so the contract is asserted on the exact class strings and the
-// inline style. The two adopters (Transcript.tsx, InputArea.tsx) migrate
+// (BET-637). As with the other primitives, the "tokens" are class names or
+// token references (maxWidth var(--measure) → the 72ch measure,
+// paddingInline var(--transcript-inset) → the wider transcript gutter that
+// holds the per-turn timestamp). jsdom loads no stylesheet, so the contract
+// is asserted on the exact class strings and the inline style. The two adopters (Transcript.tsx, InputArea.tsx) migrate
 // through the real exported component.
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -28,7 +28,8 @@ describe("MeasureColumn", () => {
   it("renders the non-stacked reading chrome (block, 28px inset, measure-capped)", () => {
     h = mount(<MeasureColumn>Hello</MeasureColumn>);
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe("w-full mx-auto px-[28px]");
+    expect(el.className).toBe("w-full mx-auto");
+    expect(el.style.paddingInline).toBe("28px");
     expect(el.style.maxWidth).toBe("var(--measure)");
     expect(el.style.gap).toBe("");
     expect(el.textContent).toBe("Hello");
@@ -42,14 +43,17 @@ describe("MeasureColumn", () => {
       </MeasureColumn>,
     );
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe("w-full mx-auto px-[28px] flex flex-col");
+    expect(el.className).toBe("w-full mx-auto flex flex-col");
+    expect(el.style.paddingInline).toBe("28px");
     expect(el.style.gap).toBe("var(--turn-gap)");
   });
 
-  it('renders the "full" variant uncapped and uncentred, keeping the 28px inset', () => {
+  it('renders the "full" variant uncapped and uncentred, at the wider transcript inset', () => {
     h = mount(<MeasureColumn width="full">Hello</MeasureColumn>);
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe("w-full px-[28px]");
+    expect(el.className).toBe("w-full");
+    // The wider gutter is what the per-turn timestamp is positioned into.
+    expect(el.style.paddingInline).toBe("var(--transcript-inset)");
     expect(el.style.maxWidth).toBe("");
     expect(el.style.gap).toBe("");
     expect(el.textContent).toBe("Hello");
@@ -63,7 +67,8 @@ describe("MeasureColumn", () => {
       </MeasureColumn>,
     );
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe("w-full px-[28px] flex flex-col");
+    expect(el.className).toBe("w-full flex flex-col");
+    expect(el.style.paddingInline).toBe("var(--transcript-inset)");
     expect(el.style.maxWidth).toBe("");
     expect(el.style.gap).toBe("var(--turn-gap)");
   });
@@ -71,7 +76,8 @@ describe("MeasureColumn", () => {
   it('renders "measure" explicitly as today\'s capped+centred behaviour', () => {
     h = mount(<MeasureColumn width="measure">Hello</MeasureColumn>);
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe("w-full mx-auto px-[28px]");
+    expect(el.className).toBe("w-full mx-auto");
+    expect(el.style.paddingInline).toBe("28px");
     expect(el.style.maxWidth).toBe("var(--measure)");
     expect(el.style.gap).toBe("");
   });

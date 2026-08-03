@@ -30,6 +30,7 @@ import {
   nextCronRun,
   describeNextRun,
   resolveToolOutput,
+  trimOutputEdges,
   reconcileOptimisticUser,
   shouldForceReconnect,
   shouldReconnectOnAppStateChange,
@@ -1106,6 +1107,34 @@ describe("describeNextRun", () => {
 
   it("never throws on bad input", () => {
     expect(() => describeNextRun(null as unknown as string, true, FROM)).not.toThrow();
+  });
+});
+
+describe("trimOutputEdges", () => {
+  it("drops trailing blank lines (the card's phantom bottom padding)", () => {
+    expect(trimOutputEdges("a\nb\n")).toBe("a\nb");
+    expect(trimOutputEdges("a\nb\n\n\n")).toBe("a\nb");
+    expect(trimOutputEdges("a\nb\n   \n\t\n")).toBe("a\nb");
+  });
+
+  it("drops leading blank lines", () => {
+    expect(trimOutputEdges("\n\na\nb")).toBe("a\nb");
+  });
+
+  it("PRESERVES interior blank lines — they are part of the output's shape", () => {
+    expect(trimOutputEdges("a\n\nb\n")).toBe("a\n\nb");
+  });
+
+  it("preserves leading indentation on a content line", () => {
+    expect(trimOutputEdges("\n   c48e3fd..5965a32  main -> main\n")).toBe(
+      "   c48e3fd..5965a32  main -> main",
+    );
+  });
+
+  it("handles CRLF and all-blank / empty input", () => {
+    expect(trimOutputEdges("a\r\n\r\n")).toBe("a");
+    expect(trimOutputEdges("\n\n")).toBe("");
+    expect(trimOutputEdges("")).toBe("");
   });
 });
 

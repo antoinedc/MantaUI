@@ -65,10 +65,19 @@ export function Transcript({
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto overflow-x-hidden"
-      // Horizontal padding moved onto the MeasureColumn (28px, BET-637) so the
+      // Horizontal padding moved onto the MeasureColumn (BET-637) so the
       // transcript shares one reading-column edge with the composer and the
       // working indicator; the container keeps only its vertical sp-6 padding.
-      style={{ padding: "var(--sp-6) 0" }}
+      //
+      // The MARGIN is not the same thing as that bottom padding and does not
+      // replace it. Padding is inside the scroller, so it only shows at the
+      // scroll extremes — mid-scroll the content is clipped flush against the
+      // container's bottom edge, which is exactly where the composer starts, so
+      // scrolling up ran a line of text right into the composer's top border.
+      // The margin sits OUTSIDE the scroller and is therefore always there. It
+      // matches the composer's own internal rhythm (the sp-2 between the input
+      // box and the model/effort row).
+      style={{ padding: "var(--sp-6) 0", marginBottom: "var(--sp-2)" }}
     >
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">

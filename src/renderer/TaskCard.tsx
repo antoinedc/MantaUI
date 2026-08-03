@@ -150,7 +150,10 @@ export function TaskCard({ state }: { state: ToolState }) {
           {info.output && effectiveStatus !== "running" && (
             <div className="flex flex-col" style={{ gap: "var(--sp-1)" }}>
               <div className="text-text-faint">Result:</div>
-              <ToolOutput output={info.output} />
+              {/* `copy` because this well has no card header above it to hold
+                  the affordance — the enclosing card's header is a disclosure
+                  button and cannot nest one. */}
+              <ToolOutput output={info.output} copy />
             </div>
           )}
         </div>
