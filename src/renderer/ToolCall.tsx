@@ -33,7 +33,7 @@ import { TaskCard } from "./TaskCard";
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
 // right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
 // when zero. The minus is U+2212 MINUS SIGN, matching the diff renderer's
-// existing convention. Callers place the two counts in a gap-spaced meta slot.
+// existing convention. The meta slot's own internal spacing separates them.
 export function formatFileDiff(additions: number, deletions: number): React.ReactNode {
   return (
     <>

@@ -1,7 +1,7 @@
 // M527.ToolCard — the tool-call / subagent card chrome primitive (BET-636).
 //
-// The spec's `.tool` shell plus its header strip `.tool-h`: a bordered,
-// rounded card on the raised surface with a header holding the status dot,
+// The spec's `.tool` shell plus its header strip `.tool-h`: a bordered card
+// (rounded-md) on the raised surface with a header holding the status dot,
 // bold tool name, a gap, a truncating muted argument, and a right-aligned
 // meta slot (`+38 −4` counts / status word). Optionally the header is a
 // disclosure button (subagent/task card) with an `aria-expanded` chevron.
