@@ -302,3 +302,36 @@ struct VoiceClassifyResult: Codable, Equatable, Sendable {
     var transcript: String?
     var actions: [VoiceClassifyResult]?
 }
+// MARK: - Overflow sheet resources (BET-627: attach, scheduled tasks, secrets)
+//
+// Server-owned resource payloads for the chat overflow sheet items. Mirrors
+// src/shared/types.ts (ScheduledJob, SecretMeta) and the box `schedule:list` /
+// `secrets:list` RPC channels. Secrets never carry a value to the device — the
+// box strips it and returns metadata only.
+
+/// A durable scheduled-prompt job (box store: ~/.manta/schedule.json).
+struct ScheduledJob: Codable, Equatable, Sendable, Identifiable {
+    var id: String
+    var cron: String
+    var prompt: String
+    var recurring: Bool
+    var label: String
+    var sessionID: String
+    var directory: String
+    var createdAt: Int
+    var lastFiredMinute: String?
+}
+
+/// Metadata for a stored secret (box store: ~/.manta/secrets.json). Values are
+/// never transmitted to the device; `hasValue` is the only value-adjacent fact.
+struct SecretMeta: Codable, Equatable, Sendable, Identifiable {
+    var id: String
+    var key: String?
+    var scope: String?
+    var sessionID: String?
+    var project: String?
+    var hint: String?
+    var hasValue: Bool
+    var createdAt: Int?
+    var updatedAt: Int?
+}

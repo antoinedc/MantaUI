@@ -283,6 +283,19 @@ final class MantaAPIClient: Sendable {
         return path
     }
 
+    /// `schedule:list` — scheduled-prompt jobs, filtered to the session when a
+    /// sessionId is given. BET-627 uses the count for the sheet's live badge.
+    func listSchedules(sessionId: String? = nil) async throws -> [ScheduledJob] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        return try await call("schedule:list", args: args, as: [ScheduledJob].self) ?? []
+    }
+
+    /// `secrets:list` — secret METADATA only (values never leave the box).
+    func listSecrets(sessionId: String? = nil) async throws -> [SecretMeta] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        return try await call("secrets:list", args: args, as: [SecretMeta].self) ?? []
+    }
+
     /// `voice:transcribe` — ship recorded audio (base64 over the JSON RPC
     /// wire, as the desktop shim does) to the box's Groq transcription.
     /// Returns the transcribed text, or nil when the clip was empty.

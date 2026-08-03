@@ -17,6 +17,15 @@ import SwiftUI
 // the generated tokens.
 // ===========================================================================
 
+/// The BET-627 overflow-sheet items that present a card of their own.
+private enum OverflowDestination: String, Identifiable {
+    case attach
+    case schedules
+    case secrets
+
+    var id: String { rawValue }
+}
+
 /// Thin wrapper that owns WHICH opencode session the screen is showing.
 ///
 /// Clearing a session does not end the conversation on screen — it starts a new
@@ -57,6 +66,10 @@ private struct ChatScreenContent: View {
     @State private var showOverflow = false
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
+    /// Which overflow-sheet item's card is presented (BET-627).
+    @State private var overflowDestination: OverflowDestination?
+    /// Live scheduled-task count for the overflow sheet's badge (BET-627).
+    @State private var scheduleCount = 0
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -130,6 +143,9 @@ private struct ChatScreenContent: View {
         // scrolling.
         .safeAreaInset(edge: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
+        .sheet(item: $overflowDestination) { destination in
+            destinationCard(destination)
+        }
         .onAppear {
             store.start()
             Task { await resolveWindowAndBranch() }
@@ -146,16 +162,55 @@ private struct ChatScreenContent: View {
             sessionTitle: title,
             projectName: projectName,
             branch: branch,
-            onAttach: {},
-            onSchedules: {},
-            onSecrets: {},
+            onAttach: { overflowDestination = .attach },
+            onSchedules: { overflowDestination = .schedules },
+            onSecrets: { overflowDestination = .secrets },
             onWebhooks: {},
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
             onOpenTerminal: {},
-            onDelete: { Task { await deleteSession() } }
+            onDelete: { Task { await deleteSession() } },
+            scheduleCount: scheduleCount
         )
+        .task { await refreshScheduleCount() }
+    }
+
+    /// The three BET-627 overflow items present their cards here. Attach sends
+    /// an attachment-only prompt through the store's existing send path.
+    @ViewBuilder
+    private func destinationCard(_ destination: OverflowDestination) -> some View {
+        switch destination {
+        case .attach:
+            AttachCard(
+                sessionId: store.sessionId,
+                projectName: projectName,
+                onSend: { attachment in
+                    overflowDestination = nil
+                    store.send(text: "", attachments: [attachment], model: nil)
+                },
+                onClose: { overflowDestination = nil },
+                api: MantaAPIClient.live()
+            )
+        case .schedules:
+            SchedulesCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil }
+            )
+        case .secrets:
+            SecretsCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil }
+            )
+        }
+    }
+
+    /// (Re)load the scheduled-task count backing the sheet's live badge.
+    private func refreshScheduleCount() async {
+        let api = MantaAPIClient.live()
+        if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
+            scheduleCount = jobs.count
+        }
     }
 
     /// The chat screen knows its project by NAME only, but every session action
