@@ -59,6 +59,9 @@ struct MultilineTextView: UIViewRepresentable {
         view.font = font
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         view.textContainer.lineFragmentPadding = 0
+        // Wrap to the view's width rather than laying out one endless line.
+        view.textContainer.widthTracksTextView = true
+        view.textContainer.lineBreakMode = .byWordWrapping
         view.textColor = textColor
         view.delegate = context.coordinator
         view.accessibilityIdentifier = "composer-input"
@@ -70,9 +73,12 @@ struct MultilineTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
+        // Only touch the text view when SwiftUI's value actually differs. It
+        // used to reassign the placeholder twice and re-measure on EVERY
+        // update, including the update its own height change triggered, so each
+        // keystroke did several full text layouts.
         if view.text != text {
             view.text = text
-            updatePlaceholder(view)
         }
         if view.font != font { view.font = font }
         if view.textColor != textColor { view.textColor = textColor }

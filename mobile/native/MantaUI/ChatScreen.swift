@@ -317,7 +317,13 @@ private struct ChatScreenContent: View {
             LazyVStack(alignment: .leading, spacing: 0) {
                 TranscriptView(blocks: store.blocks, tokens: tokens)
             }
+            // Pin the content to the scroll view's own width. A vertical scroll
+            // view otherwise sizes itself to its WIDEST child, so one long line
+            // of tool output widens the whole screen and drags the composer off
+            // with it.
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollClipDisabled(false)
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
     }
