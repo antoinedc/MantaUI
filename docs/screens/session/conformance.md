@@ -4,7 +4,7 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (bba1139)
+Last reviewed: 2026-08-03 (c274d90)
 
 ## Resolved
 
@@ -36,3 +36,11 @@ left/right edge inside the 72ch measure (`.wrap` / `.comp-in`).
   `⎿` shape unboxed at 12px size, deliberately NOT the recessed well
   (BET-636). Only the generic tool output body and the unified diff sit in the
   well.
+- **Menu secondary text uses --tx3 instead of --tx4** — the model/effort
+  dropdown proposal puts `--tx4` on the group label, the sub-line, the context
+  number and the search placeholder, but `text-text-quiet` (--tx4) is
+  decorative-only under the contrast rule (BET-410 — tailwind.config.js forbids
+  it for labels, placeholders and paths, and `src/shared/contrast.mjs` gates
+  it). BET-644 substitutes `--tx3` (`text-text-faint`) at all four sites: the
+  hierarchy is preserved (name at --tx1, everything secondary one step down),
+  only the tier changes. Deliberate, rule-driven divergence — not an open gap.
