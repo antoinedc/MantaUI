@@ -75,21 +75,7 @@ struct ComposerView: View {
                 modelPill
                 Spacer(minLength: 0)
             }
-            // The input box has TWO layouts, because one shape cannot serve
-            // both states well:
-            //
-            //  * compact — a single capsule row, [+] text [mic] [send], which
-            //    is the resting state and what a one-line prompt should look
-            //    like.
-            //  * stacked — a rounded RECT with chips on top, the text in the
-            //    middle and the controls pinned along the bottom. A capsule
-            //    cannot be used here: its corner radius tracks half its height,
-            //    so a tall capsule turns into a blob.
-            //
-            // Stacked kicks in once the text passes two visual lines, or as
-            // soon as there are attachment chips (which need a row of their
-            // own and so cannot fit the single-row form).
-            if isStacked { stackedBox } else { compactBox }
+            inputBox
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -140,54 +126,76 @@ struct ComposerView: View {
         isTall || !attachments.isEmpty
     }
 
-    /// Compact: everything on one row inside a capsule.
-    private var compactBox: some View {
-        HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-            attachButton
-            textArea
-            if micAvailable { micButton }
-            sendButton
-        }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp1)
-        .modifier(BoxChrome(shape: AnyShape(Capsule(style: .continuous)), stroke: borderColor))
-    }
-
-    /// Stacked: chips + expand on top, text in the middle, controls pinned to
-    /// the bottom.
-    private var stackedBox: some View {
+    /// The input box. ONE view tree for both layouts — this is deliberate and
+    /// load-bearing.
+    ///
+    /// It was previously an `if isStacked { … } else { … }`, which reads more
+    /// clearly but is what DISMISSED THE KEYBOARD on every mode switch: the two
+    /// branches are different view identities, so crossing the threshold tore
+    /// down the TextEditor and built a new one, and focus (and with it the
+    /// keyboard) died with the old instance. Keeping `textArea` at a fixed
+    /// position in this builder keeps its identity — and therefore its
+    /// first-responder status — stable across the switch.
+    ///
+    /// What actually changes between the two modes:
+    ///   * the SHAPE — a capsule when it is one row, a rounded rect once it is
+    ///     tall (a capsule's radius is half its height, so a tall one is a blob)
+    ///   * WHERE the controls sit — inline beside the text when compact, pinned
+    ///     along the bottom when stacked
+    private var inputBox: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            // Chips and the expand control share the top row. The chip strip is
-            // given the remaining width and stops short of the button, so a
-            // long chip list scrolls under its own clip rather than colliding
-            // with the control.
-            if !attachments.isEmpty || isTall {
-                HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                    if !attachments.isEmpty {
-                        chipsRow
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .clipped()
-                    } else {
-                        Spacer(minLength: 0)
-                    }
-                    if isTall { expandButton }
+            // Chips rail — ONLY when something is actually attached. When the
+            // box is merely tall there is no rail; the expand control is an
+            // overlay (below) and so needs no row of its own.
+            if !attachments.isEmpty {
+                chipsRow
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Stop short of the expand control so a long chip list
+                    // scrolls under its own clip instead of running into it.
+                    .padding(.trailing, isTall ? Metrics.spacing.sp6 : 0)
+                    .clipped()
+            }
+
+            // Text, with the controls inline beside it while compact.
+            HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
+                if !isStacked { attachButton }
+                textArea
+                if !isStacked {
+                    if micAvailable { micButton }
+                    sendButton
                 }
             }
-            textArea
-            // Controls pinned along the bottom, only in this layout.
-            HStack(spacing: Metrics.spacing.sp2) {
-                attachButton
-                Spacer(minLength: 0)
-                if micAvailable { micButton }
-                sendButton
+
+            // …and pinned along the bottom once stacked.
+            if isStacked {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    attachButton
+                    Spacer(minLength: 0)
+                    if micAvailable { micButton }
+                    sendButton
+                }
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp2)
-        .modifier(BoxChrome(
-            shape: AnyShape(RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)),
-            stroke: borderColor
-        ))
+        .padding(.vertical, isStacked ? Metrics.spacing.sp2 : Metrics.spacing.sp1)
+        .modifier(BoxChrome(shape: boxShape, stroke: borderColor))
+        // The expand control is an OVERLAY, not a row: it must sit in the top
+        // right corner whether or not there are chips to share a line with, and
+        // as an overlay it costs no vertical space when there are none.
+        .overlay(alignment: .topTrailing) {
+            if isTall {
+                expandButton
+                    .padding(.top, Metrics.spacing.sp2)
+                    .padding(.trailing, Metrics.spacing.sp3)
+            }
+        }
+    }
+
+    /// Capsule while the box is a single row; rounded rect once it is tall.
+    private var boxShape: AnyShape {
+        isStacked
+            ? AnyShape(RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
+            : AnyShape(Capsule(style: .continuous))
     }
 
     /// Accent while a background refetch is in flight, and never while a turn
@@ -350,11 +358,15 @@ struct ComposerView: View {
                 Label("File", systemImage: "doc")
             }
         } label: {
+            // No filled circle behind the glyph: inside the composer box these
+            // are secondary controls, and a dark disc on a glass surface read
+            // as a hole punched in it. Send keeps its fill — it is the one
+            // primary action here. Tint still carries the attached state.
             Image(systemName: "paperclip")
                 .font(.system(size: Metrics.type.body, weight: .medium))
-                .foregroundColor(tokens.tx2)
+                .foregroundColor(attachments.isEmpty ? tokens.tx2 : tokens.accentTx)
                 .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                .background(attachments.isEmpty ? AnyShapeStyle(tokens.inset) : AnyShapeStyle(tokens.accentSoft), in: Circle())
+                .contentShape(Rectangle())
                 .accessibilityLabel("Attach")
         }
         .accessibilityIdentifier("attach-button")
@@ -447,13 +459,21 @@ struct ComposerView: View {
             // hit target with an accessibility action that starts dictation.
         } label: {
             ZStack {
-                Circle()
-                    .fill(micIconFill)
-                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                // The disc is drawn only while RECORDING. At rest the glyph
+                // sits bare on the glass, like the attach control — a resting
+                // dark disc read as a hole in the surface. While recording the
+                // fill is the state indicator, so it stays.
+                if recorder.phase == .recording {
+                    Circle()
+                        .fill(micIconFill)
+                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                }
                 Image(systemName: micIcon)
                     .font(.system(size: Metrics.type.body, weight: .semibold))
                     .foregroundColor(micIconColor)
             }
+            .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .simultaneousGesture(
