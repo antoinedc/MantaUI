@@ -157,6 +157,8 @@ export function ModelPicker({
         }}
         rightAccent
         popup
+        leftHook="manta-model-picker-btn"
+        rightHook="manta-effort-picker-btn"
         leftTitle="Pick model for next prompt"
         rightTitle={
           effortDisabled

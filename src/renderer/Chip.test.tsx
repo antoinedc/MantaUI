@@ -187,6 +187,39 @@ describe("SplitChip", () => {
     expect(r.title).toBe("effort");
   });
 
+  it("applies leftHook/rightHook identity classes to the segment buttons, not just the shell (BET-635)", () => {
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+        leftHook="manta-model-picker-btn"
+        rightHook="manta-effort-picker-btn"
+      />,
+    );
+    const shell = h.container.firstElementChild as HTMLElement;
+    const [l, r] = buttons();
+    // The coverage registry scans the aria-haspopup segment buttons for a
+    // `manta-*` class, so the hooks must land on the buttons, not the shell.
+    expect(shell.className).not.toContain("manta-model-picker-btn");
+    expect(shell.className).not.toContain("manta-effort-picker-btn");
+    expect(l.className).toContain("manta-model-picker-btn");
+    expect(r.className).toContain("manta-effort-picker-btn");
+    // Absent the props, no hook class leaks onto the buttons.
+    h.unmount();
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+      />,
+    );
+    expect(buttons()[0].className).not.toContain("manta-");
+    expect(buttons()[1].className).not.toContain("manta-");
+  });
+
   it("does NOT assume popup semantics: aria-haspopup is absent unless popup is opted in", () => {
     h = mount(
       <SplitChip

@@ -77,6 +77,8 @@ export function SplitChip({
   leftTitle,
   rightTitle,
   hook,
+  leftHook,
+  rightHook,
   popup = false,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
@@ -91,8 +93,17 @@ export function SplitChip({
   leftTitle?: string;
   /** Native `title` on the right button. */
   rightTitle?: string;
-  /** A stable `manta-*` identity class for the call site (identity only, never chrome). */
+  /** A stable `manta-*` identity class for the shell (identity only, never chrome). */
   hook?: string;
+  /**
+   * A stable `manta-*` identity class for the LEFT segment button. The popup
+   * coverage registry (`assertSurfacesClosed`) keys on the SEGMENT buttons
+   * (they carry `aria-haspopup` when `popup`), so a caller whose left segment
+   * opens a popup must pass its hook here, not on the shell.
+   */
+  leftHook?: string;
+  /** A stable `manta-*` identity class for the RIGHT segment button (see `leftHook`). */
+  rightHook?: string;
   /**
    * OPT-IN popup semantics. SplitChip is a generic split control — its two
    * segments are plain buttons and it does NOT assume either opens a popup.
@@ -103,8 +114,8 @@ export function SplitChip({
   popup?: boolean;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
-  const leftClass = `inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
-  const rightClass = `inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
+  const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
+  const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
   return (
     <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
       <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox}>
