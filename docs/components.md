@@ -12,7 +12,9 @@ cells closing; it is authoritative for future issues.
 ## Source of truth
 
 - **The redesign spec** (component inventory, chrome, variants):
+  docs/screens/redesign-spec.html  (committed archive — read this)
   https://0d5784a7a43451f4ad70dd3d9ee5cf72.boxes.mantaui.com/pages/manta-redesign
+  (served copy, EXPIRES 2026-08-13 — do not rely on it)
 - **Tokens**: `src/renderer/tokens.css` (multi-consumer — BET-516 generates a Swift
   theme from it, so a token change is no longer a local edit).
 - **Validation surface**: the component companion (`npm run visual:companion`), which
