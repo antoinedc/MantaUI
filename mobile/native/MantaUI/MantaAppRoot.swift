@@ -15,6 +15,7 @@ struct MantaAppRoot: View {
     @EnvironmentObject private var store: MantaEventStore
     @EnvironmentObject private var sessionStore: SessionListStore
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var flow: MantaOnboardingFlow
     @State private var paired: Bool
 
@@ -88,6 +89,19 @@ struct MantaAppRoot: View {
         // is parsed and fed into the S2 onboarding flow. Delivery happens via
         // onOpenURL (warm launch) and MantaPairingRouter (cold start through
         // the app delegate's continue userActivity); both converge here.
+        // Coming back to the app re-syncs. Nothing observed the scene phase
+        // before, so `MantaEventStore.resume()` — written for exactly this and
+        // documented as "App foreground / resume" — had ZERO call sites: iOS
+        // suspends the process, the /events socket dies, its timers stop, and
+        // on return the app sat on whatever it had when it went away. Combined
+        // with a list fetch that only ran once at launch, a session list that
+        // went stale or blank stayed that way until the app was force-quit —
+        // which is precisely the "kill and restart and they're back" symptom.
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active, paired else { return }
+            store.resume()
+            Task { await sessionStore.refresh() }
+        }
         .onOpenURL { url in
             _ = MantaPairingRouter.route(url)
         }

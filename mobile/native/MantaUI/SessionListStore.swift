@@ -26,6 +26,12 @@ final class SessionListStore: ObservableObject {
     @Published private(set) var projects: [MantaProject] = []
     @Published private(set) var loading = false
     @Published private(set) var loadError: String?
+    /// True once a fetch has come back successfully. Without it an EMPTY list
+    /// is ambiguous — "this box has no sessions" and "we never managed to ask"
+    /// look identical — and the view rendered the inviting "No sessions yet.
+    /// Tap + to create one." for both. That is the reassuring-lie state the
+    /// user hit: sessions existed, the list was blank, and nothing said so.
+    @Published private(set) var loadedOnce = false
     @Published private(set) var pinnedWindows: Set<String> = []
     @Published private(set) var hapticsEnabled = true
     /// pinID -> pending delete being held within its 5 s undo window.
@@ -40,6 +46,11 @@ final class SessionListStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var attentionSessions: Set<String> = []
     private var modelLabels: [String: String] = [:]
+    /// A refresh asked for while one was already in flight. The request used to
+    /// be DROPPED (`guard !loading else { return }`) and never rescheduled, so
+    /// the foreground/reconnect refresh that raced the launch fetch simply
+    /// vanished and the list stayed on whatever the first one returned.
+    private var refreshQueued = false
 
     init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore) {
         self.api = api
@@ -70,24 +81,50 @@ final class SessionListStore: ObservableObject {
         if changed { objectWillChange.send() }
     }
 
-    /// Re-fetch the list (pull-to-refresh / reconnect / after create).
+    /// Re-fetch the list (pull-to-refresh / foreground / reconnect / after
+    /// create). Overlapping calls are COALESCED, not discarded: the second
+    /// caller marks a re-run and the loop fires once more when the in-flight
+    /// fetch lands, so a refresh request can never be silently lost.
     func refresh() async {
-        guard !loading else { return }
+        if loading {
+            refreshQueued = true
+            return
+        }
         loading = true
         defer { loading = false }
+        repeat {
+            refreshQueued = false
+            await fetchOnce()
+        } while refreshQueued
+    }
+
+    private func fetchOnce() async {
         do {
             let list = try await api.projects()
             projects = list
+            loadedOnce = true
             loadError = nil
             await refreshModels()
         } catch {
-            loadError = "Couldn't reach your box"
+            // Keep whatever was already on screen — a failed fetch must never
+            // blank a list we successfully loaded before.
+            loadError = Self.describe(error)
         }
     }
 
-    /// Reconcile deltas from one project list transaction (post-create).
-    private func applyProjects(_ list: [MantaProject]) {
+    private static func describe(_ error: Error) -> String {
+        if let known = error as? MantaError, known == .authRequired {
+            return "Your box rejected this device — pair it again."
+        }
+        return "Couldn't reach your box"
+    }
+
+    /// Adopt the project list a mutating RPC already returned (post-create),
+    /// so the caller resolves the new window against a list that contains it
+    /// instead of the pre-create snapshot.
+    func applyProjects(_ list: [MantaProject]) {
         projects = list
+        loadedOnce = true
         loadError = nil
     }
 

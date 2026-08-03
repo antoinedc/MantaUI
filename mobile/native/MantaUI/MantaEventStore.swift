@@ -137,6 +137,9 @@ final class MantaEventStore: ObservableObject {
     private let controller: any MantaEventStreamControl
     private var lastFrameAt: Date
     private var watchdog: Timer?
+    /// No frame (heartbeats included) for this long means the socket is dead
+    /// even if it claims otherwise. Shared by the watchdog and `resume()`.
+    private let staleFrameMs: Double = 45_000
 
     init(
         stream: (any MantaEventStreamControl)? = nil,
@@ -171,8 +174,31 @@ final class MantaEventStore: ObservableObject {
     }
 
     /// App foreground / resume: force a reconnect + resync of missed state.
+    ///
+    /// `ensure()` alone is not enough here. A socket the OS tore down while the
+    /// process was suspended can still report itself open, so `ensure()`'s
+    /// "already live" short-circuit leaves the stream permanently silent; and a
+    /// backgrounded app's reconnect timers do not fire, so the controller may
+    /// have burnt its whole reconnect window and closed for good. Whenever the
+    /// stream is not demonstrably healthy — not `connected`, or no frame
+    /// (heartbeats included) for longer than the watchdog's staleness bar — we
+    /// reopen unconditionally rather than trust it.
     func resume() {
-        controller.markReconnectAndEnsure()
+        let stale = MantaLivenessPolicy.shouldForceReconnect(
+            state: connectionState,
+            lastFrameAt: lastFrameAt,
+            now: Date(),
+            staleMs: staleFrameMs
+        )
+        if connectionState.name == "connected" && !stale {
+            controller.markReconnectAndEnsure()
+        } else {
+            controller.forceReconnect()
+        }
+        lastFrameAt = Date()
+        // Timers are suspended with the process; re-arm rather than assume the
+        // watchdog survived the trip to the background.
+        startWatchdog()
     }
 
     /// Permanent teardown.
@@ -241,7 +267,7 @@ final class MantaEventStore: ObservableObject {
             state: connectionState,
             lastFrameAt: lastFrameAt,
             now: Date(),
-            staleMs: 45_000
+            staleMs: staleFrameMs
         ) {
             controller.forceReconnect()
         }
