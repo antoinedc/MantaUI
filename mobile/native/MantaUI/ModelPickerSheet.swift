@@ -9,10 +9,10 @@ import SwiftUI
 // from the chosen model and is simply absent for a model that offers none —
 // rather than being a fixed set of levels that silently do nothing.
 //
-// Stock components on purpose: a Form with two navigation-link Pickers is the
-// system's own shape for this, complete with checkmarks, grouped sections,
-// search-free scrolling of a long provider list, dynamic type and VoiceOver.
-// The menu it replaces put every provider, model and level in one long popup.
+// Presented as ONE small sheet with two wheels side by side — model on the
+// left, effort on the right — so both choices are visible and adjustable
+// without navigating away. The effort wheel repopulates from whatever the
+// highlighted model offers, and reads "Not available" for a model with none.
 // ===========================================================================
 
 struct ModelPickerSheet: View {
@@ -36,42 +36,19 @@ struct ModelPickerSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    Picker("Model", selection: modelSelection) {
-                        Text("Default").tag(OpencodeModelID?.none)
-                        ForEach(ChatModel.groups(modelStore.models), id: \.provider) { group in
-                            Section(group.provider) {
-                                ForEach(group.models, id: \.id) { model in
-                                    Text(model.name)
-                                        .tag(Optional(OpencodeModelID(providerID: model.providerID, modelID: model.id)))
-                                }
-                            }
-                        }
-                    }
-                    .pickerStyle(.navigationLink)
-                } footer: {
-                    Text(modelFooter)
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    modelWheel
+                    effortWheel
                 }
+                .frame(maxWidth: .infinity)
 
-                Section {
-                    if modelStore.activeVariants.isEmpty {
-                        LabeledContent("Effort") {
-                            Text("Not available")
-                                .foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Picker("Effort", selection: variantSelection) {
-                            Text("Default").tag(String?.none)
-                            ForEach(modelStore.activeVariants, id: \.id) { variant in
-                                Text(variant.id.capitalized).tag(Optional(variant.id))
-                            }
-                        }
-                        .pickerStyle(.navigationLink)
-                    }
-                } footer: {
-                    Text(effortFooter)
-                }
+                Text(footer)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                    .padding(.bottom, 12)
             }
             .navigationTitle("Model")
             .navigationBarTitleDisplayMode(.inline)
@@ -81,18 +58,62 @@ struct ModelPickerSheet: View {
                 }
             }
         }
+        .presentationDetents([.height(320)])
+        .presentationDragIndicator(.visible)
         .onAppear { modelStore.load() }
     }
 
-    private var modelFooter: String {
-        modelStore.override == nil
-            ? "Using the model your box is configured to use."
-            : "This choice applies to this session only."
+    private var modelWheel: some View {
+        VStack(spacing: 2) {
+            Text("Model")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Model", selection: modelSelection) {
+                Text("Default").tag(OpencodeModelID?.none)
+                ForEach(ChatModel.groups(modelStore.models), id: \.provider) { group in
+                    ForEach(group.models, id: \.id) { model in
+                        Text(model.name)
+                            .tag(Optional(OpencodeModelID(providerID: model.providerID, modelID: model.id)))
+                    }
+                }
+            }
+            .pickerStyle(.wheel)
+            .labelsHidden()
+        }
+        .frame(maxWidth: .infinity)
     }
 
-    private var effortFooter: String {
-        modelStore.activeVariants.isEmpty
-            ? "This model has no effort setting."
-            : "More effort means more reasoning time before it answers."
+    @ViewBuilder
+    private var effortWheel: some View {
+        VStack(spacing: 2) {
+            Text("Effort")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if modelStore.activeVariants.isEmpty {
+                Text("Not available")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxHeight: .infinity)
+            } else {
+                Picker("Effort", selection: variantSelection) {
+                    Text("Default").tag(String?.none)
+                    ForEach(modelStore.activeVariants, id: \.id) { variant in
+                        Text(variant.id.capitalized).tag(Optional(variant.id))
+                    }
+                }
+                .pickerStyle(.wheel)
+                .labelsHidden()
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var footer: String {
+        if modelStore.override == nil {
+            return "Using the model your box is configured to use."
+        }
+        return modelStore.activeVariants.isEmpty
+            ? "This model has no effort setting. Applies to this session only."
+            : "More effort means more reasoning time. Applies to this session only."
     }
 }
