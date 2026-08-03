@@ -1,4 +1,3 @@
-- text: infra / Deploy new billing service feat/orders-csv-export
+- text: feat/orders-csv-export
 - button "7%"
-- button "Terminal"
 - button "Session actions"
