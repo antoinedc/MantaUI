@@ -71,8 +71,20 @@ final class MantaOverflowCaptureUITests: XCTestCase {
 
         MantaChatCapture.openChat(in: app)
 
-        let overflow = app.buttons["overflow-button"]
+        // Wait for the chat surface to push, then locate the trailing header
+        // overflow button. Query descendants + label fallback for resilience
+        // across SwiftUI element taxonomies.
+        _ = app.descendants(matching: .any)["chat-screen"].waitForExistence(timeout: 10)
+        let byId = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'overflow-button'")).firstMatch
+        let overflow = byId.exists ? byId : app.buttons["More options"]
         guard overflow.waitForExistence(timeout: 10) else {
+            // Diagnose: dump the on-screen buttons so a mis-targeted row
+            // (terminal vs chat) is obvious instead of a silent skip.
+            let labels = app.buttons.allElementsBoundByIndex
+                .prefix(40)
+                .map { $0.identifier.isEmpty ? $0.label : $0.identifier }
+            print("PAIRDRIVE overflow-missing buttons=\(labels.joined(separator: "|"))")
             throw XCTSkip("PAIRDRIVE overflow: no overflow-button (chat not open?)")
         }
         overflow.tap()
