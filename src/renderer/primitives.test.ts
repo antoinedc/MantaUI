@@ -23,7 +23,14 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "MenuOption", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble"] as const;
+
+// A primitive component whose implementation lives in a differently-named
+// module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
+// shell and must not diverge, BET-615), so both map to the one file. The
+// two-adopter count for each is the set of files that import the `./Chip`
+// module, which is how the rule stays honest for two components in one source.
+const COMPONENT_FILE: Record<string, string> = { SplitChip: "Chip" };
 
 const RENDERER = fileURLToPath(new URL(".", import.meta.url));
 
@@ -49,7 +56,7 @@ function rendererFiles(): string[] {
 }
 
 function source(p: string): string {
-  return readFileSync(path.join(RENDERER, `${p}.tsx`), "utf8");
+  return readFileSync(path.join(RENDERER, `${COMPONENT_FILE[p] ?? p}.tsx`), "utf8");
 }
 
 /** Return the balanced `{ ... }` starting at `openIdx` (must be a `{`). */
@@ -85,11 +92,18 @@ function propsLiteral(content: string, component: string): string | null {
   return null;
 }
 
-/** Impoter filenames for `p` per the epic's rule (excludes own source + test). */
+/** Importer filenames for `p` per the epic's rule (excludes own source + test).
+ *  Matches by MODULE import (any named export from `./<file>`), not by a
+ *  single export name — Chip.tsx exports two components (Chip + SplitChip),
+ *  and each is "adopted" by a file that imports the module either way, so the
+ *  two-adopter count for both resolves to the same 2 files (ModelPicker +
+ *  NewSessionScreen). For single-export modules this is equivalent to the old
+ *  brace-name match. */
 function importers(p: string): string[] {
-  const re = new RegExp(`import\\s*\\{[^}]*\\b${p}\\b[^}]*\\}\\s*from\\s*["'][^"']*\\/${p}["']`);
+  const file = COMPONENT_FILE[p] ?? p;
+  const re = new RegExp(`from\\s*["'][^"']*\\/${file}["']`);
   return rendererFiles().filter((f) => {
-    if (f === `${p}.tsx` || f === `${p}.test.tsx`) return false;
+    if (f === `${file}.tsx` || f === `${file}.test.tsx`) return false;
     return re.test(readFileSync(path.join(RENDERER, f), "utf8"));
   });
 }
@@ -126,10 +140,10 @@ function offendingLines(content: string, re: RegExp): string[] {
 // MenuItem gains a recorded waiver in BET-549. After the mobile exclusion,
 // its only remaining web adopter is SessionHeader.tsx (the session menu /
 // dropdown); its former second adopter was the excluded mobile SessionScreen
-// sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
-// in the desktop client — carried by the redesign spec — so it is a legitimate
-// one-web-surface primitive rather than a chrome-incompatible one.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem"]);
+// sheet, which the mobile-redesign deletes. BET-644 resolves it: the model
+// and effort menus (ModelMenu.tsx + EffortMenu.tsx) adopt the same Dropdown
+// surface, so MenuItem now has three web adopters and leaves SINGLE_SURFACE.
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow", "MessageBubble"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -142,13 +156,100 @@ const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem"]);
 // the one spec-authorized component.
 const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   SessionRow: [3, 7, 8, 13, 20, 26],
+  // MenuItem / Dropdown's verbatim spec chrome (BET-644): the four-region menu
+  // surface's off-grid values — 340px wide/250px narrow panel widths, 460px
+  // max-height and the 38px fixed search strip. The 11.25rem menu min-width
+  // resolves through rem so it needs no entry. Real values from the redesign
+  // spec's `.dd`, not drift.
+  MenuItem: [38, 250, 340, 460],
+  // MenuOption's verbatim spec chrome (BET-644): the 34px single-line and 44px
+  // sub-line row densities (min-h-[34px]/min-h-[44px]), the 2px sub-line top
+  // margin (mt-[2px], `.opt .sub`), and the decimal tail of the 11.5px sub-line
+  // (text-[11.5px] → the `\d+px` scan reads it as 5). Real values from the
+  // redesign spec's `.opt`, not drift. (The 16px check tick slot uses w-4, so
+  // it resolves through Tailwind's scale and needs no entry.)
+  MenuOption: [2, 5, 34, 44],
+  // Button's verbatim spec chrome (BET-611 stage 1): 14px inline padding
+  // (px-[14px]); 32px resolves via h-8, so it needs no entry. The 6px icon gap
+  // (gap-[6px]) and the 12.5px label (text-[12.5px] → 5px after the decimal)
+  // are the other spec pixel values in the BUTTON_BASE constant — all three
+  // are real values from the redesign spec's button definition, not drift.
+  Button: [5, 6, 14],
+  // Chip / SplitChip share one source file with one chrome contract (BET-615):
+  // 29px hit area (h-[29px]), 11px inline padding (px-[11px]) and a 6px gap
+  // (gap-[6px]). Both names carry the same allowlist because rule 1c scans
+  // the shared Chip.tsx for each, so both need the values listed.
+  Chip: [6, 11, 29],
+  SplitChip: [6, 11, 29],
+  // Toggle's verbatim spec chrome (BET-614 stage 3): the 2px knob offset
+  // (top-[2px]) and the 18px on-knob x-position (left-[18px] — 36px track
+  // minus 14px knob minus 2×2px padding). Real values from the redesign
+  // spec's `.sw` definition, not drift — the switch's hit-area/size resolve
+  // via w-9/h-5/w-3.5 so they need no entry.
+  Toggle: [2, 18],
+  // Callout's verbatim spec chrome (BET-614 stage 3): the 3px left accent
+  // bar (border-l-[3px]). The only off-grid px in CALLOUT_BASE.
+  Callout: [3],
+  // Tag's verbatim spec chrome (BET-614 stage 4): the 5px icon gap
+  // (gap-[5px]) and the 23px pill hit area (h-[23px]). The 11.5px label
+  // (text-[11.5px]) resolves through the `\d+px` scan's decimal skip, so it
+  // needs no entry. Real values from the redesign spec's tag definition, not
+  // drift.
+  Tag: [5, 23],
+  // IconCard's verbatim spec chrome (BET-614 stage 4): the 10.5px mono label
+  // (text-[10.5px]) is its only off-grid value — the `\d+px` scan reads the
+  // "5px" tail of the decimal 10.5, so 5 is the entry. Real spec value, not
+  // drift.
+  IconCard: [5],
+  // Eyebrow's verbatim spec chrome (BET-614 stage 4): the 11px label
+  // (text-[11px]) is its only off-grid px.
+  Eyebrow: [11],
+  // SettingsRow's verbatim spec chrome (BET-614 stage 5): the 2px control
+  // top-padding (pt-[2px]) and the 3px help top-margin (mt-[3px]) are its two
+  // off-grid values. The 12.5px help text (text-[12.5px]) reads as 5px through
+  // the `\d+px` decimal-tail scan, so 5 is allow-listed too — the same
+  // handling Button/Tag give their 12.5/11.5px labels. Real values from the
+  // redesign spec's `.setrow` definition, not drift.
+  SettingsRow: [2, 3, 5],
+  // StatusDot's verbatim spec chrome (BET-636): the 6px status dot
+  // (w-[6px] h-[6px]) — `.tool-h .g` from the session spec. The only off-grid
+  // value the dot carries.
+  StatusDot: [6],
+  // OutputWell's verbatim spec chrome (BET-636): the 9px standalone vertical
+  // padding (py-[9px], from `.ask-cmd`) and the decimal tail of the 12.5px
+  // mono size (text-[12.5px] → the `\d+px` scan reads it as 5, same handling
+  // Button/Tag give their decimal labels). Real values from `.tool-b` /
+  // `.ask-cmd`, not drift.
+  OutputWell: [9, 5],
+  // ToolCard's verbatim spec chrome (BET-636): the 9px header vertical padding
+  // (py-[9px], `.tool-h`), the 11px meta size (text-[11px], `.tool-h .r`), and
+  // the 12.5px mono header size (text-[12.5px] → reads as 5). Real values
+  // from `.tool`/`.tool-h`, not drift.
+  ToolCard: [9, 11, 5],
+  // MeasureColumn's verbatim spec chrome (BET-637): the 28px side inset
+  // (px-[28px], `.wrap` / `.comp-in`) — the transcript/composer reading column
+  // is padded 28px at the sides. The max-width resolves through the inline
+  // `var(--measure)` so it needs no entry.
+  MeasureColumn: [28],
+  // MessageBubble's verbatim spec chrome (BET-637): the 11px vertical bubble
+  // padding (py-[11px], `.umsg`). The 88% cap (max-w-[88%]) is a percentage,
+  // so it needs no entry.
+  MessageBubble: [11],
 };
 
 const SKIP_REASON: Record<string, string> = {
   SessionRow:
     "single-surface primitive: 1 web adopting file (Sidebar.tsx, the desktop session rail). Its only other session list lived in mobile/SessionListScreen, which the mobile-redesign deletes wholesale (DECISIONS.md §12) — so the two-adopter scan no longer counts it. Owner-approved formal exemption from the two-adopter rule (BET-546); the 2nd web adopter is deferred to the mobile-consolidation follow-up.",
-  MenuItem:
-    "single-surface primitive: 1 web adopting file (SessionHeader.tsx, the session menu / dropdown), which carries the menu/dropdown contract from the redesign spec. Its former second adopter was the mobile SessionScreen sheet, deleted wholesale by the mobile-redesign (DECISIONS.md §12), so it no longer counts as a web adopter. Owner-approved formal waiver (BET-549), recorded option A.",
+  Toggle:
+    "single-surface primitive: both boolean switch adopters (chatAutoAllow + allowAgentPush) are rows of the ONE settings form (Settings.tsx) — two call sites, one adopting file, so the file-counting two-adopter scan reads 1. The settings-toggle is a single surface (a live on/off setting in the settings panel); converting a second, unrelated file to satisfy the file-count would force the primitive into a UI where the spec doesn't place a switch. Recorded as a single-surface case like SessionRow/MenuItem, not a pending finding.",
+  IconCard:
+    "no adopting file this stage (BET-614 stage 4): neither named adopter (Settings.tsx, NewSessionScreen.tsx) contains an icon-above-label tile — Settings' rail tabs are horizontal, interactive nav rows (aria tablist) and NewSessionScreen has no such tile — so per the epic rule both are REPORTED here (BET-618). Registered under the enforce net (its 1a/1c/D4 checks still run) while the owner decides on real adopters; no call-site migration exists to assert.",
+  Eyebrow:
+    "single-web-adopter this stage (BET-614 stage 4): its one genuine home is Settings.tsx (the GroupCard uppercase section label). The second named adopter, NewSessionScreen.tsx, has no uppercase section label — REPORTED here (BET-618) rather than force-converted. Pending an owner decision on a real second web adopter before the waiver resolves.",
+  SettingsRow:
+    "no adopting file this stage (BET-614 stage 5): the premise that Settings.tsx's private SettingField already implements `.setrow` and only needs extracting does NOT hold — that SettingField is a Field-based text/password input (entry/value/onCommit/credential), not a row with name/help/children. Neither named adopter (Settings.tsx, ProvidersCard.tsx) carries a genuine `.setrow` row: Settings.tsx's schema rows hand-roll their own simpler chrome and ProvidersCard.tsx's rows are endpoint list items. Converting either to satisfy the count would change the settings panel's visual layout (adds row dividers + spec typography) or force-fit an unrelated element — both forbidden — so this stage builds + registers the owner-approved primitive and REPORTS both adopters (BET-619). Pending an owner decision on a real web adopter (a `.setrow` migration of the settings panel) before the waiver resolves.",
+  MessageBubble:
+    "single-surface primitive: 1 web adopting file (MessageRow.tsx, the user message in the transcript). The user message is the only bubble in the app today, and the transcript's tool chrome is now in scope — the owner wants THIS bubble's chrome owned by a primitive now rather than re-derived when mobile and any future review surface need the same right-aligned bubble (the user bubble is a LOCKED spec decision, Q7, not a preference). Owner-approved formal exemption from the two-adopter rule (BET-637), following the SessionRow/MenuItem precedent.",
 };
 
 describe("M527 primitive rules", () => {
@@ -196,8 +297,21 @@ describe("M527 primitive rules", () => {
     // never add a file to a row to make a red test green.
     const CHROME_OWNERS: Record<string, string[]> = {
       "bg-black/40": ["Modal.tsx"], // the modal overlay tint
-      "shadow-lg": ["Modal.tsx"], // window-level floating surface
+      "shadow-lg": ["Modal.tsx", "MenuItem.tsx"], // the window-level floating surface (Modal) and the dropdown menu surface (Dropdown, BET-644) — two real owners, declared with their primitives
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
+      "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
+      "h-[29px]": ["Chip.tsx"], // chip hit-area height — the one off-grid value both Chip + SplitChip carry (BET-615)
+      "left-[18px]": ["Toggle.tsx"], // toggle knob on-position — the switch's travel signature (BET-614)
+      "border-l-[3px]": ["Callout.tsx"], // the 3px callout accent bar (BET-614)
+      "h-[23px]": ["Tag.tsx"], // the tag pill's 23px hit area — the mono metadata badge signature (BET-614)
+      "text-[10.5px]": ["IconCard.tsx"], // the icon-card's mono label size (BET-614)
+      "tracking-[.1em]": ["Eyebrow.tsx"], // the eyebrow's letter-spaced uppercase signature (BET-614)
+      "last:border-b-0": ["SettingsRow.tsx"], // the settings-row trailing-border removal — the .setrow row-divider signature (BET-614)
+      "w-[6px]": ["StatusDot.tsx"], // the real 6px status dot — `.tool-h .g` (BET-636)
+      "bg-inset": ["OutputWell.tsx"], // the recessed output well — `.tool-b`/`.ask-cmd` (BET-636)
+      "px-[28px]": ["MeasureColumn.tsx"], // the 28px reading-column side inset — `.wrap`/`.comp-in` (BET-637)
+      "max-w-[88%]": ["MessageBubble.tsx"], // the user bubble's 88% cap — `.umsg` (BET-637)
+      "text-[12.5px]": ["ToolCard.tsx", "OutputWell.tsx", "Button.tsx", "SettingsRow.tsx"], // the 12.5px mono chrome — ToolCard header + OutputWell well (BET-636), plus the pre-existing Button label and SettingsRow help which already owned it before this primitive tracked it
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {

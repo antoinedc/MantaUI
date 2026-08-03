@@ -19,7 +19,7 @@ import { IconButton } from "./IconButton";
 import { SessionHeader } from "./SessionHeader";
 
 // The exact chrome string IconButton owns for the md (default) size. Padding
-// and radius live in SIZE_CHROME and vary by size (md/lg rounded-xs p-1, xl
+// and radius live in SIZE_CHROME and vary by size (md rounded-xs p-1, xl
 // rounded-md p-2); the rest of the chrome is shared — no className escape
 // hatch means every call site renders exactly these classes.
 const CHROME =
@@ -75,17 +75,17 @@ describe("IconButton", () => {
     expect(el.getAttribute("title")).toBe("Switch to Terminal");
   });
 
-  it("renders a 16px icon by default (md) and a 20px standalone (lg)", () => {
+  it("renders a 16px icon on both sizes (md and xl)", () => {
     h = mount(<IconButton label="A" icon={<Terminal />} />);
     expect(iconSize(h)).toBe("16");
-    h.rerender(<IconButton label="A" icon={<Terminal />} size="lg" />);
-    expect(iconSize(h)).toBe("20");
+    h.rerender(<IconButton label="A" icon={<Terminal />} size="xl" />);
+    expect(iconSize(h)).toBe("16");
   });
 
-  it("renders the xl size (36px hit area, --r-md radius, 20px icon) for a standalone control row", () => {
+  it("renders the xl size (32px hit area, --r-md radius, 16px icon) for a standalone control row", () => {
     h = mount(<IconButton label="A" icon={<Terminal />} size="xl" />);
     const el = buttonEl(h);
-    expect(iconSize(h)).toBe("20");
+    expect(iconSize(h)).toBe("16");
     expect(el.className).toBe(CHROME_XL);
     expect(el.className).toContain("rounded-md");
     expect(el.className).toContain("p-2");

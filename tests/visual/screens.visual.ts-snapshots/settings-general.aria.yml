@@ -1,13 +1,8 @@
 - tabpanel "General":
-  - heading "Appearance" [level=5]
-  - text: Theme
+  - text: Appearance Theme
   - group "Theme":
     - button "Theme" [pressed]: System
     - button "Light"
     - button "Dark"
-  - text: System follows your OS appearance and re-themes live.
-  - heading "About" [level=5]
-  - text: /Desktop 0\.\d+\.\d+ · server 0\.\d+\.\d+/
-  - heading "Danger zone" [level=5]
-  - text: Restore every setting below to its default. This does not remove your box pairing or projects.
+  - text: /System follows your OS appearance and re-themes live\. About Desktop 0\.\d+\.\d+ · server 0\.\d+\.\d+ Danger zone Restore every setting below to its default\. This does not remove your box pairing or projects\./
   - button "Reset all settings…"

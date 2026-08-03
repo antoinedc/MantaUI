@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
-  CornerUpRight,
+  CornerDownLeft,
   Folder as FolderIcon,
   GitBranch,
   Loader2,
@@ -26,6 +26,7 @@ import {
   Paperclip,
 } from "lucide-react";
 import { useStore } from "./store";
+import { Chip } from "./Chip";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
@@ -394,12 +395,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     // the harness never depends on a class name or DOM position — both of
     // which a redesign is expected to change.
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
-      <div className="w-full max-w-[680px] flex flex-col gap-4">
+      <div className="w-full max-w-[720px] rounded-xl border border-border-subtle bg-bg-elev px-6 py-10 flex flex-col gap-2">
         {/* Heading — the only element centred on the screen; the chip row and
             the controls row below are both left-aligned to the composer. */}
-        <div className="text-center space-y-1">
-          <h1 className="text-display font-bold text-text">What's up next?</h1>
-          <p className="text-prose text-text-muted">
+        <div className="text-center space-y-1 mb-4">
+          <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+          <p className="text-body text-text-faint">
             Start a session on any folder your box can see.
           </p>
         </div>
@@ -408,58 +409,45 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             (shared border, no gap). Left-aligned: it reads as a property bar
             belonging to the composer below, not a second heading. */}
         <div className="flex items-center gap-2 self-start">
-          <button
-            onClick={() => setPickerOpen(true)}
-            className="inline-flex items-center gap-2 h-9 pl-3 pr-2 rounded-md border border-border bg-bg-soft shadow-sm text-body text-text hover:border-border-strong"
-            title={cwd || "Select folder"}
-          >
-            <FolderIcon size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
-            <span className="truncate max-w-[200px] font-mono">{folderLabel}</span>
-            <ChevronDown size={14} className="shrink-0 text-text-faint" aria-hidden="true" />
-          </button>
+          <Chip onClick={() => setPickerOpen(true)} title={cwd || "Select folder"}>
+            <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
+            <span className="truncate max-w-[200px]">{folderLabel}</span>
+            <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
+          </Chip>
 
-          <div className="inline-flex items-center h-9 rounded-md border border-border bg-bg-soft shadow-sm text-body overflow-hidden">
-            {wantWorktree && isGitRepo ? (
-              // BET-417 §A: "Ticking worktree makes the branch field
-              // editable." The typed value is passed as `name` to
-              // gitAddWorktree, which deriveWorktree turns into the new
-              // branch name.
-              <span className="inline-flex items-center gap-1 px-3 self-stretch">
-                <GitBranch size={14} className="shrink-0 text-text-muted" aria-hidden="true" />
-                <input
-                  value={worktreeBranch}
-                  onChange={(e) => setWorktreeBranch(e.target.value)}
-                  spellCheck={false}
-                  className="w-[100px] bg-transparent border-0 outline-none text-text font-mono focus:border-b focus:border-accent"
-                  placeholder="branch-name"
-                  aria-label="Worktree branch name"
-                />
-              </span>
-            ) : branchName ? (
-              <span className="inline-flex items-center gap-1 px-3 text-text-muted self-stretch">
-                <GitBranch size={14} className="shrink-0" aria-hidden="true" />
+          {/* Branch / worktree. The branch is a Chip (display) — or a plain,
+              un-nested input while worktree is being named (BET-417 §A). The
+              worktree toggle stays the Checkbox primitive. Neither the input
+              nor the checkbox is wrapped in a <button>: that keeps valid HTML
+              and avoids loading SplitChip's opt-in popup semantics onto a
+              non-popup control. */}
+          {wantWorktree && isGitRepo ? (
+            <input
+              value={worktreeBranch}
+              onChange={(e) => setWorktreeBranch(e.target.value)}
+              spellCheck={false}
+              className="h-8 w-[132px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
+              placeholder="branch-name"
+              aria-label="Worktree branch name"
+            />
+          ) : (
+            <Chip on={wantWorktree} onClick={() => {}} title="Current git branch">
+              <GitBranch size={13} className="shrink-0" aria-hidden="true" />
+              {branchName ? (
                 <span className="truncate max-w-[120px]">{branchName}</span>
-              </span>
-            ) : (
-              <span className="inline-flex items-center px-3 text-text-faint self-stretch">
-                no branch
-              </span>
-            )}
-            <div
-              className={`inline-flex items-center gap-2 pl-3 pr-3 self-stretch border-l border-border ${
-                worktreeChipEnabled ? "" : "opacity-50"
-              }`}
-              title={worktreeChipEnabled ? "Create in a fresh git worktree" : "not a git repository"}
-            >
-              <Checkbox
-                checked={wantWorktree}
-                disabled={!worktreeChipEnabled}
-                onChange={(v) => setWantWorktree(v)}
-                ariaLabel="Create in a fresh git worktree"
-              />
-              <span className="text-text-muted">worktree</span>
-            </div>
-          </div>
+              ) : (
+                <span className="text-text-faint">no branch</span>
+              )}
+            </Chip>
+          )}
+
+          <Checkbox
+            checked={wantWorktree}
+            disabled={!worktreeChipEnabled}
+            onChange={(v) => setWantWorktree(v)}
+            label="worktree"
+            ariaLabel="Create in a fresh git worktree"
+          />
         </div>
 
         {/* Composer — a single tall input card. The submit affordance sits
@@ -467,10 +455,10 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             can grow downward without moving it. */}
         <div
           className={
-            "manta-composer-input-row rounded-lg border bg-bg-soft flex items-start gap-2 px-4 py-3 " +
+            "manta-composer-input-row rounded-lg border bg-bg-soft flex items-start gap-3 px-4 py-3 " +
             (voiceRecording
               ? "manta-recording"
-              : "border-border")
+              : "border-border-strong")
           }
         >
           <textarea
@@ -481,7 +469,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             onKeyDown={onKeyDown}
             placeholder="Describe a task or ask a question"
             rows={3}
-            className="flex-1 w-full bg-transparent border-0 text-title text-text outline-none resize-none placeholder:text-text-faint"
+            className="flex-1 w-full bg-transparent border-0 text-prose text-text outline-none resize-none placeholder:text-text-faint"
             spellCheck={false}
           />
 
@@ -496,12 +484,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
                   ? "Start a session"
                   : "Describe a task to start"
             }
-            className="shrink-0 w-9 h-9 rounded-md border border-border bg-bg-elev text-text-muted inline-grid place-items-center hover:text-text hover:border-border-strong disabled:opacity-50"
+            className="shrink-0 w-7 h-7 rounded-sm bg-fill text-text-faint inline-grid place-items-center hover:text-text hover:bg-fill-hover disabled:opacity-50"
           >
             {sending ? (
-              <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+              <Loader2 size={14} className="animate-spin" aria-hidden="true" />
             ) : (
-              <CornerUpRight size={16} aria-hidden="true" />
+              <CornerDownLeft size={14} aria-hidden="true" />
             )}
           </button>
         </div>
@@ -521,9 +509,6 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               setModelOverride(m);
             }}
             labelOverride={modelTouched ? null : "Auto"}
-            separatePills
-            alwaysShowEffort
-            effortAccent
           />
 
           {/* Attach — no implementation on this screen yet (welcome is

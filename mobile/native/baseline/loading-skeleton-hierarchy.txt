@@ -1,0 +1,22 @@
+Attributes: Application, 0xADDR, pid: PID, label: 'MantaUI'
+Element subtree:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+    Window (Main), 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}
+              ScrollView, 0xADDR, {{0.0, 0.0}, {402.0, 874.0}}, identifier: 'loading-skeleton'
+                Other, 0xADDR, {{0.0, 531.3}, {402.0, 308.7}}
+                Other, 0xADDR, {{369.0, 531.3}, {30.0, 280.7}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 534.3}, {3.0, 274.7}}
+                Other, 0xADDR, {{369.0, 531.3}, {30.0, 280.7}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                  Other, 0xADDR, {{396.0, 534.3}, {3.0, 274.7}}
+Path to element:
+ →Application, 0xADDR, pid: PID, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0xADDR, pid: PID, label: 'MantaUI'
+  }
+

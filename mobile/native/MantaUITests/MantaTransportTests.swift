@@ -142,6 +142,15 @@ final class MantaTransportTests: XCTestCase {
         XCTAssertEqual(question.tool?.callID, "toolu_10")
     }
 
+    func testDecodesTopLevelStringResultForVcsBranch() throws {
+        // `opencode:vcs-branch` returns a bare git branch name as a top-level
+        // String inside the envelope. Regression: decode must round-trip it
+        // instead of throwing (a top-level String is a JSON fragment).
+        let payload = #"{"result": "main"}"#
+        let branch = try MantaAPIClient.decode(json(payload), as: String?.self)
+        XCTAssertEqual(branch, "main")
+    }
+
     func testDecodesVoidResultPayloadsForWriteMethods() throws {
         let payload = #"{"result":null}"#
         let data = try json(payload)

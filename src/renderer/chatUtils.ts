@@ -4,7 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
+import type { DelegateApprovalTool, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -118,18 +118,70 @@ export type {
 } from "../shared/streamInterpretation.mjs";
 
 
-// Compact "Nk" display for a model's context window (e.g. 200_000 → "200k").
-// Returns null for a missing/non-positive limit so callers can omit the
-// badge entirely rather than rendering "0k". The canonical
-// `Math.round(context / 1000)k` expression — ModelPicker.tsx and
-// SubagentsCard.tsx both import this instead of re-deriving it inline.
+// Compact "Nk" / "NM" display for a model's context window (e.g. 200_000 →
+// "200k", 1_000_000 → "1M", 1_500_000 → "1.5M"). Returns null for a
+// missing/non-positive limit so callers can omit the badge entirely rather
+// than rendering "0k". The canonical formatting expression — ModelPicker,
+// ModelsCard and SubagentsCard all import this instead of re-deriving it
+// inline. At or above 1_000_000 it switches to millions and strips a
+// trailing ".0"; below it keeps the k form (BET-644).
 export function formatModelContextSize(
   context: number | null | undefined,
 ): string | null {
   if (typeof context !== "number" || !Number.isFinite(context) || context <= 0) {
     return null;
   }
+  if (context >= 1_000_000) {
+    const m = context / 1_000_000;
+    return `${(Math.round(m * 10) / 10).toFixed(1).replace(/\.0$/, "")}M`;
+  }
   return `${Math.round(context / 1000)}k`;
+}
+
+// Title-case a model variant / effort id for display: "high" → "High",
+// "extended-thinking" → "Extended Thinking". The raw id is preserved for the
+// wire; this is display-only. Extracted to chatUtils so ModelPicker's effort
+// trigger label and the effort menu share one source (BET-644).
+export function titleCase(id: string): string {
+  return id
+    .split(/[-_]/)
+    .map((w) => (w.length === 0 ? w : w[0].toUpperCase() + w.slice(1)))
+    .join(" ");
+}
+
+// Client-side filter over already-grouped models for the model menu's search
+// strip (BET-644): case-insensitive substring against the model NAME or the
+// provider id. A group whose models all filter out is elided (its header
+// disappears too). An empty / whitespace query returns the groups unchanged.
+export function filterModelGroups(
+  groups: Array<[string, OpencodeModel[]]>,
+  query: string,
+): Array<[string, OpencodeModel[]]> {
+  const q = query.trim().toLowerCase();
+  if (!q) return groups;
+  const out: Array<[string, OpencodeModel[]]> = [];
+  for (const [providerID, ms] of groups) {
+    const filtered = ms.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        m.providerID.toLowerCase().includes(q),
+    );
+    if (filtered.length > 0) out.push([providerID, filtered]);
+  }
+  return out;
+}
+
+// Move the model menu's roving highlight index one step, wrapping at both
+// ends (BET-644). Returns -1 for an empty option list. From a cold (-1)
+// index, down starts at the top (0) and up starts at the bottom (length - 1).
+export function moveMenuHighlight(
+  index: number,
+  dir: -1 | 1,
+  length: number,
+): number {
+  if (length <= 0) return -1;
+  if (index < 0) return dir > 0 ? 0 : length - 1;
+  return (index + dir + length) % length;
 }
 
 export function formatTokens(n: number): string {
@@ -545,6 +597,17 @@ export function isDrainAbortError(
   draining: boolean,
 ): boolean {
   return draining && errName === "MessageAbortedError";
+}
+
+// BET-640: server-rpc unsupported-channel predicate. manta-server throws
+// `unknown rpc channel: <ch>` (src/server/rpc.mjs) and httpApi surfaces that
+// string as the Error message, so a box that doesn't implement a channel (e.g.
+// the background-jobs endpoint on a box that predates delegation) rejects the
+// RPC with exactly this text. Renderers use it to tell "endpoint not
+// implemented" apart from a transport blip — the former should raise the
+// incompatible banner, the latter should stay silent (BET-640).
+export function isUnknownChannelError(message: string): boolean {
+  return typeof message === "string" && message.includes("unknown rpc channel");
 }
 
 // describeCron — best-effort human-readable label for a 5-field cron

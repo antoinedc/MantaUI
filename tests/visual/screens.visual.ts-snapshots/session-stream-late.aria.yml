@@ -39,7 +39,7 @@
   - button "7%"
   - button "Terminal"
   - button "Session actions"
-  - text: "/› Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. ● Read\\(app\\/routes\\/orders\\.py\\) ⎿ Read \\d+ lines \\(ctrl\\+o to expand\\) Added/"
+  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py Read \\d+ lines \\(ctrl\\+o to expand\\) Added/"
   - code: /export.csv
   - text: . It reuses the same filter query as
   - code: GET /orders
@@ -61,10 +61,10 @@
   - button "Allow once"
   - button "Always allow alembic upgrade *"
   - button "Reject"
-  - textbox "Try something… (@ files · / commands · tab insert · ⏎ send)":
-    - /placeholder: Try something…  (@ files · / commands · tab insert · ⏎ send)
+  - textbox "Reply, or describe the next task…"
+  - button "Send message"
   - button "Opus 4.7"
-  - button "High" [disabled]
+  - button "High"
   - button "schedules"
   - button "secrets"
   - button "webhooks"

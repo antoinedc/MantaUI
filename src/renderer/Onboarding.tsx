@@ -56,6 +56,7 @@ import { installHttpTransport } from "./transportInstall";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import { ProcessPanel } from "./ProcessPanel";
+import { Callout } from "./Callout";
 import mantaMark from "./assets/manta-mark-128.png";
 
 const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
@@ -341,13 +342,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
               logLines={[]}
               onCopyDiagnostics={copyVerifyDiagnostics}
             />
-            <div
-              role="alert"
-              className="rounded-sm border px-4 py-3 text-body"
-              style={{ borderColor: DANGER, color: DANGER }}
-            >
-              {verifyError.message}
-            </div>
+            <Callout tone="danger">{verifyError.message}</Callout>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"

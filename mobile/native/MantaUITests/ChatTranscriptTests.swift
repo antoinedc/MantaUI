@@ -155,6 +155,57 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
     }
 
+    // MARK: - Blank-text parts must not inflate the step-group gap (BET-632)
+
+    func testBlankTextPartBeforeStepsDoesNotEmitProseBlock() {
+        // opencode commonly emits a newline/whitespace-only text part between
+        // the real prose and a tool run. It must NOT become a `.prose` block —
+        // that would stack another `--sp-3` + line box and widen the gap above
+        // the 'Ran' group.
+        let msgs = [message(id: "m1", role: "assistant", parts: [
+            textPart("p1", "m1", "Let me check the issue."),
+            textPart("p2", "m1", "\n"),
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("multica issue get BET-520")]),
+        ])]
+        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        XCTAssertEqual(blocks.count, 2, "expected prose + steps only, got \(blocks)")
+        guard case .prose = blocks[0], case .steps = blocks[1] else {
+            return XCTFail("expected [.prose, .steps], got \(blocks)")
+        }
+    }
+
+    func testWhitespaceOnlyTextPartIsBlank() {
+        let msgs = [message(id: "m1", role: "assistant", parts: [textPart("p1", "m1", "   \n  ")])]
+        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        XCTAssertTrue(blocks.isEmpty, "whitespace-only text must be skipped, got \(blocks)")
+    }
+
+    func testBlankTrailingTextAfterStepsIsSkipped() {
+        // A blank text part AFTER a tool run must not leave a stray `.prose`
+        // block trailing the steps group (another false gap on the next block).
+        let msgs = [message(id: "m1", role: "assistant", parts: [
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
+            textPart("p1", "m1", "\n\n"),
+        ])]
+        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        XCTAssertEqual(blocks.count, 1, "expected only the steps block, got \(blocks)")
+        guard case .steps = blocks[0] else {
+            return XCTFail("expected .steps, got \(blocks)")
+        }
+    }
+
+    func testUserBlankPartDoesNotAddParagraphInsideBand() {
+        let msgs = [message(id: "m1", role: "user", parts: [
+            textPart("p1", "m1", "check bet-520"),
+            textPart("p2", "m1", "\n"),
+        ])]
+        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        guard case .user(let text) = blocks[0] else {
+            return XCTFail("expected .user, got \(blocks[0])")
+        }
+        XCTAssertEqual(text, "check bet-520")
+    }
+
     func testSubagentNeverRolls() {
         let msgs = [message(id: "m1", role: "assistant", parts: [
             toolPart("t1", "m1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
@@ -188,6 +239,10 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testHeaderSubtitleRunningNoContext() {
         XCTAssertEqual(ChatHeaderSubtitle.text(running: true, elapsed: 0, contextPct: nil), "running · 0s")
+    }
+
+    func testHeaderSubtitleIdleWithContext() {
+        XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: 12.6), "idle · 13%")
     }
 
     func testHeaderSubtitleIdle() {

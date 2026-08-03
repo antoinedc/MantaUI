@@ -62,6 +62,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
+import { MeasureColumn } from "./MeasureColumn";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { useSessionResources } from "./hooks/useSessionResources";
@@ -2138,7 +2139,12 @@ export function ChatPanel({
 
       {running && (
         <>
-          <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
+          {/* Working indicator: wrapped in the same MeasureColumn as the */}
+          {/* transcript so the running line shares the reading column's 28px */}
+          {/* left/right edge (BET-637). Its own horizontal padding was dropped. */}
+          <MeasureColumn>
+            <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
+          </MeasureColumn>
           {/* activeTodos used to render here, sticky above the input. Moved */}
           {/* into the scroll container above (tail of the transcript) so */}
           {/* long checklists scroll like normal chat content. */}

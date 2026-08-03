@@ -21,9 +21,11 @@ cells closing; it is authoritative for future issues.
 
 ## Standing decisions
 
-1. **The owner validates every component personally.** Each primitive is reviewed by
-   Antoine before it is adopted anywhere. Route to him; do not merge a primitive on
-   agent review alone.
+1. **The owner validates every primitive personally — after merge.** Each
+   primitive is reviewed by Antoine visually against a staging desktop build
+   AFTER it merges (amended BET-636: the tool-card primitives do not block the
+   PR on per-primitive owner sign-off). The review gate is the pre-merge
+   authority; owner validation happens post-merge on the staging build.
 2. **Two-adopter rule.** A primitive is only introduced when it replaces **two or more
    existing call sites**, and those call sites are migrated in the **same PR**. Never
    land a primitive with no adopter. This is what keeps the inventory evidence-driven
@@ -33,11 +35,11 @@ cells closing; it is authoritative for future issues.
    prevent.
 4. **This is not a design system.** No showcase site, no documentation site, no
    variants nobody uses. It is a primitive inventory with adopters.
-5. **Chrome only in the first pass. The transcript is excluded.** It lives inside the
-   ChatPanel monolith and the mobile track is migrating its event wiring
-   (DECISIONS.md §17, desktop renderer first). Start with card, field, pill, icon
-   button, menu item — where both style-diff PoC screens live and where
-   `Settings.tsx` already holds half the primitives privately.
+5. **Transcript chrome is in scope (first pass complete).** The first pass now
+   covers the transcript's tool rendering (LIFTED BET-636 — decision 5's
+   original exclusion of the transcript is rescinded now that the first pass
+   shipped). Transcript chrome is built as reusable primitives that later
+   screens adopt, not as inline markup inside the transcript components.
 6. **No new token.** If the spec needs a value the scale lacks, the scale changes
    first, in its own change, with baselines regenerated.
 
@@ -77,13 +79,36 @@ BET-546 / BET-549. Since BET-549 the two-adopter scan excludes
 (DECISIONS.md §12), so a file there would mark a primitive satisfied via one
 that vanishes. Adopter counts below are **web** adopters only.
 
+**Menu surface chrome (BET-644, collision 1 — C5 precedent).** The whole
+dropdown family — `Dropdown` (MenuItem) and both picker menus — uses one
+surface token, `--card`/`bg-bg-soft`, and the spec's `--r-lg`/`--shadow-lg`
+chrome, replacing the old `--panel`/`bg-bg-elev`/`rounded-md`/`shadow-md`
+contract. When the spec (the proposal's `.dd`) and the code (`docs/components.md` + `Dropdown`'s contract comment) disagreed, the spec won, and
+SessionHeader's session menu moved with it.
+
+
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
+| Button | `src/renderer/Button.tsx` | 2 — `Settings.tsx`, `FolderPickerModal.tsx` | `tone: default\|primary\|ghost\|danger` (required, no default — the bare base is abstract, C4); `disabled`; `type`; `title`; `children`; `hook`. No `size` prop — one size only (the spec has no `.btn.sm` rule). |
+| Chip | `src/renderer/Chip.tsx` | 2 — `NewSessionScreen.tsx` (folder chip + branch chip); `ModelPicker.tsx` (via the shared module) | `on` (the accent "active" state); `onClick`; `title`; `children`; `hook`. No `size` prop — one size only (29px hit area) |
+| SplitChip | `src/renderer/Chip.tsx` | 2 — `ModelPicker.tsx` (model ▸ effort split); `NewSessionScreen.tsx` (via the shared module) | `left`/`right` (ReactNode); `onLeftClick`/`onRightClick`; `rightAccent` (accent-tx + semibold on the right — replaces the composer's old inline `var(--accent-tx)`); `leftTitle`/`rightTitle`; `popup` (OPT-IN `aria-haspopup="listbox"` on both segments — a generic split control does not assume popup semantics, so a non-popup adopter omits it); `hook`. Both co-reside in `Chip.tsx` because they share the shell and must not diverge |
 | Card | `src/renderer/Card.tsx` | 3 — `Cards.tsx`, `Settings.tsx`, `NewSessionScreen.tsx` | `danger` (optional); `header`/`actions` slots |
 | Modal | `src/renderer/Modal.tsx` | 4 — `Sidebar.tsx`, `NewSessionScreen.tsx`, `Settings.tsx`, `FolderPickerModal.tsx` | `size: sm\|md\|lg`; `padded`; `tall`; `onDismiss`; `label` |
 | IconButton | `src/renderer/IconButton.tsx` | 2 — `SessionHeader.tsx`, `NewSessionScreen.tsx` | `size: md\|lg\|xl` (`xl` has a single adopting file, `NewSessionScreen.tsx`, by design — it is a size on an existing primitive, not a new primitive, so the two-adopter rule does not gate it); `ariaHaspopup`/`ariaExpanded`/`hook` |
 | Checkbox | `src/renderer/Checkbox.tsx` | 5 — `CustomProviderForm.tsx`, `ProvidersCard.tsx`, `ModelsCard.tsx`, `NewSessionScreen.tsx`, `Settings.tsx` | `checked`; `onChange`; `disabled`; `label`; `id`; `ariaLabel` |
 | Field | `src/renderer/Field.tsx` | 2 — `Settings.tsx`, `CustomProviderForm.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading`/`footer`/`disabled` |
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
-| MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` — **single-surface waiver** (owner-approved, BET-549) | `variant: normal\|danger\|active` |
+| MenuItem | `src/renderer/MenuItem.tsx` | 3 — `SessionHeader.tsx` (session menu); `ModelMenu.tsx` + `EffortMenu.tsx` (both via `Dropdown`) — BET-549 single-surface waiver **resolved** (BET-644) | `variant: normal\|danger\|active` (MenuItem). Co-exports `Dropdown` — the four-region menu surface — with `hook`; `placement: below\|above`; `align: start\|end`; `width: menu\|wide\|narrow`; `role: menu\|listbox`; `search`/`header`/`footer` slots |
+| MenuOption | `src/renderer/MenuOption.tsx` | 2 — `ModelMenu.tsx` (model list), `EffortMenu.tsx` (effort list) | `selected` (the --accent-bg fill + --accent-tx label + visible check, C1); `active` (roving-highlight target); `label`; `sub?` (presence → 44px density; absent → 34px); `trailing?`; `id` |
 | SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` — **single-surface exemption** (owner-approved, BET-546) | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |
+| Toggle | `src/renderer/Toggle.tsx` | 2 call sites in 1 file — `Settings.tsx` (`chatAutoAllow`, `allowAgentPush`) — **single-surface case** (both boolean switch rows live in the one settings form, BET-614) | `checked`; `onChange`; `disabled`; `ariaLabel`; `id` |
+| Callout | `src/renderer/Callout.tsx` | 2 — `Onboarding.tsx`, `ConnectProvider.tsx` | `tone: info\|ok\|warn\|danger` (required, no default — the bare base is abstract, C4); `children` |
+| Tag | `src/renderer/Tag.tsx` | 3 — `SessionHeader.tsx` (branch indicator); `ModelMenu.tsx` (model-menu context badge); `ModelsCard.tsx` (settings models-table count) — BET-618 report **closed** (BET-644) | `icon?` (lucide at `size={12}`); `title?`; `numeric?` (tabular-nums for counts); `tone: default\|accent` (accent = a selected menu row's badge); `children` |
+| IconCard | `src/renderer/IconCard.tsx` | 0 — **reported** (BET-618): neither named adopter (`Settings.tsx`, `NewSessionScreen.tsx`) has an icon-above-label tile; registered under the enforce net pending owner decision | `icon` (lucide at `size={20}`); `label` |
+| Eyebrow | `src/renderer/Eyebrow.tsx` | 1 — `Settings.tsx` (the GroupCard section label) — **reported** (BET-618): 2nd named adopter `NewSessionScreen.tsx` has no uppercase section label; registered as a single-web-adopter case | `children` |
+| SettingsRow | `src/renderer/SettingsRow.tsx` | 0 — **reported** (BET-619): the stage premise that Settings.tsx's private `SettingField` already implements `.setrow` is false (it is a `Field`-based text/password input, not a row with name/help/children); neither named adopter (`Settings.tsx`, `ProvidersCard.tsx`) carries a genuine `.setrow` row — registered under the enforce net pending owner decision on a `.setrow` migration of the settings panel | `name`; `help?`; `children` (the control) |
+| StatusDot | `src/renderer/StatusDot.tsx` | 2 — `ToolCard.tsx` (card header dot), `TaskCard.tsx` (subagent status line) | `tone: ok\|running\|error\|idle` (required) |
+| OutputWell | `src/renderer/OutputWell.tsx` | 2 — `ToolBodies.tsx` (tool output + diff), `Cards.tsx` (permission ask command) | `variant: attached\|standalone` (required); `maxHeight?` |
+| ToolCard | `src/renderer/ToolCard.tsx` | 2 — `ToolCall.tsx` (generic tool call), `TaskCard.tsx` (subagent card) | `tone?` (StatusDot tone; omitted when the card renders its own status dot in the body); `name`; `arg?`; `meta?`; `expanded?`; `onToggle?`; `children?` |
+| MeasureColumn | `src/renderer/MeasureColumn.tsx` | 2 — `Transcript.tsx` (message column), `InputArea.tsx` (composer inner wrapper) | `stacked` (false default — plain block; true — flex column with `--turn-gap`) |
+| MessageBubble | `src/renderer/MessageBubble.tsx` | 1 — `MessageRow.tsx` (the user message) — **single-surface exemption** (owner-approved, BET-637): the user message is the only bubble in the app today; the owner wants the chrome owned by a primitive now rather than re-derived when mobile and any future review surface need it | `children` |

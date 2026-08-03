@@ -23,6 +23,7 @@
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
 import { TaskContext, type TaskContextValue } from "./chatShared";
+import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
 import { isBackgroundJobCompletionTurn } from "./chatUtils";
@@ -64,25 +65,28 @@ export function Transcript({
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto overflow-x-hidden"
-      style={{ padding: "var(--sp-6) var(--sp-4)" }}
+      // Horizontal padding moved onto the MeasureColumn (28px, BET-637) so the
+      // transcript shares one reading-column edge with the composer and the
+      // working indicator; the container keeps only its vertical sp-6 padding.
+      style={{ padding: "var(--sp-6) 0" }}
     >
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
-            <div className="text-text-faint">
-              <span style={{ color: "var(--accent)" }}>✻</span>{" "}
-              Welcome. Type a message below to start.
-            </div>
+            <MeasureColumn>
+              <div className="text-text-faint">
+                <span style={{ color: "var(--accent)" }}>✻</span>{" "}
+                Welcome. Type a message below to start.
+              </div>
+            </MeasureColumn>
           ) : (
-            // BET-413: cap the transcript column at 72ch and centre it. This is
-            // the single highest-leverage readability change — the measure was
-            // previously the full window width (~150ch on a 2000px monitor).
-            // max-width + mx-auto on the message-flow column; the outer
-            // min-h-full wrapper keeps full width so the column centres.
-            <div
-              className="flex flex-col w-full mx-auto"
-              style={{ gap: "var(--turn-gap)", maxWidth: "72ch" }}
-            >
+            // BET-413: cap the transcript column at the measure (72ch) and
+            // centre it; BET-637: the side inset is the primitive's 28px. This
+            // is the single highest-leverage readability change — the column
+            // was previously the full window width (~150ch on a 2000px
+            // monitor). max-width + mx-auto on the message-flow column; the
+            // outer min-h-full wrapper keeps full width so the column centres.
+            <MeasureColumn stacked>
               {messages.map((m, idx) => {
                 // BET-418 §C: a background job's completion report is injected
                 // as a fake user turn whose first line is the machine marker
@@ -144,7 +148,7 @@ export function Transcript({
                   ))}
                 </div>
               )}
-            </div>
+            </MeasureColumn>
           )}
         </div>
       </TaskContext.Provider>

@@ -52,10 +52,15 @@ struct MantaAppRoot: View {
                             MantaPushService.registerAfterPairing()
                         }
                     }
-            } else if scene == "chat-overflow-clear" {
+            } else if let scene, scene == "chat-overflow-clear" {
                 // BET-628 capture scene — raises the real ChatOverflowSheet so
                 // the Clear confirmation (native action sheet) is captureable.
                 ChatOverflowCaptureScene()
+            } else if let scene, scene == "chat-loading" {
+                // D2 / BET-631 fixture: the transcript-shaped session-loading
+                // skeleton as a deterministic measurement scene (real
+                // `ChatLoadingSkeleton`, no live box required).
+                ChatLoadingScene()
             } else if let scene, !scene.isEmpty {
                 // Capture-harness fixture mode — bypass the pair gate so the
                 // measurement scenes stay reachable (S4b parent/child baseline).

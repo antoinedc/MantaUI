@@ -17,7 +17,7 @@
 // a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Mic, Shield } from "lucide-react";
+import { Mic, Send, Shield } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
@@ -32,6 +32,7 @@ import {
 } from "./chatShared";
 import { shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
+import { MeasureColumn } from "./MeasureColumn";
 import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
@@ -225,6 +226,11 @@ export function InputArea({
           floating
         />
       )}
+      {/* Measure-capped composer (BET-620 change 3): the box, meta footer and
+          trust toggle sit inside --measure (72ch) so the composer aligns with
+          the transcript's measure edge, per the session mockup (.comp-in). The
+          reading column chrome is the MeasureColumn primitive (BET-637). */}
+      <MeasureColumn>
       {/* Real input shell (BET-415): a bordered card with focus-within state
           replaces the old hairline-dividers-around-a-naked-textarea. Voice
           recording is now signalled by THIS border — a fourth treatment
@@ -234,7 +240,7 @@ export function InputArea({
           padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row mx-4 mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
+          "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
           (voiceActive
             ? "manta-recording"
             : refreshing
@@ -320,10 +326,10 @@ export function InputArea({
             }
           }}
           onPaste={onPaste}
-          placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Try something…  (@ files · / commands · tab insert · ⏎ send)"}
+          placeholder={running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Reply, or describe the next task…"}
           rows={1}
           spellCheck={false}
-          className="flex-1 resize-none bg-transparent text-text text-code focus:outline-none placeholder:text-text-faint font-mono min-w-0"
+          className="flex-1 resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
         {/* Inline mic on desktop — keyboard-driven, glyph-only feedback.
@@ -337,12 +343,25 @@ export function InputArea({
             onCancel={cancelVoice}
           />
         )}
+        {/* Send button — sits beside the textarea in the composer box (BET-620
+            change 4). Accent when there's text to send, muted fill when empty. */}
+        <button
+          onClick={submit}
+          aria-label="Send message"
+          title="Send (Enter)"
+          className={
+            "w-7 h-7 rounded-sm grid place-items-center shrink-0 " +
+            (input.trim() ? "bg-accent text-on-accent" : "bg-fill text-text-faint")
+          }
+        >
+          <Send size={14} aria-hidden="true" />
+        </button>
         </div>
       </div>
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
           transient status on the right. Branch + context pill moved to the
           SessionHeader; the footer now owns only composing controls. */}
-      <div className="px-4 py-1 flex items-center justify-between gap-3 flex-wrap">
+      <div className="py-1 flex items-center justify-between gap-3 flex-wrap">
         <span className="flex items-center gap-3 min-w-0 flex-wrap">
           <ModelPicker
             modelLabel={modelLabel}
@@ -353,9 +372,6 @@ export function InputArea({
             onOpen={onOpenModels}
             onSelect={onSelectModel}
             labelOverride={shortLabel}
-            separatePills
-            alwaysShowEffort
-            effortAccent
           />
         </span>
         <span className="shrink-0 flex items-center gap-3 flex-wrap">
@@ -379,14 +395,14 @@ export function InputArea({
       {/* Trust toggle — labelled control with a Shield icon (BET-415).
           Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
           config key. Danger colour when bypassing. */}
-      <div className="px-4 pb-3 flex items-center text-meta">
+      <div className="pb-3 flex items-center">
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "px-2 py-px rounded-xs inline-flex items-center gap-2 " +
+            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-[6px] px-0 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
-              : "text-text-faint hover:text-text-muted")
+              : "text-text-quiet hover:text-text-muted")
           }
           title={
             chatAutoAllow
@@ -400,6 +416,7 @@ export function InputArea({
             : "Permissions on — click to bypass"}
         </button>
       </div>
+      </MeasureColumn>
     </div>
   );
 }
