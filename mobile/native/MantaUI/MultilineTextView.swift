@@ -77,8 +77,6 @@ struct MultilineTextView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: WrappingTextView, context: Context) {
-
-    func updateUIView(_ view: WrappingTextView, context: Context) {
         // Only touch the text view when SwiftUI's value actually differs. It
         // used to reassign the placeholder twice and re-measure on EVERY
         // update, including the update its own height change triggered, so each
