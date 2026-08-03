@@ -56,8 +56,14 @@ struct ComposerView: View {
     /// Measured rather than counted because wrapping — not newlines — is what
     /// makes the box tall: one long pasted sentence is several visual lines.
     @State private var textHeight: CGFloat = 0
+    /// Whether the box is in its tall (stacked) form. State rather than a
+    /// derived value because the switch is hysteretic — see `updateLayout`.
+    @State private var isTall = false
     /// The near-full-screen editing sheet, opened by the expand control.
     @State private var showExpanded = false
+    /// Ties each control's inline slot to its pinned-bottom slot so the two are
+    /// one moving view rather than two that fade.
+    @Namespace private var controlSlots
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -86,6 +92,10 @@ struct ComposerView: View {
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(modelStore: modelStore)
         }
+        // Attachments also drive the layout (chips force the stacked form), so
+        // the box must move on the same curve when one is added or removed as
+        // it does when the text grows — otherwise attaching a file snaps.
+        .animation(.smooth(duration: 0.22), value: attachments.count)
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
         }
@@ -113,17 +123,51 @@ struct ComposerView: View {
         UIFont.systemFont(ofSize: Metrics.type.body).lineHeight
     }
 
-    /// True once the text runs past two visual lines. Wrapping counts, not just
-    /// newlines. The `0.5` is slack so the row the caret is on does not flip
-    /// the layout a pixel early as the editor rounds its own height.
-    private var isTall: Bool {
-        textHeight > lineHeight * 2.5
-    }
-
     /// Chips force the stacked form even on a short message: they need a row of
     /// their own, and there is nowhere to put one inside a single-row capsule.
     private var isStacked: Bool {
         isTall || !attachments.isEmpty
+    }
+
+    /// Re-evaluate the layout from a fresh text height, WITH HYSTERESIS: it
+    /// takes more height to grow into the stacked form than it takes to fall
+    /// back out of it.
+    ///
+    /// A single threshold sits exactly where the text is when the layout flips,
+    /// so the flip itself — which changes the box's padding, and so its
+    /// available width — can push the measurement back across the line and
+    /// flip it again. That is an oscillation, and it is what "snapping back and
+    /// forth" is. The gap between the two thresholds is wider than any single
+    /// change the flip can cause, so it cannot self-trigger.
+    ///
+    /// The animation is applied HERE rather than as a `.animation(value:)` on
+    /// the box, so it wraps the state change itself and every dependent piece
+    /// of the layout — corner radius, height, control positions — moves on one
+    /// curve.
+    private func updateLayout(for height: CGFloat) {
+        textHeight = height
+        let grow = lineHeight * 2.4   // into stacked
+        let shrink = lineHeight * 1.8 // back to compact
+        let next = isTall ? (height > shrink) : (height > grow)
+        guard next != isTall else { return }
+        withAnimation(.smooth(duration: 0.22)) { isTall = next }
+    }
+
+    /// Corner radius, animated between the two forms rather than swapped.
+    ///
+    /// This used to switch `Capsule` ↔ `RoundedRectangle` through an
+    /// `AnyShape`, which is why the change was abrupt: type-erasing a shape
+    /// discards its animatable data, so there was nothing for SwiftUI to
+    /// interpolate and the corners changed in one frame. One RoundedRectangle
+    /// whose radius animates gives the same two appearances — at half its own
+    /// height a rounded rect IS a capsule — and morphs between them.
+    private var cornerRadius: CGFloat {
+        if isStacked { return Metrics.radius.lg }
+        // Half the compact box's height, derived from the same metrics that
+        // lay it out: the taller of the control row and one line of text, plus
+        // the compact vertical padding.
+        let content = max(Metrics.type.chatHeaderBtn, lineHeight + Metrics.spacing.sp2)
+        return (content + Metrics.spacing.sp1 * 2) / 2
     }
 
     /// The input box. ONE view tree for both layouts — this is deliberate and
@@ -157,28 +201,43 @@ struct ComposerView: View {
             }
 
             // Text, with the controls inline beside it while compact.
+            //
+            // The controls carry `matchedGeometryEffect` so they TRAVEL between
+            // the two positions instead of cross-fading. Without it the inline
+            // copy is removed and the bottom copy inserted, and SwiftUI's
+            // default for that is opacity — the buttons blink out of one place
+            // and in at another, which reads as the layout snapping even when
+            // the box itself is animating smoothly. Only one copy of each id
+            // exists at a time (the branches are exclusive), which is what the
+            // effect requires.
             HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
-                if !isStacked { attachButton }
+                if !isStacked {
+                    attachButton.matchedGeometryEffect(id: "composer.attach", in: controlSlots)
+                }
                 textArea
                 if !isStacked {
-                    if micAvailable { micButton }
-                    sendButton
+                    if micAvailable {
+                        micButton.matchedGeometryEffect(id: "composer.mic", in: controlSlots)
+                    }
+                    sendButton.matchedGeometryEffect(id: "composer.send", in: controlSlots)
                 }
             }
 
             // …and pinned along the bottom once stacked.
             if isStacked {
                 HStack(spacing: Metrics.spacing.sp2) {
-                    attachButton
+                    attachButton.matchedGeometryEffect(id: "composer.attach", in: controlSlots)
                     Spacer(minLength: 0)
-                    if micAvailable { micButton }
-                    sendButton
+                    if micAvailable {
+                        micButton.matchedGeometryEffect(id: "composer.mic", in: controlSlots)
+                    }
+                    sendButton.matchedGeometryEffect(id: "composer.send", in: controlSlots)
                 }
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, isStacked ? Metrics.spacing.sp2 : Metrics.spacing.sp1)
-        .modifier(BoxChrome(shape: boxShape, stroke: borderColor))
+        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor))
         // The expand control is an OVERLAY, not a row: it must sit in the top
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
@@ -191,12 +250,7 @@ struct ComposerView: View {
         }
     }
 
-    /// Capsule while the box is a single row; rounded rect once it is tall.
-    private var boxShape: AnyShape {
-        isStacked
-            ? AnyShape(RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
-            : AnyShape(Capsule(style: .continuous))
-    }
+
 
     /// Accent while a background refetch is in flight, and never while a turn
     /// runs — the two states must not share an indicator (BET-630 D1).
@@ -234,7 +288,7 @@ struct ComposerView: View {
                 .onGeometryChange(for: CGFloat.self) { proxy in
                     proxy.size.height
                 } action: { height in
-                    textHeight = height
+                    updateLayout(for: height)
                 }
         }
     }
@@ -671,20 +725,21 @@ struct ComposerView: View {
 
 /// The input box's shared chrome: glass fill, hairline border, one shape.
 ///
-/// It takes the shape as a parameter because the two layouts genuinely need
-/// different ones — a capsule when the box is one row, a rounded rect once it
-/// is tall (a capsule's radius is half its height, so a tall one is a blob).
-/// Passing the shape keeps the fill and the border in ONE place instead of
-/// each layout repeating both and drifting apart.
+/// It takes a RADIUS, not a shape. Both forms are the same RoundedRectangle —
+/// at half its own height a rounded rect is a capsule — so the two appearances
+/// differ only in this number, and SwiftUI can interpolate it. Passing an
+/// `AnyShape` instead (a Capsule or a RoundedRectangle) type-erases the
+/// animatable data, which is what made the change snap in one frame.
 private struct BoxChrome: ViewModifier {
-    let shape: AnyShape
+    let cornerRadius: CGFloat
     let stroke: Color
 
     func body(content: Content) -> some View {
-        content
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return content
             .background(.ultraThinMaterial, in: shape)
             .overlay {
-                shape.stroke(stroke, lineWidth: 1)
+                shape.strokeBorder(stroke, lineWidth: 1)
             }
     }
 }
