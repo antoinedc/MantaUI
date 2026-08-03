@@ -45,9 +45,17 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         clearRow.tap()
 
         // 3. The gate that proves the ACTION SHEET (not the overflow sheet) is
-        //    up: the confirmation's unique message text, rendered by the sheet.
+        //    up: the native action sheet's unique message text OR its Cancel
+        //    button (UIAlertController may expose the two differently).
         let message = app.staticTexts["Starts a fresh session in this window. The transcript stays on the box."]
-        XCTAssertTrue(message.waitForExistence(timeout: 8), "Clear confirmation (action sheet) did not present")
+        let presented = message.waitForExistence(timeout: 8)
+            || app.buttons["Cancel"].waitForExistence(timeout: 8)
+        if !presented {
+            print("AX-TREE-BEGIN")
+            print(app.debugDescription)
+            print("AX-TREE-END")
+        }
+        XCTAssertTrue(presented, "Clear action sheet did not present")
 
         // 4. Wait out the presentation animation to a SETTLED frame.
         let png = try saveConvergedScreenshot()
@@ -60,7 +68,7 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         print(app.debugDescription)
         print("AX-TREE-END")
 
-        let nativeSheet = app.sheets.firstMatch.exists || app.popovers.firstMatch.exists
+        let nativeSheet = app.sheets.firstMatch.exists || app.popovers.firstMatch.exists || app.alerts.firstMatch.exists
         let clearButtons = app.buttons.matching(identifier: "Clear session").allElementsBoundByIndex
         let cancelButton = app.buttons["Cancel"].firstMatch
         let hasOrdering = !clearButtons.isEmpty

@@ -67,12 +67,13 @@ private struct CaptureHost: View {
                     confirmingDelete: $confirmingDelete
                 )
             }
-            .confirmationDialog("Clear this session?", isPresented: $confirmingClear, titleVisibility: .visible) {
-                Button("Clear session", role: .destructive) { showOverflow = false }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Starts a fresh session in this window. The transcript stays on the box.")
-            }
+            .nativeActionSheet(
+                isPresented: $confirmingClear,
+                title: "Clear this session?",
+                message: "Starts a fresh session in this window. The transcript stays on the box.",
+                destructiveTitle: "Clear session",
+                destructiveAction: { showOverflow = false }
+            )
             .onAppear { showOverflow = true }
     }
 }
