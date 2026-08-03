@@ -52,6 +52,10 @@ struct MantaAppRoot: View {
                             MantaPushService.registerAfterPairing()
                         }
                     }
+            } else if let scene, scene == "chat-overflow-clear" {
+                // BET-628 capture scene — raises the real ChatOverflowSheet so
+                // the Clear confirmation (native action sheet) is captureable.
+                ChatOverflowCaptureScene()
             } else if let scene, scene == "chat-loading" {
                 // D2 / BET-631 fixture: the transcript-shaped session-loading
                 // skeleton as a deterministic measurement scene (real

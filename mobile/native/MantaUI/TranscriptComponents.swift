@@ -28,6 +28,7 @@ struct UserBand: View {
             .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: 1.5, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Metrics.spacing.sp3)
             .background(tokens.fill, in: bandShape)
@@ -49,6 +50,27 @@ struct UserBand: View {
     }
 }
 
+
+// MARK: - Inline markdown
+//
+// The native transcript has no markdown renderer (the spike explicitly did not
+// build one), so assistant turns showed their source: `**bold**`, backticked
+// code and link syntax appeared verbatim. This covers the INLINE subset that
+// SwiftUI can parse natively — emphasis, strong, inline code, links —
+// preserving newlines so paragraph structure survives.
+//
+// BLOCK-level markdown (headings, lists, fenced code, thematic breaks) is
+// still unrendered; that needs a real block parser and its own components,
+// which is a separate piece of work, not something to fake here.
+enum MantaInlineMarkdown {
+    static func render(_ raw: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+        return (try? AttributedString(markdown: raw, options: options)) ?? AttributedString(raw)
+    }
+}
+
 // MARK: - Assistant prose
 //
 // §8: full width, `tx1`, 15px/`--prose-lh`, margin-bottom `--sp-3`.
@@ -57,10 +79,19 @@ struct AssistantProse: View {
     let tokens: Tokens
 
     var body: some View {
-        Text(text)
+        // `fixedSize(horizontal: false, …)` is what keeps a long unbreakable
+        // token (a shell command, a URL, a path) INSIDE the screen. Without it
+        // such a token makes the text demand its full unwrapped width, the
+        // scroll view adopts that width, and every sibling — including the
+        // composer, which shares the same layout — is laid out wider than the
+        // display: text stops appearing to wrap, the send button sits off
+        // screen, and each keystroke re-lays out an oversized view, which is
+        // what made typing crawl.
+        Text(MantaInlineMarkdown.render(text))
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
@@ -103,9 +134,17 @@ struct StepRowView: View {
                     Circle()
                         .fill(dotColor)
                         .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
+                    // §8: a step row is ONE line. The verb is normally a word
+                    // ("Ran", "Read"), but a tool name can be long enough to
+                    // wrap, which broke the row's fixed height and made the
+                    // group read as ragged. It truncates rather than wraps, and
+                    // never shrinks below its share of the row.
                     Text(step.verb)
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.tx2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
                     Text(step.target)
                         .font(.system(size: Metrics.type.xs, design: .monospaced))
                         .foregroundColor(tokens.tx4)
@@ -126,6 +165,7 @@ struct StepRowView: View {
                 Text(output)
                     .font(.system(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Metrics.spacing.sp2)
                     .padding(.horizontal, Metrics.spacing.sp3)
@@ -152,9 +192,9 @@ enum StepGroupRow: Identifiable {
     case step(ToolStep)
     case subagent(SubagentSession)
 
-    var id: UUID {
+    var id: String {
         switch self {
-        case .step(let step): return step.id
+        case .step(let step): return step.id.uuidString
         case .subagent(let agent): return agent.id
         }
     }
@@ -244,7 +284,14 @@ enum SubagentStatus: Hashable {
 }
 
 struct SubagentSession: Identifiable, Hashable {
-    let id: UUID
+    /// STABLE across rebuilds — the child opencode session id when there is
+    /// one. It used to be a fresh `UUID()` minted in `init`, and the transcript
+    /// is re-derived from scratch on every streamed event, so the value pushed
+    /// onto the NavigationStack stopped matching anything in the current
+    /// transcript within milliseconds. That is what made a tap on a subagent
+    /// row land on the wrong screen and reveal the right one only after going
+    /// back: navigation identity has to outlive a re-render.
+    let id: String
     let taskName: String
     let status: SubagentStatus
     // Live duration (e.g. "1m12s") while running; nil when done.
@@ -256,7 +303,8 @@ struct SubagentSession: Identifiable, Hashable {
     let childSessionId: String?
 
     init(taskName: String, status: SubagentStatus, duration: String?, transcript: [TranscriptBlock], childSessionId: String? = nil) {
-        self.id = UUID()
+        // Fixtures carry no child session, so they fall back to the task name.
+        self.id = childSessionId ?? "task:\(taskName)"
         self.taskName = taskName
         self.status = status
         self.duration = duration
@@ -302,8 +350,17 @@ struct TranscriptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(blocks.indices, id: \.self) { i in
-                blockView(blocks[i])
+            // Iterate over the ELEMENTS, never over indices. `ForEach(blocks
+            // .indices, id: \.self)` re-subscripts the array inside the row
+            // builder, and SwiftUI evaluates that builder against indices it
+            // captured on a previous pass — so the moment the transcript SHRINKS
+            // (which it does on every turn boundary, when the streamed prose
+            // tail is absorbed into the refetched canonical transcript) a stale
+            // index traps "Index out of range" and the app dies. That is the
+            // crash on opening a session: the first refetch lands while the
+            // first render is still in flight.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
+                blockView(pair.element)
             }
         }
     }
@@ -317,7 +374,12 @@ struct TranscriptView: View {
         case .prose(let text):
             AssistantProse(text: text, tokens: tokens)
         case .steps(let content):
+            // Machinery is inset to the same margin as prose. Only the USER
+            // band is full-bleed (§8) — that edge-to-edge treatment is what
+            // marks a turn boundary, so letting tool cards share it made every
+            // step group read as a message.
             StepGroupView(content: content, tokens: tokens)
+                .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp3)
         }
     }
@@ -454,4 +516,47 @@ struct SubagentHeader: View {
 @MainActor
 private func pointsFor(multiplier: CGFloat, size: CGFloat) -> CGFloat {
     max(0, (multiplier - 1) * size)
+}
+
+// MARK: - Shimmer
+
+/// A slow highlight sweeping across a placeholder, so a loading skeleton reads
+/// as "content is coming" rather than as empty grey boxes that might be the
+/// real, broken UI. Purely decorative: it carries no state and is skipped
+/// entirely when `active` is false.
+private struct Shimmer: ViewModifier {
+    let active: Bool
+    let tokens: Tokens
+    @State private var phase: CGFloat = -1
+
+    func body(content: Content) -> some View {
+        if !active {
+            content
+        } else {
+            content
+                .overlay {
+                    GeometryReader { geo in
+                        LinearGradient(
+                            colors: [.clear, tokens.canvas.opacity(0.65), .clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: geo.size.width * 0.6)
+                        .offset(x: phase * geo.size.width * 1.6)
+                    }
+                }
+                .clipped()
+                .onAppear {
+                    withAnimation(.linear(duration: 1.3).repeatForever(autoreverses: false)) {
+                        phase = 1
+                    }
+                }
+        }
+    }
+}
+
+extension View {
+    func shimmer(active: Bool, tokens: Tokens) -> some View {
+        modifier(Shimmer(active: active, tokens: tokens))
+    }
 }

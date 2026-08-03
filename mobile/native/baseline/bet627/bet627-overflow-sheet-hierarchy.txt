@@ -1,0 +1,177 @@
+AX-TREE-BEGIN META-SHEET
+Attributes: Application, 0x113021900, pid: 95508, label: 'MantaUI'
+Element subtree:
+ →Application, 0x113021900, pid: 95508, label: 'MantaUI'
+    Window (Main), 0x113021a40, {{0.0, 0.0}, {440.0, 956.0}}
+      Other, 0x113021b80, {{0.0, 0.0}, {440.0, 956.0}}
+        Other, 0x113021cc0, {{0.0, 0.0}, {440.0, 956.0}}
+          Other, 0x113021e00, {{-440.0, -956.0}, {1320.0, 2868.0}}, identifier: 'PopoverDismissRegion', label: 'dismiss popup'
+          Other, 0x113021f40, {{0.0, 0.0}, {440.0, 956.0}}
+            Other, 0x113022080, {{0.0, 0.0}, {440.0, 956.0}}
+              Other, 0x1130221c0, {{0.0, 0.0}, {440.0, 956.0}}
+                Other, 0x113022300, {{0.0, 0.0}, {440.0, 956.0}}
+                  Other, 0x113022440, {{0.0, 0.0}, {440.0, 956.0}}
+                    Other, 0x113022580, {{0.0, 0.0}, {440.0, 956.0}}
+                      Other, 0x1130226c0, {{0.0, 0.0}, {440.0, 956.0}}
+                        Other, 0x113022800, {{0.0, 0.0}, {440.0, 956.0}}, identifier: 'chat-screen'
+                          ScrollView, 0x113022940, {{0.0, 0.0}, {440.0, 956.0}}
+                            Other, 0x113022a80, {{0.0, 640.0}, {440.0, 166.0}}
+                              Other, 0x113076940, {{0.0, 640.0}, {440.0, 153.7}}
+                                Other, 0x113076a80, {{0.0, 640.0}, {440.0, 67.3}}, identifier: 'user-band'
+                                  StaticText, 0x113076bc0, {{12.0, 652.0}, {395.3, 43.3}}, label: 'Can this sheet show attach, a live scheduled-task count and secrets?'
+                                Other, 0x113076d00, {{12.0, 723.3}, {412.7, 70.3}}, identifier: 'assistant-prose'
+                                  StaticText, 0x113076e40, {{12.0, 723.3}, {412.7, 70.3}}, label: 'Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.'
+                            Other, 0x113076f80, {{407.0, 640.0}, {30.0, 166.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x1130770c0, {{434.0, 643.0}, {3.0, 160.0}}
+                            Other, 0x113077200, {{407.0, 640.0}, {30.0, 166.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x113077340, {{434.0, 643.0}, {3.0, 160.0}}
+                          Button, 0x113077480, {{12.0, 830.0}, {38.0, 38.0}}, identifier: 'attach-button', label: 'Attach'
+                            Button, 0x1130775c0, {{12.0, 830.0}, {38.0, 38.0}}
+                              Image, 0x113077700, {{12.0, 830.0}, {38.0, 38.0}}, identifier: 'paperclip', label: 'Attach'
+                          Button, 0x113077840, {{54.0, 837.3}, {79.0, 23.7}}, identifier: 'model-picker', label: 'Model picker'
+                            Image, 0x113077980, {{63.3, 842.3}, {11.3, 13.7}}, identifier: 'sparkles', label: 'Sparkle'
+                            StaticText, 0x113077ac0, {{80.0, 841.2}, {45.0, 15.7}}, label: 'Default'
+                          TextView, 0x113077c00, {{12.0, 880.0}, {370.0, 34.0}}, identifier: 'composer-input'
+                            StaticText, 0x113077d40, {{14.0, 888.0}, {73.7, 18.0}}, label: 'Message…'
+                            Other, 0x113077e80, {{349.0, 880.0}, {30.0, 30.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x113128000, {{376.0, 865.0}, {3.0, 36.0}}
+                            Other, 0x113128140, {{29.0, 894.0}, {349.0, 17.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                              Other, 0x113128280, {{29.0, 908.0}, {346.0, 3.0}}
+                          Button, 0x1131283c0, {{390.0, 876.0}, {38.0, 38.0}}, identifier: 'send-button', label: 'Send', Disabled
+                          Button, 0x113128500, {{12.0, 70.0}, {38.0, 38.0}}, identifier: 'chevron.left', label: 'Back to sessions'
+                          StaticText, 0x113128640, {{203.8, 72.7}, {32.3, 17.3}}, label: 'Chat'
+                          StaticText, 0x113128780, {{209.5, 91.0}, {21.0, 14.3}}, label: 'idle'
+                          Button, 0x1131288c0, {{390.0, 70.0}, {38.0, 38.0}}, identifier: 'ellipsis', label: 'Session actions'
+                Other, 0x113128a00, {{0.0, 0.0}, {440.0, 956.0}}
+                  Other, 0x113128b40, {{0.0, 0.0}, {440.0, 956.0}}
+      Other, 0x113128c80, {{0.0, 0.0}, {440.0, 956.0}}
+        Other, 0x113128dc0, {{-440.0, -956.0}, {1320.0, 2868.0}}, identifier: 'PopoverDismissRegion', label: 'dismiss popup'
+        Other, 0x113128f00, {{8.0, 451.1}, {424.0, 496.9}}
+          Button, 0x113129040, {{183.4, 446.3}, {73.2, 24.1}}, label: 'Sheet Grabber', value: Half screen
+          Other, 0x113129180, {{8.0, 451.1}, {424.0, 496.9}}
+            Other, 0x1131292c0, {{8.0, 451.1}, {424.0, 496.9}}
+              Other, 0x113129400, {{8.0, 451.1}, {424.0, 496.9}}
+                Other, 0x113129540, {{8.0, 451.1}, {424.0, 496.9}}
+                  Other, 0x113129680, {{8.0, 451.1}, {424.0, 496.9}}
+                    NavigationBar, 0x1131297c0, {{8.0, 470.4}, {424.0, 52.0}}, identifier: 'Chat'
+                      StaticText, 0x113129900, {{201.7, 474.2}, {36.6, 34.7}}, label: 'Chat'
+                        Other, 0x113129a40, {{201.7, 474.2}, {36.6, 34.7}}
+                          StaticText, 0x113129b80, {{201.7, 474.5}, {36.6, 34.0}}, label: 'Chat, Demo'
+                            StaticText, 0x113129cc0, {{201.7, 474.4}, {36.6, 19.6}}, label: 'Chat'
+                            StaticText, 0x113129e00, {{203.9, 494.9}, {32.1, 13.8}}, label: 'Demo'
+                      Other, 0x113129f40, {{345.6, 474.2}, {63.3, 34.7}}, label: 'Done'
+                        Other, 0x11312a080, {{345.6, 474.2}, {63.3, 34.7}}
+                          Button, 0x11312a1c0, {{345.6, 474.2}, {63.3, 34.7}}, label: 'Done'
+                    Other, 0x11312a300, {{8.0, 451.1}, {424.0, 496.9}}
+                      Other, 0x11312a440, {{8.0, 451.1}, {424.0, 496.9}}
+                        Other, 0x11312a580, {{8.0, 451.1}, {424.0, 496.9}}
+                          Other, 0x11312a6c0, {{8.0, 451.1}, {424.0, 496.9}}
+                            CollectionView, 0x11312a800, {{8.0, 451.1}, {424.0, 496.9}}
+                              Other, 0x11312a940, {{-11.3, -471.4}, {462.5, 1245.0}}
+                              Other, 0x11312aa80, {{8.0, 451.1}, {424.0, 496.9}}
+                                Other, 0x11312abc0, {{8.0, 451.1}, {424.0, 124.1}}
+                              Other, 0x11312ad00, {{8.0, 451.1}, {424.0, 496.9}}
+                              Cell, 0x11312ae40, {{27.3, 556.1}, {385.5, 50.1}}
+                                Other, 0x11312af80, {{27.3, 556.1}, {385.5, 50.1}}
+                                  Other, 0x11312b0c0, {{27.3, 556.1}, {385.5, 50.1}}
+                                    Other, 0x11312b200, {{27.3, 556.1}, {385.5, 50.1}}
+                                Other, 0x11312b340, {{27.3, 556.1}, {385.5, 50.1}}
+                                  Other, 0x11312b480, {{27.3, 556.1}, {385.5, 50.1}}
+                                    Other, 0x11312b5c0, {{27.3, 556.1}, {385.5, 50.1}}
+                                      Button, 0x11312b700, {{27.3, 556.1}, {385.5, 50.1}}, label: 'Attach photo or file'
+                                        Image, 0x11312b840, {{47.5, 569.6}, {20.9, 23.1}}, identifier: 'paperclip', label: 'Attachments'
+                                        StaticText, 0x11312b980, {{47.5, 569.6}, {177.6, 23.1}}, label: 'Attach photo or file'
+                              Cell, 0x11312bac0, {{27.3, 606.2}, {385.5, 50.1}}
+                                Other, 0x11312bc00, {{27.3, 606.2}, {385.5, 50.1}}
+                                  Other, 0x11312bd40, {{27.3, 606.2}, {385.5, 50.1}}
+                                    Other, 0x11312be80, {{27.3, 606.2}, {385.5, 50.1}}
+                                Other, 0x11312c000, {{27.3, 606.2}, {385.5, 50.1}}
+                                  Other, 0x11312c140, {{27.3, 606.2}, {385.5, 50.1}}
+                                    Other, 0x11312c280, {{27.3, 606.2}, {385.5, 50.1}}
+                                      Button, 0x11312c3c0, {{27.3, 606.2}, {385.5, 50.1}}, label: 'Scheduled tasks, 1'
+                                        Image, 0x11312c500, {{47.8, 621.0}, {20.9, 20.9}}, identifier: 'clock', label: 'Clock'
+                                        StaticText, 0x11312c640, {{47.8, 621.0}, {158.4, 20.9}}, label: 'Scheduled tasks'
+                                        StaticText, 0x11312c780, {{387.7, 624.4}, {5.8, 13.8}}, label: '1'
+                              Other, 0x11312c8c0, {{85.1, 605.3}, {308.4, 1.0}}
+                                Other, 0x11312ca00, {{85.1, 605.3}, {308.4, 1.0}}
+                              Cell, 0x11312cb40, {{27.3, 656.3}, {385.5, 50.1}}
+                                Other, 0x11312cc80, {{27.3, 656.3}, {385.5, 50.1}}
+                                  Other, 0x11312cdc0, {{27.3, 656.3}, {385.5, 50.1}}
+                                    Other, 0x11312cf00, {{27.3, 656.3}, {385.5, 50.1}}
+                                Other, 0x11312d040, {{27.3, 656.3}, {385.5, 50.1}}
+                                  Other, 0x11312d180, {{27.3, 656.3}, {385.5, 50.1}}
+                                    Other, 0x11312d2c0, {{27.3, 656.3}, {385.5, 50.1}}
+                                      Button, 0x11312d400, {{27.3, 656.3}, {385.5, 50.1}}, label: 'Secrets'
+                                        Image, 0x11312d540, {{51.4, 668.5}, {13.8, 25.7}}, identifier: 'key', label: 'Passwords'
+                                        StaticText, 0x11312d680, {{51.4, 668.5}, {89.6, 25.7}}, label: 'Secrets'
+                              Other, 0x11312d7c0, {{85.1, 655.4}, {308.4, 1.0}}
+                                Other, 0x11312d900, {{85.1, 655.4}, {308.4, 1.0}}
+                              Cell, 0x11312da40, {{27.3, 706.4}, {385.5, 50.1}}
+                                Other, 0x11312db80, {{27.3, 706.4}, {385.5, 50.1}}
+                                  Other, 0x11312dcc0, {{27.3, 706.4}, {385.5, 50.1}}
+                                    Other, 0x11312de00, {{27.3, 706.4}, {385.5, 50.1}}
+                                Other, 0x11312df40, {{27.3, 706.4}, {385.5, 50.1}}
+                                  Other, 0x11312e080, {{27.3, 706.4}, {385.5, 50.1}}
+                                    Other, 0x11312e1c0, {{27.3, 706.4}, {385.5, 50.1}}
+                                      Button, 0x11312e300, {{27.3, 706.4}, {385.5, 50.1}}, label: 'Webhooks'
+                                        Image, 0x11312e440, {{43.7, 725.4}, {29.2, 12.5}}, identifier: 'bolt.horizontal', label: 'Disconnect'
+                                        StaticText, 0x11312e580, {{43.7, 721.7}, {118.8, 19.6}}, label: 'Webhooks'
+                              Other, 0x11312e6c0, {{85.1, 705.5}, {308.4, 1.0}}
+                                Other, 0x11312e800, {{85.1, 705.5}, {308.4, 1.0}}
+                              Other, 0x11312e940, {{-11.3, 773.6}, {462.5, 184.1}}
+                              Cell, 0x11312ea80, {{27.3, 790.3}, {385.5, 50.1}}
+                                Other, 0x11312ebc0, {{27.3, 790.3}, {385.5, 50.1}}
+                                  Other, 0x11312ed00, {{27.3, 790.3}, {385.5, 50.1}}
+                                    Other, 0x11312ee40, {{27.3, 790.3}, {385.5, 50.1}}
+                                Other, 0x11312ef80, {{27.3, 790.3}, {385.5, 50.1}}
+                                  Other, 0x11312f0c0, {{27.3, 790.3}, {385.5, 50.1}}
+                                    Other, 0x11312f200, {{27.3, 790.3}, {385.5, 50.1}}
+                                      Button, 0x11312f340, {{27.3, 790.3}, {385.5, 50.1}}, label: 'Compact session'
+                                        Image, 0x11312f480, {{48.2, 805.1}, {20.2, 20.6}}, identifier: 'arrow.down.right.and.arrow.up.left', label: 'Exit Full Screen'
+                                        StaticText, 0x11312f5c0, {{48.2, 805.1}, {163.5, 20.6}}, label: 'Compact session'
+                              Cell, 0x11312f700, {{27.3, 840.4}, {385.5, 50.1}}
+                                Other, 0x11312f840, {{27.3, 840.4}, {385.5, 50.1}}
+                                  Other, 0x11312f980, {{27.3, 840.4}, {385.5, 50.1}}
+                                    Other, 0x11312fac0, {{27.3, 840.4}, {385.5, 50.1}}
+                                Other, 0x11312fc00, {{27.3, 840.4}, {385.5, 50.1}}
+                                  Other, 0x11312fd40, {{27.3, 840.4}, {385.5, 50.1}}
+                                    Other, 0x11312fe80, {{27.3, 840.4}, {385.5, 50.1}}
+                                      Button, 0x113138000, {{27.3, 840.4}, {385.5, 50.1}}, label: 'Fork session'
+                                        Image, 0x113138140, {{48.8, 855.8}, {19.0, 19.3}}, identifier: 'arrow.triangle.branch', label: 'Divide'
+                                        StaticText, 0x113138280, {{48.8, 855.7}, {128.5, 19.6}}, label: 'Fork session'
+                              Other, 0x1131383c0, {{85.1, 839.4}, {308.4, 1.0}}
+                                Other, 0x113138500, {{85.1, 839.4}, {308.4, 1.0}}
+                              Cell, 0x113138640, {{27.3, 890.5}, {385.5, 50.1}}
+                                Other, 0x113138780, {{27.3, 890.5}, {385.5, 50.1}}
+                                  Other, 0x1131388c0, {{27.3, 890.5}, {385.5, 50.1}}
+                                    Other, 0x113138a00, {{27.3, 890.5}, {385.5, 50.1}}
+                                Other, 0x113138b40, {{27.3, 890.5}, {385.5, 50.1}}
+                                  Other, 0x113138c80, {{27.3, 890.5}, {385.5, 50.1}}
+                                    Other, 0x113138dc0, {{27.3, 890.5}, {385.5, 50.1}}
+                                      Button, 0x113138f00, {{27.3, 890.5}, {385.5, 50.1}}, label: 'Open terminal'
+                                        Image, 0x113139040, {{45.9, 906.2}, {24.4, 19.0}}, identifier: 'terminal', label: 'terminal'
+                                        StaticText, 0x113139180, {{45.9, 905.8}, {142.6, 19.6}}, label: 'Open terminal'
+                              Other, 0x1131392c0, {{85.1, 889.5}, {308.4, 1.0}}
+                                Other, 0x113139400, {{85.1, 889.5}, {308.4, 1.0}}
+                              Other, 0x113139540, {{400.2, 522.4}, {28.9, 371.5}}, label: 'Vertical scroll bar, 2 pages', value: 0 %
+                                Other, 0x113139680, {{426.2, 905.6}, {2.9, 6.7}}
+                              Other, 0x1131397c0, {{400.2, 522.4}, {28.9, 371.5}}, label: 'Vertical scroll bar, 2 pages', value: 0 %
+                                Other, 0x113139900, {{426.2, 905.6}, {2.9, 6.7}}
+                    Other, 0x113139a40, {{8.0, 451.1}, {424.0, 496.9}}
+                      Other, 0x113139b80, {{8.0, 451.1}, {424.0, 496.9}}
+          Other, 0x113139cc0, {{8.0, 451.1}, {424.0, 496.9}}
+            Other, 0x113139e00, {{8.0, 451.1}, {424.0, 496.9}}
+              Other, 0x113139f40, {{8.0, 451.1}, {424.0, 496.9}}
+                Other, 0x11313a080, {{8.0, 451.1}, {424.0, 496.9}}
+                  Other, 0x11313a1c0, {{8.0, 451.1}, {424.0, 496.9}}
+                    Other, 0x11313a300, {{8.0, 451.1}, {424.0, 496.9}}
+                Other, 0x11313a440, {{8.0, 451.1}, {424.0, 496.9}}
+                  Other, 0x11313a580, {{8.0, 451.1}, {424.0, 496.9}}
+Path to element:
+ →Application, 0x113021900, pid: 95508, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0x11313a6c0, pid: 95508, label: 'MantaUI'
+  }
+

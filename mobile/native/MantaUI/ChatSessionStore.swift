@@ -45,6 +45,10 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True while a canonical transcript refetch (or the initial load) is in
+    /// flight. Drives the ambient hairline sweep on the composer's top divider
+    /// (BET-630, D1) — distinct from `running`, which drives the working row.
+    @Published private(set) var refreshing = false
 
     let sessionId: String
     let isReadOnly: Bool
@@ -101,17 +105,56 @@ final class ChatSessionStore: ObservableObject {
     func load() {
         guard !loading else { return }
         loading = true
+        refreshing = true
         Task {
-            let messages = (try? await api.messages(sessionId: sessionId)) ?? []
+            // An EMPTY transcript is not a failure — a session you just cleared
+            // legitimately has no messages, and reporting that as "couldn't
+            // reach your box" was wrong. Only a thrown error is a failure.
+            //
+            // The fetch is also bounded: if the box is unreachable the request
+            // can hang for the URLSession default (a minute or more), and the
+            // screen sat on its loading skeleton for the whole time with no way
+            // out. A timeout turns that into a retryable failure.
+            var failed = false
+            var messages: [OpencodeMessage] = []
+            do {
+                messages = try await Self.withTimeout(seconds: 12) {
+                    try await self.api.messages(sessionId: self.sessionId)
+                }
+            } catch {
+                failed = true
+            }
+            let loaded = messages
+            let didFail = failed
             await MainActor.run {
                 loading = false
-                loadFailed = messages.isEmpty
-                transcript = ChatTranscriptMapper.blocks(from: messages)
+                refreshing = false
+                loadFailed = didFail
+                transcript = ChatTranscriptMapper.blocks(from: loaded)
                 rebuildBlocks()
             }
             if !isReadOnly {
                 await refreshPermissions()
             }
+        }
+    }
+
+    /// Run `work`, failing if it has not finished within `seconds`.
+    private static func withTimeout<T: Sendable>(
+        seconds: Double,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw MantaError.transport("timed out")
+            }
+            guard let first = try await group.next() else {
+                throw MantaError.transport("no result")
+            }
+            group.cancelAll()
+            return first
         }
     }
 
@@ -193,10 +236,12 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func refetch() async {
+        refreshing = true
         let messages = (try? await api.messages(sessionId: sessionId)) ?? []
         await MainActor.run {
             transcript = ChatTranscriptMapper.blocks(from: messages)
             rebuildBlocks()
+            refreshing = false
             if !isReadOnly { Task { await self.refreshPermissions() } }
         }
     }
@@ -243,6 +288,18 @@ final class ChatSessionStore: ObservableObject {
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+        // Echo the message straight into the transcript and assume the turn is
+        // running. The box confirms both within a second (running frame, then
+        // the canonical refetch replaces this block), but without the echo the
+        // screen sits completely unchanged after a send, which reads as "the
+        // send did nothing".
+        if !text.isEmpty {
+            transcript.append(.user(text))
+            rebuildBlocks()
+        }
+        running = true
+        turnComplete = false
+        if runningSince == nil { runningSince = Date() }
         Task {
             try? await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,
@@ -367,6 +424,11 @@ final class ChatSessionStore: ObservableObject {
 
     /// The newest pending question request, if any.
     var newestQuestion: QuestionRequest? { questions.last }
+
+    /// When the current turn started (nil when idle). The running row measures
+    /// live elapsed against its own 1s tick rather than stream-state changes
+    /// (BET-630, D1).
+    var runningStart: Date? { runningSince }
 
     /// §8 header subtitle ("running · 2m · 8%" / "idle").
     var headerSubtitle: String {

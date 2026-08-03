@@ -1,0 +1,106 @@
+AX-TREE-BEGIN META-ATTACH
+Attributes: Application, 0x1138ccf00, pid: 95508, label: 'MantaUI'
+Element subtree:
+ →Application, 0x1138ccf00, pid: 95508, label: 'MantaUI'
+    Window (Main), 0x1138cd040, {{0.0, 0.0}, {440.0, 956.0}}
+      Other, 0x1138cd180, {{0.0, 0.0}, {440.0, 956.0}}
+        Other, 0x1138cd2c0, {{0.0, 0.0}, {440.0, 956.0}}
+          Other, 0x1138cd400, {{-440.0, -956.0}, {1320.0, 2868.0}}
+          Other, 0x1138cd540, {{0.0, 0.0}, {440.0, 956.0}}
+            Other, 0x1138cd680, {{0.0, 0.0}, {440.0, 956.0}}
+              Other, 0x1138cd7c0, {{0.0, 0.0}, {440.0, 956.0}}
+                Other, 0x1138cd900, {{0.0, 0.0}, {440.0, 956.0}}
+                  Other, 0x1138cda40, {{0.0, 0.0}, {440.0, 956.0}}
+                    Other, 0x1138cdb80, {{0.0, 0.0}, {440.0, 956.0}}
+                      Other, 0x1138cdcc0, {{0.0, 0.0}, {440.0, 956.0}}
+                        Other, 0x1138cde00, {{0.0, 0.0}, {440.0, 956.0}}, identifier: 'chat-screen'
+                          ScrollView, 0x1138cdf40, {{0.0, 0.0}, {440.0, 956.0}}
+                            Other, 0x1138ce080, {{0.0, 640.0}, {440.0, 166.0}}
+                              Other, 0x1138ce1c0, {{0.0, 640.0}, {440.0, 153.7}}
+                                Other, 0x1138ce300, {{0.0, 640.0}, {440.0, 67.3}}, identifier: 'user-band'
+                                  StaticText, 0x1138ce440, {{12.0, 652.0}, {395.3, 43.3}}, label: 'Can this sheet show attach, a live scheduled-task count and secrets?'
+                                Other, 0x1138ce580, {{12.0, 723.3}, {412.7, 70.3}}, identifier: 'assistant-prose'
+                                  StaticText, 0x1138ce6c0, {{12.0, 723.3}, {412.7, 70.3}}, label: 'Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.'
+                            Other, 0x1138ce800, {{407.0, 640.0}, {30.0, 166.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x1138ce940, {{434.0, 643.0}, {3.0, 160.0}}
+                            Other, 0x1138cea80, {{407.0, 640.0}, {30.0, 166.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x1138cebc0, {{434.0, 643.0}, {3.0, 160.0}}
+                          Button, 0x1138ced00, {{12.0, 830.0}, {38.0, 38.0}}, identifier: 'attach-button', label: 'Attach'
+                            Button, 0x1138cee40, {{12.0, 830.0}, {38.0, 38.0}}
+                              Image, 0x1138cef80, {{12.0, 830.0}, {38.0, 38.0}}, identifier: 'paperclip', label: 'Attach'
+                          Button, 0x1138cf0c0, {{54.0, 837.3}, {79.0, 23.7}}, identifier: 'model-picker', label: 'Model picker'
+                            Image, 0x1138cf200, {{63.3, 842.3}, {11.3, 13.7}}, identifier: 'sparkles', label: 'Sparkle'
+                            StaticText, 0x1138cf340, {{80.0, 841.2}, {45.0, 15.7}}, label: 'Default'
+                          TextView, 0x1138cf480, {{12.0, 880.0}, {370.0, 34.0}}, identifier: 'composer-input'
+                            StaticText, 0x1138cf5c0, {{14.0, 888.0}, {73.7, 18.0}}, label: 'Message…'
+                            Other, 0x1138cf700, {{349.0, 880.0}, {30.0, 30.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x1138cf840, {{376.0, 865.0}, {3.0, 36.0}}
+                            Other, 0x1138cf980, {{29.0, 894.0}, {349.0, 17.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                              Other, 0x1138cfac0, {{29.0, 908.0}, {346.0, 3.0}}
+                          Button, 0x1138cfc00, {{390.0, 876.0}, {38.0, 38.0}}, identifier: 'send-button', label: 'Send', Disabled
+                          Button, 0x1138cfd40, {{12.0, 70.0}, {38.0, 38.0}}, identifier: 'chevron.left', label: 'Back to sessions'
+                          StaticText, 0x1138cfe80, {{203.8, 72.7}, {32.3, 17.3}}, label: 'Chat'
+                          StaticText, 0x113074b40, {{209.5, 91.0}, {21.0, 14.3}}, label: 'idle'
+                          Button, 0x113074a00, {{390.0, 70.0}, {38.0, 38.0}}, identifier: 'ellipsis', label: 'Session actions'
+                Other, 0x113074500, {{0.0, 0.0}, {440.0, 956.0}}
+                  Other, 0x113074640, {{0.0, 0.0}, {440.0, 956.0}}
+      Other, 0x113074780, {{0.0, 0.0}, {440.0, 956.0}}
+        Other, 0x113074280, {{-440.0, -956.0}, {1320.0, 2868.0}}
+        Other, 0x1130743c0, {{0.0, 62.0}, {440.0, 894.0}}
+          Other, 0x113074140, {{0.0, 62.0}, {440.0, 894.0}}
+            Other, 0x113077c00, {{0.0, 62.0}, {440.0, 894.0}}
+              Other, 0x113076e40, {{0.0, 62.0}, {440.0, 894.0}}
+                Other, 0x113076bc0, {{0.0, 62.0}, {440.0, 894.0}}
+                  Other, 0x113076a80, {{0.0, 62.0}, {440.0, 894.0}}
+                    NavigationBar, 0x1130770c0, {{0.0, 82.0}, {440.0, 54.0}}, identifier: 'Attach'
+                      Other, 0x113076940, {{24.0, 86.0}, {76.7, 36.0}}, label: 'Cancel'
+                        Other, 0x113076d00, {{24.0, 86.0}, {76.7, 36.0}}
+                          Button, 0x113077e80, {{24.0, 86.0}, {76.7, 36.0}}, label: 'Cancel'
+                      StaticText, 0x113077340, {{193.7, 93.7}, {52.7, 20.7}}, label: 'Attach'
+                    Other, 0x113076f80, {{0.0, 62.0}, {440.0, 894.0}}
+                      Other, 0x113077700, {{0.0, 62.0}, {440.0, 894.0}}
+                        Other, 0x11385c000, {{0.0, 62.0}, {440.0, 894.0}}
+                          Other, 0x11385c140, {{0.0, 62.0}, {440.0, 894.0}}
+                            CollectionView, 0x11385c280, {{0.0, 62.0}, {440.0, 894.0}}
+                              Other, 0x11385c3c0, {{-20.0, -1652.0}, {480.0, 3744.7}}
+                              Other, 0x11385c500, {{0.0, 62.0}, {440.0, 894.0}}
+                              Other, 0x11385c640, {{0.0, 62.0}, {440.0, 894.0}}
+                              Cell, 0x11385c780, {{20.0, 171.0}, {400.0, 52.0}}
+                                Other, 0x11385c8c0, {{20.0, 171.0}, {400.0, 52.0}}
+                                  Other, 0x11385ca00, {{20.0, 171.0}, {400.0, 52.0}}
+                                Other, 0x11385cb40, {{20.0, 171.0}, {400.0, 52.0}}
+                                  Other, 0x11385cc80, {{20.0, 171.0}, {400.0, 52.0}}
+                                    Other, 0x11385cdc0, {{20.0, 171.0}, {400.0, 52.0}}
+                                      Button, 0x11385cf00, {{20.0, 171.0}, {400.0, 52.0}}, label: 'Photo'
+                                        Image, 0x11385d040, {{39.3, 187.3}, {25.3, 19.7}}, identifier: 'photo', label: 'Photo'
+                                        StaticText, 0x11385d180, {{39.3, 186.8}, {85.7, 20.3}}, label: 'Photo'
+                              Cell, 0x11385d2c0, {{20.0, 223.0}, {400.0, 52.0}}
+                                Other, 0x11385d400, {{20.0, 223.0}, {400.0, 52.0}}
+                                  Other, 0x11385d540, {{20.0, 223.0}, {400.0, 52.0}}
+                                Other, 0x11385d680, {{20.0, 223.0}, {400.0, 52.0}}
+                                  Other, 0x11385d7c0, {{20.0, 223.0}, {400.0, 52.0}}
+                                    Other, 0x11385d900, {{20.0, 223.0}, {400.0, 52.0}}
+                                      Button, 0x11385da40, {{20.0, 223.0}, {400.0, 52.0}}, label: 'File'
+                                        Image, 0x11385db80, {{43.0, 237.7}, {18.0, 23.0}}, identifier: 'doc', label: 'Document'
+                                        StaticText, 0x11385dcc0, {{43.0, 237.7}, {63.3, 23.0}}, label: 'File'
+                              Other, 0x11385de00, {{80.0, 222.0}, {320.0, 1.0}}
+                              Cell, 0x11385df40, {{20.0, 275.0}, {400.0, 29.7}}
+                                Other, 0x11385e080, {{20.0, 275.0}, {400.0, 29.7}}
+                                Other, 0x11385e1c0, {{20.0, 275.0}, {400.0, 29.7}}
+                                  Other, 0x11385e300, {{20.0, 275.0}, {400.0, 29.7}}
+                                    Other, 0x11385e440, {{20.0, 275.0}, {400.0, 29.7}}
+                                      StaticText, 0x11385e580, {{20.0, 275.0}, {400.0, 29.7}}, label: 'The file is uploaded to the box and sent to the session.'
+                              Other, 0x11385e6c0, {{407.0, 136.0}, {30.0, 758.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                                Other, 0x11385e800, {{434.0, 898.0}, {3.0, 7.0}}
+                              Other, 0x11385e940, {{407.0, 136.0}, {30.0, 758.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                                Other, 0x11385ea80, {{434.0, 898.0}, {3.0, 7.0}}
+                    Other, 0x11385ebc0, {{0.0, 62.0}, {440.0, 894.0}}
+                      Other, 0x11385ed00, {{0.0, 62.0}, {440.0, 894.0}}
+Path to element:
+ →Application, 0x1138ccf00, pid: 95508, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0x11385ee40, pid: 95508, label: 'MantaUI'
+  }
+

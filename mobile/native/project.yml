@@ -6,13 +6,33 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
+# PLCrashReporter captures what the OS would report but the phone will not hand
+# over: a Mac only receives a device's crash reports through a live Xcode
+# connection, and this device is used untethered. The report is written locally
+# on crash and uploaded to the box on the NEXT launch, so a crash is diagnosable
+# with no cable, no Xcode and no third-party service.
+packages:
+  CrashReporter:
+    url: https://github.com/microsoft/plcrashreporter
+    from: "1.11.1"
 targets:
   MantaUI:
     type: application
     platform: iOS
     deploymentTarget: "26.0"
     sources:
+      # NOTE the exclude + folder pair below: the terminal page is loaded with
+      # `Bundle.main.url(forResource:"terminal", withExtension:"html",
+      # subdirectory:"terminal")`, which only resolves if the directory SURVIVES
+      # into the bundle. Listed as ordinary sources, xcodegen emits one file
+      # reference per file and Copy Bundle Resources FLATTENS them to the bundle
+      # root, so that lookup returned nil and the terminal screen rendered a
+      # black void. `type: folder` makes it a folder reference, copied whole.
       - path: MantaUI
+        excludes:
+          - "Resources/terminal"
+      - path: MantaUI/Resources/terminal
+        type: folder
       # The design tokens are GENERATED (scripts/gen-swift-tokens.mjs reads
       # src/renderer/tokens.css). Referenced by path from the app target so the
       # Swift source of truth stays the generated file — never copied or
@@ -22,6 +42,9 @@ targets:
       # src/shared/settingsSchema.ts). Same policy: referenced by path, never
       # copied or hand-edited.
       - path: ../../generated/swift/SettingsSchema.swift
+    dependencies:
+      - package: CrashReporter
+        product: CrashReporter
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui
@@ -33,6 +56,7 @@ targets:
         # S8 (BET-600): push capability (aps-environment) + Associated Domains
         # for the pairing universal link (applinks:app.mantaui.com).
         CODE_SIGN_ENTITLEMENTS: MantaUI/MantaUI.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_CFBundleDisplayName: MantaUI
         INFOPLIST_KEY_NSMicrophoneUsageDescription: MantaUI uses the microphone for push-to-talk dictation and voice commands in chat.
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES

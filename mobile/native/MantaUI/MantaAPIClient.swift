@@ -177,8 +177,10 @@ final class MantaAPIClient: Sendable {
     }
 
     /// `opencode:fork-session` — fork a chat session into a new window (§7.2
-    /// long-press Fork). `messageID` is optional (fork at head when absent).
-    func forkSession(sessionId: String, sessionName: String, windowName: String, cwd: String? = nil, messageID: String? = nil) async throws {
+    /// long-press Fork, and the chat overflow sheet). `messageID` is optional
+    /// (fork at head when absent). Returns the NEW session id so the caller
+    /// can navigate to the fork; nil when the box returns none.
+    func forkSession(sessionId: String, sessionName: String, windowName: String, cwd: String? = nil, messageID: String? = nil) async throws -> String? {
         var dict: [String: Any] = [
             "sessionId": sessionId,
             "sessionName": sessionName,
@@ -186,7 +188,26 @@ final class MantaAPIClient: Sendable {
         ]
         if let cwd { dict["cwd"] = cwd }
         if let messageID { dict["messageID"] = messageID }
-        _ = try await callVoid("opencode:fork-session", args: [dict])
+        let result: ForkSessionResult? = try await call("opencode:fork-session", args: [dict], as: ForkSessionResult.self)
+        return result?.newSessionId
+    }
+
+    /// `opencode:clear-session` — start a fresh opencode session in the same
+    /// window (the desktop `/clear`). Returns the new session id so the caller
+    /// can re-point at it.
+    func clearSession(sessionName: String, windowIndex: Int, cwd: String? = nil, title: String? = nil) async throws -> String? {
+        var dict: [String: Any] = ["sessionName": sessionName, "windowIndex": windowIndex]
+        if let cwd { dict["cwd"] = cwd }
+        if let title { dict["title"] = title }
+        let result = try await call("opencode:clear-session", args: [dict], as: ClearSessionResult.self)
+        return result?.newSessionId
+    }
+
+    /// `opencode:vcs-branch` — the git branch for a working directory, or nil
+    /// (not a repo, detached head, unreachable). Spawned locally by the box,
+    /// so a terminal-side checkout is reflected on the next call.
+    func vcsBranch(directory: String) async throws -> String? {
+        try await call("opencode:vcs-branch", args: [directory], as: String.self)
     }
 
     /// `tmux:rename-window` — rename a session (the row's name).
@@ -263,6 +284,19 @@ final class MantaAPIClient: Sendable {
             throw MantaError.transport("upload returned no path")
         }
         return path
+    }
+
+    /// `schedule:list` — scheduled-prompt jobs, filtered to the session when a
+    /// sessionId is given. BET-627 uses the count for the sheet's live badge.
+    func listSchedules(sessionId: String? = nil) async throws -> [ScheduledJob] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        return try await call("schedule:list", args: args, as: [ScheduledJob].self) ?? []
+    }
+
+    /// `secrets:list` — secret METADATA only (values never leave the box).
+    func listSecrets(sessionId: String? = nil) async throws -> [SecretMeta] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        return try await call("secrets:list", args: args, as: [SecretMeta].self) ?? []
     }
 
     /// `voice:transcribe` — ship recorded audio (base64 over the JSON RPC
@@ -347,11 +381,13 @@ final class MantaAPIClient: Sendable {
         guard let result = object["result"], !(result is NSNull) else {
             return nil
         }
-        // `.fragmentsAllowed` so a top-level String/Number (e.g. the bare git
-        // branch name `String?` returned by `opencode:vcs-branch`) round-trips
-        // instead of throwing. Without it `JSONSerialization` rejects any
-        // non-object/non-array top level, which SIGABRT'd on any chat opened
-        // in a git checkout.
+        // `.fragmentsAllowed` is load-bearing, not defensive. A channel whose
+        // result is a bare string or number (opencode:vcs-branch returns
+        // "main") is a valid JSON FRAGMENT, and re-serialising one without this
+        // option does not fail gracefully — NSJSONSerialization raises
+        // NSInvalidArgumentException ("Invalid top-level type in JSON write"),
+        // an Objective-C exception that Swift cannot catch, so the whole app
+        // died the moment any such channel was called.
         let resultData = try JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed])
         return try JSONDecoder().decode(type, from: resultData)
     }
@@ -377,6 +413,17 @@ final class MantaAPIClient: Sendable {
 }
 
 private struct VoidResult: Decodable {}
+
+/// The `opencode:fork-session` reply is `{ newSessionId, projects }`; only the
+/// new session id is consumed by callers (to navigate to the fork). The extra
+/// keys are ignored by decoding.
+private struct ForkSessionResult: Decodable {
+    let newSessionId: String?
+}
+
+private struct ClearSessionResult: Decodable {
+    let newSessionId: String?
+}
 
 /// The `voice:classify-command` reply is `{ action, source }` — the action is
 /// the structured `VoiceAction`; `source` ("rules" | "llm" | "none") is
