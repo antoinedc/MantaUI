@@ -331,8 +331,17 @@ struct TranscriptView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(blocks.indices, id: \.self) { i in
-                blockView(blocks[i])
+            // Iterate over the ELEMENTS, never over indices. `ForEach(blocks
+            // .indices, id: \.self)` re-subscripts the array inside the row
+            // builder, and SwiftUI evaluates that builder against indices it
+            // captured on a previous pass — so the moment the transcript SHRINKS
+            // (which it does on every turn boundary, when the streamed prose
+            // tail is absorbed into the refetched canonical transcript) a stale
+            // index traps "Index out of range" and the app dies. That is the
+            // crash on opening a session: the first refetch lands while the
+            // first render is still in flight.
+            ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
+                blockView(pair.element)
             }
         }
     }

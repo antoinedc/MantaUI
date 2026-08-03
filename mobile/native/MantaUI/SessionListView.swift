@@ -48,6 +48,12 @@ struct SessionListView: View {
 
     @State private var deleteRunningText = ""
     @State private var showSettings = false
+    /// The one row that carries the `fill` background (§7.1: "the most recently
+    /// active row"). It is the session YOU last opened — not tmux's active
+    /// window, which is per-project (so one row in every project was lit) and
+    /// which opening a session sets permanently (so the highlight never
+    /// cleared).
+    @State private var lastOpened: String?
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -204,13 +210,14 @@ struct SessionListView: View {
     @ViewBuilder
     private func row(project: MantaProject, window: MantaWindow) -> some View {
         Button {
+            lastOpened = SessionRowKey(project: project.tmuxSession, window: window).id
             path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
                 timer: timerText(window),
-                isActive: window.active,
+                isActive: lastOpened == SessionRowKey(project: project.tmuxSession, window: window).id,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
                 tokens: tokens
             )
