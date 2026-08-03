@@ -100,12 +100,47 @@ private struct ChatScreenContent: View {
         // subagent destination is registered against the enclosing stack here,
         // so a value-push keeps the parent in the stack (its scroll untouched)
         // and the child streams while open (BET-576).
+        //
+        // The lifecycle hooks live on the OUTER view, not inside the loading
+        // branch: switching branch would otherwise fire onDisappear and stop
+        // the permission poll, which `start()`'s run-once guard would then
+        // refuse to restart.
+        content
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarBackButtonHidden(true)
+            .onAppear {
+                // Three independent fetches, all started together: the
+                // transcript, the model list (previously not fetched until the
+                // picker was opened, so the first open always stalled) and the
+                // window/branch lookup.
+                store.start()
+                modelStore.load()
+                Task { await resolveWindowAndBranch() }
+            }
+            .onDisappear { store.stop() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("chat-screen")
+    }
+
+    /// While the session loads there is nothing to act on, so the screen shows
+    /// ONLY the loader — no header, no composer, no cards. Hiding the chrome
+    /// outright is both honest (a disabled control still invites a tap) and
+    /// simpler than keeping every control in a disabled state.
+    @ViewBuilder
+    private var content: some View {
+        if store.loading {
+            MantaLoader(caption: "Loading session…", tokens: tokens)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(tokens.canvas.ignoresSafeArea())
+        } else {
+            loadedLayout
+        }
+    }
+
+    private var loadedLayout: some View {
         Group {
             if store.loadFailed {
                 loadFailure
-            } else if store.loading {
-                MantaLoader(caption: "Loading session…", tokens: tokens)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcript
             }
@@ -140,8 +175,6 @@ private struct ChatScreenContent: View {
                 )
             }
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(true)
         // The header is an INSET, not an overlay: as an overlay it floated on
         // top of the transcript with nothing reserving its space, so the first
         // rows sat underneath it and were clipped at rest, not just while
@@ -151,17 +184,6 @@ private struct ChatScreenContent: View {
         .sheet(item: $overflowDestination) { destination in
             destinationCard(destination)
         }
-        .onAppear {
-            // Three independent fetches, all started together: the transcript,
-            // the model list (previously not fetched until the picker opened,
-            // so the first open always stalled) and the window/branch lookup.
-            store.start()
-            modelStore.load()
-            Task { await resolveWindowAndBranch() }
-        }
-        .onDisappear { store.stop() }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chat-screen")
     }
 
     // MARK: - Overflow sheet (§8)

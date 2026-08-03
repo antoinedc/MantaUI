@@ -47,11 +47,6 @@ struct ComposerView: View {
     @State private var hint: String?
     @State private var showHint = false
     @FocusState private var inputFocused: Bool
-    /// True while the session's first transcript fetch is in flight. Every
-    /// control is inert until it lands: a prompt sent into a session that has
-    /// not loaded goes to a transcript the user cannot see, and an attachment
-    /// picked then is uploaded against a session id that may still change.
-    private var loading: Bool { store.loading }
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
@@ -61,6 +56,12 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            // The pickers hang off a neutral, zero-size anchor. They cannot go
+            // on the composer root (the model sheet is there) nor on the attach
+            // button (a Menu is itself a presentation) — in both cases SwiftUI
+            // runs one presentation and silently drops the others, which is
+            // exactly how attaching a file came to do nothing at all.
+            pickerAnchor
             if !attachments.isEmpty { chipsRow }
             HStack(spacing: Metrics.spacing.sp1) {
                 attachButton
@@ -94,8 +95,6 @@ struct ComposerView: View {
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
         .background(tokens.canvas.ignoresSafeArea())
-        .disabled(loading)
-        .opacity(loading ? 0.55 : 1)
         .overlay(alignment: .top) { topDivider }
         // ONE presentation per view. The model sheet, the photo picker and the
         // file importer were all attached HERE, and SwiftUI honours only one of
@@ -184,10 +183,6 @@ struct ComposerView: View {
                 .accessibilityLabel("Attach")
         }
         .accessibilityIdentifier("attach-button")
-        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
-        .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
-            handleDocument(result)
-        }
     }
 
     private func handleDocument(_ result: Result<URL, Error>) {
@@ -221,12 +216,23 @@ struct ComposerView: View {
                 let remote = try await api.upload(project: projectName, filename: filename, data: data)
                 await MainActor.run {
                     attachments.append(ComposerAttachment(filename: filename, mime: mime, remotePath: remote, isImage: true))
+                    surfaceHint("Attached \(filename)")
                 }
             } catch {
                 surfaceHint("Photo upload failed")
             }
         }
         await MainActor.run { photoItems = [] }
+    }
+
+    /// Zero-size host for the photo/file pickers. See the call site.
+    private var pickerAnchor: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
+            .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
+                handleDocument(result)
+            }
     }
 
     private var chipsRow: some View {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // ===========================================================================
 // The app's one loading state.
@@ -60,43 +61,16 @@ struct MantaLoader: View {
         }
     }
 
-    /// The manta mark: the same single stroke the web client drew, on the
-    /// accent tile with its soft drop shadow.
+    /// The REAL Manta mark, the same artwork as the app icon
+    /// (assets/icons/512x512.png, bundled as Resources/logo/manta-logo.png).
+    /// It is deliberately the shipped asset rather than a redrawn approximation
+    /// — a hand-rolled path is a second, drifting copy of the brand.
     private var mark: some View {
-        RoundedRectangle(cornerRadius: 13, style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [tokens.accent, tokens.accentSoft],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+        // Loaded by name from the bundle: the PNG is a loose resource, not an
+        // asset-catalog entry, so both spellings are tried.
+        Image(uiImage: UIImage(named: "manta-logo") ?? UIImage(named: "manta-logo.png") ?? UIImage())
+            .resizable()
+            .scaledToFit()
             .frame(width: tile, height: tile)
-            .shadow(color: tokens.accent.opacity(0.3), radius: 9, x: 0, y: 6)
-            .overlay {
-                MantaMark()
-                    .stroke(tokens.onAccent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .frame(width: 24, height: 24)
-            }
-    }
-}
-
-/// `M3 17c3-6 6-9 9-9s6 3 9 9` from the web mark, in a 24×24 box.
-private struct MantaMark: Shape {
-    func path(in rect: CGRect) -> Path {
-        let s = min(rect.width, rect.height) / 24
-        var p = Path()
-        p.move(to: CGPoint(x: 3 * s, y: 17 * s))
-        p.addCurve(
-            to: CGPoint(x: 12 * s, y: 8 * s),
-            control1: CGPoint(x: 6 * s, y: 11 * s),
-            control2: CGPoint(x: 9 * s, y: 8 * s)
-        )
-        p.addCurve(
-            to: CGPoint(x: 21 * s, y: 17 * s),
-            control1: CGPoint(x: 15 * s, y: 8 * s),
-            control2: CGPoint(x: 18 * s, y: 11 * s)
-        )
-        return p
     }
 }

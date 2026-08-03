@@ -56,6 +56,7 @@ targets:
         # S8 (BET-600): push capability (aps-environment) + Associated Domains
         # for the pairing universal link (applinks:app.mantaui.com).
         CODE_SIGN_ENTITLEMENTS: MantaUI/MantaUI.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_CFBundleDisplayName: MantaUI
         INFOPLIST_KEY_NSMicrophoneUsageDescription: MantaUI uses the microphone for push-to-talk dictation and voice commands in chat.
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
