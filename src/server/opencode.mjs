@@ -303,10 +303,14 @@ export function _resetStreamReadyState() {
 //
 // Eviction is SAFE because every stream is re-openable on demand:
 // `getSessionDirectoryQuery` calls `ensureStreamForDirectory(dir)` (idempotent)
-// and awaits the readiness gate before every prompt/message fetch, so closing
-// an idle stream cannot lose events for an active session — the next use
-// re-opens it. The global stream (key "") is NEVER evicted (it carries
-// unscoped events and has no directory to disappear).
+// before every prompt/message fetch, so closing an idle stream cannot lose
+// events for an active session — the next use re-opens it. A prompt (write)
+// additionally AWAITS the readiness gate so it cannot race ahead of its own
+// subscription; a transcript fetch (read) opens the stream but does not wait,
+// because a read has no reply to lose and the wait is up to 5s on exactly the
+// cold/just-evicted stream this eviction creates. The global stream (key "")
+// is NEVER evicted (it carries unscoped events and has no directory to
+// disappear).
 //
 // A stream is evicted when its directory:
 //   (a) no longer exists on disk (the one-shot workdir was deleted), OR
