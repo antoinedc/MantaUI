@@ -55,27 +55,29 @@
   .main { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; }
 
   /* --- THE SCREEN ------------------------------------------------------- */
-  .welcome { width: 100%; max-width: 680px; padding: 0 var(--sp-8); }
+  .welcome { width: 100%; max-width: 720px; padding: var(--sp-10) var(--sp-6); background: var(--panel); border: 1px solid var(--border-subtle); border-radius: var(--r-xl); }
 
   .heading { text-align: center; margin-bottom: var(--sp-6); }
   .heading h1 {
     margin: 0 0 var(--sp-2); font-size: 24px; line-height: 1.2;
-    font-weight: 700; color: var(--tx1);
+    font-weight: 700; color: var(--tx1); letter-spacing: -.02em;
   }
-  .heading p { margin: 0; font-size: 15px; color: var(--tx2); }
+  .heading p { margin: 0; font-size: 14px; color: var(--tx3); }
 
   /* Chip row — folder, then branch + worktree as ONE segmented control.
      Left-aligned with the composer, not centred: it reads as a property bar
      belonging to the input below it, not as a second heading. */
-  .chips { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+  .chips { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-2); }
   .chip {
-    display: inline-flex; align-items: center; gap: var(--sp-2);
-    height: 36px; padding: 0 var(--sp-3);
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 29px; padding: 0 11px;
     border: 1px solid var(--border); border-radius: var(--r-md);
-    background: var(--card); color: var(--tx1);
-    font-size: 14px; box-shadow: var(--shadow-sm);
+    background: var(--card); color: var(--tx2);
+    font-size: 12px; font-weight: 500;
   }
   .chip svg { color: var(--tx2); flex: none; }
+  .chip.on { border-color: var(--accent); background: var(--accent-bg); color: var(--accent-tx); }
+  .chip.on svg { color: var(--accent-tx); }
   .chip .caret { color: var(--tx3); margin-left: var(--sp-px); }
   .chip-group { display: inline-flex; }
   .chip-group .chip:first-child {
@@ -93,20 +95,20 @@
      the input on the trailing edge; the controls sit on their own row below
      the input, left-aligned. */
   .composer {
-    display: flex; align-items: flex-start; gap: var(--sp-2);
-    border: 1px solid var(--border); border-radius: var(--r-lg);
+    display: flex; align-items: flex-start; gap: var(--sp-3);
+    border: 1px solid var(--border-strong); border-radius: var(--r-lg);
     background: var(--card); box-shadow: var(--shadow-sm);
     padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);
     margin-bottom: var(--sp-3);
   }
   .composer .placeholder {
-    flex: 1; min-width: 0; font-size: 17px; color: var(--tx3);
+    flex: 1; min-width: 0; font-size: 15px; color: var(--tx3);
     padding: var(--sp-2) 0 var(--sp-6);
   }
   .send {
-    width: 36px; height: 36px; flex: none; border-radius: var(--r-md);
-    border: 1px solid var(--border); background: var(--panel);
-    display: grid; place-items: center; color: var(--tx2);
+    width: 28px; height: 28px; flex: none; border-radius: var(--r-sm);
+    border: none; background: var(--fill);
+    display: grid; place-items: center; color: var(--tx3);
   }
 
   .controls { display: flex; align-items: center; gap: var(--sp-2); }
@@ -118,7 +120,7 @@
   }
   .pill.effort { color: var(--accent-tx); font-weight: 600; }
   .icon-btn {
-    width: 36px; height: 36px; border-radius: var(--r-md); border: 1px solid transparent;
+    width: 32px; height: 32px; border-radius: var(--r-md); border: 1px solid transparent;
     display: grid; place-items: center; color: var(--tx2); background: transparent;
   }
 
@@ -171,7 +173,7 @@
       <div class="composer">
         <div class="placeholder">Describe a task or ask a question</div>
         <div class="send">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 10 4 15l5 5"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>
         </div>
       </div>
 
@@ -186,10 +188,10 @@
           <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         <button class="icon-btn" type="button" aria-label="Attach a file">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <button class="icon-btn" type="button" aria-label="Dictate">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
         </button>
       </div>
     </div>
@@ -203,10 +205,13 @@
   <strong>inside</strong> the input on the trailing edge, vertically top-aligned, so
   the input can grow downward without moving it. Branch and worktree form
   <strong>one segmented control</strong> (shared border, no gap); folder is a separate
-  chip. The effort pill is the only accent-coloured text on the screen — it is
-  the one setting users change per task. Every control is
-  <code>36px</code> tall on one <code>4px</code> grid. Empty state of the
-  sidebar is shown for context and is specified elsewhere.
+  chip. Ticking <strong>worktree</strong> turns the branch chip accent-toned (border,
+  background, text and icon); in the default view it stays an unchecked sibling
+  checkbox — the implementation keeps the toggle as a real <code>Checkbox</code>
+  beside the chip rather than a nested segment, for valid HTML. The effort pill is
+  the screen's static accent element. Sizes sit on the primitive's own off-grid
+  values where the design needs them (29px chips, 28px send, 32px icon buttons).
+  Empty state of the sidebar is shown for context and is specified elsewhere.
 </p>
 
 </body>
