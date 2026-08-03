@@ -50,6 +50,8 @@ struct ChatScreen: View {
         Group {
             if store.loadFailed {
                 loadFailure
+            } else if store.loading {
+                loadingSkeleton
             } else {
                 transcript
             }
@@ -143,6 +145,100 @@ struct ChatScreen: View {
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
     }
+
+    // MARK: - Loading skeleton (D2 / BET-631)
+
+    /// Transcript-shaped loading placeholder: three greyed blocks at the
+    /// user-band / prose / step-group rhythm, shown while the session's first
+    /// transcript fetch is in flight. It occupies the same scroll region the
+    /// real transcript will, so the first blocks replacing it cause no layout
+    /// shift — and there is deliberately no full-screen spinner (which would
+    /// discard the scroll anchor and flash on a warm reopen).
+    private var loadingSkeleton: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                skeletonUserBand
+                    .padding(.bottom, Metrics.spacing.sp4)
+                skeletonProse
+                skeletonStepGroup
+            }
+        }
+        .defaultScrollAnchor(.bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("loading-skeleton")
+    }
+
+    /// Greyed block in the shape of a user band (§8): a full-bleed `fill` band
+    /// with a leading edge, holding two placeholder body lines.
+    private var skeletonUserBand: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            skeletonLine(height: bodyLine)
+            skeletonLine(height: bodyLine)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Metrics.spacing.sp3)
+        .background(tokens.fill, in: UnevenRoundedRectangle(
+            topLeadingRadius: 0,
+            bottomLeadingRadius: 0,
+            bottomTrailingRadius: Metrics.radius.md,
+            topTrailingRadius: Metrics.radius.md
+        ))
+        .overlay(alignment: .leading) {
+            tokens.borderSubtle
+                .frame(width: Metrics.spacing.spPx * 2)
+        }
+    }
+
+    /// Greyed prose block: placeholder body lines at the prose rhythm.
+    private var skeletonProse: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            skeletonLine(height: bodyLine)
+            skeletonLine(height: bodyLine)
+            skeletonLine(height: bodyLine)
+        }
+        .padding(.top, Metrics.spacing.sp1)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    }
+
+    /// Greyed step-group block: a `panel` container with placeholder step rows
+    /// and hairlines between them, echoing the step-row geometry.
+    private var skeletonStepGroup: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<3, id: \.self) { index in
+                HStack(spacing: Metrics.spacing.sp2) {
+                    Circle()
+                        .fill(tokens.inset)
+                        .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
+                    skeletonLine(height: smallLine)
+                }
+                .padding(.vertical, Metrics.type.stepRowY)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                if index < 2 {
+                    Rectangle()
+                        .fill(tokens.borderSubtle)
+                        .frame(height: Metrics.spacing.spPx)
+                }
+            }
+        }
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+    }
+
+    /// A single grey placeholder bar, at the base of a text line's cap height.
+    private func skeletonLine(height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: Metrics.radius.xs)
+            .fill(tokens.inset)
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+    }
+
+    /// The rendered height of a body line at the prose leading.
+    private var bodyLine: CGFloat { Metrics.type.body * Metrics.type.proseLineHeight }
+
+    /// The rendered height of a small (13px) line at the UI leading.
+    private var smallLine: CGFloat { Metrics.type.small * Metrics.type.uiLineHeight }
 
     // MARK: - Live cards (todos / permission / question)
 
