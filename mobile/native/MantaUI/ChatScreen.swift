@@ -40,6 +40,7 @@ struct ChatScreen: View {
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
+    @Binding var path: NavigationPath
     @State private var currentSessionId: String?
 
     var body: some View {
@@ -49,6 +50,7 @@ struct ChatScreen: View {
             title: title,
             projectName: projectName,
             eventStore: eventStore,
+            path: $path,
             onCleared: { newId in currentSessionId = newId }
         )
         .id(sid)
@@ -59,6 +61,7 @@ private struct ChatScreenContent: View {
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
+    @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
@@ -74,10 +77,11 @@ private struct ChatScreenContent: View {
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, onCleared: @escaping (String) -> Void) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
+        self._path = path
         self.onCleared = onCleared
         let api = MantaAPIClient.live()
         _store = StateObject(wrappedValue: ChatSessionStore(
@@ -169,7 +173,7 @@ private struct ChatScreenContent: View {
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
-            onOpenTerminal: {},
+            onOpenTerminal: { Task { await openTerminal() } },
             onDelete: { Task { await deleteSession() } },
             scheduleCount: scheduleCount
         )
@@ -242,10 +246,28 @@ private struct ChatScreenContent: View {
 
     private func forkSession() async {
         guard let w = sessionWindow else { return }
-        try? await MantaAPIClient.live().forkSession(
+        let newSessionId = try? await MantaAPIClient.live().forkSession(
             sessionId: store.sessionId, sessionName: w.name,
             windowName: "\(title)-fork", cwd: w.cwd)
-        await MainActor.run { dismiss() }
+        guard let newSessionId, !newSessionId.isEmpty else { return }
+        // Fork = a full copy of the session in a fresh window. Land on the
+        // fork: push the new session as the next destination (sessionId is
+        // present, so it opens the forked chat). The original stays one pop
+        // back. windowIndex is not used when sessionId is set.
+        await MainActor.run {
+            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: "\(title) fork", sessionId: newSessionId))
+        }
+    }
+
+    /// "Open terminal" — push the terminal screen for the session's tmux
+    /// window. The target carries NO opencode session id, so SessionListView's
+    /// navigationDestination routes it to the native terminal instead of the
+    /// chat screen.
+    private func openTerminal() async {
+        guard let w = sessionWindow else { return }
+        await MainActor.run {
+            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: title, sessionId: nil))
+        }
     }
 
     private func deleteSession() async {
