@@ -228,7 +228,7 @@ export function InputArea({
       {/* Measure-capped composer (BET-620 change 3): the box, meta footer and
           trust toggle sit inside --measure (72ch) so the composer aligns with
           the transcript's measure edge, per the session mockup (.comp-in). */}
-      <div className="mx-auto max-w-[72ch] px-7">
+      <div className="mx-auto max-w-[72ch] px-[28px]">
       {/* Real input shell (BET-415): a bordered card with focus-within state
           replaces the old hairline-dividers-around-a-naked-textarea. Voice
           recording is now signalled by THIS border — a fourth treatment
@@ -399,7 +399,7 @@ export function InputArea({
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-1.5 px-0 " +
+            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-[6px] px-0 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-quiet hover:text-text-muted")
