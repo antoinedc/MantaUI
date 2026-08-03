@@ -89,31 +89,16 @@ struct SessionListView: View {
                     SessionScreenPlaceholder(name: target.name)
                 }
             }
-        }
-        .overlay(alignment: .bottom) { undoToast }
-        .sheet(item: $sheetRoute) { route in
-            switch route {
-            case .create(let project):
-                SessionCreateSheet(
-                    projects: store.projects,
-                    initialProject: project,
-                    onClose: { sheetRoute = nil },
-                    onCreated: { project, index in
-                        let window = store.projects.first(where: { $0.tmuxSession == project })?
-                            .windows.first(where: { $0.index == index })
-                        let name = window?.name ?? "session"
-                        sheetRoute = nil
-                        path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
-                    }
-                )
-            case .rename(let window, let project):
-                renameSheet(target: window, targetProject: project)
-                    .presentationDetents([.height(320)])
-            case .confirmDelete(let window):
-                confirmDeleteSheet(target: window)
-                    .presentationDetents([.height(320)])
+            // The sheet hangs off the stack's CONTENT, not off the stack
+            // itself. A single view can only run one presentation, and the
+            // settings cover below already claims the stack — with both on the
+            // same view the cover won, so every sheet (create, rename, delete)
+            // was silently dead and the `+` looked like it did nothing.
+            .sheet(item: $sheetRoute) { route in
+                sheetContent(route)
             }
         }
+        .overlay(alignment: .bottom) { undoToast }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
@@ -124,6 +109,31 @@ struct SessionListView: View {
         // (the tap routed before the list appeared).
         .onAppear { consumePushLink() }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+    }
+
+    @ViewBuilder
+    private func sheetContent(_ route: SheetRoute) -> some View {
+        switch route {
+        case .create(let project):
+            SessionCreateSheet(
+                projects: store.projects,
+                initialProject: project,
+                onClose: { sheetRoute = nil },
+                onCreated: { project, index in
+                    let window = store.projects.first(where: { $0.tmuxSession == project })?
+                        .windows.first(where: { $0.index == index })
+                    let name = window?.name ?? "session"
+                    sheetRoute = nil
+                    path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
+                }
+            )
+        case .rename(let window, let project):
+            renameSheet(target: window, targetProject: project)
+                .presentationDetents([.height(320)])
+        case .confirmDelete(let window):
+            confirmDeleteSheet(target: window)
+                .presentationDetents([.height(320)])
+        }
     }
 
     // MARK: - Push deep-link (§S8)
