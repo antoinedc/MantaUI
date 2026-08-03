@@ -20,6 +20,7 @@ import CrashReporter
 // symbolication tool in the loop.
 // ===========================================================================
 
+@MainActor
 enum CrashReports {
 
     private static var reporter: PLCrashReporter?
@@ -46,7 +47,7 @@ enum CrashReports {
     /// every launch; does nothing when there is no pending report.
     static func uploadPending(using api: MantaAPIClient) {
         guard let reporter, reporter.hasPendingCrashReport() else { return }
-        guard let data = reporter.loadPendingCrashReportDataAndReturnError(nil) else {
+        guard let data = try? reporter.loadPendingCrashReportDataAndReturnError() else {
             reporter.purgePendingCrashReport()
             return
         }
