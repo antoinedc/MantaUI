@@ -189,6 +189,25 @@ final class MantaAPIClient: Sendable {
         _ = try await callVoid("opencode:fork-session", args: [dict])
     }
 
+    /// `opencode:clear-session` — start a fresh opencode session in the same
+    /// window (the desktop `/clear`). Returns the new session id so the caller
+    /// can re-point at it.
+    func clearSession(sessionName: String, windowIndex: Int, cwd: String? = nil, title: String? = nil) async throws -> String? {
+        var dict: [String: Any] = ["sessionName": sessionName, "windowIndex": windowIndex]
+        if let cwd { dict["cwd"] = cwd }
+        if let title { dict["title"] = title }
+        let result = try await call("opencode:clear-session", args: [dict], as: ClearSessionResult.self)
+        return result?.newSessionId
+    }
+
+    /// `opencode:vcs-branch` — the git branch for a working directory, or nil
+    /// (not a repo, detached head, unreachable). Spawned locally by the box,
+    /// so a terminal-side checkout is reflected on the next call.
+    func vcsBranch(directory: String) async throws -> String? {
+        let result = try await call("opencode:vcs-branch", args: [directory], as: String?.self)
+        return result ?? nil
+    }
+
     /// `tmux:rename-window` — rename a session (the row's name).
     func renameWindow(session: String, index: Int, newName: String) async throws {
         let dict: [String: Any] = [
@@ -372,6 +391,10 @@ final class MantaAPIClient: Sendable {
 }
 
 private struct VoidResult: Decodable {}
+
+private struct ClearSessionResult: Decodable {
+    let newSessionId: String?
+}
 
 /// The `voice:classify-command` reply is `{ action, source }` — the action is
 /// the structured `VoiceAction`; `source` ("rules" | "llm" | "none") is

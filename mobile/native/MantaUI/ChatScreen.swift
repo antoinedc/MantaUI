@@ -25,6 +25,9 @@ struct ChatScreen: View {
     @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showOverflow = false
+    @State private var branch: String?
+    @State private var sessionWindow: (name: String, index: Int, cwd: String)?
 
     init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore) {
         self.title = title
@@ -84,10 +87,71 @@ struct ChatScreen: View {
         // rows sat underneath it and were clipped at rest, not just while
         // scrolling.
         .safeAreaInset(edge: .top) { header }
-        .onAppear { store.start() }
+        .sheet(isPresented: $showOverflow) { overflowSheet }
+        .onAppear {
+            store.start()
+            Task { await resolveWindowAndBranch() }
+        }
         .onDisappear { store.stop() }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-screen")
+    }
+
+    // MARK: - Overflow sheet (§8)
+
+    private var overflowSheet: some View {
+        ChatOverflowSheet(
+            sessionTitle: title,
+            projectName: projectName,
+            branch: branch,
+            onAttach: {},
+            onSchedules: {},
+            onSecrets: {},
+            onWebhooks: {},
+            onCompact: { store.compact() },
+            onClear: { Task { await clearSession() } },
+            onFork: { Task { await forkSession() } },
+            onOpenTerminal: {},
+            onDelete: { Task { await deleteSession() } }
+        )
+    }
+
+    /// The chat screen knows its project by NAME only, but every session action
+    /// (clear/fork/delete) and the branch lookup need the tmux window index and
+    /// its working directory. Resolve both once when the screen appears.
+    private func resolveWindowAndBranch() async {
+        let api = MantaAPIClient.live()
+        guard let projects = try? await api.projects(),
+              let project = projects.first(where: { $0.tmuxSession == projectName }),
+              let window = project.windows.first(where: { $0.opencodeSessionId == store.sessionId })
+        else { return }
+        let cwd = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
+        await MainActor.run { sessionWindow = (project.tmuxSession, window.index, cwd) }
+        if !cwd.isEmpty, let resolved = try? await api.vcsBranch(directory: cwd) {
+            await MainActor.run { branch = resolved }
+        }
+    }
+
+    private func clearSession() async {
+        guard let w = sessionWindow else { return }
+        _ = try? await MantaAPIClient.live().clearSession(
+            sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
+        await MainActor.run { dismiss() }
+    }
+
+    private func forkSession() async {
+        guard let w = sessionWindow else { return }
+        try? await MantaAPIClient.live().forkSession(
+            sessionId: store.sessionId, sessionName: w.name,
+            windowName: "\(title)-fork", cwd: w.cwd)
+        await MainActor.run { dismiss() }
+    }
+
+    private func deleteSession() async {
+        guard let w = sessionWindow else { return }
+        try? await MantaAPIClient.live().deleteSession(
+            sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
+        await MainActor.run { dismiss() }
     }
 
     // MARK: - Header (§8)
@@ -124,10 +188,19 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Trailing 38×38 glass button (§8) — a placeholder in S4 (the
-            // overflow sheet with fork/settings is a later stage).
-            Color.clear
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            // Trailing 38×38 glass button (§8) — the overflow sheet, which is
+            // where every session action lives (DECISIONS.md:667-670).
+            Button {
+                showOverflow = true
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.tx1)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Session actions")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
