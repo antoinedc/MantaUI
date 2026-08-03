@@ -226,21 +226,60 @@ export function InputArea({
           floating
         />
       )}
-      {/* Measure-capped composer (BET-620 change 3): the box, meta footer and
-          trust toggle sit inside --measure (72ch) so the composer aligns with
-          the transcript's measure edge, per the session mockup (.comp-in). The
-          reading column chrome is the MeasureColumn primitive (BET-637). */}
+      {/* Measure-capped composer (BET-620 change 3): the box and the chip row
+          sit inside --measure (72ch) so the composer aligns with the
+          transcript's measure edge. The reading column chrome is the
+          MeasureColumn primitive (BET-637). */}
       <MeasureColumn>
-      {/* Real input shell (BET-415): a bordered card with focus-within state
-          replaces the old hairline-dividers-around-a-naked-textarea. Voice
-          recording is now signalled by THIS border — a fourth treatment
-          alongside resting / focus / error (BET-416 §A): border-colour pulses
-          to --danger, border only, never the fill, solid under reduced-motion.
-          A background refetch still shows as an ambient accent border. Horizontal
-          padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
+      {/* Model picker + trust toggle as FLOATING CHIPS above the input box.
+          They used to sit in a meta footer BELOW the box; hoisting them above
+          it is what makes the composer read as one floating element rather
+          than a box with a caption. Both wear `.manta-glass-pill` so they
+          match the session-header chips — glass supplies the surface, the
+          primitive supplies the content. */}
+      <div className="mb-2 flex items-center gap-2 flex-wrap">
+        <div className="manta-glass-pill flex items-center">
+          <ModelPicker
+            modelLabel={modelLabel}
+            models={models}
+            modelOverride={modelOverride}
+            defaultModel={defaultModel}
+            deactivatedMainModels={deactivatedMainModels}
+            onOpen={onOpenModels}
+            onSelect={onSelectModel}
+            labelOverride={shortLabel}
+          />
+        </div>
+        {/* Trust toggle as a glass chip */}
+        <button
+          onClick={() => setChatAutoAllow(!chatAutoAllow)}
+          className={
+            "manta-glass-pill inline-flex items-center gap-1 text-[11.5px] leading-none font-medium py-1 px-3 rounded-full transition-colors " +
+            (chatAutoAllow
+              ? "text-danger"
+              : "text-text-quiet hover:text-text-muted")
+          }
+          title={
+            chatAutoAllow
+              ? "Bypassing permissions — click to re-enable approval"
+              : "Permissions on — click to bypass"
+          }
+        >
+          <Shield size={12} aria-hidden="true" />
+          {chatAutoAllow ? "Bypassing" : "Permissions on"}
+        </button>
+      </div>
+
+      {/* Floating composer input shell. Voice recording is signalled by THIS
+          border — a fourth treatment alongside resting / focus / error
+          (BET-416 §A): border-colour pulses to --danger, border only, never
+          the fill, solid under reduced-motion. A background refetch still
+          shows as an ambient accent border. Horizontal padding is --sp-4
+          (16px) per the BET-423 spacing ruling; the radius is --r-xl and the
+          glass fill comes from `.manta-float-composer`. */}
       <div
         className={
-          "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
+          "manta-composer-input-row manta-float-composer mb-4 rounded-xl border flex flex-col gap-2 px-4 py-3 " +
           (voiceActive
             ? "manta-recording"
             : refreshing
@@ -250,8 +289,8 @@ export function InputArea({
       >
         {/* Attachment chips live INSIDE the box, above the text line (BET-416
             §B). They are part of the message being composed, so they share
-            the box; context chips (folder / branch) sit ABOVE the box in the
-            SessionHeader because they describe the session. */}
+            the box; context chips (folder / branch) sit in the SessionHeader
+            because they describe the session. */}
         {attachments.length > 0 && (
           <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
         )}
@@ -344,37 +383,28 @@ export function InputArea({
           />
         )}
         {/* Send button — sits beside the textarea in the composer box (BET-620
-            change 4). Accent when there's text to send, muted fill when empty. */}
+            change 4). Accent when there's text to send, muted fill when empty.
+            Circular here (not rounded-sm) to echo the pill language the
+            floating chips establish. */}
         <button
           onClick={submit}
           aria-label="Send message"
           title="Send (Enter)"
           className={
-            "w-7 h-7 rounded-sm grid place-items-center shrink-0 " +
+            "w-8 h-8 rounded-full grid place-items-center shrink-0 transition-colors " +
             (input.trim() ? "bg-accent text-on-accent" : "bg-fill text-text-faint")
           }
         >
-          <Send size={14} aria-hidden="true" />
+          <Send size={15} aria-hidden="true" />
         </button>
         </div>
-      </div>
-      {/* Meta footer — model ▸ effort split on the left, resource toolbar +
-          transient status on the right. Branch + context pill moved to the
-          SessionHeader; the footer now owns only composing controls. */}
-      <div className="py-1 flex items-center justify-between gap-3 flex-wrap">
-        <span className="flex items-center gap-3 min-w-0 flex-wrap">
-          <ModelPicker
-            modelLabel={modelLabel}
-            models={models}
-            modelOverride={modelOverride}
-            defaultModel={defaultModel}
-            deactivatedMainModels={deactivatedMainModels}
-            onOpen={onOpenModels}
-            onSelect={onSelectModel}
-            labelOverride={shortLabel}
-          />
-        </span>
-        <span className="shrink-0 flex items-center gap-3 flex-wrap">
+
+        {/* Resource toolbar (⏰/🔑/🪝) + transient voice / running status. This
+            moved INSIDE the box when the model + trust chips moved above it:
+            the box would otherwise have chrome on both sides of it, which is
+            what made the old layout read as a panel rather than a floating
+            input. */}
+        <div className="flex items-center justify-between gap-2">
           <SessionToolbar
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}
@@ -390,31 +420,7 @@ export function InputArea({
                 : "esc · interrupt"}
             </span>
           )}
-        </span>
-      </div>
-      {/* Trust toggle — labelled control with a Shield icon (BET-415).
-          Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
-          config key. Danger colour when bypassing. */}
-      <div className="pb-3 flex items-center">
-        <button
-          onClick={() => setChatAutoAllow(!chatAutoAllow)}
-          className={
-            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-[6px] px-0 " +
-            (chatAutoAllow
-              ? "text-danger hover:text-danger"
-              : "text-text-quiet hover:text-text-muted")
-          }
-          title={
-            chatAutoAllow
-              ? "Bypassing permissions — click to re-enable approval"
-              : "Permissions on — click to bypass"
-          }
-        >
-          <Shield size={14} aria-hidden="true" />
-          {chatAutoAllow
-            ? "Bypassing permissions"
-            : "Permissions on — click to bypass"}
-        </button>
+        </div>
       </div>
       </MeasureColumn>
     </div>

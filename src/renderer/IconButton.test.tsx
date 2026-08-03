@@ -123,16 +123,23 @@ describe("IconButton", () => {
   });
 });
 
-describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter rule)", () => {
+// The session header used to host TWO IconButtons: a Terminal glyph that
+// toggled Chat ↔ Terminal, and the ⋯ session-actions trigger. The glyph was
+// removed — it was a second control for a decision the ⋯ menu's own Mode
+// section already owns, and it could only express the Chat ↔ Terminal half of
+// a list that also holds every AI-CLI launcher. The trigger is the header's
+// only IconButton now; IconButton's two-adopter count is unaffected (it is
+// counted per importing FILE, and NewSessionScreen.tsx is the second).
+describe("IconButton migration — SessionHeader call site (BET-532 two-adopter rule)", () => {
   let h: Harness | null = null;
   afterEach(() => {
     h?.unmount();
     h = null;
   });
 
-  // Minimal SessionHeader props rendering BOTH adopted controls: the mode
-  // toggle (onModeChange set) and the session-menu trigger (hasSession, not
-  // readOnly). totalInput 0 hides the context pill so it doesn't add buttons.
+  // Minimal SessionHeader props rendering the adopted control: the
+  // session-menu trigger (hasSession, not readOnly). totalInput 0 hides the
+  // context pill so its own trigger button doesn't join the count.
   function renderHeader() {
     return mount(
       <SessionHeader
@@ -153,25 +160,22 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     );
   }
 
-  it("mode toggle renders through IconButton's chrome with no unintended change", () => {
+  it("the header carries exactly one IconButton — the mode-toggle glyph is gone", () => {
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
-    expect(els.length).toBe(2);
-    const modeToggle = els[0];
-    // Same chrome + same accessible name/title as the pre-migration button
-    // (aria-label names the mode you switch TO from chat: Terminal). The mode
-    // toggle's `manta-*` hook was stripped (not consumed by the visual gate);
-    // the session-menu trigger keeps its `manta-session-menu-trigger` hook.
-    expect(modeToggle.className).toBe(CHROME);
-    expect(modeToggle.getAttribute("aria-label")).toBe("Terminal");
-    expect(modeToggle.getAttribute("title")).toBe("Switch to Terminal");
-    expect(modeToggle.querySelector("svg")?.getAttribute("width")).toBe("16");
+    expect(els.length).toBe(1);
+    // Specifically: nothing in the header offers Terminal as a standalone
+    // control any more. Reaching Terminal is a Mode row in the ⋯ menu, which
+    // is also the only place the AI-CLI launchers can be reached.
+    expect(
+      els.some((el) => el.getAttribute("aria-label") === "Terminal"),
+    ).toBe(false);
   });
 
   it("session-menu trigger renders through IconButton with its menu semantics and hook", () => {
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
-    const trigger = els[1];
+    const trigger = els[0];
     expect(trigger.className).toBe(`manta-session-menu-trigger ${CHROME}`);
     expect(trigger.getAttribute("aria-label")).toBe("Session actions");
     expect(trigger.getAttribute("title")).toBe("Session actions");
@@ -180,11 +184,11 @@ describe("IconButton migration — SessionHeader call sites (BET-532 two-adopter
     expect(trigger.querySelector("svg")?.getAttribute("width")).toBe("16");
   });
 
-  it("does not inject arbitrary classes into the migrated call sites", () => {
+  it("does not inject arbitrary classes into the migrated call site", () => {
     h = renderHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
-    expect(els.map((el) => el.className).sort()).toEqual(
-      [CHROME, `manta-session-menu-trigger ${CHROME}`].sort(),
-    );
+    expect(els.map((el) => el.className)).toEqual([
+      `manta-session-menu-trigger ${CHROME}`,
+    ]);
   });
 });
