@@ -220,6 +220,38 @@ describe("SplitChip", () => {
     expect(buttons()[1].className).not.toContain("manta-");
   });
 
+  it("sets aria-expanded per segment only when the caller provides it (BET-635)", () => {
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+        popup
+        leftExpanded
+        rightExpanded={false}
+      />,
+    );
+    const [l, r] = buttons();
+    expect(l.getAttribute("aria-expanded")).toBe("true");
+    expect(r.getAttribute("aria-expanded")).toBe("false");
+    // Absent the props, no aria-expanded leaks onto the buttons — a non-popup
+    // or stateless adopter stays clean.
+    h.unmount();
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+        popup
+      />,
+    );
+    const [pl, pr] = buttons();
+    expect(pl.hasAttribute("aria-expanded")).toBe(false);
+    expect(pr.hasAttribute("aria-expanded")).toBe(false);
+  });
+
   it("does NOT assume popup semantics: aria-haspopup is absent unless popup is opted in", () => {
     h = mount(
       <SplitChip

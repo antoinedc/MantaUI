@@ -79,6 +79,8 @@ export function SplitChip({
   hook,
   leftHook,
   rightHook,
+  leftExpanded,
+  rightExpanded,
   popup = false,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
@@ -105,6 +107,16 @@ export function SplitChip({
   /** A stable `manta-*` identity class for the RIGHT segment button (see `leftHook`). */
   rightHook?: string;
   /**
+   * `aria-expanded` for the left segment, reflecting whether its popup is open.
+   * The popup coverage registry EXCLUDES an `aria-expanded="true"` trigger from
+   * a row's closed-surface inventory, so the caller who owns the open state
+   * must pass it here (a `popup` segment that never reports open reads as
+   * permanently closed).
+   */
+  leftExpanded?: boolean;
+  /** `aria-expanded` for the right segment (see `leftExpanded`). */
+  rightExpanded?: boolean;
+  /**
    * OPT-IN popup semantics. SplitChip is a generic split control — its two
    * segments are plain buttons and it does NOT assume either opens a popup.
    * A caller whose segments genuinely toggle a listbox (e.g. ModelPicker)
@@ -114,14 +126,16 @@ export function SplitChip({
   popup?: boolean;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
+  const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
+  const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
   const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
   const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
   return (
     <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
-      <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox}>
+      <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
         {left}
       </button>
-      <button type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox}>
+      <button type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox} {...rightAria}>
         {right}
       </button>
     </div>
