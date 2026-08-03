@@ -64,40 +64,19 @@ export function bulletStyle(part: OpencodePart): { color: string; pulse: boolean
 // primitives. Safe to use the default shallow comparator.
 export const AssistantPart = memo(function AssistantPart({
   part,
-  first,
   showThinking,
 }: {
   part: OpencodePart;
-  first: boolean;
   showThinking: boolean;
 }) {
-  // Single bullet on the very first line of the very first content part;
-  // everything else gets a 2-space indent to align under it.
-  const Prefix = ({ char, color, pulse }: { char: string; color: string; pulse?: boolean }) => (
-    <span
-      className={"select-none " + (pulse ? "animate-pulse" : "")}
-      style={{ color }}
-    >
-      {char}{" "}
-    </span>
-  );
-
   if (part.type === "text") {
     const text = (part.text ?? "").replace(/^\n+|\n+$/g, "");
     if (!text) return null;
-    const { color, pulse } = bulletStyle(part);
-    // No `whitespace-pre-wrap` here — react-markdown handles block structure
-    // and would otherwise stack raw newlines from the source on top of its
-    // own paragraph spacing, leaving huge visual gaps around code blocks.
+    // Per the spec (.amsg) the assistant text is plain paragraphs at the
+    // reading size with no leading gutter — the old `●` bullet column is gone
+    // (BET-637), so the markdown body sits flush with the reading column.
     return (
-      <div className="break-words text-text">
-        <div className="flex">
-          <span className="select-none w-4 shrink-0">
-            {first ? <Prefix char="●" color={color} pulse={pulse} /> : <span className="invisible">●</span>}
-          </span>
-          <div className="flex-1 min-w-0">{renderMarkdown(text)}</div>
-        </div>
-      </div>
+      <div className="break-words text-text">{renderMarkdown(text)}</div>
     );
   }
 

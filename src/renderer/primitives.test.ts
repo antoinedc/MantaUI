@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
@@ -143,7 +143,7 @@ function offendingLines(content: string, re: RegExp): string[] {
 // sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
 // in the desktop client — carried by the redesign spec — so it is a legitimate
 // one-web-surface primitive rather than a chrome-incompatible one.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow"]);
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow", "MessageBubble"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -213,6 +213,15 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // the 12.5px mono header size (text-[12.5px] → reads as 5). Real values
   // from `.tool`/`.tool-h`, not drift.
   ToolCard: [9, 11, 5],
+  // MeasureColumn's verbatim spec chrome (BET-637): the 28px side inset
+  // (px-[28px], `.wrap` / `.comp-in`) — the transcript/composer reading column
+  // is padded 28px at the sides. The max-width resolves through the inline
+  // `var(--measure)` so it needs no entry.
+  MeasureColumn: [28],
+  // MessageBubble's verbatim spec chrome (BET-637): the 11px vertical bubble
+  // padding (py-[11px], `.umsg`). The 88% cap (max-w-[88%]) is a percentage,
+  // so it needs no entry.
+  MessageBubble: [11],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -230,6 +239,8 @@ const SKIP_REASON: Record<string, string> = {
     "single-web-adopter this stage (BET-614 stage 4): its one genuine home is Settings.tsx (the GroupCard uppercase section label). The second named adopter, NewSessionScreen.tsx, has no uppercase section label — REPORTED here (BET-618) rather than force-converted. Pending an owner decision on a real second web adopter before the waiver resolves.",
   SettingsRow:
     "no adopting file this stage (BET-614 stage 5): the premise that Settings.tsx's private SettingField already implements `.setrow` and only needs extracting does NOT hold — that SettingField is a Field-based text/password input (entry/value/onCommit/credential), not a row with name/help/children. Neither named adopter (Settings.tsx, ProvidersCard.tsx) carries a genuine `.setrow` row: Settings.tsx's schema rows hand-roll their own simpler chrome and ProvidersCard.tsx's rows are endpoint list items. Converting either to satisfy the count would change the settings panel's visual layout (adds row dividers + spec typography) or force-fit an unrelated element — both forbidden — so this stage builds + registers the owner-approved primitive and REPORTS both adopters (BET-619). Pending an owner decision on a real web adopter (a `.setrow` migration of the settings panel) before the waiver resolves.",
+  MessageBubble:
+    "single-surface primitive: 1 web adopting file (MessageRow.tsx, the user message in the transcript). The user message is the only bubble in the app today, and the transcript's tool chrome is now in scope — the owner wants THIS bubble's chrome owned by a primitive now rather than re-derived when mobile and any future review surface need the same right-aligned bubble (the user bubble is a LOCKED spec decision, Q7, not a preference). Owner-approved formal exemption from the two-adopter rule (BET-637), following the SessionRow/MenuItem precedent.",
 };
 
 describe("M527 primitive rules", () => {
@@ -289,6 +300,8 @@ describe("M527 primitive rules", () => {
       "last:border-b-0": ["SettingsRow.tsx"], // the settings-row trailing-border removal — the .setrow row-divider signature (BET-614)
       "w-[6px]": ["StatusDot.tsx"], // the real 6px status dot — `.tool-h .g` (BET-636)
       "bg-inset": ["OutputWell.tsx"], // the recessed output well — `.tool-b`/`.ask-cmd` (BET-636)
+      "px-[28px]": ["MeasureColumn.tsx"], // the 28px reading-column side inset — `.wrap`/`.comp-in` (BET-637)
+      "max-w-[88%]": ["MessageBubble.tsx"], // the user bubble's 88% cap — `.umsg` (BET-637)
       "text-[12.5px]": ["ToolCard.tsx", "OutputWell.tsx", "Button.tsx", "SettingsRow.tsx"], // the 12.5px mono chrome — ToolCard header + OutputWell well (BET-636), plus the pre-existing Button label and SettingsRow help which already owned it before this primitive tracked it
     };
 
