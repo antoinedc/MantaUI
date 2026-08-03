@@ -60,7 +60,11 @@ import {
   globCovers,
   isApprovalCoveredByAlways,
   shortModelName,
+  filterModelGroups,
+  moveMenuHighlight,
 } from "./chatUtils";
+
+import type { OpencodeModel } from "../shared/types";
 
 
 
@@ -275,10 +279,17 @@ describe("ctxStageColor", () => {
 // ===== formatModelContextSize =====
 
 describe("formatModelContextSize", () => {
-  it("formats a context limit as a rounded-xs 'Nk' string", () => {
-    expect(formatModelContextSize(1_000_000)).toBe("1000k");
+  it("formats a context limit as a rounded 'Nk' string below 1M", () => {
     expect(formatModelContextSize(200_000)).toBe("200k");
+    expect(formatModelContextSize(999_000)).toBe("999k");
     expect(formatModelContextSize(1_500)).toBe("2k");
+  });
+
+  it("switches to 'NM' (millions) at or above 1_000_000, stripping a trailing .0", () => {
+    expect(formatModelContextSize(1_000_000)).toBe("1M");
+    expect(formatModelContextSize(1_500_000)).toBe("1.5M");
+    expect(formatModelContextSize(2_000_000)).toBe("2M");
+    expect(formatModelContextSize(1_200_000)).toBe("1.2M");
   });
 
   it("returns null for missing/non-positive/non-finite values", () => {
@@ -288,6 +299,76 @@ describe("formatModelContextSize", () => {
     expect(formatModelContextSize(-1)).toBeNull();
     expect(formatModelContextSize(Infinity)).toBeNull();
     expect(formatModelContextSize(NaN)).toBeNull();
+  });
+});
+
+// ===== filterModelGroups =====
+
+function model(id: string, providerID: string): OpencodeModel {
+  return {
+    id,
+    providerID,
+    name: id,
+    limit: { context: 200_000 },
+  };
+}
+
+const FILTER_GROUPS: Array<[string, OpencodeModel[]]> = [
+  ["anthropic", [model("claude-opus-4", "anthropic"), model("claude-sonnet-4", "anthropic")]],
+  ["deepseek", [model("deepseek-chat", "deepseek")]],
+  ["groq", [model("llama-3.3-70b", "groq")]],
+];
+
+describe("filterModelGroups", () => {
+  it("returns the groups unchanged for an empty / whitespace query", () => {
+    expect(filterModelGroups(FILTER_GROUPS, "")).toEqual(FILTER_GROUPS);
+    expect(filterModelGroups(FILTER_GROUPS, "   ")).toEqual(FILTER_GROUPS);
+  });
+
+  it("matches on the model name, case-insensitively", () => {
+    const out = filterModelGroups(FILTER_GROUPS, "CLAUDE-OPUS");
+    expect(out).toEqual([["anthropic", [model("claude-opus-4", "anthropic")]]]);
+  });
+
+  it("matches on the provider id", () => {
+    const out = filterModelGroups(FILTER_GROUPS, "deepseek");
+    expect(out).toEqual([["deepseek", [model("deepseek-chat", "deepseek")]]]);
+  });
+
+  it("elides a group whose models all filter out", () => {
+    const out = filterModelGroups(FILTER_GROUPS, "llama");
+    expect(out).toEqual([["groq", [model("llama-3.3-70b", "groq")]]]);
+  });
+
+  it("returns no groups when nothing matches", () => {
+    expect(filterModelGroups(FILTER_GROUPS, "zzz")).toEqual([]);
+  });
+});
+
+// ===== moveMenuHighlight =====
+
+describe("moveMenuHighlight", () => {
+  it("returns -1 for an empty option list", () => {
+    expect(moveMenuHighlight(0, 1, 0)).toBe(-1);
+    expect(moveMenuHighlight(-1, 1, 0)).toBe(-1);
+  });
+
+  it("wraps from the bottom back to the top", () => {
+    expect(moveMenuHighlight(2, 1, 3)).toBe(0);
+  });
+
+  it("wraps from the top back to the bottom", () => {
+    expect(moveMenuHighlight(0, -1, 3)).toBe(2);
+  });
+
+  it("steps within the list", () => {
+    expect(moveMenuHighlight(1, 1, 3)).toBe(2);
+    expect(moveMenuHighlight(1, -1, 3)).toBe(0);
+  });
+
+  it("starts at the top from a cold index going down, bottom going up", () => {
+    expect(moveMenuHighlight(-1, 1, 3)).toBe(0);
+    expect(moveMenuHighlight(-1, -1, 3)).toBe(2);
   });
 });
 

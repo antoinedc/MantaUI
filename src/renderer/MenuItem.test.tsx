@@ -28,16 +28,15 @@ describe("Dropdown — the shared dropdown surface", () => {
     h = null;
   });
 
-  it("renders the panel tokens (bg-elev, border, shadow-md, r-md, py-1) and role=menu", () => {
+  it("renders the panel tokens (bg-soft, border, shadow-lg, r-lg) and role=menu", () => {
     h = mount(<Dropdown>hello</Dropdown>);
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.getAttribute("role")).toBe("menu");
-    expect(el.className).toContain("rounded-md");
+    expect(el.className).toContain("rounded-lg");
     expect(el.className).toContain("border");
     expect(el.className).toContain("border-border");
-    expect(el.className).toContain("bg-bg-elev");
-    expect(el.className).toContain("shadow-md");
-    expect(el.className).toContain("py-1");
+    expect(el.className).toContain("bg-bg-soft");
+    expect(el.className).toContain("shadow-lg");
     expect(el.textContent).toBe("hello");
   });
 
@@ -45,6 +44,53 @@ describe("Dropdown — the shared dropdown surface", () => {
     h = mount(<Dropdown hook="manta-session-menu-dropdown">x</Dropdown>);
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.className).toContain("manta-session-menu-dropdown");
+  });
+
+  it("wraps children in a scrolling body — the surface's only scroller", () => {
+    h = mount(<Dropdown>row</Dropdown>);
+    const body = h.container.querySelector("div.overflow-y-auto") as HTMLElement;
+    expect(body).toBeTruthy();
+    expect(body.className).toContain("min-h-0");
+    expect(body.textContent).toBe("row");
+  });
+
+  it("renders the fixed search / header / footer slots as flex-none regions", () => {
+    h = mount(
+      <Dropdown
+        search={<input aria-label="Search models" />}
+        header={<span>header</span>}
+        footer={<button>footer</button>}
+      >
+        body
+      </Dropdown>,
+    );
+    const root = h.container.firstElementChild as HTMLElement;
+    expect(root.querySelector('input[aria-label="Search models"]')).toBeTruthy();
+    expect(root.textContent).toContain("header");
+    expect(root.textContent).toContain("footer");
+    const searchStrip = root.querySelector("input")!.parentElement as HTMLElement;
+    expect(searchStrip.className).toContain("flex-none");
+  });
+
+  it("placement=above flips to bottom-full, align=start to left-0", () => {
+    h = mount(<Dropdown placement="above" align="start">x</Dropdown>);
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toContain("bottom-full");
+    expect(el.className).toContain("mb-1");
+    expect(el.className).toContain("left-0");
+  });
+
+  it("width wide/narrow set the 340px / 250px spec panels", () => {
+    h = mount(<Dropdown width="wide">x</Dropdown>);
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("w-[340px]");
+    h.unmount();
+    h = mount(<Dropdown width="narrow">x</Dropdown>);
+    expect((h.container.firstElementChild as HTMLElement).className).toContain("w-[250px]");
+  });
+
+  it("role=listbox is honoured for the single-select pickers", () => {
+    h = mount(<Dropdown role="listbox">x</Dropdown>);
+    expect((h.container.firstElementChild as HTMLElement).getAttribute("role")).toBe("listbox");
   });
 });
 
@@ -168,8 +214,8 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
     openMenu();
     const surface = h!.container.querySelector(".manta-session-menu-dropdown") as HTMLElement;
     expect(surface.getAttribute("role")).toBe("menu");
-    expect(surface.className).toContain("bg-bg-elev");
-    expect(surface.className).toContain("shadow-md");
+    expect(surface.className).toContain("bg-bg-soft");
+    expect(surface.className).toContain("shadow-lg");
 
     for (const label of ["Fork session", "Compact context", "Clear session"]) {
       const row = itemByText(label);

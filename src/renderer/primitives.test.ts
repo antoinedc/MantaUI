@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "MenuOption", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow", "StatusDot", "OutputWell", "ToolCard", "MeasureColumn", "MessageBubble"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
@@ -140,10 +140,10 @@ function offendingLines(content: string, re: RegExp): string[] {
 // MenuItem gains a recorded waiver in BET-549. After the mobile exclusion,
 // its only remaining web adopter is SessionHeader.tsx (the session menu /
 // dropdown); its former second adopter was the excluded mobile SessionScreen
-// sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
-// in the desktop client — carried by the redesign spec — so it is a legitimate
-// one-web-surface primitive rather than a chrome-incompatible one.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow", "MessageBubble"]);
+// sheet, which the mobile-redesign deletes. BET-644 resolves it: the model
+// and effort menus (ModelMenu.tsx + EffortMenu.tsx) adopt the same Dropdown
+// surface, so MenuItem now has three web adopters and leaves SINGLE_SURFACE.
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow", "MessageBubble"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -156,6 +156,19 @@ const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle",
 // the one spec-authorized component.
 const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   SessionRow: [3, 7, 8, 13, 20, 26],
+  // MenuItem / Dropdown's verbatim spec chrome (BET-644): the four-region menu
+  // surface's off-grid values — 340px wide/250px narrow panel widths, 460px
+  // max-height and the 38px fixed search strip. The 11.25rem menu min-width
+  // resolves through rem so it needs no entry. Real values from the redesign
+  // spec's `.dd`, not drift.
+  MenuItem: [38, 250, 340, 460],
+  // MenuOption's verbatim spec chrome (BET-644): the 34px single-line and 44px
+  // sub-line row densities (min-h-[34px]/min-h-[44px]), the 2px sub-line top
+  // margin (mt-[2px], `.opt .sub`), and the decimal tail of the 11.5px sub-line
+  // (text-[11.5px] → the `\d+px` scan reads it as 5). Real values from the
+  // redesign spec's `.opt`, not drift. (The 16px check tick slot uses w-4, so
+  // it resolves through Tailwind's scale and needs no entry.)
+  MenuOption: [2, 5, 34, 44],
   // Button's verbatim spec chrome (BET-611 stage 1): 14px inline padding
   // (px-[14px]); 32px resolves via h-8, so it needs no entry. The 6px icon gap
   // (gap-[6px]) and the 12.5px label (text-[12.5px] → 5px after the decimal)
@@ -227,12 +240,8 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
 const SKIP_REASON: Record<string, string> = {
   SessionRow:
     "single-surface primitive: 1 web adopting file (Sidebar.tsx, the desktop session rail). Its only other session list lived in mobile/SessionListScreen, which the mobile-redesign deletes wholesale (DECISIONS.md §12) — so the two-adopter scan no longer counts it. Owner-approved formal exemption from the two-adopter rule (BET-546); the 2nd web adopter is deferred to the mobile-consolidation follow-up.",
-  MenuItem:
-    "single-surface primitive: 1 web adopting file (SessionHeader.tsx, the session menu / dropdown), which carries the menu/dropdown contract from the redesign spec. Its former second adopter was the mobile SessionScreen sheet, deleted wholesale by the mobile-redesign (DECISIONS.md §12), so it no longer counts as a web adopter. Owner-approved formal waiver (BET-549), recorded option A.",
   Toggle:
     "single-surface primitive: both boolean switch adopters (chatAutoAllow + allowAgentPush) are rows of the ONE settings form (Settings.tsx) — two call sites, one adopting file, so the file-counting two-adopter scan reads 1. The settings-toggle is a single surface (a live on/off setting in the settings panel); converting a second, unrelated file to satisfy the file-count would force the primitive into a UI where the spec doesn't place a switch. Recorded as a single-surface case like SessionRow/MenuItem, not a pending finding.",
-  Tag:
-    "single-web-adopter this stage (BET-614 stage 4): its one genuine home is the SessionHeader.tsx branch indicator (an inline mono metadata badge). The second named adopter, Cards.tsx, has no inline mono metadata badge — its badges are the ask-card 30px icon box and the Pill-formatted 'Recommended' tag — so per the epic rule it is REPORTED here (BET-618), not force-converted to an unrelated element. Pending an owner decision on a real second web adopter before the waiver resolves.",
   IconCard:
     "no adopting file this stage (BET-614 stage 4): neither named adopter (Settings.tsx, NewSessionScreen.tsx) contains an icon-above-label tile — Settings' rail tabs are horizontal, interactive nav rows (aria tablist) and NewSessionScreen has no such tile — so per the epic rule both are REPORTED here (BET-618). Registered under the enforce net (its 1a/1c/D4 checks still run) while the owner decides on real adopters; no call-site migration exists to assert.",
   Eyebrow:
@@ -288,7 +297,7 @@ describe("M527 primitive rules", () => {
     // never add a file to a row to make a red test green.
     const CHROME_OWNERS: Record<string, string[]> = {
       "bg-black/40": ["Modal.tsx"], // the modal overlay tint
-      "shadow-lg": ["Modal.tsx"], // window-level floating surface
+      "shadow-lg": ["Modal.tsx", "MenuItem.tsx"], // the window-level floating surface (Modal) and the dropdown menu surface (Dropdown, BET-644) — two real owners, declared with their primitives
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
       "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
       "h-[29px]": ["Chip.tsx"], // chip hit-area height — the one off-grid value both Chip + SplitChip carry (BET-615)

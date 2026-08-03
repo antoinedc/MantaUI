@@ -14,24 +14,42 @@
 
 import type { ReactNode } from "react";
 
-const TAG =
-  "inline-flex items-center gap-[5px] h-[23px] px-2 rounded-full border border-border " +
-  "bg-fill font-mono text-[11.5px] leading-none font-medium text-text-faint";
+const TAG_BASE =
+  "inline-flex items-center gap-[5px] h-[23px] px-2 rounded-full border border-border font-mono text-[11.5px] leading-none font-medium";
+const TAG_TONE: Record<"default" | "accent", string> = {
+  default: "bg-fill text-text-faint",
+  accent: "bg-transparent text-accent-tx",
+};
 
 export function Tag({
   icon,
   title,
+  numeric,
+  tone = "default",
   children,
 }: {
   /** Optional lucide icon at `size={12}` rendered before the label. */
   icon?: ReactNode;
   /** Native `title` tooltip. */
   title?: string;
+  /** Tabular numerals — for a count / context badge (BET-644). */
+  numeric?: boolean;
+  /** Accent state — a selected menu row's badge (`.opt.on .ctx`, BET-644). */
+  tone?: "default" | "accent";
   /** The tag label. */
   children: ReactNode;
 }) {
   return (
-    <span className={TAG} title={title}>
+    <span
+      className={[
+        TAG_BASE,
+        TAG_TONE[tone],
+        numeric ? "tabular-nums" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={title}
+    >
       {icon}
       {children}
     </span>

@@ -26,6 +26,7 @@ import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
 import type { OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
+import { Tag } from "./Tag";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -316,7 +317,7 @@ export function ModelsCard() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-body text-text font-medium">{m.name}</span>
                       <span className="text-meta text-text-faint">{m.providerID}</span>
-                      {ctxSize && <span className="text-meta text-text-faint">{ctxSize}</span>}
+                      {ctxSize && <Tag numeric>{ctxSize}</Tag>}
                       {info && (
                         <span className={`px-2 py-px rounded-xs text-meta ${TIER_CLASS[info.tier]}`}>
                           {info.tier}

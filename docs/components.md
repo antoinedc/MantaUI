@@ -79,6 +79,14 @@ BET-546 / BET-549. Since BET-549 the two-adopter scan excludes
 (DECISIONS.md §12), so a file there would mark a primitive satisfied via one
 that vanishes. Adopter counts below are **web** adopters only.
 
+**Menu surface chrome (BET-644, collision 1 — C5 precedent).** The whole
+dropdown family — `Dropdown` (MenuItem) and both picker menus — uses one
+surface token, `--card`/`bg-bg-soft`, and the spec's `--r-lg`/`--shadow-lg`
+chrome, replacing the old `--panel`/`bg-bg-elev`/`rounded-md`/`shadow-md`
+contract. When the spec (the proposal's `.dd`) and the code (`docs/components.md` + `Dropdown`'s contract comment) disagreed, the spec won, and
+SessionHeader's session menu moved with it.
+
+
 | Primitive | File | Adopters | Variants |
 | --- | --- | --- | --- |
 | Button | `src/renderer/Button.tsx` | 2 — `Settings.tsx`, `FolderPickerModal.tsx` | `tone: default\|primary\|ghost\|danger` (required, no default — the bare base is abstract, C4); `disabled`; `type`; `title`; `children`; `hook`. No `size` prop — one size only (the spec has no `.btn.sm` rule). |
@@ -90,11 +98,12 @@ that vanishes. Adopter counts below are **web** adopters only.
 | Checkbox | `src/renderer/Checkbox.tsx` | 5 — `CustomProviderForm.tsx`, `ProvidersCard.tsx`, `ModelsCard.tsx`, `NewSessionScreen.tsx`, `Settings.tsx` | `checked`; `onChange`; `disabled`; `label`; `id`; `ariaLabel` |
 | Field | `src/renderer/Field.tsx` | 2 — `Settings.tsx`, `CustomProviderForm.tsx` | `type: text\|password\|number`; `mono` (default true); `label`/`help`/`leading`/`footer`/`disabled` |
 | Pill | `src/renderer/Pill.tsx` | 2 — `Cards.tsx`, `SessionHeader.tsx` | `tone: neutral\|accent\|warn` (required); `size: meta\|label`; `border` |
-| MenuItem | `src/renderer/MenuItem.tsx` | 1 — `SessionHeader.tsx` — **single-surface waiver** (owner-approved, BET-549) | `variant: normal\|danger\|active` |
+| MenuItem | `src/renderer/MenuItem.tsx` | 3 — `SessionHeader.tsx` (session menu); `ModelMenu.tsx` + `EffortMenu.tsx` (both via `Dropdown`) — BET-549 single-surface waiver **resolved** (BET-644) | `variant: normal\|danger\|active` (MenuItem). Co-exports `Dropdown` — the four-region menu surface — with `hook`; `placement: below\|above`; `align: start\|end`; `width: menu\|wide\|narrow`; `role: menu\|listbox`; `search`/`header`/`footer` slots |
+| MenuOption | `src/renderer/MenuOption.tsx` | 2 — `ModelMenu.tsx` (model list), `EffortMenu.tsx` (effort list) | `selected` (the --accent-bg fill + --accent-tx label + visible check, C1); `active` (roving-highlight target); `label`; `sub?` (presence → 44px density; absent → 34px); `trailing?`; `id` |
 | SessionRow | `src/renderer/SessionRow.tsx` | 1 — `Sidebar.tsx` — **single-surface exemption** (owner-approved, BET-546) | `status: run\|att\|idle\|ok\|default` (required); `selected`; `child`; `ageStale` |
 | Toggle | `src/renderer/Toggle.tsx` | 2 call sites in 1 file — `Settings.tsx` (`chatAutoAllow`, `allowAgentPush`) — **single-surface case** (both boolean switch rows live in the one settings form, BET-614) | `checked`; `onChange`; `disabled`; `ariaLabel`; `id` |
 | Callout | `src/renderer/Callout.tsx` | 2 — `Onboarding.tsx`, `ConnectProvider.tsx` | `tone: info\|ok\|warn\|danger` (required, no default — the bare base is abstract, C4); `children` |
-| Tag | `src/renderer/Tag.tsx` | 1 — `SessionHeader.tsx` (branch indicator) — **reported** (BET-618): 2nd named adopter `Cards.tsx` has no inline mono metadata badge; registered as a single-web-adopter case | `icon?` (lucide at `size={12}`); `title?`; `children` |
+| Tag | `src/renderer/Tag.tsx` | 3 — `SessionHeader.tsx` (branch indicator); `ModelMenu.tsx` (model-menu context badge); `ModelsCard.tsx` (settings models-table count) — BET-618 report **closed** (BET-644) | `icon?` (lucide at `size={12}`); `title?`; `numeric?` (tabular-nums for counts); `tone: default\|accent` (accent = a selected menu row's badge); `children` |
 | IconCard | `src/renderer/IconCard.tsx` | 0 — **reported** (BET-618): neither named adopter (`Settings.tsx`, `NewSessionScreen.tsx`) has an icon-above-label tile; registered under the enforce net pending owner decision | `icon` (lucide at `size={20}`); `label` |
 | Eyebrow | `src/renderer/Eyebrow.tsx` | 1 — `Settings.tsx` (the GroupCard section label) — **reported** (BET-618): 2nd named adopter `NewSessionScreen.tsx` has no uppercase section label; registered as a single-web-adopter case | `children` |
 | SettingsRow | `src/renderer/SettingsRow.tsx` | 0 — **reported** (BET-619): the stage premise that Settings.tsx's private `SettingField` already implements `.setrow` is false (it is a `Field`-based text/password input, not a row with name/help/children); neither named adopter (`Settings.tsx`, `ProvidersCard.tsx`) carries a genuine `.setrow` row — registered under the enforce net pending owner decision on a `.setrow` migration of the settings panel | `name`; `help?`; `children` (the control) |

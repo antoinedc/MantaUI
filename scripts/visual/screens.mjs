@@ -502,7 +502,9 @@ export const SCREENS = [
     actions: async (page) => {
       await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
       await page.locator(".manta-model-picker-btn:visible").first().click();
-      await page.getByRole("button", { name: "Claude Opus 4.7 Rationale" }).click();
+      // Model rows render as listbox options now (MenuOption, BET-644) — the
+      // row that enables the effort segment is an option, not a button.
+      await page.getByRole("option", { name: "Claude Opus 4.7 Rationale" }).click();
       await page.locator(".manta-effort-picker-btn:visible").first().click();
     },
     viewport: DESKTOP_VIEWPORT,
