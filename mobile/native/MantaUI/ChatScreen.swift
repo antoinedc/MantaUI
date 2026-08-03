@@ -151,7 +151,11 @@ private struct ChatScreenContent: View {
             destinationCard(destination)
         }
         .onAppear {
+            // Three independent fetches, all started together: the transcript,
+            // the model list (previously not fetched until the picker opened,
+            // so the first open always stalled) and the window/branch lookup.
             store.start()
+            modelStore.load()
             Task { await resolveWindowAndBranch() }
         }
         .onDisappear { store.stop() }
@@ -436,6 +440,7 @@ private struct ChatScreenContent: View {
             .fill(tokens.inset)
             .frame(maxWidth: .infinity)
             .frame(height: height)
+            .shimmer(active: true, tokens: tokens)
     }
 
     /// The rendered height of a body line at the prose leading.

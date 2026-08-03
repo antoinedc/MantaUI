@@ -107,17 +107,54 @@ final class ChatSessionStore: ObservableObject {
         loading = true
         refreshing = true
         Task {
-            let messages = (try? await api.messages(sessionId: sessionId)) ?? []
+            // An EMPTY transcript is not a failure — a session you just cleared
+            // legitimately has no messages, and reporting that as "couldn't
+            // reach your box" was wrong. Only a thrown error is a failure.
+            //
+            // The fetch is also bounded: if the box is unreachable the request
+            // can hang for the URLSession default (a minute or more), and the
+            // screen sat on its loading skeleton for the whole time with no way
+            // out. A timeout turns that into a retryable failure.
+            var failed = false
+            var messages: [OpencodeMessage] = []
+            do {
+                messages = try await Self.withTimeout(seconds: 12) {
+                    try await self.api.messages(sessionId: self.sessionId)
+                }
+            } catch {
+                failed = true
+            }
+            let loaded = messages
+            let didFail = failed
             await MainActor.run {
                 loading = false
                 refreshing = false
-                loadFailed = messages.isEmpty
-                transcript = ChatTranscriptMapper.blocks(from: messages)
+                loadFailed = didFail
+                transcript = ChatTranscriptMapper.blocks(from: loaded)
                 rebuildBlocks()
             }
             if !isReadOnly {
                 await refreshPermissions()
             }
+        }
+    }
+
+    /// Run `work`, failing if it has not finished within `seconds`.
+    private static func withTimeout<T: Sendable>(
+        seconds: Double,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw MantaError.transport("timed out")
+            }
+            guard let first = try await group.next() else {
+                throw MantaError.transport("no result")
+            }
+            group.cancelAll()
+            return first
         }
     }
 

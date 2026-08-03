@@ -47,6 +47,11 @@ struct ComposerView: View {
     @State private var hint: String?
     @State private var showHint = false
     @FocusState private var inputFocused: Bool
+    /// True while the session's first transcript fetch is in flight. Every
+    /// control is inert until it lands: a prompt sent into a session that has
+    /// not loaded goes to a transcript the user cannot see, and an attachment
+    /// picked then is uploaded against a session id that may still change.
+    private var loading: Bool { store.loading }
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
@@ -89,13 +94,15 @@ struct ComposerView: View {
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
         .background(tokens.canvas.ignoresSafeArea())
+        .disabled(loading)
+        .opacity(loading ? 0.55 : 1)
         .overlay(alignment: .top) { topDivider }
+        // ONE presentation per view. The model sheet, the photo picker and the
+        // file importer were all attached HERE, and SwiftUI honours only one of
+        // them — which is why attaching a file silently did nothing. The two
+        // pickers now hang off the attach button instead (see attachButton).
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(modelStore: modelStore)
-        }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
-        .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
-            handleDocument(result)
         }
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
@@ -177,6 +184,10 @@ struct ComposerView: View {
                 .accessibilityLabel("Attach")
         }
         .accessibilityIdentifier("attach-button")
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
+        .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
+            handleDocument(result)
+        }
     }
 
     private func handleDocument(_ result: Result<URL, Error>) {
