@@ -28,14 +28,17 @@ final class MantaUIHierarchyCaptureUITests: XCTestCase {
         //   • parent transcript  — the first full-bleed user band
         //   • child drill-in     — the `subagent · running 1m12s` subtitle
         //   • S2 joiner screens  — the `onboarding-root` container
-        // One of the three must appear; the others belong to other scenes.
+        //   • D2 loading (BET-631) — the `loading-skeleton` scroll region
+        // One of these must appear; the others belong to other scenes.
         let subtitle = app.staticTexts["subagent · running 1m12s"]
         let userBand = app.staticTexts["check bet-520 and see if it's blocked correctly"]
         let onboardingGate = app.scrollViews["onboarding-root"]
+        let loadingGate = app.scrollViews["loading-skeleton"]
         let appeared = subtitle.waitForExistence(timeout: 4)
             || userBand.waitForExistence(timeout: 8)
             || onboardingGate.waitForExistence(timeout: 8)
-        XCTAssertTrue(appeared, "no stable gate element appeared (transcript or onboarding)")
+            || loadingGate.waitForExistence(timeout: 8)
+        XCTAssertTrue(appeared, "no stable gate element appeared (transcript, onboarding, or loading skeleton)")
 
         print("AX-TREE-BEGIN")
         print(app.debugDescription)
