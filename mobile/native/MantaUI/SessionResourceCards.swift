@@ -1,17 +1,19 @@
 import SwiftUI
-import PhotosUI
-import UniformTypeIdentifiers
 
 // ===========================================================================
-// BET-627 — overflow sheet items 1-3 (attach · scheduled tasks · secrets).
+// BET-627 — overflow sheet items (scheduled tasks · secrets).
 //
 // Each overflow row opens one of these cards. They are deliberately built from
 // STOCK SwiftUI (NavigationStack + List/Form + toolbar), the same system-shaped
 // treatment as SessionCreateSheet: grouped styling, dynamic type and VoiceOver
 // come from the platform instead of being re-implemented in tokens.
 //
+// Attaching used to be a third card here. It was removed: the composer already
+// carries a paperclip, so the sheet only offered a slower path to the same
+// picker.
+//
 // The cards talk to the box over the existing RPC wire
-// (`schedule:list` / `secrets:list` / `POST /api/upload`) — no new transport.
+// (`schedule:list` / `secrets:list`) — no new transport.
 // Secrets are METADATA ONLY: the box never sends a value to the device, so the
 // secrets card can list names without ever materialising a secret device-side.
 // ===========================================================================
@@ -176,115 +178,5 @@ struct SecretsCard: View {
         if let scope = secret.scope, !scope.isEmpty { parts.append(scope) }
         if let hint = secret.hint, !hint.isEmpty { parts.append(hint) }
         return parts.joined(separator: " · ")
-    }
-}
-
-/// Attach photo or file: uploads through the same `POST /api/upload` endpoint
-/// the composer uses, then sends it as an attachment-only prompt.
-struct AttachCard: View {
-    let sessionId: String
-    let projectName: String
-    let onSend: (SendPromptInput.Attachment) -> Void
-    let onClose: () -> Void
-
-    let api: MantaAPIClient
-    @State private var uploading = false
-    @State private var errorText: String?
-    @State private var photoItems: [PhotosPickerItem] = []
-    @State private var showFilePicker = false
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    PhotosPicker(selection: $photoItems, maxSelectionCount: 1, matching: .images) {
-                        Label("Photo", systemImage: "photo")
-                    }
-                    Button {
-                        showFilePicker = true
-                    } label: {
-                        Label("File", systemImage: "doc")
-                    }
-                } footer: {
-                    Text("The file is uploaded to the box and sent to the session.")
-                }
-                if uploading {
-                    Section { HStack { Spacer(); ProgressView(); Spacer() } }
-                }
-                if let errorText {
-                    Section { Text(errorText).foregroundStyle(.red) }
-                }
-            }
-            .navigationTitle("Attach")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onClose) }
-            }
-            .fileImporter(isPresented: $showFilePicker,
-                          allowedContentTypes: [.item],
-                          allowsMultipleSelection: false) { result in
-                if case .success(let urls) = result, let url = urls.first {
-                    sendFile(url)
-                }
-            }
-            .onChange(of: photoItems) { _, items in
-                guard let item = items.first else { return }
-                sendPhoto(item)
-            }
-        }
-    }
-
-    private func sendPhoto(_ item: PhotosPickerItem) {
-        guard !uploading else { return }
-        uploading = true
-        errorText = nil
-        Task {
-            guard let data = try? await item.loadTransferable(type: Data.self) else {
-                await MainActor.run { fail("Couldn't read that photo") }
-                return
-            }
-            let mime = ChatVoice.mime(forImageData: data)
-            let filename = "photo-\(Int(Date().timeIntervalSince1970)).jpg"
-            do {
-                let remote = try await api.upload(project: projectName, filename: filename, data: data)
-                await MainActor.run {
-                    uploading = false
-                    onSend(SendPromptInput.Attachment(remotePath: remote, mime: mime, filename: filename))
-                }
-            } catch {
-                await MainActor.run { fail("Photo upload failed") }
-            }
-        }
-    }
-
-    private func sendFile(_ url: URL) {
-        guard !uploading else { return }
-        uploading = true
-        errorText = nil
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-        let filename = url.lastPathComponent
-        guard let data = try? Data(contentsOf: url) else {
-            uploading = false
-            errorText = "Couldn't read that file"
-            return
-        }
-        let mime = ChatVoice.mime(forFilename: filename)
-        Task {
-            do {
-                let remote = try await api.upload(project: projectName, filename: filename, data: data)
-                await MainActor.run {
-                    uploading = false
-                    onSend(SendPromptInput.Attachment(remotePath: remote, mime: mime, filename: filename))
-                }
-            } catch {
-                await MainActor.run { fail("File upload failed") }
-            }
-        }
-    }
-
-    private func fail(_ message: String) {
-        uploading = false
-        errorText = message
     }
 }

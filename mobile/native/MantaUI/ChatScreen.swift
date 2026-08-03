@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // ===========================================================================
 // S4 — chat screen wired to live data (BET-596).
@@ -18,8 +19,11 @@ import SwiftUI
 // ===========================================================================
 
 /// The BET-627 overflow-sheet items that present a card of their own.
+///
+/// Attaching is NOT one of them: the composer carries its own paperclip, so a
+/// second entry point in the overflow sheet was a duplicate of a control that
+/// is already one tap away, in a sheet you have to open first.
 private enum OverflowDestination: String, Identifiable {
-    case attach
     case schedules
     case secrets
 
@@ -195,7 +199,6 @@ private struct ChatScreenContent: View {
             sessionTitle: title,
             projectName: projectName,
             branch: branch,
-            onAttach: { overflowDestination = .attach },
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
             onWebhooks: {},
@@ -209,22 +212,10 @@ private struct ChatScreenContent: View {
         .task { await refreshScheduleCount() }
     }
 
-    /// The three BET-627 overflow items present their cards here. Attach sends
-    /// an attachment-only prompt through the store's existing send path.
+    /// The BET-627 overflow items that present their cards here.
     @ViewBuilder
     private func destinationCard(_ destination: OverflowDestination) -> some View {
         switch destination {
-        case .attach:
-            AttachCard(
-                sessionId: store.sessionId,
-                projectName: projectName,
-                onSend: { attachment in
-                    overflowDestination = nil
-                    store.send(text: "", attachments: [attachment], model: nil)
-                },
-                onClose: { overflowDestination = nil },
-                api: MantaAPIClient.live()
-            )
         case .schedules:
             SchedulesCard(
                 sessionId: store.sessionId,
@@ -382,6 +373,21 @@ private struct ChatScreenContent: View {
         .scrollClipDisabled(false)
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
+        // Dragging the transcript already lowers the keyboard; a TAP on it now
+        // does the same, which is what "put the keyboard away so I can read"
+        // looks like on iOS. A simultaneous gesture, so it neither blocks the
+        // scroll (a tap that moves is not a tap) nor swallows taps on rows that
+        // have their own action — a subagent row still pushes its child.
+        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+    }
+
+    /// Lower the keyboard by asking whoever holds first responder to give it
+    /// up. The composer's focus binding lives inside ComposerView, and routing
+    /// a "please blur" signal down to it would mean threading state through a
+    /// sibling view for one gesture.
+    private func resignKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
     // MARK: - Loading skeleton (D2 / BET-631)

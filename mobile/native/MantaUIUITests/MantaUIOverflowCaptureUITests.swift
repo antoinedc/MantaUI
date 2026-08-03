@@ -31,7 +31,7 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         // 1. The overflow sheet is raised by the scene; the Clear row is the
         //    destructive Button in the LAST section, below the medium-detent
         //    fold, so scroll the sheet to reveal it before querying.
-        XCTAssertTrue(app.staticTexts["Attach photo or file"].waitForExistence(timeout: 8), "overflow sheet did not present")
+        XCTAssertTrue(app.staticTexts["Scheduled tasks"].waitForExistence(timeout: 8), "overflow sheet did not present")
         let clearRow = app.buttons["Clear session"]
         if !clearRow.waitForExistence(timeout: 3) {
             for _ in 0..<4 where !clearRow.exists {

@@ -669,6 +669,9 @@ it carries everything rather than a subset.
   flicks away, dims the screen behind proportionally, grabber functional.
   Contents: Attach photo or file · Scheduled tasks (with live count) · Secrets ·
   Fork session · Open terminal · Delete session (destructive).
+  - **Amended: the attach row is gone.** The composer carries a paperclip, so
+    the sheet only offered a slower second route to the same picker. Attaching
+    is a composer action; the sheet is for session actions. Do not re-add it.
 
 ### 8a. Subagents — a drill-in screen, not an inline expansion
 

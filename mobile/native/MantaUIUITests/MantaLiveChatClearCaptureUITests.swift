@@ -40,7 +40,7 @@ final class MantaLiveChatClearCaptureUITests: XCTestCase {
         var opened = false
         for _ in 0..<4 {
             if app.buttons["Session actions"].exists { app.buttons["Session actions"].tap() }
-            if app.staticTexts["Attach photo or file"].waitForExistence(timeout: 4) { opened = true; break }
+            if app.staticTexts["Scheduled tasks"].waitForExistence(timeout: 4) { opened = true; break }
         }
         XCTAssertTrue(opened, "overflow sheet did not present")
 

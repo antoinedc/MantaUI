@@ -170,7 +170,8 @@ clear/fork/trust return "isn't available in this chat" (`ChatVoice.swift:53-56`)
 **Resolved contents for the sheet** (spec list + the compact/clear ruling +
 the two unspecified items given a home):
 
-1. Attach photo or file
+1. ~~Attach photo or file~~ — **removed.** The composer's paperclip is the one
+   attach entry point; the sheet row was a duplicate behind an extra tap.
 2. Scheduled tasks (live count)
 3. Secrets
 4. Webhooks — *new, by analogy with schedules/secrets; same session-scoped card*

@@ -29,7 +29,6 @@ struct ChatOverflowCaptureScene: View {
                     sessionTitle: "better-ui",
                     projectName: "manta",
                     branch: "main",
-                    onAttach: {},
                     onSchedules: {},
                     onSecrets: {},
                     onWebhooks: {},

@@ -24,7 +24,6 @@ struct ChatOverflowSheet: View {
     let projectName: String
     let branch: String?
 
-    var onAttach: () -> Void
     var onSchedules: () -> Void
     var onSecrets: () -> Void
     var onWebhooks: () -> Void
@@ -50,7 +49,6 @@ struct ChatOverflowSheet: View {
         NavigationStack {
             List {
                 Section {
-                    row("Attach photo or file", systemImage: "paperclip", action: onAttach)
                     row("Scheduled tasks", systemImage: "clock", badge: scheduleCount, action: onSchedules)
                     row("Secrets", systemImage: "key", action: onSecrets)
                     row("Webhooks", systemImage: "bolt.horizontal", action: onWebhooks)

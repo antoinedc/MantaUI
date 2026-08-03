@@ -1,15 +1,18 @@
 import XCTest
 
 // ===========================================================================
-// BET-627 capture driver — Sheet items 1-3 (attach · scheduled tasks live
-// count · secrets) on the pinned simulator.
+// BET-627 capture driver — sheet items (scheduled tasks live count · secrets)
+// on the pinned simulator.
 //
 // Drives the REAL app (paired to the local capture-fixture box at
 // 127.0.0.1:8787) through the chat overflow sheet and captures each required
-// surface, so the DONE WHEN — "the overflow sheet showing the three rows, the
+// surface, so the DONE WHEN — "the overflow sheet showing its rows, the
 // scheduled-tasks count badge non-zero with a schedule present, and each row
-// (Attach / Scheduled tasks / Secrets) opening its card" — has screenshot +
+// (Scheduled tasks / Secrets) opening its card" — has screenshot +
 // accessibility-hierarchy evidence.
+//
+// The attach row is gone (the composer's paperclip is the only attach entry
+// point), so this driver no longer captures it.
 //
 // Pairing: if the app is not yet paired it claims a code against the fixture
 // box ("123456") via the advanced server-URL path, exactly like a user would.
@@ -77,12 +80,11 @@ final class MantaOverflowCaptureUITests: XCTestCase {
         }
         XCTAssertTrue(actions.waitForExistence(timeout: 25), "chat screen did not open (no Session actions button)")
 
-        // --- A. Overflow sheet: three rows + non-zero count badge ------------
+        // --- A. Overflow sheet: rows + non-zero count badge ------------------
         actions.tap()
         let scheduledRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Scheduled tasks'")).firstMatch
         XCTAssertTrue(scheduledRow.waitForExistence(timeout: 10), "overflow sheet did not open (Scheduled tasks row missing)")
         XCTAssertTrue(app.staticTexts["Secrets"].exists, "Secrets row missing from overflow sheet")
-        XCTAssertTrue(app.staticTexts["Attach photo or file"].exists, "Attach row missing from overflow sheet")
         // The count arrives async once `schedule:list` returns; wait for the
         // badge (either merged into the row label or as its own static text).
         let countVisible = waitNonZeroBadge(app: app, scheduledRow: scheduledRow)
@@ -106,21 +108,6 @@ final class MantaOverflowCaptureUITests: XCTestCase {
         usleep(400_000)
         snap(app, marker: "META-SECRETS")
         app.buttons["Done"].firstMatch.tap()
-
-        // --- D. Attach card --------------------------------------------------
-        app.buttons["Session actions"].tap()
-        // Match the sheet row, not the composer's `attach-button` ("Attach").
-        let attachRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Attach photo'")).firstMatch
-        XCTAssertTrue(attachRow.waitForExistence(timeout: 10), "Attach row missing on reopen")
-        attachRow.tap()
-        // The card loads instantly (no RPC); the PhotosPicker + File button are
-        // system controls that can vary in element type, so confirm on the
-        // card's own nav title, then settle before the screenshot.
-        XCTAssertTrue(app.staticTexts["Attach"].waitForExistence(timeout: 10),
-                      "Attach card did not present its navigation title")
-        XCTAssertTrue(app.buttons["File"].exists, "Attach card did not show the File row")
-        usleep(800_000)
-        snap(app, marker: "META-ATTACH")
     }
 
     /// True once the scheduled-tasks count badge is visible — either merged into
