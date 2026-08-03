@@ -316,8 +316,10 @@ enum ChatQuestionAnswers {
 }
 
 // MARK: - Header subtitle (§8 "running · 2m · 8%" / idle)/// The §8 chat-header subtitle: while running, `running · <elapsed> · <N>%`;
-/// otherwise `idle`. Token-aware on the surrounding prose only; the string is
-/// assembled here so the view stays a thin token resolver.
+/// while idle, `idle · <N>%` (the context number matters most before sending),
+/// falling back to `idle` when no context is established yet. Token-aware on
+/// the surrounding prose only; the string is assembled here so the view stays a
+/// thin token resolver.
 enum ChatHeaderSubtitle {
     static func text(running: Bool, elapsed: TimeInterval, contextPct: Double?) -> String {
         if running {
@@ -326,6 +328,9 @@ enum ChatHeaderSubtitle {
                 return "running · \(elapsed) · \(Int(pct.rounded()))%"
             }
             return "running · \(elapsed)"
+        }
+        if let pct = contextPct {
+            return "idle · \(Int(pct.rounded()))%"
         }
         return "idle"
     }
