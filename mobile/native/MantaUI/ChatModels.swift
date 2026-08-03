@@ -225,7 +225,12 @@ enum ChatTranscriptMapper {
         if part.ignored == true || part.synthetic == true { return }
         switch part.type {
         case "text":
-            if let t = part.text, !t.isEmpty {
+            // Prose does not collapse, but a blank/whitespace-only text part is
+            // paragraph noise — opencode routinely emits a newline-only text
+            // part after a tool run. Rendering it as a prose block would stack
+            // another `--sp-3` (+ line box) and inflate the step-group gap above
+            // the next block (BET-632). Same rule as `textParts(of:)`.
+            if let t = part.text, !ChatTranscriptMapper.isBlank(t) {
                 flush(&pending, into: &blocks)
                 blocks.append(.prose(t))
             }
@@ -249,9 +254,16 @@ enum ChatTranscriptMapper {
             guard part.type == "text",
                   part.ignored != true,
                   part.synthetic != true,
-                  let t = part.text, !t.isEmpty else { return nil }
+                  let t = part.text, !isBlank(t) else { return nil }
             return t
         }.joined(separator: "\n")
+    }
+
+    /// A text part is "blank" when it contains no visible content — empty, or
+    /// only whitespace/newlines. Such parts are paragraph noise (BET-632): they
+    /// must never become a `.prose` block, which would stack gap spacing.
+    private static func isBlank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func step(from part: OpencodePart, tool: String) -> ToolStep {
