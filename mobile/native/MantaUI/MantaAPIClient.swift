@@ -347,7 +347,12 @@ final class MantaAPIClient: Sendable {
         guard let result = object["result"], !(result is NSNull) else {
             return nil
         }
-        let resultData = try JSONSerialization.data(withJSONObject: result)
+        // `.fragmentsAllowed` so a top-level String/Number (e.g. the bare git
+        // branch name `String?` returned by `opencode:vcs-branch`) round-trips
+        // instead of throwing. Without it `JSONSerialization` rejects any
+        // non-object/non-array top level, which SIGABRT'd on any chat opened
+        // in a git checkout.
+        let resultData = try JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed])
         return try JSONDecoder().decode(type, from: resultData)
     }
 
