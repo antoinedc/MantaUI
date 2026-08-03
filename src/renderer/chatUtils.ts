@@ -494,6 +494,34 @@ export function classifyScrollForPin(
 }
 
 /**
+ * Largest follow-step that is animated. Above this the scroll jumps.
+ *
+ * A streamed sentence moves the bottom by a line or three; a whole turn
+ * landing, a session switch or a re-pin after the panel was hidden moves it by
+ * hundreds of pixels. Easing the big ones means the animation is still running
+ * when the next commit arrives, so the view chases the content and never
+ * settles — worse than the jump it replaces.
+ */
+export const SMOOTH_SCROLL_MAX_PX = 240;
+
+/**
+ * How to follow the transcript to the bottom: eased for a small step, instant
+ * for a large one or under reduced motion.
+ *
+ * `deltaPx` is how far the bottom moved (target scrollTop minus current). A
+ * non-positive delta means we are already there — nothing to animate, so
+ * "auto" (the write is a no-op either way).
+ */
+export function scrollBehaviorFor(
+  deltaPx: number,
+  reducedMotion: boolean,
+): "smooth" | "auto" {
+  if (reducedMotion) return "auto";
+  if (deltaPx <= 0) return "auto";
+  return deltaPx <= SMOOTH_SCROLL_MAX_PX ? "smooth" : "auto";
+}
+
+/**
  * Whether the viewport was at the tail of the transcript BEFORE the current
  * commit grew the scroll container. Used by the post-commit layout effect
  * to decide whether to glue to the new bottom.

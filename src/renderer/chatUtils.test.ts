@@ -19,6 +19,8 @@ import {
   SCROLL_REPIN_PX,
   distFromBottom,
   classifyScrollForPin,
+  scrollBehaviorFor,
+  SMOOTH_SCROLL_MAX_PX,
   wasAtBottomBeforeCommit,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
@@ -377,6 +379,32 @@ describe("moveMenuHighlight", () => {
 
 // ===== findFlushBoundary =====
 
+
+// ===== scrollBehaviorFor (BET-649) =====
+
+describe("scrollBehaviorFor", () => {
+  it("eases a small follow-step — the streamed-sentence case", () => {
+    expect(scrollBehaviorFor(40, false)).toBe("smooth");
+    expect(scrollBehaviorFor(SMOOTH_SCROLL_MAX_PX, false)).toBe("smooth");
+  });
+
+  it("jumps a large one so the view cannot chase the content", () => {
+    // A whole turn landing / a session switch / a re-pin after the panel was
+    // hidden. Easing hundreds of pixels means the animation is still running
+    // when the next commit arrives and the viewport never settles.
+    expect(scrollBehaviorFor(SMOOTH_SCROLL_MAX_PX + 1, false)).toBe("auto");
+    expect(scrollBehaviorFor(5000, false)).toBe("auto");
+  });
+
+  it("always jumps under reduced motion", () => {
+    expect(scrollBehaviorFor(40, true)).toBe("auto");
+  });
+
+  it("treats a non-positive delta as nothing to animate", () => {
+    expect(scrollBehaviorFor(0, false)).toBe("auto");
+    expect(scrollBehaviorFor(-120, false)).toBe("auto");
+  });
+});
 
 // ===== mergeBufferedDeltas =====
 

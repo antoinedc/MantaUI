@@ -106,14 +106,71 @@ export function describeTruncation(kind) {
 // growing code block on every keystroke.
 //
 // Instead, buffer deltas in-memory and FLUSH at natural section boundaries:
-// paragraph breaks (`\n\n`) outside a code block, and the newline that
-// follows a closing ``` fence. Plus a 250ms max-age fallback (handled at the
-// caller) so a single long paragraph doesn't stall indefinitely.
+// paragraph breaks (`\n\n`) outside a code block, the newline that follows a
+// closing ``` fence, and — since BET-649 — the end of a SENTENCE. Plus a
+// max-age fallback (`FLUSH_MAX_AGE_MS`, handled at the caller) so a single
+// long paragraph doesn't stall indefinitely.
+//
+// WHY SENTENCES. Paragraph-only flushing is why streamed prose lands in slabs:
+// a whole paragraph is withheld and then committed at once, so the text does
+// not arrive, it appears. Cutting at sentence ends makes the same content
+// arrive in roughly sentence-sized pieces, which is the single biggest change
+// to how streaming FEELS. It costs more commits per turn (more re-renders,
+// more scroll work), which is why the max age came down rather than to zero —
+// per-character rendering was never the goal.
+//
+// A sentence end is only a boundary when the prefix is SAFE TO CUT — see
+// `isSafeCut`. Splitting inside an inline code span, a link, or a `**bold**`
+// run renders the half-finished markup literally for a frame, which is the
+// exact jitter this buffer exists to prevent. Code blocks are unchanged: they
+// still flush whole, never mid-fence.
 //
 // `findFlushBoundary(buffer)` returns the byte index AFTER which the buffer
 // is safe to flush, or -1 if no boundary is present yet. The caller slices
 // `buffer.slice(0, idx)` and keeps the remainder buffered for the next round.
 //
+// Maximum time a buffered chunk may be withheld before the caller flushes it
+// at the latest safe cut. Was 250ms when only paragraph breaks could flush;
+// with sentence boundaries carrying most of the traffic this is the fallback
+// for a long unpunctuated run, so it can be tighter without thrashing.
+export const FLUSH_MAX_AGE_MS = 120;
+
+/**
+ * Is `prefix` safe to cut at — i.e. does it end outside every markdown
+ * construct that would render wrong if split?
+ *
+ * Deliberately a few cheap counts rather than a markdown parser: this runs on
+ * every delta. It is CONSERVATIVE — when in doubt it returns false and the text
+ * stays buffered until the next boundary or the max age. A false negative costs
+ * a few hundred milliseconds of latency; a false positive puts `**bold` on
+ * screen.
+ *
+ * Checks, all scoped to the prefix:
+ *   - backticks: an odd count means we are inside an inline code span;
+ *   - `[` vs `]` and `(` vs `)`: unbalanced means we are mid-link;
+ *   - `**`: an odd count means we are inside a bold run.
+ * Underscore emphasis is NOT counted — `_` appears constantly in identifiers
+ * and file paths, so counting it would block almost every cut.
+ */
+export function isSafeCut(prefix) {
+  let backticks = 0;
+  let bold = 0;
+  let brackets = 0;
+  let parens = 0;
+  for (let i = 0; i < prefix.length; i++) {
+    const ch = prefix[i];
+    if (ch === "`") backticks++;
+    else if (ch === "*" && prefix[i + 1] === "*") {
+      bold++;
+      i++;
+    } else if (ch === "[") brackets++;
+    else if (ch === "]") brackets--;
+    else if (ch === "(") parens++;
+    else if (ch === ")") parens--;
+  }
+  return backticks % 2 === 0 && bold % 2 === 0 && brackets <= 0 && parens <= 0;
+}
+
 // Returns -1 if no boundary is present yet. Don't flush mid-fence, even if
 // there's a `\n\n` inside it — whole code blocks should appear at once.
 export function findFlushBoundary(buffer) {
@@ -152,6 +209,22 @@ export function findFlushBoundary(buffer) {
         i++;
       }
       continue;
+    }
+    // Sentence end OUTSIDE a code block: `.`/`!`/`?` (plus any closing quote
+    // or bracket that belongs to it) followed by whitespace. The trailing
+    // whitespace is INCLUDED in the flushed slice so the next chunk starts at
+    // the next sentence's first character and the joined text is unchanged.
+    if (!inCode && (buffer[i] === "." || buffer[i] === "!" || buffer[i] === "?")) {
+      let j = i + 1;
+      while (j < buffer.length && (buffer[j] === '"' || buffer[j] === "'" || buffer[j] === ")" || buffer[j] === "]")) j++;
+      // Require the whitespace to be PRESENT: a buffer ending in "." may be
+      // mid-number ("1.") or mid-abbreviation, and the next delta decides.
+      if (j < buffer.length && (buffer[j] === " " || buffer[j] === "\n")) {
+        const cut = j + 1;
+        if (isSafeCut(buffer.slice(0, cut))) lastBoundary = cut;
+        i = cut;
+        continue;
+      }
     }
     i++;
   }

@@ -126,6 +126,61 @@ html, body, #root {
   .manta-recording { animation: none; border-color: var(--danger); }
 }
 
+/* MantaLoader — the two counter-rotating arcs (src/renderer/MantaLoader.tsx).
+   Speeds are the native client's, verbatim: 0.9s clockwise outer, 1.4s
+   anticlockwise inner. The mismatched periods are what stop the pair reading
+   as one spinning circle, so do not "tidy" them to a shared duration.
+   `transform-box: fill-box` is required — without it an SVG child rotates
+   about the viewport origin, not its own centre, and the arcs orbit away. */
+@keyframes manta-loader-cw { to { transform: rotate(360deg); } }
+@keyframes manta-loader-ccw { to { transform: rotate(-360deg); } }
+.manta-loader-ring-out,
+.manta-loader-ring-in {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.manta-loader-ring-out { animation: manta-loader-cw 0.9s linear infinite; }
+.manta-loader-ring-in { animation: manta-loader-ccw 1.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .manta-loader-ring-out,
+  .manta-loader-ring-in { animation: none; }
+}
+
+/* Streaming assistant text (BET-649).
+   Two effects, both scoped to the ONE message currently being written, so
+   nothing in the settled transcript animates or carries a caret.
+
+   1. Block fade-in. Each markdown block enters with a short fade + 3px rise
+      instead of appearing instantly. It fires on MOUNT, so an already-rendered
+      paragraph that merely grows does not re-animate, and the canonical
+      refetch (which reconciles rather than remounts) does not re-fire it.
+   2. Trailing caret. A thin accent block after the last block's last line,
+      marking where output is being written. Drawn with ::after on the last
+      child so it sits INLINE at the end of the text — a sibling element would
+      break onto its own line after a block-level <p>. */
+@keyframes manta-chunk-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.manta-streaming > * {
+  animation: manta-chunk-in 0.18s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+.manta-streaming > *:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: blink-cursor 1s step-start infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-streaming > * { animation: none; }
+  .manta-streaming > *:last-child::after { animation: none; }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

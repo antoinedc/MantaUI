@@ -62,6 +62,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { RunningIndicator } from "./MessageRow";
+import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
@@ -1897,11 +1898,10 @@ export function ChatPanel({
 
   if (!messages) {
     return (
-      <div className="h-full w-full flex flex-col items-center justify-center gap-3 bg-bg text-text-faint text-body font-mono">
-        <div
-          className="h-5 w-5 rounded-full border-2 border-text-faint border-t-transparent animate-spin"
-          aria-hidden
-        />
+      // The app's one waiting image, the same one iOS shows when a session
+      // opens — replacing the generic grey ring that used to sit here.
+      <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-bg text-text-faint text-body">
+        <MantaLoader size="screen" label="Connecting to session" />
         <span>Connecting to session…</span>
       </div>
     );

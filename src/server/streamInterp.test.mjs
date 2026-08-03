@@ -13,7 +13,12 @@ function make(now = 500_000) {
 
 const SID = "ses_main";
 
-test("message.part.delta emits a flush at a paragraph boundary and keeps the remainder", () => {
+// BET-649 changed the expected cut here: the sentence end is now the boundary,
+// so the flush stops after "Hello world.\n" instead of withholding the line
+// until the paragraph break. The remainder ("\nSecond para") still carries the
+// second newline, so the text the client assembles is byte-identical — only
+// the timing of the split changed.
+test("message.part.delta flushes at the sentence end and keeps the remainder", () => {
   const { interp, events } = make();
   interp.interpret({
     type: "message.part.delta",
@@ -35,8 +40,83 @@ test("message.part.delta emits a flush at a paragraph boundary and keeps the rem
   const fl = events.find((e) => e.sub === "flush");
   assert.ok(fl, "a flush event was emitted");
   assert.equal(fl.sessionId, SID);
-  assert.equal(fl.payload.text, "Hello world.\n\n");
+  assert.equal(fl.payload.text, "Hello world.\n");
   assert.equal(fl.payload.messageID, "msg1");
+});
+
+test("a paragraph break still flushes when there is no sentence end", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.delta",
+    properties: {
+      sessionID: SID,
+      messageID: "msg1",
+      part: { id: "p1", type: "text", text: "# Heading\n\nbody" },
+    },
+  });
+  const fl = events.find((e) => e.sub === "flush");
+  assert.ok(fl, "a flush event was emitted");
+  assert.equal(fl.payload.text, "# Heading\n\n");
+});
+
+test("max-age fallback flushes an unpunctuated run at the last safe word break", () => {
+  // No sentence end, no paragraph break — the pre-BET-649 policy withheld this
+  // until the part snapshot, which is the "it all arrived at once" case.
+  let clock = 500_000;
+  const events = [];
+  const interp = createStreamInterpreter({
+    publish: (e) => events.push(e),
+    now: () => clock,
+  });
+  const delta = (text) =>
+    interp.interpret({
+      type: "message.part.delta",
+      properties: { sessionID: SID, messageID: "msg1", part: { id: "p1", type: "text", text } },
+    });
+
+  delta("a long unpunctuated ");
+  assert.equal(events.length, 0, "still fresh -> nothing flushed");
+  clock += 200; // past FLUSH_MAX_AGE_MS
+  delta("run of words");
+
+  const fl = events.find((e) => e.sub === "flush");
+  assert.ok(fl, "the age fallback flushed");
+  // Cut at the LAST word break in the buffer, never mid-word — so the reader
+  // gets everything except the word still being typed.
+  assert.equal(fl.payload.text, "a long unpunctuated run of ");
+});
+
+test("max-age fallback stops BEFORE an unclosed inline code span", () => {
+  let clock = 500_000;
+  const events = [];
+  const interp = createStreamInterpreter({
+    publish: (e) => events.push(e),
+    now: () => clock,
+  });
+  interp.interpret({
+    type: "message.part.delta",
+    properties: {
+      sessionID: SID,
+      messageID: "msg1",
+      part: { id: "p1", type: "text", text: "see `some code " },
+    },
+  });
+  clock += 200;
+  interp.interpret({
+    type: "message.part.delta",
+    properties: {
+      sessionID: SID,
+      messageID: "msg1",
+      part: { id: "p1", type: "text", text: "still open" },
+    },
+  });
+  // Every cut after the opening backtick is inside the span, so the fallback
+  // walks back past it and releases only the text before it. `some code still
+  // open` stays buffered until the span closes — half a code span must never
+  // reach the screen.
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 1);
+  assert.equal(flushes[0].payload.text, "see ");
 });
 
 test("session.next.step.ended emits truncation classification", () => {

@@ -23,6 +23,14 @@ export function describeTruncation(kind: TruncationKind): {
 
 export function findFlushBoundary(buffer: string): number;
 
+/** Max time a chunk may be withheld before the caller flushes at the latest
+ *  safe cut (BET-649). */
+export const FLUSH_MAX_AGE_MS: number;
+
+/** Whether `prefix` ends outside every markdown construct that would render
+ *  wrong if split there (inline code, link, bold). Conservative. */
+export function isSafeCut(prefix: string): boolean;
+
 export type PendingDelta = {
   messageID: string;
   field: string;
