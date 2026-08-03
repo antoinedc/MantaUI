@@ -1,5 +1,7 @@
-- button "●Server default"
-- text: anthropic
-- button /● Claude Opus 4\.7 [\d,.]+[bkmBKM]+/
-- button /● Claude Sonnet 4\.6 [\d,.]+[bkmBKM]+/
-- button /● Claude Opus 4\.7 Rationale [\d,.]+[bkmBKM]+/
+- listbox:
+  - textbox "Search models"
+  - option "Server default Claude Opus 4.7 · set in Settings"
+  - text: anthropic
+  - option /Claude Opus 4\.7 [\d,.]+[bkmBKM]+/ [selected]
+  - option /Claude Sonnet 4\.6 [\d,.]+[bkmBKM]+/
+  - option /Claude Opus 4\.7 Rationale [\d,.]+[bkmBKM]+/

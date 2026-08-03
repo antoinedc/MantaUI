@@ -13,7 +13,7 @@ import { Tag } from "./Tag";
 
 const TAG =
   "inline-flex items-center gap-[5px] h-[23px] px-2 rounded-full border border-border " +
-  "bg-fill font-mono text-[11.5px] leading-none font-medium text-text-faint";
+  "font-mono text-[11.5px] leading-none font-medium bg-fill text-text-faint";
 
 function tagEl(h: Harness): HTMLElement {
   const el = h.container.firstElementChild as HTMLElement;

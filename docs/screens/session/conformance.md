@@ -4,7 +4,7 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (f2b3cd2)
+Last reviewed: 2026-08-03 (0a7b57e)
 
 ## Resolved
 
@@ -56,3 +56,11 @@ the 24px `--turn-gap`.
 (The bash/read/grep connector output was listed here as an accepted divergence
 by BET-636 — kept unboxed with its `⎿` gutter at 12px. That is now resolved;
 see below.)
+- **Menu secondary text uses --tx3 instead of --tx4** — the model/effort
+  dropdown proposal puts `--tx4` on the group label, the sub-line, the context
+  number and the search placeholder, but `text-text-quiet` (--tx4) is
+  decorative-only under the contrast rule (BET-410 — tailwind.config.js forbids
+  it for labels, placeholders and paths, and `src/shared/contrast.mjs` gates
+  it). BET-644 substitutes `--tx3` (`text-text-faint`) at all four sites: the
+  hierarchy is preserved (name at --tx1, everything secondary one step down),
+  only the tier changes. Deliberate, rule-driven divergence — not an open gap.

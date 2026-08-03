@@ -16,9 +16,11 @@ import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { formatModelContextSize } from "./chatUtils";
+import { titleCase } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import { SplitChip } from "./Chip";
+import { EffortMenu } from "./EffortMenu";
+import { ModelMenu } from "./ModelMenu";
 
 export function ModelPicker({
   modelLabel,
@@ -78,17 +80,6 @@ export function ModelPicker({
     }
     return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [models, deactivatedMainModels]);
-
-  const isActive = (m: OpencodeModel, variantId?: string): boolean => {
-    if (modelOverride) {
-      return (
-        modelOverride.providerID === m.providerID &&
-        modelOverride.modelID === m.id &&
-        (modelOverride.variant ?? undefined) === variantId
-      );
-    }
-    return false;
-  };
 
   // Resolve the active model object (for the friendly name + variant list).
   // Shared resolution path with ChatPanel (BET-415 duplication gate).
@@ -169,117 +160,31 @@ export function ModelPicker({
         }
       />
 
-      {/* Model dropdown — provider-grouped list. Selecting a row sets the
-          per-session override; the variant is cleared (the new model's own
-          variants show up in the effort segment). */}
+      {/* Model dropdown — renders through the specced Dropdown + MenuOption
+          surface (ModelMenu: search strip, pinned server-default header,
+          provider-grouped body). Selecting a row sets the per-session
+          override; the variant is cleared on model change. */}
       {modelOpen && (
-        <div className="manta-model-dropdown absolute left-0 bottom-full mb-1 z-20 min-w-[240px] max-h-[360px] overflow-y-auto rounded-xs border border-border bg-bg-elev shadow-md text-meta">
-          <button
-            onClick={() => {
-              onSelect(null);
-              setModelOpen(false);
-            }}
-            className={
-              "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
-              (modelOverride == null ? "text-text" : "text-text-muted")
-            }
-          >
-            <span className="mr-1" style={{ color: modelOverride == null ? "var(--accent)" : "transparent" }}>●</span>
-            Server default
-          </button>
-          {!groups && (
-            <div className="px-2 py-2 text-text-faint">Loading…</div>
-          )}
-          {groups?.length === 0 && (
-            <div className="px-2 py-2 text-text-faint">No models</div>
-          )}
-          {groups?.map(([providerID, ms]) => (
-            <div key={providerID} className="py-1">
-              <div className="px-2 py-px text-micro font-semibold uppercase text-text-faint">
-                {providerID}
-              </div>
-              {ms.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => {
-                    // Selecting a model clears any variant — the new model's
-                    // own variants surface in the effort segment.
-                    onSelect({ providerID: m.providerID, modelID: m.id });
-                    setModelOpen(false);
-                  }}
-                  className={
-                    "w-full text-left px-2 py-px hover:bg-bg-soft flex justify-between gap-2 " +
-                    (isActive(m) ? "text-text" : "text-text-muted")
-                  }
-                >
-                  <span className="truncate flex items-center gap-1">
-                    <span style={{ color: isActive(m) ? "var(--accent)" : "transparent" }}>●</span>
-                    <span>{m.name}</span>
-                  </span>
-                  {formatModelContextSize(m.limit?.context) ? (
-                    <span className="text-text-faint text-meta shrink-0">
-                      {formatModelContextSize(m.limit?.context)}
-                    </span>
-                  ) : null}
-                </button>
-              ))}
-            </div>
-          ))}
-        </div>
+        <ModelMenu
+          groups={groups}
+          modelOverride={modelOverride}
+          defaultModel={defaultModel}
+          onSelect={onSelect}
+          onClose={() => setModelOpen(false)}
+        />
       )}
 
       {/* Variant / effort dropdown — flat list of the active model's variants
-          plus a "Default" (no variant) row. */}
+          plus a "Default" (no variant) row, via EffortMenu. */}
       {variantOpen && variants.length > 0 && (
-        <div className="manta-effort-dropdown absolute right-0 bottom-full mb-1 z-20 min-w-[160px] rounded-xs border border-border bg-bg-elev shadow-md text-meta">
-          <button
-            onClick={() => {
-              onSelect({
-                providerID: activeModel!.providerID,
-                modelID: activeModel!.id,
-              });
-              setVariantOpen(false);
-            }}
-            className={
-              "w-full text-left px-2 py-1 hover:bg-bg-soft border-b border-border " +
-              (activeVariantId == null ? "text-text" : "text-text-muted")
-            }
-          >
-            <span className="mr-1" style={{ color: activeVariantId == null ? "var(--accent)" : "transparent" }}>●</span>
-            Default
-          </button>
-          {variants.map((v) => (
-            <button
-              key={v.id}
-              onClick={() => {
-                onSelect({
-                  providerID: activeModel!.providerID,
-                  modelID: activeModel!.id,
-                  variant: v.id,
-                });
-                setVariantOpen(false);
-              }}
-              className={
-                "w-full text-left px-2 py-px hover:bg-bg-soft " +
-                (isActive(activeModel!, v.id) ? "text-text" : "text-text-muted")
-              }
-            >
-              <span style={{ color: isActive(activeModel!, v.id) ? "var(--accent)" : "transparent" }}>●</span>{" "}
-              {titleCase(v.id)}
-            </button>
-          ))}
-        </div>
+        <EffortMenu
+          variants={variants}
+          activeModel={activeModel}
+          activeVariantId={activeVariantId}
+          onSelect={onSelect}
+          onClose={() => setVariantOpen(false)}
+        />
       )}
     </div>
   );
-}
-
-// Title-case a variant id for display: "high" → "High", "extended-thinking"
-// → "Extended Thinking". The raw id is preserved for the wire; this is
-// display-only.
-function titleCase(id: string): string {
-  return id
-    .split(/[-_]/)
-    .map((w) => (w.length === 0 ? w : w[0].toUpperCase() + w.slice(1)))
-    .join(" ");
 }

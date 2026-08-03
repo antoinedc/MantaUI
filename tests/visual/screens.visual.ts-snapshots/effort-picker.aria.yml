@@ -1,3 +1,4 @@
-- button "●Default"
-- button "● Balanced"
-- button "● Maximum"
+- listbox:
+  - option "Default Let the model decide" [selected]
+  - option "Balanced"
+  - option "Maximum"

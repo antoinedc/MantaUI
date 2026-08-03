@@ -6,9 +6,12 @@
 // itself is retuned. Ships alongside `Dropdown`, the shared dropdown surface
 // that owns the panel chrome under the anchor.
 //
-// Chrome contract (BET-529 inventory):
-//   - dropdown surface: `--panel`/`bg-bg-elev`, `--border` edge,
-//     `--shadow-md`, `--r-md` (8px / `rounded-md`), `py-1`.
+// Chrome contract (BET-529 inventory; surface updated BET-644, collision 1):
+//   - dropdown surface: `--card`/`bg-bg-soft` (the proposal's `.dd` won C5
+//     over the old `--panel`/`bg-bg-elev` contract, for the whole menu
+//     family), `--border` edge, `--shadow-lg`, `--r-lg` (`rounded-lg`),
+//     max-h 460px, a flex column whose search/header/footer regions are fixed
+//     and whose body is the only scroller.
 //   - item label 13px `--tx1` (`text-label text-text`), padding `sp-2/sp-2`
 //     (`px-2 py-2`), hover `--card` (`bg-bg-soft`), icon 14px.
 //   - variants danger (`--danger` + hover `--danger-bg`) and active
@@ -69,29 +72,83 @@ export function MenuItem({
 }
 
 // The shared dropdown surface under an anchor trigger. Owns the panel chrome
-// (surface, edge, shadow, radius, padding) plus the standard right-aligned
-// placement. The `hook` prop is a stable `manta-*` identity class for the
-// call site (repo contract for popup surfaces — the visual coverage registry
-// keys on it). It is an IDENTITY hook, not a chrome class: it has no styling
-// and cannot shear the panel chrome, so it is not the `className` escape
-// hatch the epic forbids.
+// (surface, edge, shadow, radius) plus the four-region anatomy from the
+// redesign spec's `.dd`: a fixed search strip, a fixed header, a scrolling
+// body, a fixed footer. The surface is a flex column with `overflow-hidden`
+// and `max-h-[460px]`; the body is the ONLY scroller. Every region that is
+// absent is simply not rendered (SessionHeader's menu passes only children,
+// so it land in the scroll body). The `hook` prop is a stable `manta-*`
+// identity class for the call site (repo contract for popup surfaces — the
+// visual coverage registry keys on it). It is an IDENTITY hook, not a chrome
+// class: it has no styling and cannot shear the panel chrome, so it is not
+// the `className` escape hatch the epic forbids.
+type DropdownPlacement = "below" | "above";
+type DropdownAlign = "start" | "end";
+type DropdownWidth = "menu" | "wide" | "narrow";
+
+const DROPDOWN_SURFACE =
+  "absolute z-30 overflow-hidden flex flex-col max-h-[460px] rounded-lg border border-border bg-bg-soft shadow-lg";
+const DROPDOWN_WIDTH: Record<DropdownWidth, string> = {
+  menu: "min-w-[11.25rem]",
+  wide: "w-[340px]",
+  narrow: "w-[250px]",
+};
+const DROPDOWN_PLACEMENT: Record<DropdownPlacement, string> = {
+  below: "top-full mt-1",
+  above: "bottom-full mb-1",
+};
+const DROPDOWN_ALIGN: Record<DropdownAlign, string> = {
+  start: "left-0",
+  end: "right-0",
+};
+const DROPDOWN_SEARCH =
+  "flex items-center gap-2 h-[38px] px-3 border-b border-border-subtle flex-none";
+const DROPDOWN_HEADER = "p-2 border-b border-border-subtle flex-none";
+const DROPDOWN_SCROLL = "overflow-y-auto p-2 min-h-0";
+const DROPDOWN_FOOTER = "border-t border-border-subtle p-2 flex-none";
+
 export function Dropdown({
   hook,
+  placement = "below",
+  align = "end",
+  width = "menu",
+  role = "menu",
+  search,
+  header,
+  footer,
   children,
 }: {
   /** Optional `manta-*` identity class for the call site (no styling). */
   hook?: string;
+  /** below (top-full, SessionHeader's menu) | above (bottom-full, composer). */
+  placement?: DropdownPlacement;
+  /** start (left-0) | end (right-0, today's right-aligned default). */
+  align?: DropdownAlign;
+  /** menu (11.25rem min) | wide (340px, model list) | narrow (250px, effort). */
+  width?: DropdownWidth;
+  /** menu (SessionHeader) | listbox (single-select pickers). */
+  role?: "menu" | "listbox";
+  /** Optional fixed search strip rendered above the header. */
+  search?: ReactNode;
+  /** Optional fixed header region (e.g. the pinned server-default row). */
+  header?: ReactNode;
+  /** Optional fixed footer region (e.g. a "Manage models…" action). */
+  footer?: ReactNode;
+  /** The scrolling body. */
   children?: ReactNode;
 }) {
   return (
     <div
-      role="menu"
+      role={role}
       className={
         `${hook ? `${hook} ` : ""}` +
-        "absolute right-0 top-full mt-1 z-30 min-w-[11.25rem] rounded-md border border-border bg-bg-elev shadow-md py-1"
+        `${DROPDOWN_SURFACE} ${DROPDOWN_WIDTH[width]} ${DROPDOWN_PLACEMENT[placement]} ${DROPDOWN_ALIGN[align]}`
       }
     >
-      {children}
+      {search && <div className={DROPDOWN_SEARCH}>{search}</div>}
+      {header && <div className={DROPDOWN_HEADER}>{header}</div>}
+      <div className={DROPDOWN_SCROLL}>{children}</div>
+      {footer && <div className={DROPDOWN_FOOTER}>{footer}</div>}
     </div>
   );
 }

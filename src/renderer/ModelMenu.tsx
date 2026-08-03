@@ -1,0 +1,206 @@
+// BET-644 — the model listbox: the first adopter of both the specced
+// `Dropdown` menu surface (with its fixed search strip + pinned server-default
+// header) and the `MenuOption` row. Split out of ModelPicker so MenuOption
+// has two genuinely distinct adopting files (this menu and the effort menu) —
+// they differ in width, density and behaviour, and the file split is what
+// makes the two-adopter enforce test tell the truth.
+//
+// The search strip is client-side over the already-in-memory `groups`; the
+// keyboard roving highlight (↑/↓/Enter/Esc) and the filter live in
+// chatUtils.ts as pure functions so the arithmetic is testable.
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Search } from "lucide-react";
+import type { OpencodeModel } from "../shared/types";
+import { type ModelSelection, resolveActiveModel } from "./chatShared";
+import { Dropdown } from "./MenuItem";
+import { MenuOption } from "./MenuOption";
+import { Tag } from "./Tag";
+import {
+  filterModelGroups,
+  formatModelContextSize,
+  moveMenuHighlight,
+} from "./chatUtils";
+
+export function ModelMenu({
+  groups,
+  modelOverride,
+  defaultModel,
+  onSelect,
+  onClose,
+}: {
+  groups: Array<[string, OpencodeModel[]]> | null;
+  modelOverride: ModelSelection | null;
+  defaultModel: { providerID: string; modelID: string } | null;
+  onSelect: (m: ModelSelection | null) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the search input as soon as the menu mounts (it opens on open).
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  // The server-default row is pinned ABOVE the scroll area and never scrolls
+  // away. Resolve the model the server default actually points at so its
+  // sub-line names it (the same resolution the trigger label uses).
+  const allModels = useMemo(() => groups?.flatMap(([, ms]) => ms) ?? [], [groups]);
+  const serverModel = useMemo(
+    () => resolveActiveModel(allModels, null, defaultModel),
+    [allModels, defaultModel],
+  );
+  const serverSub = serverModel
+    ? `${serverModel.name} · set in Settings`
+    : "opencode decides";
+  const serverSelected = modelOverride == null;
+
+  const filtered = useMemo(
+    () => (groups == null ? null : filterModelGroups(groups, query)),
+    [groups, query],
+  );
+  const visibleModels = useMemo(
+    () => filtered?.flatMap(([, ms]) => ms) ?? [],
+    [filtered],
+  );
+
+  const isActive = (m: OpencodeModel): boolean => {
+    if (!modelOverride) return false;
+    return (
+      modelOverride.providerID === m.providerID &&
+      modelOverride.modelID === m.id
+    );
+  };
+
+  // The flattened option list the roving highlight indexes over: the
+  // server-default row (index 0) plus every visible model row, in group order.
+  const flatOptions: Array<{ id: string; select: () => void }> = [
+    { id: "server-default", select: () => { onSelect(null); onClose(); } },
+  ];
+  for (const [, ms] of filtered ?? []) {
+    for (const m of ms) {
+      const id = `${m.providerID}/${m.id}`;
+      flatOptions.push({
+        id,
+        select: () => {
+          onSelect({ providerID: m.providerID, modelID: m.id });
+          onClose();
+        },
+      });
+    }
+  }
+  const optionIndexById = new Map<string, number>();
+  flatOptions.forEach((o, i) => optionIndexById.set(o.id, i));
+  const highlightedId =
+    highlight >= 0 && highlight < flatOptions.length
+      ? flatOptions[highlight].id
+      : undefined;
+
+  const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => moveMenuHighlight(h, 1, flatOptions.length));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => moveMenuHighlight(h, -1, flatOptions.length));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (highlight >= 0 && highlight < flatOptions.length) {
+        flatOptions[highlight].select();
+      }
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  const body =
+    groups === null ? (
+      <div className="px-2 py-2 text-text-faint">Loading…</div>
+    ) : visibleModels.length === 0 && query.trim() !== "" ? (
+      <div className="px-2 py-2 text-text-faint">No models match</div>
+    ) : (filtered ?? []).length === 0 ? (
+      <div className="px-2 py-2 text-text-faint">No models</div>
+    ) : (
+      (filtered ?? []).map(([providerID, ms]) => (
+        <div key={providerID}>
+          <div className="text-micro font-semibold uppercase text-text-faint px-2 pt-3 pb-2 first:pt-1">
+            {providerID}
+          </div>
+          {ms.map((m) => {
+            const ctx = formatModelContextSize(m.limit?.context);
+            const id = `${m.providerID}/${m.id}`;
+            const active = isActive(m);
+            return (
+              <MenuOption
+                key={m.id}
+                id={id}
+                selected={active}
+                active={highlight === optionIndexById.get(id)}
+                label={m.name}
+                trailing={
+                  ctx ? (
+                    <Tag numeric tone={active ? "accent" : undefined}>
+                      {ctx}
+                    </Tag>
+                  ) : undefined
+                }
+                onSelect={() => {
+                  onSelect({ providerID: m.providerID, modelID: m.id });
+                  onClose();
+                }}
+              />
+            );
+          })}
+        </div>
+      ))
+    );
+
+  return (
+    <Dropdown
+      hook="manta-model-dropdown"
+      role="listbox"
+      placement="above"
+      align="start"
+      width="wide"
+      search={
+        <>
+          <Search size={14} aria-hidden="true" className="flex-none text-text-faint" />
+          <input
+            ref={inputRef}
+            value={query}
+            placeholder="Search models"
+            aria-label="Search models"
+            aria-activedescendant={highlightedId ?? undefined}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setHighlight(-1);
+            }}
+            onKeyDown={onSearchKeyDown}
+            className="flex-1 min-w-0 bg-transparent border-none outline-none text-label text-text placeholder:text-text-faint"
+          />
+          <kbd className="flex-none font-sans text-meta text-text-faint select-none" aria-hidden="true">
+            esc
+          </kbd>
+        </>
+      }
+      header={
+        <MenuOption
+          id="server-default"
+          selected={serverSelected}
+          active={highlight === 0}
+          label="Server default"
+          sub={serverSub}
+          onSelect={() => {
+            onSelect(null);
+            onClose();
+          }}
+        />
+      }
+    >
+      {body}
+    </Dropdown>
+  );
+}
