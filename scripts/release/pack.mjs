@@ -360,6 +360,16 @@ async function main() {
     await cp(from, join(stageDir, rel), { recursive: true });
   }
 
+  // BET-640: self-update.sh sources the shared release helpers
+  // (scripts/lib/release.sh) at runtime on the box. It ships inside the
+  // `scripts` include (copied recursively above); fail LOUD here if it's ever
+  // missing, so a packaged box never ends up with the updater but not the
+  // library it sources — which would convert the self-update fix into a worse
+  // failure.
+  if (!existsSync(join(stageDir, "scripts/lib/release.sh"))) {
+    die("release tarball is missing scripts/lib/release.sh — self-update.sh sources it");
+  }
+
   // 3. Vendored Node 20.20.2 — downloaded + sha256-verified + extracted under
   //    stage/runtime/node. Tarball is cached under .cache/ so re-packs skip the
   //    network round-trip. This is the runtime the box will use.

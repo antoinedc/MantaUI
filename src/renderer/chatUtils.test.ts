@@ -23,6 +23,7 @@ import {
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   isDrainAbortError,
+  isUnknownChannelError,
   describeCron,
   nextCronRun,
   describeNextRun,
@@ -864,6 +865,24 @@ describe("isDrainAbortError", () => {
     expect(isDrainAbortError("ApiError", true)).toBe(false);
     expect(isDrainAbortError("ContextOverflowError", true)).toBe(false);
     expect(isDrainAbortError(undefined, true)).toBe(false);
+  });
+});
+
+describe("isUnknownChannelError", () => {
+  it("matches the exact message manta-server's rpc dispatcher throws", () => {
+    expect(isUnknownChannelError("unknown rpc channel: delegate:list")).toBe(true);
+  });
+
+  it("matches wrapped variants that still contain the marker", () => {
+    expect(isUnknownChannelError("HTTP 500 unknown rpc channel: delegate:list")).toBe(true);
+    expect(isUnknownChannelError('rpc failed: { channel: "delegate:list", error: "unknown rpc channel: delegate:list" }')).toBe(true);
+  });
+
+  it("does NOT match other errors (transport blips, real 500s, auth)", () => {
+    expect(isUnknownChannelError("Network request failed")).toBe(false);
+    expect(isUnknownChannelError("HTTP 500 Internal Server Error")).toBe(false);
+    expect(isUnknownChannelError("fetch failed: socket hang up")).toBe(false);
+    expect(isUnknownChannelError("")).toBe(false);
   });
 });
 

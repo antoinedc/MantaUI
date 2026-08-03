@@ -16,7 +16,7 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
-import { chooseUpdateSkewVariant, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
@@ -49,6 +49,8 @@ export function App() {
     updatePrompt,
     updateError,
     setUpdateError,
+    boxIncompatible,
+    setBoxIncompatible,
     serverUpdatePrompt,
     setServerUpdatePrompt,
     connectionState,
@@ -75,6 +77,9 @@ export function App() {
   const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const sidebarRef = useRef<SidebarHandle>(null);
+  // BET-640: latch so the job poll raises the incompatible banner at most ONCE
+  // (a box that can't implement the jobs endpoint will 500 on every 30s tick).
+  const incompatibleFlaggedRef = useRef(false);
 
   // BET-417: the new-session screen replaces the old inline forms. null =
   // not shown. { mode: "new-project" } = new-project (creates a tmux
@@ -261,8 +266,18 @@ export function App() {
         .then((list) => {
           useStore.getState().setJobs(Array.isArray(list) ? list : []);
         })
-        .catch(() => {
-          /* server unreachable — leave the prior jobs map; the card surfaces errors */
+        .catch((e) => {
+          // BET-640: a transport blip keeps today's silent behaviour (leave
+          // the prior jobs map; the card surfaces errors). But a box that does
+          // NOT implement the jobs endpoint at all rejects the RPC with
+          // `unknown rpc channel` every tick — before this, that rendered as a
+          // permanently empty sidebar, indistinguishable from "no jobs". Raise
+          // the existing incompatible banner ONCE instead of hiding the cause.
+          const msg = e instanceof Error ? e.message : String(e);
+          if (isUnknownChannelError(msg) && !incompatibleFlaggedRef.current) {
+            incompatibleFlaggedRef.current = true;
+            useStore.getState().setBoxIncompatible(true);
+          }
         });
     };
     tick();
@@ -743,12 +758,34 @@ export function App() {
   // compatibility variant folds into `server-update` (it is an upgrade prompt
   // with the same self-update action, not a blocking incompatibility).
   const reconnecting = connectionState.state !== "connected" && connectionState.state !== "idle";
-  const incompatible = showCompatibilityCard && compatibilityVariant === "incompatible";
+  const incompatible =
+    boxIncompatible || (showCompatibilityCard && compatibilityVariant === "incompatible");
   const versionSkew = chooseUpdateSkewVariant(clientVersion, serverMinClient) === "outdated";
   const updateFailed = !!updateError;
   const serverUpdate = !!serverUpdatePrompt || (showCompatibilityCard && compatibilityVariant === "behind");
   const bannerState: BannerState = { reconnecting, incompatible, versionSkew, updateFailed, serverUpdate };
   const activeBanner = pickBanner(bannerState);
+
+  // BET-640: running the box's self-update can now fail EARLY (before the
+  // server restart) — e.g. a packaged box that can't resolve its release
+  // manifest, or a git box whose fetch dies. The RPC resolves {ok:false} in
+  // that case; surface it in the EXISTING update-failed banner (the same
+  // state the auto-update path already feeds) instead of silently reporting
+  // success and leaving the box stale.
+  const applyServerUpdate = async () => {
+    try {
+      const res = await window.api.serverUpdateApply();
+      if (res && res.ok === false) {
+        setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
+      }
+    } catch (e) {
+      setUpdateError({
+        message: e instanceof Error ? e.message : String(e),
+        raw: String(e),
+      });
+    }
+  };
+
   // BET-459: when a chat session is the visible pane, the SessionHeader owns
   // the single top-of-pane row (breadcrumb + mode toggle) — the app titlebar
   // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
@@ -801,7 +838,10 @@ export function App() {
             onAction={() => {
               void window.api.openExternal("https://mantaui.com/install");
             }}
-            onDismiss={dismiss}
+            onDismiss={() => {
+              setBoxIncompatible(false);
+              dismiss();
+            }}
           />
         )}
         {!showOnboarding && activeBanner === "version-skew" && (
@@ -842,7 +882,7 @@ export function App() {
             }
             actionLabel="Update & restart"
             onAction={() => {
-              void window.api.serverUpdateApply();
+              void applyServerUpdate();
             }}
             onDismiss={() => setServerUpdatePrompt(null)}
           />
@@ -863,7 +903,7 @@ export function App() {
               }
               actionLabel="Upgrade box"
               onAction={() => {
-                void window.api.serverUpdateApply();
+                void applyServerUpdate();
               }}
               onDismiss={dismiss}
             />

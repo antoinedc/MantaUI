@@ -131,6 +131,29 @@ install_root_file() {
   sudo -n install -m 0644 -o root -g root "$1" "$2"
 }
 
+# --- Shared release-resolution helpers (BET-640) -----------------------------
+# install.sh shares the four release-resolution helpers (manifest_get,
+# resolve_arch, _sha256_of, verify_sha256) with scripts/self-update.sh via
+# scripts/lib/release.sh so the two update paths never drift. Normally we
+# source that lib, deriving install.sh's own directory from ${BASH_SOURCE[0]}
+# (dev checkout, installed-box re-run, or the test harness, where the file is
+# on disk).
+#
+# install.sh's PRIMARY mode is `curl -fsSL … | bash`, where there is NO local
+# file yet — the tarball that carries scripts/lib/release.sh is downloaded
+# MID-install, and a piped script has BASH_SOURCE empty and cannot read a
+# sibling file. In that mode we fall back to the inline definitions below.
+# Those are the SAME bytes as the lib (keep them in sync) and are the
+# standalone piped artifact — self-update.sh has NO copy of its own, it always
+# sources the lib. sync_opencode_guidance lives ONLY in the lib and is sourced
+# from $MANTA_HOME/scripts/lib/release.sh after the tarball is extracted.
+INSTALL_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)"
+if [ -n "$INSTALL_SOURCE_DIR" ] && [ -f "$INSTALL_SOURCE_DIR/lib/release.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$INSTALL_SOURCE_DIR/lib/release.sh"
+else
+  # curl | bash / no local lib yet — inline fallback (byte-identical to lib).
+
 # Parse one key out of a key=value manifest body. Echoes the value, empty if
 # absent. Values may contain `=` (cut -d= -f2- preserves them). A repeated key
 # is reduced to the FIRST occurrence (head -n1) — the manifest writer emits
@@ -163,6 +186,29 @@ resolve_arch() {
     *) die "unsupported OS: $s (the MantaUI box installer supports Linux and macOS/Apple Silicon)" ;;
   esac
 }
+
+
+# _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
+# it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
+# shasum by default but NOT sha256sum. Single shared helper so the prereq
+# check (step 1) and verify_sha256 can't drift — the BET-278 review concern.
+_sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# Verify $1's sha256 equals $2 (64-hex). Dies on mismatch.
+verify_sha256() {
+  local actual; actual="$(_sha256_of "$1")"
+  [ "$actual" = "$2" ] || die "checksum mismatch for $1
+      expected: $2
+      actual:   $actual
+      (corrupt download or stale manifest — re-run; if it persists, report it)"
+}
+fi
 
 # launchd_agent_path — the PATH a MantaUI supervisor-managed service must
 # run with. Used by:
@@ -222,27 +268,6 @@ launchd_agent_path() {
     *) base="$HOME/.local/bin:$base" ;;
   esac
   printf '%s' "$base"
-}
-
-# _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
-# it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
-# shasum by default but NOT sha256sum. Single shared helper so the prereq
-# check (step 1) and verify_sha256 can't drift — the BET-278 review concern.
-_sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
-  else
-    shasum -a 256 "$1" | cut -d' ' -f1
-  fi
-}
-
-# Verify $1's sha256 equals $2 (64-hex). Dies on mismatch.
-verify_sha256() {
-  local actual; actual="$(_sha256_of "$1")"
-  [ "$actual" = "$2" ] || die "checksum mismatch for $1
-      expected: $2
-      actual:   $actual
-      (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
 
 # print_provider_detection_summary <lib-path> <node-path> <home-path> [is_macos]
@@ -821,20 +846,18 @@ main() {
   else
     warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
   fi
-  # AGENTS.md append with marker guard — idempotency by a single grep on a
-  # stable line ("## manta scheduled tasks"). A re-run with the marker present
-  # is a clean no-op.
+  # AGENTS.md section-sync (BET-640): append any top-level `## ` guidance
+  # section from docs/opencode-tools/AGENTS.md that is not already present, so
+  # a section added after a box was installed lands on the NEXT install/update.
+  # Existing sections are never rewritten (the user may have edited them).
+  # sync_opencode_guidance lives in scripts/lib/release.sh — under clean
+  # `curl | bash` it wasn't available at the top (no local file pre-download),
+  # but the tarball is extracted by now, so source the lib from MANTA_HOME.
   if [ -f "$OPENCODE_TOOLS_SRC/AGENTS.md" ]; then
-    if [ -f "$OPENCODE_AGENTS" ] && grep -q '^## manta scheduled tasks' "$OPENCODE_AGENTS"; then
-      ok "opencode AGENTS.md already contains manta guidance — skipping append."
-    else
-      log "Appending manta opencode agent guidance to ${OPENCODE_AGENTS}…"
-      {
-        [ -f "$OPENCODE_AGENTS" ] && cat "$OPENCODE_AGENTS" && printf '\n'
-        cat "$OPENCODE_TOOLS_SRC/AGENTS.md"
-      } > "$OPENCODE_AGENTS.tmp" && mv "$OPENCODE_AGENTS.tmp" "$OPENCODE_AGENTS"
-      ok "opencode AGENTS.md updated."
+    if ! declare -F sync_opencode_guidance >/dev/null 2>&1; then
+      . "$MANTA_HOME/scripts/lib/release.sh"
     fi
+    sync_opencode_guidance "$OPENCODE_TOOLS_SRC/AGENTS.md" "$OPENCODE_AGENTS"
   fi
 
   # install_launchd_agent <label> <template-src> <dest-plist> — render the

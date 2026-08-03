@@ -1080,7 +1080,8 @@ export const httpApi: Api = {
   // process mid-run so a caller awaiting past the RPC send may never see
   // a response. Modeled on `opencode:restart` (single-purpose server action,
   // fixed-argv execFile, no injection surface).
-  serverUpdateApply: () => rpc<void>(IPC.serverUpdateApply),
+  serverUpdateApply: () =>
+    rpc<{ ok: boolean; error?: string }>(IPC.serverUpdateApply),
 
   // -- server-update available subscription (BET-225 stage 3) --
   // /events WS stream publishes `{kind: "serverUpdateAvailable", payload}`

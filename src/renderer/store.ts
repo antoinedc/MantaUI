@@ -235,6 +235,12 @@ type State = {
   // app simply never updated — across two releases, diagnosed only when a
   // shipped fix was reported as missing.
   updateError: { message: string; raw: string } | null;
+  // BET-640: a box that doesn't implement a channel the renderer polls (the
+  // background-jobs endpoint on a box that predates delegation) surfaces as a
+  // persistent empty sidebar, indistinguishable from "no jobs running". When
+  // the job poll's error says "unknown rpc channel", flip this flag ONCE to
+  // show the existing incompatible banner instead of rendering nothing.
+  boxIncompatible: boolean;
   // Single global server-update prompt (BET-225 stage 3). Set when the box's
   // server-update poller (src/server/serverUpdate.mjs) publishes a
   // `serverUpdateAvailable` bus event after polling its version manifest.
@@ -371,6 +377,7 @@ type State = {
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
   setUpdateError: (p: { message: string; raw: string } | null) => void;
+  setBoxIncompatible: (b: boolean) => void;
   setServerUpdatePrompt: (
     p: { version: string; notesUrl?: string | null } | null,
   ) => void;
@@ -419,6 +426,7 @@ export const useStore = create<State>((set, get) => ({
   agentFileToast: null,
   updatePrompt: null,
   updateError: null,
+  boxIncompatible: false,
   serverUpdatePrompt: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
@@ -607,6 +615,7 @@ export const useStore = create<State>((set, get) => ({
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
   setUpdateError: (p) => set({ updateError: p }),
+  setBoxIncompatible: (b) => set({ boxIncompatible: b }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setConnectionState: (s) => set({ connectionState: s }),
   setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),

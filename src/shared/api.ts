@@ -431,13 +431,17 @@ export interface Api {
   getClientVersion(): Promise<{ version: string }>;
 
   // Server-update apply (BET-225 stage 3): triggers the box's
-  // `scripts/self-update.sh` (git fetch + reset --hard origin/main + npm ci
-  // --omit=dev + systemctl --user restart manta-server). The server returns
-  // immediately (fire-and-forget); the restart will kill the process mid-
-  // run so a caller awaiting past the RPC send may never see a response.
+  // `scripts/self-update.sh` (git fetch + reset --hard origin/main, or the
+  // packaged-install tarball path, + npm ci --omit=dev + systemctl --user
+  // restart manta-server). The server returns immediately (fire-and-forget);
+  // the restart will kill the process mid-run so a caller awaiting past the
+  // RPC send may never see a response. BET-640: the RPC now watches the
+  // spawned updater for its early failures and resolves `{ ok:false, error }`
+  // when the updater exits non-zero before reaching the restart, `{ ok:true }`
+  // otherwise (still-running at the watch window = it reached the restart).
   // Mirror of the desktop `opencode:restart` action — fixed-argv execFile,
   // no injection surface, no caller-supplied input.
-  serverUpdateApply(): Promise<void>;
+  serverUpdateApply(): Promise<{ ok: boolean; error?: string }>;
 
   // Server-update available subscription (BET-225 stage 3): fires when the
   // box's server-update poller sees a newer manifest version. Mirrors the

@@ -547,6 +547,17 @@ export function isDrainAbortError(
   return draining && errName === "MessageAbortedError";
 }
 
+// BET-640: server-rpc unsupported-channel predicate. manta-server throws
+// `unknown rpc channel: <ch>` (src/server/rpc.mjs) and httpApi surfaces that
+// string as the Error message, so a box that doesn't implement a channel (e.g.
+// the background-jobs endpoint on a box that predates delegation) rejects the
+// RPC with exactly this text. Renderers use it to tell "endpoint not
+// implemented" apart from a transport blip — the former should raise the
+// incompatible banner, the latter should stay silent (BET-640).
+export function isUnknownChannelError(message: string): boolean {
+  return typeof message === "string" && message.includes("unknown rpc channel");
+}
+
 // describeCron — best-effort human-readable label for a 5-field cron
 // expression, for the ScheduledTasksCard. Covers the common shapes the model
 // emits; falls back to the raw expression for anything it doesn't recognize.
