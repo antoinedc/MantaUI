@@ -595,9 +595,14 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
     }
 
     /// A canonical transcript carrying one assistant message with `text`.
-    private func transcriptResult(messageID: String, text: String) -> String {
-        """
-        {"result":[{"info":{"id":"\(messageID)","sessionID":"ses_1","role":"assistant"},\
+    ///
+    /// `time.completed` is REQUIRED for the message to render: the mapper skips
+    /// an assistant message still streaming, so a fixture without it produces
+    /// an empty transcript and every assertion here becomes meaningless.
+    private func transcriptResult(messageID: String, text: String, completed: Bool = true) -> String {
+        let time = completed ? #"{"created":1000,"completed":2000}"# : #"{"created":1000}"#
+        return """
+        {"result":[{"info":{"id":"\(messageID)","sessionID":"ses_1","role":"assistant","time":\(time)},\
         "parts":[{"type":"text","id":"part_3","messageID":"\(messageID)","text":"\(text)"}]}]}
         """
     }
@@ -646,6 +651,28 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
 
         XCTAssertEqual(store.inProgressText, "still writing")
         XCTAssertEqual(proseCount(store.blocks, containing: "still writing"), 1)
+    }
+
+    /// A transcript that carries the message but has NOT completed it renders
+    /// nothing for it (the mapper skips a still-streaming assistant message).
+    /// Retiring on its mere presence would trade a duplicate for a
+    /// DISAPPEARANCE — strictly worse. Caught by the gate on 7bd8277.
+    func testDoesNotRetireAMessageTheTranscriptWillNotRenderYet() async throws {
+        let fake = FakeStreamControl()
+        fake.hasConnectedOnce = true
+        fake.drive(.connected)
+        let eventStore = makeEventStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"the answer"}}"#)
+
+        // Same message id as the live chunk, but still streaming.
+        StubTranscriptURLProtocol.result = transcriptResult(messageID: "msg_2", text: "the answer", completed: false)
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+
+        await store.refetch()
+
+        XCTAssertEqual(eventStore.sessionStates["ses_1"]?.liveText, "the answer")
+        XCTAssertEqual(proseCount(store.blocks, containing: "the answer"), 1)
     }
 
     /// A failed refetch proves nothing about what the transcript carries, so it

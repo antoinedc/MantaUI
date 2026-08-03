@@ -333,9 +333,20 @@ final class ChatSessionStore: ObservableObject {
                     // the event-store sink lands on a later run-loop turn, too
                     // late for the rebuild happening right here.
                     if !didFail {
+                        // Retire only what the transcript will actually RENDER.
+                        // ChatTranscriptMapper skips an assistant message whose
+                        // `time.completed` is nil — a turn still streaming — so
+                        // counting it as covered would retire the live copy of a
+                        // turn that draws NOTHING, and the answer would vanish
+                        // from the screen mid-turn instead of merely appearing
+                        // twice. Retirement has to mirror the mapper's emit rule
+                        // exactly, or it trades a duplicate for a disappearance.
+                        let rendered = loaded
+                            .filter { $0.info.time?.completed != nil }
+                            .map(\.info.id)
                         eventStore.retireCoveredStreamText(
                             sessionId: sessionId,
-                            covered: Set(loaded.map(\.info.id))
+                            covered: Set(rendered)
                         )
                         inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
                     }
