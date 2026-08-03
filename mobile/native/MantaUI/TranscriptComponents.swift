@@ -366,7 +366,12 @@ struct TranscriptView: View {
         case .prose(let text):
             AssistantProse(text: text, tokens: tokens)
         case .steps(let content):
+            // Machinery is inset to the same margin as prose. Only the USER
+            // band is full-bleed (§8) — that edge-to-edge treatment is what
+            // marks a turn boundary, so letting tool cards share it made every
+            // step group read as a message.
             StepGroupView(content: content, tokens: tokens)
+                .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp3)
         }
     }
