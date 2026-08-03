@@ -76,7 +76,9 @@ final class MantaLiveChatClearCaptureUITests: XCTestCase {
 
         // 7. The DONE-WHEN: native presentation, destructive Clear first,
         //    detached Cancel present.
-        let nativeSheet = app.sheets.firstMatch.exists || app.popovers.firstMatch.exists || app.alerts.firstMatch.exists
+        let nativeSheet = app.staticTexts["Clear this session?"].exists
+            && !app.buttons.matching(identifier: "Clear session").allElementsBoundByIndex.isEmpty
+            && app.buttons["Cancel"].exists
         let clearButtons = app.buttons.matching(identifier: "Clear session").allElementsBoundByIndex
         let cancelButton = app.buttons["Cancel"].firstMatch
         let clearMaxY = clearButtons.map { $0.frame.minY }.max() ?? 0

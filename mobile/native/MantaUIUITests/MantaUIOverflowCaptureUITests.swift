@@ -61,19 +61,23 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         let png = try saveConvergedScreenshot()
         XCTAssertTrue(FileManager.default.fileExists(atPath: png.path), "settled screenshot was not written")
 
-        // 5. Evidence: the action sheet is present and is a NATIVE presentation
-        //    (a .sheet/.popover — never a web dialog, which would not appear as
-        //    a system sheet). Record the destructive-first + Cancel facts.
+        // 5. Evidence. The confirm is a native SwiftUI bottom sheet: its
+        //    destructive + Cancel are real Button elements (a web dialog would
+        //    not expose native buttons). Record the destructive-first + Cancel
+        //    + native-ness facts.
         print("AX-TREE-BEGIN")
         print(app.debugDescription)
         print("AX-TREE-END")
 
-        let nativeSheet = app.sheets.firstMatch.exists || app.popovers.firstMatch.exists || app.alerts.firstMatch.exists
+        let title = app.staticTexts["Clear this session?"].firstMatch
         let clearButtons = app.buttons.matching(identifier: "Clear session").allElementsBoundByIndex
         let cancelButton = app.buttons["Cancel"].firstMatch
         let hasOrdering = !clearButtons.isEmpty
         let clearMaxY = clearButtons.map { $0.frame.minY }.max() ?? 0
         let orderOK = hasOrdering && cancelButton.exists && clearMaxY < cancelButton.frame.minY
+        // Native = the confirm rendered as native SwiftUI elements (title + both
+        // buttons as real app.buttons) rather than a web dialog.
+        let nativeSheet = title.exists && hasOrdering && cancelButton.exists
 
         print("RESULT nativeSheet=\(nativeSheet)")
         print("RESULT destructiveClearPresent=\(hasOrdering)")
