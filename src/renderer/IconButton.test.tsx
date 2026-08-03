@@ -14,9 +14,8 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { Terminal, MoreHorizontal } from "lucide-react";
-import { mount, type Harness } from "./testHarness";
+import { mount, mountSessionHeader, type Harness } from "./testHarness";
 import { IconButton } from "./IconButton";
-import { SessionHeader } from "./SessionHeader";
 
 // The exact chrome string IconButton owns for the md (default) size. Padding
 // and radius live in SIZE_CHROME and vary by size (md rounded-xs p-1, xl
@@ -137,31 +136,11 @@ describe("IconButton migration — SessionHeader call site (BET-532 two-adopter 
     h = null;
   });
 
-  // Minimal SessionHeader props rendering the adopted control: the
-  // session-menu trigger (hasSession, not readOnly). totalInput 0 hides the
-  // context pill so its own trigger button doesn't join the count.
-  function renderHeader() {
-    return mount(
-      <SessionHeader
-        branch={null}
-        ctxBreakdown={{ freshInput: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, pct: 0, segments: [] }}
-        ctxLimit={0}
-        staleCache={{ isStale: false, idleMs: 0, staleTokens: 0, ttlMs: 0 }}
-        modelName={null}
-        hasSession
-        onFork={() => {}}
-        onCompact={() => {}}
-        onClear={() => {}}
-        onDelete={() => {}}
-        breadcrumb={null}
-        mode="chat"
-        onModeChange={() => {}}
-      />,
-    );
-  }
-
+  // The shared scaffold's default is exactly this case: session present (so
+  // the ⋯ trigger renders) and totalInput 0 (so the context pill is hidden and
+  // its own trigger button doesn't join the count).
   it("the header carries exactly one IconButton — the mode-toggle glyph is gone", () => {
-    h = renderHeader();
+    h = mountSessionHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     expect(els.length).toBe(1);
     // Specifically: nothing in the header offers Terminal as a standalone
@@ -173,7 +152,7 @@ describe("IconButton migration — SessionHeader call site (BET-532 two-adopter 
   });
 
   it("session-menu trigger renders through IconButton with its menu semantics and hook", () => {
-    h = renderHeader();
+    h = mountSessionHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     const trigger = els[0];
     expect(trigger.className).toBe(`manta-session-menu-trigger ${CHROME}`);
@@ -185,7 +164,7 @@ describe("IconButton migration — SessionHeader call site (BET-532 two-adopter 
   });
 
   it("does not inject arbitrary classes into the migrated call site", () => {
-    h = renderHeader();
+    h = mountSessionHeader();
     const els = Array.from(h!.container.querySelectorAll("button"));
     expect(els.map((el) => el.className)).toEqual([
       `manta-session-menu-trigger ${CHROME}`,

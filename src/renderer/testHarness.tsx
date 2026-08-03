@@ -27,6 +27,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
+import { SessionHeader } from "./SessionHeader";
 
 // React 18's `act` warns unless this global is set. jsdom test env only.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -245,4 +246,47 @@ export async function emitStreamAndFlush(
 ): Promise<void> {
   act(() => bus.emitStream(ev));
   await h.flush();
+}
+
+// ===== SessionHeader mount helper =====
+//
+// SessionHeader takes ~14 props, nearly all of which are inert scaffolding for
+// any given assertion — a test that cares about the ⋯ menu's hover fill still
+// has to name onFork/onCompact/onClear/onDelete/breadcrumb/mode/... to satisfy
+// the type. Two separate suites (IconButton, MenuItem) hand-rolled the same
+// `renderHeader()` and differed only in the context numbers, which the
+// duplication gate correctly flagged as a clone.
+//
+// `overrides` is the escape hatch: pass only what the assertion is ABOUT. The
+// default is the quiet case — no branch, no context (totalInput 0 hides the
+// context pill so its trigger doesn't join a button count), session present so
+// the ⋯ menu renders.
+export function mountSessionHeader(
+  overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {},
+): Harness {
+  return mount(
+    <SessionHeader
+      branch={null}
+      ctxBreakdown={{
+        freshInput: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalInput: 0,
+        pct: 0,
+        segments: [],
+      }}
+      ctxLimit={0}
+      staleCache={{ isStale: false, idleMs: 0, staleTokens: 0, ttlMs: 0 }}
+      modelName={null}
+      hasSession
+      onFork={() => {}}
+      onCompact={() => {}}
+      onClear={() => {}}
+      onDelete={() => {}}
+      breadcrumb={null}
+      mode="chat"
+      onModeChange={() => {}}
+      {...overrides}
+    />,
+  );
 }

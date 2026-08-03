@@ -15,9 +15,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { Zap } from "lucide-react";
-import { mount, type Harness } from "./testHarness";
+import { mount, mountSessionHeader, type Harness } from "./testHarness";
 import { Dropdown, MenuItem } from "./MenuItem";
-import { SessionHeader } from "./SessionHeader";
 
 const ITEM_BASE =
   "flex w-full items-center gap-3 px-2 py-2 mb-1 last:mb-0 rounded-md text-left " +
@@ -205,24 +204,21 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
     h = null;
   });
 
+  // Non-zero context so the context pill renders alongside the ⋯ trigger —
+  // this suite asserts the MENU's row highlight, and a populated header is the
+  // realistic surface for that.
   function renderHeader() {
-    h = mount(
-      <SessionHeader
-        branch={null}
-        ctxBreakdown={{ freshInput: 1, cacheRead: 1, cacheWrite: 1, totalInput: 100, pct: 12, segments: [] }}
-        ctxLimit={200000}
-        staleCache={{ isStale: false, idleMs: 0, staleTokens: 0, ttlMs: 0 }}
-        modelName={null}
-        hasSession
-        onFork={() => {}}
-        onCompact={() => {}}
-        onClear={() => {}}
-        onDelete={() => {}}
-        breadcrumb={null}
-        mode="chat"
-        onModeChange={() => {}}
-      />,
-    );
+    h = mountSessionHeader({
+      ctxBreakdown: {
+        freshInput: 1,
+        cacheRead: 1,
+        cacheWrite: 1,
+        totalInput: 100,
+        pct: 12,
+        segments: [],
+      },
+      ctxLimit: 200000,
+    });
   }
 
   function openMenu() {
