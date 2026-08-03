@@ -58,11 +58,10 @@ private struct ChatScreenContent: View {
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
     /// Clear/Delete confirmations. These state fields live HERE, on the pushed
-    /// ChatScreen, not inside the overflow sheet: a `confirmationDialog`
-    /// presented from within a `.sheet` adapts to a popover on iOS 26 and drops
-    /// its detached `.cancel` button, so the action sheet must present from the
-    /// presenter (this screen), never from the sheet content
-    /// (DECISIONS.md:709-715).
+    /// ChatScreen (not inside the overflow sheet): the native action sheet is
+    /// presented from the presenter via `UIAlertController(.actionSheet)`, which
+    /// `confirmationDialog` cannot reproduce on iOS 26 (it drops the detached
+    /// Cancel) — see `NativeActionSheet.swift` (DECISIONS.md:709-715).
     @State private var confirmingClear = false
     @State private var confirmingDelete = false
 
@@ -138,22 +137,25 @@ private struct ChatScreenContent: View {
         // scrolling.
         .safeAreaInset(edge: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
-        // Clear/Delete confirm as a NATIVE action sheet — never a web dialog
-        // (DECISIONS.md:709-715). Presented from this presenter rather than the
-        // sheet content so iOS renders a true bottom action sheet: destructive
-        // item at the top, Cancel detached at the bottom.
-        .confirmationDialog("Clear this session?", isPresented: $confirmingClear, titleVisibility: .visible) {
-            Button("Clear session", role: .destructive) { showOverflow = false; Task { await clearSession() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Starts a fresh session in this window. The transcript stays on the box.")
-        }
-        .confirmationDialog("Delete this session?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-            Button("Delete session", role: .destructive) { showOverflow = false; Task { await deleteSession() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Removes the session and its window. This cannot be undone.")
-        }
+        // Clear/Delete confirm in a native action sheet — never a web dialog
+        // (DECISIONS.md:709-715). `confirmationDialog` drops the detached Cancel
+        // on iOS 26 (popover card), so this uses `UIAlertController(.actionSheet)`:
+        // destructive item first, Cancel detached at the bottom. Presented from
+        // this presenter, above the overflow sheet.
+        .nativeActionSheet(
+            isPresented: $confirmingClear,
+            title: "Clear this session?",
+            message: "Starts a fresh session in this window. The transcript stays on the box.",
+            destructiveTitle: "Clear session",
+            destructiveAction: { showOverflow = false; Task { await clearSession() } }
+        )
+        .nativeActionSheet(
+            isPresented: $confirmingDelete,
+            title: "Delete this session?",
+            message: "Removes the session and its window. This cannot be undone.",
+            destructiveTitle: "Delete session",
+            destructiveAction: { showOverflow = false; Task { await deleteSession() } }
+        )
         .onAppear {
             store.start()
             Task { await resolveWindowAndBranch() }
