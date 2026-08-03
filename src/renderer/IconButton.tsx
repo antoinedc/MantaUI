@@ -5,14 +5,13 @@
 // area, radius, resting/hover icon colour or hover fill, so the icon-button
 // family can only drift if IconButton itself is retuned.
 //
-// Chrome contract (BET-529 inventory): square hit area (md 24px / lg 28px /
-// xl 36px), radius `--r-xs` for md/lg (`rounded-xs`) and `--r-md` for xl
-// (`rounded-md`), resting icon `--tx3` → `--tx1` on hover with `--fill-hover`
-// bg, accent focus ring, 16px md icon / 20px lg + xl standalone. `xl` is for a
-// standalone control row where the button sits beside 36px pills; `md`/`lg`
-// remain the dense-toolbar sizes. C1 (validated constraints): the hover sets a
-// background, so it also sets the matching foreground (`hover:text-text`); the
-// resting state sets `--tx3`.
+// Chrome contract (BET-529 inventory): square hit area (md 24px / xl 32px),
+// radius `--r-xs` for md (`rounded-xs`) and `--r-md` for xl (`rounded-md`),
+// resting icon `--tx3` → `--tx1` on hover with `--fill-hover` bg, accent focus
+// ring, 16px icon on both sizes. `xl` is for a standalone control row where the
+// button sits beside the 29px chips; `md` remains the dense-toolbar size. C1
+// (validated constraints): the hover sets a background, so it also sets the
+// matching foreground (`hover:text-text`); the resting state sets `--tx3`.
 //
 // The hover fill uses the `fill-hover` colour utility (`hover:bg-fill-hover`,
 // registered by BET-539 → `--fill-hover`). No arbitrary value needed — the
@@ -31,11 +30,10 @@ const CHROME_BASE =
   "inline-flex items-center justify-center text-text-faint hover:text-text hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 
 // Padding + radius vary by size; everything else is shared. `xl` widens the
-// hit area to 36px with `--r-md` so it reads correctly beside 36px pills in a
-// standalone control row.
-const SIZE_CHROME: Record<"md" | "lg" | "xl", string> = {
+// hit area to 32px with `--r-md` so it sits correctly beside the 29px chips in
+// a standalone control row.
+const SIZE_CHROME: Record<"md" | "xl", string> = {
   md: "rounded-xs p-1",
-  lg: "rounded-xs p-1",
   xl: "rounded-md p-2",
 };
 
@@ -57,8 +55,8 @@ export function IconButton({
   onClick?: () => void;
   /** Native `title` tooltip; defaults to `label`. */
   title?: string;
-  /** md = 16px icon (default), lg = 20px standalone, xl = 20px standalone with a 36px hit area + `--r-md` radius, for a control row beside 36px pills. */
-  size?: "md" | "lg" | "xl";
+  /** md = 16px icon on a 24px hit area (default), xl = 16px icon on a 32px hit area + `--r-md` radius, for a control row beside the 29px chips. */
+  size?: "md" | "xl";
   /** Menu/popover semantics for a trigger-style icon button. */
   ariaHaspopup?: "menu" | "dialog" | "listbox" | "grid" | "tree" | "true" | "false";
   ariaExpanded?: boolean;
@@ -72,7 +70,7 @@ export function IconButton({
    */
   hook?: string;
 }) {
-  const iconSize = size === "md" ? 16 : 20;
+  const iconSize = 16;
   // Disabled-only classes are appended by the primitive itself (a disabled
   // icon button stays flat: no hover fill/foreground, not-allowed cursor) —
   // never by a caller, so the standing-decision-3 escape hatch still holds.

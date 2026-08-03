@@ -17,6 +17,13 @@
 // shell and divides it with a `border-l` divider; `rightAccent` colours the
 // right segment with `--accent-tx` + semibold.
 //
+// Split rule (BET-634): the shell hover is the SINGLE chip's (`hover:border
+// -border-strong hover:text-text`) — a split control leaves its shell border
+// untouched and instead fills the HOVERED SEGMENT (`hover:bg-fill-hover`), so
+// you can tell which half you're about to click. `Chip` keeps both rest-tone +
+// hover classes; `SplitChip` uses `CHIP_REST` alone on its shell and applies
+// the fill to the segments.
+//
 // Icons are the caller's job (a lucide icon at `size={13}`); the primitive does
 // not style children beyond reserving the gap. There is deliberately no size
 // prop: the spec has one chip size only.
@@ -26,7 +33,8 @@ import type { ReactNode } from "react";
 const CHIP_SHELL =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap " +
   "text-meta font-medium leading-none transition-colors";
-const CHIP_REST = "border-border bg-bg-soft text-text-muted hover:border-border-strong hover:text-text";
+const CHIP_REST = "border-border bg-bg-soft text-text-muted";
+const CHIP_HOVER = "hover:border-border-strong hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
 const CHIP_PAD = "gap-[6px] px-[11px]";
 
@@ -52,7 +60,7 @@ export function Chip({
    */
   hook?: string;
 }) {
-  const className = `${hook ? `${hook} ` : ""}${CHIP_SHELL} ${CHIP_PAD} ${on ? CHIP_ON : CHIP_REST}`;
+  const className = `${hook ? `${hook} ` : ""}${CHIP_SHELL} ${CHIP_PAD} ${on ? CHIP_ON : `${CHIP_REST} ${CHIP_HOVER}`}`;
   return (
     <button type="button" onClick={onClick} title={title} className={className}>
       {children}
@@ -95,8 +103,8 @@ export function SplitChip({
   popup?: boolean;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
-  const leftClass = `inline-flex items-center ${CHIP_PAD} h-full`;
-  const rightClass = `inline-flex items-center ${CHIP_PAD} h-full border-l border-border${rightAccent ? " text-accent-tx font-semibold" : ""}`;
+  const leftClass = `inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
+  const rightClass = `inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
   return (
     <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
       <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox}>
