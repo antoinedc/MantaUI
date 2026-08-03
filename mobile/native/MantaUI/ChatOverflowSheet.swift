@@ -37,9 +37,14 @@ struct ChatOverflowSheet: View {
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
 
-    @Environment(\.dismiss) private var dismiss
+    /// Clear/Delete confirmations. Presented as a compact native bottom sheet
+    /// (`ConfirmActionSheet`) from within this sheet, so it layers over the
+    /// overflow sheet (sheet-on-sheet). No system primitive renders a detached
+    /// Cancel on iOS 26 — see `ConfirmActionSheet` (DECISIONS.md:709-715).
     @State private var confirmingClear = false
     @State private var confirmingDelete = false
+
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -72,19 +77,26 @@ struct ChatOverflowSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .confirmationDialog("Clear this session?", isPresented: $confirmingClear, titleVisibility: .visible) {
-                Button("Clear session", role: .destructive) { dismiss(); onClear() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Starts a fresh session in this window. The transcript stays on the box.")
-            }
-            .confirmationDialog("Delete this session?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                Button("Delete session", role: .destructive) { dismiss(); onDelete() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Removes the session and its window. This cannot be undone.")
-            }
         }
+        // Clear/Delete confirm in a native action sheet — never a web dialog
+        // (DECISIONS.md:709-715). No system primitive on iOS 26 renders a
+        // detached Cancel, so these present a compact SwiftUI bottom sheet
+        // (`ConfirmActionSheet`) from within this sheet: destructive item first,
+        // Cancel separated at the bottom.
+        .confirmActionSheet(
+            isPresented: $confirmingClear,
+            title: "Clear this session?",
+            message: "Starts a fresh session in this window. The transcript stays on the box.",
+            destructiveTitle: "Clear session",
+            destructiveAction: { dismiss(); onClear() }
+        )
+        .confirmActionSheet(
+            isPresented: $confirmingDelete,
+            title: "Delete this session?",
+            message: "Removes the session and its window. This cannot be undone.",
+            destructiveTitle: "Delete session",
+            destructiveAction: { dismiss(); onDelete() }
+        )
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
