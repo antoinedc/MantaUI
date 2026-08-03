@@ -23,7 +23,7 @@ import path from "node:path";
 
 // Every primitive in the M527 inventory. Adding one here is the whole cost of
 // putting it under the epic's rules.
-const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow"] as const;
+const PRIMITIVES = ["Card", "IconButton", "Field", "Pill", "MenuItem", "SessionRow", "Checkbox", "Button", "Chip", "SplitChip", "Toggle", "Callout", "Tag", "IconCard", "Eyebrow", "SettingsRow"] as const;
 
 // A primitive component whose implementation lives in a differently-named
 // module file. `Chip.tsx` exports BOTH `Chip` and `SplitChip` (they share the
@@ -143,7 +143,7 @@ function offendingLines(content: string, re: RegExp): string[] {
 // sheet, which the mobile-redesign deletes. The menu/dropdown contract is real
 // in the desktop client — carried by the redesign spec — so it is a legitimate
 // one-web-surface primitive rather than a chrome-incompatible one.
-const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle", "Tag", "IconCard", "Eyebrow"]);
+const SINGLE_SURFACE: Set<string> = new Set(["SessionRow", "MenuItem", "Toggle", "Tag", "IconCard", "Eyebrow", "SettingsRow"]);
 
 // Spec-authorized off-grid px values, per primitive, that rule 1c consults
 // instead of skipping the primitive (BET-547). SessionRow's .srow chrome is
@@ -191,6 +191,13 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // Eyebrow's verbatim spec chrome (BET-614 stage 4): the 11px label
   // (text-[11px]) is its only off-grid px.
   Eyebrow: [11],
+  // SettingsRow's verbatim spec chrome (BET-614 stage 5): the 2px control
+  // top-padding (pt-[2px]) and the 3px help top-margin (mt-[3px]) are its two
+  // off-grid values. The 12.5px help text (text-[12.5px]) reads as 5px through
+  // the `\d+px` decimal-tail scan, so 5 is allow-listed too — the same
+  // handling Button/Tag give their 12.5/11.5px labels. Real values from the
+  // redesign spec's `.setrow` definition, not drift.
+  SettingsRow: [2, 3, 5],
 };
 
 const SKIP_REASON: Record<string, string> = {
@@ -206,6 +213,8 @@ const SKIP_REASON: Record<string, string> = {
     "no adopting file this stage (BET-614 stage 4): neither named adopter (Settings.tsx, NewSessionScreen.tsx) contains an icon-above-label tile — Settings' rail tabs are horizontal, interactive nav rows (aria tablist) and NewSessionScreen has no such tile — so per the epic rule both are REPORTED here (BET-618). Registered under the enforce net (its 1a/1c/D4 checks still run) while the owner decides on real adopters; no call-site migration exists to assert.",
   Eyebrow:
     "single-web-adopter this stage (BET-614 stage 4): its one genuine home is Settings.tsx (the GroupCard uppercase section label). The second named adopter, NewSessionScreen.tsx, has no uppercase section label — REPORTED here (BET-618) rather than force-converted. Pending an owner decision on a real second web adopter before the waiver resolves.",
+  SettingsRow:
+    "no adopting file this stage (BET-614 stage 5): the premise that Settings.tsx's private SettingField already implements `.setrow` and only needs extracting does NOT hold — that SettingField is a Field-based text/password input (entry/value/onCommit/credential), not a row with name/help/children. Neither named adopter (Settings.tsx, ProvidersCard.tsx) carries a genuine `.setrow` row: Settings.tsx's schema rows hand-roll their own simpler chrome and ProvidersCard.tsx's rows are endpoint list items. Converting either to satisfy the count would change the settings panel's visual layout (adds row dividers + spec typography) or force-fit an unrelated element — both forbidden — so this stage builds + registers the owner-approved primitive and REPORTS both adopters (BET-619). Pending an owner decision on a real web adopter (a `.setrow` migration of the settings panel) before the waiver resolves.",
 };
 
 describe("M527 primitive rules", () => {
@@ -262,6 +271,7 @@ describe("M527 primitive rules", () => {
       "h-[23px]": ["Tag.tsx"], // the tag pill's 23px hit area — the mono metadata badge signature (BET-614)
       "text-[10.5px]": ["IconCard.tsx"], // the icon-card's mono label size (BET-614)
       "tracking-[.1em]": ["Eyebrow.tsx"], // the eyebrow's letter-spaced uppercase signature (BET-614)
+      "last:border-b-0": ["SettingsRow.tsx"], // the settings-row trailing-border removal — the .setrow row-divider signature (BET-614)
     };
 
     it("no non-owner file contains a primitive's owned chrome", () => {
