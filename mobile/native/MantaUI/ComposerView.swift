@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import PhotosUI
 import UniformTypeIdentifiers
 
@@ -51,6 +52,12 @@ struct ComposerView: View {
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
     @State private var showModelPicker = false
+    /// Measured height of the text area, used to decide the composer's layout.
+    /// Measured rather than counted because wrapping — not newlines — is what
+    /// makes the box tall: one long pasted sentence is several visual lines.
+    @State private var textHeight: CGFloat = 0
+    /// The near-full-screen editing sheet, opened by the expand control.
+    @State private var showExpanded = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -62,58 +69,27 @@ struct ComposerView: View {
             // runs one presentation and silently drops the others, which is
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
+            expandAnchor
             // Model chip sits above the input box on its own row.
             HStack(spacing: Metrics.spacing.sp1) {
                 modelPill
                 Spacer(minLength: 0)
             }
-            // Floating input box: rounded rect (fixed radius so it stays
-            // rectangular regardless of how tall the text grows), glass fill,
-            // thin border. Everything lives INSIDE — chips at the top, text in
-            // the middle, attach/mic/send at the bottom.
-            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                // Attachment chips inside the box, above the text field.
-                if !attachments.isEmpty { chipsRow }
-                // Text field.
-                ZStack(alignment: .topLeading) {
-                    if text.isEmpty {
-                        Text("Message…")
-                            .font(.system(size: Metrics.type.body))
-                            .foregroundColor(tokens.tx4)
-                            .padding(.top, 8)
-                            .padding(.leading, 5)
-                            .allowsHitTesting(false)
-                    }
-                    TextEditor(text: $text)
-                        .font(.system(size: Metrics.type.body))
-                        .foregroundColor(tokens.tx1)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: Metrics.type.display,
-                               maxHeight: Metrics.type.display * 6)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .focused($inputFocused)
-                        .accessibilityIdentifier("composer-input")
-                }
-                // Bottom row: attach on the left, mic + send on the right.
-                HStack(spacing: Metrics.spacing.sp2) {
-                    attachButton
-                    Spacer(minLength: 0)
-                    if micAvailable { micButton }
-                    sendButton
-                }
-            }
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.vertical, Metrics.spacing.sp2)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
-            // Border carries the background-refetch signal (BET-630 D1):
-            // tints to accent while refreshing, never while a turn runs.
-            .overlay {
-                RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
-                    .strokeBorder(
-                        store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle,
-                        lineWidth: Metrics.spacing.spPx
-                    )
-            }
+            // The input box has TWO layouts, because one shape cannot serve
+            // both states well:
+            //
+            //  * compact — a single capsule row, [+] text [mic] [send], which
+            //    is the resting state and what a one-line prompt should look
+            //    like.
+            //  * stacked — a rounded RECT with chips on top, the text in the
+            //    middle and the controls pinned along the bottom. A capsule
+            //    cannot be used here: its corner radius tracks half its height,
+            //    so a tall capsule turns into a blob.
+            //
+            // Stacked kicks in once the text passes two visual lines, or as
+            // soon as there are attachment chips (which need a row of their
+            // own and so cannot fit the single-row form).
+            if isStacked { stackedBox } else { compactBox }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -138,10 +114,196 @@ struct ComposerView: View {
 
     // The composer's top hairline — and the ambient `RefetchSweep` that ran
     // along it during a background refetch (BET-630 D1) — are both gone with
-    // the full-bleed bar: the floating rounded rect has no divider to sweep.
-    // The refetch signal moved onto the box's border (see the stroke in `body`),
-    // so the state is still shown and still never shares an indicator with the
-    // running row.
+    // the full-bleed bar: the floating box has no divider to sweep. The refetch
+    // signal moved onto the box's border (see `boxChrome`), so the state is
+    // still shown and still never shares an indicator with the running row.
+
+    // MARK: - Input box (two layouts)
+
+    /// One visual line of the input's font — the unit the layout switch is
+    /// measured in. Taken from the font itself rather than guessed, so it
+    /// tracks a type-scale change.
+    private var lineHeight: CGFloat {
+        UIFont.systemFont(ofSize: Metrics.type.body).lineHeight
+    }
+
+    /// True once the text runs past two visual lines. Wrapping counts, not just
+    /// newlines. The `0.5` is slack so the row the caret is on does not flip
+    /// the layout a pixel early as the editor rounds its own height.
+    private var isTall: Bool {
+        textHeight > lineHeight * 2.5
+    }
+
+    /// Chips force the stacked form even on a short message: they need a row of
+    /// their own, and there is nowhere to put one inside a single-row capsule.
+    private var isStacked: Bool {
+        isTall || !attachments.isEmpty
+    }
+
+    /// Compact: everything on one row inside a capsule.
+    private var compactBox: some View {
+        HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+            attachButton
+            textArea
+            if micAvailable { micButton }
+            sendButton
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp1)
+        .modifier(BoxChrome(shape: AnyShape(Capsule(style: .continuous)), stroke: borderColor))
+    }
+
+    /// Stacked: chips + expand on top, text in the middle, controls pinned to
+    /// the bottom.
+    private var stackedBox: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            // Chips and the expand control share the top row. The chip strip is
+            // given the remaining width and stops short of the button, so a
+            // long chip list scrolls under its own clip rather than colliding
+            // with the control.
+            if !attachments.isEmpty || isTall {
+                HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+                    if !attachments.isEmpty {
+                        chipsRow
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .clipped()
+                    } else {
+                        Spacer(minLength: 0)
+                    }
+                    if isTall { expandButton }
+                }
+            }
+            textArea
+            // Controls pinned along the bottom, only in this layout.
+            HStack(spacing: Metrics.spacing.sp2) {
+                attachButton
+                Spacer(minLength: 0)
+                if micAvailable { micButton }
+                sendButton
+            }
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .modifier(BoxChrome(
+            shape: AnyShape(RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)),
+            stroke: borderColor
+        ))
+    }
+
+    /// Accent while a background refetch is in flight, and never while a turn
+    /// runs — the two states must not share an indicator (BET-630 D1).
+    private var borderColor: Color {
+        store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle
+    }
+
+    /// The text field, shared by both layouts. It reports its own height so the
+    /// layout switch has something real to measure.
+    private var textArea: some View {
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text("Message…")
+                    .font(.system(size: Metrics.type.body))
+                    .foregroundColor(tokens.tx4)
+                    .padding(.top, 8)
+                    .padding(.leading, 5)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $text)
+                .font(.system(size: Metrics.type.body))
+                .foregroundColor(tokens.tx1)
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: lineHeight + Metrics.spacing.sp2,
+                       maxHeight: lineHeight * 6)
+                .fixedSize(horizontal: false, vertical: true)
+                .focused($inputFocused)
+                .accessibilityIdentifier("composer-input")
+                // `onGeometryChange` rather than a PreferenceKey +
+                // `onPreferenceChange`: under Swift 6 that pair reports the
+                // height through a @Sendable closure, which cannot write to
+                // this view's @State without hopping actors. This modifier is
+                // the iOS 18 replacement built for exactly this and runs on the
+                // main actor already.
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    textHeight = height
+                }
+        }
+    }
+
+    /// Opens the near-full-screen editing sheet. Only shown in the stacked
+    /// layout, where the message is already long enough for the small box to be
+    /// the constraint.
+    private var expandButton: some View {
+        Button {
+            showExpanded = true
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: Metrics.type.small, weight: .semibold))
+                .foregroundColor(tokens.tx3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Expand composer")
+        .accessibilityIdentifier("composer-expand")
+    }
+
+    /// The expanded sheet hangs off its OWN zero-size anchor. It cannot go on
+    /// the composer root, which already carries the model-picker sheet — when
+    /// two sheet-family presentations sit on one view SwiftUI honours only one
+    /// of them, which is the bug that once made attaching a file do nothing.
+    private var expandAnchor: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .sheet(isPresented: $showExpanded) { expandedComposer }
+    }
+
+    /// Near-full-screen editing surface: the text fills the sheet, a collapse
+    /// control sits top-right and send sits bottom-right. Sending closes the
+    /// sheet, because the message it was opened to write is gone.
+    private var expandedComposer: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+            HStack {
+                Spacer(minLength: 0)
+                Button {
+                    showExpanded = false
+                } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.tx2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Collapse composer")
+            }
+            if !attachments.isEmpty { chipsRow }
+            TextEditor(text: $text)
+                .font(.system(size: Metrics.type.body))
+                .foregroundColor(tokens.tx1)
+                .scrollContentBackground(.hidden)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("composer-input-expanded")
+            HStack(spacing: Metrics.spacing.sp2) {
+                attachButton
+                Spacer(minLength: 0)
+                if micAvailable { micButton }
+                Button {
+                    submit()
+                    showExpanded = false
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(canSend ? tokens.onAccent : tokens.tx4)
+                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                        .background(canSend ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
+            }
+        }
+        .padding(Metrics.spacing.sp4)
+        .background(tokens.panel.ignoresSafeArea())
+        .presentationDetents([.large])
+    }
 
     // MARK: - Model pill
 
@@ -486,3 +648,23 @@ struct ComposerView: View {
     }
 }
 
+
+/// The input box's shared chrome: glass fill, hairline border, one shape.
+///
+/// It takes the shape as a parameter because the two layouts genuinely need
+/// different ones — a capsule when the box is one row, a rounded rect once it
+/// is tall (a capsule's radius is half its height, so a tall one is a blob).
+/// Passing the shape keeps the fill and the border in ONE place instead of
+/// each layout repeating both and drifting apart.
+private struct BoxChrome: ViewModifier {
+    let shape: AnyShape
+    let stroke: Color
+
+    func body(content: Content) -> some View {
+        content
+            .background(.ultraThinMaterial, in: shape)
+            .overlay {
+                shape.stroke(stroke, lineWidth: 1)
+            }
+    }
+}
