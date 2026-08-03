@@ -185,10 +185,7 @@ final class ChatSessionStore: ObservableObject {
     private func applyStreamState() {
         guard let s = eventStore.sessionStates[sessionId] else { return }
 
-        let mergedText = s.textByPart.values
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        inProgressText = mergedText
+        inProgressText = s.liveText
 
         running = s.running == true
         turnComplete = s.turnComplete == true
@@ -220,8 +217,11 @@ final class ChatSessionStore: ObservableObject {
         }
 
         // Refetch the canonical transcript at turn boundaries so a finished
-        // turn's blocks (steps/prose/subagents) land as real content and the
-        // in-progress text is absorbed (no duplication while streaming).
+        // turn's blocks (steps/prose/subagents) land as real content. The fetch
+        // itself retires the live text it now covers (see `fetchTranscript`) —
+        // absorption is an explicit step, not something the refetch does for
+        // free. Assuming it was free is what rendered every finished answer
+        // twice (BET-655).
         //
         // The FIRST call here is not a transition, it is the initial snapshot:
         // `@Published` replays its current value the moment we subscribe, which
@@ -261,6 +261,10 @@ final class ChatSessionStore: ObservableObject {
     /// tail (the streaming assistant text, §8). Keeping them separate makes the
     /// scroll `defaultScrollAnchor(.bottom)` cheap: only the tail mutates
     /// between turn boundaries.
+    ///
+    /// The two sources must never hold the same prose at once — that is a
+    /// visible duplicate, not a harmless overlap. The tail is emptied by the
+    /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
         if inProgressText.isEmpty {
             blocks = transcript
@@ -322,6 +326,19 @@ final class ChatSessionStore: ObservableObject {
                 if !didFail { hasEarlier = loaded.count >= limit }
                 if !didFail || isFirstLoad {
                     transcript = ChatTranscriptMapper.blocks(from: loaded)
+                    // The transcript now carries these messages, so any live
+                    // copy of them is a duplicate — retire it BEFORE rebuilding
+                    // or the finished answer renders twice, once from each
+                    // source (BET-655). Read the pruned text back synchronously:
+                    // the event-store sink lands on a later run-loop turn, too
+                    // late for the rebuild happening right here.
+                    if !didFail {
+                        eventStore.retireCoveredStreamText(
+                            sessionId: sessionId,
+                            covered: Set(loaded.map(\.info.id))
+                        )
+                        inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
+                    }
                     rebuildBlocks()
                 }
             }

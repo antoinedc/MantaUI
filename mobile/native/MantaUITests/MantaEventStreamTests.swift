@@ -263,6 +263,79 @@ final class MantaEventStreamRouterTests: XCTestCase {
         let resulting = MantaStreamRouter.applying(status, to: original)
         XCTAssertEqual(resulting, original)
     }
+
+    // MARK: - Retiring covered text (BET-655)
+
+    private func flush(_ messageID: String, _ partID: String, _ text: String, field: String = "text") throws -> MantaStreamFrame {
+        try MantaStreamFrame.parse(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"\#(messageID)","partID":"\#(partID)","field":"\#(field)","text":"\#(text)"}}"#)
+    }
+
+    /// The live tail is joined in ARRIVAL order. A dictionary's values are
+    /// unordered, so the previous shape could shuffle a multi-part answer.
+    func testLiveTextKeepsArrivalOrder() throws {
+        var state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "first"), to: nil)
+        state = MantaStreamRouter.applying(try flush("msg_2", "part_2", "second"), to: state)
+        state = MantaStreamRouter.applying(try flush("msg_2", "part_3", "third"), to: state)
+
+        XCTAssertEqual(state.liveText, "first\nsecond\nthird")
+    }
+
+    func testReasoningIsNotPartOfTheLiveTail() throws {
+        var state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "prose"), to: nil)
+        state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "thinking", field: "reasoning"), to: state)
+
+        XCTAssertEqual(state.liveText, "prose")
+        XCTAssertEqual(state.textByPart["part_1"], "prose")
+        XCTAssertEqual(state.reasoningByPart["part_1"], "thinking")
+    }
+
+    /// THE REGRESSION: a finished turn whose message the canonical transcript
+    /// now carries must leave NO live text behind, or the screen renders the
+    /// same answer twice — once canonical, once live.
+    func testRetiresTextCoveredByTheTranscript() throws {
+        var state = MantaStreamRouter.applying(try flush("msg_2", "part_3", "the answer"), to: nil)
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#),
+            to: state
+        )
+
+        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2"])
+
+        XCTAssertEqual(retired.liveText, "")
+        XCTAssertTrue(retired.chunks.isEmpty)
+    }
+
+    func testKeepsTextTheTranscriptDoesNotCoverYet() throws {
+        let state = MantaStreamRouter.applying(try flush("msg_9", "part_3", "brand new"), to: nil)
+        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2"])
+        XCTAssertEqual(retired.liveText, "brand new")
+    }
+
+    /// A mid-turn transcript holds only the prose written before the fetch, so
+    /// retiring the streaming message there would split one answer in two and
+    /// drop whatever arrived since. It is kept until the turn ends.
+    func testKeepsTheStreamingMessageEvenWhenCovered() throws {
+        var state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#),
+            to: nil
+        )
+        state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "done earlier"), to: state)
+        state = MantaStreamRouter.applying(try flush("msg_7", "part_2", "still writing"), to: state)
+
+        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2", "msg_7"])
+
+        XCTAssertEqual(retired.liveText, "still writing")
+    }
+
+    /// Retirement runs after every fetch, so it must be idempotent — a second
+    /// pass over already-clean state must not change it (or the store would
+    /// republish and wake every subscriber on a no-op).
+    func testRetiringIsIdempotent() throws {
+        let state = MantaStreamRouter.applying(try flush("msg_2", "part_3", "answer"), to: nil)
+        let once = MantaStreamRouter.retiring(state, covered: ["msg_2"])
+        let twice = MantaStreamRouter.retiring(once, covered: ["msg_2"])
+        XCTAssertEqual(once, twice)
+    }
 }
 
 // MARK: - Reconnect controller
@@ -467,5 +540,132 @@ final class MantaEventStoreTests: XCTestCase {
         XCTAssertEqual(MantaEventStore.bearer(token: "abc"), "Bearer abc")
         XCTAssertNil(MantaEventStore.bearer(token: ""))
         XCTAssertNil(MantaEventStore.bearer(token: nil))
+    }
+}
+
+// MARK: - Stream text ↔ canonical transcript seam (BET-655)
+//
+// The screen draws the canonical transcript PLUS the live streamed tail. The
+// two must never hold the same prose at once. Nothing retired the tail, so
+// every finished answer was drawn twice — once canonical, once live — and the
+// tail then accumulated across the whole session. These tests drive the real
+// seam: frames in through the stream, a canonical transcript in over the wire.
+
+private final class StubTranscriptURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var result: String = #"{"result": []}"#
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let data = Data(Self.result.utf8)
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+@MainActor
+final class ChatSessionStoreRetirementTests: XCTestCase {
+
+    private func makeEventStore(_ fake: FakeStreamControl) -> MantaEventStore {
+        MantaEventStore(
+            stream: fake,
+            tokenProvider: { "feedfacefeedfacefeedfacefeedface" },
+            serverProvider: { URL(string: "https://0123.boxes.mantaui.com") }
+        )
+    }
+
+    private func makeAPI() -> MantaAPIClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubTranscriptURLProtocol.self]
+        return MantaAPIClient(
+            serverURL: URL(string: "https://box.example")!,
+            tokenProvider: { "tok" },
+            session: URLSession(configuration: config)
+        )
+    }
+
+    /// A canonical transcript carrying one assistant message with `text`.
+    private func transcriptResult(messageID: String, text: String) -> String {
+        """
+        {"result":[{"info":{"id":"\(messageID)","sessionID":"ses_1","role":"assistant"},\
+        "parts":[{"type":"text","id":"part_3","messageID":"\(messageID)","text":"\(text)"}]}]}
+        """
+    }
+
+    private func proseCount(_ blocks: [TranscriptBlock], containing needle: String) -> Int {
+        blocks.reduce(into: 0) { total, block in
+            if case .prose(let body) = block, body.contains(needle) { total += 1 }
+        }
+    }
+
+    /// THE REGRESSION. Stream an answer, complete the turn, then let the
+    /// canonical refetch land: the answer must appear exactly ONCE.
+    func testFinishedAnswerIsNotRenderedTwice() async throws {
+        let fake = FakeStreamControl()
+        fake.hasConnectedOnce = true
+        fake.drive(.connected)
+        let eventStore = makeEventStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"the answer"}}"#)
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+
+        StubTranscriptURLProtocol.result = transcriptResult(messageID: "msg_2", text: "the answer")
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+
+        await store.refetch()
+
+        XCTAssertEqual(proseCount(store.blocks, containing: "the answer"), 1)
+        XCTAssertTrue(store.inProgressText.isEmpty)
+    }
+
+    /// While the turn is still streaming the tail is the ONLY copy, so a
+    /// refetch that returns nothing for it must leave it on screen.
+    func testStreamingTailSurvivesARefetchThatDoesNotCoverIt() async throws {
+        let fake = FakeStreamControl()
+        fake.hasConnectedOnce = true
+        fake.drive(.connected)
+        let eventStore = makeEventStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#)
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_9","partID":"part_1","field":"text","text":"still writing"}}"#)
+
+        StubTranscriptURLProtocol.result = transcriptResult(messageID: "msg_2", text: "an older turn")
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+
+        await store.refetch()
+
+        XCTAssertEqual(store.inProgressText, "still writing")
+        XCTAssertEqual(proseCount(store.blocks, containing: "still writing"), 1)
+    }
+
+    /// A failed refetch proves nothing about what the transcript carries, so it
+    /// must not retire the tail — that would erase the answer from the screen.
+    func testAFailedRefetchDoesNotRetireTheTail() async throws {
+        let fake = FakeStreamControl()
+        fake.hasConnectedOnce = true
+        fake.drive(.connected)
+        let eventStore = makeEventStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"the answer"}}"#)
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+
+        StubTranscriptURLProtocol.result = "not json at all"
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+
+        await store.refetch()
+
+        // Asserted on the event store, not the published tail: retirement is
+        // synchronous, whereas the store's sink lands on a later run-loop turn.
+        XCTAssertEqual(eventStore.sessionStates["ses_1"]?.liveText, "the answer")
     }
 }
