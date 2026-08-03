@@ -60,7 +60,7 @@ export function SessionHeader({
   onCompact,
   onClear,
   onDelete,
-  breadcrumb: _breadcrumb,
+  breadcrumb,
   mode,
   onModeChange,
   availableLaunchers,
@@ -100,71 +100,75 @@ export function SessionHeader({
   const fill = ctxStageColor(pct);
   const showContext = totalInput > 0;
   const stale = staleCache.isStale;
+  const crumb = breadcrumb
+    ? breadcrumb.window
+      ? `${breadcrumb.project} / ${breadcrumb.window}`
+      : breadcrumb.project
+    : "";
 
   return (
     <div
-      className="manta-session-header absolute top-3 left-0 right-0 z-20 flex items-center gap-2 px-3 pointer-events-none shrink-0 min-w-0"
-      style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
+      style={{ WebkitAppRegion: "drag" } as CSSProperties}
     >
-      {/* Left: branch chip — session state, on the header's shared glass
-            surface. The chip's own chrome comes from `Tag` at the `sm`
-            density; the glass pill supplies only the surface (fill, edge,
-            blur, capsule), exactly as it does for the context pill and the ⋯
-            trigger, so all three items in this row are one construction.
-            `plain` is what stops Tag drawing a second edge inside the glass
-            one. `sm` over `md` is the sizing fix: at the full badge size this
-            chip stood ~28px tall and was the tallest thing in the row, which
-            read as a control rather than as the label it is. */}
-      <div className="pointer-events-auto flex items-center gap-2">
-        {branch && (
-          <div className="manta-glass-pill flex items-center">
-            <Tag
-              size="sm"
-              plain
-              icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
-              title={`Current branch: ${branch}`}
-            >
-              <span className="shrink-0 truncate max-w-[160px]">{branch}</span>
-            </Tag>
-          </div>
-        )}
-      </div>
+      {/* Breadcrumb — workspace / session. This names WHERE YOU ARE, and it is
+            the header's primary job: one window shows many sessions across
+            many workspaces, and the branch alone does not identify one. It is
+            not decoration, and nothing else in the desktop chrome carries it. */}
+      {crumb && (
+        <span
+          className="text-label text-text-faint shrink-0 truncate max-w-[200px]"
+          title={crumb}
+        >
+          {crumb}
+        </span>
+      )}
 
-      {/* Right group — context pill, session menu */}
+      {/* Branch chip — session state, at the `sm` tag density so it reads as
+            metadata beside the breadcrumb rather than as a control. */}
+      {branch && (
+        <Tag
+          size="sm"
+          icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+          title={`Current branch: ${branch}`}
+        >
+          <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
+        </Tag>
+      )}
+
+      {/* Right group — context pill, session menu. Opts out of the header's
+            drag region so the controls stay clickable. */}
       <div
-        className="ml-auto flex items-center gap-2 pointer-events-auto"
+        className="ml-auto flex items-center gap-2"
+        style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
       >
         {showContext && (
-          <div className="manta-glass-pill flex items-center">
-            <ContextPill
-              pct={pct}
-              segments={segments}
-              fill={fill}
-              stale={stale}
-              totalInput={totalInput}
-              ctxLimit={ctxLimit}
-              freshInput={freshInput}
-              cacheRead={cacheRead}
-              cacheWrite={cacheWrite}
-              modelName={modelName}
-              staleCache={staleCache}
-              onClear={onClear}
-            />
-          </div>
+          <ContextPill
+            pct={pct}
+            segments={segments}
+            fill={fill}
+            stale={stale}
+            totalInput={totalInput}
+            ctxLimit={ctxLimit}
+            freshInput={freshInput}
+            cacheRead={cacheRead}
+            cacheWrite={cacheWrite}
+            modelName={modelName}
+            staleCache={staleCache}
+            onClear={onClear}
+          />
         )}
 
         {hasSession && !readOnly && (
-          <div className="manta-glass-pill flex items-center">
-            <SessionMenu
-              mode={mode}
-              onModeChange={onModeChange}
-              availableLaunchers={availableLaunchers}
-              onFork={onFork}
-              onCompact={onCompact}
-              onClear={onClear}
-              onDelete={onDelete}
-            />
-          </div>
+          <SessionMenu
+            mode={mode}
+            onModeChange={onModeChange}
+            availableLaunchers={availableLaunchers}
+            onFork={onFork}
+            onCompact={onCompact}
+            onClear={onClear}
+            onDelete={onDelete}
+          />
         )}
       </div>
     </div>
