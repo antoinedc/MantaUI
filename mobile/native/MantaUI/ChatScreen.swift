@@ -124,10 +124,20 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Trailing 38×38 glass button (§8) — a placeholder in S4 (the
-            // overflow sheet with fork/settings is a later stage).
-            Color.clear
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            // Trailing 38×38 glass button (§8) — a tappable placeholder in S4.
+            // Inert until BET-626 builds the real overflow sheet; it carries a
+            // stable identifier so the simulator capture driver (BET-625) and
+            // BET-626 can both address it. No action yet — BET-626 wires it.
+            Button(action: {}) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.tx1)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .accessibilityLabel("More options")
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("overflow-button")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
