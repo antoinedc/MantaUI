@@ -37,11 +37,13 @@ struct ModelPickerSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                HStack(spacing: 0) {
+                HStack(spacing: 8) {
                     modelWheel
                     effortWheel
+                        .frame(width: 116)
                 }
                 .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
 
                 Text(footer)
                     .font(.footnote)
@@ -58,7 +60,7 @@ struct ModelPickerSheet: View {
                 }
             }
         }
-        .presentationDetents([.height(320)])
+        .presentationDetents([.height(420)])
         .presentationDragIndicator(.visible)
         .onAppear { modelStore.load() }
     }
