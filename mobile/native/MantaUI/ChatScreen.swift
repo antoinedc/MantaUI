@@ -156,13 +156,29 @@ private struct ChatScreenContent: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom) {
+        // The bottom stack is an OVERLAY, not a safeAreaInset.
+        //
+        // As an inset, the composer's height was part of the scroll view's
+        // layout: every line the text gained shrank the viewport, and with the
+        // transcript anchored to its bottom the content shifted by the same
+        // amount. So growing the composer scrolled the conversation — on the
+        // first wrap and on every line break after it.
+        //
+        // As an overlay it takes no layout space, so the viewport never
+        // changes size and the transcript does not move at all while the
+        // composer grows; the composer simply covers more of it. The space the
+        // inset used to reserve is now a fixed spacer at the tail of the scroll
+        // content (see `transcript`), sized for the composer at REST — so the
+        // last message still comes to rest above a compact composer, and a
+        // grown one overlaps content that is dimmed by the scrim below rather
+        // than pushing it.
+        .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 bottomCards
                 // BET-630 (D1): the running-state working row. Shown only while a
                 // turn runs; the ambient refetch sweep lives on the composer's
-                // top divider and means a different thing, so the two never
-                // share an indicator. Not shown during a background refetch.
+                // border and means a different thing, so the two never share an
+                // indicator. Not shown during a background refetch.
                 if store.running {
                     RunningIndicator(store: store)
                 }
@@ -173,6 +189,25 @@ private struct ChatScreenContent: View {
                     store: store,
                     modelStore: modelStore
                 )
+            }
+            // Scrim: transcript text passing behind the composer fades out
+            // instead of competing with it. Transparent at the top so there is
+            // no visible edge, opaque by the bottom. It sits BEHIND the stack
+            // and ignores the safe area so the home-indicator strip is covered
+            // too. `allowsHitTesting(false)` keeps it from stealing taps meant
+            // for the transcript.
+            .background {
+                LinearGradient(
+                    colors: [
+                        tokens.canvas.opacity(0),
+                        tokens.canvas.opacity(0.75),
+                        tokens.canvas.opacity(0.95),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .bottom)
+                .allowsHitTesting(false)
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -367,6 +402,22 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
+    /// Space the transcript reserves for the floating composer.
+    ///
+    /// FIXED, and deliberately sized for the composer at REST rather than
+    /// tracking its live height. Tracking is what the safeAreaInset used to do,
+    /// and it is precisely why the transcript lurched every time the text
+    /// wrapped. A constant means the viewport never changes, so the
+    /// conversation holds still while the composer grows over it.
+    ///
+    /// Covers the model-chip row, the compact input box and the stack's own
+    /// vertical padding — all from the tokens those are laid out with.
+    private static let composerReservedHeight =
+        Metrics.type.chatHeaderBtn          // compact input row
+        + Metrics.spacing.sp1 * 2           // its vertical padding
+        + Metrics.type.small + Metrics.spacing.sp1 * 2  // model chip row
+        + Metrics.spacing.sp2 * 3           // stack spacing + outer padding
+
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -392,7 +443,13 @@ private struct ChatScreenContent: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
-                        .padding(.bottom, Metrics.spacing.sp2)
+                    // Reserve for the floating composer, inside the scroll
+                    // content — the mirror of the header spacer at the top.
+                    // The composer is an overlay and reserves nothing itself,
+                    // so without this the last message would rest underneath
+                    // it. AFTER the anchor, so "scroll to bottom" still lands
+                    // on the last message rather than on empty space.
+                    Color.clear.frame(height: Self.composerReservedHeight)
                 }
                 // Pin the content to the scroll view's own width. A vertical scroll
                 // view otherwise sizes itself to its WIDEST child, so one long line
