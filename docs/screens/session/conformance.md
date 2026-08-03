@@ -4,7 +4,7 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (c274d90)
+Last reviewed: 2026-08-03 (0a7b57e)
 
 ## Resolved
 
