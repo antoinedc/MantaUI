@@ -186,15 +186,79 @@ designed and should not be invented here.
 
 ---
 
-## Work implied (not scheduled here)
+---
 
-1. Overflow sheet + its nine items — the bulk of it.
-2. Session-loading skeleton.
-3. Running-state call (subtitle-only vs desktop's row + ambient sweep), then
-   delete or formalise the ad-hoc spinner row.
-4. Fix the prose→step-group gap against §3's numbers.
-5. Context % at idle.
-6. Branch: decide in/out; if in, the sheet header.
+# Part 2 — the build spec
 
-Items 1-3 and 6 need a decision from the design record's owner; 4 and 5 are
-straight defects against text already written.
+## Why the first spec did not get built
+
+Not because it was ignored. Because it was never asked for. The design record is
+prose organised by screen, while the work was cut into stage tickets (S1…S8)
+organised by plumbing. S4 built the chat screen, wrote
+`// a placeholder in S4 (the overflow sheet with fork/settings is a later
+stage)`, and **no later stage was ever filed**. The same is true of the loading
+skeleton and the idle context percent: no line item, no owner, no due date, so
+they were never late — they were invisible.
+
+Three rules make this round different, and they are the whole proposal:
+
+1. **One decision = one issue.** No "chat polish" bucket. A prose paragraph in
+   DECISIONS.md is not a work item; the table below is.
+2. **Acceptance is a screenshot, not a claim.** Every item states the exact
+   surface to capture and what must be visible in it. The capture is produced by
+   the simulator driver (`manta-sim-drive`), so the reviewer looks at the pixels
+   rather than at a diff. An item whose surface cannot be reached by the driver
+   is not startable — hence item 0.
+3. **A placeholder must carry its own issue key.** If a stage ships
+   `Color.clear` in place of a control, the comment cites the issue that will
+   replace it. A placeholder with no key is a defect in review.
+
+## Locked decisions
+
+The four open calls, decided. Each is the cheaper half of the trade unless noted.
+
+- **D1 — Running state: port the desktop pair.** A working row above the
+  composer (spinner + verb + elapsed, e.g. `working · 1m 12s`), plus the ambient
+  hairline sweep on the composer's top divider while the transcript is syncing.
+  They mean different things and must not share one indicator. The header
+  subtitle stays as specified — it is the at-a-glance status, not the wait
+  affordance. The ad-hoc `ProgressView` row becomes this row.
+- **D2 — Session loading: transcript-shaped skeleton.** Three greyed blocks at
+  the user-band / prose / step-group rhythm, replaced in place. No full-screen
+  spinner (it discards the scroll position and flashes on a warm reopen), no
+  layout shift.
+- **D3 — Context percent shows at idle**: `idle · 8%`. The number matters most
+  before sending, which is exactly when the session is idle.
+- **D4 — Branch lives in the overflow sheet header**, under the session name:
+  `⎇ main`. It stays out of the two-line header, which is a status line and
+  already has three fields.
+
+## Build order
+
+Sequential — each row's acceptance depends on the one above it existing.
+
+| # | Item | Done when the capture shows |
+|---|---|---|
+| 0 | Driver actions: open the overflow sheet, capture mid-turn, capture during load | The driver can produce every capture below on demand |
+| 1 | Overflow sheet shell (two-button header, real sheet, grabber, half/full detents, branch in its header per D4) | Trailing header button opens a half-height sheet titled with the session name and `⎇ <branch>` |
+| 2 | Sheet items 1-3: attach · scheduled tasks (live count) · secrets | The three rows, the count badge non-zero with a schedule present, each opening its card |
+| 3 | Sheet items 4-6: webhooks · compact · clear (action sheet, destructive top, Cancel detached) | Clear shows a NATIVE action sheet, destructive item first |
+| 4 | Sheet items 7-9: fork · open terminal · delete session (destructive) | Fork lands on the new session; terminal opens the terminal screen |
+| 5 | Running row + ambient sweep (D1) | Mid-turn capture shows the row with a live elapsed time; refetch shows the sweep and no row |
+| 6 | Loading skeleton (D2) | Capture during load shows three skeleton blocks, not a blank canvas |
+| 7 | Prose→step-group gap defect (§3 numbers) | Capture matches the mockup's `--sp-3` below prose and below a group |
+| 8 | Context percent at idle (D3) | Header reads `idle · N%` |
+
+Items 7 and 8 are small enough to land with any of the rows above them; they are
+listed separately so neither is absorbed into "polish" and lost again.
+
+## Rules that survive this round
+
+- Header keeps **two** controls. Anything new goes in the sheet
+  (`DECISIONS.md:770-775`).
+- Native alerts and action sheets only — never a web dialog
+  (`DECISIONS.md:709-711`).
+- Machinery collapses, prose does not (`DECISIONS.md:644-660`). No item here may
+  loosen step-row density to fix a spacing bug.
+- Model picker stays in the composer; trust mode stays a Settings toggle.
+  Per-session trust was never designed and is not invented here.
