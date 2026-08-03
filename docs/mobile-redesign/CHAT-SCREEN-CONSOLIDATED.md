@@ -204,11 +204,12 @@ Three rules make this round different, and they are the whole proposal:
 
 1. **One decision = one issue.** No "chat polish" bucket. A prose paragraph in
    DECISIONS.md is not a work item; the table below is.
-2. **Acceptance is a screenshot, not a claim.** Every item states the exact
-   surface to capture and what must be visible in it. The capture is produced by
-   the simulator driver (`manta-sim-drive`), so the reviewer looks at the pixels
-   rather than at a diff. An item whose surface cannot be reached by the driver
-   is not startable — hence item 0.
+2. **Acceptance is the app on a real phone.** Each item ships to the device and
+   is checked there, then corrected in the next pass. Automated simulator
+   captures were tried and dropped: driving the UI to the surface under test
+   costs more than it proves, and a screenshot of the wrong screen is worse than
+   no screenshot. Each item still states what must be visible — that is the
+   check, it is just performed by a human.
 3. **A placeholder must carry its own issue key.** If a stage ships
    `Color.clear` in place of a control, the comment cites the issue that will
    replace it. A placeholder with no key is a defect in review.
@@ -237,16 +238,15 @@ The four open calls, decided. Each is the cheaper half of the trade unless noted
 
 Sequential — each row's acceptance depends on the one above it existing.
 
-| # | Item | Done when the capture shows |
+| # | Item | Done when, on the phone |
 |---|---|---|
-| 0 | Driver actions: open the overflow sheet, capture mid-turn, capture during load | The driver can produce every capture below on demand |
-| 1 | Overflow sheet shell (two-button header, real sheet, grabber, half/full detents, branch in its header per D4) | Trailing header button opens a half-height sheet titled with the session name and `⎇ <branch>` |
-| 2 | Sheet items 1-3: attach · scheduled tasks (live count) · secrets | The three rows, the count badge non-zero with a schedule present, each opening its card |
-| 3 | Sheet items 4-6: webhooks · compact · clear (action sheet, destructive top, Cancel detached) | Clear shows a NATIVE action sheet, destructive item first |
+| 1 | Overflow sheet shell (two-button header, real sheet, grabber, half/full detents, branch in its header per D4) | The trailing header button opens a half-height sheet titled with the session name and `⎇ <branch>` |
+| 2 | Sheet items 1-3: attach · scheduled tasks (live count) · secrets | The three rows are there, the count badge is non-zero with a schedule present, each opens its card |
+| 3 | Sheet items 4-6: webhooks · compact · clear (action sheet, destructive top, Cancel detached) | Clear shows a native action sheet, destructive item first |
 | 4 | Sheet items 7-9: fork · open terminal · delete session (destructive) | Fork lands on the new session; terminal opens the terminal screen |
-| 5 | Running row + ambient sweep (D1) | Mid-turn capture shows the row with a live elapsed time; refetch shows the sweep and no row |
-| 6 | Loading skeleton (D2) | Capture during load shows three skeleton blocks, not a blank canvas |
-| 7 | Prose→step-group gap defect (§3 numbers) | Capture matches the mockup's `--sp-3` below prose and below a group |
+| 5 | Running row + ambient sweep (D1) | A running turn shows the row with a live elapsed time; a background sync shows the sweep and no row |
+| 6 | Loading skeleton (D2) | Opening a session shows three skeleton blocks, not a blank canvas |
+| 7 | Prose→step-group gap defect (§3 numbers) | Spacing matches the mockup: `--sp-3` below prose and below a group |
 | 8 | Context percent at idle (D3) | Header reads `idle · N%` |
 
 Items 7 and 8 are small enough to land with any of the rows above them; they are
