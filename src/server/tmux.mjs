@@ -253,11 +253,45 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
   }));
 }
 
+// True iff a tmux invocation failed because there is genuinely no tmux server
+// (or no session) to talk to — i.e. the box really does have zero sessions.
+// Anything else is a FAULT and must not be reported as "zero sessions".
+//
+// Pure + exported for tests.
+export function isNoTmuxServerError(err) {
+  const msg = typeof err?.message === "string" ? err.message : "";
+  if (!msg) return false;
+  return (
+    /no server running on/i.test(msg) ||
+    /no sessions?$/im.test(msg) ||
+    /error connecting to .*(no such file or directory|connection refused)/i.test(msg)
+  );
+}
+
+// `tmux list-*` output, or "" when tmux legitimately has nothing to list.
+//
+// This used to be a bare `.catch(() => ({ stdout: "" }))` on both queries, which
+// turned ANY tmux fault — a momentarily restarting server, a mangled locale, an
+// ENOENT because the service has no PATH — into a successful 200 carrying an
+// EMPTY session list. The client cannot tell that apart from a box that really
+// has no sessions, so the phone showed "No sessions yet. Tap + to create one."
+// with no error, and (worse) `reconcileOwnedSessions` pruned the ownership
+// sidecar against that phantom empty list. A fault must surface as a fault.
+async function tmuxListOutput(args) {
+  try {
+    const { stdout } = await run("tmux", args);
+    return stdout;
+  } catch (e) {
+    if (isNoTmuxServerError(e)) return "";
+    throw e;
+  }
+}
+
 export async function listProjects() {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
   const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
-  const sess = await run("tmux", ["list-sessions", "-F", sessFmt]).catch(() => ({ stdout: "" }));
-  const wins = await run("tmux", ["list-windows", "-a", "-F", winFmt]).catch(() => ({ stdout: "" }));
+  const sess = { stdout: await tmuxListOutput(["list-sessions", "-F", sessFmt]) };
+  const wins = { stdout: await tmuxListOutput(["list-windows", "-a", "-F", winFmt]) };
   // BET-348: build the owned set from the cache (hydrated on first call),
   // reconcile it against the LIVE tmux session list — anything in the
   // sidecar that no longer exists gets pruned before we serve the listing,

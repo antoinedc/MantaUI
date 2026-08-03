@@ -60,8 +60,24 @@ struct SessionListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if store.projects.isEmpty && !store.loading {
+                // Three distinct nothing-on-screen cases, and they used to
+                // collapse into one. `projects.isEmpty && !loading` rendered
+                // the inviting "No sessions yet. Tap + to create one." whether
+                // the box really had no sessions, the fetch had FAILED, or it
+                // had never run — which is exactly how a box full of sessions
+                // came up blank and reassuring. A search that matches nothing
+                // rendered a totally bare screen with no message at all.
+                // Gated on loadError, NOT on `loading`: the first frame renders
+                // before `.task` has flipped `loading`, so a `loading`-based
+                // gate flashes the failure state on every cold launch.
+                if !store.loadedOnce && store.loadError == nil {
+                    loadingState
+                } else if !store.loadedOnce {
+                    unreachableState
+                } else if store.projects.isEmpty {
                     emptyState
+                } else if filteredProjects.isEmpty {
+                    noMatchState
                 } else {
                     list
                 }
@@ -129,7 +145,12 @@ struct SessionListView: View {
                 projects: store.projects,
                 initialProject: project,
                 onClose: { sheetRoute = nil },
-                onCreated: { project, index in
+                onCreated: { project, index, fresh in
+                    // Adopt the post-create list BEFORE resolving the window,
+                    // otherwise the lookup runs against the pre-create snapshot
+                    // and the new session opens as an unnamed, session-id-less
+                    // placeholder.
+                    store.applyProjects(fresh)
                     let window = store.projects.first(where: { $0.tmuxSession == project })?
                         .windows.first(where: { $0.index == index })
                     let name = window?.name ?? "session"
@@ -191,6 +212,10 @@ struct SessionListView: View {
         guard !searchText.isEmpty else { return store.projects }
         let q = searchText.lowercased()
         return store.projects.compactMap { p in
+            // A project-name match keeps the whole group. Matching window names
+            // only meant typing the name of the project you were looking at
+            // emptied the screen.
+            if p.tmuxSession.lowercased().contains(q) { return p }
             let kept = p.windows.filter { $0.name.lowercased().contains(q) }
             guard !kept.isEmpty else { return nil }
             var copy = p
@@ -499,6 +524,50 @@ struct SessionListView: View {
                 .font(.system(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
         }
+        .accessibilityIdentifier("sessions-empty")
+    }
+
+    private var loadingState: some View {
+        ProgressView()
+            .accessibilityIdentifier("sessions-loading")
+    }
+
+    /// Never loaded successfully. Says so, and offers the retry — the one
+    /// thing the user could previously only get by force-quitting the app.
+    private var unreachableState: some View {
+        VStack(spacing: Metrics.spacing.sp2) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: Metrics.type.display))
+                .foregroundColor(tokens.tx4)
+            Text("Can't load your sessions")
+                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .foregroundColor(tokens.tx3)
+            Text(store.loadError ?? "Couldn't reach your box")
+                .font(.system(size: Metrics.type.small))
+                .foregroundColor(tokens.tx4)
+                .multilineTextAlignment(.center)
+            Button("Try again") {
+                Task { await store.refresh() }
+            }
+            .font(.system(size: Metrics.type.small, weight: .semibold))
+            .foregroundColor(tokens.accentTx)
+            .padding(.top, Metrics.spacing.sp1)
+            .disabled(store.loading)
+        }
+        .padding(.horizontal, Metrics.spacing.sp4)
+        .accessibilityIdentifier("sessions-unreachable")
+    }
+
+    private var noMatchState: some View {
+        VStack(spacing: Metrics.spacing.sp2) {
+            Text("No sessions match")
+                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .foregroundColor(tokens.tx3)
+            Text("Nothing named “\(searchText)”.")
+                .font(.system(size: Metrics.type.small))
+                .foregroundColor(tokens.tx4)
+        }
+        .accessibilityIdentifier("sessions-no-match")
     }
 
     @ViewBuilder

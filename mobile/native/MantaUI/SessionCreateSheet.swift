@@ -22,7 +22,12 @@ struct SessionCreateSheet: View {
     /// Pre-selected project (the one the user was looking at), if any.
     let initialProject: String?
     let onClose: () -> Void
-    let onCreated: (String, Int) -> Void
+    /// `(project, windowIndex, freshProjects)`. The FRESH list matters: every
+    /// create RPC already returns the box's post-create session list, and
+    /// throwing it away left the caller resolving the brand-new window against
+    /// a list that predates it — so the just-created session opened nameless
+    /// and without its opencode session id.
+    let onCreated: (String, Int, [MantaProject]) -> Void
 
     /// Where the new session goes: an existing project, or a brand new one.
     private enum Target: Hashable {
@@ -190,7 +195,7 @@ struct SessionCreateSheet: View {
         }
         await MainActor.run {
             creating = false
-            onCreated(project, window.index)
+            onCreated(project, window.index, projects)
         }
     }
 
@@ -198,6 +203,7 @@ struct SessionCreateSheet: View {
         let projectName = newProjectName.trimmingCharacters(in: .whitespaces)
         let dir = cwd.trimmingCharacters(in: .whitespaces)
         var windowIndex = 0
+        var fresh: [MantaProject] = []
 
         if let worktrees = detectedWorktrees, worktrees.count > 1 {
             // Fan out: the first worktree is the project's initial window, the
@@ -212,6 +218,7 @@ struct SessionCreateSheet: View {
                     cwd: worktree.path, chatMode: true))
             }
             windowIndex = Self.findInitialWindow(projects, projectName: projectName, cwd: worktrees[0].path)?.index ?? 0
+            fresh = projects
         } else {
             let windowName = resolvedSessionName
             let projects = try await api.newSession(NewSessionInput(
@@ -222,11 +229,12 @@ struct SessionCreateSheet: View {
                 throw MantaError.transport("created project was not returned")
             }
             windowIndex = window.index
+            fresh = projects
         }
 
         await MainActor.run {
             creating = false
-            onCreated(projectName, windowIndex)
+            onCreated(projectName, windowIndex, fresh)
         }
     }
 
