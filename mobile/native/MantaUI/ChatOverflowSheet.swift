@@ -29,17 +29,20 @@ struct ChatOverflowSheet: View {
     var onSecrets: () -> Void
     var onWebhooks: () -> Void
     var onCompact: () -> Void
-    var onClear: () -> Void
     var onFork: () -> Void
     var onOpenTerminal: () -> Void
-    var onDelete: () -> Void
 
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
 
+    /// Confirmation bindings owned by the presenting ChatScreen. Clear/Delete
+    /// confirm in an action sheet that lives on the PRESENTER, not here — a
+    /// `confirmationDialog` shown from inside a `.sheet` adapts to a popover on
+    /// iOS 26 and drops its detached `.cancel` button (DECISIONS.md:709-715).
+    @Binding var confirmingClear: Bool
+    @Binding var confirmingDelete: Bool
+
     @Environment(\.dismiss) private var dismiss
-    @State private var confirmingClear = false
-    @State private var confirmingDelete = false
 
     var body: some View {
         NavigationStack {
@@ -71,18 +74,6 @@ struct ChatOverflowSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
-            }
-            .confirmationDialog("Clear this session?", isPresented: $confirmingClear, titleVisibility: .visible) {
-                Button("Clear session", role: .destructive) { dismiss(); onClear() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Starts a fresh session in this window. The transcript stays on the box.")
-            }
-            .confirmationDialog("Delete this session?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-                Button("Delete session", role: .destructive) { dismiss(); onDelete() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Removes the session and its window. This cannot be undone.")
             }
         }
         .presentationDetents([.medium, .large])

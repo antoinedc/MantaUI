@@ -57,6 +57,14 @@ private struct ChatScreenContent: View {
     @State private var showOverflow = false
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
+    /// Clear/Delete confirmations. These state fields live HERE, on the pushed
+    /// ChatScreen, not inside the overflow sheet: a `confirmationDialog`
+    /// presented from within a `.sheet` adapts to a popover on iOS 26 and drops
+    /// its detached `.cancel` button, so the action sheet must present from the
+    /// presenter (this screen), never from the sheet content
+    /// (DECISIONS.md:709-715).
+    @State private var confirmingClear = false
+    @State private var confirmingDelete = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -130,6 +138,22 @@ private struct ChatScreenContent: View {
         // scrolling.
         .safeAreaInset(edge: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
+        // Clear/Delete confirm as a NATIVE action sheet — never a web dialog
+        // (DECISIONS.md:709-715). Presented from this presenter rather than the
+        // sheet content so iOS renders a true bottom action sheet: destructive
+        // item at the top, Cancel detached at the bottom.
+        .confirmationDialog("Clear this session?", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("Clear session", role: .destructive) { showOverflow = false; Task { await clearSession() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Starts a fresh session in this window. The transcript stays on the box.")
+        }
+        .confirmationDialog("Delete this session?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete session", role: .destructive) { showOverflow = false; Task { await deleteSession() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes the session and its window. This cannot be undone.")
+        }
         .onAppear {
             store.start()
             Task { await resolveWindowAndBranch() }
@@ -151,10 +175,10 @@ private struct ChatScreenContent: View {
             onSecrets: {},
             onWebhooks: {},
             onCompact: { store.compact() },
-            onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
             onOpenTerminal: {},
-            onDelete: { Task { await deleteSession() } }
+            confirmingClear: $confirmingClear,
+            confirmingDelete: $confirmingDelete
         )
     }
 
