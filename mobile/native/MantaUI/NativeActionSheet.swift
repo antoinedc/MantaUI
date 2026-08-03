@@ -12,22 +12,22 @@ import UIKit
 //
 // SwiftUI's `confirmationDialog` cannot produce this on iOS 26: it presents as
 // a centered popover card and DROPS the `.cancel`-role button — verified
-// on-device (iPhone 17 Pro / iOS 26.5) at every attachment point (inside the
-// sheet, at the presenter root, and on the pushed chat screen). The tolerance
+// on-device (iPhone 17 Pro / iOS 26.5) at every attachment point. The tolerance
 // is not there to coerce. `UIAlertController(preferredStyle: .actionSheet)`
 // renders the requirement exactly: destructive item first, Cancel detached at
 // the bottom, and a genuinely native sheet (not a web dialog).
 //
-// The presenter is a backgrounded `UIViewControllerRepresentable` so the alert
-// presents from the chat screen's own hosting hierarchy. A `UIAlertController`
-// action sheet shows in its own alert window, so it appears above an already-
-// presented overflow sheet; we keep the confirmation state on the presenter
-// (the ChatScreen), not inside the sheet content.
+// Presentation: the representable's own view controller (sitting in a
+// `.background`) is NOT a valid presenting context on this toolchain — the alert
+// never surfaces from it. So the sheet is presented from the app's key-window
+// TOPMOST view controller (walk `presentedViewController` to the top), which is:
+// (a) reliably in the windowing hierarchy, and (b) above any already-presented
+// overflow sheet, so the action sheet appears over it.
 // ===========================================================================
 
 /// Presents a native action sheet with one destructive item first and a Cancel
 /// detached at the bottom.
-private struct NativeActionSheetPresenter: UIViewControllerRepresentable {
+struct NativeActionSheetPresenter: UIViewControllerRepresentable {
     @Binding var isPresented: Bool
     var title: String?
     var message: String?
@@ -62,24 +62,40 @@ private struct NativeActionSheetPresenter: UIViewControllerRepresentable {
             }
             alert.addAction(destructive)
             alert.addAction(cancel)
-            if let popover = alert.popoverPresentationController {
+            if let popover = alert.popoverPresentationController,
+               let top = NativeActionSheet.topmostViewController(),
+               let anchor = top.view {
                 // iPad anchors the sheet; on iPhone it is ignored.
-                popover.sourceView = presenter.view
+                popover.sourceView = anchor
                 popover.sourceRect = CGRect(
-                    x: presenter.view.bounds.midX,
-                    y: presenter.view.bounds.midY,
+                    x: anchor.bounds.midX,
+                    y: anchor.bounds.midY,
                     width: 0, height: 0
                 )
                 popover.permittedArrowDirections = []
             }
             context.coordinator.hasPresented = true
-            presenter.present(alert, animated: true, completion: nil)
+            NativeActionSheet.topmostViewController()?.present(alert, animated: true, completion: nil)
         } else {
             context.coordinator.hasPresented = false
-            if presenter.presentedViewController != nil {
-                presenter.dismiss(animated: true, completion: nil)
-            }
         }
+    }
+}
+
+enum NativeActionSheet {
+    /// The windowing-hierarchy view controller that can present a modal today:
+    /// the app's key-window root, walking up through whatever is currently
+    /// presented (e.g. the overflow sheet).
+    @MainActor
+    static func topmostViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        guard let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first,
+              let root = window.rootViewController
+        else { return nil }
+        var top = root
+        while let presented = top.presentedViewController { top = presented }
+        return top
     }
 }
 
