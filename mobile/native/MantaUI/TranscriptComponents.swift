@@ -134,9 +134,17 @@ struct StepRowView: View {
                     Circle()
                         .fill(dotColor)
                         .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
+                    // §8: a step row is ONE line. The verb is normally a word
+                    // ("Ran", "Read"), but a tool name can be long enough to
+                    // wrap, which broke the row's fixed height and made the
+                    // group read as ragged. It truncates rather than wraps, and
+                    // never shrinks below its share of the row.
                     Text(step.verb)
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.tx2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
                     Text(step.target)
                         .font(.system(size: Metrics.type.xs, design: .monospaced))
                         .foregroundColor(tokens.tx4)
