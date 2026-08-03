@@ -45,6 +45,10 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True while a canonical transcript refetch (or the initial load) is in
+    /// flight. Drives the ambient hairline sweep on the composer's top divider
+    /// (BET-630, D1) — distinct from `running`, which drives the working row.
+    @Published private(set) var refreshing = false
 
     let sessionId: String
     let isReadOnly: Bool
@@ -101,10 +105,12 @@ final class ChatSessionStore: ObservableObject {
     func load() {
         guard !loading else { return }
         loading = true
+        refreshing = true
         Task {
             let messages = (try? await api.messages(sessionId: sessionId)) ?? []
             await MainActor.run {
                 loading = false
+                refreshing = false
                 loadFailed = messages.isEmpty
                 transcript = ChatTranscriptMapper.blocks(from: messages)
                 rebuildBlocks()
@@ -193,10 +199,12 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func refetch() async {
+        refreshing = true
         let messages = (try? await api.messages(sessionId: sessionId)) ?? []
         await MainActor.run {
             transcript = ChatTranscriptMapper.blocks(from: messages)
             rebuildBlocks()
+            refreshing = false
             if !isReadOnly { Task { await self.refreshPermissions() } }
         }
     }
@@ -367,6 +375,11 @@ final class ChatSessionStore: ObservableObject {
 
     /// The newest pending question request, if any.
     var newestQuestion: QuestionRequest? { questions.last }
+
+    /// When the current turn started (nil when idle). The running row measures
+    /// live elapsed against its own 1s tick rather than stream-state changes
+    /// (BET-630, D1).
+    var runningStart: Date? { runningSince }
 
     /// §8 header subtitle ("running · 2m · 8%" / "idle").
     var headerSubtitle: String {

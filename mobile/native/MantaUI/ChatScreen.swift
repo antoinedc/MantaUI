@@ -58,6 +58,13 @@ struct ChatScreen: View {
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
                 bottomCards
+                // BET-630 (D1): the running-state working row. Shown only while a
+                // turn runs; the ambient refetch sweep lives on the composer's
+                // top divider and means a different thing, so the two never
+                // share an indicator. Not shown during a background refetch.
+                if store.running {
+                    RunningIndicator(store: store)
+                }
                 ComposerView(
                     sessionId: store.sessionId,
                     projectName: projectName,
