@@ -21,12 +21,28 @@ import Combine
 
 // MARK: - Per-session interpreted state
 
+/// One part's accumulated live text, tagged with the message it belongs to.
+///
+/// The messageID is the load-bearing field: it is what lets a finished chunk be
+/// RETIRED once the canonical transcript carries the same prose. Without it the
+/// live copy has no expiry and the screen renders a finished answer twice —
+/// once from the transcript, once from the still-live tail (BET-655).
+struct StreamTextChunk: Equatable, Sendable {
+    var partID: String
+    var messageID: String
+    var field: String
+    var text: String
+}
+
 struct MantaSessionStreamState: Equatable, Sendable {
     var sessionId: String
-    /// partID -> accumulated flushed text (the box already applied flush
-    /// boundaries; the device just concatenates).
-    var textByPart: [String: String] = [:]
-    var reasoningByPart: [String: String] = [:]
+    /// Accumulated flushed text, one entry per (part, field), in ARRIVAL order
+    /// (the box already applied flush boundaries; the device just concatenates).
+    ///
+    /// Ordered on purpose: this used to be a dictionary, whose `values` have no
+    /// defined order, so an answer streamed as several parts could reassemble
+    /// with its paragraphs shuffled.
+    var chunks: [StreamTextChunk] = []
     var running: Bool?
     var turnComplete: Bool?
     var context: StreamContextPayload?
@@ -38,6 +54,42 @@ struct MantaSessionStreamState: Equatable, Sendable {
 
     init(sessionId: String) {
         self.sessionId = sessionId
+    }
+
+    /// partID -> accumulated text, for callers that only want a lookup.
+    var textByPart: [String: String] {
+        Dictionary(chunks.filter { $0.field != "reasoning" }.map { ($0.partID, $0.text) },
+                   uniquingKeysWith: { _, latest in latest })
+    }
+
+    var reasoningByPart: [String: String] {
+        Dictionary(chunks.filter { $0.field == "reasoning" }.map { ($0.partID, $0.text) },
+                   uniquingKeysWith: { _, latest in latest })
+    }
+
+    /// The live assistant prose for the turn in flight, in arrival order. Empty
+    /// once every chunk has been retired by a canonical transcript that covers
+    /// it — which is what stops a finished answer rendering twice.
+    var liveText: String {
+        chunks
+            .filter { $0.field != "reasoning" && !$0.text.isEmpty }
+            .map(\.text)
+            .joined(separator: "\n")
+    }
+
+    /// Append a flushed chunk, extending the part's text when it is already
+    /// known. Text and reasoning are tracked separately for the same part.
+    mutating func appending(_ payload: StreamFlushPayload) {
+        if let i = chunks.firstIndex(where: { $0.partID == payload.partID && $0.field == payload.field }) {
+            chunks[i].text += payload.text
+        } else {
+            chunks.append(StreamTextChunk(
+                partID: payload.partID,
+                messageID: payload.messageID,
+                field: payload.field,
+                text: payload.text
+            ))
+        }
     }
 }
 
@@ -53,11 +105,7 @@ enum MantaStreamRouter {
         switch sub {
         case "flush":
             if let p = try? frame.decodedPayload(StreamFlushPayload.self) {
-                if p.field == "reasoning" {
-                    s.reasoningByPart[p.partID, default: ""] += p.text
-                } else {
-                    s.textByPart[p.partID, default: ""] += p.text
-                }
+                s.appending(p)
             }
         case "running":
             if let p = try? frame.decodedPayload(StreamRunningPayload.self) { s.running = p.running }
@@ -80,6 +128,21 @@ enum MantaStreamRouter {
         default:
             break
         }
+        return s
+    }
+
+    /// Retire the live chunks whose message the canonical transcript now
+    /// carries. Pure so the retirement rule is testable without a socket.
+    ///
+    /// The chunk for the message STILL STREAMING is kept even when the fetch
+    /// covered it: a mid-turn transcript holds only the prose written before
+    /// that fetch, so retiring the live copy there would split one answer
+    /// across two blocks and drop everything that arrived since. Once the turn
+    /// ends, the next fetch retires it for real.
+    static func retiring(_ state: MantaSessionStreamState, covered: Set<String>) -> MantaSessionStreamState {
+        var s = state
+        let inFlight = s.running == true ? s.chunks.last?.messageID : nil
+        s.chunks.removeAll { covered.contains($0.messageID) && $0.messageID != inFlight }
         return s
     }
 }
@@ -244,6 +307,18 @@ final class MantaEventStore: ObservableObject {
         let sid = frame.sessionId ?? ""
         let next = MantaStreamRouter.applying(frame, to: sessionStates[sid])
         sessionStates[sid] = next
+    }
+
+    /// Retire live stream text the canonical transcript now carries. A session
+    /// store calls this straight after a successful refetch — the one moment
+    /// the live copy turns from "the only copy" into a duplicate.
+    ///
+    /// Publishes only on a real change, so an already-clean state does not wake
+    /// every subscriber (and cannot loop: retirement is idempotent).
+    func retireCoveredStreamText(sessionId: String, covered: Set<String>) {
+        guard let state = sessionStates[sessionId] else { return }
+        let next = MantaStreamRouter.retiring(state, covered: covered)
+        if next != state { sessionStates[sessionId] = next }
     }
 
     private func handleReconnect() {
