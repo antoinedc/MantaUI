@@ -104,7 +104,8 @@ private struct ChatScreenContent: View {
             if store.loadFailed {
                 loadFailure
             } else if store.loading {
-                loadingSkeleton
+                MantaLoader(caption: "Loading session…", tokens: tokens)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 transcript
             }
