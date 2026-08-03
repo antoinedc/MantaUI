@@ -370,8 +370,6 @@ export function InputArea({
             onOpen={onOpenModels}
             onSelect={onSelectModel}
             labelOverride={shortLabel}
-            alwaysShowEffort
-            effortAccent
           />
         </span>
         <span className="shrink-0 flex items-center gap-3 flex-wrap">

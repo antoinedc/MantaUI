@@ -30,8 +30,6 @@ export function ModelPicker({
   onSelect,
   defaultLabel = null,
   labelOverride = null,
-  alwaysShowEffort = false,
-  effortAccent = false,
 }: {
   modelLabel: string | null;
   models: OpencodeModel[] | null;
@@ -52,14 +50,6 @@ export function ModelPicker({
   // Both are no-ops for callers that don't pass them (ChatPanel).
   defaultLabel?: string | null;
   labelOverride?: string | null;
-  // Welcome-screen layout toggle: force the SplitChip on even when the active
-  // model exposes no variants (the right segment is then non-interactive —
-  // nothing to select — but still present so the screen's one accent element
-  // per the mockup spec-notes is never absent). ChatPanel passes none of these.
-  alwaysShowEffort?: boolean;
-  // Colour the right (effort) segment with the accent token via SplitChip's
-  // `rightAccent` — the spec-note's "only accent element on the screen".
-  effortAccent?: boolean;
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
@@ -111,11 +101,10 @@ export function ModelPicker({
   const activeVariantId = modelOverride?.variant ?? undefined;
   const activeVariant = variants.find((v) => v.id === activeVariantId) ?? null;
 
-  // Effort visibility/state. `alwaysShowEffort` forces the SplitChip on even
-  // when the active model exposes no variant list — in that case the right
-  // segment is non-interactive (nothing to select) but still present so the
-  // screen's one accent element (per the mockup spec-notes) is never absent.
-  const showEffort = alwaysShowEffort || variants.length > 0;
+  // Effort visibility/state. The SplitChip is always rendered — the design's
+  // one split control must never be absent from the composer row. When the
+  // active model exposes no variant list the right segment is simply
+  // non-interactive (nothing to select).
   const effortDisabled = variants.length === 0;
   // Label reflects the user's selected variant; with no selectable variants
   // (or no selection yet) it shows the design's default effort value.
@@ -138,45 +127,43 @@ export function ModelPicker({
 
   return (
     <div ref={rootRef} className="overflow-visible min-w-0 relative">
-      {showEffort && (
-        <SplitChip
-          left={
-            <span className="flex items-center gap-1 truncate">
-              <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
-              <span className="truncate max-w-[140px]">{modelDisplayName}</span>
-              <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
-            </span>
-          }
-          right={
-            <span className="flex items-center gap-1 truncate">
-              <span className="truncate max-w-[80px]">{effortLabel}</span>
-              <ChevronDown
-                size={13}
-                aria-hidden="true"
-                className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`}
-              />
-            </span>
-          }
-          onLeftClick={() => {
-            if (!modelOpen) onOpen();
-            setVariantOpen(false);
-            setModelOpen((v) => !v);
-          }}
-          onRightClick={() => {
-            if (effortDisabled) return;
-            setModelOpen(false);
-            setVariantOpen((v) => !v);
-          }}
-          rightAccent={effortAccent}
-          popup
-          leftTitle="Pick model for next prompt"
-          rightTitle={
-            effortDisabled
-              ? "This model has no effort / variant setting"
-              : "Pick effort / variant"
-          }
-        />
-      )}
+      <SplitChip
+        left={
+          <span className="flex items-center gap-1 truncate">
+            <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
+            <span className="truncate max-w-[140px]">{modelDisplayName}</span>
+            <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
+          </span>
+        }
+        right={
+          <span className="flex items-center gap-1 truncate">
+            <span className="truncate max-w-[80px]">{effortLabel}</span>
+            <ChevronDown
+              size={13}
+              aria-hidden="true"
+              className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`}
+            />
+          </span>
+        }
+        onLeftClick={() => {
+          if (!modelOpen) onOpen();
+          setVariantOpen(false);
+          setModelOpen((v) => !v);
+        }}
+        onRightClick={() => {
+          if (effortDisabled) return;
+          setModelOpen(false);
+          setVariantOpen((v) => !v);
+        }}
+        rightAccent
+        popup
+        leftTitle="Pick model for next prompt"
+        rightTitle={
+          effortDisabled
+            ? "This model has no effort / variant setting"
+            : "Pick effort / variant"
+        }
+      />
 
       {/* Model dropdown — provider-grouped list. Selecting a row sets the
           per-session override; the variant is cleared (the new model's own

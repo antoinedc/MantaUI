@@ -16,7 +16,8 @@ import { Chip, SplitChip } from "./Chip";
 
 const CHIP_SHELL =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta font-medium leading-none transition-colors";
-const CHIP_REST = "border-border bg-bg-soft text-text-muted hover:border-border-strong hover:text-text";
+const CHIP_REST = "border-border bg-bg-soft text-text-muted";
+const CHIP_HOVER = "hover:border-border-strong hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
 const CHIP_PAD = "gap-[6px] px-[11px]";
 
@@ -42,7 +43,7 @@ describe("Chip", () => {
   });
   it("renders the shell + pad + rest chrome when off", () => {
     h = mount(<Chip>Hello</Chip>);
-    expect(button(h).className).toBe(`${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST}`);
+    expect(button(h).className).toBe(`${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST} ${CHIP_HOVER}`);
   });
 
   it("switches to the 'on' chrome when on=true", () => {
@@ -61,7 +62,7 @@ describe("Chip", () => {
   it("renders children and prepends a hook class", () => {
     h = mount(<Chip hook="manta-folder-chip">leasebot</Chip>);
     expect(button(h).textContent).toBe("leasebot");
-    expect(button(h).className).toBe(`manta-folder-chip ${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST}`);
+    expect(button(h).className).toBe(`manta-folder-chip ${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST} ${CHIP_HOVER}`);
   });
 });
 
@@ -96,8 +97,31 @@ describe("SplitChip", () => {
     const shell = h.container.firstElementChild as HTMLElement;
     expect(shell.className).toBe(`${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
     const [l, r] = buttons();
-    expect(l.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full`);
-    expect(r.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full border-l border-border`);
+    expect(l.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`);
+    expect(r.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover`);
+  });
+
+  it("fills the hovered segment, not the shell — Chip keeps the outline hover, SplitChip does not (BET-634)", () => {
+    // A single Chip's shell still darkens its outline on hover.
+    h = mount(<Chip>Hello</Chip>);
+    expect(button(h).className).toContain("hover:border-border-strong");
+
+    h.unmount();
+    // The split control's shell carries NO outline hover; both segments fill.
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+      />,
+    );
+    const shell = h.container.firstElementChild as HTMLElement;
+    expect(shell.className).not.toContain("hover:border-border-strong");
+    expect(shell.className).not.toContain("hover:text-text");
+    const [l, r] = buttons();
+    expect(l.className).toContain("hover:bg-fill-hover");
+    expect(r.className).toContain("hover:bg-fill-hover");
   });
 
   it("adds accent-tx + semibold to the right segment only when rightAccent", () => {
