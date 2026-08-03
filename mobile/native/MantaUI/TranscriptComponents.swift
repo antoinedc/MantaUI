@@ -28,6 +28,7 @@ struct UserBand: View {
             .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: 1.5, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Metrics.spacing.sp3)
             .background(tokens.fill, in: bandShape)
@@ -78,10 +79,19 @@ struct AssistantProse: View {
     let tokens: Tokens
 
     var body: some View {
+        // `fixedSize(horizontal: false, …)` is what keeps a long unbreakable
+        // token (a shell command, a URL, a path) INSIDE the screen. Without it
+        // such a token makes the text demand its full unwrapped width, the
+        // scroll view adopts that width, and every sibling — including the
+        // composer, which shares the same layout — is laid out wider than the
+        // display: text stops appearing to wrap, the send button sits off
+        // screen, and each keystroke re-lays out an oversized view, which is
+        // what made typing crawl.
         Text(MantaInlineMarkdown.render(text))
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
@@ -147,6 +157,7 @@ struct StepRowView: View {
                 Text(output)
                     .font(.system(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Metrics.spacing.sp2)
                     .padding(.horizontal, Metrics.spacing.sp3)

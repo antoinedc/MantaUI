@@ -46,13 +46,10 @@ struct ComposerView: View {
     @State private var micAvailable = false
     @State private var hint: String?
     @State private var showHint = false
-    @StateObject private var controller = ComposerTextController()
+    @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
-    /// Measured height of the input. See MultilineTextView: a scroll-enabled
-    /// UITextView has no intrinsic height, so the composer must give it one.
-    @State private var inputHeight: CGFloat = Metrics.type.display
     @State private var showModelPicker = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -66,19 +63,25 @@ struct ComposerView: View {
                 Spacer(minLength: 0)
             }
             HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
-                MultilineTextView(
-                    text: $text,
-                    height: $inputHeight,
-                    controller: controller,
-                    placeholder: "Message…",
-                    font: UIFont.systemFont(ofSize: Metrics.type.body),
-                    textColor: UIColor(tokens.tx1),
-                    placeholderColor: UIColor(tokens.tx4),
-                    minHeight: Metrics.type.display,
-                    maxHeight: Metrics.type.display * 3
-                )
-                .frame(maxWidth: .infinity)
-                .frame(height: inputHeight)
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Message…")
+                            .font(.system(size: Metrics.type.body))
+                            .foregroundColor(tokens.tx4)
+                            .padding(.top, 8)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $text)
+                        .font(.system(size: Metrics.type.body))
+                        .foregroundColor(tokens.tx1)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: Metrics.type.display,
+                               maxHeight: Metrics.type.display * 6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .focused($inputFocused)
+                        .accessibilityIdentifier("composer-input")
+                }
                 if micAvailable { micButton }
                 sendButton
             }
@@ -348,11 +351,8 @@ struct ComposerView: View {
     /// Insert text at the caret (dictate). Falls back to append if the input
     /// isn't focused/bound yet.
     private func insertAtCaret(_ string: String) {
-        if controller.textView != nil {
-            controller.insertAtCaret(string)
-        } else {
-            text += string
-        }
+        // TextEditor owns the selection; append at end for dictation.
+        text += string
     }
 
     private func classify(_ transcript: String) async {
@@ -427,7 +427,7 @@ struct ComposerView: View {
         store.send(text: trimmed, attachments: sendAttachments, model: model)
         text = ""
         attachments = []
-        controller.focus()
+        inputFocused = true
     }
 
     // MARK: - Mic availability (Groq key gate)
