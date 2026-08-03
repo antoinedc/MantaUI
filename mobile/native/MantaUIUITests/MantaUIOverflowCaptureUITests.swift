@@ -63,18 +63,19 @@ final class MantaUIOverflowCaptureUITests: XCTestCase {
         let nativeSheet = app.sheets.firstMatch.exists || app.popovers.firstMatch.exists
         let clearButtons = app.buttons.matching(identifier: "Clear session").allElementsBoundByIndex
         let cancelButton = app.buttons["Cancel"].firstMatch
-        let cancelPresent = cancelButton.exists
         let hasOrdering = !clearButtons.isEmpty
         let clearMaxY = clearButtons.map { $0.frame.minY }.max() ?? 0
-        let orderOK = hasOrdering && cancelPresent && clearMaxY < cancelButton.frame.minY
+        let orderOK = hasOrdering && cancelButton.exists && clearMaxY < cancelButton.frame.minY
 
         print("RESULT nativeSheet=\(nativeSheet)")
         print("RESULT destructiveClearPresent=\(hasOrdering)")
-        print("RESULT cancelPresent=\(cancelPresent)")
+        print("RESULT cancelPresent=\(cancelButton.exists)")
         print("RESULT destructiveFirstAboveCancel=\(orderOK)")
 
         XCTAssertTrue(nativeSheet, "Clear should present a NATIVE action sheet, not a web dialog")
         XCTAssertTrue(hasOrdering, "destructive Clear session should be present in the action sheet")
+        XCTAssertTrue(cancelButton.exists, "detached Cancel should be present in the action sheet (DECISIONS.md:709-715)")
+        XCTAssertTrue(orderOK, "destructive Clear session must be FIRST, above the detached Cancel")
     }
 
     // Two consecutive byte-identical screenshots, else fail (no retry-until-pass).
