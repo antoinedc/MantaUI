@@ -4,7 +4,61 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (040bc97)
+Last reviewed: 2026-08-03 (33dc528)
+
+## Floating chat chrome (this change)
+
+The header stopped being a bar. It is now a row of floating translucent
+"glass" pills over the transcript, the composer is a floating rounded input,
+and the model chip sits above it. That is a **deliberate departure from
+`mockup.html`, which still draws the pre-floating design** — so the list under
+"Open against the mockup" below is not a list of defects, it is the mockup
+being behind the app. Whoever next revises the mockup should reconcile from
+that direction.
+
+Baselines regenerated in 33dc528 for the three registry rows that share this
+record (`session`, `session-header`, `session-composer`), pixels and aria
+structure together.
+
+Fixed here, and visible in the new `session` baseline:
+
+- **The context bar fills from its left edge.** The segments were inline
+  content, so they inherited `text-align` from the `<button>` hosting the pill,
+  which the UA stylesheet centres — a 19% reading was computed correctly and
+  then painted as a 19%-wide block floating at ~40% of the track, dead space on
+  both sides. The track is a flex row now, which packs from the main-start edge
+  and cannot inherit that.
+- **Every session-menu row shows its hover.** All three variants painted their
+  hover fill with the token `Dropdown` paints its own panel with, so hovering a
+  row drew card-on-card. Only `danger` looked interactive, because `--danger-bg`
+  happens to differ from the panel — and with no radius on the row, that single
+  visible fill was a square block inside a 12px-rounded panel. Now `--fill-hover`
+  + `--r-md`, matching `MenuOption` in the model and effort menus.
+- **The context popover is a sibling of its trigger, not a child of it.** It was
+  rendered inside the trigger `<button>`, which put the "Clear session"
+  `<button>` inside a `<button>` — invalid markup browsers repair by splitting
+  the element, and the reason every control in the panel needed a
+  `stopPropagation` to survive its own click.
+
+## Open against the mockup
+
+Recorded from `npm run visual:compare session` at 33dc528. These are app-vs-
+mockup deltas, all of them the app moving ahead of the drawing:
+
+- **Header band → floating pills.** The mockup draws an opaque header with a
+  bottom border and content starting beneath it; the app draws no band, and the
+  transcript scrolls *under* the glass. Intentional (the blur is what keeps the
+  chips legible over moving content).
+- **Breadcrumb dropped.** `infra / Deploy new billing service` is in the
+  mockup's header; the app no longer renders it.
+- **Mode-toggle glyph dropped.** The mockup keeps a `>_` glyph beside the ⋯
+  button. Removed by owner direction: it was a second control for a decision
+  the ⋯ menu's own Mode section already owns, and it could only ever express
+  the Chat ↔ Terminal half of a list that also holds every AI-CLI launcher.
+- **Branch chip sizing.** The mockup draws it as a bordered inline tag; the app
+  draws `Tag` at the new `sm` density (20px, `--tx3`) on the glass surface, with
+  `plain` suppressing Tag's own edge so it does not double the pill's. Owner
+  direction was "slightly smaller"; it had been the tallest element in the row.
 
 ## Resolved
 
