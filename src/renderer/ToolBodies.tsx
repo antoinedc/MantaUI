@@ -6,7 +6,7 @@
 // None of them depend on the message-row rendering stack, so they import
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
@@ -69,19 +69,28 @@ export function ReadBody({ state, verbose }: { state: ToolState; verbose: boolea
   const body = m ? m[1] : output;
   const lineCount = body.split("\n").filter((l) => l.length > 0).length;
   if (!verbose) {
-    return (
-      <div className="flex text-meta text-text-faint">
-        <span className="select-none w-4 shrink-0">⎿</span>
-        <span>Read {lineCount} line{lineCount === 1 ? "" : "s"} (ctrl+o to expand)</span>
-      </div>
-    );
+    return <CollapsedNotice>Read {lineCount} line{lineCount === 1 ? "" : "s"} (ctrl+o to expand)</CollapsedNotice>;
   }
   return <ConnectorOutput body={body} maxLines={Infinity} />;
 }
 
-// Bash: output rendered as ⎿-connected monospace lines under the header,
-// no boxed background. The command itself is already shown in the header via
-// state.title. Output is truncated to 5 lines by default; verbose expands.
+// The one-line "this is collapsed, ctrl+o for the rest" body a tool card shows
+// instead of its output (Read, Grep). It lives in the SAME recessed well as
+// real output (BET-636's `.tool-b`) so a collapsed card and an expanded one
+// have the same silhouette — before this it was a bare row flush against the
+// card's inner edge, sharing neither the header's `px-3` nor the well's
+// surface, which is what made the card look unfinished.
+function CollapsedNotice({ children }: { children: ReactNode }) {
+  return (
+    <OutputWell variant="attached">
+      <div className="whitespace-pre-wrap text-text-quiet">{children}</div>
+    </OutputWell>
+  );
+}
+
+// Bash: output rendered in the tool card's recessed well under the header.
+// The command itself is already shown in the header via state.title. Output is
+// truncated to 5 lines by default; verbose expands.
 export function BashBody({ state, verbose }: { state: ToolState; verbose: boolean }) {
   // Prefer the final output; while running, fall back to the live
   // metadata.output stream so a long command tails its latest lines instead
@@ -91,11 +100,25 @@ export function BashBody({ state, verbose }: { state: ToolState; verbose: boolea
   return <ConnectorOutput body={output} maxLines={verbose ? Infinity : 5} />;
 }
 
-// Shared renderer for the "⎿ … +N more (ctrl+o)\n  output\n  more lines" style.
-// Used by Bash and (any future tool wanting the same look). When the body is
-// taller than maxLines we keep the LATEST lines: oldest scroll up out of view
-// behind the "+N more" notice and the newest line stays at the bottom. This
-// matches how a terminal tails a long-running command's output.
+// Shared renderer for a tool's line-oriented output (Bash, and Read/Grep when
+// expanded). When the body is taller than maxLines we keep the LATEST lines:
+// oldest scroll up out of view behind the "+N earlier lines" notice and the
+// newest line stays at the bottom. This matches how a terminal tails a
+// long-running command's output.
+//
+// It renders inside the card's recessed OutputWell (BET-636's `.tool-b`), so
+// the output shares the header's `px-3` inset, sits on the inset surface, and
+// is separated from the header by the well's top border.
+//
+// THE ⎿ GUTTER IS GONE, deliberately. It came from the pre-card transcript
+// where every tool call was a flat bullet list on the page background and the
+// corner glyph was the only thing tying output to its header. Inside a bordered
+// card the well already does that job, so the glyph plus its 16px column — a
+// column that held a single character on ONE row and a blank on every other —
+// just pushed every line out of alignment with the header above it and left a
+// ragged left edge. Do not reintroduce it here; the flat-list `⎿` in
+// ToolCall.tsx (patch/file parts) and ActiveTodos is a different, still-flat
+// context and keeps its glyph.
 function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number }) {
   const lines = body.split("\n");
   const visibleCount = Math.min(lines.length, maxLines);
@@ -103,26 +126,20 @@ function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number })
   // Take the tail (latest lines), not the head.
   const visible = lines.slice(lines.length - visibleCount);
   return (
-    <div className="text-meta font-mono leading-snug">
+    <OutputWell variant="attached">
       {hidden > 0 && (
-        <div className="flex">
-          <span className="select-none w-4 shrink-0 text-text-faint">⎿</span>
-          <span className="text-text-faint">
-            … +{hidden} earlier line{hidden === 1 ? "" : "s"} (ctrl+o to expand)
-          </span>
+        <div className="text-text-quiet">
+          … {hidden} earlier line{hidden === 1 ? "" : "s"} (ctrl+o to expand)
         </div>
       )}
-      {visible.map((l, i) => (
-        <div key={i} className="flex">
-          <span className="select-none w-4 shrink-0 text-text-faint">
-            {hidden === 0 && i === 0 ? "⎿" : " "}
-          </span>
-          <span className="flex-1 whitespace-pre-wrap break-all text-text-muted">
+      <div className="text-text-muted">
+        {visible.map((l, i) => (
+          <div key={i} className="whitespace-pre-wrap break-all">
             {l || " "}
-          </span>
-        </div>
-      ))}
-    </div>
+          </div>
+        ))}
+      </div>
+    </OutputWell>
   );
 }
 
@@ -133,15 +150,18 @@ export function GlobBody({ state }: { state: ToolState }) {
   const output = state.output ?? "";
   const paths = output.split("\n").filter((l) => l.length > 0);
   return (
-    <div className="text-code font-mono text-text-muted">
-      {pattern && (
-        <div className="text-text-faint mb-1">
-          pattern <span className="text-text-muted">{pattern}</span> · {paths.length} match
-          {paths.length === 1 ? "" : "es"}
-        </div>
-      )}
-      <CollapsiblePathList paths={paths} maxLines={10} />
-    </div>
+    <CollapsibleLines
+      lines={paths}
+      maxLines={10}
+      header={
+        pattern ? (
+          <div className="text-text-quiet">
+            pattern <span className="text-text-muted">{pattern}</span> · {paths.length} match
+            {paths.length === 1 ? "" : "es"}
+          </div>
+        ) : null
+      }
+    />
   );
 }
 
@@ -153,13 +173,10 @@ export function GrepBody({ state, verbose }: { state: ToolState; verbose: boolea
   const lines = output.split("\n").filter((l) => l.length > 0);
   if (!verbose) {
     return (
-      <div className="flex text-meta text-text-faint">
-        <span className="select-none w-4 shrink-0">⎿</span>
-        <span>
-          {pattern ? <>Searched <code className="font-mono text-accent">{pattern}</code> · </> : null}
-          {lines.length} hit{lines.length === 1 ? "" : "s"} (ctrl+o to expand)
-        </span>
-      </div>
+      <CollapsedNotice>
+        {pattern ? <>Searched <span className="text-accent">{pattern}</span> · </> : null}
+        {lines.length} hit{lines.length === 1 ? "" : "s"} (ctrl+o to expand)
+      </CollapsedNotice>
     );
   }
   return <ConnectorOutput body={lines.join("\n")} maxLines={Infinity} />;
@@ -212,68 +229,62 @@ export function WebFetchBody({ state }: { state: ToolState }) {
   const url = typeof input.url === "string" ? input.url : "";
   const output = resolveToolOutput(state);
   return (
-    <div className="text-code font-mono space-y-1">
-      {url && (
-        <div className="text-text-faint break-all">
-          <span className="select-none">→ </span>
-          <span style={{ color: "var(--accent-tx)" }}>{url}</span>
-        </div>
-      )}
-      {output && <CollapsibleCode body={output} maxLines={15} />}
-    </div>
+    <CollapsibleLines
+      lines={output ? output.split("\n") : []}
+      maxLines={15}
+      header={
+        url ? (
+          <div className="break-all text-text-quiet">
+            <span className="select-none">→ </span>
+            <span style={{ color: "var(--accent-tx)" }}>{url}</span>
+          </div>
+        ) : null
+      }
+    />
   );
 }
 
-// Generic collapsible monospace block — used by Read/Bash/Grep/WebFetch.
-// Shows the first maxLines lines; clicking the "(N more)" footer expands.
-function CollapsibleCode({ body, maxLines }: { body: string; maxLines: number }) {
+// Collapsible line list with an optional header line — Glob's `pattern … · N
+// matches` and WebFetch's `→ url`, then the payload, then a "+N more" button.
+//
+// It draws NO box of its own. It used to (`bg-bg-soft border rounded-xs`),
+// which since BET-636 meant a bordered box sitting flush inside a bordered
+// card — two nested frames with no gap between them. The card's own recessed
+// well (`.tool-b`) is the surface, so this renders into it and the expander is
+// a divider row inside that same well.
+function CollapsibleLines({
+  lines,
+  maxLines,
+  header,
+}: {
+  lines: string[];
+  maxLines: number;
+  header?: ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
-  const lines = body.split("\n");
+  if (lines.length === 0 && header == null) return null;
   const overflow = lines.length > maxLines && !expanded;
-  const shown = overflow ? lines.slice(0, maxLines).join("\n") : body;
+  const shown = overflow ? lines.slice(0, maxLines) : lines;
   const hiddenCount = lines.length - maxLines;
   return (
-    <div className="text-code font-mono bg-bg-soft border border-border rounded-xs">
-      <pre className="px-2 py-1 overflow-x-auto max-w-full whitespace-pre">
-        <code>{shown}</code>
-      </pre>
-      {overflow && (
-        <button
-          onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text border-t border-border"
-        >
-          + {hiddenCount} more line{hiddenCount === 1 ? "" : "s"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-// Simpler list variant for Glob — just paths, no monospace wrapper styling.
-function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: number }) {
-  const [expanded, setExpanded] = useState(false);
-  if (paths.length === 0) return null;
-  const overflow = paths.length > maxLines && !expanded;
-  const shown = overflow ? paths.slice(0, maxLines) : paths;
-  const hiddenCount = paths.length - maxLines;
-  return (
-    <div className="text-code font-mono bg-bg-soft border border-border rounded-xs">
-      <div className="px-2 py-1 overflow-x-auto max-w-full">
-        {shown.map((p, i) => (
-          <div key={i} className="text-text-muted whitespace-pre">
-            {p}
+    <OutputWell variant="attached">
+      {header}
+      <div className="text-text-muted">
+        {shown.map((l, i) => (
+          <div key={i} className="whitespace-pre-wrap break-all">
+            {l || " "}
           </div>
         ))}
       </div>
       {overflow && (
         <button
           onClick={() => setExpanded(true)}
-          className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text border-t border-border"
+          className="block w-full text-left pt-1 text-text-quiet hover:text-text"
         >
-          + {hiddenCount} more
+          + {hiddenCount} more line{hiddenCount === 1 ? "" : "s"}
         </button>
       )}
-    </div>
+    </OutputWell>
   );
 }
 

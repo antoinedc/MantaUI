@@ -243,12 +243,21 @@ export const MessageRow = memo(function MessageRow({
   // content box (left-0, not overflowing into the transcript's px-4 padding —
   // that zone is clipped by the scroller's overflow). It stays out of the way
   // (faint, fades in on hover) and never shifts the message layout.
+  //
+  // The offset CLEARS the row's first block rather than overlapping it. At
+  // `-top-2` the 12px `leading-none` box ran from −8px to +4px, i.e. its
+  // bottom 4px sat INSIDE the block — invisible while the first block was
+  // bare text, but a visible collision once that block became a bordered
+  // tool card (BET-636) or a user bubble (BET-637). `-top-[18px]` puts the
+  // box at −18px..−6px: 6px of air under the stamp and 6px above it inside
+  // the 24px `--turn-gap`, so it reads as a label for the row rather than a
+  // glyph stuck to the card's top edge.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
     <div className="group relative">
       {ts && (
         <span
-          className={`pointer-events-none absolute ${isUser ? "right-0" : "left-0"} -top-2 z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity`}
+          className={`pointer-events-none absolute ${isUser ? "right-0" : "left-0"} -top-[18px] z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity`}
           aria-hidden
         >
           {ts}
