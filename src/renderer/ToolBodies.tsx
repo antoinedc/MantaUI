@@ -301,7 +301,15 @@ export function UnifiedDiff({ text }: { text: string }) {
   let newLine = 0;
   return (
     <OutputWell variant="attached">
-      <div className="leading-snug max-w-full">
+      {/* `w-max min-w-full` is what makes a +/− row's colored background span
+          the WHOLE line, not just the visible viewport. The well scrolls
+          horizontally; without this the rows are block-level children sized to
+          the well's client width, so scrolling right ran past the end of the
+          green/red block and the rest of the line sat on the bare well.
+          `w-max` sizes the wrapper to the widest line so every row fills it;
+          `min-w-full` keeps short diffs flush to the well's full width. Do NOT
+          put `max-w-full` back here — it re-clamps to the viewport. */}
+      <div className="leading-snug w-max min-w-full">
       {lines.map((line, i) => {
         // Hunk header: parse counters silently. Skip the visible row — the
         // header carries file/range metadata that's noise next to the actual
