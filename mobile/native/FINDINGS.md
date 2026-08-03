@@ -668,3 +668,96 @@ settings screen opens from a gear in the session list's navigation bar.
 - **"Adding a setting surfaces it" is enforced structurally**: the UI iterates
   the generated `SettingsSchema.entries` / `sections` and never hand-writes a
   row; the CI drift gate catches a schema edit without a regenerate commit.
+
+## BET-632 — prose → step-group gap (verification leg)
+
+### What the defect was
+
+A wide gap appeared above a "Ran …" step-group on device. Root cause (fixed by
+`manta-dev` on the mapper): `ChatTranscriptMapper` emitted a `.prose` block for
+*any* non-empty text part, and opencode routinely appends a newline/whitespace-
+only text part after a tool run. That phantom paragraph carried its own
+`--sp-3` bottom padding *and* a line box, stacking on the group's real `--sp-3`
+and inflating the gap. The other suspect (sp-3 on both the prose bottom *and*
+the group top) was ruled out — spacing was already single-sourced correctly in
+`TranscriptView.blockView` (sp-3 below prose via `AssistantProse`, sp-3 below a
+group, sp-4 below a user band, 7pt row padding).
+
+### What the fix does
+
+`mobile/native/MantaUI/ChatModels.swift` treats whitespace-only/blank text
+parts as blank in both the assistant `process` path and the user `textParts`
+aggregation, so they never become a `.prose` block and never split a
+consecutive-step group.
+
+### Unit verification — quoted
+
+`xcodebuild test` (`-only-testing:MantaUITests/ChatTranscriptTests`) on
+`iPhone 17 Pro` (iOS 26.5):
+
+```
+Test Suite 'ChatTranscriptTests' passed at ...
+	 Executed 20 tests, with 0 failures (0 unexpected) in 0.018 (0.052) seconds
+```
+
+The four new BET-632 regression tests all pass:
+- `testBlankTextPartBeforeStepsDoesNotEmitProseBlock` — blank part before a
+  Ran group yields `[.prose, .steps]`
+- `testWhitespaceOnlyTextPartIsBlank` — `"   \n  "` is skipped entirely
+- `testBlankTrailingTextAfterStepsIsSkipped` — no stray trailing prose
+- `testUserBlankPartDoesNotAddParagraphInsideBand` — user band text unchanged
+
+Full `MantaUITests` suite is green (no regressions):
+
+```
+Test Suite 'MantaUITests.xctest' passed
+	 Executed 172 tests, with 0 failures (0 unexpected) in 0.892 (1.303) seconds
+```
+
+### On-device capture — two runs, quoted
+
+`OUT_DIR=…/b632-parent1 ./mobile/native/capture.sh` and `…/b632-parent2`:
+```
+hierarchy leg: IDENTICAL (byte-for-byte)
+screenshot leg: 1206x2622 vs 1206x2622 (dims match)
+masks applied: [415,42 375x78]
+differing pixels (absolute): 0
+VERDICT: PASS
+```
+
+### Geometry — measured per element (parent scene, prose→step-group)
+
+The mockup numbers (`DECISIONS.md` §8 / `transcript-mockup.html`) are met by
+the rendered tree. The decisive pair — the prose immediately above the "Ran"
+step-group:
+
+```
+assistant-prose {{12,120},{308.7,18}}   'Checking its metadata and the blocker chain.' (bottom 138)
+step-rows      {{-0.5,149.5},{403,30.7}}   top 149.5 (content 150); hairline stroke extends 0.5 outside
+  row          {{0,150},{402,29.7}} = 7 + 15.7 + 7 (--step-row-y)
+  verb Ran      tx2 13px; target mono 12px tx4; duration '0.4s' tx4
+```
+
+- **Prose → step-group gap = 12pt (`--sp-3`)** — prose text bottom 138 → group
+  content top 150; the 0.5 stem is the hairline stroke, proving NO phantom
+  paragraph and NO double-stacked `--sp-3`. This is the number the defect
+  inflated.
+- **Below a step-group = 12pt (`--sp-3`)** — group2 (agent rows) bottom 340 →
+  next prose top 352.
+- **Below a user band = 16pt (`--sp-4`)** — user-band bottom 104 → next prose
+  top 120.
+- **Step-row padding = 7pt** (`--step-row-y`): row `{0,150}` → 'Ran' text top
+  157; text bottom 172.7 → row bottom 179.7.
+- **Between rows = hairline only (1pt `--spPx`), zero gap** — the three agent
+  rows sit at 248/279/310 (contiguous 30pt rows, `border-subtle` stroke
+  between them, no added spacing). Machinery collapses; prose does not.
+
+### Honesty note
+
+The capture harness's `parent` scene renders hand-authored `TranscriptBlock`s
+directly (`RootView.parentBlocks`), so it exercises the *rendered* spacing
+against the mockup — it does not itself push a raw wire transcript through
+`ChatTranscriptMapper`. The mapper-level fix (blank part → no phantom prose)
+is therefore pinned by the four unit tests above; the capture pins the target
+spacing geometry. The baseline `baseline/screen.{png,hierarchy.txt}` is
+unchanged — the fixture did not change.
