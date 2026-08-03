@@ -43,9 +43,10 @@ import { nowMs } from "./clock";
 // send → first-token window is never silent. That is why there is no skeleton
 // placeholder here: the loader plus its verb IS the placeholder.
 //
-// Type split: the verb is 13px sans (`text-label`) because it is prose, while
-// the elapsed/token readout stays mono and tabular so the digits stop jittering
-// as they tick.
+// Type: all sans — the verb is prose and the elapsed/token readout is chrome,
+// not output, so neither wants the mono face the transcript reserves for
+// commands and tool output. `tabular-nums` (which Inter supports) is what stops
+// the digits jittering as they tick; the mono face was never doing that job.
 export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
   // Tick once per second to drive the elapsed-time re-render.
   const [, setTick] = useState(0);
@@ -81,7 +82,7 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
       <div className="flex items-center gap-2">
         <MantaLoader />
         <span className="text-label text-text-muted">{verb.current}…</span>
-        <span className="text-meta font-mono tabular-nums text-text-faint">
+        <span className="text-meta tabular-nums text-text-faint">
           {formatDuration(elapsedMs)}
           {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>}
         </span>
@@ -255,29 +256,32 @@ export const MessageRow = memo(function MessageRow({
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
-  // untouched. It sits at the row's top-left, absolutely positioned INSIDE the
-  // content box (left-0, not overflowing into the transcript's px-4 padding —
-  // that zone is clipped by the scroller's overflow). It stays out of the way
-  // (faint, fades in on hover) and never shifts the message layout.
+  // untouched. It labels the row from above: left for the assistant, right for
+  // the user's bubble.
   //
-  // The offset CLEARS the row's first block rather than overlapping it. At
-  // `-top-2` the 12px `leading-none` box ran from −8px to +4px, i.e. its
-  // bottom 4px sat INSIDE the block — invisible while the first block was
-  // bare text, but a visible collision once that block became a bordered
-  // tool card (BET-636) or a user bubble (BET-637). `-top-[18px]` puts the
-  // box at −18px..−6px: 6px of air under the stamp and 6px above it inside
-  // the 24px `--turn-gap`, so it reads as a label for the row rather than a
-  // glyph stuck to the card's top edge.
+  // IN FLOW, NOT ABSOLUTE (and not hover-gated). It used to be an absolutely
+  // positioned `-top-[18px]` overlay revealed on hover, which meant two
+  // problems: the stamp was invisible until you happened to point at the row,
+  // and its 6px of air had to be stolen out of the 24px `--turn-gap` — so it
+  // read as a glyph stuck to the top edge of the following card rather than a
+  // label for the turn. A persistent stamp is layout, so it participates in
+  // layout: the turn gap sits ABOVE it untouched and `--sp-1` separates it
+  // from the row's first block. Do not put it back in an absolute box — the
+  // negative offset only existed to avoid shifting a hidden element in.
+  //
+  // Type: sans (it is chrome, not code — the transcript's mono is reserved for
+  // commands, paths and output), 11px, tabular so the digits don't jitter
+  // between rows.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
-    <div className="group relative">
+    <div className="flex flex-col" style={{ gap: "var(--sp-1)" }}>
       {ts && (
-        <span
-          className={`pointer-events-none absolute ${isUser ? "right-0" : "left-0"} -top-[18px] z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity`}
+        <div
+          className={`select-none whitespace-nowrap text-[11px] leading-none tabular-nums text-text-faint${isUser ? " text-right" : ""}`}
           aria-hidden
         >
           {ts}
-        </span>
+        </div>
       )}
       {children}
     </div>
@@ -373,8 +377,11 @@ export const MessageRow = memo(function MessageRow({
       {/* (most common case: end-of-turn truncation). For mid-turn step */}
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
+      {/* Sans, not mono: this is a sentence about the turn ("Brewed for 40s"), */}
+      {/* not a command or a path. In mono it read as terminal output that had */}
+      {/* leaked into the transcript. */}
       {(turnDurationMs != null || truncation != null) && (
-        <div className="text-code font-mono text-text-muted">
+        <div className="text-label text-text-muted">
           {turnDurationMs != null && (
             <>
               {/* The finished turn keeps the mark the working row was built

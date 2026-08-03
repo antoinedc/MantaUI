@@ -7,7 +7,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { cssVar } from "./chatUtils";
-import { bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
+import { AssistantPart, bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
 import {
   installMockApi,
   mount,
@@ -95,6 +95,99 @@ describe("formatFileDiff", () => {
     installMockApi();
     h = mount(<>{formatFileDiff(0, 0)}</>);
     expect(h.text() ?? "").toBe("");
+  });
+});
+
+describe("tool card chrome", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // An unrecognized tool falls through to ToolOutput, which is where the
+  // nested-scroller bug lived: the well was given `max-h-64 overflow-y-auto`
+  // AND the <pre> inside it declared the same cap, so the card carried two
+  // vertical scrollbars over one body.
+  function outputPart(output: string): OpencodePart {
+    return {
+      type: "tool",
+      tool: "plugins_plugin_list",
+      state: { status: "completed", output },
+    } as unknown as OpencodePart;
+  }
+
+  it("gives a tool output body exactly ONE scroll container", () => {
+    installMockApi();
+    const long = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
+    h = mount(<ToolCall part={outputPart(long)} verbose={false} />);
+    const scrollers = h.container.querySelectorAll(".overflow-y-auto");
+    expect(scrollers.length).toBe(1);
+    // …and it is the <pre>, because that is the element the pin-to-bottom
+    // effect measures.
+    expect(scrollers[0].tagName).toBe("PRE");
+  });
+
+  it("puts the copy button in the card header, not floating over the body", () => {
+    installMockApi();
+    h = mount(<ToolCall part={outputPart("hello")} verbose={false} />);
+    const copy = h.container.querySelector('[aria-label="Copy"]');
+    expect(copy).toBeTruthy();
+    // The header is the card shell's first child; the copy button must be
+    // inside it (and therefore not absolutely positioned over the output).
+    const header = h.container.firstElementChild?.firstElementChild;
+    expect(header?.contains(copy!)).toBe(true);
+    expect(copy!.className).not.toContain("absolute");
+  });
+
+  it("does not nest a copy button inside a disclosure header (invalid HTML)", () => {
+    installMockApi();
+    // The subagent card's header IS a <button>; a copy button inside it would
+    // be unclickable and invalid markup.
+    h = mount(<ToolCall part={taskPart({ subagent_type: "explore" })} verbose={false} />);
+    for (const btn of Array.from(h.container.querySelectorAll("button"))) {
+      expect(btn.querySelector("button")).toBeNull();
+    }
+  });
+});
+
+describe("non-tool assistant parts", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // patch / file / unknown parts used to render as bare `⎿ …` mono rows on the
+  // page background, which read as tool output that had escaped its card.
+  it("renders a patch part as a card, not a bare ⎿ row", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "patch", files: ["/a/b.py", "/c/d.ts"] } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.container.firstElementChild?.className).toContain("border-border-subtle");
+    expect(h.text()).toContain("Patch");
+    expect(h.text()).toContain("2 files");
+    expect(h.text()).toContain("/a/b.py");
+    expect(h.text() ?? "").not.toContain("⎿");
+  });
+
+  it("renders a file part as a card", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "report.pdf", mime: "application/pdf" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.container.firstElementChild?.className).toContain("border-border-subtle");
+    expect(h.text()).toContain("report.pdf");
+    expect(h.text() ?? "").not.toContain("⎿");
   });
 });
 
