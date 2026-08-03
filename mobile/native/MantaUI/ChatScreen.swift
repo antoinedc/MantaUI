@@ -139,6 +139,11 @@ struct ChatScreen: View {
     private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                if store.hasEarlier {
+                    LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
+                        store.loadEarlier()
+                    }
+                }
                 TranscriptView(blocks: store.blocks, tokens: tokens)
             }
         }
@@ -233,6 +238,11 @@ struct ChatSubagentScreen: View {
             )
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if store.hasEarlier {
+                        LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
+                            store.loadEarlier()
+                        }
+                    }
                     TranscriptView(blocks: store.blocks, tokens: tokens)
                 }
             }

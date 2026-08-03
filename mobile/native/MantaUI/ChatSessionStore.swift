@@ -45,6 +45,23 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True when the transcript on screen is a WINDOW onto a longer history —
+    /// i.e. the box returned a full page, so older messages exist. Drives the
+    /// "Load earlier messages" affordance at the top of the transcript.
+    @Published private(set) var hasEarlier = false
+    /// True while a `loadEarlier()` widening fetch is in flight.
+    @Published private(set) var loadingEarlier = false
+
+    /// How many of the most recent messages the first fetch asks for. A session
+    /// open used to pull the ENTIRE history — hundreds of KB on a long session,
+    /// almost all of it scrolled far out of view. One screenful is ~3-6 blocks,
+    /// so 30 messages is several screens of headroom.
+    static let initialMessageLimit = 30
+    /// Each "load earlier" tap widens the window by this much. opencode has no
+    /// working cursor on this endpoint (`before` is declared but 400s), so
+    /// paging = re-asking for a bigger tail. Wasteful in principle, bounded and
+    /// simple in practice — and it only happens when the user asks for it.
+    static let earlierMessageStep = 50
 
     let sessionId: String
     let isReadOnly: Bool
@@ -57,6 +74,20 @@ final class ChatSessionStore: ObservableObject {
     private var didRunOnce = false
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// How many recent messages the CURRENT window covers. Every refetch reuses
+    /// it, so a turn-boundary refresh never silently collapses a window the
+    /// user widened.
+    private var messageLimit = ChatSessionStore.initialMessageLimit
+    /// One transcript fetch at a time. Three independent triggers (first load,
+    /// connection, turn boundary) used to fire concurrently on open and pull the
+    /// same transcript three times over. `fetchPending` remembers that a trigger
+    /// arrived mid-flight so the refresh still happens — exactly once — after.
+    private var fetchInFlight = false
+    private var fetchPending = false
+    /// The connection sink replays its CURRENT value on subscribe, so without
+    /// this the store fired a "reconnect" refetch before `start()` had even run.
+    /// Only a genuine drop→connect transition is a resync.
+    private var wasConnected: Bool?
 
     init(
         sessionId: String,
@@ -102,16 +133,23 @@ final class ChatSessionStore: ObservableObject {
         guard !loading else { return }
         loading = true
         Task {
-            let messages = (try? await api.messages(sessionId: sessionId)) ?? []
-            await MainActor.run {
-                loading = false
-                loadFailed = messages.isEmpty
-                transcript = ChatTranscriptMapper.blocks(from: messages)
-                rebuildBlocks()
-            }
+            await fetchTranscript(isFirstLoad: true)
+            await MainActor.run { loading = false }
             if !isReadOnly {
                 await refreshPermissions()
             }
+        }
+    }
+
+    /// Widen the window by `earlierMessageStep` and re-render. No-op while a
+    /// widening is already running or when the whole history is already shown.
+    func loadEarlier() {
+        guard hasEarlier, !loadingEarlier else { return }
+        loadingEarlier = true
+        messageLimit += ChatSessionStore.earlierMessageStep
+        Task {
+            await fetchTranscript(isFirstLoad: false)
+            await MainActor.run { loadingEarlier = false }
         }
     }
 
@@ -141,8 +179,12 @@ final class ChatSessionStore: ObservableObject {
             runningSince = nil
         }
 
-        // Register child stores for any subagent that has a child session id,
-        // so its drill-in is live before the user taps it (BET-576).
+        // Register a store for any subagent that has a child session id, so the
+        // drill-in destination can resolve it without mutating state during a
+        // view update (BET-576). Registering does NOT start it: the child's own
+        // screen calls `start()` on appear. Starting them here meant opening a
+        // parent session downloaded a full extra transcript for EVERY subagent
+        // in its history, none of which is on screen.
         for payload in s.subagents {
             let childID = payload.childSessionId
             if !childID.isEmpty, childStores[childID] == nil {
@@ -153,23 +195,37 @@ final class ChatSessionStore: ObservableObject {
         // Refetch the canonical transcript at turn boundaries so a finished
         // turn's blocks (steps/prose/subagents) land as real content and the
         // in-progress text is absorbed (no duplication while streaming).
-        if running != lastRunning {
-            lastRunning = running
-            if running { scheduleRefetch() }
-        }
-        if turnComplete != lastComplete {
-            lastComplete = turnComplete
-            if turnComplete { scheduleRefetch() }
+        //
+        // The FIRST call here is not a transition, it is the initial snapshot:
+        // `@Published` replays its current value the moment we subscribe, which
+        // is before `start()` runs. Seeding without fetching is what stops a
+        // session open from pulling the same transcript two extra times.
+        let firstSnapshot = lastRunning == nil && lastComplete == nil
+        let runningChanged = running != lastRunning
+        let completeChanged = turnComplete != lastComplete
+        lastRunning = running
+        lastComplete = turnComplete
+        if !firstSnapshot {
+            if runningChanged && running { scheduleRefetch() }
+            if completeChanged && turnComplete { scheduleRefetch() }
         }
 
         rebuildBlocks()
     }
 
     private func handleConnection(_ state: MantaConnectionState) {
-        // A healthy reconnect means missed state should be re-fetched, exactly
+        // A healthy RECONNECT means missed state should be re-fetched, exactly
         // what resyncHandler would do — but derived here so we never steal the
         // event store's single-owner resync slot from the session list.
-        if state == .connected { scheduleRefetch() }
+        //
+        // Only a drop→connect transition counts. The sink replays the current
+        // value on subscribe, so treating every `.connected` as a resync fired
+        // a full transcript fetch at construction, racing the one `start()` was
+        // about to make.
+        let connected = state == .connected
+        let wasDisconnected = wasConnected == false
+        wasConnected = connected
+        if connected && wasDisconnected { scheduleRefetch() }
     }
 
     // MARK: - Block assembly
@@ -193,12 +249,35 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func refetch() async {
-        let messages = (try? await api.messages(sessionId: sessionId)) ?? []
-        await MainActor.run {
-            transcript = ChatTranscriptMapper.blocks(from: messages)
-            rebuildBlocks()
-            if !isReadOnly { Task { await self.refreshPermissions() } }
+        await fetchTranscript(isFirstLoad: false)
+        if !isReadOnly { await refreshPermissions() }
+    }
+
+    /// The ONE place a transcript is fetched. Serialised: a trigger that
+    /// arrives while a fetch is running sets `fetchPending` instead of starting
+    /// a second identical request, and the in-flight one re-runs once when it
+    /// finishes so nothing is missed.
+    private func fetchTranscript(isFirstLoad: Bool) async {
+        if fetchInFlight {
+            fetchPending = true
+            return
         }
+        fetchInFlight = true
+        defer { fetchInFlight = false }
+
+        repeat {
+            fetchPending = false
+            let limit = messageLimit
+            let messages = (try? await api.messages(sessionId: sessionId, limit: limit, slim: true)) ?? []
+            await MainActor.run {
+                if isFirstLoad { loadFailed = messages.isEmpty }
+                // A full page back means the window is a view onto more
+                // history. A short page means we are looking at all of it.
+                hasEarlier = messages.count >= limit
+                transcript = ChatTranscriptMapper.blocks(from: messages)
+                rebuildBlocks()
+            }
+        } while fetchPending
     }
 
     // MARK: - Permissions (S1a answerable)
@@ -350,7 +429,9 @@ final class ChatSessionStore: ObservableObject {
             isReadOnly: true
         )
         childStores[childSessionId] = child
-        child.start()
+        // NOT started here — `ChatSubagentScreen.onAppear` calls `start()`, so
+        // a child's transcript is fetched when the user opens it and not
+        // before. See the registration comment in `applyStreamState`.
         return child
     }
 

@@ -4,6 +4,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
@@ -383,8 +384,14 @@ export function buildHandlers({
     // ---- opencode: simple pass-throughs ----
 
     // preload: ipcRenderer.invoke(IPC.opencodeMessages, sessionId)
-    // → args[0] = sessionId (string)
-    "opencode:messages": (sessionId) => oc.listMessages(sessionId),
+    // → args[0] = sessionId (string), args[1] = optional {limit, slim}.
+    //
+    // The desktop passes ONE arg and so keeps the whole, unabridged history —
+    // its renderer draws reasoning/patch/file parts and needs every message.
+    // The native iOS client passes {limit, slim} to fetch only the recent tail
+    // with the parts it never renders (and the duplicated tool stdout)
+    // stripped. See `slimTranscript` in opencode.mjs for why slim is opt-in.
+    "opencode:messages": (sessionId, opts) => oc.listMessages(sessionId, opts ?? {}),
 
     // Reconcile == full pull on the server (no transcript cache to merge
     // against; the tail-merge win is desktop-only). Same renderer API on both.
@@ -940,18 +947,48 @@ export function buildHandlers({
 }
 
 // POST /rpc/<channel>  body: {"args":[...]}  ->  {"result":...} | {"error":"..."}
+/** Below this, gzip costs more (CPU + header bytes) than it saves. */
+export const GZIP_MIN_BYTES = 1024;
+
+/** Does this request's Accept-Encoding allow a gzipped response? */
+export function acceptsGzip(header) {
+  return typeof header === "string" && /(^|[,\s])gzip\b/i.test(header);
+}
+
 export async function handleRpcRequest(handlers, channel, req, res) {
   let body = "";
   let responded = false;
 
+  // A transcript is highly repetitive JSON and compresses ~8-10×. It was going
+  // over the wire raw, which on a phone off Wi-Fi is most of the wait to open
+  // a session. Only the /rpc path is compressed — never /events (SSE must not
+  // be buffered) and never /pty.
   function sendJson(status, payload) {
     if (responded) return;
     responded = true;
-    res.writeHead(status, {
+    const json = JSON.stringify(payload);
+    const headers = {
       "content-type": "application/json",
       "access-control-allow-origin": "*",
-    });
-    res.end(JSON.stringify(payload));
+    };
+    const raw = Buffer.from(json, "utf8");
+    if (raw.length >= GZIP_MIN_BYTES && acceptsGzip(req.headers?.["accept-encoding"])) {
+      let gz;
+      try {
+        gz = gzipSync(raw);
+      } catch {
+        gz = null; // never fail a response over compression
+      }
+      if (gz) {
+        headers["content-encoding"] = "gzip";
+        headers["vary"] = "accept-encoding";
+        res.writeHead(status, headers);
+        res.end(gz);
+        return;
+      }
+    }
+    res.writeHead(status, headers);
+    res.end(raw);
   }
 
   req.on("error", (err) => {

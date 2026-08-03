@@ -105,6 +105,36 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertNotNil(payload?["createDir"])
         XCTAssertNotNil(payload?["chatMode"])
     }
+
+    // MARK: - transcript window (mobile session-load perf)
+
+    /// `opencode:messages` is dispatched as `fn(sessionId, opts)`, so the
+    /// window options MUST be a SECOND arg — not merged into the first, and not
+    /// wrapped in an array. Getting this wrong is silent: the server reads
+    /// `opts` as undefined and quietly serves the whole history again.
+    func testMessagesSendsWindowOptionsAsASecondArg() async throws {
+        CapturingURLProtocol.result = #"{"result": []}"#
+        let client = makeClient()
+        _ = try await client.messages(sessionId: "ses_1", limit: 30, slim: true)
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:messages")
+        XCTAssertEqual(args?.count, 2)
+        XCTAssertEqual(args?.first as? String, "ses_1")
+        let opts = args?.last as? [String: Any]
+        XCTAssertEqual(opts?["limit"] as? Int, 30)
+        XCTAssertEqual(opts?["slim"] as? Bool, true)
+    }
+
+    /// The un-windowed call must stay a ONE-arg request — that is the shape the
+    /// server treats as "the whole history, verbatim".
+    func testMessagesWithoutOptionsSendsOnlyTheSessionId() async throws {
+        CapturingURLProtocol.result = #"{"result": []}"#
+        let client = makeClient()
+        _ = try await client.messages(sessionId: "ses_1")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(args?.count, 1)
+        XCTAssertEqual(args?.first as? String, "ses_1")
+    }
 }
 
 // MARK: - Capturing URLProtocol

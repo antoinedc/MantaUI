@@ -32,8 +32,20 @@ final class MantaAPIClient: Sendable {
         return try await call("opencode:list-sessions", args: args, as: [OpencodeSessionListItem].self) ?? []
     }
 
-    func messages(sessionId: String) async throws -> [OpencodeMessage] {
-        try await call("opencode:messages", args: [sessionId], as: [OpencodeMessage].self) ?? []
+    /// Fetch a session's transcript.
+    ///
+    /// `limit` asks the box for only the most recent N messages (opencode's
+    /// `?limit=` returns the tail, chronologically ordered). `slim` drops the
+    /// part types this client never renders plus the duplicated copy of every
+    /// tool's stdout that opencode writes into `state.metadata.output` — on a
+    /// real 63-message session that is most of the payload. Both are opt-in on
+    /// the wire; the desktop passes neither and still gets the full history.
+    func messages(sessionId: String, limit: Int? = nil, slim: Bool = false) async throws -> [OpencodeMessage] {
+        var opts: [String: Any] = [:]
+        if let limit, limit > 0 { opts["limit"] = limit }
+        if slim { opts["slim"] = true }
+        let args: [Any] = opts.isEmpty ? [sessionId] : [sessionId, opts]
+        return try await call("opencode:messages", args: args, as: [OpencodeMessage].self) ?? []
     }
 
     func sendPrompt(_ input: SendPromptInput) async throws {

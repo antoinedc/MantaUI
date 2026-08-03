@@ -329,6 +329,38 @@ enum TranscriptBlock {
     case steps(StepGroupContent)
 }
 
+// MARK: - "Load earlier messages"
+//
+// A session opens on a WINDOW of its most recent messages, not the whole
+// history — pulling every message of a long session was most of the wait to
+// open one, and nearly all of it lands far out of view. This row is how the
+// user reaches back past the window; it appears only when the box says there
+// is more (a full page came back).
+struct LoadEarlierRow: View {
+    let loading: Bool
+    let tokens: Tokens
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if loading {
+                    ProgressView()
+                } else {
+                    Text("Load earlier messages")
+                        .font(.system(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx3)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, Metrics.spacing.sp3)
+        }
+        .buttonStyle(.plain)
+        .disabled(loading)
+        .accessibilityIdentifier("load-earlier")
+    }
+}
+
 // §8a agent-row treatment: `[agent glyph] [name] [live status] [chevron]`.
 // The glyph is a 16px `accent-soft` tile; the name is 600 weight `tx1` — a task
 // name, never a command; the status is a live duration while running; the

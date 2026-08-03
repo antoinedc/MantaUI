@@ -6,6 +6,7 @@ import {
   createSession,
   sendPrompt,
   listMessages,
+  slimTranscript,
   runCommand,
   forkSession,
   compactSession,
@@ -1039,29 +1040,32 @@ test("readiness gate: degrades to sending after the bound elapses (wedged stream
   );
 });
 
-test("listMessages awaits the scoped stream ready gate BEFORE fetching the transcript", async () => {
-  // Regression: listMessages used to fire-and-forget getSessionDirectoryQuery,
-  // so the /message snapshot could be fetched (and events lost) before the
-  // scoped stream was actually connected. This asserts the ready gate is
-  // awaited — the /message GET must never fire until the scoped stream
-  // connects — mirroring the write-path readiness gate test above.
+test("listMessages OPENS the scoped stream but does NOT wait for it", async () => {
+  // The readiness gate is a WRITE-path guarantee: a session-mutating call must
+  // not race ahead of its own event subscription and lose the reply. A READ has
+  // no reply to lose, and on a cold or LRU-evicted stream the wait costs up to
+  // 5s — paid in front of every transcript fetch, it was the single largest
+  // component of a slow session open on mobile.
+  //
+  // So this pins BOTH halves of the current contract: the scoped stream is
+  // still opened (events keep flowing), and the /message GET does NOT wait for
+  // it to connect. The write-path gate test above is what keeps the guarantee
+  // that actually matters; do not "restore symmetry" by re-awaiting here.
   _resetSessionDirectoryCache();
   _resetStreamReadyState();
-  let releaseConnect;
-  const connectGate = new Promise((r) => { releaseConnect = r; });
+  const streamUrls = [];
   _setEventStreamTransport(async (url) => {
+    streamUrls.push(String(url));
     if (String(url).includes("directory=")) {
-      await connectGate; // hold the scoped stream "connecting" until released
+      await new Promise(() => {}); // scoped stream never finishes connecting
     }
     return new Response(openStreamBody(), { status: 200 });
   });
 
-  const calls = [];
   const stop = subscribeEvents(() => {});
   try {
     await withMockFetch(
-      async (url, opts) => {
-        calls.push({ url: String(url), method: opts?.method ?? "GET" });
+      async (url) => {
         if (String(url).endsWith("/session/ses_msg_gate")) {
           return new Response(JSON.stringify({ directory: "/work/msg-gate" }), {
             status: 200,
@@ -1077,25 +1081,14 @@ test("listMessages awaits the scoped stream ready gate BEFORE fetching the trans
         return new Response(null, { status: 204 });
       },
       async () => {
-        const listDone = listMessages("ses_msg_gate").then((msgs) => {
-          calls.push({ marker: "list-resolved" });
-          return msgs;
-        });
-        // Let microtasks/timers run without advancing past the gate — the
-        // scoped stream hasn't connected, so the /message GET must not have
-        // fired yet.
-        await new Promise((r) => setTimeout(r, 30));
-        assert.ok(
-          !calls.some((c) => c.url?.includes("/message")),
-          "listMessages fetched the transcript before the scoped stream connected",
-        );
-        releaseConnect();
-        const msgs = await listDone;
-        assert.ok(
-          calls.some((c) => c.url?.includes("/message")),
-          "listMessages never fetched the transcript after the scoped stream connected",
-        );
+        // Resolves even though the scoped stream never connects, and without
+        // the readiness bound having to elapse.
+        const msgs = await listMessages("ses_msg_gate");
         assert.deepEqual(msgs, [{ id: "m1" }]);
+        assert.ok(
+          streamUrls.some((u) => u.includes("directory=")),
+          "listMessages never opened the session's scoped event stream",
+        );
       },
     );
   } finally {
@@ -1103,6 +1096,105 @@ test("listMessages awaits the scoped stream ready gate BEFORE fetching the trans
     _setEventStreamTransport(null);
     _resetStreamReadyState();
   }
+});
+
+test("listMessages passes ?limit through and leaves the tail slim-untouched by default", async () => {
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  const urls = [];
+  const raw = [
+    {
+      id: "m1",
+      parts: [
+        { type: "step-start" },
+        { type: "text", text: "hi" },
+        { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
+      ],
+    },
+  ];
+  await withMockFetch(
+    async (url) => {
+      urls.push(String(url));
+      if (String(url).includes("/message")) {
+        return new Response(JSON.stringify(raw), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const full = await listMessages("ses_lim");
+      assert.ok(!urls.some((u) => u.includes("limit=")), "a no-opts call must not add ?limit");
+      assert.deepEqual(full, raw, "a no-opts call must return the payload verbatim (desktop)");
+
+      urls.length = 0;
+      await listMessages("ses_lim", { limit: 20 });
+      assert.ok(urls.some((u) => u.includes("limit=20")), "limit was not forwarded to opencode");
+
+      urls.length = 0;
+      await listMessages("ses_lim", { limit: 0 });
+      assert.ok(!urls.some((u) => u.includes("limit=")), "a non-positive limit must be ignored");
+    },
+  );
+});
+
+test("slimTranscript drops unrendered parts + the duplicated tool stdout", () => {
+  const messages = [
+    {
+      id: "m1",
+      info: { role: "assistant" },
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "x".repeat(500) },
+        { type: "step-finish" },
+        { type: "text", text: "hello" },
+        { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
+      ],
+    },
+  ];
+  const slim = slimTranscript(messages);
+  assert.deepEqual(
+    slim[0].parts.map((p) => p.type),
+    ["text", "tool"],
+    "only the part types the client renders survive",
+  );
+  assert.deepEqual(
+    slim[0].parts[1].state,
+    { output: "OUT", metadata: { exit: 0 } },
+    "the duplicate metadata.output is dropped, the rest of metadata kept",
+  );
+  assert.equal(messages[0].parts.length, 5, "the input must not be mutated");
+});
+
+test("slimTranscript keeps a RUNNING tool's live output", () => {
+  // While a tool runs, state.output does not exist yet and metadata.output IS
+  // the live stream — dropping it would blank the running tool's body. Only
+  // the exact-duplicate case is removed.
+  const slim = slimTranscript([
+    { id: "m1", parts: [{ type: "tool", state: { status: "running", metadata: { output: "live…" } } }] },
+  ]);
+  assert.equal(slim[0].parts[0].state.metadata.output, "live…");
+
+  // Different strings are also both kept — never assume they duplicate.
+  const differing = slimTranscript([
+    { id: "m2", parts: [{ type: "tool", state: { output: "final", metadata: { output: "partial" } } }] },
+  ]);
+  assert.equal(differing[0].parts[0].state.metadata.output, "partial");
+});
+
+test("slimTranscript is a DENY-list — an unknown future part type survives", () => {
+  const slim = slimTranscript([{ id: "m1", parts: [{ type: "brand-new-thing", v: 1 }] }]);
+  assert.deepEqual(slim[0].parts, [{ type: "brand-new-thing", v: 1 }]);
+});
+
+test("slimTranscript tolerates malformed payloads", () => {
+  assert.deepEqual(slimTranscript([]), []);
+  assert.equal(slimTranscript(null), null);
+  assert.deepEqual(slimTranscript([{ id: "m1" }]), [{ id: "m1" }]);
+  assert.deepEqual(slimTranscript([{ id: "m1", parts: [{ type: "tool" }] }]), [
+    { id: "m1", parts: [{ type: "tool" }] },
+  ]);
 });
 
 test("listMessages still returns the transcript when the readiness gate times out", async () => {

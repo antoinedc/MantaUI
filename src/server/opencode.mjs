@@ -390,7 +390,7 @@ async function fetchSessionDirectory(sessionId) {
   }
 }
 
-async function getSessionDirectoryQuery(sessionId) {
+async function getSessionDirectoryQuery(sessionId, { awaitReady = true } = {}) {
   let dir = sessionDirectoryCache.get(sessionId);
   if (!dir) {
     const fetched = await fetchSessionDirectory(sessionId);
@@ -410,10 +410,17 @@ async function getSessionDirectoryQuery(sessionId) {
   // connect before returning, so a session-mutating call (sendPrompt et al.)
   // can't race ahead of its own event subscription and lose the reply. Bound
   // is deliberately short — a wedged opencode must never hang the prompt.
+  //
+  // `awaitReady:false` (read-only callers — see listMessages) still OPENS the
+  // stream but does not wait for it. A read has no reply that could be lost to
+  // the race the gate protects against, and the wait is up to 5s on a cold or
+  // LRU-evicted stream.
   if (dir && ensureStreamForDirectory) {
     try { ensureStreamForDirectory(dir); } catch { /* non-fatal */ }
-    const ready = getOrCreateStreamReady(dir).promise;
-    await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000)]);
+    if (awaitReady) {
+      const ready = getOrCreateStreamReady(dir).promise;
+      await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000)]);
+    }
   }
   return dir ? `?directory=${encodeURIComponent(dir)}` : "";
 }
@@ -474,27 +481,94 @@ export async function createSession({ directory, title = "", permission }) {
   return sess;
 }
 
-/** Fetch the full message transcript for a session.
- *  @param {string} sessionId
+// Part types NO client renders. `slim` drops them from the wire.
+//
+// The desktop renderer DOES render `reasoning` (ctrl+O) and `patch`/`file`
+// parts, which is exactly why slim is OPT-IN and desktop never asks for it:
+// only the native iOS transcript mapper, which switches on `text` and `tool`
+// and falls through everything else, sets it. Measured on a real 63-message
+// session these are ~20% of the payload, decoded on-device and then dropped.
+const SLIM_DROP_PART_TYPES = new Set(["step-start", "step-finish", "reasoning", "snapshot"]);
+
+/**
+ * Shrink a transcript for a client that renders only text + tool parts.
+ *
+ * Two reductions, both lossless for such a client:
+ *
+ *  1. Drop the part types in SLIM_DROP_PART_TYPES. This is a DENY-list, not an
+ *     allow-list, so a part type opencode adds later still reaches the client
+ *     rather than silently vanishing.
+ *  2. Drop `state.metadata.output` when it is byte-identical to `state.output`.
+ *     opencode writes a tool's stdout to BOTH fields, and on a real session
+ *     that duplicate alone was ~30% of the whole payload. `metadata.output` is
+ *     the LIVE stream while a tool runs (`state.output` only exists once it
+ *     completes), so it is dropped ONLY on the exact-match case — a running
+ *     tool keeps its live text.
+ *
+ * Pure: takes and returns plain JSON, no I/O. The input is not mutated.
+ * @param {any[]} messages
  */
-export async function listMessages(sessionId) {
-  // Open AND await the session's scoped event stream BEFORE reading the
-  // transcript snapshot, so live events emitted around the snapshot land on
-  // the now-open stream instead of vanishing (opencode has no replay). The
-  // wait is internally bounded (~5s) so a wedged opencode degrades to
-  // "fetch anyway", never a hang. This mirrors the write paths (sendPrompt),
-  // which already await the same gate.
+export function slimTranscript(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((msg) => {
+    const parts = Array.isArray(msg?.parts) ? msg.parts : null;
+    if (!parts) return msg;
+    const kept = [];
+    for (const part of parts) {
+      if (SLIM_DROP_PART_TYPES.has(part?.type)) continue;
+      kept.push(slimPart(part));
+    }
+    return { ...msg, parts: kept };
+  });
+}
+
+/** Drop a tool part's duplicated stdout. Returns the part unchanged otherwise. */
+function slimPart(part) {
+  const state = part?.state;
+  const metadata = state?.metadata;
+  if (!metadata || typeof metadata !== "object") return part;
+  if (typeof metadata.output !== "string") return part;
+  if (metadata.output !== state.output) return part;
+  const { output: _dropped, ...restMetadata } = metadata;
+  return { ...part, state: { ...state, metadata: restMetadata } };
+}
+
+/** Fetch a session's message transcript.
+ *
+ *  @param {string} sessionId
+ *  @param {{limit?: number, slim?: boolean}} [opts]
+ *    limit — return only the most recent N messages (opencode's `?limit=`
+ *      returns the TAIL, chronologically ordered; verified live). Omit for the
+ *      whole history, which is what the desktop still does.
+ *    slim  — apply `slimTranscript` (see above). Opt-in; mobile only.
+ */
+export async function listMessages(sessionId, opts = {}) {
+  // Open the session's scoped event stream BEFORE reading the transcript
+  // snapshot, so live events emitted around the snapshot land on the now-open
+  // stream instead of vanishing (opencode has no replay).
+  //
+  // We do NOT await the readiness gate here. The gate exists so a
+  // session-MUTATING call (sendPrompt et al.) can't race ahead of its own
+  // event subscription and lose the reply; a read has no reply to lose. On a
+  // cold or evicted stream that wait costs up to 5s, and it was being paid in
+  // front of every transcript fetch — the single largest component of "opening
+  // a session on mobile is slow". `ensureStreamForDirectory` still runs, so
+  // the stream is opened either way; we just don't block the read on it.
+  let query = "";
   try {
-    await getSessionDirectoryQuery(sessionId);
+    query = await getSessionDirectoryQuery(sessionId, { awaitReady: false });
   } catch {
     /* non-fatal: fetch the snapshot regardless */
   }
-  const url = `/session/${encodeURIComponent(sessionId)}/message`;
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : null;
+  if (limit != null) query += `${query ? "&" : "?"}limit=${limit}`;
+  const url = `/session/${encodeURIComponent(sessionId)}/message${query}`;
   const res = await ocFetch(apiUrl(url));
   if (!res.ok) {
     throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
   }
-  return res.json();
+  const messages = await res.json();
+  return opts.slim ? slimTranscript(messages) : messages;
 }
 
 /** Fetch a single message by id (GET /session/{id}/message/{messageID}).

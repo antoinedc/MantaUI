@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { dispatch, buildHandlers, SELF_UPDATE_SCRIPT } from "./rpc.mjs";
+import {
+  dispatch,
+  buildHandlers,
+  handleRpcRequest,
+  acceptsGzip,
+  GZIP_MIN_BYTES,
+  SELF_UPDATE_SCRIPT,
+} from "./rpc.mjs";
+import { gunzipSync } from "node:zlib";
 
 test("dispatch routes a known channel to its handler with args", async () => {
   const handlers = { "echo:it": async (a, b) => ({ sum: a + b }) };
@@ -638,4 +646,91 @@ test("server:update-apply propagates runServerSelfUpdate's failure result throug
     ok: false,
     error: "spawn /abs/scripts/self-update.sh EACCES",
   });
+});
+
+// ===== /rpc response compression (mobile session-load perf) =====
+
+/** Minimal fake req/res pair for handleRpcRequest. */
+function fakeExchange({ acceptEncoding } = {}) {
+  const listeners = {};
+  const req = {
+    headers: acceptEncoding ? { "accept-encoding": acceptEncoding } : {},
+    on(ev, fn) {
+      listeners[ev] = fn;
+      return req;
+    },
+    _fire(ev, arg) {
+      return listeners[ev]?.(arg);
+    },
+  };
+  const res = {
+    status: null,
+    headers: null,
+    body: null,
+    writeHead(status, headers) {
+      this.status = status;
+      this.headers = headers;
+    },
+    end(buf) {
+      this.body = buf;
+    },
+  };
+  return { req, res };
+}
+
+test("acceptsGzip only matches a real gzip token", () => {
+  assert.equal(acceptsGzip("gzip"), true);
+  assert.equal(acceptsGzip("gzip, deflate, br"), true);
+  assert.equal(acceptsGzip("deflate, gzip"), true);
+  assert.equal(acceptsGzip("br, deflate"), false);
+  assert.equal(acceptsGzip("xgzip"), false, "must not match a token it is only a suffix of");
+  assert.equal(acceptsGzip(undefined), false);
+  assert.equal(acceptsGzip(""), false);
+});
+
+test("a large /rpc response is gzipped when the client accepts it", async () => {
+  // A transcript is highly repetitive JSON; sending it raw over a phone's
+  // connection was most of the wait to open a session.
+  const big = { rows: Array.from({ length: 400 }, (_, i) => ({ i, text: "repetitive payload" })) };
+  const handlers = { "x:big": () => big };
+  const { req, res } = fakeExchange({ acceptEncoding: "gzip, deflate" });
+  const done = handleRpcRequest(handlers, "x:big", req, res);
+  req._fire("data", JSON.stringify({ args: [] }));
+  await req._fire("end");
+  await done;
+
+  assert.equal(res.status, 200);
+  assert.equal(res.headers["content-encoding"], "gzip");
+  assert.equal(res.headers["vary"], "accept-encoding");
+  const raw = Buffer.from(JSON.stringify({ result: big }), "utf8");
+  assert.ok(res.body.length < raw.length / 2, "gzip must actually shrink a repetitive payload");
+  assert.deepEqual(JSON.parse(gunzipSync(res.body).toString("utf8")), { result: big });
+});
+
+test("a /rpc response is sent raw without a gzip Accept-Encoding, and when small", async () => {
+  const big = { rows: Array.from({ length: 400 }, (_, i) => ({ i, text: "repetitive payload" })) };
+
+  // No Accept-Encoding → raw, whatever the size.
+  {
+    const { req, res } = fakeExchange();
+    const done = handleRpcRequest({ "x:big": () => big }, "x:big", req, res);
+    req._fire("data", JSON.stringify({ args: [] }));
+    await req._fire("end");
+    await done;
+    assert.equal(res.headers["content-encoding"], undefined);
+    assert.deepEqual(JSON.parse(res.body.toString("utf8")), { result: big });
+  }
+
+  // Under the threshold → raw even though gzip is offered (the header bytes
+  // and the CPU cost outweigh the saving on a small body).
+  {
+    const { req, res } = fakeExchange({ acceptEncoding: "gzip" });
+    const done = handleRpcRequest({ "x:small": () => ({ ok: true }) }, "x:small", req, res);
+    req._fire("data", JSON.stringify({ args: [] }));
+    await req._fire("end");
+    await done;
+    assert.ok(res.body.length < GZIP_MIN_BYTES);
+    assert.equal(res.headers["content-encoding"], undefined);
+    assert.deepEqual(JSON.parse(res.body.toString("utf8")), { result: { ok: true } });
+  }
 });
