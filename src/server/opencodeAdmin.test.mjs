@@ -4,7 +4,11 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
+import { statePath } from "../shared/paths.mjs";
 
 describe("restartOpencode", () => {
   it("invokes systemctl --user restart opencode-serve with a fixed argv (no shell string)", async () => {
@@ -42,25 +46,23 @@ describe("restartOpencode", () => {
 describe("runServerSelfUpdate", () => {
   // The injection here uses the callback-shaped execFile (not the
   // promisified one) because the production path needs the raw
-  // ChildProcess handle to .unref() it. Stub returns a fake child with a
-  // fixed pid and a no-op unref so we can assert the call shape.
-  function fakeSpawn(records, pid = 4242) {
+  // ChildProcess handle to .unref() it. A quiet stub returns a fake child
+  // with a fixed pid and a no-op unref (and NO exit/error emitters), so the
+  // watch simply times out → ok:true. A scripted stub extends EventEmitter
+  // and lets the test emit `exit`/`error` to exercise the early-failure path.
+  function quietSpawn(records, pid = 4242) {
     return (cmd, args, opts) => {
       records.push({ cmd, args, opts });
-      return {
-        pid,
-        unref() {
-          /* no-op */
-        },
-      };
+      return { pid, unref() {} };
     };
   }
 
   it("spawns the script detached + unref'd with no argv (fire-and-forget)", async () => {
     const calls = [];
-    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", fakeSpawn(calls));
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", quietSpawn(calls), {
+      timeoutMs: 10,
+    });
     assert.equal(result.ok, true);
-    assert.equal(result.pid, 4242);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].cmd, "/abs/scripts/self-update.sh");
     assert.deepEqual(calls[0].args, []);
@@ -75,7 +77,9 @@ describe("runServerSelfUpdate", () => {
     const spawn = () => {
       throw new Error("spawn /abs/scripts/self-update.sh EACCES");
     };
-    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn);
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 10,
+    });
     assert.equal(result.ok, false);
     assert.equal(result.error, "spawn /abs/scripts/self-update.sh EACCES");
   });
@@ -85,7 +89,69 @@ describe("runServerSelfUpdate", () => {
     // no caller input (the script path is resolved at module load from
     // import.meta.url), so the argv array must always be exactly [].
     const calls = [];
-    await runServerSelfUpdate("/abs/scripts/self-update.sh", fakeSpawn(calls));
+    await runServerSelfUpdate("/abs/scripts/self-update.sh", quietSpawn(calls), { timeoutMs: 10 });
     assert.deepEqual(calls[0].args, []);
+  });
+
+  it("resolves ok:false with the log's last line when the child exits non-zero fast", async () => {
+    // BET-640: an early failure (before the server restart) is knowable. The
+    // script writes its output to the state-dir log; a non-zero exit inside
+    // the watch window must surface as ok:false with that line — NOT as a
+    // silent "ok:true". Stub a child that emits `exit` non-zero after the log
+    // holds a failure line.
+    const logPath = statePath("self-update.log");
+    mkdirSync(dirname(logPath), { recursive: true });
+    writeFileSync(logPath, "▸ self-update: fetching manifest\n✗ self-update: manifest fetch failed: https://mantaui.com/releases/\n");
+
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const spawn = () => {
+      // Emit the exit asynchronously so runServerSelfUpdate has attached its
+      // listener before the event fires.
+      setImmediate(() => setTimeout(() => child.emit("exit", 1), 0));
+      return child;
+    };
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 500,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "✗ self-update: manifest fetch failed: https://mantaui.com/releases/");
+  });
+
+  it("resolves ok:true when the child exits zero fast", async () => {
+    // An early clean exit ("already at version", no update needed) is success.
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const spawn = () => {
+      setImmediate(() => setTimeout(() => child.emit("exit", 0), 0));
+      return child;
+    };
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 500,
+    });
+    assert.equal(result.ok, true);
+  });
+
+  it("resolves ok:true when the child is still running at the watch timeout", async () => {
+    // BET-640: the normal case — the script reached the server restart, which
+    // kills manta-server in a sibling process, so the child may keep running
+    // (or die with our process). Still-running-at-timeout must resolve ok:true
+    // and never hang the RPC past the window.
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const calls = [];
+    const spawn = (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return child;
+    };
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 5,
+    });
+    assert.equal(result.ok, true);
+    // And the child was detached + unref'd even though it kept running.
+    assert.equal(calls[0].opts.detached, true);
   });
 });

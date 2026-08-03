@@ -19,7 +19,9 @@
 // existing Providers "restart to apply" flow.
 
 import { execFile as execFileCb } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
+import { statePath } from "../shared/paths.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -48,30 +50,81 @@ export async function restartOpencode(exec = execFileAsync) {
  * Trigger the box's self-update script (`scripts/self-update.sh` in the
  * repo root). Fixed argv passed to execFile — never a shell string — so
  * there is no command-injection surface regardless of caller input (this
- * takes no caller input). The script itself does `git fetch + reset --hard
- * origin/main + npm ci --omit=dev + systemctl --user restart manta-server`;
- * the restart will kill this manta-server process mid-run, so we spawn the
- * child DETACHED and unref() it — never await on exit. The caller (RPC
- * handler in src/server/rpc.mjs) gets the child PID back; the renderer
- * UpdateBar fires this on click and the HTTP promise resolves immediately.
+ * takes no caller input). The script updates the box (git fetch + reset on a
+ * checkout, or download+verify+replace on a packaged install), runs
+ * `npm ci --omit=dev`, refreshes the opencode tools + agent guidance, then
+ * `systemctl --user restart manta-server`; the restart will kill this
+ * manta-server process mid-run, so we spawn the child DETACHED and unref()
+ * it — never await on exit. The caller (RPC handler in src/server/rpc.mjs)
+ * gets the outcome back; the renderer UpdateBar fires this on click.
  *
- * `spawnFile` is injectable for tests; defaults to the real execFileCb
- * (the callback variant, since we DON'T want the promisified form — we
- * need the raw ChildProcess to unref). Tests inject a stub that records
- * the call.
+ * BET-640: early failures (anything before the restart) are knowable — the
+ * script writes its output to the state-dir log (`self-update.log`, truncated
+ * each run) and exits non-zero before the restart. We watch the child for up
+ * to `timeoutMs` (20s default): if it exits non-zero inside that window we
+ * resolve `{ ok:false, error: <last line of the log> }`; if it is still
+ * running at the timeout (the normal case — it has reached the restart, which
+ * killed us in a sibling process) we resolve `{ ok:true }`. The promise always
+ * settles within `timeoutMs` regardless of the child's eventual fate.
+ *
+ * `spawnFile` is injectable for tests; defaults to the real execFileCb (the
+ * callback variant, since we DON'T want the promisified form — we need the
+ * raw ChildProcess to unref + attach exit listeners). Tests inject a stub
+ * whose returned child mimics the relevant surface.
  *
  * @param {string} scriptPath - absolute path to scripts/self-update.sh
  *   (resolved by the RPC handler from `import.meta.url`).
- * @param {(cmd: string, args: string[], opts: { detached?: boolean, stdio?: string }) => { pid?: number, unref: () => void }} [spawnFile]
- * @returns {Promise<{ ok: true, pid?: number } | { ok: false, error: string }>}
+ * @param {(cmd: string, args: string[], opts: { detached?: boolean, stdio?: string }) => { pid?: number, unref: () => void, once?: (ev: string, cb: Function) => void, on?: (ev: string, cb: Function) => void }} [spawnFile]
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
-export async function runServerSelfUpdate(scriptPath, spawnFile = execFileCb) {
+export async function runServerSelfUpdate(
+  scriptPath,
+  spawnFile = execFileCb,
+  { timeoutMs = SELF_UPDATE_WATCH_MS } = {},
+) {
+  const logPath = statePath("self-update.log");
   try {
     const child = spawnFile(scriptPath, [], { detached: true, stdio: "ignore" });
     child.unref();
-    return { ok: true, pid: child.pid };
+    return await new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        // Still running at the watch window → it reached the server restart.
+        resolve({ ok: true });
+      }, timeoutMs);
+      const finish = (ok, err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok ? { ok: true } : { ok: false, error: lastLogLine(logPath, err) });
+      };
+      if (typeof child.once === "function") {
+        child.once("error", (e) => finish(false, e));
+        child.once("exit", (code) => finish(code === 0, code));
+      }
+    });
   } catch (e) {
     console.warn("[opencodeAdmin] self-update failed:", e);
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export const SELF_UPDATE_WATCH_MS = 20_000;
+
+// Last non-empty line of the self-update log, or a fallback derived from the
+// error/exit that triggered the failure report. Never throws.
+function lastLogLine(logPath, err) {
+  const fallback = err instanceof Error ? err.message : err == null ? "server update failed" : String(err);
+  try {
+    const lines = readFileSync(logPath, "utf8")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return lines.length > 0 ? lines[lines.length - 1] : fallback;
+  } catch {
+    return fallback;
   }
 }

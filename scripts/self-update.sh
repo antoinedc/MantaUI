@@ -1,37 +1,155 @@
 #!/usr/bin/env bash
-# self-update.sh — pull latest main on the box, reinstall deps, restart server.
+# self-update.sh — bring the box's manta-server code up to date, reinstall
+# deps, refresh the opencode tools + agent guidance, restart the server.
 #
 # Wired up in BET-225 stage 2 (server-side update poller calls this on a
 # cadence). Manual invocation also works — idempotent.
 #
-# Resets the local checkout to origin/main and reinstalls prod-only deps, then
-# refreshes the manta-native opencode tools and restarts the systemd --user
-# service that runs manta-server. Safe to re-run.
+# Two kinds of box are supported (BET-640):
+#
+#   * git checkout (the maintainer's dev box): update = `git fetch origin main`
+#     + `git reset --hard origin/main`.
+#   * packaged install (every box created by `curl mantaui.com/install.sh`):
+#     a plain directory with RELEASE.json (no .git). Update = download the
+#     release tarball for this arch, verify it, extract it, and replace only
+#     the payload paths the release owns (`includes` in RELEASE.json) —
+#     never `runtime/` or `node_modules/`, which are installed separately and
+#     must survive.
+#
+# The install kind is detected, not assumed, so a box installed before the
+# updater understood packaged installs (or whose git fetch fails) self-heals.
+#
+# Regardless of kind, the tail is shared and never duplicated: reinstall
+# prod-only deps, refresh the manta-native opencode tools + agent guidance,
+# then restart the supervisor that runs manta-server.
 #
 # Run from anywhere; the script derives its checkout from $0 so the caller's
 # cwd doesn't matter.
 #
 # Requires: a clean working tree (git reset --hard will discard any local
 # edits), systemd --user with the manta-server.service unit enabled
-# (`loginctl enable-linger $USER`).
+# (`loginctl enable-linger $USER`), or the macOS LaunchAgent (BET-277).
 #
-# No flags, no branch parameterization — always pins to origin/main.
+# No flags, no branch parameterization — always pins to origin/main (git
+# kind) or the latest release tarball (packaged kind).
 #
-# BET-559: the box no longer fetches a prebuilt mobile/PWA bundle — that was
-# the served web client, which is retired. Nothing here rebuilds or downloads a
-# bundle; self-update only pulls server source + deps + the AI tool copies.
+# The script's output is written to a log under the box state directory
+# (truncated on each run); early failures are reported by the caller from the
+# log's last line. See src/server/opencodeAdmin.mjs `runServerSelfUpdate`.
 
 set -euo pipefail
 
 MANTA_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "▸ self-update: fetching origin/main into $MANTA_HOME"
-git -C "$MANTA_HOME" fetch origin main -q
+# --- Own printing helpers (install.sh owns its copies; release.sh needs them) --
+log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
-echo "▸ self-update: resetting to origin/main"
-git -C "$MANTA_HOME" reset --hard origin/main -q
+# --- Output log under the state dir (BET-640) --------------------------------
+# Early failures (install-kind detection, manifest/version resolution, any
+# error before the server restart) are knowable by the caller, which reads the
+# LAST LINE of this log. Uses the same state-home resolution as
+# src/shared/paths.mjs `statePath()` — MANTA_STATE_HOME override first, else
+# $HOME — so tests (which sandbox the state dir) and prod agree.
+STATE_HOME="${MANTA_STATE_HOME:-$HOME}"
+LOG_FILE="$STATE_HOME/.manta/self-update.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+: > "$LOG_FILE"
+exec >>"$LOG_FILE" 2>&1
 
-echo "▸ self-update: reinstalling prod-only deps"
+# --- Shared release helpers (arch + manifest + checksum + guidance sync) ------
+# Single copy lives at scripts/lib/release.sh (ships in the release tarball);
+# install.sh and self-update.sh both source it so they never drift.
+. "$MANTA_HOME/scripts/lib/release.sh"
+
+# --- Detect install kind ------------------------------------------------------
+if [ -d "$MANTA_HOME/.git" ]; then
+  INSTALL_KIND=git
+elif [ -f "$MANTA_HOME/RELEASE.json" ]; then
+  INSTALL_KIND=packaged
+else
+  die "self-update: $MANTA_HOME is neither a git checkout nor a packaged install"
+fi
+
+# node for reading RELEASE.json / includes: prefer the box's bundled runtime,
+# else node on PATH (the box always has one of the two because it runs the
+# server).
+if [ -x "$MANTA_HOME/runtime/node/bin/node" ]; then
+  NODE_CMD="$MANTA_HOME/runtime/node/bin/node"
+else
+  NODE_CMD="node"
+fi
+
+if [ "$INSTALL_KIND" = "git" ]; then
+  log "self-update: fetching origin/main into $MANTA_HOME"
+  git -C "$MANTA_HOME" fetch origin main -q
+
+  log "self-update: resetting to origin/main"
+  git -C "$MANTA_HOME" reset --hard origin/main -q
+else
+  # packaged install — download + verify + extract the release tarball and
+  # replace only the payload paths the release owns.
+  host="${MANTA_RELEASE_HOST:-https://mantaui.com}"
+  host="${host%/}"
+
+  INSTALLED_VERSION="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)||"")' "$MANTA_HOME/RELEASE.json")"
+
+  log "self-update: fetching manifest from $host/releases/manta-latest.txt"
+  manifest="$(curl -fsSL "$host/releases/manta-latest.txt")" \
+    || die "self-update: manifest fetch failed: $host/releases/manta-latest.txt"
+
+  resolve_arch
+  TARBALL_FILE="$(manifest_get "$manifest" "file_${ARCH_KEY}")"
+  TARBALL_SHA="$(manifest_get "$manifest" "sha256_${ARCH_KEY}")"
+  TARBALL_VERSION="$(manifest_get "$manifest" "version")"
+  if [ -z "$TARBALL_FILE" ] || [ -z "$TARBALL_SHA" ] || [ -z "$TARBALL_VERSION" ]; then
+    die "self-update: manifest is malformed or has no ${ARCH_KEY} build"
+  fi
+
+  # Cheap early exit when already current — no download, no reinstall, no restart.
+  if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$TARBALL_VERSION" ]; then
+    ok "self-update: already at $TARBALL_VERSION"
+    exit 0
+  fi
+
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/manta-update.XXXXXX")"
+  trap 'rm -rf "$WORK"' EXIT
+
+  log "self-update: downloading $host/releases/$TARBALL_FILE"
+  curl -fsSL "$host/releases/$TARBALL_FILE" -o "$WORK/manta.tar.gz" \
+    || die "self-update: download failed: $host/releases/$TARBALL_FILE"
+
+  log "self-update: verifying tarball sha256…"
+  verify_sha256 "$WORK/manta.tar.gz" "$TARBALL_SHA"
+
+  log "self-update: extracting to $WORK/pkg…"
+  mkdir "$WORK/pkg"
+  tar -xzf "$WORK/manta.tar.gz" -C "$WORK/pkg" --strip-components=1 \
+    || die "self-update: extract failed"
+
+  # A torn/corrupt download must never overwrite a working install — confirm
+  # the payload is complete before replacing anything.
+  [ -f "$WORK/pkg/src/server/index.mjs" ] \
+    || die "self-update: bad tarball — missing src/server/index.mjs"
+  [ -f "$WORK/pkg/RELEASE.json" ] \
+    || die "self-update: bad tarball — missing RELEASE.json"
+
+  # Replace ONLY the paths the release owns (`includes` in RELEASE.json).
+  # Never touch runtime/ or node_modules/ — the bundled runtime + prebuilt
+  # deps are installed separately and must survive.
+  INCLUDES="$("$NODE_CMD" -e 'const i=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).includes||[]; process.stdout.write(i.join("\n"))' "$MANTA_HOME/RELEASE.json")"
+  for rel in $INCLUDES; do
+    [ -n "$rel" ] || continue
+    rm -rf "$MANTA_HOME/$rel"
+    mkdir -p "$(dirname "$MANTA_HOME/$rel")"
+    cp -R "$WORK/pkg/$rel" "$MANTA_HOME/$rel"
+  done
+  ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
+fi
+
+log "self-update: reinstalling prod-only deps"
 npm ci --omit=dev --prefix "$MANTA_HOME"
 
 # --- Refresh the manta-native opencode tools --------------------------------
@@ -42,20 +160,17 @@ npm ci --omit=dev --prefix "$MANTA_HOME"
 # never registers.
 #
 # WHY THIS IS HERE: install.sh does that copy, but ONLY on install. Nothing in
-# the update path did, so `git reset --hard origin/main` refreshed the SOURCE
-# while every box kept running whatever tool copy it was installed with. Any
-# change to what the AI is told about a tool was therefore undeliverable to an
-# existing box — BET-344 rewrote serve_page's description to stop naming the
-# retired *.pages.mantaui.com domain, and no box would ever have seen it.
+# the update path did, so updating the SOURCE while every box kept running
+# whatever tool copy it was installed with left tool updates undeliverable to
+# an existing box (BET-344 / BET-640 background delegation).
 #
 # Non-fatal throughout: a tool copy failing must never abort an update that has
-# already reset the checkout and reinstalled deps.
+# already updated the checkout and reinstalled deps.
 #
 # NOTE: we deliberately do NOT restart opencode here. Picking up a new tool
 # needs an opencode restart, but that kills every in-flight agent turn on the
-# box — which is exactly the "close the lid and the work carries on" guarantee
-# the product is built on. Staging the files is safe and unconditional; they
-# take effect at the next opencode restart, and we say so.
+# box. Staging the files is safe and unconditional; they take effect at the
+# next opencode restart, and we say so.
 refresh_opencode_tools() {
   local src="$MANTA_HOME/docs/opencode-tools"
   local dest="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/tools"
@@ -108,6 +223,13 @@ refresh_opencode_tools() {
 }
 
 refresh_opencode_tools
+
+# --- Sync opencode agent guidance (BET-640) -----------------------------------
+# Appends any top-level `## ` guidance section that is missing from the user's
+# AGENTS.md (replaces install.sh's old all-or-nothing marker check). Same lib
+# function install.sh uses, so a section added after install lands on the next
+# update without rewriting existing (possibly user-edited) sections.
+sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/AGENTS.md"
 
 # Restart the supervisor that runs manta-server. Linux uses the systemd
 # --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
