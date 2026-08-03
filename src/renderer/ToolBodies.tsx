@@ -10,6 +10,7 @@ import { memo, useLayoutEffect, useRef, useState } from "react";
 import { resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
+import { OutputWell } from "./OutputWell";
 
 // Renders a tool's `output` string. If it looks like a unified diff (starts
 // with `--- ` or `@@`, or has multiple `@@` headers), each line is colored
@@ -35,24 +36,26 @@ export const ToolOutput = memo(function ToolOutput({ output }: { output: string 
   if (looksLikeDiff) {
     return <UnifiedDiff text={output} />;
   }
-  // Plain code/text output — small monospace block, scroll on overflow.
+  // Plain code/text output — recessed well (12.5px mono), scroll on overflow.
   return (
     <div className="relative">
       <CopyButton
         text={output}
         className="absolute top-1 right-1 z-10 text-meta text-text-faint hover:text-text px-1 rounded-xs"
       />
-      <pre
-        ref={preRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          pinnedRef.current =
-            el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-        }}
-        className="text-code font-mono bg-bg-soft border border-border rounded-xs px-2 py-1 pr-8 max-h-64 overflow-auto whitespace-pre"
-      >
-        <code>{output}</code>
-      </pre>
+      <OutputWell variant="attached" maxHeight>
+        <pre
+          ref={preRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            pinnedRef.current =
+              el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+          }}
+          className="pr-8 max-h-64 overflow-y-auto"
+        >
+          <code>{output}</code>
+        </pre>
+      </OutputWell>
     </div>
   );
 });
@@ -274,10 +277,10 @@ function CollapsiblePathList({ paths, maxLines }: { paths: string[]; maxLines: n
   );
 }
 
-// Unified diff: renders directly on the page background — no card, no border,
-// no hunk-header decoration. Same font/size/weight as body text (inherits from
-// the panel wrapper); diff bodies use the bright cream `text-text` color.
-// Background blocks are saturated green/red for proper contrast.
+// Unified diff: renders inside the recessed OutputWell (12.5px mono) beneath a
+// tool card header. No card of its own — the well's top border separates it
+// from the header strip. Background blocks are saturated green/red for proper
+// contrast; the copy is the bright cream `text-text` from the well.
 //
 // Line numbers come from `@@ -A,B +C,D @@` parsed per hunk; `+` and context
 // use NEW line numbers, `-` uses OLD.
@@ -286,7 +289,8 @@ export function UnifiedDiff({ text }: { text: string }) {
   let oldLine = 0;
   let newLine = 0;
   return (
-    <div className="font-mono leading-snug my-1 overflow-x-auto max-w-full">
+    <OutputWell variant="attached">
+      <div className="leading-snug max-w-full">
       {lines.map((line, i) => {
         // Hunk header: parse counters silently. Skip the visible row — the
         // header carries file/range metadata that's noise next to the actual
@@ -346,7 +350,7 @@ export function UnifiedDiff({ text }: { text: string }) {
         if (sign !== null) {
           return (
             <div key={i} className={`flex whitespace-pre ${bg}`}>
-              <span className={`select-none shrink-0 text-right pr-2 w-10 ${lnCls}`}>
+              <span className={`select-none shrink-0 text-right pr-2 w-[30px] ${lnCls}`}>
                 {ln ?? ""}
               </span>
               <span className={`select-none shrink-0 w-3 ${signCls}`}>
@@ -358,6 +362,7 @@ export function UnifiedDiff({ text }: { text: string }) {
         }
         return null;
       })}
-    </div>
+      </div>
+    </OutputWell>
   );
 }

@@ -21,9 +21,11 @@ cells closing; it is authoritative for future issues.
 
 ## Standing decisions
 
-1. **The owner validates every component personally.** Each primitive is reviewed by
-   Antoine before it is adopted anywhere. Route to him; do not merge a primitive on
-   agent review alone.
+1. **The owner validates every primitive personally — after merge.** Each
+   primitive is reviewed by Antoine visually against a staging desktop build
+   AFTER it merges (amended BET-636: the tool-card primitives do not block the
+   PR on per-primitive owner sign-off). The review gate is the pre-merge
+   authority; owner validation happens post-merge on the staging build.
 2. **Two-adopter rule.** A primitive is only introduced when it replaces **two or more
    existing call sites**, and those call sites are migrated in the **same PR**. Never
    land a primitive with no adopter. This is what keeps the inventory evidence-driven
@@ -33,11 +35,11 @@ cells closing; it is authoritative for future issues.
    prevent.
 4. **This is not a design system.** No showcase site, no documentation site, no
    variants nobody uses. It is a primitive inventory with adopters.
-5. **Chrome only in the first pass. The transcript is excluded.** It lives inside the
-   ChatPanel monolith and the mobile track is migrating its event wiring
-   (DECISIONS.md §17, desktop renderer first). Start with card, field, pill, icon
-   button, menu item — where both style-diff PoC screens live and where
-   `Settings.tsx` already holds half the primitives privately.
+5. **Transcript chrome is in scope (first pass complete).** The first pass now
+   covers the transcript's tool rendering (LIFTED BET-636 — decision 5's
+   original exclusion of the transcript is rescinded now that the first pass
+   shipped). Transcript chrome is built as reusable primitives that later
+   screens adopt, not as inline markup inside the transcript components.
 6. **No new token.** If the spec needs a value the scale lacks, the scale changes
    first, in its own change, with baselines regenerated.
 
@@ -96,3 +98,6 @@ that vanishes. Adopter counts below are **web** adopters only.
 | IconCard | `src/renderer/IconCard.tsx` | 0 — **reported** (BET-618): neither named adopter (`Settings.tsx`, `NewSessionScreen.tsx`) has an icon-above-label tile; registered under the enforce net pending owner decision | `icon` (lucide at `size={20}`); `label` |
 | Eyebrow | `src/renderer/Eyebrow.tsx` | 1 — `Settings.tsx` (the GroupCard section label) — **reported** (BET-618): 2nd named adopter `NewSessionScreen.tsx` has no uppercase section label; registered as a single-web-adopter case | `children` |
 | SettingsRow | `src/renderer/SettingsRow.tsx` | 0 — **reported** (BET-619): the stage premise that Settings.tsx's private `SettingField` already implements `.setrow` is false (it is a `Field`-based text/password input, not a row with name/help/children); neither named adopter (`Settings.tsx`, `ProvidersCard.tsx`) carries a genuine `.setrow` row — registered under the enforce net pending owner decision on a `.setrow` migration of the settings panel | `name`; `help?`; `children` (the control) |
+| StatusDot | `src/renderer/StatusDot.tsx` | 2 — `ToolCard.tsx` (card header dot), `TaskCard.tsx` (subagent status line) | `tone: ok\|running\|error\|idle` (required) |
+| OutputWell | `src/renderer/OutputWell.tsx` | 2 — `ToolBodies.tsx` (tool output + diff), `Cards.tsx` (permission ask command) | `variant: attached\|standalone` (required); `maxHeight?` |
+| ToolCard | `src/renderer/ToolCard.tsx` | 2 — `ToolCall.tsx` (generic tool call), `TaskCard.tsx` (subagent card) | `tone?` (StatusDot tone; omitted when the card renders its own status dot in the body); `name`; `arg?`; `meta?`; `expanded?`; `onToggle?`; `children?` |

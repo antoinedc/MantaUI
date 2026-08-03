@@ -18,6 +18,7 @@ import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
+import { OutputWell } from "./OutputWell";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
@@ -240,10 +241,8 @@ export function PermissionCard({
       subtitle={desc}
       body={
         detail ? (
-          // The literal command in its own mono well — only for permissions.
-          <div className="rounded-md bg-inset border border-border-subtle px-3 py-[9px] font-mono text-text break-all">
-            {detail}
-          </div>
+          // The literal command in its own recessed well — only for permissions.
+          <OutputWell variant="standalone">{detail}</OutputWell>
         ) : null
       }
       actions={actions}
