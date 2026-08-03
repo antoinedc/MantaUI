@@ -308,7 +308,10 @@ test("message.part.delta flushes from the FLAT delta the box sends", () => {
   });
   const fl = events.find((e) => e.sub === "flush");
   assert.ok(fl);
-  assert.equal(fl.payload.text, "Rain falls.\n\n");
+  // BET-649: the sentence end is the boundary, so the cut lands after
+  // "Rain falls.\n" and the remaining newline rides with the next chunk. The
+  // assembled text is unchanged — only the split moved earlier.
+  assert.equal(fl.payload.text, "Rain falls.\n");
   assert.equal(fl.payload.partID, "p1");
   assert.equal(fl.payload.field, "text");
 });
