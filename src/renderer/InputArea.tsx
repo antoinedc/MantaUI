@@ -32,6 +32,7 @@ import {
 } from "./chatShared";
 import { shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
+import { MeasureColumn } from "./MeasureColumn";
 import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
@@ -227,8 +228,9 @@ export function InputArea({
       )}
       {/* Measure-capped composer (BET-620 change 3): the box, meta footer and
           trust toggle sit inside --measure (72ch) so the composer aligns with
-          the transcript's measure edge, per the session mockup (.comp-in). */}
-      <div className="mx-auto max-w-[72ch] px-[28px]">
+          the transcript's measure edge, per the session mockup (.comp-in). The
+          reading column chrome is the MeasureColumn primitive (BET-637). */}
+      <MeasureColumn>
       {/* Real input shell (BET-415): a bordered card with focus-within state
           replaces the old hairline-dividers-around-a-naked-textarea. Voice
           recording is now signalled by THIS border — a fourth treatment
@@ -414,7 +416,7 @@ export function InputArea({
             : "Permissions on — click to bypass"}
         </button>
       </div>
-      </div>
+      </MeasureColumn>
     </div>
   );
 }

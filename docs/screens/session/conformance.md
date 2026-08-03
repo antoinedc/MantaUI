@@ -4,22 +4,27 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (93c3359)
+Last reviewed: 2026-08-03 (bba1139)
 
-## Open divergences
+## Resolved
 
-The prior transcript tool rendering — a text bullet plus a floating monospace
-line at the 15px reading size — did NOT match the spec and was left unrecorded
-here as "none". BET-636 fixes it: a tool call now renders as a bordered,
-rounded card on the raised surface (`.tool`), with a header strip (`.tool-h`)
-holding the real status dot, bold name, gap, truncating muted argument and a
-right-aligned `+38 −4` summary, and — when there is output — a recessed well
-(`.tool-b`) at 12.5px mono. The permission card's command block shares the
-same well. No tool-call chrome divergences remain open after this change; the
-deliberate tail-gaps are recorded as accepted divergences below.
+BET-637 fixes the remaining transcript-frame divergences against the mockup:
+the user message was a full-width left-aligned tinted bar with a `›` marker that
+bled outside the column; it is now a right-aligned rounded bubble capped at 88%
+(`.umsg`). Assistant text blocks carried a `●` bullet in a left gutter; they are
+now plain paragraphs flush with the column (`.amsg`). And the reading column
+was padded 16px (inherited from the scroll container) while the composer and
+the working indicator sat at a different inset; all three now share one 28px
+left/right edge inside the 72ch measure (`.wrap` / `.comp-in`).
 
 ## Accepted divergences
 
+- **Slash-command bar keeps its own bar treatment** — the collapsed `/name args`
+  row that expands to the full template keeps its `›` gray-bar chrome; it is a
+  different object from a typed message and the spec does not draw it (BET-637).
+- **Reasoning block keeps its `✻` gutter** — the `✻` is italic, muted and
+  visually distinct on purpose; the spec does not draw a reasoning block
+  (BET-637).
 - **Pinned vs inline ask card** — the app pins a pending permission card above
   the composer, while the mockup draws the ask inline in the scrollback (PR
   #392). The pinned placement is deliberate and will not be changed.

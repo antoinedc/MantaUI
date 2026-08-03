@@ -31,6 +31,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
+import { MessageBubble } from "./MessageBubble";
 import { nowMs } from "./clock";
 
 export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
@@ -60,9 +61,11 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
   // pt-0 + pb-3: the scroll container above already has pb-3 (12px), so
   // dropping the indicator's top padding gives 12px between the last
   // message and the ✻ glyph. pb-3 matches it on the other side (12px
-  // between context bar / ✻ line and the input divider).
+  // between context bar / ✻ line and the input divider). No horizontal
+  // padding: the indicator sits inside a MeasureColumn (padded 28px) so it
+  // shares the reading column's left edge with the transcript (BET-637).
   return (
-    <div className={`shrink-0 px-4 pb-3 text-meta font-mono ${atBottom ? "pt-0" : "pt-1"}`}>
+    <div className={`shrink-0 pb-3 text-meta font-mono ${atBottom ? "pt-0" : "pt-1"}`}>
       <div>
         <span style={{ color: "var(--accent)" }}>
           <span className="inline-block animate-pulse">✻</span>{" "}
@@ -100,7 +103,7 @@ export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<R
   const summary = formatHiddenTodosSummary(hiddenPending, hiddenDone);
   const lastVisibleIdx = visible.length - 1;
   return (
-    <div className="px-4 pb-2 text-label">
+    <div className="pb-2 text-label">
       {visible.map((t, i) => {
         const content = String(t.content ?? "");
         const status = String(t.status ?? "pending");
@@ -245,7 +248,7 @@ export const MessageRow = memo(function MessageRow({
     <div className="group relative">
       {ts && (
         <span
-          className="pointer-events-none absolute left-0 -top-2 z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity"
+          className={`pointer-events-none absolute ${isUser ? "right-0" : "left-0"} -top-2 z-10 select-none whitespace-nowrap text-meta font-mono leading-none tabular-nums text-text-faint opacity-0 group-hover:opacity-60 transition-opacity`}
           aria-hidden
         >
           {ts}
@@ -255,11 +258,11 @@ export const MessageRow = memo(function MessageRow({
     </div>
   );
 
-  // User message: rendered as a single gray bar with curved corners so it reads as a
-  // distinct "you said this" block instead of just text with a `>` prefix.
-  // `›` is the dim left marker; continuation lines wrap inside the bar.
-  // FileParts attached to the message render as chips ABOVE the bar so
-  // attached files stay visible alongside what the user said.
+  // User message: the spec draws a right-aligned pill bubble capped at 88%
+  // of the reading column (`.umsg`, a LOCKED spec decision — Q7). Rendered
+  // through the MessageBubble primitive, which owns the chrome.
+  // FileParts attached to the message render as chips ABOVE the bubble, in the
+  // same flex justify-end flow so they right-align with it.
   if (isUser) {
     const text = msg.parts
       .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
@@ -271,24 +274,26 @@ export const MessageRow = memo(function MessageRow({
     return stampedRow(
       <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
         {fileParts.length > 0 && (
-          <div className="flex flex-wrap gap-1 text-label font-mono">
-            {fileParts.map((p) => {
-              const raw = p as Record<string, unknown>;
-              const url = typeof raw.url === "string" ? raw.url : "";
-              const filename =
-                (typeof raw.filename === "string" && raw.filename) ||
-                url.split("/").pop() ||
-                "file";
-              return (
-                <span
-                  key={p.id}
-                  className="rounded-sm border border-border-strong px-2 py-px bg-bg-elev text-text-muted truncate max-w-[260px]"
-                  title={url}
-                >
-                  {filename}
-                </span>
-              );
-            })}
+          <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-1 text-label font-mono">
+              {fileParts.map((p) => {
+                const raw = p as Record<string, unknown>;
+                const url = typeof raw.url === "string" ? raw.url : "";
+                const filename =
+                  (typeof raw.filename === "string" && raw.filename) ||
+                  url.split("/").pop() ||
+                  "file";
+                return (
+                  <span
+                    key={p.id}
+                    className="rounded-sm border border-border-strong px-2 py-px bg-bg-elev text-text-muted truncate max-w-[260px]"
+                    title={url}
+                  >
+                    {filename}
+                  </span>
+                );
+              })}
+            </div>
           </div>
         )}
         {text && (
@@ -299,24 +304,19 @@ export const MessageRow = memo(function MessageRow({
               expandedText={text}
             />
           ) : (
-            <div className="-mx-4 px-4 py-px bg-bg-soft flex">
-              <span className="text-text-quiet select-none mr-2 shrink-0">›</span>
-              <span className="flex-1 min-w-0 whitespace-pre-wrap break-words text-text">
-                {text}
-              </span>
-            </div>
+            <MessageBubble>{text}</MessageBubble>
           )
         )}
       </div>,
     );
   }
 
-  // Assistant: render each part on its own. First non-trivial part gets the
-  // `●` bullet; subsequent parts are indented to 2 spaces.
-  // todowrite invocations are filtered out — the latest checklist is already
-  // pinned under the running indicator + final assistant footer (ActiveTodos),
-  // so inlining each call too would duplicate the same list multiple times
-  // for any turn that updates todos.
+  // Assistant: render each part on its own. Per the spec (.amsg) the text is
+  // plain paragraphs at the reading size with no leading gutter; the bullet
+  // column no longer exists (BET-637). todowrite invocations are filtered out —
+  // the latest checklist is already pinned under the running indicator + final
+  // assistant footer (ActiveTodos), so inlining each call too would duplicate
+  // the same list multiple times for any turn that updates todos.
   const visibleParts = msg.parts.filter((p) => {
     if (p.type === "text") return !p.synthetic && !p.ignored && (p.text ?? "").length > 0;
     if (p.type === "step-start" || p.type === "step-finish") return false;
@@ -330,20 +330,19 @@ export const MessageRow = memo(function MessageRow({
 
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
-      {visibleParts.map((p, i) => (
-        <AssistantPart key={p.id} part={p} first={i === 0} showThinking={showThinking} />
+      {visibleParts.map((p) => (
+        <AssistantPart key={p.id} part={p} showThinking={showThinking} />
       ))}
       {/* Turn-level duration footer — only on the FINAL assistant message */}
-      {/* of a turn. -ml-[8px] places the ✻ glyph halfway between the panel's */}
-      {/* left edge (where the transcript's padding starts) and the assistant */}
-      {/* bullet column. Vertical spacing is now owned by the turn wrapper's */}
-      {/* `gap: var(--block-gap)` (BET-411) — no per-child mt/mb. */}
+      {/* of a turn. Vertical spacing is owned by the turn wrapper's */}
+      {/* `gap: var(--block-gap)` (BET-411) — no per-child mt/mb. The old */}
+      {/* -ml-[8px] nudge is gone with the assistant bullet gutter (BET-637). */}
       {/* Truncation badge piggy-backs onto the same line when both are set */}
       {/* (most common case: end-of-turn truncation). For mid-turn step */}
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
       {(turnDurationMs != null || truncation != null) && (
-        <div className="-ml-[8px] text-code font-mono text-text-muted">
+        <div className="text-code font-mono text-text-muted">
           {turnDurationMs != null && (
             <>
               <span style={{ color: "var(--accent)" }}>✻</span>{" "}
