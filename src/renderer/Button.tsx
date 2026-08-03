@@ -20,6 +20,14 @@
 // not style children — it only reserves the `gap-[6px]` so an inline icon sits
 // beside the label. There is deliberately no size prop: the spec has no
 // `.btn.sm` rule, so there is one size only.
+//
+// `block` is a WIDTH axis, not a size one: the spec puts a full-width, centred
+// button at the foot of a narrow panel (the context popover's "Clear session"
+// — `width:100%;justify-content:center`), which the inline-flex base cannot
+// express. It is optional and additive, and it is NOT the C4 abstract-variant
+// trap: a button without it renders as a real button. It lives here rather
+// than as a `w-full` at the call site precisely because that would be the
+// className escape hatch by another name.
 
 import type { ReactNode } from "react";
 
@@ -36,8 +44,11 @@ const BUTTON_TONE = {
   danger: "border-transparent bg-transparent text-danger hover:bg-danger-bg",
 } as const;
 
+const BUTTON_BLOCK = "w-full justify-center";
+
 export function Button({
   tone,
+  block = false,
   onClick,
   disabled,
   type = "button",
@@ -47,6 +58,8 @@ export function Button({
 }: {
   /** The visual tone. REQUIRED — the bare base is abstract (C4), so there is no safe default. */
   tone: keyof typeof BUTTON_TONE;
+  /** Full-width, centred label — the spec's panel-footer action. */
+  block?: boolean;
   onClick?: () => void;
   /** Renders the native `disabled` attribute + the not-allowed cursor, and dims the chrome. */
   disabled?: boolean;
@@ -64,7 +77,9 @@ export function Button({
    */
   hook?: string;
 }) {
-  const className = `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_TONE[tone]}`;
+  const className =
+    `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_TONE[tone]}` +
+    (block ? ` ${BUTTON_BLOCK}` : "");
   return (
     <button
       type={type}

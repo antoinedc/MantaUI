@@ -6,16 +6,31 @@
 // itself is retuned. Ships alongside `Dropdown`, the shared dropdown surface
 // that owns the panel chrome under the anchor.
 //
-// Chrome contract (BET-529 inventory; surface updated BET-644, collision 1):
+// Chrome contract (BET-529 inventory; surface updated BET-644, collision 1;
+// row highlight corrected against the spec's `.mi` — see below):
 //   - dropdown surface: `--card`/`bg-bg-soft` (the proposal's `.dd` won C5
 //     over the old `--panel`/`bg-bg-elev` contract, for the whole menu
 //     family), `--border` edge, `--shadow-lg`, `--r-lg` (`rounded-lg`),
 //     max-h 460px, a flex column whose search/header/footer regions are fixed
 //     and whose body is the only scroller.
-//   - item label 13px `--tx1` (`text-label text-text`), padding `sp-2/sp-2`
-//     (`px-2 py-2`), hover `--card` (`bg-bg-soft`), icon 14px.
+//   - item label 13px medium `--tx2` (`text-label font-medium text-text-muted`)
+//     brightening to `--tx1` on hover, padding `sp-2/sp-2` (`px-2 py-2`),
+//     `sp-3` icon gap, `--r-md` radius, hover fill `--fill-hover`, icon 14px.
 //   - variants danger (`--danger` + hover `--danger-bg`) and active
 //     (`--accent`).
+//
+// THE HIGHLIGHT IS THE HOVER FILL, AND IT MUST NOT BE THE SURFACE COLOUR.
+// The contract used to say hover `--card` (`bg-bg-soft`) — the exact colour
+// `Dropdown`'s own panel carries, so hovering a `normal` row painted card-on-
+// card and NOTHING moved. Only `danger` looked interactive (its `--danger-bg`
+// differs from the panel), and because the base carried no radius that one
+// visible fill was a square block inside a 12px-rounded panel. Both are fixed
+// here rather than at the call site: the fill is `--fill-hover` (the spec's
+// `.mi:hover`, a translucent white/ink wash that reads on ANY surface the menu
+// is ever moved to) and the row carries `--r-md` + the 4px row gap, so the
+// highlight is a soft-cornered pill inset in the panel's `p-2` — the same
+// affordance `MenuOption` gives the model/effort menus. A hover that resolves
+// to the surface it sits on is not a subtle bug; it is no feedback at all.
 //
 // Variant + C1 (validated constraints). C1: a variant that sets a hover
 // background also sets the matching foreground, so the contrast stays valid
@@ -30,13 +45,17 @@ import { cloneElement } from "react";
 
 type MenuItemVariant = "normal" | "danger" | "active";
 
-const ITEM_BASE = "flex w-full items-center gap-2 px-2 py-2 text-left text-label";
+// `mb-1 last:mb-0` is MenuOption's row gap, for the same reason it has one:
+// without it a highlighted row's fill touches the fill boundary of the row
+// below and the two read as one block instead of one item.
+const ITEM_BASE =
+  "flex w-full items-center gap-3 px-2 py-2 mb-1 last:mb-0 rounded-md text-left text-label font-medium transition-colors duration-150";
 // C1: every variant that sets a hover background also declares the matching
 // foreground so the row never renders low-contrast text on its fill.
 const VARIANT: Record<MenuItemVariant, string> = {
-  normal: "text-text hover:bg-bg-soft",
+  normal: "text-text-muted hover:bg-fill-hover hover:text-text",
   danger: "text-danger hover:bg-danger-bg",
-  active: "text-accent hover:bg-bg-soft",
+  active: "text-accent hover:bg-fill-hover",
 };
 
 export function MenuItem({

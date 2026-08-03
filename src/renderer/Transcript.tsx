@@ -77,7 +77,7 @@ export function Transcript({
       // The margin sits OUTSIDE the scroller and is therefore always there. It
       // matches the composer's own internal rhythm (the sp-2 between the input
       // box and the model/effort row).
-      style={{ padding: "var(--sp-6) 0", marginBottom: "var(--sp-2)" }}
+      style={{ paddingTop: "3.5rem", paddingBottom: "var(--sp-6)", marginBottom: "var(--sp-2)" }}
     >
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">

@@ -15,11 +15,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { Zap } from "lucide-react";
-import { mount, type Harness } from "./testHarness";
+import { mount, mountSessionHeader, type Harness } from "./testHarness";
 import { Dropdown, MenuItem } from "./MenuItem";
-import { SessionHeader } from "./SessionHeader";
 
-const ITEM_BASE = "flex w-full items-center gap-2 px-2 py-2 text-left text-label";
+const ITEM_BASE =
+  "flex w-full items-center gap-3 px-2 py-2 mb-1 last:mb-0 rounded-md text-left " +
+  "text-label font-medium transition-colors duration-150";
+
+// The surface `Dropdown` paints. A row's hover fill must never resolve to this
+// — see the "hover fill is not the surface colour" case below.
+const PANEL_SURFACE = "bg-bg-soft";
 
 describe("Dropdown — the shared dropdown surface", () => {
   let h: Harness | null = null;
@@ -101,15 +106,16 @@ describe("MenuItem", () => {
     h = null;
   });
 
-  it("normal renders the 13px label, sp-2/sp-2 padding and bg-soft hover per the contract", () => {
+  it("normal renders the 13px label, sp-2/sp-2 padding and the --fill-hover highlight per the contract", () => {
     h = mount(<MenuItem>Fork session</MenuItem>);
     const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toBe(`${ITEM_BASE} text-text hover:bg-bg-soft`);
+    expect(el.className).toBe(
+      `${ITEM_BASE} text-text-muted hover:bg-fill-hover hover:text-text`,
+    );
     expect(el.className).toContain("text-label");
     expect(el.className).toContain("px-2");
     expect(el.className).toContain("py-2");
-    expect(el.className).toContain("hover:bg-bg-soft");
-    expect(el.className).toContain("text-text");
+    expect(el.className).toContain("hover:bg-fill-hover");
     expect(el.getAttribute("role")).toBe("menuitem");
   });
 
@@ -118,14 +124,43 @@ describe("MenuItem", () => {
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.className).toContain("text-danger");
     expect(el.className).toContain("hover:bg-danger-bg");
-    expect(el.className).not.toContain("hover:bg-bg-soft");
+    expect(el.className).not.toContain("hover:bg-fill-hover");
   });
 
-  it("active renders --accent text with the bg-soft hover", () => {
+  it("active renders --accent text with the --fill-hover highlight", () => {
     h = mount(<MenuItem variant="active">Chat</MenuItem>);
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.className).toContain("text-accent");
-    expect(el.className).toContain("hover:bg-bg-soft");
+    expect(el.className).toContain("hover:bg-fill-hover");
+  });
+
+  // The regression this contract exists to prevent. Every variant painted its
+  // hover with `bg-bg-soft` — the SAME token `Dropdown` paints its panel with
+  // — so hovering a row drew card-on-card and produced no visible feedback at
+  // all. Only `danger` looked alive, because `--danger-bg` happens to differ
+  // from the panel. Asserting "not the surface" (rather than a literal) keeps
+  // the rule true if the panel token is ever re-pointed.
+  it("no variant's hover fill is the dropdown surface colour", () => {
+    for (const variant of ["normal", "danger", "active"] as const) {
+      h?.unmount();
+      h = mount(<MenuItem variant={variant}>row</MenuItem>);
+      const el = h.container.firstElementChild as HTMLElement;
+      expect(
+        el.className,
+        `${variant}: hover fill must not resolve to the panel's own ${PANEL_SURFACE}`,
+      ).not.toContain(`hover:${PANEL_SURFACE}`);
+    }
+  });
+
+  // The fill has to be a rounded pill inset in the panel's `p-2`, like
+  // MenuOption's — a square fill inside a 12px-rounded panel reads as a
+  // rendering fault, which is how the old chrome's one visible hover looked.
+  it("carries the row radius and row gap so the highlight is a rounded, separated pill", () => {
+    h = mount(<MenuItem>row</MenuItem>);
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toContain("rounded-md");
+    expect(el.className).toContain("mb-1");
+    expect(el.className).toContain("last:mb-0");
   });
 
   it("renders a leading icon at 14px, hidden from the a11y tree", () => {
@@ -169,24 +204,21 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
     h = null;
   });
 
+  // Non-zero context so the context pill renders alongside the ⋯ trigger —
+  // this suite asserts the MENU's row highlight, and a populated header is the
+  // realistic surface for that.
   function renderHeader() {
-    h = mount(
-      <SessionHeader
-        branch={null}
-        ctxBreakdown={{ freshInput: 1, cacheRead: 1, cacheWrite: 1, totalInput: 100, pct: 12, segments: [] }}
-        ctxLimit={200000}
-        staleCache={{ isStale: false, idleMs: 0, staleTokens: 0, ttlMs: 0 }}
-        modelName={null}
-        hasSession
-        onFork={() => {}}
-        onCompact={() => {}}
-        onClear={() => {}}
-        onDelete={() => {}}
-        breadcrumb={null}
-        mode="chat"
-        onModeChange={() => {}}
-      />,
-    );
+    h = mountSessionHeader({
+      ctxBreakdown: {
+        freshInput: 1,
+        cacheRead: 1,
+        cacheWrite: 1,
+        totalInput: 100,
+        pct: 12,
+        segments: [],
+      },
+      ctxLimit: 200000,
+    });
   }
 
   function openMenu() {
@@ -219,8 +251,9 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
 
     for (const label of ["Fork session", "Compact context", "Clear session"]) {
       const row = itemByText(label);
-      expect(row.className).toContain("text-text");
-      expect(row.className).toContain("hover:bg-bg-soft");
+      expect(row.className).toContain("text-text-muted");
+      expect(row.className).toContain("hover:bg-fill-hover");
+      expect(row.className).toContain("rounded-md");
       expect(row.className).not.toContain("text-danger");
     }
   });

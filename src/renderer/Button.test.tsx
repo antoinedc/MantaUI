@@ -44,6 +44,26 @@ describe("Button", () => {
     });
   });
 
+  it("block makes the button full-width and centres its label, changing nothing else", () => {
+    h = mount(<Button tone="default" block>Clear session</Button>);
+    expect(buttonEl(h).className).toBe(`${CHROME} ${TONE.default} w-full justify-center`);
+  });
+
+  it("block is opt-in — omitting it leaves the inline-flex base untouched", () => {
+    h = mount(<Button tone="default">Clear session</Button>);
+    const cls = buttonEl(h).className;
+    expect(cls).not.toContain("w-full");
+    expect(cls).not.toContain("justify-center");
+  });
+
+  it("block is a width axis, not a size one — it composes with every tone", () => {
+    (Object.keys(TONE) as (keyof typeof TONE)[]).forEach((tone) => {
+      h?.unmount();
+      h = mount(<Button tone={tone} block>Save</Button>);
+      expect(buttonEl(h).className).toBe(`${CHROME} ${TONE[tone]} w-full justify-center`);
+    });
+  });
+
   it("has no size prop — one size only (the spec has no .btn.sm rule)", () => {
     // If Button ever grew a `size` prop this directive becomes unused and
     // typecheck fails.

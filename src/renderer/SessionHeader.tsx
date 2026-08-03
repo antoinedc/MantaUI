@@ -11,7 +11,7 @@
 // props by ChatPanel, which owns the session lifecycle.
 
 import { useRef, useState, type CSSProperties } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -21,6 +21,7 @@ import {
 import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher } from "../shared/types";
+import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
 import { Tag } from "./Tag";
@@ -59,7 +60,7 @@ export function SessionHeader({
   onCompact,
   onClear,
   onDelete,
-  breadcrumb,
+  breadcrumb: _breadcrumb,
   mode,
   onModeChange,
   availableLaunchers,
@@ -99,99 +100,71 @@ export function SessionHeader({
   const fill = ctxStageColor(pct);
   const showContext = totalInput > 0;
   const stale = staleCache.isStale;
-  const crumb = breadcrumb
-    ? breadcrumb.window
-      ? `${breadcrumb.project} / ${breadcrumb.window}`
-      : breadcrumb.project
-    : "";
-  // The mode toggle is a single terminal glyph (BET-459): the accessible name
-  // names the mode you'll switch TO, so it stays nameable in the structure
-  // snapshot ("Terminal" from chat, "Chat" from terminal).
-  const isTerminal = mode === "terminal";
-  const targetMode: SessionMode = isTerminal ? "chat" : "terminal";
-  const modeLabel = isTerminal ? "Chat" : "Terminal";
 
   return (
     <div
-      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
-      style={{ WebkitAppRegion: "drag" } as CSSProperties}
+      className="manta-session-header absolute top-3 left-0 right-0 z-20 flex items-center gap-2 px-3 pointer-events-none shrink-0 min-w-0"
+      style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
     >
-      {/* Breadcrumb — project / window (the cwd path was dropped, BET-459) */}
-      {crumb && (
-        <span
-          className="text-label text-text-faint shrink-0 truncate max-w-[200px]"
-          title={crumb}
-        >
-          {crumb}
-        </span>
-      )}
+      {/* Left: branch chip — session state, on the header's shared glass
+            surface. The chip's own chrome comes from `Tag` at the `sm`
+            density; the glass pill supplies only the surface (fill, edge,
+            blur, capsule), exactly as it does for the context pill and the ⋯
+            trigger, so all three items in this row are one construction.
+            `plain` is what stops Tag drawing a second edge inside the glass
+            one. `sm` over `md` is the sizing fix: at the full badge size this
+            chip stood ~28px tall and was the tallest thing in the row, which
+            read as a control rather than as the label it is. */}
+      <div className="pointer-events-auto flex items-center gap-2">
+        {branch && (
+          <div className="manta-glass-pill flex items-center">
+            <Tag
+              size="sm"
+              plain
+              icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+              title={`Current branch: ${branch}`}
+            >
+              <span className="shrink-0 truncate max-w-[160px]">{branch}</span>
+            </Tag>
+          </div>
+        )}
+      </div>
 
-      {/* Branch chip — session state, lives in the header not the composer. */}
-      {branch && (
-        <Tag
-          icon={<GitBranch size={12} aria-hidden="true" className="shrink-0" />}
-          title={`Current branch: ${branch}`}
-        >
-          <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
-        </Tag>
-      )}
-
-      {/* Right group — context pill, mode toggle, session menu (8px items).
-            opt out of the header's drag region so they stay clickable. The
-            left cluster (breadcrumb + branch) is separated from this group by
-            the 16px group gap the auto-margin reserves. */}
+      {/* Right group — context pill, session menu */}
       <div
-        className="ml-auto flex items-center gap-2"
-        style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+        className="ml-auto flex items-center gap-2 pointer-events-auto"
       >
-        {/* Context pill — clickable, opens the breakdown popover. Amber tint
-            when the cache is stale so the user has a peripheral signal before
-            clicking. */}
         {showContext && (
-          <ContextPill
-            pct={pct}
-            segments={segments}
-            fill={fill}
-            stale={stale}
-            totalInput={totalInput}
-            ctxLimit={ctxLimit}
-            freshInput={freshInput}
-            cacheRead={cacheRead}
-            cacheWrite={cacheWrite}
-            modelName={modelName}
-            staleCache={staleCache}
-            onClear={onClear}
-          />
+          <div className="manta-glass-pill flex items-center">
+            <ContextPill
+              pct={pct}
+              segments={segments}
+              fill={fill}
+              stale={stale}
+              totalInput={totalInput}
+              ctxLimit={ctxLimit}
+              freshInput={freshInput}
+              cacheRead={cacheRead}
+              cacheWrite={cacheWrite}
+              modelName={modelName}
+              staleCache={staleCache}
+              onClear={onClear}
+            />
+          </div>
         )}
 
-        {/* Mode toggle (BET-459): a terminal glyph that swaps Chat ↔
-            Terminal — the presentation of the old mode <select>, keeping its
-            accessible name. Omitted when the caller owns mode elsewhere
-            (mobile SessionScreen has its own toggle). */}
-        {onModeChange && (
-          <IconButton
-            icon={<Terminal />}
-            label={modeLabel}
-            title={`Switch to ${modeLabel}`}
-            onClick={() => onModeChange(targetMode)}
-          />
-        )}
-
-        {/* Session menu — mode (Chat / Terminal / AI-CLI launchers) + Fork /
-            Compact / Clear / Delete. No badge on the button (per BET-415
-            Do-NOT #2). Hidden when there is no owning tmux window, and when
-            the view is read-only (BET-418 §D: a background-job session — Stop
-            in ReadOnlyJobBar is the only live action). */}
         {hasSession && !readOnly && (
-          <SessionMenu
-            mode={mode}
-            onModeChange={onModeChange}
-            availableLaunchers={availableLaunchers}
-            onFork={onFork}
-            onCompact={onCompact}
-            onClear={onClear}
-            onDelete={onDelete}
-          />
+          <div className="manta-glass-pill flex items-center">
+            <SessionMenu
+              mode={mode}
+              onModeChange={onModeChange}
+              availableLaunchers={availableLaunchers}
+              onFork={onFork}
+              onCompact={onCompact}
+              onClear={onClear}
+              onDelete={onDelete}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -201,8 +174,22 @@ export function SessionHeader({
 // ===== Segmented context bar =====
 //
 // Renders the fresh / cache-write / cache-read segments as proportional
-// inline slices of a track. Used twice in ContextPill (mini bar in the pill,
-// larger bar in the popover) — extracted to clear the self-clone.
+// slices of a track. Used twice in ContextPill (mini bar in the pill, larger
+// bar in the popover) — extracted to clear the self-clone.
+//
+// THE TRACK IS A FLEX ROW, AND THAT IS LOAD-BEARING. The segments used to be
+// `inline-block` spans, which made them inline content — so they inherited
+// `text-align` from their ancestors, and the pill's host is a `<button>`,
+// which the UA stylesheet centres. The result: the widths were computed
+// correctly and the fill was then painted in the MIDDLE of the track with dead
+// space on both sides, so a 19% reading rendered as a ~19%-wide block floating
+// at ~40%. It reads as "the bar is wrong" but the arithmetic was never wrong;
+// only the packing was. A flex row packs from the main-start edge and cannot
+// inherit that, whatever surface the bar is later dropped into.
+//
+// `flex-none` pins each slice to its computed percentage: flex items are
+// shrinkable by default, so once the segments sum near 100% the browser would
+// otherwise scale them down and the fill would under-report.
 
 function SegmentedBar({
   segments,
@@ -214,17 +201,13 @@ function SegmentedBar({
   className: string;
 }) {
   return (
-    <span className={className} style={{ backgroundColor: "var(--card)" }}>
-      {segments.map((s, i) =>
+    <span className={`flex overflow-hidden bg-fill-active ${className}`}>
+      {segments.map((s) =>
         s.pct > 0 ? (
           <span
             key={s.kind}
-            className="inline-block h-full align-top"
-            style={{
-              width: `${s.pct}%`,
-              backgroundColor: segColor(s.kind),
-              boxShadow: i > 0 ? "inset 1px 0 0 rgba(0,0,0,0.35)" : undefined,
-            }}
+            className="h-full flex-none"
+            style={{ width: `${s.pct}%`, backgroundColor: segColor(s.kind) }}
           />
         ) : null,
       )}
@@ -262,7 +245,7 @@ function ContextPill({
   onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLButtonElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   useClickAway(rootRef, open, () => setOpen(false));
 
   const segColor = (kind: ContextBreakdown["segments"][number]["kind"]) => {
@@ -271,123 +254,144 @@ function ContextPill({
     return CACHE_READ_COLOR;
   };
 
+  // The trigger and the popover are SIBLINGS under a positioned wrapper, not
+  // parent and child. The popover used to be rendered INSIDE the trigger
+  // `<button>`, which put a `<button>` (Clear session) inside a `<button>` —
+  // invalid HTML that browsers repair by splitting the element, and the reason
+  // every interaction inside the panel needed a `stopPropagation` to stop the
+  // trigger's own onClick from closing the thing being clicked. Splitting them
+  // deletes both problems and the workarounds with them.
   return (
-    <button
-      ref={rootRef}
-      type="button"
-      onClick={() => setOpen((v) => !v)}
-      className={
-        // The button is the interactive host (click + popover + hover fill);
-        // the pill chrome itself lives on the Pill below. `rounded-full`
-        // keeps the resting-transparent hover fill capsule-shaped.
-        "manta-ctx-pill text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
-        (stale ? "" : "hover:bg-fill-hover")
-      }
-      aria-haspopup="dialog"
-      aria-expanded={open}
-      title={stale ? "Context stale — click for details" : "Context usage — click for details"}
-    >
-      <Pill tone={stale ? "warn" : "neutral"}>
-        {/* Mini segmented bar inside the pill — same segment order/colors as
-            ContextBar but at pill scale (w-16 h-2). */}
-        <SegmentedBar
-          segments={segments}
-          segColor={segColor}
-          className="inline-block w-16 h-2 rounded-full overflow-hidden align-middle"
-        />
-        <span
-          className="tabular-nums font-mono font-semibold"
-          style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
-        >
-          {pct}%
-        </span>
-      </Pill>
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={
+          // The button is the interactive host (click + hover fill); the pill
+          // chrome itself lives on the Pill below. `rounded-full` keeps the
+          // resting-transparent hover fill capsule-shaped.
+          "manta-ctx-pill text-meta rounded-full p-0 border-0 bg-transparent transition-colors " +
+          (stale ? "" : "hover:bg-fill-hover")
+        }
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={stale ? "Context stale — click for details" : "Context usage — click for details"}
+      >
+        <Pill tone={stale ? "warn" : "neutral"}>
+          {/* Mini segmented bar inside the pill — same segment order/colors as
+              the popover's bar but at pill scale (w-16 h-2). */}
+          <SegmentedBar
+            segments={segments}
+            segColor={segColor}
+            className="w-16 h-2 rounded-full"
+          />
+          <span
+            className="tabular-nums font-mono font-semibold"
+            style={{ color: stale ? CACHE_WRITE_COLOR : fill }}
+          >
+            {pct}%
+          </span>
+        </Pill>
+      </button>
 
       {open && (
-        <span
-          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-80 rounded-md border border-border bg-bg-elev shadow-md text-meta text-text"
-          // Stop the pill's onClick from toggling when interacting with the
-          // popover contents (it's inside the button element).
-          onClick={(e) => e.stopPropagation()}
+        <div
+          role="dialog"
+          aria-label="Context usage"
+          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-[340px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
         >
-          {/* Header line */}
-          <div className="px-3 py-2 border-b border-border font-medium">
-            {totalInput.toLocaleString()} / {ctxLimit.toLocaleString()} tokens
-            <span className="text-text-faint ml-1">({pct}%)</span>
+          {/* Headline — the percentage leads, the absolute counts qualify it.
+              Baseline-aligned so the 15px metric and the 12px mono counts sit
+              on one line rather than centring against each other. */}
+          <div className="flex items-baseline gap-2 mb-3">
+            <span className="text-prose font-semibold text-text leading-none">
+              {pct}%
+            </span>
+            <span className="font-mono text-meta font-medium text-text-faint">
+              {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit)} tokens
+            </span>
           </div>
 
-          {/* Segmented bar — larger version for the popover */}
-          <div className="px-3 py-2">
-            <SegmentedBar
-              segments={segments}
-              segColor={segColor}
-              className="inline-block w-full h-3 rounded-xs overflow-hidden"
-            />
-          </div>
+          {/* Segmented bar — the pill's mini bar at reading size. */}
+          <SegmentedBar
+            segments={segments}
+            segColor={segColor}
+            className="w-full h-[7px] rounded-xs mb-3"
+          />
 
-          {/* Legend with per-segment counts */}
-          <div className="px-3 pb-2 space-y-1">
+          {/* Legend with per-segment counts. */}
+          <div className="flex flex-col gap-1 mb-4">
             <LegendRow
               color={fill}
               label="Fresh input"
               count={freshInput}
-              hint="uncached, paid full rate"
+              hint="Uncached — billed at the full input rate."
             />
             <LegendRow
               color={CACHE_WRITE_COLOR}
               label="Cache write"
               count={cacheWrite}
-              hint="warm-up, full rate + surcharge"
+              hint="Warming the prompt cache — full input rate plus a surcharge."
             />
             <LegendRow
               color={CACHE_READ_COLOR}
               label="Cache read"
               count={cacheRead}
-              hint="cached, ~10% cost"
+              hint="Served from the prompt cache — around a tenth of the input rate."
             />
           </div>
 
           {modelName && (
-            <div className="px-3 pb-2 text-text-faint">
-              Model window: {modelName}
+            <div className="text-meta text-text-faint truncate" title={modelName}>
+              Model window · {modelName}
             </div>
           )}
 
-          {/* Stale-cache warning — only when actually stale. The amber tint
-              on the pill above is the peripheral cue; this is the detail +
-              the Clear-session action. */}
+          {/* Stale-cache warning — only when actually stale. The amber tint on
+              the pill is the peripheral cue; this is the detail plus the one
+              action that resolves it. */}
           {stale && (
-            <div className="px-3 py-2 border-t border-border bg-warn-bg">
-              <div className="text-warn font-medium mb-1">
-                ⚠ Prompt cache expired
+            <div className="mt-4 pt-3 border-t border-border-subtle">
+              <div className="flex items-center gap-2">
+                <span
+                  className="grid place-items-center w-[26px] h-[26px] shrink-0 rounded-sm bg-warn-bg text-warn"
+                  aria-hidden="true"
+                >
+                  <Clock size={14} />
+                </span>
+                <span className="flex-1 min-w-0 text-meta text-text-muted">
+                  Cache went stale after {formatIdleDuration(staleCache.idleMs)}{" "}
+                  idle — clearing saves{" "}
+                  <strong className="font-semibold text-text">
+                    {formatTokensCompact(staleCache.staleTokens)}
+                  </strong>{" "}
+                  tokens on your next message.
+                </span>
               </div>
-              <div className="text-text-muted mb-2">
-                Session idle for {formatIdleDuration(staleCache.idleMs)}.
-                {" "}
-                {formatTokensCompact(staleCache.staleTokens)} tokens currently in
-                cache will be re-billed as cache_creation_input_tokens on your
-                next message (full input rate + 25% surcharge).
+              <div className="mt-3">
+                <Button
+                  tone="default"
+                  block
+                  onClick={() => {
+                    setOpen(false);
+                    onClear();
+                  }}
+                >
+                  Clear session
+                </Button>
               </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOpen(false);
-                  onClear();
-                }}
-                className="px-2 py-px rounded-xs text-bg text-meta font-medium"
-                style={{ backgroundColor: "var(--warn)" }}
-              >
-                Clear session
-              </button>
             </div>
           )}
-        </span>
+        </div>
       )}
-    </button>
+    </div>
   );
 }
 
+// One legend line: swatch, name, count. The per-segment economics live in the
+// row's `title` rather than a fourth column — at 340px the hint column was
+// truncating to an unreadable stub on every row, which is a worse answer than
+// a tooltip on hover.
 function LegendRow({
   color,
   label,
@@ -400,17 +404,14 @@ function LegendRow({
   hint: string;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2 text-meta font-medium" title={hint}>
       <span
-        className="inline-block w-2.5 h-2.5 rounded-xs shrink-0"
+        className="w-[9px] h-[9px] rounded-xs shrink-0"
         style={{ backgroundColor: color }}
       />
-      <span className="text-text min-w-0">{label}</span>
-      <span className="tabular-nums text-text-faint ml-auto shrink-0">
-        {count.toLocaleString()}
-      </span>
-      <span className="text-text-faint text-label truncate max-w-[120px]" title={hint}>
-        {hint}
+      <span className="text-text-muted min-w-0 truncate">{label}</span>
+      <span className="tabular-nums font-mono text-text-faint ml-auto shrink-0">
+        {formatTokensCompact(count)}
       </span>
     </div>
   );
@@ -423,6 +424,13 @@ function LegendRow({
 // functional replacement for the header `<select>` BET-459 removed (BET-467):
 // the header glyph only toggles Chat ↔ Terminal, so this is the entry point
 // for entering a launcher (`tui:<id>`) mode from the running UI.
+
+// The group label above a run of menu rows. Same chrome as the model menu's
+// provider headings (`ModelMenu`'s `providerID` line) so the two dropdowns
+// read as one family: 11px letter-spaced uppercase in `--tx3`, on the panel's
+// own `p-2` grid rather than the rows' former `px-3`.
+const GROUP_LABEL =
+  "px-2 pb-2 text-micro font-semibold uppercase text-text-faint select-none";
 
 function SessionMenu({
   mode,
@@ -515,14 +523,14 @@ function SessionMenu({
         <Dropdown hook="manta-session-menu-dropdown">
           {hasMode && (
             <>
-              <div className="px-3 pt-1 pb-px text-label text-text-faint select-none" role="presentation">
+              <div className={`${GROUP_LABEL} pt-1`} role="presentation">
                 Mode
               </div>
               {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
               {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
               {availableLaunchers && availableLaunchers.length > 0 && (
                 <>
-                  <div className="px-3 pt-2 pb-px text-label text-text-faint select-none" role="presentation">
+                  <div className={`${GROUP_LABEL} pt-3`} role="presentation">
                     AI-CLI
                   </div>
                   {availableLaunchers.map((l) =>
@@ -534,7 +542,7 @@ function SessionMenu({
                   )}
                 </>
               )}
-              <div className="my-1 border-t border-border" />
+              <div className="my-1 border-t border-border-subtle" role="separator" />
             </>
           )}
 
@@ -553,7 +561,7 @@ function SessionMenu({
             "Clear session",
             onClear,
           )}
-          <div className="my-1 border-t border-border" />
+          <div className="my-1 border-t border-border-subtle" role="separator" />
           {item(
             <Trash2 size={14} aria-hidden="true" />,
             "Delete session",

@@ -194,8 +194,10 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // (gap-[5px]) and the 23px pill hit area (h-[23px]). The 11.5px label
   // (text-[11.5px]) resolves through the `\d+px` scan's decimal skip, so it
   // needs no entry. Real values from the redesign spec's tag definition, not
-  // drift.
-  Tag: [5, 23],
+  // drift. 11 is the `sm` size's label (text-[11px]) — the header-density
+  // variant's one off-grid value; its 20px height resolves via `h-5` and its
+  // 4px gap via `gap-1`, so neither needs an entry.
+  Tag: [5, 11, 23],
   // IconCard's verbatim spec chrome (BET-614 stage 4): the 10.5px mono label
   // (text-[10.5px]) is its only off-grid value — the `\d+px` scan reads the
   // "5px" tail of the decimal 10.5, so 5 is the entry. Real spec value, not
