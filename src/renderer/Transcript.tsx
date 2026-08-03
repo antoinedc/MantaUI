@@ -117,6 +117,9 @@ export function Transcript({
                     }
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
+                    // The message being written right now: last in the
+                    // transcript, assistant, and the turn still running.
+                    streaming={isLastInTranscript && running}
                   />
                 );
               })}

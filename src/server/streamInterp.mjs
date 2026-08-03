@@ -20,6 +20,8 @@ import {
   classifyFinish,
   describeTruncation,
   findFlushBoundary,
+  isSafeCut,
+  FLUSH_MAX_AGE_MS,
   computeContextBreakdown,
   resolveContextLimit,
   selectCacheTtlMs,
@@ -42,6 +44,30 @@ import {
 } from "../shared/streamInterpretation.mjs";
 
 const TTL_DEFAULT = "1h";
+
+/**
+ * The latest index in `text` that is safe to cut at, or -1 if none is.
+ *
+ * Only used by the max-age fallback: `findFlushBoundary` found no structural
+ * boundary, the buffer has been held too long, and we would rather emit a
+ * partial line than keep the user waiting. Walks back from the end to the last
+ * word break whose prefix passes `isSafeCut`, so we never cut inside an inline
+ * code span, a link or a bold run — and never mid-word, which would make the
+ * text visibly stutter.
+ *
+ * Returns -1 when nothing is safe (e.g. an unclosed code span running the whole
+ * buffer), in which case the caller keeps buffering — correctness beats
+ * latency.
+ */
+export function lastSafeCut(text) {
+  if (!text) return -1;
+  for (let i = text.length - 1; i > 0; i--) {
+    if (text[i] !== " " && text[i] !== "\n") continue;
+    const cut = i + 1;
+    if (isSafeCut(text.slice(0, cut))) return cut;
+  }
+  return -1;
+}
 
 function newSessionState() {
   return {
@@ -121,12 +147,24 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
               : "";
         const partID = evt.properties?.partID ?? part?.id;
         if (!messageID || !partID || !chunk) return;
-        const cur = st.parts.get(partID) ?? { messageID, field, text: "" };
+        const cur = st.parts.get(partID) ?? { messageID, field, text: "", firstAt: now() };
+        if (cur.firstAt == null) cur.firstAt = now();
         cur.text += chunk;
-        const boundary = findFlushBoundary(cur.text);
+        let boundary = findFlushBoundary(cur.text);
+        // Max-age fallback (BET-649). Without it a long run with no sentence
+        // or paragraph break — a table, a bulleted line, a wall of prose —
+        // stays buffered until the part's snapshot lands, which is the "it
+        // arrived all at once at the end" case. Checked on the NEXT delta
+        // rather than on a timer: deltas arrive continuously while the model
+        // generates, so an age check here needs no clock of its own and the
+        // interpreter stays purely event-driven.
+        if (boundary <= 0 && now() - cur.firstAt >= FLUSH_MAX_AGE_MS) {
+          boundary = lastSafeCut(cur.text);
+        }
         if (boundary > 0) {
           const flushed = cur.text.slice(0, boundary);
           cur.text = cur.text.slice(boundary);
+          cur.firstAt = now();
           emit(sid, "flush", { messageID, partID, field, text: flushed });
         }
         st.parts.set(partID, cur);

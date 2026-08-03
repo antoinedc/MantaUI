@@ -31,9 +31,21 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
+import { MantaLoader, MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
 import { nowMs } from "./clock";
 
+// The working row. The mark inside its two counter-rotating arcs (the app's
+// one waiting image — see MantaLoader), the verb, and the run's numbers.
+//
+// The row appears the moment a prompt is submitted, not when the box reports
+// the turn busy (ChatPanel's submit sets `running` optimistically), so the
+// send → first-token window is never silent. That is why there is no skeleton
+// placeholder here: the loader plus its verb IS the placeholder.
+//
+// Type split: the verb is 13px sans (`text-label`) because it is prose, while
+// the elapsed/token readout stays mono and tabular so the digits stop jittering
+// as they tick.
 export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
   // Tick once per second to drive the elapsed-time re-render.
   const [, setTick] = useState(0);
@@ -65,15 +77,13 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
   // padding: the indicator sits inside a MeasureColumn (padded 28px) so it
   // shares the reading column's left edge with the transcript (BET-637).
   return (
-    <div className={`shrink-0 pb-3 text-meta font-mono ${atBottom ? "pt-0" : "pt-1"}`}>
-      <div>
-        <span style={{ color: "var(--accent)" }}>
-          <span className="inline-block animate-pulse">✻</span>{" "}
-          {verb.current}…
-        </span>{" "}
-        <span className="text-text-faint">
-          ({formatDuration(elapsedMs)}
-          {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>})
+    <div className={`shrink-0 pb-3 ${atBottom ? "pt-0" : "pt-1"}`}>
+      <div className="flex items-center gap-2">
+        <MantaLoader />
+        <span className="text-label text-text-muted">{verb.current}…</span>
+        <span className="text-meta font-mono tabular-nums text-text-faint">
+          {formatDuration(elapsedMs)}
+          {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>}
         </span>
       </div>
     </div>
@@ -213,6 +223,7 @@ export const MessageRow = memo(function MessageRow({
   persistentTodos,
   truncation,
   commandInfo,
+  streaming = false,
 }: {
   msg: OpencodeMessage;
   showThinking: boolean;
@@ -234,6 +245,11 @@ export const MessageRow = memo(function MessageRow({
   // message, the row shows a collapsed `/name args` pill with an expand
   // chevron instead of the full expanded template body.
   commandInfo: { name: string; arguments: string } | null;
+  // True ONLY for the last assistant message while the turn is running — the
+  // message currently being written. Drives the per-block fade-in and the
+  // trailing caret on its final text part (BET-649). Primitive prop, so the
+  // MessageRow memo chain is untouched.
+  streaming?: boolean;
 }) {
   const isUser = msg.info.role === "user";
 
@@ -339,8 +355,15 @@ export const MessageRow = memo(function MessageRow({
 
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
-      {visibleParts.map((p) => (
-        <AssistantPart key={p.id} part={p} showThinking={showThinking} />
+      {visibleParts.map((p, i) => (
+        <AssistantPart
+          key={p.id}
+          part={p}
+          showThinking={showThinking}
+          // Only the LAST part of the message being written streams — an
+          // earlier part is finished even while the turn continues.
+          streaming={streaming && i === visibleParts.length - 1}
+        />
       ))}
       {/* Turn-level duration footer — only on the FINAL assistant message */}
       {/* of a turn. Vertical spacing is owned by the turn wrapper's */}
@@ -354,7 +377,9 @@ export const MessageRow = memo(function MessageRow({
         <div className="text-code font-mono text-text-muted">
           {turnDurationMs != null && (
             <>
-              <span style={{ color: "var(--accent)" }}>✻</span>{" "}
+              {/* The finished turn keeps the mark the working row was built
+                  around, held still — the arcs are what meant "in flight". */}
+              <MantaMark size={12} />{" "}
               {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
             </>
           )}

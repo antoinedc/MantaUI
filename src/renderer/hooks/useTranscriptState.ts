@@ -25,7 +25,18 @@ import {
   wasAtBottomBeforeCommit,
   classifyScrollForPin,
   reconcileOptimisticUser,
+  scrollBehaviorFor,
 } from "../chatUtils";
+
+/** Live reduced-motion preference. Read per call — a user can change it
+ *  mid-session and `matchMedia` is cheap. Guarded for non-DOM test runs. */
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
 
 export type TranscriptState = {
   messages: OpencodeMessage[] | null;
@@ -107,10 +118,28 @@ export function useTranscriptState(params: {
   const wantQuestionScroll = useRef(false);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Follow new content to the bottom.
+  //
+  // Eased rather than instant when the step is SMALL (BET-649): a sentence
+  // arriving every ~120ms used to jump the viewport, which is most of what
+  // made streaming feel jerky. `scrollBehaviorFor` (pure, tested) keeps the
+  // instant write for anything large — a whole turn landing, a session switch,
+  // a re-pin after the panel was hidden — because smooth-scrolling hundreds of
+  // pixels lags behind the next commit and the view never catches up. Reduced
+  // motion always jumps.
+  //
+  // The pin DECISION is untouched: this animates how we follow, never whether
+  // we stick (that is `wasAtBottomBeforeCommit`, on its fourth design).
   const stickToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    const target = el.scrollHeight;
+    const behavior = scrollBehaviorFor(
+      target - el.scrollTop - el.clientHeight,
+      prefersReducedMotion(),
+    );
+    if (behavior === "smooth") el.scrollTo({ top: target, behavior: "smooth" });
+    else el.scrollTop = target;
   }, []);
 
   // Apply one box-flushed delta (stream.flush) into the transcript

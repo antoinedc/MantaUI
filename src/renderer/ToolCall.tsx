@@ -65,9 +65,16 @@ export function bulletStyle(part: OpencodePart): { color: string; pulse: boolean
 export const AssistantPart = memo(function AssistantPart({
   part,
   showThinking,
+  streaming = false,
 }: {
   part: OpencodePart;
   showThinking: boolean;
+  // True ONLY for the text part currently being written (last part of the last
+  // assistant message while the turn runs). Adds `manta-streaming`, which owns
+  // the per-block fade-in and the trailing caret in index.css. A primitive so
+  // the memo chain is untouched; false everywhere else, so a settled transcript
+  // never animates and never shows a caret.
+  streaming?: boolean;
 }) {
   if (part.type === "text") {
     const text = (part.text ?? "").replace(/^\n+|\n+$/g, "");
@@ -76,7 +83,9 @@ export const AssistantPart = memo(function AssistantPart({
     // reading size with no leading gutter — the old `●` bullet column is gone
     // (BET-637), so the markdown body sits flush with the reading column.
     return (
-      <div className="break-words text-text">{renderMarkdown(text)}</div>
+      <div className={`break-words text-text${streaming ? " manta-streaming" : ""}`}>
+        {renderMarkdown(text)}
+      </div>
     );
   }
 
