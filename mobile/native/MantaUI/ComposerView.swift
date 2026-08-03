@@ -86,7 +86,7 @@ struct ComposerView: View {
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
         .background(tokens.canvas.ignoresSafeArea())
-        .overlay(alignment: .top) { divider }
+        .overlay(alignment: .top) { topDivider }
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(modelStore: modelStore)
         }
@@ -106,10 +106,19 @@ struct ComposerView: View {
         }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(tokens.borderSubtle)
-            .frame(height: Metrics.spacing.spPx)
+    /// The composer's top hairline. While a background transcript refetch (or the
+    /// initial load) runs — and the turn is NOT running — it becomes an ambient
+    /// accent sweep (BET-630, D1). A running turn shows the working row instead;
+    /// the two states never share an indicator.
+    @ViewBuilder
+    private var topDivider: some View {
+        if store.refreshing && !store.running {
+            RefetchSweep(tokens: tokens)
+        } else {
+            Rectangle()
+                .fill(tokens.borderSubtle)
+                .frame(height: Metrics.spacing.spPx)
+        }
     }
 
     // MARK: - Model pill
@@ -444,5 +453,39 @@ struct ComposerView: View {
 
     private func surfaceHint(_ message: String) {
         hintState(message)
+    }
+}
+
+/// Ambient transcript-refetch sweep on the composer's top hairline (BET-630, D1).
+/// A slow accent gradient travels L→R while the canonical transcript syncs in the
+/// background; border-only (1px) so there is no layout shift. Distinct from the
+/// running row — the two mean different things and never share an indicator.
+/// Mirrors the desktop `.manta-loading-divider` (src/renderer/index.css).
+private struct RefetchSweep: View {
+    let tokens: Tokens
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
+            let period = 1.5
+            let t = (context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: period) / period)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(tokens.borderSubtle)
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.clear, tokens.accent.opacity(0.85), .clear],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geo.size.width * 0.42)
+                        .offset(x: (CGFloat(t) * 1.45 - 0.42) * geo.size.width)
+                }
+            }
+            .frame(height: Metrics.spacing.spPx)
+            .clipped()
+        }
     }
 }

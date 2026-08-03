@@ -147,6 +147,19 @@ enum SessionTimerFormat {
         let m = t / 60
         return "\(m) minute" + (m == 1 ? "" : "s")
     }
+
+    /// Live elapsed for the running row ("12s" / "1m 12s" / "1h 5m"). Unlike the
+    /// compact `elapsed` (the header slot), this keeps the seconds so a running
+    /// turn's elapsed visibly ticks even before the first minute (BET-630, D1).
+    static func liveElapsed(_ interval: TimeInterval) -> String {
+        let t = Int(interval)
+        let s = t % 60
+        let m = (t / 60) % 60
+        let h = t / 3600
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
 }
 
 // MARK: - Pin identity (client-side, persisted in config)

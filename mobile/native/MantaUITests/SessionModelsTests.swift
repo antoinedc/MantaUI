@@ -65,6 +65,13 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(SessionTimerFormat.runningDuration(1), "1 second")
     }
 
+    func testLiveElapsedKeepsSeconds() {
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(5), "5s")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(72), "1m 12s")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(60), "1m 0s")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(3725), "1h 2m")
+    }
+
     // MARK: - Pin identity
 
     func testWindowPinID() {
