@@ -38,15 +38,14 @@
   - text: /This box \(v1\.0\.0\) is not supported by this app \(v0\.\d+\.\d+\)\./
   - button "Learn more"
   - button "Dismiss update"
-  - text: ethernal / Add CSV export feat/orders-csv-export
-  - button "Terminal"
+  - text: feat/orders-csv-export
   - button "Session actions"
   - text: ✻ Welcome. Type a message below to start.
-  - textbox "Reply, or describe the next task…"
-  - button "Send message"
   - button "Opus 4.7"
   - button "High"
+  - button "Permissions on"
+  - textbox "Reply, or describe the next task…"
+  - button "Send message"
   - button "schedules"
   - button "secrets"
   - button "webhooks"
-  - button "Permissions on — click to bypass"
