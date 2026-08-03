@@ -243,6 +243,18 @@ final class ChatSessionStore: ObservableObject {
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+        // Echo the message straight into the transcript and assume the turn is
+        // running. The box confirms both within a second (running frame, then
+        // the canonical refetch replaces this block), but without the echo the
+        // screen sits completely unchanged after a send, which reads as "the
+        // send did nothing".
+        if !text.isEmpty {
+            transcript.append(.user(text))
+            rebuildBlocks()
+        }
+        running = true
+        turnComplete = false
+        if runningSince == nil { runningSince = Date() }
         Task {
             try? await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,

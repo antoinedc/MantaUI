@@ -153,6 +153,9 @@ struct ChatScreen: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            if store.running {
+                runningIndicator
+            }
             if let todos = store.todos, let active = todos.active, !active.isEmpty {
                 TodosCard(items: active, tokens: tokens)
             }
@@ -171,6 +174,23 @@ struct ChatScreen: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.top, Metrics.spacing.sp2)
+    }
+
+    /// The one always-visible sign that a turn is in flight. The header
+    /// subtitle also says "running", but it is 11pt at the top of a screen the
+    /// user is not looking at while they wait for a reply.
+    private var runningIndicator: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            ProgressView()
+                .controlSize(.small)
+            Text(store.headerSubtitle)
+                .font(.system(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tokens.tx4)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Working")
     }
 
     private var newestPermission: PermissionRequest? {

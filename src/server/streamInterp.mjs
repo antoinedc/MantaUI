@@ -66,6 +66,27 @@ function newSessionState() {
  */
 export function createStreamInterpreter({ publish, now = () => Date.now() }) {
   const sessions = new Map();
+  // The same opencode event is delivered on BOTH the global stream and the
+  // per-directory scoped one, so interpret() is called twice for it. Un-deduped
+  // that doubles every derived event — and because flushed text is APPENDED by
+  // the client, a streamed answer arrived on the phone written out twice.
+  // Events carry a unique id; remember a bounded window of them.
+  const seenEventIds = new Set();
+  const SEEN_CAP = 1000;
+  function isDuplicate(id) {
+    if (typeof id !== "string" || id.length === 0) return false;
+    if (seenEventIds.has(id)) return true;
+    seenEventIds.add(id);
+    if (seenEventIds.size > SEEN_CAP) {
+      // Drop the oldest half; insertion order is preserved by Set.
+      let drop = seenEventIds.size - SEEN_CAP / 2;
+      for (const key of seenEventIds) {
+        if (drop-- <= 0) break;
+        seenEventIds.delete(key);
+      }
+    }
+    return false;
+  }
   function state(sid) {
     if (!sessions.has(sid)) sessions.set(sid, newSessionState());
     return sessions.get(sid);
@@ -78,16 +99,27 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
     const sid = evt.properties?.sessionID;
     if (typeof sid !== "string" || sid.length === 0) return; // no session to interpret for
+    if (isDuplicate(evt.id)) return;
 
     const st = state(sid);
     switch (evt.type) {
       case "message.part.delta": {
-        // delta flush boundaries
+        // Delta flush boundaries. opencode sends the chunk FLAT
+        // (`properties.{messageID, partID, field, delta}`) — there is no
+        // `part` object and no `part.text` on this event. Reading only the
+        // nested shape meant `chunk` was always empty, so not one flush was
+        // ever emitted and a streaming answer reached the phone as silence.
         const part = evt.properties?.part;
         const messageID = evt.properties?.messageID ?? part?.messageID;
-        const field = part?.type === "reasoning" ? "reasoning" : "text";
-        const chunk = typeof part?.text === "string" ? part.text : "";
-        const partID = part?.id;
+        const rawField = evt.properties?.field ?? part?.type;
+        const field = rawField === "reasoning" ? "reasoning" : "text";
+        const chunk =
+          typeof evt.properties?.delta === "string"
+            ? evt.properties.delta
+            : typeof part?.text === "string"
+              ? part.text
+              : "";
+        const partID = evt.properties?.partID ?? part?.id;
         if (!messageID || !partID || !chunk) return;
         const cur = st.parts.get(partID) ?? { messageID, field, text: "" };
         cur.text += chunk;
@@ -105,6 +137,19 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         const part = evt.properties?.part;
         const partID = part?.id;
         if (partID && st.parts.has(partID)) {
+          // Flush whatever is still buffered before dropping the part. A
+          // boundary only fires at a paragraph break or a closed code fence,
+          // so a short answer ends its whole life inside the buffer — without
+          // this it was streamed as nothing at all.
+          const pending = st.parts.get(partID);
+          if (pending?.text) {
+            emit(sid, "flush", {
+              messageID: pending.messageID,
+              partID,
+              field: pending.field,
+              text: pending.text,
+            });
+          }
           st.finalParts.add(partID);
           st.parts.delete(partID);
         }
@@ -154,13 +199,21 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
           emit(sid, "turnComplete", { complete, running: st.running && !complete });
           return;
         }
-        if (msg?.info) st.msgByMsgId.set(msg.info.id ?? (msg.id ?? ""), msg);
+        // `properties.info` IS the message info, not a `{info}` wrapper —
+        // the turn-completion helper expects the wrapper, so normalise here.
+        // Without this no message was ever recorded and completion was judged
+        // against an empty map, which reads as "complete" on every event.
+        const wrapped = msg?.info ? msg : msg ? { info: msg } : null;
+        if (wrapped?.info?.id) st.msgByMsgId.set(wrapped.info.id, wrapped);
         const complete = isAssistantTurnComplete([...st.msgByMsgId.values()]);
         emit(sid, "turnComplete", { complete, running: st.running && !complete });
         return;
       }
       case "session.status": {
-        const type = evt.properties?.type;
+        // The status is NESTED (`properties.status.type`); the flat
+        // `properties.type` this used to read is never present, so every
+        // status resolved to "not busy" and the running indicator never lit.
+        const type = evt.properties?.status?.type ?? evt.properties?.type;
         // retry is a live turn for the renderer's running indicator (matches
         // pre-S1b renderer semantics) — the box is the single source of truth,
         // so it must report the same value the renderer's raw handler does.

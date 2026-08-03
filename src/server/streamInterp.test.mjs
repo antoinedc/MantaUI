@@ -194,6 +194,86 @@ test("session.status retry reports running true (parity with pre-S1b renderer)",
   assert.equal(ev.payload.running, true);
 });
 
+// ---------------------------------------------------------------------------
+// Real-wire regression tests.
+//
+// The shapes above were written from the spec, not from a live box, and the
+// box actually sends something different for the two events that matter most:
+// the status is nested and a delta is flat. Every one of these passed while
+// the phone showed no running indicator and no streaming text at all, so
+// these cases pin the shapes captured off a running box.
+// ---------------------------------------------------------------------------
+
+test("session.status reports running from the NESTED status.type the box sends", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  const ev = events.find((e) => e.sub === "running");
+  assert.ok(ev);
+  assert.equal(ev.payload.running, true);
+});
+
+test("message.part.delta flushes from the FLAT delta the box sends", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "Rain falls" },
+  });
+  assert.equal(events.length, 0, "no boundary yet");
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: ".\n\nThen it stops" },
+  });
+  const fl = events.find((e) => e.sub === "flush");
+  assert.ok(fl);
+  assert.equal(fl.payload.text, "Rain falls.\n\n");
+  assert.equal(fl.payload.partID, "p1");
+  assert.equal(fl.payload.field, "text");
+});
+
+test("message.part.updated flushes the buffered tail of a short answer", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "msg1", partID: "p1", field: "text", delta: "Hello" },
+  });
+  interp.interpret({
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: { id: "p1", type: "text", text: "Hello", messageID: "msg1" } },
+  });
+  const flushes = events.filter((e) => e.sub === "flush");
+  assert.equal(flushes.length, 1, "the tail is flushed exactly once");
+  assert.equal(flushes[0].payload.text, "Hello");
+});
+
+test("message.updated records the message from properties.info (no wrapper)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.updated",
+    properties: {
+      sessionID: SID,
+      info: { id: "msg1", role: "assistant", sessionID: SID, time: { created: 1 } },
+    },
+  });
+  const ev = events.find((e) => e.sub === "turnComplete");
+  assert.ok(ev);
+  assert.equal(ev.payload.complete, false, "an assistant turn with no completion time is not complete");
+});
+
+test("the same event delivered twice is interpreted once", () => {
+  const { interp, events } = make();
+  const ev = {
+    id: "evt_1",
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  };
+  interp.interpret(ev);
+  interp.interpret(ev); // global + per-directory stream deliver the same event
+  assert.equal(events.filter((e) => e.sub === "running").length, 1);
+});
+
 test("interpret ignores events with no session id", () => {
   const { interp, events } = make();
   interp.interpret({ type: "message.part.delta", properties: { part: { id: "x" } } });
