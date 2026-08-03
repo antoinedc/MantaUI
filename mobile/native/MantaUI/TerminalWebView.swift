@@ -283,8 +283,11 @@ final class TerminalContainerController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Present the software keyboard + accessory.
-        inputField.becomeFirstResponder()
+        // Do NOT raise the keyboard on entry: it covers half the terminal
+        // before the user has read a single line, and the floating bar exists
+        // precisely to offer the keyboard on demand (its ⌨ button calls
+        // becomeFirstResponder), as does a tap on the terminal surface.
+        floatingBar.isHidden = false
         socket?.reconnectNow()
         Task { await fetchDictateAvailability() }
     }
@@ -322,6 +325,13 @@ final class TerminalContainerController: UIViewController {
         floatingBar.onInterrupt = { [weak self] in self?.sendToShell("\u{03}") }
         floatingBar.onPaste = { [weak self] in self?.paste() }
         floatingBar.onShowKeyboard = { [weak self] in self?.inputField.becomeFirstResponder() }
+
+        // Tap the surface to type — the keyboard is no longer raised on entry,
+        // so this is the second way in besides the bar's keyboard button.
+        // `cancelsTouchesInView = false` keeps xterm's own selection working.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleSurfaceTap))
+        tap.cancelsTouchesInView = false
+        webView.addGestureRecognizer(tap)
         floatingBar.onDictateBegan = { [weak self] in self?.dictateBegan() }
         floatingBar.onDictateEnded = { [weak self] in self?.dictateEnded() }
 
@@ -359,8 +369,15 @@ final class TerminalContainerController: UIViewController {
     // MARK: - Page load + font
 
     private func loadPage() {
-        guard let url = Bundle.main.url(forResource: "terminal", withExtension: "html", subdirectory: "terminal") else {
+        // The folder reference keeps `terminal/` in the bundle; the root
+        // fallback covers a build where the resources were flattened, because
+        // the failure mode is invisible — a black webview with no terminal and
+        // no error on screen.
+        let url = Bundle.main.url(forResource: "terminal", withExtension: "html", subdirectory: "terminal")
+            ?? Bundle.main.url(forResource: "terminal", withExtension: "html")
+        guard let url else {
             state.connectionLabel = "terminal bundle missing"
+            assertionFailure("terminal.html is not in the app bundle — check the Copy Bundle Resources phase")
             return
         }
         webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
@@ -371,6 +388,11 @@ final class TerminalContainerController: UIViewController {
         wv.evaluateJavaScript("window.__manta.setFontSize(\(font)); window.__manta.fit();") { [weak self] _, _ in
             self?.connectSocket()
         }
+    }
+
+    @objc private func handleSurfaceTap() {
+        guard !inputField.isFirstResponder else { return }
+        inputField.becomeFirstResponder()
     }
 
     // MARK: - Pinch to zoom (font size, §9.2)

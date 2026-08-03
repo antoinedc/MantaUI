@@ -186,11 +186,11 @@
 
 /* ---- transcript: ONE gap value ---- */
 .scroll{flex:1;overflow-y:auto;padding:var(--sp-6) 0;min-height:0}
-.wrap{max-width:var(--measure);margin:0 auto;padding:0 28px;display:flex;flex-direction:column;gap:var(--turn-gap)}
+.wrap{padding:0 28px;display:flex;flex-direction:column;gap:var(--turn-gap)}
 .turn{display:flex;flex-direction:column;gap:var(--block-gap)}   /* ← the whole fix, one line */
 .uwrap{display:flex;justify-content:flex-end}
 .umsg{background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);
-  padding:11px var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);max-width:88%}
+  padding:11px var(--sp-4);font:400 15px/1.55 var(--font-sans);color:var(--tx1);max-width:min(88%,var(--measure))}
 .amsg{font:400 15px/var(--prose-lh) var(--font-sans);color:var(--tx1);display:flex;flex-direction:column;gap:var(--block-gap)}
 .amsg p{font:inherit;color:inherit;margin:0;max-width:none}
 .amsg .ic-t{font-family:var(--font-mono);font-size:.86em;background:var(--fill);
@@ -458,10 +458,12 @@
   components each pick their own value (4 / 8 / 8 / 12px) and the hierarchy is inverted: the
   gap between turns is larger than the gap between a paragraph and the tool card it
   introduces, which is why the transcript reads as one undifferentiated column.
-  <strong>The transcript is measure-capped</strong> at <code>--measure</code> (72ch) and
-  centred. Ask cards sit at that same measure, edge-aligned with the prose — they are blocks
-  in the conversation, not floating overlays, so they are never narrower or wider than the
-  body around them.
+  <strong>The transcript runs the panel's full width</strong> — 28px inset from each
+  edge, no measure cap, no centring (owner decision, BET-646). Ask cards sit
+  at that same full width, edge-aligned with the prose — they are blocks in
+  the conversation, not floating overlays. The composer stack below keeps the
+  <code>--measure</code> (72ch) cap, so on a wide window the centred composer's
+  left edge no longer meets the transcript's — that is intended.
   <strong>The header owns session state; the composer owns composing.</strong> Context %,
   branch and the session menu (⋯) belong in the header. Model ▸ effort, attach, voice, send,
   the bypass-permissions toggle and the three resource buttons stay by the input, because
@@ -475,8 +477,8 @@
   whatever is blocking — the filled <em>Allow once</em> when a permission card is open.
   Reject is pushed to the far right and tinted only on hover, so the destructive option is
   reachable but never where the eye lands first.
-  <strong>What grows:</strong> the transcript grows vertically within its measure; the
-  composer grows downward from a fixed top edge, so the send control never moves.
+  <strong>What grows:</strong> the transcript grows vertically within the panel's full
+  width; the composer grows downward from a fixed top edge, so the send control never moves.
   <strong>Icons are stroked, never emoji</strong> — emoji render differently per platform and
   cannot take <code>currentColor</code>, which is why today's toolbar cannot be themed.
 </p>

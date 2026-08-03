@@ -26,20 +26,39 @@ struct SessionListView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
-    @State private var createItem: CreateItem?
-    @State private var openTarget: SessionOpenTarget?
-    @State private var renameTarget: MantaWindow?
+    // ONE sheet binding. Three separate `.sheet` modifiers used to sit on the
+    // same view, and SwiftUI honours only one of them — which is why the `+`
+    // button appeared dead: its sheet was never the one that won.
+    @State private var sheetRoute: SheetRoute?
+    // ONE path-driven stack. It used to be a bare NavigationStack whose only
+    // destination was item-based (`navigationDestination(item:)`) while the
+    // subagent row inside the chat screen pushed a VALUE
+    // (`NavigationLink(value:)`). Mixing the two in one stack is what made a
+    // subagent tap resolve against the session destination — you landed back on
+    // the parent session and only saw the child after going back. Everything is
+    // a value push now, so each entry resolves against its own destination.
+    // NavigationPath, not a typed array: the stack carries TWO route types
+    // (a session target here, a subagent value pushed from inside the chat
+    // screen), and a typed path would silently swallow the second.
+    @State private var path = NavigationPath()
+
     @State private var renameProject = ""
     @State private var renameValue = ""
     @State private var confirmDeleteProject = ""
-    @State private var confirmDeleteWindow: MantaWindow?
+
     @State private var deleteRunningText = ""
     @State private var showSettings = false
+    /// The row that carries the `fill` background while its session is OPEN.
+    /// Cleared the moment you come back to the list: a highlight there reads as
+    /// "you are here", and you are not — you are on the list. (It used to track
+    /// tmux's active window, which lit one row in every project and never
+    /// cleared at all.)
+    @State private var openRow: String?
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if store.projects.isEmpty && !store.loading {
                     emptyState
@@ -64,10 +83,9 @@ struct SessionListView: View {
             .refreshable { await store.refresh() }
             .safeAreaInset(edge: .bottom) { capsule }
             .overlay(alignment: .top) { errorBanner }
-            .sheet(item: $renameTarget) { _ in renameSheet(targetProject: renameProject) }
-            .navigationDestination(item: $openTarget) { target in
+            .navigationDestination(for: SessionOpenTarget.self) { target in
                 if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore)
+                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path)
                 } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
                           let window = project.windows.first(where: { $0.index == target.windowIndex }) {
                     // S6 (BET-598): a non-chat window opens the native
@@ -77,23 +95,16 @@ struct SessionListView: View {
                     SessionScreenPlaceholder(name: target.name)
                 }
             }
+            // The sheet hangs off the stack's CONTENT, not off the stack
+            // itself. A single view can only run one presentation, and the
+            // settings cover below already claims the stack — with both on the
+            // same view the cover won, so every sheet (create, rename, delete)
+            // was silently dead and the `+` looked like it did nothing.
+            .sheet(item: $sheetRoute) { route in
+                sheetContent(route)
+            }
         }
-        .sheet(item: $confirmDeleteWindow) { target in confirmDeleteSheet(target: target) }
         .overlay(alignment: .bottom) { undoToast }
-        .sheet(item: $createItem) { item in
-            SessionCreateSheet(
-                mode: item.mode,
-                onClose: { createItem = nil },
-                onCreated: { project, index in
-                    let window = store.projects.first(where: { $0.tmuxSession == project })?
-                        .windows.first(where: { $0.index == index })
-                    let name = window?.name ?? "session"
-                    createItem = nil
-                    openTarget = SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId)
-                }
-            )
-            .presentationDetents([.medium, .large])
-        }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
@@ -102,8 +113,37 @@ struct SessionListView: View {
         // it into the same openTarget the list rows use. onChange covers a
         // warm launch (view already mounted), onAppear the cold-start case
         // (the tap routed before the list appeared).
+        // Back on the list means nothing is open, so nothing is highlighted.
+        .onChange(of: path.count) { count in
+            if count == 0 { openRow = nil }
+        }
         .onAppear { consumePushLink() }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+    }
+
+    @ViewBuilder
+    private func sheetContent(_ route: SheetRoute) -> some View {
+        switch route {
+        case .create(let project):
+            SessionCreateSheet(
+                projects: store.projects,
+                initialProject: project,
+                onClose: { sheetRoute = nil },
+                onCreated: { project, index in
+                    let window = store.projects.first(where: { $0.tmuxSession == project })?
+                        .windows.first(where: { $0.index == index })
+                    let name = window?.name ?? "session"
+                    sheetRoute = nil
+                    path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
+                }
+            )
+        case .rename(let window, let project):
+            renameSheet(target: window, targetProject: project)
+                .presentationDetents([.height(320)])
+        case .confirmDelete(let window):
+            confirmDeleteSheet(target: window)
+                .presentationDetents([.height(320)])
+        }
     }
 
     // MARK: - Push deep-link (§S8)
@@ -117,9 +157,9 @@ struct SessionListView: View {
         // still fine).
         if let project = store.projects.first(where: { $0.windows.contains { $0.opencodeSessionId == sessionId } }),
            let window = project.windows.first(where: { $0.opencodeSessionId == sessionId }) {
-            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId)
+            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId))
         } else {
-            openTarget = SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId)
+            path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
         }
     }
 
@@ -131,8 +171,14 @@ struct SessionListView: View {
                 ForEach(filteredProjects) { project in
                     Section {
                         groupHeader(project.tmuxSession)
-                        ForEach(project.windows) { window in
-                            row(project: project, window: window)
+                        // Identity MUST be project-scoped. `MantaWindow.id` is
+                        // the tmux window index, which repeats across projects
+                        // (every project has a window 0), and a LazyVStack
+                        // keeps ONE flat identity space across the nested
+                        // ForEachs — so the second project's window 0 collided
+                        // with the first project's and rendered as a blank row.
+                        ForEach(project.windows.map { SessionRowKey(project: project.tmuxSession, window: $0) }) { entry in
+                            row(project: project, window: entry.window)
                         }
                     }
                 }
@@ -168,13 +214,14 @@ struct SessionListView: View {
     @ViewBuilder
     private func row(project: MantaProject, window: MantaWindow) -> some View {
         Button {
-            openTarget = SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId)
+            openRow = SessionRowKey(project: project.tmuxSession, window: window).id
+            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
                 timer: timerText(window),
-                isActive: window.active,
+                isActive: openRow == SessionRowKey(project: project.tmuxSession, window: window).id,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
                 tokens: tokens
             )
@@ -184,8 +231,8 @@ struct SessionListView: View {
             let id = SessionPinID.window(project.tmuxSession, index: window.index)
             Button("Rename") {
                 renameProject = project.tmuxSession
-                renameTarget = window
                 renameValue = window.name
+                sheetRoute = .rename(window: window, project: project.tmuxSession)
             }
             Button(store.isPinned(session: project.tmuxSession, index: window.index) ? "Unpin" : "Pin") {
                 store.togglePin(session: project.tmuxSession, index: window.index)
@@ -242,7 +289,7 @@ struct SessionListView: View {
             let durationText = runningDuration(of: window)
             deleteRunningText = durationText
             confirmDeleteProject = project.tmuxSession
-            confirmDeleteWindow = window
+            sheetRoute = .confirmDelete(window: window)
             SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
         } else {
             store.beginIdleDelete(session: project.tmuxSession, index: window.index)
@@ -271,7 +318,7 @@ struct SessionListView: View {
             Button {
                 let index = target.index
                 let project = confirmDeleteProject
-                confirmDeleteWindow = nil
+                sheetRoute = nil
                 Task {
                     if let sid = target.opencodeSessionId {
                         try? await MantaAPIClient.live().deleteSession(sessionId: sid, sessionName: project, windowIndex: index)
@@ -290,7 +337,7 @@ struct SessionListView: View {
                     .background(tokens.danger, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             }
             Button {
-                confirmDeleteWindow = nil
+                sheetRoute = nil
             } label: {
                 Text("Cancel")
                     .font(.system(size: Metrics.type.small, weight: .medium))
@@ -299,7 +346,6 @@ struct SessionListView: View {
             }
         }
         .padding(Metrics.spacing.sp4)
-        .presentationDetents([.height(320)])
     }
 
     // MARK: - Undo toast
@@ -343,52 +389,62 @@ struct SessionListView: View {
 
     // MARK: - Floating capsule (+ search) + create
 
+    // The search + create control FLOATS over the list on Liquid Glass, the
+    // system material for iOS 26 chrome. It used to be a flat
+    // `.ultraThinMaterial` rectangle spanning the full width, which reads as an
+    // opaque grey band with a hard seam — not glass, and visibly not a system
+    // control. Each element carries its own glass so the pill and the button
+    // are separate floating shapes, which is what `GlassEffectContainer` is
+    // for; there is no full-bleed backing plate any more.
     private var capsule: some View {
-        HStack(spacing: Metrics.spacing.sp3) {
-            HStack(spacing: Metrics.spacing.sp2) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: Metrics.type.xs))
-                    .foregroundColor(tokens.tx4)
-                TextField("Search sessions", text: $searchText)
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.tx1)
-            }
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.vertical, Metrics.spacing.sp2)
-            .overlay {
-                Capsule().stroke(tokens.borderSubtle, lineWidth: 1)
-            }
+        GlassEffectContainer(spacing: Metrics.spacing.sp3) {
+            HStack(spacing: Metrics.spacing.sp3) {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                    TextField("Search sessions", text: $searchText)
+                        .font(.system(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx1)
+                }
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp3)
+                .glassEffect(.regular.interactive(), in: .capsule)
 
-            Button {
-                SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
-                presentCreateMenu()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: Metrics.type.body, weight: .semibold))
-                    .foregroundColor(tokens.accentTx)
-                    .frame(width: 44, height: 44)
-                    .background(tokens.accentSolid, in: Circle())
+                Button {
+                    SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                    presentCreateMenu()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        // onAccent, NOT accentTx: accentTx is the accent colour
+                        // for text on a NEUTRAL background. Over a solid accent
+                        // fill it is the same colour in light mode, which is why
+                        // this button was a featureless blue disc. Every other
+                        // filled-accent control in the app already uses onAccent.
+                        .foregroundColor(tokens.onAccent)
+                        .frame(width: 44, height: 44)
+                }
+                // The system's own glass BUTTON style, not a plain button with
+                // a glass effect layered over it: the layered version rendered
+                // correctly but ate the touch, so the button looked dead.
+                .buttonStyle(.glassProminent)
+                .tint(tokens.accentSolid)
+                .clipShape(.circle)
+                .accessibilityLabel("New")
             }
-            .accessibilityLabel("New")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.bottom, Metrics.spacing.sp2)
-        .background {
-            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
-        }
     }
 
     private func presentCreateMenu() {
-        if store.projects.isEmpty {
-            createItem = CreateItem(mode: .newProject)
-        } else {
-            createItem = CreateItem(mode: .newSession(projectName: store.projects.first?.tmuxSession ?? ""))
-        }
+        sheetRoute = .create(project: store.projects.first?.tmuxSession)
     }
 
     // MARK: - Rename (§7.2 context menu)
 
-    private func renameSheet(targetProject: String) -> some View {
+    private func renameSheet(target: MantaWindow, targetProject: String) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
             Text("Rename session")
                 .font(.system(size: Metrics.type.body, weight: .semibold))
@@ -402,24 +458,23 @@ struct SessionListView: View {
                 .autocorrectionDisabled()
             HStack {
                 Spacer()
-                Button("Cancel") { renameTarget = nil }
+                Button("Cancel") { sheetRoute = nil }
                     .foregroundColor(tokens.tx2)
                 Button("Save") {
                     let value = renameValue.trimmingCharacters(in: .whitespaces)
-                    if !value.isEmpty, let target = renameTarget {
+                    if !value.isEmpty {
                         Task {
                             try? await MantaAPIClient.live().renameWindow(session: targetProject, index: target.index, newName: value)
                             await store.refresh()
                         }
                     }
-                    renameTarget = nil
+                    sheetRoute = nil
                 }
                 .fontWeight(.semibold)
                 .foregroundColor(tokens.accentTx)
             }
         }
         .padding(Metrics.spacing.sp4)
-        .presentationDetents([.height(220)])
     }
 
     // MARK: - Fork
@@ -471,6 +526,15 @@ struct SessionListView: View {
 }
 
 // MARK: - Row content (§7.1 slots)
+
+/// Project-scoped row identity for the session list. A tmux window index is
+/// only unique WITHIN its project, so it cannot be the identity of a row in a
+/// LazyVStack that renders every project in one flat identity space.
+private struct SessionRowKey: Identifiable {
+    let project: String
+    let window: MantaWindow
+    var id: String { "\(project)#\(window.index)" }
+}
 
 private struct SessionRowContent: View {
     let window: MantaWindow
@@ -551,17 +615,44 @@ enum SessionHaptics {
 
 // MARK: - Identifiable helpers
 
-private struct CreateItem: Identifiable {
-    let id = UUID()
-    let mode: SessionCreateMode
+/// Every sheet this screen can present, so exactly one `.sheet` modifier is
+/// attached to the view.
+private enum SheetRoute: Identifiable {
+    case create(project: String?)
+    case rename(window: MantaWindow, project: String)
+    case confirmDelete(window: MantaWindow)
+
+    var id: String {
+        switch self {
+        case .create(let project): return "create:\(project ?? "")"
+        case .rename(let window, let project): return "rename:\(project):\(window.index)"
+        case .confirmDelete(let window): return "delete:\(window.index)"
+        }
+    }
 }
 
-private struct SessionOpenTarget: Identifiable, Hashable {
-    let id = UUID()
+/// A route value, so its identity must be stable and derived from what it
+/// addresses — never a fresh UUID, which would make the same session push as a
+/// different destination every time it is constructed.
+///
+/// Internal (not `private`) so the chat screen can push routes onto the same
+/// NavigationStack path — fork lands on the new session, and "Open terminal"
+/// routes to the terminal surface for the same window.
+struct SessionOpenTarget: Hashable {
     let project: String
     let windowIndex: Int
     let name: String
     let sessionId: String?
+
+    static func == (lhs: SessionOpenTarget, rhs: SessionOpenTarget) -> Bool {
+        lhs.project == rhs.project && lhs.windowIndex == rhs.windowIndex && lhs.sessionId == rhs.sessionId
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(project)
+        hasher.combine(windowIndex)
+        hasher.combine(sessionId)
+    }
 }
 
 /// The chat screen this row opens is S4's (chat wired to live data). This

@@ -80,12 +80,15 @@
   --r-xl: 16px;
   --r-full: 999px;
 
-  /* Reading measure + leading (BET-451). The transcript is what a user spends
-     nearly all their time reading, so it is capped rather than left to run the
-     window's full width: Bringhurst's 45-75 characters is the long-standing
-     optimum, and the transcript runs ~150 characters at 2000px today. Leading
-     is split because prose and chrome want different values — WCAG 1.4.12
-     requires content to survive 1.5, so 1.5 is a floor, not a target. */
+  /* Reading measure + leading (BET-451). The measure now caps the composer
+     stack and the user bubble — not the transcript. Bringhurst's 45-75
+     characters is the long-standing optimum for prose that should be read at
+     measure; by owner decision the transcript runs the panel's full width
+     instead (BET-646), keeping only the 28px inset. Leading is split because
+     prose and chrome want different values — WCAG 1.4.12 requires content to
+     survive 1.5, so 1.5 is a floor, not a target. Do NOT change the token's
+     value: it is multi-consumer (BET-516 generates a Swift theme from this
+     file) and it still governs the composer and the user bubble. */
   --measure: 72ch;
   --prose-lh: 1.55;
   --ui-lh: 1.45;
@@ -271,7 +274,11 @@
   --accent-tx: #1F55D6;
   --accent-solid: #1F55D6;
   --on-accent: #FFFFFF;
-  --accent-soft: #1F55D6;
+  /* A SOFT tint, not the accent itself. It was #1F55D6 — byte-identical to
+     --accent-tx, the colour drawn ON it — so every light-mode pill that pairs
+     them (the composer's model picker, the attach button, transcript glyphs)
+     rendered as a solid blue blob with invisible content. */
+  --accent-soft: #DFE8FF;
   --ok: #0A7A53;
   --warn: #8A5A08;
   --danger: #BE2F3C;
@@ -297,7 +304,7 @@
   --border-rgb: 218 213 204;
   --tx1-rgb: 26 24 21;
   --accent-rgb: 46 107 255;
-  --accent-soft-rgb: 31 85 214;
+  --accent-soft-rgb: 223 232 255;
 
   --shadow-sm: 0 1px 2px rgb(26 24 21 / 0.06);
   --shadow-md: 0 8px 24px rgb(26 24 21 / 0.10);

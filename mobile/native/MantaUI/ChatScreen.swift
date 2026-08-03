@@ -17,19 +17,72 @@ import SwiftUI
 // the generated tokens.
 // ===========================================================================
 
+/// The BET-627 overflow-sheet items that present a card of their own.
+private enum OverflowDestination: String, Identifiable {
+    case attach
+    case schedules
+    case secrets
+
+    var id: String { rawValue }
+}
+
+/// Thin wrapper that owns WHICH opencode session the screen is showing.
+///
+/// Clearing a session does not end the conversation on screen — it starts a new
+/// opencode session in the same tmux window, and the user expects to stay
+/// exactly where they are with an empty transcript. The stores are built from
+/// the session id, so the id has to live one level ABOVE them: swapping it here
+/// rebuilds the content view (and its stores) in place. Popping back to the
+/// list instead, which is what this did before, both lost the user's place and
+/// left them reopening the OLD session id from a stale list.
 struct ChatScreen: View {
+    let sessionId: String
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
+    @Binding var path: NavigationPath
+    @State private var currentSessionId: String?
+
+    var body: some View {
+        let sid = currentSessionId ?? sessionId
+        ChatScreenContent(
+            sessionId: sid,
+            title: title,
+            projectName: projectName,
+            eventStore: eventStore,
+            path: $path,
+            onCleared: { newId in currentSessionId = newId }
+        )
+        .id(sid)
+    }
+}
+
+private struct ChatScreenContent: View {
+    let title: String
+    let projectName: String
+    @ObservedObject var eventStore: MantaEventStore
+    @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showOverflow = false
+    @State private var branch: String?
+    @State private var sessionWindow: (name: String, index: Int, cwd: String)?
+    /// Which overflow-sheet item's card is presented (BET-627).
+    @State private var overflowDestination: OverflowDestination?
+    /// Live scheduled-task count for the overflow sheet's badge (BET-627).
+    @State private var scheduleCount = 0
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore) {
+    /// Called with the NEW session id after a clear, so the wrapper can swap it.
+    let onCleared: (String) -> Void
+
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
+        self._path = path
+        self.onCleared = onCleared
         let api = MantaAPIClient.live()
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
@@ -47,6 +100,44 @@ struct ChatScreen: View {
         // subagent destination is registered against the enclosing stack here,
         // so a value-push keeps the parent in the stack (its scroll untouched)
         // and the child streams while open (BET-576).
+        //
+        // The lifecycle hooks live on the OUTER view, not inside the loading
+        // branch: switching branch would otherwise fire onDisappear and stop
+        // the permission poll, which `start()`'s run-once guard would then
+        // refuse to restart.
+        content
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarBackButtonHidden(true)
+            .onAppear {
+                // Three independent fetches, all started together: the
+                // transcript, the model list (previously not fetched until the
+                // picker was opened, so the first open always stalled) and the
+                // window/branch lookup.
+                store.start()
+                modelStore.load()
+                Task { await resolveWindowAndBranch() }
+            }
+            .onDisappear { store.stop() }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("chat-screen")
+    }
+
+    /// While the session loads there is nothing to act on, so the screen shows
+    /// ONLY the loader — no header, no composer, no cards. Hiding the chrome
+    /// outright is both honest (a disabled control still invites a tap) and
+    /// simpler than keeping every control in a disabled state.
+    @ViewBuilder
+    private var content: some View {
+        if store.loading {
+            MantaLoader(caption: "Loading session…", tokens: tokens)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(tokens.canvas.ignoresSafeArea())
+        } else {
+            loadedLayout
+        }
+    }
+
+    private var loadedLayout: some View {
         Group {
             if store.loadFailed {
                 loadFailure
@@ -60,6 +151,13 @@ struct ChatScreen: View {
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
                 bottomCards
+                // BET-630 (D1): the running-state working row. Shown only while a
+                // turn runs; the ambient refetch sweep lives on the composer's
+                // top divider and means a different thing, so the two never
+                // share an indicator. Not shown during a background refetch.
+                if store.running {
+                    RunningIndicator(store: store)
+                }
                 ComposerView(
                     sessionId: store.sessionId,
                     projectName: projectName,
@@ -79,13 +177,133 @@ struct ChatScreen: View {
                 )
             }
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(true)
-        .overlay(alignment: .top) { header }
-        .onAppear { store.start() }
-        .onDisappear { store.stop() }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chat-screen")
+        // The header is an INSET, not an overlay: as an overlay it floated on
+        // top of the transcript with nothing reserving its space, so the first
+        // rows sat underneath it and were clipped at rest, not just while
+        // scrolling.
+        .safeAreaInset(edge: .top) { header }
+        .sheet(isPresented: $showOverflow) { overflowSheet }
+        .sheet(item: $overflowDestination) { destination in
+            destinationCard(destination)
+        }
+    }
+
+    // MARK: - Overflow sheet (§8)
+
+    private var overflowSheet: some View {
+        ChatOverflowSheet(
+            sessionTitle: title,
+            projectName: projectName,
+            branch: branch,
+            onAttach: { overflowDestination = .attach },
+            onSchedules: { overflowDestination = .schedules },
+            onSecrets: { overflowDestination = .secrets },
+            onWebhooks: {},
+            onCompact: { store.compact() },
+            onClear: { Task { await clearSession() } },
+            onFork: { Task { await forkSession() } },
+            onOpenTerminal: { Task { await openTerminal() } },
+            onDelete: { Task { await deleteSession() } },
+            scheduleCount: scheduleCount
+        )
+        .task { await refreshScheduleCount() }
+    }
+
+    /// The three BET-627 overflow items present their cards here. Attach sends
+    /// an attachment-only prompt through the store's existing send path.
+    @ViewBuilder
+    private func destinationCard(_ destination: OverflowDestination) -> some View {
+        switch destination {
+        case .attach:
+            AttachCard(
+                sessionId: store.sessionId,
+                projectName: projectName,
+                onSend: { attachment in
+                    overflowDestination = nil
+                    store.send(text: "", attachments: [attachment], model: nil)
+                },
+                onClose: { overflowDestination = nil },
+                api: MantaAPIClient.live()
+            )
+        case .schedules:
+            SchedulesCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil }
+            )
+        case .secrets:
+            SecretsCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil }
+            )
+        }
+    }
+
+    /// (Re)load the scheduled-task count backing the sheet's live badge.
+    private func refreshScheduleCount() async {
+        let api = MantaAPIClient.live()
+        if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
+            scheduleCount = jobs.count
+        }
+    }
+
+    /// The chat screen knows its project by NAME only, but every session action
+    /// (clear/fork/delete) and the branch lookup need the tmux window index and
+    /// its working directory. Resolve both once when the screen appears.
+    private func resolveWindowAndBranch() async {
+        let api = MantaAPIClient.live()
+        guard let projects = try? await api.projects(),
+              let project = projects.first(where: { $0.tmuxSession == projectName }),
+              let window = project.windows.first(where: { $0.opencodeSessionId == store.sessionId })
+        else { return }
+        let cwd = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
+        await MainActor.run { sessionWindow = (project.tmuxSession, window.index, cwd) }
+        if !cwd.isEmpty, let resolved = try? await api.vcsBranch(directory: cwd) {
+            await MainActor.run { branch = resolved }
+        }
+    }
+
+    /// Clear = a fresh opencode session in the SAME window. Stay on the screen
+    /// and re-point it at the new id; the transcript comes back empty because
+    /// the session really is new.
+    private func clearSession() async {
+        guard let w = sessionWindow else { return }
+        let newId = try? await MantaAPIClient.live().clearSession(
+            sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
+        guard let newId, !newId.isEmpty else { return }
+        await MainActor.run { onCleared(newId) }
+    }
+
+    private func forkSession() async {
+        guard let w = sessionWindow else { return }
+        let newSessionId = try? await MantaAPIClient.live().forkSession(
+            sessionId: store.sessionId, sessionName: w.name,
+            windowName: "\(title)-fork", cwd: w.cwd)
+        guard let newSessionId, !newSessionId.isEmpty else { return }
+        // Fork = a full copy of the session in a fresh window. Land on the
+        // fork: push the new session as the next destination (sessionId is
+        // present, so it opens the forked chat). The original stays one pop
+        // back. windowIndex is not used when sessionId is set.
+        await MainActor.run {
+            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: "\(title) fork", sessionId: newSessionId))
+        }
+    }
+
+    /// "Open terminal" — push the terminal screen for the session's tmux
+    /// window. The target carries NO opencode session id, so SessionListView's
+    /// navigationDestination routes it to the native terminal instead of the
+    /// chat screen.
+    private func openTerminal() async {
+        guard let w = sessionWindow else { return }
+        await MainActor.run {
+            path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: title, sessionId: nil))
+        }
+    }
+
+    private func deleteSession() async {
+        guard let w = sessionWindow else { return }
+        try? await MantaAPIClient.live().deleteSession(
+            sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
+        await MainActor.run { dismiss() }
     }
 
     // MARK: - Header (§8)
@@ -122,10 +340,19 @@ struct ChatScreen: View {
 
             Spacer(minLength: 0)
 
-            // Trailing 38×38 glass button (§8) — a placeholder in S4 (the
-            // overflow sheet with fork/settings is a later stage).
-            Color.clear
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            // Trailing 38×38 glass button (§8) — the overflow sheet, which is
+            // where every session action lives (DECISIONS.md:667-670).
+            Button {
+                showOverflow = true
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.tx1)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Session actions")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -146,7 +373,13 @@ struct ChatScreen: View {
                 }
                 TranscriptView(blocks: store.blocks, tokens: tokens)
             }
+            // Pin the content to the scroll view's own width. A vertical scroll
+            // view otherwise sizes itself to its WIDEST child, so one long line
+            // of tool output widens the whole screen and drags the composer off
+            // with it.
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .scrollClipDisabled(false)
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
     }
@@ -236,6 +469,11 @@ struct ChatSubagentScreen: View {
                 onBack: { dismiss() },
                 tokens: tokens
             )
+            // `.bottom` ALONE also aligns SHORT content to the bottom, which
+            // is what put a screenful of dead space above a subagent report
+            // that does not fill the view. Scoping the anchor to `.sizeChanges`
+            // keeps the useful half — the view sticks to the bottom as the
+            // child streams — while content that fits simply starts at the top.
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if store.hasEarlier {
@@ -246,7 +484,7 @@ struct ChatSubagentScreen: View {
                     TranscriptView(blocks: store.blocks, tokens: tokens)
                 }
             }
-            .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
         }
         .background(tokens.canvas.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)

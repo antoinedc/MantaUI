@@ -14,7 +14,7 @@ import { mount, type Harness } from "./testHarness";
 import { MessageBubble } from "./MessageBubble";
 
 const BUBBLE_CHROME =
-  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[88%] whitespace-pre-wrap break-words";
+  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words";
 
 describe("MessageBubble", () => {
   let h: Harness | null = null;
@@ -27,6 +27,13 @@ describe("MessageBubble", () => {
     // @ts-expect-error — MessageBubble must NOT accept className (M527 decision 3)
     void <MessageBubble className="bg-red-500">x</MessageBubble>;
     expect(true).toBe(true);
+  });
+
+  it("caps the bubble against both 88% of its container and the reading measure", () => {
+    // BET-646: with the transcript now uncapped, a bare 88% would stretch the
+    // bubble across a wide window. The cap is the min() of the two terms.
+    expect(BUBBLE_CHROME).toContain("max-w-[min(88%,var(--measure))]");
+    expect(BUBBLE_CHROME).not.toContain("max-w-[88%]");
   });
 
   it("renders a right-aligned wrapper around the bubble chrome", () => {

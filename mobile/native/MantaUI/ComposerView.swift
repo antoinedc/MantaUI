@@ -46,15 +46,22 @@ struct ComposerView: View {
     @State private var micAvailable = false
     @State private var hint: String?
     @State private var showHint = false
-    @StateObject private var controller = ComposerTextController()
+    @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
+    @State private var showModelPicker = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            // The pickers hang off a neutral, zero-size anchor. They cannot go
+            // on the composer root (the model sheet is there) nor on the attach
+            // button (a Menu is itself a presentation) — in both cases SwiftUI
+            // runs one presentation and silently drops the others, which is
+            // exactly how attaching a file came to do nothing at all.
+            pickerAnchor
             if !attachments.isEmpty { chipsRow }
             HStack(spacing: Metrics.spacing.sp1) {
                 attachButton
@@ -62,16 +69,25 @@ struct ComposerView: View {
                 Spacer(minLength: 0)
             }
             HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
-                MultilineTextView(
-                    text: $text,
-                    controller: controller,
-                    placeholder: "Message…",
-                    font: UIFont.systemFont(ofSize: Metrics.type.body),
-                    textColor: UIColor(tokens.tx1),
-                    placeholderColor: UIColor(tokens.tx4),
-                    maxHeight: Metrics.type.display * 3
-                )
-                .frame(maxWidth: .infinity)
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text("Message…")
+                            .font(.system(size: Metrics.type.body))
+                            .foregroundColor(tokens.tx4)
+                            .padding(.top, 8)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $text)
+                        .font(.system(size: Metrics.type.body))
+                        .foregroundColor(tokens.tx1)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: Metrics.type.display,
+                               maxHeight: Metrics.type.display * 6)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .focused($inputFocused)
+                        .accessibilityIdentifier("composer-input")
+                }
                 if micAvailable { micButton }
                 sendButton
             }
@@ -79,10 +95,13 @@ struct ComposerView: View {
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
         .background(tokens.canvas.ignoresSafeArea())
-        .overlay(alignment: .top) { divider }
-        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
-        .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
-            handleDocument(result)
+        .overlay(alignment: .top) { topDivider }
+        // ONE presentation per view. The model sheet, the photo picker and the
+        // file importer were all attached HERE, and SwiftUI honours only one of
+        // them — which is why attaching a file silently did nothing. The two
+        // pickers now hang off the attach button instead (see attachButton).
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerSheet(modelStore: modelStore)
         }
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
@@ -90,40 +109,32 @@ struct ComposerView: View {
         .onAppear {
             modelStore.load()
             checkMicAvailability()
-            controller.focus()
+            // Deliberately NOT focusing the input here: raising the keyboard on
+            // entry hides most of the transcript you opened the session to
+            // read. Tapping the input is the way in, as in Messages.
         }
     }
 
-    private var divider: some View {
-        Rectangle()
-            .fill(tokens.borderSubtle)
-            .frame(height: Metrics.spacing.spPx)
+    /// The composer's top hairline. While a background transcript refetch (or the
+    /// initial load) runs — and the turn is NOT running — it becomes an ambient
+    /// accent sweep (BET-630, D1). A running turn shows the working row instead;
+    /// the two states never share an indicator.
+    @ViewBuilder
+    private var topDivider: some View {
+        if store.refreshing && !store.running {
+            RefetchSweep(tokens: tokens)
+        } else {
+            Rectangle()
+                .fill(tokens.borderSubtle)
+                .frame(height: Metrics.spacing.spPx)
+        }
     }
 
     // MARK: - Model pill
 
     private var modelPill: some View {
-        Menu {
-            Button {
-                modelStore.setOverride(nil)
-            } label: {
-                Label(settingIsDefault ? "Default (in use)" : "Default", systemImage: settingIsDefault ? "checkmark" : "circle")
-            }
-            if modelStore.models.isEmpty {
-                Text("No models")
-            } else {
-                ForEach(ChatModel.groups(modelStore.models), id: \.provider) { group in
-                    Section(group.provider) {
-                        ForEach(group.models, id: \.id) { model in
-                            Button {
-                                modelStore.setOverride(OpencodeModelID(providerID: model.providerID, modelID: model.id))
-                            } label: {
-                                Label(model.name, systemImage: isActive(model) ? "checkmark" : "circle")
-                            }
-                        }
-                    }
-                }
-            }
+        Button {
+            showModelPicker = true
         } label: {
             HStack(spacing: Metrics.spacing.sp1) {
                 Image(systemName: "sparkles")
@@ -131,23 +142,22 @@ struct ComposerView: View {
                 Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
                     .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                     .lineLimit(1)
+                if let variant = modelStore.variant, !variant.isEmpty {
+                    Text("·")
+                        .font(.system(size: Metrics.type.small))
+                    Text(variant.capitalized)
+                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .lineLimit(1)
+                }
             }
             .foregroundColor(tokens.accentTx)
             .padding(.horizontal, Metrics.spacing.sp2)
             .padding(.vertical, Metrics.spacing.sp1)
             .background(tokens.accentSoft, in: Capsule())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("Model picker")
         .accessibilityIdentifier("model-picker")
-    }
-
-    private var settingIsDefault: Bool {
-        modelStore.override == nil
-    }
-
-    private func isActive(_ model: OpencodeModel) -> Bool {
-        guard let active = modelStore.active else { return false }
-        return active.providerID == model.providerID && active.modelID == model.id
     }
 
     // MARK: - Attach
@@ -206,12 +216,23 @@ struct ComposerView: View {
                 let remote = try await api.upload(project: projectName, filename: filename, data: data)
                 await MainActor.run {
                     attachments.append(ComposerAttachment(filename: filename, mime: mime, remotePath: remote, isImage: true))
+                    surfaceHint("Attached \(filename)")
                 }
             } catch {
                 surfaceHint("Photo upload failed")
             }
         }
         await MainActor.run { photoItems = [] }
+    }
+
+    /// Zero-size host for the photo/file pickers. See the call site.
+    private var pickerAnchor: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems, maxSelectionCount: 5, matching: .images)
+            .fileImporter(isPresented: $showDocPicker, allowedContentTypes: [.item]) { result in
+                handleDocument(result)
+            }
     }
 
     private var chipsRow: some View {
@@ -347,11 +368,8 @@ struct ComposerView: View {
     /// Insert text at the caret (dictate). Falls back to append if the input
     /// isn't focused/bound yet.
     private func insertAtCaret(_ string: String) {
-        if controller.textView != nil {
-            controller.insertAtCaret(string)
-        } else {
-            text += string
-        }
+        // TextEditor owns the selection; append at end for dictation.
+        text += string
     }
 
     private func classify(_ transcript: String) async {
@@ -426,7 +444,7 @@ struct ComposerView: View {
         store.send(text: trimmed, attachments: sendAttachments, model: model)
         text = ""
         attachments = []
-        controller.focus()
+        inputFocused = true
     }
 
     // MARK: - Mic availability (Groq key gate)
@@ -452,5 +470,39 @@ struct ComposerView: View {
 
     private func surfaceHint(_ message: String) {
         hintState(message)
+    }
+}
+
+/// Ambient transcript-refetch sweep on the composer's top hairline (BET-630, D1).
+/// A slow accent gradient travels L→R while the canonical transcript syncs in the
+/// background; border-only (1px) so there is no layout shift. Distinct from the
+/// running row — the two mean different things and never share an indicator.
+/// Mirrors the desktop `.manta-loading-divider` (src/renderer/index.css).
+private struct RefetchSweep: View {
+    let tokens: Tokens
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
+            let period = 1.5
+            let t = (context.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: period) / period)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(tokens.borderSubtle)
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.clear, tokens.accent.opacity(0.85), .clear],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geo.size.width * 0.42)
+                        .offset(x: (CGFloat(t) * 1.45 - 0.42) * geo.size.width)
+                }
+            }
+            .frame(height: Metrics.spacing.spPx)
+            .clipped()
+        }
     }
 }

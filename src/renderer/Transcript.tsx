@@ -73,20 +73,22 @@ export function Transcript({
       <TaskContext.Provider value={taskContextValue}>
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
-            <MeasureColumn>
+            // Full width, matching the populated flow below so both states
+            // share a left edge (BET-646).
+            <MeasureColumn width="full">
               <div className="text-text-faint">
                 <span style={{ color: "var(--accent)" }}>✻</span>{" "}
                 Welcome. Type a message below to start.
               </div>
             </MeasureColumn>
           ) : (
-            // BET-413: cap the transcript column at the measure (72ch) and
-            // centre it; BET-637: the side inset is the primitive's 28px. This
-            // is the single highest-leverage readability change — the column
-            // was previously the full window width (~150ch on a 2000px
-            // monitor). max-width + mx-auto on the message-flow column; the
-            // outer min-h-full wrapper keeps full width so the column centres.
-            <MeasureColumn stacked>
+            // BET-646 (supersedes BET-413/BET-637's single-edge goal): the
+            // transcript runs the full width of the session panel by owner
+            // decision — 28px inset from each edge, no measure cap, no
+            // centring. The 72ch measure now caps only the composer stack and
+            // the user bubble; the left edge of the centred composer no longer
+            // meets the transcript's edge on a wide window, which is intended.
+            <MeasureColumn stacked width="full">
               {messages.map((m, idx) => {
                 // BET-418 §C: a background job's completion report is injected
                 // as a fake user turn whose first line is the machine marker

@@ -20,6 +20,8 @@ struct MantaUIApp: App {
     @StateObject private var sessionStore: SessionListStore
 
     init() {
+        // Before anything else, so a crash during start-up is captured too.
+        CrashReports.install()
         let event = MantaEventStore()
         _store = StateObject(wrappedValue: event)
         _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
@@ -37,6 +39,8 @@ struct MantaUIApp: App {
                 .task {
                     store.start()
                     sessionStore.bindResync()
+                    // Ship the previous run's crash, if it ended in one.
+                    CrashReports.uploadPending(using: MantaAPIClient.live())
                 }
         }
     }

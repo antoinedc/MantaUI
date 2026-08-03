@@ -4,6 +4,7 @@ import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { Settings } from "./Settings";
+import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
 import { Onboarding } from "./Onboarding";
 import { NewSessionScreen } from "./NewSessionScreen";
 import { useStore, flatSessions, resolveSessionOwner } from "./store";
@@ -76,6 +77,10 @@ export function App() {
   }, [enterOnboarding, onboardingLatched]);
   const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Section the Settings modal lands on when the `manta-open-settings` bridge
+  // fires (e.g. "Manage models…" → Models). The modal re-targets to it on
+  // mount and on every later request.
+  const [settingsSection, setSettingsSection] = useState<SettingSectionId>("general");
   const sidebarRef = useRef<SidebarHandle>(null);
   // BET-640: latch so the job poll raises the incompatible banner at most ONCE
   // (a box that can't implement the jobs endpoint will 500 on every 30s tick).
@@ -726,6 +731,24 @@ export function App() {
       window.removeEventListener("manta-voice-app-action", handler as EventListener);
   }, [projects, setActive]);
 
+  // Generic "open Settings on section X" bridge, the same window-CustomEvent
+  // convention as the schedules/secrets bridges. The composer-level menus
+  // dispatch it; App owns the Settings modal, so it consumes it here — it
+  // validates the requested section and falls back to General on garbage.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ section?: string }>).detail;
+      const requested = detail?.section
+        ? SETTING_SECTIONS.find((s) => s.id === detail.section)?.id
+        : undefined;
+      setSettingsSection(requested ?? "general");
+      setSettingsOpen(true);
+    };
+    window.addEventListener("manta-open-settings", handler as EventListener);
+    return () =>
+      window.removeEventListener("manta-open-settings", handler as EventListener);
+  }, []);
+
   const activeWinName = activeProject?.windows.find(
     (w) => w.index === activeWindowByProject[activeProjectName!],
   )?.name ?? null;
@@ -1071,7 +1094,9 @@ export function App() {
           )}
         </div>
       </main>
-      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
     </div>
   );
 }

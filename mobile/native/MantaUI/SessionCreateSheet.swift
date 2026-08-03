@@ -3,308 +3,230 @@ import SwiftUI
 // ===========================================================================
 // S3 — create-session sheet (BET-595 §create).
 //
-// THE OWNER OVERRIDE (§5.5 "you do not create a session" is overridden): the
-// user chooses a NAME and (on new-project) a FOLDER (optionally a worktree
-// fan-out), then the FIRST MESSAGE creates the session — no session is
-// created at "Continue"; it is created the moment the first message is sent,
-// then that message is delivered to it. Ports the retired `MobileCreateSheet`
-// / `MobileFolderPicker` to SwiftUI per §7-ported folderPicker helpers.
+// The `+` on the session list opens THIS. It used to be handed a fixed mode
+// (either "new project" or "new session in whatever project happened to be
+// first"), so there was no way to choose which project a session belonged to.
+// Now the project is a choice inside the sheet — any existing project, or a
+// new one — and the session name is optional.
+//
+// Deliberately built from STOCK SwiftUI (NavigationStack + Form + Picker +
+// toolbar Cancel/Create): this is a system-shaped data-entry screen, and the
+// platform's own components carry the keyboard handling, grouped styling,
+// dynamic type and accessibility for free. The bespoke token-styled fields it
+// replaced did none of that.
 // ===========================================================================
 
-enum SessionCreateMode: Equatable {
-    case newProject
-    case newSession(projectName: String)
-}
-
 struct SessionCreateSheet: View {
-    let mode: SessionCreateMode
+    /// Existing projects, so the picker can offer them.
+    let projects: [MantaProject]
+    /// Pre-selected project (the one the user was looking at), if any.
+    let initialProject: String?
     let onClose: () -> Void
     let onCreated: (String, Int) -> Void
-    @Environment(\.colorScheme) private var colorScheme
 
-    @State private var step: Step = .form
-    @State private var name = ""
+    /// Where the new session goes: an existing project, or a brand new one.
+    private enum Target: Hashable {
+        case existing(String)
+        case newProject
+    }
+
+    @State private var target: Target = .newProject
+    @State private var newProjectName = ""
     @State private var cwd = "~"
+    @State private var sessionName = ""
     @State private var detectedWorktrees: [MantaWorktree]?
     @State private var creating = false
     @State private var error: String?
     @State private var folderPickerOpen = false
-    @State private var firstMessage = ""
 
     private let api = MantaAPIClient.live()
 
-    enum Step { case form, firstMessage }
-
-    private var tokens: Tokens { Tokens.scheme(colorScheme) }
-
-    private var titleText: String {
-        switch mode {
-        case .newProject: return "New project"
-        case .newSession(let project): return "New session in \"\(project)\""
-        }
-    }
-
-    private var isNewProject: Bool {
-        if case .newProject = mode { return true }
-        return false
-    }
-
     var body: some View {
-        ZStack {
-            tokens.canvas.ignoresSafeArea()
-            VStack(spacing: 0) {
-                header
-                switch step {
-                case .form: formStep
-                case .firstMessage: firstMessageStep
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Project", selection: $target) {
+                        ForEach(projects, id: \.tmuxSession) { project in
+                            Text(project.tmuxSession).tag(Target.existing(project.tmuxSession))
+                        }
+                        Text("New project…").tag(Target.newProject)
+                    }
                 }
-            }
-        }
-        .overlay {
-            if folderPickerOpen {
-                FolderPickerView(
-                    initialPath: cwd,
-                    onSelect: { path in
-                        cwd = path
-                        folderPickerOpen = false
-                    },
-                    onFanOut: { base, wts in
-                        cwd = base
-                        detectedWorktrees = wts
-                        folderPickerOpen = false
-                    },
-                    onCancel: { folderPickerOpen = false }
-                )
-                .transition(.move(edge: .bottom))
-            }
-        }
-    }
 
-    private var header: some View {
-        HStack {
-            Text(titleText)
-                .font(.system(size: Metrics.type.body, weight: .semibold))
-                .foregroundColor(tokens.tx1)
-            Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: Metrics.type.body, weight: .regular))
-                    .foregroundColor(tokens.tx2)
-            }
-            .accessibilityLabel("Close")
-        }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp3)
-    }
-
-    // MARK: - Form step
-
-    private var formStep: some View {
-        VStack(spacing: Metrics.spacing.sp3) {
-            field(label: "Name", placeholder: isNewProject ? "my-project" : "session", text: $name)
-
-            if isNewProject {
-                VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-                    Text("Default working directory")
-                        .font(.system(size: Metrics.type.twoXS, weight: .semibold))
-                        .foregroundColor(tokens.tx3)
-                    HStack(spacing: Metrics.spacing.sp2) {
-                        TextField("~/code/foo", text: $cwd)
-                            .font(.system(size: Metrics.type.small, design: .monospaced))
-                            .foregroundColor(tokens.tx1)
-                            .padding(.horizontal, Metrics.spacing.sp3)
-                            .padding(.vertical, Metrics.spacing.sp2)
-                            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+                if target == .newProject {
+                    Section("New project") {
+                        TextField("Name", text: $newProjectName)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                         Button {
                             folderPickerOpen = true
                         } label: {
-                            Image(systemName: "folder")
-                                .font(.system(size: Metrics.type.body))
-                                .foregroundColor(tokens.tx2)
-                                .padding(Metrics.spacing.sp2)
-                                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+                            LabeledContent("Folder") {
+                                Text(cwd)
+                                    .font(.system(.body, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.head)
+                            }
                         }
-                        .accessibilityLabel("Browse folders")
+                        .buttonStyle(.plain)
                     }
-                    worktreeInfo
+                    if let worktrees = detectedWorktrees, worktrees.count > 1 {
+                        Section("Git worktrees") {
+                            Text("\(worktrees.count) worktrees found — one session will be opened for each.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            ForEach(worktrees, id: \.path) { worktree in
+                                Text(WorktreeInfoLogic.name(worktree))
+                                    .font(.system(.footnote, design: .monospaced))
+                            }
+                        }
+                    }
                 }
-            }
 
-            if let error {
-                Text(error)
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.danger)
-            }
-
-            VStack(spacing: Metrics.spacing.sp2) {
-                Button {
-                    continueToFirstMessage()
-                } label: {
-                    primaryButton("Continue")
+                Section {
+                    TextField("Session name", text: $sessionName, prompt: Text("Optional"))
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } footer: {
+                    Text("Leave empty and the session is named for you.")
                 }
-                .disabled(!formValid)
-                Button(action: onClose) {
-                    Text("Cancel")
-                        .font(.system(size: Metrics.type.small, weight: .medium))
-                        .foregroundColor(tokens.tx3)
-                        .padding(Metrics.spacing.sp2)
-                }
-            }
-            .padding(.top, Metrics.spacing.sp1)
-        }
-        .padding(.horizontal, Metrics.spacing.sp3)
-    }
 
-    @ViewBuilder
-    private var worktreeInfo: some View {
-        if let wts = detectedWorktrees, wts.count > 1 {
-            VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-                Text("Detected \(wts.count) git worktrees. Open a session for each?")
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.tx2)
-                ForEach(wts, id: \.path) { w in
-                    HStack {
-                        Text(WorktreeInfoLogic.name(w))
-                            .font(.system(size: Metrics.type.xs, design: .monospaced))
-                            .foregroundColor(tokens.tx1)
-                        Spacer()
-                        Text(w.path)
-                            .font(.system(size: Metrics.type.xs, design: .monospaced))
-                            .foregroundColor(tokens.tx4)
-                            .lineLimit(1)
+                if let error {
+                    Section {
+                        Text(error).foregroundStyle(.red)
                     }
                 }
             }
-            .padding(Metrics.spacing.sp2)
-            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        }
-    }
-
-    private func continueToFirstMessage() {
-        guard formValid else { return }
-        if isNewProject {
-            Task {
-                // Auto-detect worktrees for the fan-out question (best-effort).
-                let trimmed = cwd.trimmingCharacters(in: .whitespaces)
-                if let wts = try? await api.listWorktrees(trimmed), wts.count > 1 {
-                    detectedWorktrees = wts
+            .navigationTitle("New session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onClose)
                 }
-            }
-        }
-        step = .firstMessage
-    }
-
-    // MARK: - First-message step (creation happens HERE)
-
-    private var firstMessageStep: some View {
-        VStack(spacing: Metrics.spacing.sp3) {
-            Text("Type your first message")
-                .font(.system(size: Metrics.type.small))
-                .foregroundColor(tokens.tx2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Message…", text: $firstMessage, axis: .vertical)
-                .lineLimit(1...6)
-                .font(.system(size: Metrics.type.body))
-                .foregroundColor(tokens.tx1)
-                .padding(Metrics.spacing.sp3)
-                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-                .autocorrectionDisabled()
-
-            if let error {
-                Text(error)
-                    .font(.system(size: Metrics.type.small))
-                    .foregroundColor(tokens.danger)
-            }
-
-            Button {
-                createAndSend()
-            } label: {
-                primaryButton(creating ? "Creating…" : "Create session")
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create", action: create)
+                        .disabled(!formValid || creating)
+                }
             }
             .disabled(creating)
+            .overlay {
+                if creating { ProgressView().controlSize(.large) }
+            }
         }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.top, Metrics.spacing.sp2)
+        .onAppear(perform: selectInitialTarget)
+        .sheet(isPresented: $folderPickerOpen) {
+            FolderPickerView(
+                initialPath: cwd,
+                onSelect: { path in
+                    cwd = path
+                    folderPickerOpen = false
+                },
+                onFanOut: { base, worktrees in
+                    cwd = base
+                    detectedWorktrees = worktrees
+                    folderPickerOpen = false
+                },
+                onCancel: { folderPickerOpen = false }
+            )
+        }
     }
 
-    private func createAndSend() {
-        guard !creating else { return }
-        let message = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty else { return }
+    private func selectInitialTarget() {
+        if let initialProject, projects.contains(where: { $0.tmuxSession == initialProject }) {
+            target = .existing(initialProject)
+        } else if let first = projects.first {
+            target = .existing(first.tmuxSession)
+        } else {
+            target = .newProject
+        }
+    }
+
+    private var formValid: Bool {
+        switch target {
+        case .existing: return true
+        case .newProject: return !newProjectName.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    // MARK: - Create
+    //
+    // The session is created for real here (tmux window + opencode session);
+    // the caller pushes it, and the user types their first message in the
+    // session itself rather than in this sheet.
+
+    private func create() {
+        guard !creating, formValid else { return }
         creating = true
         error = nil
         Task {
             do {
-                switch mode {
+                switch target {
+                case .existing(let project):
+                    try await createWindow(in: project)
                 case .newProject:
-                    try await createProjectAndSend(message)
-                case .newSession(let project):
-                    try await createWindowAndSend(projectName: project, message: message)
+                    try await createProject()
                 }
             } catch {
-                self.error = "Couldn't create the session"
-                creating = false
+                await MainActor.run {
+                    self.error = "Couldn't create the session"
+                    self.creating = false
+                }
             }
         }
     }
 
-    private func createProjectAndSend(_ message: String) async throws {
-        let projectName = name.trimmingCharacters(in: .whitespaces)
-        let dir = cwd.trimmingCharacters(in: .whitespaces)
-        var targetSessionID: String?
-        var targetProject: String = projectName
-        var targetWindow: Int = 0
-
-        if let wts = detectedWorktrees, wts.count > 1 {
-            let first = wts[0]
-            var projects = try await api.newSession(NewSessionInput(
-                name: projectName, cwd: first.path, windowName: WorktreeInfoLogic.name(first),
-                createDir: false, chatMode: true))
-            for w in wts.dropFirst() {
-                projects = try await api.newWindow(NewWindowInput(
-                    sessionName: projectName, windowName: WorktreeInfoLogic.name(w),
-                    cwd: w.path, chatMode: true))
-            }
-            if let window = Self.findInitialWindow(projects, projectName: projectName, cwd: first.path) {
-                targetSessionID = window.opencodeSessionId
-                targetWindow = window.index
-            }
-        } else {
-            let projects = try await api.newSession(NewSessionInput(
-                name: projectName, cwd: dir, windowName: "default",
-                createDir: true, chatMode: true))
-            if let proj = projects.first(where: { $0.tmuxSession == projectName }),
-               let window = proj.windows.first(where: { $0.name == "default" }) ?? proj.windows.first {
-                targetSessionID = window.opencodeSessionId
-                targetWindow = window.index
-            }
-        }
-
-        guard let sessionID = targetSessionID else {
-            throw MantaError.transport("created session returned no chat id")
-        }
-        try await api.sendPrompt(SendPromptInput(sessionId: sessionID, text: message))
-        await MainActor.run {
-            creating = false
-            onCreated(targetProject, targetWindow)
-        }
+    private var resolvedSessionName: String {
+        let trimmed = sessionName.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "session" : trimmed
     }
 
-    private func createWindowAndSend(projectName: String, message: String) async throws {
-        let windowName = name.trimmingCharacters(in: .whitespaces).isEmpty ? "session" : name.trimmingCharacters(in: .whitespaces)
+    private func createWindow(in project: String) async throws {
+        let windowName = resolvedSessionName
         let projects = try await api.newWindow(NewWindowInput(
-            sessionName: projectName, windowName: windowName, cwd: nil, chatMode: true))
-        guard let proj = projects.first(where: { $0.tmuxSession == projectName }),
-              let window = proj.windows.first(where: { $0.name == windowName }),
-              let sessionID = window.opencodeSessionId else {
-            throw MantaError.transport("created session returned no chat id")
+            sessionName: project, windowName: windowName, cwd: nil, chatMode: true))
+        guard let proj = projects.first(where: { $0.tmuxSession == project }),
+              let window = proj.windows.first(where: { $0.name == windowName }) ?? proj.windows.last else {
+            throw MantaError.transport("created session was not returned")
         }
-        try await api.sendPrompt(SendPromptInput(sessionId: sessionID, text: message))
         await MainActor.run {
             creating = false
-            onCreated(projectName, window.index)
+            onCreated(project, window.index)
+        }
+    }
+
+    private func createProject() async throws {
+        let projectName = newProjectName.trimmingCharacters(in: .whitespaces)
+        let dir = cwd.trimmingCharacters(in: .whitespaces)
+        var windowIndex = 0
+
+        if let worktrees = detectedWorktrees, worktrees.count > 1 {
+            // Fan out: the first worktree is the project's initial window, the
+            // rest are added alongside it.
+            var projects = try await api.newSession(NewSessionInput(
+                name: projectName, cwd: worktrees[0].path,
+                windowName: WorktreeInfoLogic.name(worktrees[0]),
+                createDir: false, chatMode: true))
+            for worktree in worktrees.dropFirst() {
+                projects = try await api.newWindow(NewWindowInput(
+                    sessionName: projectName, windowName: WorktreeInfoLogic.name(worktree),
+                    cwd: worktree.path, chatMode: true))
+            }
+            windowIndex = Self.findInitialWindow(projects, projectName: projectName, cwd: worktrees[0].path)?.index ?? 0
+        } else {
+            let windowName = resolvedSessionName
+            let projects = try await api.newSession(NewSessionInput(
+                name: projectName, cwd: dir, windowName: windowName,
+                createDir: true, chatMode: true))
+            guard let proj = projects.first(where: { $0.tmuxSession == projectName }),
+                  let window = proj.windows.first(where: { $0.name == windowName }) ?? proj.windows.first else {
+                throw MantaError.transport("created project was not returned")
+            }
+            windowIndex = window.index
+        }
+
+        await MainActor.run {
+            creating = false
+            onCreated(projectName, windowIndex)
         }
     }
 
@@ -313,40 +235,5 @@ struct SessionCreateSheet: View {
         guard let proj = projects.first(where: { $0.tmuxSession == projectName }) else { return nil }
         if let exact = proj.windows.first(where: { $0.paneCurrentPath == cwd }) { return exact }
         return proj.windows.min(by: { $0.index < $1.index })
-    }
-
-    // MARK: - shared pieces
-
-    private var formValid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    @ViewBuilder
-    private func field(label: String, placeholder: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-            Text(label)
-                .font(.system(size: Metrics.type.twoXS, weight: .semibold))
-                .foregroundColor(tokens.tx3)
-            TextField(placeholder, text: text)
-                .font(.system(size: Metrics.type.body))
-                .foregroundColor(tokens.tx1)
-                .padding(.horizontal, Metrics.spacing.sp3)
-                .padding(.vertical, Metrics.spacing.sp2)
-                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-        }
-    }
-
-    @ViewBuilder
-    private func primaryButton(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: Metrics.type.small, weight: .semibold))
-            .foregroundColor(text.hasPrefix("Creating") ? tokens.tx4 : tokens.onAccent)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, Metrics.spacing.sp3)
-            .background(
-                text.hasPrefix("Creating") ? AnyShapeStyle(tokens.panel) : AnyShapeStyle(tokens.accentSolid),
-                in: RoundedRectangle(cornerRadius: Metrics.radius.md))
     }
 }

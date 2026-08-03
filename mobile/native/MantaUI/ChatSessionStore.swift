@@ -45,6 +45,10 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True while a canonical transcript refetch (or the initial load) is in
+    /// flight. Drives the ambient hairline sweep on the composer's top divider
+    /// (BET-630, D1) — distinct from `running`, which drives the working row.
+    @Published private(set) var refreshing = false
     /// True when the transcript on screen is a WINDOW onto a longer history —
     /// i.e. the box returned a full page, so older messages exist. Drives the
     /// "Load earlier messages" affordance at the top of the transcript.
@@ -132,8 +136,12 @@ final class ChatSessionStore: ObservableObject {
     func load() {
         guard !loading else { return }
         loading = true
+        refreshing = true
         Task {
             await fetchTranscript(isFirstLoad: true)
+            // Cleared HERE, not inside the fetch: the fetch can return early
+            // (a refetch already in flight serves this load), and every one of
+            // those paths must still take the screen off its skeleton.
             await MainActor.run { loading = false }
             if !isReadOnly {
                 await refreshPermissions()
@@ -150,6 +158,25 @@ final class ChatSessionStore: ObservableObject {
         Task {
             await fetchTranscript(isFirstLoad: false)
             await MainActor.run { loadingEarlier = false }
+        }
+    }
+
+    /// Run `work`, failing if it has not finished within `seconds`.
+    private static func withTimeout<T: Sendable>(
+        seconds: Double,
+        _ work: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw MantaError.transport("timed out")
+            }
+            guard let first = try await group.next() else {
+                throw MantaError.transport("no result")
+            }
+            group.cancelAll()
+            return first
         }
     }
 
@@ -257,6 +284,12 @@ final class ChatSessionStore: ObservableObject {
     /// arrives while a fetch is running sets `fetchPending` instead of starting
     /// a second identical request, and the in-flight one re-runs once when it
     /// finishes so nothing is missed.
+    ///
+    /// An EMPTY transcript is not a failure — a session you just cleared
+    /// legitimately has no messages, and reporting that as "couldn't reach your
+    /// box" was wrong. Only a thrown error is. The fetch is also bounded: an
+    /// unreachable box can hang a request for the URLSession default (a minute
+    /// or more), leaving the screen on its skeleton with no way out.
     private func fetchTranscript(isFirstLoad: Bool) async {
         if fetchInFlight {
             fetchPending = true
@@ -267,15 +300,30 @@ final class ChatSessionStore: ObservableObject {
 
         repeat {
             fetchPending = false
+            refreshing = true
             let limit = messageLimit
-            let messages = (try? await api.messages(sessionId: sessionId, limit: limit, slim: true)) ?? []
+            var failed = false
+            var messages: [OpencodeMessage] = []
+            do {
+                messages = try await Self.withTimeout(seconds: 12) {
+                    try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: true)
+                }
+            } catch {
+                failed = true
+            }
+            let loaded = messages
+            let didFail = failed
             await MainActor.run {
-                if isFirstLoad { loadFailed = messages.isEmpty }
+                if isFirstLoad { loadFailed = didFail }
+                refreshing = false
                 // A full page back means the window is a view onto more
-                // history. A short page means we are looking at all of it.
-                hasEarlier = messages.count >= limit
-                transcript = ChatTranscriptMapper.blocks(from: messages)
-                rebuildBlocks()
+                // history. A short page means we are looking at all of it. A
+                // failed fetch says nothing either way — leave it alone.
+                if !didFail { hasEarlier = loaded.count >= limit }
+                if !didFail || isFirstLoad {
+                    transcript = ChatTranscriptMapper.blocks(from: loaded)
+                    rebuildBlocks()
+                }
             }
         } while fetchPending
     }
@@ -322,6 +370,18 @@ final class ChatSessionStore: ObservableObject {
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+        // Echo the message straight into the transcript and assume the turn is
+        // running. The box confirms both within a second (running frame, then
+        // the canonical refetch replaces this block), but without the echo the
+        // screen sits completely unchanged after a send, which reads as "the
+        // send did nothing".
+        if !text.isEmpty {
+            transcript.append(.user(text))
+            rebuildBlocks()
+        }
+        running = true
+        turnComplete = false
+        if runningSince == nil { runningSince = Date() }
         Task {
             try? await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,
@@ -448,6 +508,11 @@ final class ChatSessionStore: ObservableObject {
 
     /// The newest pending question request, if any.
     var newestQuestion: QuestionRequest? { questions.last }
+
+    /// When the current turn started (nil when idle). The running row measures
+    /// live elapsed against its own 1s tick rather than stream-state changes
+    /// (BET-630, D1).
+    var runningStart: Date? { runningSince }
 
     /// §8 header subtitle ("running · 2m · 8%" / "idle").
     var headerSubtitle: String {
