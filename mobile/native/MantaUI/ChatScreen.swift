@@ -57,13 +57,6 @@ private struct ChatScreenContent: View {
     @State private var showOverflow = false
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
-    /// Clear/Delete confirmations. These state fields live HERE, on the pushed
-    /// ChatScreen (not inside the overflow sheet): the native action sheet is
-    /// presented from the presenter via `UIAlertController(.actionSheet)`, which
-    /// `confirmationDialog` cannot reproduce on iOS 26 (it drops the detached
-    /// Cancel) — see `NativeActionSheet.swift` (DECISIONS.md:709-715).
-    @State private var confirmingClear = false
-    @State private var confirmingDelete = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -137,25 +130,6 @@ private struct ChatScreenContent: View {
         // scrolling.
         .safeAreaInset(edge: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
-        // Clear/Delete confirm in a native action sheet — never a web dialog
-        // (DECISIONS.md:709-715). `confirmationDialog` drops the detached Cancel
-        // on iOS 26 (popover card), so this uses `UIAlertController(.actionSheet)`:
-        // destructive item first, Cancel detached at the bottom. Presented from
-        // this presenter, above the overflow sheet.
-        .nativeActionSheet(
-            isPresented: $confirmingClear,
-            title: "Clear this session?",
-            message: "Starts a fresh session in this window. The transcript stays on the box.",
-            destructiveTitle: "Clear session",
-            destructiveAction: { showOverflow = false; Task { await clearSession() } }
-        )
-        .nativeActionSheet(
-            isPresented: $confirmingDelete,
-            title: "Delete this session?",
-            message: "Removes the session and its window. This cannot be undone.",
-            destructiveTitle: "Delete session",
-            destructiveAction: { showOverflow = false; Task { await deleteSession() } }
-        )
         .onAppear {
             store.start()
             Task { await resolveWindowAndBranch() }
@@ -177,10 +151,10 @@ private struct ChatScreenContent: View {
             onSecrets: {},
             onWebhooks: {},
             onCompact: { store.compact() },
+            onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
             onOpenTerminal: {},
-            confirmingClear: $confirmingClear,
-            confirmingDelete: $confirmingDelete
+            onDelete: { Task { await deleteSession() } }
         )
     }
 
