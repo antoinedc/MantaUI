@@ -32,24 +32,31 @@ export function SessionToolbar({
   onSecrets: () => void;
   onWebhooks: () => void;
 }) {
+  // Shared chrome for the three resource buttons (BET-620 change 6). One const
+  // so they can't drift; the count badge carries its own mono type. Matches
+  // the mockup's `.mbtn` (27px hit, --r-sm radius, --tx3 rest tone).
+  const mbtn =
+    "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors";
+  const cnum =
+    "font-mono text-[11px] leading-none font-semibold text-text-muted tabular-nums";
   return (
     <span className="flex items-center gap-2 text-meta">
       <button
         onClick={onSchedules}
-        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center gap-1"
+        className={mbtn}
         title="View / cancel scheduled tasks"
         aria-label="schedules"
       >
         <Clock size={16} strokeWidth={2} aria-hidden="true" />
         {scheduleCount > 0 && (
-          <span className="text-text-muted text-label tabular-nums" aria-hidden="true">
+          <span className={cnum} aria-hidden="true">
             {scheduleCount}
           </span>
         )}
       </button>
       <button
         onClick={onSecrets}
-        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
+        className={mbtn}
         title="Manage secrets the agent can use (values never enter the chat)"
         aria-label="secrets"
       >
@@ -57,7 +64,7 @@ export function SessionToolbar({
       </button>
       <button
         onClick={onWebhooks}
-        className="px-2 py-px rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
+        className={mbtn}
         title="View / revoke inbound webhooks (external events that wake this session)"
         aria-label="webhooks"
       >
