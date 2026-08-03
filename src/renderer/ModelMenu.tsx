@@ -10,7 +10,7 @@
 // chatUtils.ts as pure functions so the arithmetic is testable.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, Sliders } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { Dropdown } from "./MenuItem";
@@ -198,6 +198,26 @@ export function ModelMenu({
             onClose();
           }}
         />
+      }
+      footer={
+        // BET-645 — deactivating a model lives in Settings → Models; the model
+        // menu is exactly where you realise you want it. A plain footer action
+        // (not a MenuOption — not selectable, no tick/trailing slot). Kept
+        // local to this file: one call site, which does not clear the
+        // two-adopter rule for promoting it to a primitive (standing decision 2).
+        <button
+          type="button"
+          onClick={() => {
+            window.dispatchEvent(
+              new CustomEvent("manta-open-settings", { detail: { section: "models" } }),
+            );
+            onClose();
+          }}
+          className="inline-flex w-full items-center gap-[7px] rounded-md px-2 py-2 text-left text-meta text-text-faint hover:bg-fill-hover hover:text-text"
+        >
+          <Sliders size={14} aria-hidden="true" className="flex-none" />
+          <span>Manage models…</span>
+        </button>
       }
     >
       {body}

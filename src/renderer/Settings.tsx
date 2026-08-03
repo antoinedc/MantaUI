@@ -266,7 +266,15 @@ function GroupCard({ title, danger = false, children }: {
   );
 }
 
-export function Settings({ onClose }: { onClose: () => void }) {
+export function Settings({
+  onClose,
+  initialSection,
+}: {
+  onClose: () => void;
+  /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
+   *  bridge from "Manage models…"). Defaults to General. */
+  initialSection?: SettingSectionId;
+}) {
   const store = useStore();
   const { toasts, push, dismiss } = useSettingsToasts();
   const applySetting = useApplySetting(push);
@@ -274,8 +282,13 @@ export function Settings({ onClose }: { onClose: () => void }) {
 
   // Active tab + search — declared early so the plugins effect below can read
   // activeTab without a TDZ violation.
-  const [activeTab, setActiveTab] = useState<SettingSectionId>("general");
+  const [activeTab, setActiveTab] = useState<SettingSectionId>(initialSection ?? "general");
   const [query, setQuery] = useState("");
+  // A section request that lands while the modal is already open re-targets
+  // it, rather than only applying on mount.
+  useEffect(() => {
+    if (initialSection) setActiveTab(initialSection);
+  }, [initialSection]);
   const inSearch = query.trim().length > 0;
   const searchHits = useMemo(() => searchSettings(SETTINGS, query, PLATFORM), [query]);
 
