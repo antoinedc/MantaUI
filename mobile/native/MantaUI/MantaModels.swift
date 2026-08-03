@@ -279,7 +279,7 @@ struct OpencodeModel: Codable, Equatable, Sendable {
 
 /// `{ providerID, modelID }` — the minimal selection sent with a prompt and
 /// returned by `opencode:default-model`.
-struct OpencodeModelID: Codable, Equatable, Sendable {
+struct OpencodeModelID: Codable, Equatable, Hashable, Sendable {
     var providerID: String
     var modelID: String
 
