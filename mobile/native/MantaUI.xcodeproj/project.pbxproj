@@ -11,6 +11,7 @@
 		01871023D47544D64443194D /* MantaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C8240F1954861B4846E279D /* MantaModels.swift */; };
 		0488B71F794FC6E64CDC0B23 /* TerminalKeyRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7BC8920829E8847057C8DA /* TerminalKeyRow.swift */; };
 		1B9026B4F0286A5186FD5197 /* MantaSettingsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39978655A14BFA5D39336286 /* MantaSettingsModels.swift */; };
+		1BDC4C2CBE50E2D18FD2AE3F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E6DAC1364D09A1487B2DEE /* Theme.swift */; };
 		1F0E6031C0987AFF27CC3F47 /* SessionListStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24994B33B60EB6C4C6EF4178 /* SessionListStore.swift */; };
 		239BD2739F1F96A11F033259 /* SessionCreateSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B928337494F2C80D8ACB126C /* SessionCreateSheet.swift */; };
 		261925E9ADC090271FED15DE /* TerminalSessionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81FE763828641B50BF496F4D /* TerminalSessionState.swift */; };
@@ -28,7 +29,6 @@
 		5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */; };
 		5E0226E9FAFF3F9CA9F45F8F /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E78B0F5B521937B40937DC /* SettingsScreen.swift */; };
 		5E96ADCA67A3CABA9EFA9923 /* xterm.js in Resources */ = {isa = PBXBuildFile; fileRef = 32A7DC894AD600D3C2DE3160 /* xterm.js */; };
-		5F85B39269B52E1E816CBA1B /* SettingsSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */; };
 		61062DC85A5139A0AB22BC24 /* TerminalSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88D3B9B782BF819EEBEBF1D /* TerminalSocket.swift */; };
 		612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */; };
 		61441105C65E4D7385DAF363 /* TerminalWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDC7F6FA94631DA4C55A948 /* TerminalWebView.swift */; };
@@ -45,11 +45,13 @@
 		9055A7DECF435A0A430D6FAB /* MantaSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABF1AB00CC95EA99A4EF537B /* MantaSettingsStore.swift */; };
 		94493F871005DA7F4DA19ED7 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D06ECCB6D27DBD73D1FF3189 /* SessionListView.swift */; };
 		95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */; };
+		959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */; };
 		95A9EDE98E7304030E438CEF /* FolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D71EC917661085ED10E0867 /* FolderPickerView.swift */; };
 		96F128D3EBC0D1432F603FDB /* ComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 938AB4A14437119280E1B53A /* ComposerTests.swift */; };
 		98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B4BD7922C8909E3A3961957 /* VoiceRecorder.swift */; };
 		9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
+		A6574F4CA0C8390EFDC2D65E /* SettingsSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4CF3C7F4C7BE1B86916D71A /* SettingsSchema.swift */; };
 		B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */; };
 		C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */; };
 		C96C7F34F91F06214FD25523 /* ChatVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */; };
@@ -57,7 +59,6 @@
 		D776E336456236DC1493565F /* ChatModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229392FD3405558D301D0809 /* ChatModel.swift */; };
 		D9266F363BEB86F687C320FC /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42691C89906181C99929354 /* ComposerView.swift */; };
 		E013C537E1082259B979DF35 /* SessionModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9803742B79E4302F8813EFCC /* SessionModelsTests.swift */; };
-		E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799EED7CC4F10C6684A5662C /* Theme.swift */; };
 		E0DE29696DA12A52BE7FCD0D /* TerminalModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3C09F5D2FEAE01B1C9CF1E /* TerminalModels.swift */; };
 		E12FC0E7284E2760AD3A6C4C /* ChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 436675A65BF149932C1EADE0 /* ChatScreen.swift */; };
 		E2D12EA2304A2505C26C0698 /* xterm-addon-fit.js in Resources */ = {isa = PBXBuildFile; fileRef = 905097B1C8A76B785330CFB6 /* xterm-addon-fit.js */; };
@@ -112,7 +113,6 @@
 		6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainCredentialStore.swift; sourceTree = "<group>"; };
 		714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIHierarchyCaptureUITests.swift; sourceTree = "<group>"; };
 		772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaReconnectController.swift; sourceTree = "<group>"; };
-		799EED7CC4F10C6684A5662C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		7D7BC8920829E8847057C8DA /* TerminalKeyRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyRow.swift; sourceTree = "<group>"; };
 		7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaStreamModels.swift; sourceTree = "<group>"; };
 		81FE763828641B50BF496F4D /* TerminalSessionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionState.swift; sourceTree = "<group>"; };
@@ -124,7 +124,6 @@
 		938AB4A14437119280E1B53A /* ComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTests.swift; sourceTree = "<group>"; };
 		942605E2D67D55C6DCCE83AC /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		9803742B79E4302F8813EFCC /* SessionModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionModelsTests.swift; sourceTree = "<group>"; };
-		988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSchema.swift; sourceTree = "<group>"; };
 		989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAuthClientTests.swift; sourceTree = "<group>"; };
 		9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaTransportTests.swift; sourceTree = "<group>"; };
 		9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaActionRPCWireTests.swift; sourceTree = "<group>"; };
@@ -133,6 +132,7 @@
 		A4E84DF65831DE58599C53BD /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingTests.swift; sourceTree = "<group>"; };
 		ABF1AB00CC95EA99A4EF537B /* MantaSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsStore.swift; sourceTree = "<group>"; };
+		B2E6DAC1364D09A1487B2DEE /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		B928337494F2C80D8ACB126C /* SessionCreateSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreateSheet.swift; sourceTree = "<group>"; };
 		C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilineTextView.swift; sourceTree = "<group>"; };
 		C25DFE9E1AD1E939DBF7101D /* ChatTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptTests.swift; sourceTree = "<group>"; };
@@ -143,8 +143,10 @@
 		DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalModelsTests.swift; sourceTree = "<group>"; };
 		DC240598BDE45C3D43B46191 /* MantaUI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MantaUI.entitlements; sourceTree = "<group>"; };
 		DD646A4951E292E750890CCB /* MantaAppRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAppRoot.swift; sourceTree = "<group>"; };
+		E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLoadingSkeleton.swift; sourceTree = "<group>"; };
 		E15031A040AEE7D0E9F4968B /* terminal.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = terminal.html; sourceTree = "<group>"; };
 		EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStreamTests.swift; sourceTree = "<group>"; };
+		F4CF3C7F4C7BE1B86916D71A /* SettingsSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSchema.swift; sourceTree = "<group>"; };
 		F88D3B9B782BF819EEBEBF1D /* TerminalSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSocket.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -159,13 +161,21 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		50A0ACE5FA8F3A848B41986E /* MantaUI */ = {
+		04011C8608A1F0CB963849C7 /* better-ui */ = {
 			isa = PBXGroup;
 			children = (
-				B72EDCFA9E8A4AE9662EC299 /* generated */,
+				1AB5E1FF766612B9C9309DAC /* generated */,
 			);
-			name = MantaUI;
+			name = "better-ui";
 			path = ../..;
+			sourceTree = "<group>";
+		};
+		1AB5E1FF766612B9C9309DAC /* generated */ = {
+			isa = PBXGroup;
+			children = (
+				A4AEEFF52F71D3F83FCE191E /* swift */,
+			);
+			path = generated;
 			sourceTree = "<group>";
 		};
 		6BE82C3C8936377EEB75129C /* terminal */ = {
@@ -208,34 +218,27 @@
 		855545FE3D464DDBA2B48C48 = {
 			isa = PBXGroup;
 			children = (
+				04011C8608A1F0CB963849C7 /* better-ui */,
 				D7128F5AAFA315FE875EEC98 /* MantaUI */,
-				50A0ACE5FA8F3A848B41986E /* MantaUI */,
 				7168FDC00E99AA075ACA9698 /* MantaUITests */,
 				DF70760D7D88A6A31A5243DA /* MantaUIUITests */,
 				0141B3CF9BBB5EB026BDA8C5 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		A2F2688921C397D0D4B331A3 /* swift */ = {
+		A4AEEFF52F71D3F83FCE191E /* swift */ = {
 			isa = PBXGroup;
 			children = (
-				988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */,
-				799EED7CC4F10C6684A5662C /* Theme.swift */,
+				F4CF3C7F4C7BE1B86916D71A /* SettingsSchema.swift */,
+				B2E6DAC1364D09A1487B2DEE /* Theme.swift */,
 			);
 			path = swift;
-			sourceTree = "<group>";
-		};
-		B72EDCFA9E8A4AE9662EC299 /* generated */ = {
-			isa = PBXGroup;
-			children = (
-				A2F2688921C397D0D4B331A3 /* swift */,
-			);
-			path = generated;
 			sourceTree = "<group>";
 		};
 		D7128F5AAFA315FE875EEC98 /* MantaUI */ = {
 			isa = PBXGroup;
 			children = (
+				E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */,
 				229392FD3405558D301D0809 /* ChatModel.swift */,
 				4F7631E09B6FF7B150392A83 /* ChatModels.swift */,
 				8A6472C0BC3BDACAC4559198 /* ChatModelStore.swift */,
@@ -435,6 +438,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */,
 				D776E336456236DC1493565F /* ChatModel.swift in Sources */,
 				CC6A77686B936B4DB6026466 /* ChatModelStore.swift in Sources */,
 				6A720AF41BDA6F4FC40A5585 /* ChatModels.swift in Sources */,
@@ -464,7 +468,7 @@
 				1F0E6031C0987AFF27CC3F47 /* SessionListStore.swift in Sources */,
 				94493F871005DA7F4DA19ED7 /* SessionListView.swift in Sources */,
 				7E8C2A70A3D5C0F949D79FF5 /* SessionModels.swift in Sources */,
-				5F85B39269B52E1E816CBA1B /* SettingsSchema.swift in Sources */,
+				A6574F4CA0C8390EFDC2D65E /* SettingsSchema.swift in Sources */,
 				5E0226E9FAFF3F9CA9F45F8F /* SettingsScreen.swift in Sources */,
 				0488B71F794FC6E64CDC0B23 /* TerminalKeyRow.swift in Sources */,
 				E0DE29696DA12A52BE7FCD0D /* TerminalModels.swift in Sources */,
@@ -472,7 +476,7 @@
 				261925E9ADC090271FED15DE /* TerminalSessionState.swift in Sources */,
 				61062DC85A5139A0AB22BC24 /* TerminalSocket.swift in Sources */,
 				61441105C65E4D7385DAF363 /* TerminalWebView.swift in Sources */,
-				E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */,
+				1BDC4C2CBE50E2D18FD2AE3F /* Theme.swift in Sources */,
 				95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */,
 				98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */,
 			);

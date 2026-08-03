@@ -761,3 +761,33 @@ against the mockup — it does not itself push a raw wire transcript through
 is therefore pinned by the four unit tests above; the capture pins the target
 spacing geometry. The baseline `baseline/screen.{png,hierarchy.txt}` is
 unchanged — the fixture did not change.
+
+## D2 — session-loading skeleton capture fixture (BET-631)
+
+`ChatLoadingSkeleton` (extracted out of `ChatScreen` so the fixture renders the
+SAME skeleton — single source of truth, no copy) is the transcript-shaped
+placeholder shown while a session's first fetch is in flight: three greyed
+blocks at the user-band / prose / step-group rhythm, occupying the same scroll
+region (`.defaultScrollAnchor(.bottom)`), no full-screen spinner, no layout
+shift.
+
+The capture harness exposes it as a deterministic scene (`SCENE_MODE=chat-loading`
+/ `MantaScene=chat-loading`), routed by `MantaAppRoot` to `ChatLoadingScene`.
+A real ChatScreen is not reachable from the capture harness without a live
+paired box, so the fixture renders the production component directly on the
+canvas.
+
+```
+OUT_DIR=/tmp/loading1 SCENE_MODE=chat-loading ./mobile/native/capture.sh
+OUT_DIR=/tmp/loading2 SCENE_MODE=chat-loading ./mobile/native/capture.sh
+```
+
+Baseline committed as `baseline/loading-skeleton.png` +
+`baseline/loading-skeleton-hierarchy.txt`. Determinism quoted (BET-631): the two
+runs above were byte-identical on both legs (same pinned iPhone 17 Pro, iOS
+26.5, light, status bar 9:41/100%).
+
+Honesty note: the skeleton is deliberately label-less greyed geometry, so the
+AX hierarchy is sparse (just the `loading-skeleton` scroll region + content
+frame) — the pixel leg is the real coverage here, and the hierarchy leg is the
+auditability gate only.

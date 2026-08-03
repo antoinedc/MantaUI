@@ -50,6 +50,8 @@ struct ChatScreen: View {
         Group {
             if store.loadFailed {
                 loadFailure
+            } else if store.loading {
+                loadingSkeleton
             } else {
                 transcript
             }
@@ -142,6 +144,17 @@ struct ChatScreen: View {
         }
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
+    }
+
+    // MARK: - Loading skeleton (D2 / BET-631)
+
+    /// Transcript-shaped loading placeholder, shown while the session's first
+    /// transcript fetch is in flight. Renders the shared `ChatLoadingSkeleton`
+    /// (single source of truth — the same one the capture fixture uses) which
+    /// replaces the transcript in place: no layout shift, no full-screen
+    /// spinner.
+    private var loadingSkeleton: some View {
+        ChatLoadingSkeleton()
     }
 
     // MARK: - Live cards (todos / permission / question)
