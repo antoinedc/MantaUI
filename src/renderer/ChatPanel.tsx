@@ -2139,20 +2139,25 @@ export function ChatPanel({
 
       {running && (
         <>
-          {/* Working indicator: wrapped in the same MeasureColumn as the */}
-          {/* transcript so the running line shares the reading column's 28px */}
-          {/* left/right edge (BET-637). Its own horizontal padding was dropped. */}
-          <MeasureColumn>
+          {/* Working indicator: the last row of the transcript flow, so it
+              aligns with assistant rows — the transcript's full width — not
+              with the composer stack below it (BET-646). Its own horizontal
+              padding was dropped. */}
+          <MeasureColumn width="full">
             <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
           </MeasureColumn>
           {/* activeTodos used to render here, sticky above the input. Moved */}
           {/* into the scroll container above (tail of the transcript) so */}
           {/* long checklists scroll like normal chat content. */}
           {messageQueue.length > 0 && (
-            <div
-              className="shrink-0 px-4 pb-2 flex flex-col text-meta text-text-faint"
-              style={{ gap: "var(--block-gap)" }}
-            >
+            // Queued prompts are about to be submitted, so the notice belongs
+            // to the composer stack — default ("measure") MeasureColumn, which
+            // owns the 28px inset (BET-646, supersedes BET-642).
+            <MeasureColumn>
+              <div
+                className="shrink-0 pb-2 flex flex-col text-meta text-text-faint"
+                style={{ gap: "var(--block-gap)" }}
+              >
               {messageQueue.map((msg, i) => (
                 <div key={i} className="flex items-baseline gap-1">
                   <Clock size={14} aria-hidden="true" className="shrink-0 self-center" />
@@ -2167,7 +2172,8 @@ export function ChatPanel({
                   </button>
                 </div>
               ))}
-            </div>
+              </div>
+            </MeasureColumn>
           )}
         </>
       )}
