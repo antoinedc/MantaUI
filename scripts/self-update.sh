@@ -146,6 +146,11 @@ else
     mkdir -p "$(dirname "$MANTA_HOME/$rel")"
     cp -R "$WORK/pkg/$rel" "$MANTA_HOME/$rel"
   done
+  # RELEASE.json is the box's version marker but is intentionally NOT in the
+  # `includes` list (which excludes runtime/node_modules). Copy it anyway so
+  # the tree actually ends up at the manifest version — without this the box
+  # would believe it is forever on the old version and re-download every run.
+  cp "$WORK/pkg/RELEASE.json" "$MANTA_HOME/RELEASE.json"
   ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
 fi
 
