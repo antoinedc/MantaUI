@@ -9,8 +9,10 @@ import UIKit
 // answerable permissions/questions) and renders through the EXISTING
 // TranscriptComponents (§8/§8a): there is no second transcript renderer.
 //
-// Container per BET-481: ScrollView + LazyVStack + .defaultScrollAnchor(.bottom)
-// kept verbatim — do NOT re-measure or replace. Subagent rows PUSH a live child
+// Container per BET-481: ScrollView + LazyVStack — do NOT re-measure or replace.
+// The scroll anchor is the one part that moved: it is scoped to `.sizeChanges`
+// and the initial landing is an explicit post-layout scroll (see `transcript`).
+// Subagent rows PUSH a live child
 // screen via NavigationStack (parent scroll untouched; BET-576 binds the child
 // to the same observable source).
 //
@@ -77,6 +79,8 @@ private struct ChatScreenContent: View {
     @State private var overflowDestination: OverflowDestination?
     /// Live scheduled-task count for the overflow sheet's badge (BET-627).
     @State private var scheduleCount = 0
+    /// Whether the one-shot "open at the newest message" scroll has run.
+    @State private var didLandAtBottom = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -181,11 +185,17 @@ private struct ChatScreenContent: View {
                 )
             }
         }
-        // The header is an INSET, not an overlay: as an overlay it floated on
-        // top of the transcript with nothing reserving its space, so the first
-        // rows sat underneath it and were clipped at rest, not just while
-        // scrolling.
-        .safeAreaInset(edge: .top) { header }
+        // The header is an OVERLAY so the transcript runs full-bleed and the
+        // conversation scrolls under the floating buttons — that is the whole
+        // point of floating them.
+        //
+        // It was previously an inset for a real reason: as an overlay nothing
+        // reserved its space, so the first rows sat under it and were clipped
+        // AT REST, not just mid-scroll. That failure is why the transcript now
+        // carries its own top inset (see `transcript`) — the space is reserved
+        // by the scroll content instead of by the header, which is what lets
+        // rows pass beneath the glass while still coming to rest below it.
+        .overlay(alignment: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
         .sheet(item: $overflowDestination) { destination in
             destinationCard(destination)
@@ -299,6 +309,16 @@ private struct ChatScreenContent: View {
 
     // MARK: - Header (§8)
 
+    /// Two floating glass circles over the transcript — nothing else.
+    ///
+    /// The title and subtitle were removed: the session name is already the row
+    /// you tapped to get here, so repeating it costs a whole bar of vertical
+    /// space to say something the user just read. Without it there is no
+    /// content to seat, so the bar itself goes too — the buttons float directly
+    /// on the transcript and the conversation scrolls beneath them.
+    ///
+    /// Each button keeps its own `.ultraThinMaterial` circle, so the glass is
+    /// per-control rather than one edge-to-edge sheet.
     private var header: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             Button {
@@ -312,22 +332,6 @@ private struct ChatScreenContent: View {
                     .accessibilityLabel("Back to sessions")
             }
             .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            VStack(spacing: Metrics.spacing.spPx) {
-                Text(title)
-                    .font(.system(size: Metrics.type.chatTitle, weight: mantaFontWeight(Metrics.type.semibold)))
-                    .kerning(Metrics.type.chatTitleTracking * Metrics.type.chatTitle)
-                    .foregroundColor(tokens.tx1)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(store.headerSubtitle)
-                    .font(.system(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.medium)))
-                    .foregroundColor(tokens.tx4)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
 
             Spacer(minLength: 0)
 
@@ -347,38 +351,104 @@ private struct ChatScreenContent: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .background {
-            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+    }
+
+    // MARK: - Transcript (BET-481 container; anchor + landing corrected)
+
+    /// Id of the zero-height row that marks the end of the transcript. Scrolling
+    /// to a real anchor is what makes the landing deterministic (see below).
+    private static let bottomAnchorID = "transcript-bottom"
+
+    /// Space the transcript reserves for the floating header: the 38pt button
+    /// plus the header's own vertical padding on both sides. Derived from the
+    /// same tokens the header lays itself out with, so retuning the button size
+    /// or the padding moves both together instead of leaving a magic number
+    /// here to drift out of sync.
+    private static let headerReservedHeight =
+        Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    // Reserves the floating header's height INSIDE the scroll
+                    // content. The header is an overlay and reserves nothing
+                    // itself, so without this the first row rests underneath
+                    // the glass instead of below it. Putting the space here
+                    // rather than on the header is what lets content pass under
+                    // the buttons while scrolling and still land clear of them —
+                    // a safeAreaInset would push content down permanently and
+                    // leave nothing to scroll under.
+                    Color.clear.frame(height: Self.headerReservedHeight)
+                    if store.hasEarlier {
+                        LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
+                            store.loadEarlier()
+                        }
+                    }
+                    TranscriptView(blocks: store.blocks, tokens: tokens)
+                    // The end-of-transcript marker. Zero-height and invisible;
+                    // it exists only so `scrollTo` has something stable to aim
+                    // at that is guaranteed to be the last thing in the stack.
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.bottomAnchorID)
+                        .padding(.bottom, Metrics.spacing.sp2)
+                }
+                // Pin the content to the scroll view's own width. A vertical scroll
+                // view otherwise sizes itself to its WIDEST child, so one long line
+                // of tool output widens the whole screen and drags the composer off
+                // with it.
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollClipDisabled(false)
+            // Scoped to `.sizeChanges` — the same correction the subagent screen
+            // already carries, for the same reason plus one more:
+            //
+            //  * `.bottom` in its all-roles form also decides the INITIAL offset,
+            //    and it decides it from the content height known at the first
+            //    layout pass. A LazyVStack has not measured the rows below the
+            //    viewport at that point and prose rows resolve their height a
+            //    pass or two later, so the offset it picks stops corresponding to
+            //    the bottom the moment the real heights land — which is the blank
+            //    transcript that only a manual scroll repairs.
+            //  * It also bottom-ALIGNS content shorter than the viewport, leaving
+            //    a screenful of dead space above a short session.
+            //
+            // Keeping only the size-changes role preserves the half that is
+            // wanted (the view sticks to the bottom as a turn streams) and hands
+            // the initial landing to the explicit scroll below, which runs after
+            // layout and therefore aims at a height that is actually real.
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .scrollDismissesKeyboard(.interactively)
+            // Dragging the transcript already lowers the keyboard; a TAP on it now
+            // does the same, which is what "put the keyboard away so I can read"
+            // looks like on iOS. A simultaneous gesture, so it neither blocks the
+            // scroll (a tap that moves is not a tap) nor swallows taps on rows that
+            // have their own action — a subagent row still pushes its child.
+            .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+            .task { await landAtBottom(proxy) }
         }
     }
 
-    // MARK: - Transcript (BET-481 container, kept verbatim)
-
-    private var transcript: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if store.hasEarlier {
-                    LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
-                        store.loadEarlier()
-                    }
-                }
-                TranscriptView(blocks: store.blocks, tokens: tokens)
-            }
-            // Pin the content to the scroll view's own width. A vertical scroll
-            // view otherwise sizes itself to its WIDEST child, so one long line
-            // of tool output widens the whole screen and drags the composer off
-            // with it.
-            .frame(maxWidth: .infinity, alignment: .leading)
+    /// Put the freshly-opened session at its newest message.
+    ///
+    /// Runs once per screen, never again: re-running it on every content change
+    /// would yank the viewport back down while the user is reading history.
+    /// Streaming stickiness is the scroll anchor's job, not this one's.
+    ///
+    /// It scrolls more than once on purpose. The lazy stack materialises rows
+    /// over several layout passes, so a single scroll issued on the first pass
+    /// lands short of the end; repeating it across the next couple of passes
+    /// converges on the real bottom. Each pass is a no-op once the view is
+    /// already there.
+    private func landAtBottom(_ proxy: ScrollViewProxy) async {
+        guard !didLandAtBottom else { return }
+        didLandAtBottom = true
+        for delayNs in [UInt64(0), 50_000_000, 250_000_000] {
+            if delayNs > 0 { try? await Task.sleep(nanoseconds: delayNs) }
+            guard !Task.isCancelled else { return }
+            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
         }
-        .scrollClipDisabled(false)
-        .defaultScrollAnchor(.bottom)
-        .scrollDismissesKeyboard(.interactively)
-        // Dragging the transcript already lowers the keyboard; a TAP on it now
-        // does the same, which is what "put the keyboard away so I can read"
-        // looks like on iOS. A simultaneous gesture, so it neither blocks the
-        // scroll (a tap that moves is not a tap) nor swallows taps on rows that
-        // have their own action — a subagent row still pushes its child.
-        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
     }
 
     /// Lower the keyboard by asking whoever holds first responder to give it

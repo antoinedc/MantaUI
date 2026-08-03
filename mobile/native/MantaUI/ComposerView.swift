@@ -63,12 +63,18 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             if !attachments.isEmpty { chipsRow }
+            // The model chip floats ABOVE the input capsule, on its own row.
+            // It describes what will answer, not what you are typing, so it
+            // sits outside the box rather than competing for room inside it.
             HStack(spacing: Metrics.spacing.sp1) {
-                attachButton
                 modelPill
                 Spacer(minLength: 0)
             }
+            // The input capsule. Attach, text, mic and send all live INSIDE one
+            // rounded glass container instead of being spread across a
+            // full-bleed bar — the icons belong to the field they act on.
             HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
+                attachButton
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
                         Text("Message…")
@@ -91,11 +97,25 @@ struct ComposerView: View {
                 if micAvailable { micButton }
                 sendButton
             }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp2)
+            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            // The capsule's own border carries the background-refetch signal
+            // (BET-630 D1). That used to be an ambient sweep on the composer's
+            // top hairline, but a floating capsule has no hairline to sweep —
+            // so the border tints to accent instead. Same meaning, same
+            // never-with-a-running-turn rule; a running turn shows the working
+            // row above and the two still never share an indicator.
+            .overlay {
+                Capsule(style: .continuous)
+                    .strokeBorder(
+                        store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle,
+                        lineWidth: Metrics.spacing.spPx
+                    )
+            }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .background(tokens.canvas.ignoresSafeArea())
-        .overlay(alignment: .top) { topDivider }
         // ONE presentation per view. The model sheet, the photo picker and the
         // file importer were all attached HERE, and SwiftUI honours only one of
         // them — which is why attaching a file silently did nothing. The two
@@ -115,20 +135,12 @@ struct ComposerView: View {
         }
     }
 
-    /// The composer's top hairline. While a background transcript refetch (or the
-    /// initial load) runs — and the turn is NOT running — it becomes an ambient
-    /// accent sweep (BET-630, D1). A running turn shows the working row instead;
-    /// the two states never share an indicator.
-    @ViewBuilder
-    private var topDivider: some View {
-        if store.refreshing && !store.running {
-            RefetchSweep(tokens: tokens)
-        } else {
-            Rectangle()
-                .fill(tokens.borderSubtle)
-                .frame(height: Metrics.spacing.spPx)
-        }
-    }
+    // The composer's top hairline — and the ambient `RefetchSweep` that ran
+    // along it during a background refetch (BET-630 D1) — are both gone with
+    // the full-bleed bar: a floating capsule has no edge to divide and nothing
+    // to sweep. The refetch signal moved onto the capsule's border (see the
+    // stroke in `body`), so the state is still shown and still never shares an
+    // indicator with the running row.
 
     // MARK: - Model pill
 
@@ -473,36 +485,3 @@ struct ComposerView: View {
     }
 }
 
-/// Ambient transcript-refetch sweep on the composer's top hairline (BET-630, D1).
-/// A slow accent gradient travels L→R while the canonical transcript syncs in the
-/// background; border-only (1px) so there is no layout shift. Distinct from the
-/// running row — the two mean different things and never share an indicator.
-/// Mirrors the desktop `.manta-loading-divider` (src/renderer/index.css).
-private struct RefetchSweep: View {
-    let tokens: Tokens
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
-            let period = 1.5
-            let t = (context.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: period) / period)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Rectangle().fill(tokens.borderSubtle)
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.clear, tokens.accent.opacity(0.85), .clear],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: geo.size.width * 0.42)
-                        .offset(x: (CGFloat(t) * 1.45 - 0.42) * geo.size.width)
-                }
-            }
-            .frame(height: Metrics.spacing.spPx)
-            .clipped()
-        }
-    }
-}

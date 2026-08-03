@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 // Shared helper: map a generated font-weight metric (500 / 600 from
@@ -59,15 +60,292 @@ struct UserBand: View {
 // SwiftUI can parse natively — emphasis, strong, inline code, links —
 // preserving newlines so paragraph structure survives.
 //
-// BLOCK-level markdown (headings, lists, fenced code, thematic breaks) is
-// still unrendered; that needs a real block parser and its own components,
-// which is a separate piece of work, not something to fake here.
+// BLOCK-level markdown is handled by `MantaMarkdownParser` below, which splits
+// a turn into blocks and hands each block's TEXT back through this renderer for
+// its inline spans.
 enum MantaInlineMarkdown {
     static func render(_ raw: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
         )
         return (try? AttributedString(markdown: raw, options: options)) ?? AttributedString(raw)
+    }
+}
+
+// MARK: - Block markdown
+//
+// `AttributedString(markdown:)` with `.inlineOnlyPreservingWhitespace` parses
+// ONLY inline spans, and passes every block construct through as literal text.
+// So a turn that opened with `## How it compares` and laid its answer out as a
+// GFM table rendered as its own source: a heading line with two hashes, then
+// `| Latency | record → upload |` and a `|---|---|---|` rule, verbatim.
+//
+// This is the block layer. It is deliberately a small, total, PURE function —
+// no library, no dependency, and no throwing path: anything it does not
+// recognise stays a paragraph and still gets inline rendering, so an
+// unsupported construct degrades to exactly today's behaviour rather than
+// disappearing.
+enum MantaMarkdownBlock: Equatable {
+    case paragraph(String)
+    case heading(level: Int, text: String)
+    /// One list item. `ordered` drives the marker; `depth` its indent.
+    case listItem(depth: Int, marker: String, text: String)
+    case code(language: String?, text: String)
+    case quote(String)
+    case rule
+    case table(MantaMarkdownTable)
+}
+
+enum MantaTableAlignment: Equatable {
+    case leading, center, trailing
+}
+
+struct MantaMarkdownTable: Equatable {
+    var header: [String]
+    var alignments: [MantaTableAlignment]
+    var rows: [[String]]
+
+    /// Header + body, padded/truncated to the header's column count so the grid
+    /// is always rectangular (a ragged row is legal GFM and must not crash or
+    /// misalign the columns).
+    var normalizedRows: [[String]] {
+        rows.map { row in
+            (0..<header.count).map { i in i < row.count ? row[i] : "" }
+        }
+    }
+
+    func alignment(_ column: Int) -> MantaTableAlignment {
+        column < alignments.count ? alignments[column] : .leading
+    }
+}
+
+enum MantaMarkdownParser {
+
+    /// Split a turn's text into blocks. Total: never throws, never drops input.
+    static func blocks(_ raw: String) -> [MantaMarkdownBlock] {
+        let lines = raw.components(separatedBy: "\n")
+        var out: [MantaMarkdownBlock] = []
+        var paragraph: [String] = []
+        var i = 0
+
+        func flushParagraph() {
+            let text = paragraph.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            paragraph.removeAll()
+            if !text.isEmpty { out.append(.paragraph(text)) }
+        }
+
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced code. Consumes to the closing fence, or to the end of the
+            // input when the fence never closes (the streaming case — a half
+            // written block must still render as code, not as loose prose).
+            if let fence = fenceToken(trimmed) {
+                flushParagraph()
+                let language = String(trimmed.dropFirst(fence.count)).trimmingCharacters(in: .whitespaces)
+                var body: [String] = []
+                i += 1
+                while i < lines.count {
+                    let candidate = lines[i].trimmingCharacters(in: .whitespaces)
+                    if candidate.hasPrefix(fence) { i += 1; break }
+                    body.append(lines[i])
+                    i += 1
+                }
+                out.append(.code(language: language.isEmpty ? nil : language,
+                                 text: body.joined(separator: "\n")))
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                i += 1
+                continue
+            }
+
+            if isThematicBreak(trimmed) {
+                flushParagraph()
+                out.append(.rule)
+                i += 1
+                continue
+            }
+
+            if let heading = parseHeading(trimmed) {
+                flushParagraph()
+                out.append(heading)
+                i += 1
+                continue
+            }
+
+            // GFM table: a header row plus a delimiter row. Checked BEFORE the
+            // paragraph fallback and before list parsing, because both would
+            // otherwise swallow the pipes as ordinary text.
+            if let parsed = parseTable(lines, from: i) {
+                flushParagraph()
+                out.append(.table(parsed.table))
+                i = parsed.next
+                continue
+            }
+
+            if let item = parseListItem(line) {
+                flushParagraph()
+                out.append(item)
+                i += 1
+                continue
+            }
+
+            if trimmed.hasPrefix(">") {
+                flushParagraph()
+                var body: [String] = []
+                while i < lines.count {
+                    let candidate = lines[i].trimmingCharacters(in: .whitespaces)
+                    guard candidate.hasPrefix(">") else { break }
+                    body.append(String(candidate.dropFirst()).trimmingCharacters(in: .whitespaces))
+                    i += 1
+                }
+                out.append(.quote(body.joined(separator: "\n")))
+                continue
+            }
+
+            paragraph.append(line)
+            i += 1
+        }
+
+        flushParagraph()
+        return out
+    }
+
+    // MARK: - Line classifiers (each pure + individually testable)
+
+    /// The ``` / ~~~ opener, or nil.
+    static func fenceToken(_ trimmed: String) -> String? {
+        for token in ["```", "~~~"] where trimmed.hasPrefix(token) {
+            return token
+        }
+        return nil
+    }
+
+    static func isThematicBreak(_ trimmed: String) -> Bool {
+        for ch in ["-", "*", "_"] {
+            let stripped = trimmed.replacingOccurrences(of: " ", with: "")
+            if stripped.count >= 3, stripped.allSatisfy({ String($0) == ch }) { return true }
+        }
+        return false
+    }
+
+    static func parseHeading(_ trimmed: String) -> MantaMarkdownBlock? {
+        guard trimmed.hasPrefix("#") else { return nil }
+        let hashes = trimmed.prefix(while: { $0 == "#" })
+        guard hashes.count <= 6 else { return nil }
+        let rest = trimmed.dropFirst(hashes.count)
+        // `#hashtag` is not a heading — ATX requires a space after the run.
+        guard rest.first == " " || rest.isEmpty else { return nil }
+        let text = rest.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+        return .heading(level: hashes.count, text: text)
+    }
+
+    static func parseListItem(_ line: String) -> MantaMarkdownBlock? {
+        let indent = line.prefix(while: { $0 == " " || $0 == "\t" }).count
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let depth = min(indent / 2, 3)
+
+        for bullet in ["- ", "* ", "+ "] where trimmed.hasPrefix(bullet) {
+            let text = String(trimmed.dropFirst(bullet.count)).trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            return .listItem(depth: depth, marker: "•", text: text)
+        }
+
+        // `12. text` / `12) text`
+        let digits = trimmed.prefix(while: { $0.isNumber })
+        if !digits.isEmpty, digits.count <= 9 {
+            let rest = trimmed.dropFirst(digits.count)
+            if let sep = rest.first, sep == "." || sep == ")" {
+                let text = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
+                guard !text.isEmpty else { return nil }
+                return .listItem(depth: depth, marker: "\(digits).", text: text)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Table
+
+    /// Parse a GFM table starting at `start`, returning it plus the index of
+    /// the first line AFTER it. nil when the two-line header+delimiter shape
+    /// isn't there — which is what keeps a lone pipe-bearing prose line prose.
+    static func parseTable(_ lines: [String], from start: Int) -> (table: MantaMarkdownTable, next: Int)? {
+        guard start + 1 < lines.count else { return nil }
+        let headerLine = lines[start].trimmingCharacters(in: .whitespaces)
+        guard headerLine.contains("|") else { return nil }
+        let delimiterLine = lines[start + 1].trimmingCharacters(in: .whitespaces)
+        guard let alignments = parseDelimiterRow(delimiterLine) else { return nil }
+
+        let header = splitRow(headerLine)
+        guard header.count == alignments.count else { return nil }
+
+        var rows: [[String]] = []
+        var cursor = start + 2
+        while cursor < lines.count {
+            let candidate = lines[cursor].trimmingCharacters(in: .whitespaces)
+            guard !candidate.isEmpty, candidate.contains("|") else { break }
+            rows.append(splitRow(candidate))
+            cursor += 1
+        }
+        return (MantaMarkdownTable(header: header, alignments: alignments, rows: rows), cursor)
+    }
+
+    /// `|---|:--:|---:|` -> per-column alignment, or nil when the line is not a
+    /// delimiter row (which is what makes a lone pipe-bearing prose line stay
+    /// prose).
+    static func parseDelimiterRow(_ line: String) -> [MantaTableAlignment]? {
+        guard line.contains("|"), line.contains("-") else { return nil }
+        let cells = splitRow(line)
+        guard !cells.isEmpty else { return nil }
+        var out: [MantaTableAlignment] = []
+        for cell in cells {
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            guard !c.isEmpty else { return nil }
+            let left = c.hasPrefix(":")
+            let right = c.hasSuffix(":")
+            let dashes = c.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            if left && right { out.append(.center) }
+            else if right { out.append(.trailing) }
+            else { out.append(.leading) }
+        }
+        return out
+    }
+
+    /// Split one table row into cells, honouring `\|` escapes and dropping the
+    /// optional leading/trailing pipe. An EMPTY first header cell is legal and
+    /// common (a corner cell), so we must not trim empties away wholesale —
+    /// only the delimiters the row shape contributes.
+    static func splitRow(_ line: String) -> [String] {
+        var body = line
+        if body.hasPrefix("|") { body.removeFirst() }
+        if body.hasSuffix("|") && !body.hasSuffix("\\|") { body.removeLast() }
+
+        var cells: [String] = []
+        var current = ""
+        var escaped = false
+        for ch in body {
+            if escaped {
+                current.append(ch == "|" ? "|" : ch)
+                escaped = false
+                continue
+            }
+            if ch == "\\" { escaped = true; continue }
+            if ch == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+                continue
+            }
+            current.append(ch)
+        }
+        if escaped { current.append("\\") }
+        cells.append(current.trimmingCharacters(in: .whitespaces))
+        return cells
     }
 }
 
@@ -78,25 +356,207 @@ struct AssistantProse: View {
     let text: String
     let tokens: Tokens
 
+    private var blocks: [MantaMarkdownBlock] { MantaMarkdownParser.blocks(text) }
+
     var body: some View {
-        // `fixedSize(horizontal: false, …)` is what keeps a long unbreakable
-        // token (a shell command, a URL, a path) INSIDE the screen. Without it
-        // such a token makes the text demand its full unwrapped width, the
-        // scroll view adopts that width, and every sibling — including the
-        // composer, which shares the same layout — is laid out wider than the
-        // display: text stops appearing to wrap, the send button sits off
-        // screen, and each keystroke re-lays out an oversized view, which is
-        // what made typing crawl.
-        Text(MantaInlineMarkdown.render(text))
+        // Spacing 0 + a per-block bottom gap: a uniform VStack spacing would
+        // set consecutive list items as far apart as two paragraphs, which
+        // stops a list reading as one list.
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
+                blockView(pair.element)
+                    .padding(.bottom, gapBelow(pair.element))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp3)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("assistant-prose")
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: MantaMarkdownBlock) -> some View {
+        switch block {
+        case .paragraph(let content):
+            proseText(content)
+        case .heading(let level, let content):
+            Text(MantaInlineMarkdown.render(content))
+                .font(.system(size: headingSize(level), weight: .semibold))
+                .kerning(Metrics.type.headingTracking * headingSize(level))
+                .foregroundColor(tokens.tx1)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, Metrics.spacing.sp2)
+        case .listItem(let depth, let marker, let content):
+            HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
+                Text(marker)
+                    .font(.system(size: Metrics.type.body))
+                    .foregroundColor(tokens.tx4)
+                    .monospacedDigit()
+                proseText(content)
+            }
+            .padding(.leading, CGFloat(depth) * Metrics.spacing.sp4)
+        case .code(let language, let content):
+            MarkdownCodeBlock(language: language, text: content, tokens: tokens)
+        case .quote(let content):
+            proseText(content)
+                .foregroundColor(tokens.tx2)
+                .padding(.leading, Metrics.spacing.sp3)
+                .overlay(alignment: .leading) {
+                    tokens.borderSubtle.frame(width: Metrics.spacing.spPx * 2)
+                }
+        case .rule:
+            tokens.borderSubtle
+                .frame(height: Metrics.spacing.spPx)
+                .padding(.vertical, Metrics.spacing.sp1)
+        case .table(let table):
+            MarkdownTableView(table: table, tokens: tokens)
+        }
+    }
+
+    // `fixedSize(horizontal: false, …)` is what keeps a long unbreakable token
+    // (a shell command, a URL, a path) INSIDE the screen. Without it such a
+    // token makes the text demand its full unwrapped width, the scroll view
+    // adopts that width, and every sibling — including the composer, which
+    // shares the same layout — is laid out wider than the display: text stops
+    // appearing to wrap, the send button sits off screen, and each keystroke
+    // re-lays out an oversized view, which is what made typing crawl.
+    private func proseText(_ content: String) -> some View {
+        Text(MantaInlineMarkdown.render(content))
             .font(.system(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.bottom, Metrics.spacing.sp3)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("assistant-prose")
+    }
+
+    private func gapBelow(_ block: MantaMarkdownBlock) -> CGFloat {
+        switch block {
+        case .listItem, .heading, .rule: return Metrics.spacing.sp1
+        case .paragraph, .code, .quote, .table: return Metrics.spacing.sp2
+        }
+    }
+
+    /// `#` is the turn's own top level, so it is only slightly larger than
+    /// body; deeper levels converge on body size. A transcript turn is not a
+    /// document — an `h1` set at display size would shout over the user band.
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return Metrics.type.body + 4
+        case 2: return Metrics.type.body + 2
+        case 3: return Metrics.type.body + 1
+        default: return Metrics.type.body
+        }
+    }
+}
+
+// MARK: - Fenced code
+//
+// Horizontal scroll rather than wrapping: a wrapped command line is a command
+// line you cannot read, and (per the note in `proseText`) letting an
+// unwrappable token dictate the width blows out the whole transcript layout.
+// A horizontal ScrollView takes the width it is GIVEN, so it bounds itself.
+struct MarkdownCodeBlock: View {
+    let language: String?
+    let text: String
+    let tokens: Tokens
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let language, !language.isEmpty {
+                Text(language)
+                    .font(.system(size: Metrics.type.twoXS, weight: .medium))
+                    .foregroundColor(tokens.tx4)
+                    .padding(.horizontal, Metrics.spacing.sp2)
+                    .padding(.top, Metrics.spacing.sp2)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(text)
+                    .font(.system(size: Metrics.type.xs, design: .monospaced))
+                    .foregroundColor(tokens.tx1)
+                    .textSelection(.enabled)
+                    .padding(Metrics.spacing.sp2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay {
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        }
+        .accessibilityIdentifier("markdown-code")
+    }
+}
+
+// MARK: - GFM table
+//
+// Rows are HStacks of equal-share (`maxWidth: .infinity`) cells, NOT a `Grid`.
+// A Grid sizes each column to its widest cell's IDEAL width, and a prose cell's
+// ideal width is its UNWRAPPED width — the exact layout blow-out the note in
+// `proseText` describes, where one long cell widens the scroll view and drags
+// the composer off screen with it. Equal shares of the width we are actually
+// given can't overflow, and every cell wraps inside its share.
+//
+// Column rules are deliberately omitted: keeping vertical hairlines aligned
+// needs equal-height cells, which needs a height the transcript can't propose.
+// Row hairlines plus a filled header row carry the structure on a phone.
+struct MarkdownTableView: View {
+    let table: MantaMarkdownTable
+    let tokens: Tokens
+
+    var body: some View {
+        VStack(spacing: 0) {
+            row(table.header, header: true)
+            ForEach(Array(table.normalizedRows.enumerated()), id: \.offset) { pair in
+                Divider().overlay(tokens.borderSubtle)
+                row(pair.element, header: false)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.card)
+        // Clip BEFORE the stroke: the header row's own fill is a plain
+        // rectangle and would otherwise square off the container's top corners.
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay {
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("markdown-table")
+    }
+
+    private func row(_ cells: [String], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { pair in
+                Text(MantaInlineMarkdown.render(pair.element))
+                    .font(.system(size: Metrics.type.xs, weight: header ? .semibold : .regular))
+                    .foregroundColor(header ? tokens.tx1 : tokens.tx2)
+                    .multilineTextAlignment(textAlignment(pair.offset))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: frameAlignment(pair.offset))
+            }
+        }
+        .padding(.horizontal, Metrics.spacing.sp2)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(header ? tokens.panel : Color.clear)
+    }
+
+    private func textAlignment(_ column: Int) -> TextAlignment {
+        switch table.alignment(column) {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
+    }
+
+    private func frameAlignment(_ column: Int) -> Alignment {
+        switch table.alignment(column) {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
     }
 }
 
@@ -348,6 +808,18 @@ struct TranscriptView: View {
     let blocks: [TranscriptBlock]
     let tokens: Tokens
 
+    /// How far the transcript slides, and therefore how wide the revealed
+    /// timestamp strip is.
+    private static let gutterWidth: CGFloat = 58
+    /// Finger travel needed for a full reveal. Longer than the strip itself, so
+    /// the strip arrives damped instead of slamming open on a flick.
+    private static let gutterTravel: CGFloat = 96
+
+    /// Live drag offset, negative (leftward) and clamped to the strip width.
+    /// `@GestureState` resets itself the instant the finger lifts, which is what
+    /// springs the transcript back with no release handler of our own.
+    @GestureState private var gutterReveal: CGFloat = 0
+
     var body: some View {
         VStack(spacing: 0) {
             // Iterate over the ELEMENTS, never over indices. `ForEach(blocks
@@ -361,17 +833,58 @@ struct TranscriptView: View {
             // first render is still in flight.
             ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
                 blockView(pair.element)
+                    // The timestamp rides WITH its own block rather than living
+                    // in a parallel column, so it stays aligned to the thing it
+                    // describes no matter how tall that thing is. An overlay
+                    // takes no part in layout, and the offset parks it just
+                    // outside the trailing edge, so nothing about the transcript
+                    // at rest changes: it is off screen until the slide brings
+                    // it in, and the scroll view clips it the rest of the time.
+                    .overlay(alignment: .trailing) {
+                        TimestampGutterLabel(
+                            date: pair.element.timestamp,
+                            width: Self.gutterWidth,
+                            tokens: tokens
+                        )
+                        .offset(x: Self.gutterWidth)
+                    }
             }
         }
+        // The whole transcript slides as ONE piece, the way Messages does it —
+        // per-row swiping would read as "act on this message" (reply/delete),
+        // which is a different gesture with a different outcome.
+        .offset(x: gutterReveal)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.86), value: gutterReveal)
+        .simultaneousGesture(gutterGesture)
+    }
+
+    /// Horizontal-only drag that reveals the timestamps.
+    ///
+    /// Simultaneous with the scroll view's own pan, and deliberately inert
+    /// unless the movement is clearly sideways and leftward: a vertical scroll
+    /// (or a rightward drag, which is the navigation back-swipe) leaves the
+    /// offset at zero, so neither gesture is stolen from the other.
+    private var gutterGesture: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .updating($gutterReveal) { value, state, _ in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard dx < 0, -dx > abs(dy) * 1.5 else {
+                    state = 0
+                    return
+                }
+                let progress = min(1, -dx / Self.gutterTravel)
+                state = -Self.gutterWidth * progress
+            }
     }
 
     @ViewBuilder
     private func blockView(_ block: TranscriptBlock) -> some View {
         switch block {
-        case .user(let text):
+        case .user(let text, _):
             UserBand(text: text, tokens: tokens)
                 .padding(.bottom, Metrics.spacing.sp4)
-        case .prose(let text):
+        case .prose(let text, _):
             AssistantProse(text: text, tokens: tokens)
         case .steps(let content):
             // Machinery is inset to the same margin as prose. Only the USER
@@ -385,10 +898,43 @@ struct TranscriptView: View {
     }
 }
 
+/// The wall-clock time shown in the strip a leftward slide opens up.
+///
+/// Fixed width so every timestamp lands on the same vertical line — a gutter
+/// that ragged-edges as the values change reads as a glitch. Blocks with no
+/// time (machinery) render an empty label of the same width rather than
+/// collapsing, which keeps the rows they sit next to from shifting.
+private struct TimestampGutterLabel: View {
+    let date: Date?
+    let width: CGFloat
+    let tokens: Tokens
+
+    var body: some View {
+        Text(ChatClock.time(date))
+            .font(.system(size: Metrics.type.twoXS))
+            .foregroundColor(tokens.tx4)
+            .monospacedDigit()
+            .lineLimit(1)
+            .frame(width: width, alignment: .center)
+            .accessibilityHidden(true)
+    }
+}
+
 enum TranscriptBlock {
-    case user(String)
-    case prose(String)
+    // The date is the block's wall-clock time, shown only in the swipe-to-reveal
+    // gutter. Machinery (`.steps`) carries none: a step row already states how
+    // long it took, and a second time reading next to it is noise, not detail.
+    case user(String, at: Date?)
+    case prose(String, at: Date?)
     case steps(StepGroupContent)
+
+    /// The time shown in the gutter; nil for blocks that have none.
+    var timestamp: Date? {
+        switch self {
+        case .user(_, let at), .prose(_, let at): return at
+        case .steps: return nil
+        }
+    }
 }
 
 // MARK: - "Load earlier messages"
