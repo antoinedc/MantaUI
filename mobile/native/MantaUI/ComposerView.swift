@@ -62,19 +62,19 @@ struct ComposerView: View {
             // runs one presentation and silently drops the others, which is
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
-            if !attachments.isEmpty { chipsRow }
-            // The model chip floats ABOVE the input capsule, on its own row.
-            // It describes what will answer, not what you are typing, so it
-            // sits outside the box rather than competing for room inside it.
+            // Model chip sits above the input box on its own row.
             HStack(spacing: Metrics.spacing.sp1) {
                 modelPill
                 Spacer(minLength: 0)
             }
-            // The input capsule. Attach, text, mic and send all live INSIDE one
-            // rounded glass container instead of being spread across a
-            // full-bleed bar — the icons belong to the field they act on.
-            HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
-                attachButton
+            // Floating input box: rounded rect (fixed radius so it stays
+            // rectangular regardless of how tall the text grows), glass fill,
+            // thin border. Everything lives INSIDE — chips at the top, text in
+            // the middle, attach/mic/send at the bottom.
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                // Attachment chips inside the box, above the text field.
+                if !attachments.isEmpty { chipsRow }
+                // Text field.
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
                         Text("Message…")
@@ -94,20 +94,21 @@ struct ComposerView: View {
                         .focused($inputFocused)
                         .accessibilityIdentifier("composer-input")
                 }
-                if micAvailable { micButton }
-                sendButton
+                // Bottom row: attach on the left, mic + send on the right.
+                HStack(spacing: Metrics.spacing.sp2) {
+                    attachButton
+                    Spacer(minLength: 0)
+                    if micAvailable { micButton }
+                    sendButton
+                }
             }
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.vertical, Metrics.spacing.sp2)
-            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-            // The capsule's own border carries the background-refetch signal
-            // (BET-630 D1). That used to be an ambient sweep on the composer's
-            // top hairline, but a floating capsule has no hairline to sweep —
-            // so the border tints to accent instead. Same meaning, same
-            // never-with-a-running-turn rule; a running turn shows the working
-            // row above and the two still never share an indicator.
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
+            // Border carries the background-refetch signal (BET-630 D1):
+            // tints to accent while refreshing, never while a turn runs.
             .overlay {
-                Capsule(style: .continuous)
+                RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
                     .strokeBorder(
                         store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle,
                         lineWidth: Metrics.spacing.spPx
@@ -137,10 +138,10 @@ struct ComposerView: View {
 
     // The composer's top hairline — and the ambient `RefetchSweep` that ran
     // along it during a background refetch (BET-630 D1) — are both gone with
-    // the full-bleed bar: a floating capsule has no edge to divide and nothing
-    // to sweep. The refetch signal moved onto the capsule's border (see the
-    // stroke in `body`), so the state is still shown and still never shares an
-    // indicator with the running row.
+    // the full-bleed bar: the floating rounded rect has no divider to sweep.
+    // The refetch signal moved onto the box's border (see the stroke in `body`),
+    // so the state is still shown and still never shares an indicator with the
+    // running row.
 
     // MARK: - Model pill
 
