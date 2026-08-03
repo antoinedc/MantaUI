@@ -153,7 +153,7 @@ if [ -n "$INSTALL_SOURCE_DIR" ] && [ -f "$INSTALL_SOURCE_DIR/lib/release.sh" ]; 
   . "$INSTALL_SOURCE_DIR/lib/release.sh"
 else
   # curl | bash / no local lib yet — inline fallback (byte-identical to lib).
-
+  # >>> BEGIN GENERATED — scripts/sync-release-fallback.mjs — do not edit by hand <<<
 # Parse one key out of a key=value manifest body. Echoes the value, empty if
 # absent. Values may contain `=` (cut -d= -f2- preserves them). A repeated key
 # is reduced to the FIRST occurrence (head -n1) — the manifest writer emits
@@ -165,6 +165,8 @@ manifest_get() { # $1=manifest-body $2=key
 # Map (uname -s, uname -m) to the release manifest arch key. Sets global
 # ARCH_KEY. Dies on any (OS, arch) we don't ship a tarball for. This is the
 # SINGLE place the installer decides which OS+arch it is — see BET-274.
+# NOTE: this function is defined here so install.sh (fresh `curl | bash`) and
+# self-update.sh (packaged box) resolve arch identically.
 resolve_arch() {
   local s m; s="$(uname -s)"; m="$(uname -m)"
   case "$s" in
@@ -187,7 +189,6 @@ resolve_arch() {
   esac
 }
 
-
 # _sha256_of echoes the sha256 hex of $1. Prefers GNU sha256sum (Linux ships
 # it via coreutils); falls back to BSD `shasum -a 256` on macOS, which ships
 # shasum by default but NOT sha256sum. Single shared helper so the prereq
@@ -208,6 +209,7 @@ verify_sha256() {
       actual:   $actual
       (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
+  # >>> END GENERATED — scripts/sync-release-fallback.mjs — do not edit by hand <<<
 fi
 
 # launchd_agent_path — the PATH a MantaUI supervisor-managed service must
