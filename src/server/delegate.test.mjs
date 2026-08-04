@@ -673,17 +673,27 @@ test("finishJob is idempotent for an already-terminal job", async () => {
 // buildPermissionRuleset (BET-418 §A)
 // ----------------------------------------------------------------------------
 
-test("buildPermissionRuleset appends the mandatory catch-all deny last", () => {
+// REGRESSION (verified against live opencode v1.15.12): opencode resolves this
+// list LAST-MATCH-WINS. The catch-all deny therefore has to sit FIRST, under
+// the grants. When it was appended last it matched every call and beat every
+// allow, so a delegated job could not run a single tool it had been granted:
+//   [bash ** allow, * ** deny] → bash DENIED
+//   [* ** deny, bash ** allow] → bash COMPLETED
+test("buildPermissionRuleset puts the catch-all deny FIRST, under the grants", () => {
   const rs = buildPermissionRuleset([
     { permission: "bash", pattern: "pytest *" },
     { permission: "write", pattern: "**/*.ts" },
   ]);
   assert.deepEqual(rs, [
+    { permission: "*", pattern: "**", action: "deny" },
     { permission: "bash", pattern: "pytest *", action: "allow" },
     { permission: "write", pattern: "**/*.ts", action: "allow" },
-    { permission: "*", pattern: "**", action: "deny" },
   ]);
-  assert.equal(rs[rs.length - 1].action, "deny", "catch-all deny MUST be last");
+  assert.equal(rs[0].action, "deny", "catch-all deny MUST be FIRST (last-match-wins)");
+  assert.ok(
+    rs.slice(1).every((r) => r.action === "allow"),
+    "every grant must come AFTER the catch-all so it can override it",
+  );
 });
 
 test("buildPermissionRuleset with no tools still applies the catch-all deny (job asks nothing, denies everything)", () => {
@@ -697,9 +707,10 @@ test("buildPermissionRuleset de-dups identical rules and defaults action to allo
     { permission: "bash", pattern: "pytest *" },
     { permission: "bash", pattern: "rm *", action: "deny" },
   ]);
-  assert.equal(rs.length, 3, "two allows (de-duped) + one explicit deny + catch-all");
-  assert.equal(rs[0].action, "allow");
-  assert.equal(rs[1].action, "deny");
+  assert.equal(rs.length, 3, "catch-all + one de-duped allow + one explicit deny");
+  assert.equal(rs[0].action, "deny", "catch-all first");
+  assert.equal(rs[1].action, "allow");
+  assert.equal(rs[2].action, "deny");
 });
 
 // BET-418 §A acceptance: a job whose ruleset omits `bash` must FAIL its first
@@ -713,7 +724,7 @@ test("a ruleset omitting bash has no bash-allow rule (command fails, no hang)", 
   ]);
   const bashAllow = rs.find((r) => r.permission === "bash" && r.action === "allow");
   assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
-  assert.equal(rs[rs.length - 1].action, "deny");
+  assert.equal(rs[0].action, "deny", "catch-all deny is the floor, and nothing lifts bash off it");
 });
 
 // ----------------------------------------------------------------------------
@@ -841,12 +852,13 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
   assert.ok(h.engine.approve(req.payload.id, [{ permission: "bash", pattern: "pytest * -x" }]));
   const res = await p;
   assert.equal(res.ok, true);
-  // newWindow received the permission ruleset ending in the catch-all deny.
+  // newWindow received the ruleset: catch-all deny FIRST, then the approved
+  // grant — the order that actually lets the grant take effect (last-match-wins).
   const perm = h.newWindowCalls[0]?.permission;
   assert.ok(Array.isArray(perm));
-  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
-  assert.equal(perm[0].permission, "bash");
-  assert.equal(perm[0].pattern, "pytest * -x");
+  assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
+  assert.equal(perm[1].permission, "bash");
+  assert.equal(perm[1].pattern, "pytest * -x");
 });
 
 // ----------------------------------------------------------------------------
@@ -881,7 +893,7 @@ test("§A4: a job omitting bash receives the catch-all deny at the session-creat
   assert.ok(Array.isArray(perm), "the permission ruleset was forwarded to session creation");
   const bashAllow = perm.find((r) => r.permission === "bash" && r.action === "allow");
   assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
-  assert.deepEqual(perm[perm.length - 1], { permission: "*", pattern: "**", action: "deny" });
+  assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
 
   // 2. Simulate opencode denying the job's first bash command. opencode
   //    surfaces a tool denial as a session.error (the job's turn aborts); the

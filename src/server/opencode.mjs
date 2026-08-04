@@ -686,6 +686,39 @@ export async function listSessions(directory) {
 }
 
 /**
+ * Does this opencode session still exist?
+ *
+ * Answered with a DIRECT lookup (`GET /session/{id}`), never by scanning
+ * `listSessions()`. opencode caps `GET /session` at 100 records and the
+ * unscoped form returns the 100 most-recently-updated sessions BOX-WIDE, so on
+ * any box with real history a perfectly healthy session is absent from that
+ * page — a scan reports it as gone. That false "gone" is destructive: the
+ * delegate sweeper reads it as "parent session gone", stops the background job
+ * (BET-418 §B) and stamps it `stopped by user`, so every delegated job died
+ * within a sweep tick and the sidebar never had a job to show.
+ *
+ * Returns:
+ *   true   — 200, the session is alive
+ *   false  — 404, the session is genuinely gone (the ONLY negative)
+ *   true   — anything else (5xx, network error): best-effort "assume alive",
+ *            preserving the existing rule that a transient opencode blip must
+ *            never orphan a healthy job. Only a definitive 404 is destructive.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<boolean>}
+ */
+export async function sessionExists(sessionId) {
+  if (!sessionId) return false;
+  try {
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (res.status === 404) return false;
+    return true;
+  } catch {
+    return true; // transient failure — never treat as "gone"
+  }
+}
+
+/**
  * Fork a session (copies history up to messageID into a new session).
  * @param {{ sessionId: string, messageID?: string }} opts
  */

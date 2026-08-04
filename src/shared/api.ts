@@ -455,6 +455,15 @@ export interface Api {
     cb: (payload: ServerUpdateAvailablePayload) => void,
   ): () => void;
 
+  // Server-update progress subscription. While `scripts/self-update.sh` runs
+  // on the box, the server tails its log and republishes each `MANTA_PROGRESS
+  // <step>/<total> <label>` marker as a `serverUpdateProgress` bus event. The
+  // renderer's UpdateBar renders a determinate progress bar from these so the
+  // user sees the update advancing instead of a frozen button.
+  onServerUpdateProgress(
+    cb: (p: { step: number; total: number; label: string }) => void,
+  ): () => void;
+
   // Plugins (BET-189 / BET-190): read the current plugin registry the Mac
   // executor has published. Backed by GET /api/plugins/registry via the
   // `plugins:registry` RPC channel. Returns the rows verbatim — invalid

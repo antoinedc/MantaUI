@@ -1168,6 +1168,36 @@ table.spec tr:last-child td{border-bottom:0}
     the ones you named. The mockup is clickable.
   </p>
 
+  <h3 class="sub">Two different things are both called "a subagent"</h3>
+  <div class="callout">
+    <p>
+      In conversation both of these get called "a subagent", and confusing them is why this section reads as
+      if it is missing a feature. <strong>Everything below is about the second one only.</strong>
+    </p>
+    <table class="spec" style="margin-top:var(--sp-3)">
+      <tr><th style="width:22%">Name used here</th><th style="width:20%">Started by</th><th>Where you see it</th></tr>
+      <tr>
+        <td><strong>Inline subagent</strong></td>
+        <td>the <span class="mono-inline">task</span> tool</td>
+        <td><strong>In the transcript</strong> — a collapsed card you expand to read the child's turns. No
+        window, no branch, and <em>no row in the sidebar, ever</em>. Untouched by this redesign.</td>
+      </tr>
+      <tr>
+        <td><strong>Background job</strong><br><span style="color:var(--tx4)">a.k.a. "delegated subagent"</span></td>
+        <td>the <span class="mono-inline">delegate</span> tool</td>
+        <td><strong>In the rail</strong> — its own session, window, worktree and branch, nested under the
+        session that started it. This section.</td>
+      </tr>
+    </table>
+    <p style="margin-top:var(--sp-3)">
+      The two coexist deliberately and the model chooses per task. The rule of thumb: <em>if you delegated it
+      and expect a row in the sidebar, it is a background job; if you expect to read it inline, it is an
+      inline subagent and no sidebar row will ever appear for it.</em> This document says "job" throughout
+      because the rail row, the branch and the worktree all belong to that one — "delegated subagent" means
+      exactly the same thing.
+    </p>
+  </div>
+
   <h3 class="sub">The governing principle</h3>
   <div class="callout ok">
     <p><strong>A background job is disposable, non-critical and read-only. It reports to the main agent, not

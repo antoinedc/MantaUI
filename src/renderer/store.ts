@@ -252,6 +252,12 @@ type State = {
   // for a STRICTLY newer version; the server-side dedup gate mirrors this
   // exactly, see src/server/serverUpdate.mjs).
   serverUpdatePrompt: { version: string; notesUrl?: string | null } | null;
+  // Live progress of an in-flight box self-update. Set from the box's
+  // `serverUpdateProgress` bus events (one per MANTA_PROGRESS marker the
+  // self-update script emits). null when no update is running; drives the
+  // UpdateBar's determinate progress bar. Mirrors the serverUpdatePrompt
+  // shape/lifecycle (a plain state + setter pair).
+  serverUpdateProgress: { step: number; total: number; label: string } | null;
   // Live events-WebSocket connection state (from the shared
   // ConnectionState machine). Surface to the UI so a title-bar pill can
   // show "reconnecting…" when the link is down. Updated by the httpApi
@@ -381,6 +387,9 @@ type State = {
   setServerUpdatePrompt: (
     p: { version: string; notesUrl?: string | null } | null,
   ) => void;
+  setServerUpdateProgress: (
+    p: { step: number; total: number; label: string } | null,
+  ) => void;
   // Deep-link pairing (BET-240): write/clear the pending pair link. Pass
   // null to consume (PairStep clears on use); App.tsx writes the URL when
   // the preload's pair:link-received IPC fires.
@@ -428,6 +437,7 @@ export const useStore = create<State>((set, get) => ({
   updateError: null,
   boxIncompatible: false,
   serverUpdatePrompt: null,
+  serverUpdateProgress: null,
   connectionState: { state: "idle" },
   backgroundSyncing: false,
   videoRenderNow: null,
@@ -617,6 +627,7 @@ export const useStore = create<State>((set, get) => ({
   setUpdateError: (p) => set({ updateError: p }),
   setBoxIncompatible: (b) => set({ boxIncompatible: b }),
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
+  setServerUpdateProgress: (p) => set({ serverUpdateProgress: p }),
   setConnectionState: (s) => set({ connectionState: s }),
   setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),
 

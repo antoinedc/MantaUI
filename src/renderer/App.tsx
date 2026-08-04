@@ -17,13 +17,16 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
-import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
+import { Modal } from "./Modal";
+import { Button } from "./Button";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
+import { ErrorBoundary } from "./ErrorBoundary";
 import type { AvailableLauncher } from "../shared/types";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
@@ -35,7 +38,36 @@ import type { AvailableLauncher } from "../shared/types";
 // `manta://` link can never silently pass through a staging build.
 const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 
+// The whole app tree is wrapped once in an ErrorBoundary so an uncaught render
+// throw anywhere degrades to a minimal centered "Something went wrong — Reload"
+// (using existing tokens) instead of React 18 unmounting the root to a white
+// screen. AppInner holds the real component; App is the boundary wrapper.
 export function App() {
+  return (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <div className="h-full w-full flex items-center justify-center bg-bg text-text">
+          <div className="bg-danger-bg border border-danger rounded-md px-4 py-3 text-meta text-center">
+            <div className="text-text mb-2 break-words">
+              Something went wrong{err.message ? ` — ${err.message}` : ""}
+            </div>
+            <button
+              type="button"
+              onClick={reset}
+              className="text-accent hover:underline"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      )}
+    >
+      <AppInner />
+    </ErrorBoundary>
+  );
+}
+
+function AppInner() {
   const {
     loaded,
     projects,
@@ -54,6 +86,7 @@ export function App() {
     setBoxIncompatible,
     serverUpdatePrompt,
     setServerUpdatePrompt,
+    serverUpdateProgress,
     connectionState,
     launcherFlags,
   } = useStore();
@@ -269,7 +302,22 @@ export function App() {
       window.api
         .delegateList()
         .then((list) => {
-          useStore.getState().setJobs(Array.isArray(list) ? list : []);
+          const store = useStore.getState();
+          store.setJobs(Array.isArray(list) ? list : []);
+          // A job's tmux window is created ON THE BOX, so nothing here has
+          // re-listed windows since bootstrap and the tree is missing it.
+          // computeJobNesting drops a job whose window it can't find, so
+          // without this the job is invisible in the sidebar even though the
+          // slice above holds it. Re-list only when the tree actually
+          // disagrees (window created for a running job, or still present for
+          // a finished one) — not on every event, which would mean a tmux call
+          // per job per activity tick.
+          const after = useStore.getState();
+          if (shouldResyncWindowsForJobs(after.projects, after.jobs)) {
+            void after.refresh().catch(() => {
+              /* transport blip — the next tick re-evaluates the invariant */
+            });
+          }
         })
         .catch((e) => {
           // BET-640: a transport blip keeps today's silent behaviour (leave
@@ -423,6 +471,20 @@ export function App() {
         version: payload.version,
         notesUrl: payload.notesUrl ?? undefined,
       });
+    });
+    return off;
+  }, []);
+
+  // Server-update progress (this ticket): while the box runs
+  // scripts/self-update.sh, manta-server tails its log and republishes each
+  // MANTA_PROGRESS marker as a `serverUpdateProgress` bus event. The renderer
+  // renders a determinate progress bar in the server-update UpdateBar so the
+  // update reads as advancing rather than a frozen button. Mirrors the
+  // onServerUpdateAvailable subscription above.
+  useEffect(() => {
+    if (!window.api.onServerUpdateProgress) return;
+    const off = window.api.onServerUpdateProgress((p) => {
+      useStore.getState().setServerUpdateProgress(p);
     });
     return off;
   }, []);
@@ -795,6 +857,12 @@ export function App() {
   // that case; surface it in the EXISTING update-failed banner (the same
   // state the auto-update path already feeds) instead of silently reporting
   // success and leaving the box stale.
+  // Restarting opencode ends every in-flight agent turn, so the box
+  // self-update is gated behind an explicit confirm dialog. The two
+  // server-update UpdateBars open it; "Update & restart" in the dialog is what
+  // actually fires applyServerUpdate().
+  const [confirmServerUpdate, setConfirmServerUpdate] = useState(false);
+
   const applyServerUpdate = async () => {
     try {
       const res = await window.api.serverUpdateApply();
@@ -904,10 +972,9 @@ export function App() {
               </>
             }
             actionLabel="Update & restart"
-            onAction={() => {
-              void applyServerUpdate();
-            }}
+            onAction={() => setConfirmServerUpdate(true)}
             onDismiss={() => setServerUpdatePrompt(null)}
+            progress={serverUpdateProgress ?? undefined}
           />
         )}
         {!showOnboarding &&
@@ -925,10 +992,9 @@ export function App() {
                 </>
               }
               actionLabel="Upgrade box"
-              onAction={() => {
-                void applyServerUpdate();
-              }}
+              onAction={() => setConfirmServerUpdate(true)}
               onDismiss={dismiss}
+              progress={serverUpdateProgress ?? undefined}
             />
           )}
         {!isChatPaneActive && (
@@ -1096,6 +1162,41 @@ export function App() {
       </main>
       {settingsOpen && (
         <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
+      {/* Box self-update confirm: restarting opencode ends every in-flight
+          agent turn, so the destructive restart needs explicit consent before
+          the update starts. */}
+      {confirmServerUpdate && (
+        <Modal
+          size="md"
+          label="Update the box?"
+          onDismiss={() => setConfirmServerUpdate(false)}
+        >
+          <div className="space-y-4">
+            <h3 className="text-title font-semibold">Update the box?</h3>
+            <div className="text-body text-text-faint">
+              This restarts opencode, which will end every agent turn currently
+              running in any session. Any unsaved work in a running turn is lost.
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmServerUpdate(false)}
+                className="px-4 py-2 text-body text-text-muted hover:text-text"
+              >
+                Cancel
+              </button>
+              <Button
+                tone="primary"
+                onClick={() => {
+                  setConfirmServerUpdate(false);
+                  void applyServerUpdate();
+                }}
+              >
+                Update &amp; restart
+              </Button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

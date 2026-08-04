@@ -22,11 +22,18 @@
 // stability, so passing it through as a prop keeps that identity intact.
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
+import { useRef } from "react";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
-import { isBackgroundJobCompletionTurn } from "./chatUtils";
+import { ErrorBoundary } from "./ErrorBoundary";
+import {
+  createEntryMotionState,
+  isBackgroundJobCompletionTurn,
+  updateEntryMotion,
+  type EntryMotionState,
+} from "./chatUtils";
 
 export type TranscriptProps = {
   messages: OpencodeMessage[];
@@ -61,6 +68,22 @@ export function Transcript({
   onReplyQuestion,
   onRejectQuestion,
 }: TranscriptProps) {
+  // Entry motion (transcript-motion). A message that arrives while the user is
+  // watching animates in; a transcript they merely LOADED does not. The whole
+  // gate lives in `updateEntryMotion` (chatUtils, pure + tested) — see the
+  // comment there for the two invariants (primed / sticky) and the two earlier
+  // bugs that made this feature fire on history and never on new messages.
+  //
+  // Held in a ref, not state: it must not schedule a render, and folding the
+  // current message list into it during render is idempotent. The ref resets
+  // when Transcript remounts, which is exactly the session-switch boundary.
+  const motionRef = useRef<EntryMotionState | null>(null);
+  motionRef.current ??= createEntryMotionState();
+  const motion = updateEntryMotion(
+    motionRef.current,
+    messages.map((m) => ({ id: m.info.id, role: m.info.role })),
+  );
+
   return (
     <div
       ref={scrollRef}
@@ -80,6 +103,9 @@ export function Transcript({
       style={{ paddingTop: "3.5rem", paddingBottom: "var(--sp-6)", marginBottom: "var(--sp-2)" }}
     >
       <TaskContext.Provider value={taskContextValue}>
+        {/* Defensive boundary around the whole transcript body: a single */}
+        {/* MessageRow / card that throws must not white out the app. */}
+        <ErrorBoundary>
         <div className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
             // Full width, matching the populated flow below so both states
@@ -129,6 +155,7 @@ export function Transcript({
                     // The message being written right now: last in the
                     // transcript, assistant, and the turn still running.
                     streaming={isLastInTranscript && running}
+                    entering={motion.entering.has(m.info.id)}
                   />
                 );
               })}
@@ -153,18 +180,23 @@ export function Transcript({
               {questions.length > 0 && (
                 <div className="space-y-2 pt-1" ref={questionCardRef}>
                   {questions.map((q) => (
-                    <QuestionCard
-                      key={q.id}
-                      request={q}
-                      onReply={(answers) => onReplyQuestion(q, answers)}
-                      onReject={() => onRejectQuestion(q)}
-                    />
+                    // A malformed question payload must not kill the app — each
+                    // card gets its own boundary so a bad card degrades to an
+                    // inline error while its siblings still render.
+                    <ErrorBoundary key={q.id}>
+                      <QuestionCard
+                        request={q}
+                        onReply={(answers) => onReplyQuestion(q, answers)}
+                        onReject={() => onRejectQuestion(q)}
+                      />
+                    </ErrorBoundary>
                   ))}
                 </div>
               )}
             </MeasureColumn>
           )}
         </div>
+        </ErrorBoundary>
       </TaskContext.Provider>
     </div>
   );

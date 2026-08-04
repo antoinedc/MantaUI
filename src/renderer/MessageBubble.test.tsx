@@ -11,10 +11,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
-import { MessageBubble } from "./MessageBubble";
-
-const BUBBLE_CHROME =
-  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words";
+import { BUBBLE_CHROME, MessageBubble } from "./MessageBubble";
 
 describe("MessageBubble", () => {
   let h: Harness | null = null;
@@ -43,5 +40,19 @@ describe("MessageBubble", () => {
     const bubble = wrapper.firstElementChild as HTMLElement;
     expect(bubble.className).toBe(BUBBLE_CHROME);
     expect(bubble.textContent).toBe("Hello");
+  });
+
+  // The send animation must be OPT-IN. It shipped unconditional, so opening
+  // any session popped every bubble in the transcript at once.
+  it("does not animate by default — a loaded transcript stays still", () => {
+    h = mount(<MessageBubble>Hello</MessageBubble>);
+    const bubble = h.container.querySelector(".flex.justify-end > div") as HTMLElement;
+    expect(bubble.className).not.toContain("manta-bubble-in");
+  });
+
+  it("animates the send only when the message arrived live", () => {
+    h = mount(<MessageBubble entering>Hello</MessageBubble>);
+    const bubble = h.container.querySelector(".flex.justify-end > div") as HTMLElement;
+    expect(bubble.className).toContain("manta-bubble-in");
   });
 });

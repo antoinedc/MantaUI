@@ -65,6 +65,7 @@ exec >>"$LOG_FILE" 2>&1
 . "$MANTA_HOME/scripts/lib/release.sh"
 
 # --- Detect install kind ------------------------------------------------------
+echo "MANTA_PROGRESS 1/6 Checking for updates"
 if [ -d "$MANTA_HOME/.git" ]; then
   INSTALL_KIND=git
 elif [ -f "$MANTA_HOME/RELEASE.json" ]; then
@@ -82,6 +83,7 @@ else
   NODE_CMD="node"
 fi
 
+echo "MANTA_PROGRESS 2/6 Downloading update"
 if [ "$INSTALL_KIND" = "git" ]; then
   log "self-update: fetching origin/main into $MANTA_HOME"
   git -C "$MANTA_HOME" fetch origin main -q
@@ -91,8 +93,29 @@ if [ "$INSTALL_KIND" = "git" ]; then
 else
   # packaged install — download + verify + extract the release tarball and
   # replace only the payload paths the release owns.
-  host="${MANTA_RELEASE_HOST:-https://mantaui.com}"
+  # Channel-derived release host. This default used to be an unconditional
+  # `https://mantaui.com`, so a box installed with MANTA_CHANNEL=staging
+  # fetched the PROD manifest and updated itself onto PROD builds — the
+  # staging track was published but no box could ever follow it.
+  #
+  # Mirrors `releaseHost` in src/shared/channel.mjs (prod →
+  # https://mantaui.com, staging → https://mantaui.com/staging). Kept as a
+  # small case rather than shelling out to node so this still works when the
+  # bundled runtime is mid-replacement. `dev` maps to the prod host on
+  # purpose: a dev box is a git checkout, which takes the git branch above and
+  # never reaches this code at all.
+  #
+  # MANTA_CHANNEL reaches us from the environment of whoever spawned this
+  # script — manta-server inherits it from its own systemd unit / LaunchAgent,
+  # which install.sh renders with the channel it installed. An unset value
+  # falls back to prod, matching install.sh's own default.
+  case "${MANTA_CHANNEL:-prod}" in
+    staging) channel_release_host="https://mantaui.com/staging" ;;
+    *)       channel_release_host="https://mantaui.com" ;;
+  esac
+  host="${MANTA_RELEASE_HOST:-$channel_release_host}"
   host="${host%/}"
+  log "self-update: channel=${MANTA_CHANNEL:-prod} release host=$host"
 
   INSTALLED_VERSION="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)||"")' "$MANTA_HOME/RELEASE.json")"
 
@@ -154,6 +177,7 @@ else
   ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
 fi
 
+echo "MANTA_PROGRESS 3/6 Installing dependencies"
 log "self-update: reinstalling prod-only deps"
 npm ci --omit=dev --prefix "$MANTA_HOME"
 
@@ -219,14 +243,9 @@ refresh_opencode_tools() {
     return 0
   fi
   echo "✓ self-update: opencode tools refreshed ($changed of $copied changed)"
-  echo "  ↳ restart opencode to load them (this will end any running agent turn):"
-  if command -v systemctl >/dev/null 2>&1; then
-    echo "      systemctl --user restart opencode-serve"
-  elif [ "$(uname -s)" = "Darwin" ]; then
-    echo "      launchctl kickstart -k gui/\$(id -u)/com.mantaui.opencode"
-  fi
 }
 
+echo "MANTA_PROGRESS 4/6 Refreshing AI tools"
 refresh_opencode_tools
 
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
@@ -236,6 +255,23 @@ refresh_opencode_tools
 # update without rewriting existing (possibly user-edited) sections.
 sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/AGENTS.md"
 
+echo "MANTA_PROGRESS 5/6 Restarting opencode"
+# Restart opencode so refreshed tools are actually loaded. opencode only
+# re-scans its tools/ directory at startup, so without this an update
+# leaves the new tools inert on disk. UNCONDITIONAL: the user confirmed a
+# restart before the update started, so the behaviour must be predictable
+# rather than depending on whether any tool file happened to change.
+if command -v systemctl >/dev/null 2>&1; then
+  echo "▸ self-update: restarting opencode-serve"
+  systemctl --user restart opencode-serve || echo "⚠ self-update: opencode restart failed"
+elif [ "$(uname -s)" = "Darwin" ]; then
+  echo "▸ self-update: kickstarting com.mantaui.opencode LaunchAgent"
+  launchctl kickstart -k "gui/$(id -u)/com.mantaui.opencode" || echo "⚠ self-update: opencode restart failed"
+else
+  echo "⚠ self-update: no systemctl/launchctl — restart opencode manually"
+fi
+
+echo "MANTA_PROGRESS 6/6 Restarting box server"
 # Restart the supervisor that runs manta-server. Linux uses the systemd
 # --user unit (default since v1); macOS (BET-277) uses the LaunchAgent
 # installed by install.sh — `launchctl kickstart -k` kills any running

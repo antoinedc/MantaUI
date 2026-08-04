@@ -6,7 +6,7 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
-import { Clock, Key, Webhook, X, Mic, Loader2 } from "lucide-react";
+import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip } from "lucide-react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
@@ -71,6 +71,45 @@ export function SessionToolbar({
         <Webhook size={16} strokeWidth={2} aria-hidden="true" />
       </button>
     </span>
+  );
+}
+
+// AttachButton — the composer's explicit "attach a file" affordance.
+//
+// Attaching used to be discoverable only by DRAGGING a file onto the panel or
+// PASTING an image; mobile got a picker in its ⋯ sheet but the desktop
+// composer had no visible entry point at all. This is that entry point: a
+// glyph button next to the model chip that opens the OS file picker and hands
+// the chosen File[] to the SAME `addDroppedFiles` path drag-drop uses (chips,
+// mime split, upload). No new upload code — only a new way to reach it.
+//
+// The <input type="file"> is hidden and reset to "" after each pick so that
+// choosing the same file twice in a row still fires `change`.
+export function AttachButton({ onFiles }: { onFiles: (files: File[]) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        title="Attach files"
+        aria-label="Attach files"
+        className="shrink-0 leading-none bg-transparent text-text-faint hover:text-text-muted transition-colors"
+      >
+        <Paperclip size={16} aria-hidden="true" />
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length > 0) onFiles(files);
+        }}
+      />
+    </>
   );
 }
 

@@ -21,6 +21,7 @@ import {
   createUpdateCheck,
   startServerUpdatePoller,
   MANIFEST_URL,
+  manifestUrl,
 } from "./serverUpdate.mjs";
 
 function fakeBus() {
@@ -309,4 +310,83 @@ test("poller: stop() clears the interval timer", async () => {
       `stop() should clear the interval (before=${handlesBefore} after=${handlesAfter})`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Channel routing.
+//
+// THE BUG THIS LOCKS IN: the manifest URL was a hardcoded prod constant, so a
+// box installed with MANTA_CHANNEL=staging checked the PROD manifest and
+// updated itself onto PROD builds. The staging track was published and live,
+// but nothing could follow it — staging drifted versions behind and no one
+// noticed, because the failure is silent and looks exactly like "no update".
+// ---------------------------------------------------------------------------
+
+// Run `fn` with MANTA_CHANNEL set to `value` (or unset when null), always
+// restoring the previous value. Shared because these cases differ only in the
+// channel and the expected URL — repeating the save/restore dance per test is
+// what the duplication gate flagged.
+function withChannel(value, fn) {
+  const prev = process.env.MANTA_CHANNEL;
+  if (value === null) delete process.env.MANTA_CHANNEL;
+  else process.env.MANTA_CHANNEL = value;
+  try {
+    fn();
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_CHANNEL;
+    else process.env.MANTA_CHANNEL = prev;
+  }
+}
+
+const PROD_FEED = "https://mantaui.com/updates/server.json";
+
+// prod / staging / dev / unset / garbage, in one table. The staging row is THE
+// regression: it used to resolve to PROD_FEED, so a staging box updated itself
+// onto prod builds.
+for (const { name, channel, expected } of [
+  { name: "prod → the prod feed", channel: "prod", expected: PROD_FEED },
+  {
+    name: "REGRESSION staging → the STAGING feed, not prod",
+    channel: "staging",
+    expected: "https://mantaui.com/staging/updates/server.json",
+  },
+  { name: "dev has no feed at all (null, never a prod fallback)", channel: "dev", expected: null },
+  { name: "unset falls back to prod", channel: null, expected: PROD_FEED },
+  { name: "unrecognised falls back to prod", channel: "banana", expected: PROD_FEED },
+]) {
+  test(`manifestUrl: ${name}`, () => {
+    withChannel(channel, () => {
+      assert.equal(manifestUrl(), expected);
+    });
+  });
+}
+
+test("createUpdateCheck fetches the channel's feed, not a hardcoded one", async () => {
+  const seen = [];
+  const check = createUpdateCheck({
+    currentVersion: "0.0.1",
+    url: "https://mantaui.com/staging/updates/server.json",
+    fetchManifest: async (u) => {
+      seen.push(u);
+      return { version: "9.9.9" };
+    },
+  });
+  const res = await check.tick();
+  assert.deepEqual(seen, ["https://mantaui.com/staging/updates/server.json"]);
+  assert.equal(res.available, true);
+});
+
+test("createUpdateCheck on a feedless (dev) build reports no update and never fetches", async () => {
+  let called = 0;
+  const check = createUpdateCheck({
+    currentVersion: "0.0.1",
+    url: null,
+    fetchManifest: async () => {
+      called++;
+      return { version: "9.9.9" };
+    },
+  });
+  const res = await check.tick();
+  assert.equal(res.available, false);
+  assert.equal(called, 0, "a dev build must not reach for a public feed");
 });

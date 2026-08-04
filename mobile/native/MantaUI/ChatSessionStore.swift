@@ -372,14 +372,45 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func replyQuestion(_ request: QuestionRequest, answers: [[String]]) {
+        // opencode's /question/{id}/reply|reject accept ONLY the `que_…`
+        // requestId — NOT the stable card id (a tool callID). Sending the card
+        // id makes the box return HTTP 400 and the question never clears, so
+        // the blocked turn stays blocked and the session looks dead to the
+        // user. A transcript-recovered question has no requestId and is
+        // unanswerable — drop the card locally rather than erroring.
+        guard let requestId = request.requestId else {
+            questions.removeAll { $0.id == request.id }
+            return
+        }
+        // Drop the card optimistically; restore it on failure so a real send
+        // error doesn't silently leave the question gone while the box stays
+        // blocked on it ("can't send messages").
+        questions.removeAll { $0.id == request.id }
         Task {
-            try? await api.questionReply(requestId: request.id, answers: answers, sessionId: sessionId)
+            do {
+                try await api.questionReply(requestId: requestId, answers: answers, sessionId: sessionId)
+            } catch {
+                if !questions.contains(where: { $0.id == request.id }) {
+                    questions.append(request)
+                }
+            }
         }
     }
 
     func rejectQuestion(_ request: QuestionRequest) {
+        guard let requestId = request.requestId else {
+            questions.removeAll { $0.id == request.id }
+            return
+        }
+        questions.removeAll { $0.id == request.id }
         Task {
-            try? await api.questionReject(requestId: request.id, sessionId: sessionId)
+            do {
+                try await api.questionReject(requestId: requestId, sessionId: sessionId)
+            } catch {
+                if !questions.contains(where: { $0.id == request.id }) {
+                    questions.append(request)
+                }
+            }
         }
     }
 

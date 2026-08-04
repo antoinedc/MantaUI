@@ -30,10 +30,10 @@ import {
   type Attachment,
   resolveActiveModel,
 } from "./chatShared";
-import { shortModelName } from "./chatUtils";
+import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
-import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
+import { AttachButton, AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
 export { TypeaheadPopup } from "./ComposerParts";
@@ -96,6 +96,24 @@ export function caretRowInfo(el: HTMLTextAreaElement | null): CaretRow | null {
   return { atFirstRow, atLastRow };
 }
 
+// True when a mousedown inside the composer box landed on a real control that
+// owns its own click — the Send button, the mic, a resource-toolbar button, an
+// attachment chip's remove button. Everything else in the box (the padding,
+// the chrome, the text field itself) should end up focusing the message field.
+//
+// WHY THIS EXISTS: on Windows the box could be clicked without the <textarea>
+// ever taking focus — the box lit its `:focus-within` ring (so the click DID
+// resolve to some descendant) but no caret appeared and the field was
+// unusable, while every other input in the app worked. Rather than depend on
+// the browser resolving a click inside the box to the textarea, InputArea now
+// routes focus explicitly (see the box's onMouseDown). Keep the control
+// escape hatch: without it, clicking Send would steal focus back to the field
+// and swallow the button's own click.
+export function isComposerControlTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return !!target.closest("button, a, [role='button']");
+}
+
 export function InputArea({
   input,
   setInput,
@@ -106,6 +124,7 @@ export function InputArea({
   refreshing,
   attachments,
   onRemoveAttachment,
+  onAttachFiles,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -152,6 +171,10 @@ export function InputArea({
   // context chips (folder / branch) which sit ABOVE the box in the header.
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
+  // Files chosen through the composer's 📎 button. Same sink as drag-drop
+  // (ChatPanel's addDroppedFiles) — the button is a second door, not a second
+  // upload path.
+  onAttachFiles: (files: File[]) => void;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
@@ -202,10 +225,22 @@ export function InputArea({
   // (e.g. "Claude Opus 4.7" → "Opus 4.7"), which sits as its own pill with
   // the effort pill showing the accent. Passed via ModelPicker's existing
   // `labelOverride` (a call-site change — ModelPicker gains no new props).
+  // When the active model is a `-fast` twin, the chip shows the BASE model's
+  // name and lets the lit ⚡ segment carry the mode — "Opus 4.7 Rationale ⚡"
+  // rather than "Opus 4.7 Rationale Fast ⚡", which says it twice. Falls back
+  // to the model's own name whenever the base twin isn't in the list.
   const shortLabel = useMemo(
     () => {
       const activeModel = resolveActiveModel(models, modelOverride, defaultModel);
-      return activeModel ? shortModelName(activeModel.name) : null;
+      if (!activeModel) return null;
+      const base = isFastModelId(activeModel.id)
+        ? models?.find(
+            (m) =>
+              m.providerID === activeModel.providerID &&
+              m.id === baseModelId(activeModel.id),
+          )
+        : null;
+      return shortModelName(base?.name ?? activeModel.name);
     },
     [models, modelOverride, defaultModel],
   );
@@ -226,71 +261,45 @@ export function InputArea({
           floating
         />
       )}
-      {/* Measure-capped composer (BET-620 change 3): the box and the chip row
-          sit inside --measure (72ch) so the composer aligns with the
-          transcript's measure edge. The reading column chrome is the
-          MeasureColumn primitive (BET-637). */}
+      {/* Measure-capped composer (BET-620 change 3): the box, meta footer and
+          trust toggle sit inside --measure (72ch) so the composer aligns with
+          the transcript's measure edge, per the session mockup (.comp-in). The
+          reading column chrome is the MeasureColumn primitive (BET-637). */}
       <MeasureColumn>
-      {/* Model picker + trust toggle as FLOATING CHIPS above the input box.
-          They used to sit in a meta footer BELOW the box; hoisting them above
-          it is what makes the composer read as one floating element rather
-          than a box with a caption. Both wear `.manta-glass-pill` so they
-          match the session-header chips — glass supplies the surface, the
-          primitive supplies the content. */}
-      <div className="mb-2 flex items-center gap-2 flex-wrap">
-        <div className="manta-glass-pill flex items-center">
-          <ModelPicker
-            modelLabel={modelLabel}
-            models={models}
-            modelOverride={modelOverride}
-            defaultModel={defaultModel}
-            deactivatedMainModels={deactivatedMainModels}
-            onOpen={onOpenModels}
-            onSelect={onSelectModel}
-            labelOverride={shortLabel}
-          />
-        </div>
-        {/* Trust toggle as a glass chip */}
-        <button
-          onClick={() => setChatAutoAllow(!chatAutoAllow)}
-          className={
-            "manta-glass-pill inline-flex items-center gap-1 text-[11.5px] leading-none font-medium py-1 px-3 rounded-full transition-colors " +
-            (chatAutoAllow
-              ? "text-danger"
-              : "text-text-quiet hover:text-text-muted")
-          }
-          title={
-            chatAutoAllow
-              ? "Bypassing permissions — click to re-enable approval"
-              : "Permissions on — click to bypass"
-          }
-        >
-          <Shield size={12} aria-hidden="true" />
-          {chatAutoAllow ? "Bypassing" : "Permissions on"}
-        </button>
-      </div>
-
-      {/* Floating composer input shell. Voice recording is signalled by THIS
-          border — a fourth treatment alongside resting / focus / error
-          (BET-416 §A): border-colour pulses to --danger, border only, never
-          the fill, solid under reduced-motion. A background refetch still
-          shows as an ambient accent border. Horizontal padding is --sp-4
-          (16px) per the BET-423 spacing ruling; the radius is --r-xl and the
-          glass fill comes from `.manta-float-composer`. */}
+      {/* Real input shell (BET-415): a bordered card with focus-within state
+          replaces the old hairline-dividers-around-a-naked-textarea. Voice
+          recording is now signalled by THIS border — a fourth treatment
+          alongside resting / focus / error (BET-416 §A): border-colour pulses
+          to --danger, border only, never the fill, solid under reduced-motion.
+          A background refetch still shows as an ambient accent border. Horizontal
+          padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row manta-float-composer mb-4 rounded-xl border flex flex-col gap-2 px-4 py-3 " +
+          "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
           (voiceActive
             ? "manta-recording"
             : refreshing
               ? "border-accent"
               : "border-border-strong")
         }
+        // Route every non-control click in the box to the message field. This
+        // is what makes the composer focusable on Windows, where a click could
+        // resolve to a sibling and leave the field caret-less (see
+        // isComposerControlTarget). Clicking the textarea itself keeps the
+        // browser default so native caret PLACEMENT still works — we only add
+        // the focus() the platform failed to do.
+        onMouseDown={(e) => {
+          if (isComposerControlTarget(e.target)) return;
+          const el = inputRef.current;
+          if (!el) return;
+          if (e.target !== el) e.preventDefault();
+          if (document.activeElement !== el) el.focus();
+        }}
       >
         {/* Attachment chips live INSIDE the box, above the text line (BET-416
             §B). They are part of the message being composed, so they share
-            the box; context chips (folder / branch) sit in the SessionHeader
-            because they describe the session. */}
+            the box; context chips (folder / branch) sit ABOVE the box in the
+            SessionHeader because they describe the session. */}
         {attachments.length > 0 && (
           <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
         )}
@@ -371,40 +380,61 @@ export function InputArea({
           className="flex-1 resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
-        {/* Inline mic on desktop — keyboard-driven, glyph-only feedback.
-            The mobile PTT FAB is rendered above the composer wrapper. */}
-        {voiceEnabled && !isMobileShell && (
-          <MicButton
-            phase={voicePhase}
-            mode={voiceMode}
-            onStart={startVoice}
-            onStop={stopVoice}
-            onCancel={cancelVoice}
-          />
-        )}
+        {/* The desktop mic + attach buttons moved DOWN into the meta row
+            beside the model picker; the box now holds only the message and
+            Send. The mobile PTT FAB is still rendered above the composer. */}
         {/* Send button — sits beside the textarea in the composer box (BET-620
-            change 4). Accent when there's text to send, muted fill when empty.
-            Circular here (not rounded-sm) to echo the pill language the
-            floating chips establish. */}
+            change 4). Accent when there's text to send, muted fill when empty. */}
         <button
           onClick={submit}
           aria-label="Send message"
           title="Send (Enter)"
           className={
-            "w-8 h-8 rounded-full grid place-items-center shrink-0 transition-colors " +
+            "w-7 h-7 rounded-sm grid place-items-center shrink-0 " +
             (input.trim() ? "bg-accent text-on-accent" : "bg-fill text-text-faint")
           }
         >
-          <Send size={15} aria-hidden="true" />
+          <Send size={14} aria-hidden="true" />
         </button>
         </div>
-
-        {/* Resource toolbar (⏰/🔑/🪝) + transient voice / running status. This
-            moved INSIDE the box when the model + trust chips moved above it:
-            the box would otherwise have chrome on both sides of it, which is
-            what made the old layout read as a panel rather than a floating
-            input. */}
-        <div className="flex items-center justify-between gap-2">
+      </div>
+      {/* Meta footer — model ▸ effort split on the left, resource toolbar +
+          transient status on the right. Branch + context pill moved to the
+          SessionHeader; the footer now owns only composing controls. */}
+      <div className="py-1 flex items-center justify-between gap-3 flex-wrap">
+        <span className="flex items-center gap-3 min-w-0 flex-wrap">
+          <ModelPicker
+            modelLabel={modelLabel}
+            models={models}
+            modelOverride={modelOverride}
+            defaultModel={defaultModel}
+            deactivatedMainModels={deactivatedMainModels}
+            onOpen={onOpenModels}
+            onSelect={onSelectModel}
+            labelOverride={shortLabel}
+          />
+          {/* Input-mode affordances (🎤 / 📎) sit HERE, beside the model
+              group, rather than inside the input box. They choose HOW you
+              compose — the same category as which model you compose for —
+              whereas the box holds the message itself and its send action.
+              The mic moved out of the box for this reason; the mobile PTT FAB
+              is unaffected (it is positioned by mobile.css, not this row). */}
+          {!isMobileShell && (
+            <span className="flex items-center gap-3">
+              {voiceEnabled && (
+                <MicButton
+                  phase={voicePhase}
+                  mode={voiceMode}
+                  onStart={startVoice}
+                  onStop={stopVoice}
+                  onCancel={cancelVoice}
+                />
+              )}
+              <AttachButton onFiles={onAttachFiles} />
+            </span>
+          )}
+        </span>
+        <span className="shrink-0 flex items-center gap-3 flex-wrap">
           <SessionToolbar
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}
@@ -420,7 +450,31 @@ export function InputArea({
                 : "esc · interrupt"}
             </span>
           )}
-        </div>
+        </span>
+      </div>
+      {/* Trust toggle — labelled control with a Shield icon (BET-415).
+          Replaces the ▶▶/▷▷ glyphs. Same chatAutoAllow behaviour, same
+          config key. Danger colour when bypassing. */}
+      <div className="pb-3 flex items-center">
+        <button
+          onClick={() => setChatAutoAllow(!chatAutoAllow)}
+          className={
+            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-[6px] px-0 " +
+            (chatAutoAllow
+              ? "text-danger hover:text-danger"
+              : "text-text-quiet hover:text-text-muted")
+          }
+          title={
+            chatAutoAllow
+              ? "Bypassing permissions — click to re-enable approval"
+              : "Permissions on — click to bypass"
+          }
+        >
+          <Shield size={14} aria-hidden="true" />
+          {chatAutoAllow
+            ? "Bypassing permissions"
+            : "Permissions on — click to bypass"}
+        </button>
       </div>
       </MeasureColumn>
     </div>

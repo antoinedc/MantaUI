@@ -16,7 +16,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { isPrivateServerUrl } from "../shared/transport.mjs";
-import { channelConfig } from "../shared/channel.mjs";
+import { channelConfig, resolveBoxChannel as sharedResolveBoxChannel } from "../shared/channel.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -40,13 +40,10 @@ export const CODE_RE = /^\d{6}$/;
  * cheap, and tests rely on being able to mutate the env between cases.
  */
 export function resolveBoxChannel() {
-  const raw =
-    typeof process !== "undefined" && process.env
-      ? process.env.MANTA_CHANNEL ?? ""
-      : "";
-  // channelConfig handles the unknown-channel → prod fallback (same rule
-  // as resolveChannel: a bad lookup must still return a usable config).
-  return channelConfig(raw || "prod");
+  // Re-exported from src/shared/channel.mjs, which is now the single home for
+  // it (the self-updater reads it too). Kept as a named export here so the
+  // existing pairPage callers and tests are untouched.
+  return sharedResolveBoxChannel();
 }
 
 /**

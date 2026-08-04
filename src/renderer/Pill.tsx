@@ -21,9 +21,10 @@
 //   - `neutral` sets no background (it inherits the surface it sits on) and
 //     therefore may inherit its foreground — a muted `--tx2` is declared as
 //     the resting label colour so a bare neutral pill reads as a label.
-//   - `accent` / `warn` set a surface (`--accent-bg` / `--warn-bg`) that
-//     differs from the page, so C1 makes them declare the matching foreground
-//     token (`text-accent` / `text-warn`) to keep contrast valid.
+//   - `accent` / `warn` / `ok` set a surface (`--accent-bg` / `--warn-bg` /
+//     `--ok-bg`) that differs from the page, so C1 makes them declare the
+//     matching foreground token (`text-accent` / `text-warn` / `text-ok`) to
+//     keep contrast valid.
 //
 // An optional `border` flag adds the `--border` edge. `size` is a separate
 // axis from the tone — "meta" (12px, the ContextPill size) is the default,
@@ -33,7 +34,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { cloneElement } from "react";
 
-type PillTone = "neutral" | "accent" | "warn";
+type PillTone = "neutral" | "accent" | "warn" | "ok";
 type PillSize = "meta" | "label";
 
 const PILL_BASE = "inline-flex items-center gap-2 rounded-full px-2 py-px font-semibold";
@@ -41,6 +42,7 @@ const TONE: Record<PillTone, string> = {
   neutral: "text-text-muted",
   accent: "bg-accent-bg text-accent",
   warn: "bg-warn-bg text-warn",
+  ok: "bg-ok-bg text-ok",
 };
 const SIZE: Record<PillSize, string> = {
   meta: "text-meta",

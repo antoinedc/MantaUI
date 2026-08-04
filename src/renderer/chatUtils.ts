@@ -1701,6 +1701,53 @@ export function computeJobNesting(
   return { hidden, children, orphans };
 }
 
+// Does the window tree disagree with the jobs slice, so the tree needs a
+// re-list?
+//
+// `computeJobNesting` can only render a job it can find a WINDOW for
+// (`byOpencodeId.get(job.childSessionID)`), and drops the job outright when it
+// can't. The two inputs refresh on completely different schedules: the jobs
+// slice re-fetches on every `delegate.updated` bus event, while the window tree
+// is only re-listed by `refresh()` — which the app runs at bootstrap and then
+// only after an action it performed itself. A background job creates its tmux
+// window on the BOX, after boot and without the app doing anything, so its
+// window is absent from the tree and the job renders NOWHERE: not nested, not
+// orphaned, not top-level. That is the "delegated jobs never appear in the
+// sidebar" bug, and it self-heals only if the user happens to do something
+// that re-lists windows.
+//
+// Rather than re-listing tmux on a timer (polling the box for a change that is
+// already announced) or on every `delegate.updated` (activity updates fire
+// every ~10s per job, so that is a tmux call per job per tick), this states the
+// invariant the renderer actually depends on and lets the caller re-list only
+// when it is violated:
+//
+//   - a RUNNING job whose child window is missing  → the tree is behind a
+//     window that was created (job would be invisible)
+//   - a window whose session belongs to a TERMINAL job → the tree is behind a
+//     window that was removed (a finished job's window would otherwise linger
+//     and, once its record is swept, reappear as an ordinary session)
+//
+// Pure so it can be tested without a tree, a socket, or a live job.
+export function shouldResyncWindowsForJobs(
+  projects: Project[],
+  jobs: Record<string, { status: string; childSessionID: string | null }>,
+): boolean {
+  const known = new Set<string>();
+  for (const p of projects) {
+    for (const w of p.windows) {
+      if (w.opencodeSessionId) known.add(w.opencodeSessionId);
+    }
+  }
+  for (const job of Object.values(jobs)) {
+    if (!job.childSessionID) continue;
+    const present = known.has(job.childSessionID);
+    if (job.status === "running" && !present) return true;
+    if (job.status !== "running" && present) return true;
+  }
+  return false;
+}
+
 // Convenience: is a given window a job child that should be nested (i.e.
 // hidden from the top-level list)? Combines isJobRow with the running/viewed
 // gate so the Sidebar's top-level filter stays a single expression.
@@ -1803,4 +1850,238 @@ export function shortModelName(name: string | null | undefined): string | null {
     }
   }
   return trimmed;
+}
+
+// ===== Fast-mode sibling models (composer ⚡ toggle) =====
+//
+// Several providers ship a "fast" flavour of a model as a SEPARATE model id
+// with a `-fast` suffix rather than as a variant: `gpt-5.6` / `gpt-5.6-fast`,
+// `gpt-5.4-mini` / `gpt-5.4-mini-fast`, `databricks-claude-opus-4-7` /
+// `…-4-7-fast`. Listing both in the model dropdown doubles its length and
+// makes an orthogonal speed/quality choice look like two unrelated models.
+//
+// So the composer treats fast as a MODE of the base model: the `-fast` id is
+// hidden from the dropdown (as long as its base twin is also visible, else it
+// would be unreachable) and reached instead through a lightning toggle in the
+// model chip. These helpers are the whole rule — the id arithmetic and the
+// availability predicate — kept pure so the toggle's disabled/on states are
+// testable without a live provider list.
+
+const FAST_SUFFIX = "-fast";
+
+/** True when `modelID` is the fast flavour of some base model. */
+export function isFastModelId(modelID: string): boolean {
+  return modelID.length > FAST_SUFFIX.length && modelID.endsWith(FAST_SUFFIX);
+}
+
+/** `"gpt-5.6-fast"` → `"gpt-5.6"`; a non-fast id is returned unchanged. */
+export function baseModelId(modelID: string): string {
+  return isFastModelId(modelID) ? modelID.slice(0, -FAST_SUFFIX.length) : modelID;
+}
+
+/** `"gpt-5.6"` → `"gpt-5.6-fast"`; a fast id is returned unchanged. */
+export function fastModelId(modelID: string): string {
+  return isFastModelId(modelID) ? modelID : `${modelID}${FAST_SUFFIX}`;
+}
+
+/**
+ * Drop `-fast` models from the grouped dropdown list, but ONLY where the base
+ * twin survives in the same provider group — a `-fast` model whose base is
+ * absent (or deactivated) has no toggle to reach it by, so hiding it would
+ * make it unselectable. Groups left empty are dropped so the menu never
+ * renders a provider heading with nothing under it.
+ */
+export function hideFastSiblingGroups(
+  groups: Array<[string, OpencodeModel[]]>,
+): Array<[string, OpencodeModel[]]> {
+  const out: Array<[string, OpencodeModel[]]> = [];
+  for (const [providerID, models] of groups) {
+    const ids = new Set(models.map((m) => m.id));
+    const kept = models.filter((m) => !(isFastModelId(m.id) && ids.has(baseModelId(m.id))));
+    if (kept.length > 0) out.push([providerID, kept]);
+  }
+  return out;
+}
+
+export type FastToggleState = {
+  /** The toggle can be clicked (a counterpart exists that keeps the effort). */
+  available: boolean;
+  /** The active model IS the fast flavour. */
+  on: boolean;
+  /** The selection a click produces; null when unavailable. */
+  target: { providerID: string; modelID: string; variant?: string } | null;
+  /** Tooltip copy explaining the current state. */
+  title: string;
+};
+
+/**
+ * Resolve the ⚡ toggle for the active model.
+ *
+ * Available only when the counterpart model exists AND still offers the
+ * currently-selected effort/variant — flipping to fast must never silently
+ * drop the user's effort choice, so a fast twin that lacks it reads as "no
+ * fast mode for this effort" and the toggle goes disabled (the user's ask).
+ * With no variant selected, only the counterpart's existence matters.
+ */
+export function resolveFastToggle(
+  models: OpencodeModel[] | null,
+  active: OpencodeModel | null,
+  variantId: string | undefined,
+): FastToggleState {
+  const off = (title: string): FastToggleState => ({ available: false, on: false, target: null, title });
+  if (!active || !models) return off("No fast mode for this model");
+
+  const on = isFastModelId(active.id);
+  const counterpartId = on ? baseModelId(active.id) : fastModelId(active.id);
+  const counterpart =
+    models.find(
+      (m) =>
+        m.providerID === active.providerID &&
+        m.id === counterpartId &&
+        m.enabled !== false &&
+        m.status !== "deprecated",
+    ) ?? null;
+
+  if (!counterpart) {
+    // Already on a fast model whose base vanished: report the truth (on) but
+    // give the user nothing to click, rather than lying that fast is off.
+    return on
+      ? { available: false, on: true, target: null, title: "Fast mode on (no standard model available)" }
+      : off("No fast mode for this model");
+  }
+
+  const keepsVariant =
+    variantId === undefined || (counterpart.variants ?? []).some((v) => v.id === variantId);
+  if (!keepsVariant) {
+    return {
+      available: false,
+      on,
+      target: null,
+      title: `No fast mode at ${variantId} effort`,
+    };
+  }
+
+  return {
+    available: true,
+    on,
+    target: {
+      providerID: counterpart.providerID,
+      modelID: counterpart.id,
+      ...(variantId === undefined ? {} : { variant: variantId }),
+    },
+    title: on ? "Fast mode on — click for the standard model" : "Fast mode off — click for the faster model",
+  };
+}
+
+// ===== Transcript entry motion =====
+//
+// Which transcript rows are allowed to ANIMATE their arrival. The rule the
+// user actually wants is narrow: a message that lands while they are watching
+// animates; everything else — the transcript they just loaded, the session
+// they just switched into, history paged in above — appears instantly.
+//
+// This is the third attempt at that gate, and the two failures are worth
+// recording because both looked correct in review:
+//
+//   1. The user bubble carried its animation class UNCONDITIONALLY, so every
+//      bubble in a loaded transcript popped on mount. Session switch replayed
+//      the entire history's sends.
+//   2. The assistant row's flag lived for exactly ONE render. React removes
+//      the class on the next render, which CANCELS a running CSS animation and
+//      snaps the element to its end state. During a live turn the transcript
+//      re-renders every few milliseconds, so the animation was destroyed about
+//      one frame after it started — it never visibly played at all.
+//
+// Hence the two invariants this module exists to enforce:
+//
+//   PRIMED — nothing animates until the transcript has been populated once.
+//   The first non-empty render defines "history"; only ids appearing AFTER it
+//   are new. An empty transcript (the "Welcome" state) must NOT prime, or a
+//   brand-new session's first send would be classified as history.
+//
+//   STICKY — once an id is marked entering it STAYS marked for as long as it
+//   is on screen. A CSS animation is a mount-time, play-once effect (fill mode
+//   `both` holds the end state), so keeping the class costs nothing and is the
+//   only way to survive the re-render storm of a streaming turn.
+//
+// Kept pure + mutation-in-place so the caller can hold it in a ref and update
+// it during render without scheduling another one.
+
+/** A message reduced to what the entry-motion gate needs. */
+export type EntryMotionRow = { id: string; role: string };
+
+export type EntryMotionState = {
+  /** Ids already accounted for. `null` until the first non-empty render. */
+  seen: Set<string> | null;
+  /** Ids cleared to animate. Sticky for as long as the id is present. */
+  entering: Set<string>;
+  /** Whether the previous update saw a live optimistic placeholder. */
+  hadOptimistic: boolean;
+};
+
+export function createEntryMotionState(): EntryMotionState {
+  return { seen: null, entering: new Set(), hadOptimistic: false };
+}
+
+/** The renderer's optimistic placeholder id prefix (see ChatPanel `submit`). */
+const OPTIMISTIC_USER_PREFIX = "optimistic-user-";
+
+export function isOptimisticUserId(id: string): boolean {
+  return id.startsWith(OPTIMISTIC_USER_PREFIX);
+}
+
+/**
+ * Fold the current message list into `state`, deciding which ids animate.
+ * MUTATES `state` and returns it (it lives in a ref; a new object per render
+ * would defeat the point).
+ *
+ * The optimistic-placeholder handover is the subtle case. A send appends a
+ * placeholder immediately, then the server's canonical message REPLACES it
+ * under a different id. React sees a different key, so it tears the bubble
+ * down and builds a new one — which would replay the send animation a second
+ * time, a visible double-pop a few hundred milliseconds apart. When a
+ * placeholder retires, the first new user message in that same update is
+ * therefore treated as its continuation and does NOT animate: the bubble it
+ * replaces already played, and the swap should be invisible.
+ */
+export function updateEntryMotion(
+  state: EntryMotionState,
+  rows: EntryMotionRow[],
+): EntryMotionState {
+  const ids = new Set(rows.map((r) => r.id));
+  const hasOptimistic = rows.some((r) => isOptimisticUserId(r.id));
+
+  if (state.seen == null) {
+    // Nothing to do until the transcript is populated — an empty render is
+    // the "Welcome" state, not a history load.
+    if (rows.length === 0) return state;
+    // First non-empty render IS the history. Prime, animate nothing.
+    state.seen = ids;
+    state.hadOptimistic = hasOptimistic;
+    return state;
+  }
+
+  // A placeholder was live last update and is gone now: the canonical message
+  // for that send has landed, and exactly one new user row inherits its
+  // already-played animation instead of starting a fresh one.
+  let handover = state.hadOptimistic && !hasOptimistic;
+
+  for (const row of rows) {
+    if (state.seen.has(row.id)) continue;
+    state.seen.add(row.id);
+    if (handover && row.role === "user" && !isOptimisticUserId(row.id)) {
+      handover = false;
+      continue;
+    }
+    state.entering.add(row.id);
+  }
+
+  // Drop ids that have left the transcript so the sticky set stays bounded
+  // (a cleared/compacted session replaces the whole list).
+  for (const id of state.entering) {
+    if (!ids.has(id)) state.entering.delete(id);
+  }
+
+  state.hadOptimistic = hasOptimistic;
+  return state;
 }

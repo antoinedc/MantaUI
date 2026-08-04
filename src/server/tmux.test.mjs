@@ -7,6 +7,7 @@ import {
   parseSessions,
   tmuxSpawnEnv,
   isMissingSessionError,
+  isNoTmuxServerError,
   newWindow,
   newSession,
   newWindowGetIndex,
@@ -287,6 +288,96 @@ test("resolveCwdOrThrow: '~/<existing dir>' resolves under os.homedir()", async 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// listProjects must not report a tmux FAULT as "this box has zero sessions".
+//
+// Both tmux queries used to end in `.catch(() => ({ stdout: "" }))`, so any
+// failure — a restarting server, a missing PATH, a mangled locale — came back
+// as a successful, EMPTY listing. A client cannot tell that apart from a box
+// that genuinely has no sessions, so the phone showed the inviting "No
+// sessions yet. Tap + to create one." for a box full of work, and the
+// ownership sidecar was reconciled to nothing against the phantom empty list.
+// ---------------------------------------------------------------------------
+
+test("isNoTmuxServerError separates 'no tmux server' from a real fault", () => {
+  assert.equal(
+    isNoTmuxServerError(new Error("tmux exited 1: no server running on /tmp/tmux-1000/default")),
+    true,
+  );
+  assert.equal(
+    isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)")),
+    true,
+  );
+  assert.equal(isNoTmuxServerError(new Error("spawn tmux ENOENT")), false);
+  assert.equal(isNoTmuxServerError(new Error("tmux exited 1: lost server")), false);
+  assert.equal(isNoTmuxServerError(undefined), false);
+  assert.equal(isNoTmuxServerError({}), false);
+});
+
+test("listProjects returns [] when tmux genuinely has no server", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async () => {
+    throw new Error("tmux exited 1: no server running on /tmp/tmux-1000/default");
+  });
+  try {
+    assert.deepEqual(await listProjects(), []);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
+test("listProjects THROWS on a tmux fault rather than reporting zero sessions", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async () => {
+    throw new Error("spawn tmux ENOENT");
+  });
+  try {
+    await assert.rejects(() => listProjects(), /ENOENT/);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
+test("listProjects THROWS when only the window query faults", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async (cmd, args) => {
+    if (args.includes("list-sessions")) return { stdout: "alpha\t1\n", stderr: "" };
+    throw new Error("tmux exited 1: lost server");
+  });
+  try {
+    await assert.rejects(() => listProjects(), /lost server/);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
+// A fault must also leave the ownership sidecar alone — reconciling against an
+// empty live-session list is what would silently drop every owned session.
+test("a tmux fault does not prune the owned-session sidecar", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-fault-"));
+  const path = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    await addOwnedSession("alpha", { path });
+    _setRun(async () => {
+      throw new Error("spawn tmux ENOENT");
+    });
+    try {
+      await assert.rejects(() => listProjects());
+    } finally {
+      _setRun(null);
+    }
+    assert.deepEqual(await loadOwnedSessions(path), ["alpha"]);
+  } finally {
+    _resetOwnedSessionsCache();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 
 test("resolveCwdOrThrow: undefined resolves to '.' (current working dir)", () => {
   const out = resolveCwdOrThrow(undefined);

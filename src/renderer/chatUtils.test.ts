@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  createEntryMotionState,
+  updateEntryMotion,
+  isOptimisticUserId,
   formatTokens,
   formatBytes,
   formatDuration,
@@ -59,10 +62,16 @@ import {
   resolvePin,
   fuzzySessionScore,
   computeJobNesting,
+  shouldResyncWindowsForJobs,
   isNestedJobChild,
   globCovers,
   isApprovalCoveredByAlways,
   shortModelName,
+  isFastModelId,
+  baseModelId,
+  fastModelId,
+  hideFastSiblingGroups,
+  resolveFastToggle,
   filterModelGroups,
   moveMenuHighlight,
 } from "./chatUtils";
@@ -2182,6 +2191,89 @@ describe("fuzzySessionScore", () => {
   });
 });
 
+describe("shouldResyncWindowsForJobs", () => {
+  // THE REGRESSION THIS LOCKS IN: a delegated job creates its tmux window on
+  // the box, so the renderer's window tree — only re-listed at bootstrap and
+  // after the app's own actions — never contains it. computeJobNesting then
+  // drops the job (`if (!childWin) continue`) and it renders NOWHERE, while
+  // the jobs slice happily holds it. The sidebar looked like it ignored
+  // background jobs entirely.
+  it("running job whose window is NOT in the tree → resync (the invisible-job bug)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
+  });
+
+  it("documents WHY it matters: nesting renders a window-less job NOWHERE", () => {
+    // Not nested, not orphaned, not top-level — computeJobNesting's
+    // `if (!childWin) continue` drops it silently. This is the state the
+    // sidebar was permanently in for every delegated job.
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const nesting = computeJobNesting(
+      projects[0],
+      { child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" } },
+      undefined,
+    );
+    expect(nesting.hidden.size).toBe(0);
+    expect(nesting.children.size).toBe(0);
+    expect(nesting.orphans).toEqual([]);
+    // …which is exactly the condition the predicate flags for a re-list.
+    expect(
+      shouldResyncWindowsForJobs(projects, {
+        child1: { status: "running", childSessionID: "child1" },
+      }),
+    ).toBe(true);
+  });
+
+  it("running job whose window IS in the tree → no resync", () => {
+    const projects = [
+      mkProject("p", [
+        { index: 1, name: "parent", opencodeSessionId: "parent" },
+        { index: 2, name: "job", opencodeSessionId: "child1" },
+      ]),
+    ];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("finished job whose window is STILL in the tree → resync (stale window would linger)", () => {
+    const projects = [
+      mkProject("p", [
+        { index: 1, name: "parent", opencodeSessionId: "parent" },
+        { index: 2, name: "job", opencodeSessionId: "child1" },
+      ]),
+    ];
+    const jobs = { child1: { status: "done", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
+  });
+
+  it("finished job already cleaned up → no resync (steady state, no tmux call)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { child1: { status: "done", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("no jobs → no resync", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    expect(shouldResyncWindowsForJobs(projects, {})).toBe(false);
+  });
+
+  it("job with no childSessionID is ignored (mid-start record)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { x: { status: "running", childSessionID: null } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("finds a job window in ANY project, not just the parent's", () => {
+    const projects = [
+      mkProject("a", [{ index: 1, name: "parent", opencodeSessionId: "parent" }]),
+      mkProject("b", [{ index: 1, name: "job", opencodeSessionId: "child1" }]),
+    ];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+});
+
 describe("computeJobNesting", () => {
   const jobs = {
     child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" },
@@ -2416,5 +2508,230 @@ describe("shortModelName", () => {
     expect(shortModelName(null)).toBeNull();
     expect(shortModelName(undefined)).toBeNull();
     expect(shortModelName("   ")).toBeNull();
+  });
+});
+
+// ===== Fast-mode sibling models (composer ⚡ toggle) =====
+
+describe("fast-mode model helpers", () => {
+  const M = (
+    providerID: string,
+    id: string,
+    variants?: string[],
+    extra: Partial<OpencodeModel> = {},
+  ): OpencodeModel =>
+    ({
+      id,
+      providerID,
+      name: id,
+      ...(variants ? { variants: variants.map((v) => ({ id: v })) } : {}),
+      ...extra,
+    }) as OpencodeModel;
+
+  it("isFastModelId / baseModelId / fastModelId round-trip", () => {
+    expect(isFastModelId("gpt-5.6-fast")).toBe(true);
+    expect(isFastModelId("gpt-5.6")).toBe(false);
+    // A bare "-fast" is not a fast flavour of anything.
+    expect(isFastModelId("-fast")).toBe(false);
+    expect(baseModelId("gpt-5.6-fast")).toBe("gpt-5.6");
+    expect(baseModelId("gpt-5.6")).toBe("gpt-5.6");
+    expect(fastModelId("gpt-5.6")).toBe("gpt-5.6-fast");
+    expect(fastModelId("gpt-5.6-fast")).toBe("gpt-5.6-fast");
+  });
+
+  it("hideFastSiblingGroups drops a -fast model when its base is present", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["openai", [M("openai", "gpt-5.6"), M("openai", "gpt-5.6-fast"), M("openai", "gpt-5.4-mini")]],
+    ];
+    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual([
+      "gpt-5.6",
+      "gpt-5.4-mini",
+    ]);
+  });
+
+  it("hideFastSiblingGroups KEEPS an orphan -fast model (nothing else reaches it)", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["x", [M("x", "solo-fast")]],
+    ];
+    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual(["solo-fast"]);
+  });
+
+  it("hideFastSiblingGroups drops a group left empty", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["a", [M("a", "m"), M("a", "m-fast")]],
+      ["b", [M("b", "only-fast"), M("b", "only")]],
+    ];
+    const out = hideFastSiblingGroups(groups);
+    expect(out.map(([p]) => p)).toEqual(["a", "b"]);
+    expect(out[1][1].map((m) => m.id)).toEqual(["only"]);
+  });
+
+  it("resolveFastToggle: base model with a fast twin is available and off", () => {
+    const models = [M("openai", "gpt-5.6", ["low", "high"]), M("openai", "gpt-5.6-fast", ["low", "high"])];
+    const r = resolveFastToggle(models, models[0], "high");
+    expect(r).toMatchObject({
+      available: true,
+      on: false,
+      target: { providerID: "openai", modelID: "gpt-5.6-fast", variant: "high" },
+    });
+  });
+
+  it("resolveFastToggle: fast model reports on and targets the base", () => {
+    const models = [M("openai", "gpt-5.6", ["low"]), M("openai", "gpt-5.6-fast", ["low"])];
+    const r = resolveFastToggle(models, models[1], "low");
+    expect(r).toMatchObject({
+      available: true,
+      on: true,
+      target: { providerID: "openai", modelID: "gpt-5.6", variant: "low" },
+    });
+  });
+
+  it("resolveFastToggle: no variant selected → target carries no variant", () => {
+    const models = [M("openai", "a"), M("openai", "a-fast")];
+    expect(resolveFastToggle(models, models[0], undefined).target).toEqual({
+      providerID: "openai",
+      modelID: "a-fast",
+    });
+  });
+
+  it("resolveFastToggle: disabled when the twin lacks the selected effort", () => {
+    const models = [
+      M("openai", "a", ["low", "max"]),
+      M("openai", "a-fast", ["low"]),
+    ];
+    const r = resolveFastToggle(models, models[0], "max");
+    expect(r.available).toBe(false);
+    expect(r.target).toBeNull();
+    expect(r.title).toContain("max");
+  });
+
+  it("resolveFastToggle: disabled when no twin exists at all", () => {
+    const models = [M("openai", "solo", ["low"])];
+    expect(resolveFastToggle(models, models[0], "low")).toMatchObject({
+      available: false,
+      on: false,
+      target: null,
+    });
+  });
+
+  it("resolveFastToggle: a twin in a DIFFERENT provider does not count", () => {
+    const models = [M("openai", "a"), M("azure", "a-fast")];
+    expect(resolveFastToggle(models, models[0], undefined).available).toBe(false);
+  });
+
+  it("resolveFastToggle: a deactivated/deprecated twin does not count", () => {
+    const models = [
+      M("openai", "a"),
+      M("openai", "a-fast", undefined, { enabled: false }),
+    ];
+    expect(resolveFastToggle(models, models[0], undefined).available).toBe(false);
+  });
+
+  it("resolveFastToggle: fast model with no base still reports on, but not clickable", () => {
+    const models = [M("openai", "orphan-fast")];
+    expect(resolveFastToggle(models, models[0], undefined)).toMatchObject({
+      available: false,
+      on: true,
+      target: null,
+    });
+  });
+
+  it("resolveFastToggle: null model is off + unavailable", () => {
+    expect(resolveFastToggle([], null, undefined)).toMatchObject({
+      available: false,
+      on: false,
+    });
+  });
+});
+
+// ===== Transcript entry motion =====
+//
+// The gate that decides which transcript rows animate their arrival. Every
+// case below is a bug that shipped, not a hypothetical: the feature reached
+// production animating exactly the wrong set (all of history, none of the new
+// messages), so these tests pin both halves of the contract.
+
+describe("updateEntryMotion", () => {
+  const user = (id: string) => ({ id, role: "user" });
+  const asst = (id: string) => ({ id, role: "assistant" });
+
+  it("animates nothing on the first populated render — that is history", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")]);
+    expect([...s.entering]).toEqual([]);
+  });
+
+  it("does not prime on an empty transcript, so a new session's first send still animates", () => {
+    // The "Welcome" state renders with zero messages. If that primed the gate,
+    // the very next message would be classified as pre-existing history and a
+    // brand-new session would never animate anything.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, []);
+    expect(s.seen).toBeNull();
+    updateEntryMotion(s, [user("u1")]);
+    expect([...s.entering]).toEqual([]); // u1 IS the first populated render
+  });
+
+  it("animates a message appended after the initial load", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")]);
+    expect([...s.entering]).toEqual(["u2"]);
+  });
+
+  it("KEEPS the flag across later renders — dropping it cancels the animation", () => {
+    // A CSS animation is killed the moment its class is removed, and the
+    // element snaps to its end state. The transcript re-renders every few ms
+    // during a streaming turn, so a flag that lasted one render meant the
+    // animation was destroyed about one frame in and never visibly played.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+    for (let i = 0; i < 50; i++) updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+  });
+
+  it("animates the optimistic placeholder a send appends", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("optimistic-user-7")]);
+    expect(s.entering.has("optimistic-user-7")).toBe(true);
+  });
+
+  it("does NOT replay the pop when the canonical message replaces the placeholder", () => {
+    // The server's real message arrives under a different id, so React tears
+    // the bubble down and mounts a new one. Without the handover that reads as
+    // a second pop a few hundred ms after the first.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), user("optimistic-user-7")]);
+    updateEntryMotion(s, [user("u1"), user("msg_real")]);
+    expect(s.entering.has("msg_real")).toBe(false);
+  });
+
+  it("still animates the assistant reply that follows a placeholder handover", () => {
+    // The handover must be spent on exactly one user row, never on the
+    // assistant turn that arrives alongside it.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), user("optimistic-user-7")]);
+    updateEntryMotion(s, [user("u1"), user("msg_real"), asst("a_new")]);
+    expect(s.entering.has("msg_real")).toBe(false);
+    expect(s.entering.has("a_new")).toBe(true);
+  });
+
+  it("forgets ids that leave the transcript, so a cleared session stays bounded", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+    updateEntryMotion(s, [user("u1")]);
+    expect(s.entering.has("a1")).toBe(false);
+  });
+
+  it("recognises the renderer's optimistic id prefix", () => {
+    expect(isOptimisticUserId("optimistic-user-1770000000000")).toBe(true);
+    expect(isOptimisticUserId("msg_01ABC")).toBe(false);
   });
 });

@@ -27,10 +27,25 @@
 
 import type { ReactNode } from "react";
 
-export function MessageBubble({ children }: { children: ReactNode }) {
+export const BUBBLE_CHROME =
+  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text " +
+  "max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words";
+
+export function MessageBubble({
+  children,
+  entering = false,
+}: {
+  children: ReactNode;
+  // The iMessage-style send pop, and the ONE thing that must stay gated: this
+  // class used to be unconditional, so every bubble in a transcript the user
+  // merely opened popped on mount and a session switch replayed every send
+  // they had ever made. Only a message that arrives while they are watching
+  // animates (decided in Transcript, see `updateEntryMotion`).
+  entering?: boolean;
+}) {
   return (
     <div className="flex justify-end">
-      <div className="bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words">
+      <div className={entering ? BUBBLE_CHROME + " manta-bubble-in" : BUBBLE_CHROME}>
         {children}
       </div>
     </div>
