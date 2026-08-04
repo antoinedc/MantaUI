@@ -38,6 +38,13 @@ ipcRenderer.on(IPC.pairLinkReceived, (_event, url: string) => {
 });
 
 const api = {
+  // TEMP DIAG: forward a renderer error/console line to the main process so it
+  // reaches the launching terminal. Fire-and-forget (no invoke). Remove with
+  // the blank-bug probe.
+  reportRendererLog: (kind: string, message: string, stack?: string): void => {
+    ipcRenderer.send(IPC.rendererLog, { kind, message, stack });
+  },
+
   // Read ONLY by main.tsx's boot sequence (`chooseDesktopTransport`), before
   // httpApi is installed as `window.api` — used to seed httpApi's
   // localStorage credentials from the desktop's local config.json (pairing

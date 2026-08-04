@@ -371,6 +371,14 @@ function registerHandlers(): void {
   // /rpc/config:get instead). See src/preload/index.ts and src/renderer/main.tsx.
   ipcMain.handle(IPC.configGet, () => config);
 
+  // TEMP DIAG: renderer → terminal forwarding for the silent-blank probe.
+  // Main's console.write reaches the launching terminal / log; the error is
+  // otherwise invisible when devtools is closed or the root went blank.
+  // Remove with the blank-bug probe.
+  ipcMain.on(IPC.rendererLog, (_e, p: { kind: string; message: string; stack?: string }) => {
+    console.error(`[renderer:${p?.kind ?? "log"}]`, p?.message ?? "", p?.stack ?? "");
+  });
+
   // BET-225 stage 3 (Part C): returns the desktop app's own version via
   // Electron's `app.getVersion()` (reads the same package.json the server
   // uses for `server:version`). Renderer combines this with `minClient`
