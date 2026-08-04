@@ -23,7 +23,6 @@ import {
   GrepBody,
   ReadBody,
   ToolOutput,
-  TodoWriteBody,
   UnifiedDiff,
   WebFetchBody,
 } from "./ToolBodies";
@@ -274,9 +273,18 @@ function ToolBody({
       return <GlobBody state={state} />;
     case "grep":
       return <GrepBody state={state} verbose={verbose} />;
+    // The checklist has exactly ONE renderer: the ActiveTodos card at the tail
+    // of the transcript. `MessageRow`'s part filter already drops todowrite
+    // parts, so this case is normally unreachable — it stays as a belt-and-
+    // braces guard so that if the filter ever changes, a todowrite call falls
+    // through to NOTHING rather than to the default generic-output well, which
+    // would dump the raw todo JSON into the transcript under a second,
+    // divergent treatment. (There used to be a real TodoWriteBody here that
+    // drew the same list with a different glyph set — `◐ ☒ ☐` vs the card's
+    // marks — and struck through completed items when the card did not.)
     case "todowrite":
     case "todo_write":
-      return <TodoWriteBody state={state} />;
+      return null;
     case "webfetch":
     case "web_fetch":
       return <WebFetchBody state={state} />;

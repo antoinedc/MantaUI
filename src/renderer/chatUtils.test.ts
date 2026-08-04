@@ -13,6 +13,8 @@ import {
   dedupeAgainstBuiltins,
   formatModelContextSize,
   formatHiddenTodosSummary,
+  summarizeTodoProgress,
+  todoStatusOf,
   buildQuestionAnswers,
   canSubmitQuestion,
   commandPrefixKey,
@@ -562,6 +564,81 @@ describe("formatHiddenTodosSummary", () => {
   it("formats both with the literal '&' separator from the spec", () => {
     expect(formatHiddenTodosSummary(5, 5)).toBe("+ 5 pending & 5 done");
     expect(formatHiddenTodosSummary(2, 3)).toBe("+ 2 pending & 3 done");
+  });
+});
+
+// ===== todoStatusOf / summarizeTodoProgress =====
+
+describe("todoStatusOf", () => {
+  it("maps the four canonical statuses", () => {
+    expect(todoStatusOf({ status: "in_progress" })).toBe("in_progress");
+    expect(todoStatusOf({ status: "completed" })).toBe("completed");
+    expect(todoStatusOf({ status: "cancelled" })).toBe("cancelled");
+    expect(todoStatusOf({ status: "pending" })).toBe("pending");
+  });
+
+  it("is case-insensitive — the render path used to compare raw strings, so a "
+    + "mixed-case status sorted as current but drew the pending mark", () => {
+    expect(todoStatusOf({ status: "In_Progress" })).toBe("in_progress");
+    expect(todoStatusOf({ status: "COMPLETED" })).toBe("completed");
+  });
+
+  it("treats an unknown or missing status as pending", () => {
+    expect(todoStatusOf({ status: "blocked" })).toBe("pending");
+    expect(todoStatusOf({})).toBe("pending");
+    expect(todoStatusOf({ status: null })).toBe("pending");
+  });
+});
+
+describe("summarizeTodoProgress", () => {
+  const todo = (status: string) => ({ status, content: "x" });
+
+  it("counts settled vs in-flight and labels 'N of M'", () => {
+    const p = summarizeTodoProgress([
+      todo("in_progress"),
+      todo("completed"),
+      todo("completed"),
+      todo("pending"),
+    ]);
+    expect(p.total).toBe(4);
+    expect(p.settled).toBe(2);
+    expect(p.inProgress).toBe(1);
+    expect(p.label).toBe("2 of 4");
+    expect(p.allSettled).toBe(false);
+  });
+
+  it("counts cancelled as settled — the model is done with it", () => {
+    const p = summarizeTodoProgress([todo("cancelled"), todo("pending")]);
+    expect(p.settled).toBe(1);
+    expect(p.label).toBe("1 of 2");
+  });
+
+  it("segment widths are percentages of the WHOLE list, not the visible cap", () => {
+    const p = summarizeTodoProgress([
+      todo("completed"),
+      todo("completed"),
+      todo("in_progress"),
+      todo("pending"),
+    ]);
+    expect(p.settledPct).toBe(50);
+    expect(p.activePct).toBe(25);
+    // The two segments never exceed the track.
+    expect(p.settledPct + p.activePct).toBeLessThanOrEqual(100);
+  });
+
+  it("labels 'complete' once every item is terminal", () => {
+    const p = summarizeTodoProgress([todo("completed"), todo("cancelled")]);
+    expect(p.allSettled).toBe(true);
+    expect(p.label).toBe("complete");
+    expect(p.settledPct).toBe(100);
+  });
+
+  it("does not divide by zero on an empty list", () => {
+    const p = summarizeTodoProgress([]);
+    expect(p.settledPct).toBe(0);
+    expect(p.activePct).toBe(0);
+    expect(p.allSettled).toBe(false);
+    expect(p.label).toBe("0 of 0");
   });
 });
 

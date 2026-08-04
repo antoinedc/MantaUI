@@ -311,6 +311,74 @@ export function dedupeAgainstBuiltins<T extends TypeaheadCommandRow>(
 }
 
 /**
+ * The four todo states the ActiveTodos card renders, normalized.
+ *
+ * `status` arrives as a free-form string on both paths (the `todo.updated`
+ * SSE payload and the transcript-scraped TodoWrite input), and the selectors
+ * in streamInterpretation.mjs already lowercase before comparing. The RENDER
+ * path used to compare case-sensitively, so a `"In_Progress"` sorted into the
+ * current bucket but drew the pending checkbox. One normalizer now feeds both
+ * the row and the progress summary, so they can't disagree.
+ */
+export type TodoStatus = "in_progress" | "completed" | "cancelled" | "pending";
+
+export function todoStatusOf(t: Record<string, unknown>): TodoStatus {
+  const s = String(t.status ?? "").toLowerCase();
+  if (s === "in_progress") return "in_progress";
+  if (s === "completed") return "completed";
+  if (s === "cancelled") return "cancelled";
+  return "pending";
+}
+
+export type TodoProgress = {
+  total: number;
+  /** completed + cancelled — everything the model is finished with. */
+  settled: number;
+  inProgress: number;
+  /** Width of the green settled segment of the progress bar, 0-100. */
+  settledPct: number;
+  /** Width of the amber in-flight segment, 0-100. */
+  activePct: number;
+  /** Header label: "4 of 5", or "complete" once nothing is left. */
+  label: string;
+  allSettled: boolean;
+};
+
+/**
+ * Count a todo list into the ActiveTodos card's header label and the two
+ * progress-bar segment widths.
+ *
+ * Counts run over the WHOLE list, not the <= 5 rows `selectVisibleTodos`
+ * renders — the bar's job is to say how much of the plan is left, which is
+ * exactly the thing the visible-row cap hides. Cancelled counts as settled
+ * (the model is done with it) but is drawn neutral rather than green by the
+ * row itself, so a cancelled item advances the bar without claiming success.
+ */
+export function summarizeTodoProgress(
+  todos: Array<Record<string, unknown>>,
+): TodoProgress {
+  let settled = 0;
+  let inProgress = 0;
+  for (const t of todos) {
+    const s = todoStatusOf(t);
+    if (s === "completed" || s === "cancelled") settled += 1;
+    else if (s === "in_progress") inProgress += 1;
+  }
+  const total = todos.length;
+  const pct = (n: number) => (total > 0 ? (n / total) * 100 : 0);
+  const allSettled = total > 0 && settled === total;
+  return {
+    total,
+    settled,
+    inProgress,
+    settledPct: pct(settled),
+    activePct: pct(inProgress),
+    label: allSettled ? "complete" : `${settled} of ${total}`,
+    allSettled,
+  };
+}
+
+/**
  * Format the hidden-counts overflow line for the ActiveTodos card.
  * Returns null when nothing is hidden (caller skips the row entirely).
  * Examples: "+ 5 pending & 5 done", "+ 5 pending", "+ 4 done".
