@@ -593,7 +593,7 @@ describe("todoStatusOf", () => {
 describe("summarizeTodoProgress", () => {
   const todo = (status: string) => ({ status, content: "x" });
 
-  it("counts settled vs in-flight and labels 'N of M'", () => {
+  it("counts settled vs in-flight and labels the done/total counter", () => {
     const p = summarizeTodoProgress([
       todo("in_progress"),
       todo("completed"),
@@ -603,14 +603,14 @@ describe("summarizeTodoProgress", () => {
     expect(p.total).toBe(4);
     expect(p.settled).toBe(2);
     expect(p.inProgress).toBe(1);
-    expect(p.label).toBe("2 of 4");
+    expect(p.label).toBe("2/4");
     expect(p.allSettled).toBe(false);
   });
 
   it("counts cancelled as settled — the model is done with it", () => {
     const p = summarizeTodoProgress([todo("cancelled"), todo("pending")]);
     expect(p.settled).toBe(1);
-    expect(p.label).toBe("1 of 2");
+    expect(p.label).toBe("1/2");
   });
 
   it("segment widths are percentages of the WHOLE list, not the visible cap", () => {
@@ -626,10 +626,10 @@ describe("summarizeTodoProgress", () => {
     expect(p.settledPct + p.activePct).toBeLessThanOrEqual(100);
   });
 
-  it("labels 'complete' once every item is terminal", () => {
+  it("labels the done/total counter once every item is terminal", () => {
     const p = summarizeTodoProgress([todo("completed"), todo("cancelled")]);
     expect(p.allSettled).toBe(true);
-    expect(p.label).toBe("complete");
+    expect(p.label).toBe("2/2");
     expect(p.settledPct).toBe(100);
   });
 
@@ -638,7 +638,7 @@ describe("summarizeTodoProgress", () => {
     expect(p.settledPct).toBe(0);
     expect(p.activePct).toBe(0);
     expect(p.allSettled).toBe(false);
-    expect(p.label).toBe("0 of 0");
+    expect(p.label).toBe("0/0");
   });
 });
 
