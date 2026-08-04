@@ -46,7 +46,7 @@ Required before you flip the parent to `done`:
 
 The merge is blocked only by (i) an *actionable* follow-up that exists nowhere but a comment, or (ii) an *above-bar* follow-up left unowned. Non-actionable musings never block. When unsure whether something is actionable, file it (cheap `todo`); when unsure whether it crosses the bar, treat "could show a user a wrong value" as over the line and own it. Never auto-dispatch every filed follow-up to `manta-dev` — park below-bar ones with the `follow-up` label; only you promote a parked item.
 
-MANTA now HAS CI (since 2026-07-02): `.github/workflows/ci.yml` on the self-hosted manta-dev-runner, with three jobs — `typecheck-test`, `duplication-gate`, `E2E Smoke Test`. **`typecheck-test` is the ONE required check** (the only context in `required-checks.json` and in the `main` branch ruleset): it runs typecheck, tests, the gitleaks secret scan, and — only when the PR changes `package.json`/`package-lock.json` — the dependency audit. **Read `gh pr checks <N>`; `typecheck-test` must be green before merge.** A red `duplication-gate` or `E2E Smoke Test` is a judgment call (duplication-gate is flaky at token boundaries; Electron/Xvfb flake exists — rerun once, then escalate); a red required check is an absolute stop. The local `npm run typecheck && npm test` run remains your fallback when CI is queued/stuck >15 min. The finish line is: PR reviewer-PASSed + required checks green + merged to `main`.
+MANTA now HAS CI (since 2026-07-02): `.github/workflows/ci.yml` on GitHub-hosted runners, with two jobs — `typecheck-test`, `duplication-gate`. **`typecheck-test` is the ONE required check** (the only context in `required-checks.json` and in the `main` branch ruleset): it runs typecheck, tests, the gitleaks secret scan, and — only when the PR changes `package.json`/`package-lock.json` — the dependency audit. **Read `gh pr checks <N>`; `typecheck-test` must be green before merge.** A red `duplication-gate` is a judgment call (flaky at token boundaries — rerun once, then escalate); a red required check is an absolute stop. (The `E2E Smoke Test` job was removed from `ci.yml`.) The local `npm run typecheck && npm test` run remains your fallback when CI is queued/stuck >15 min. The finish line is: PR reviewer-PASSed + required checks green + merged to `main`.
 
 **GATE 3 — STOP AT MERGE. Human owns deploy.**
 MANTA does NOT have agent-driven prod deploys. There is no `./scripts/deploy.sh`, no `docker compose` on prod, no VPS to SSH into. Your finish line is **merged-clean-on-`main`**, full stop. After merge, post a comment summarizing the diff and **explicitly hand the deploy decision to the human (@antoinedc)** — then stop and wait. A clean review, green typecheck, and green tests are NOT overrides — the gate is the human's *confirmation*, not the code's readiness.
@@ -77,8 +77,10 @@ The `main` branch ruleset requires, before any merge:
 - the required status check GREEN on the head SHA: `typecheck-test` (the one
   context in `.github/workflows/required-checks.json`; it covers typecheck,
   tests, the secret scan and the conditional dependency audit).
-  `e2e-smoke` and `duplication-gate` are ADVISORY, not required — a red
-  advisory check is a reviewer-judgment signal, never a stop.
+  `duplication-gate` is ADVISORY, not required — a red advisory check is a
+  reviewer-judgment signal, never a stop. (The `E2E Smoke Test` / `e2e-smoke`
+  job was removed from `ci.yml`; `scripts/check-e2e-smoke.sh` stays runnable
+  locally.)
 - Code Owner review for gate-integrity paths (`.github/CODEOWNERS`:
   `.github/**` and `.gitleaks.toml` → @antoinedc).
 
@@ -564,7 +566,7 @@ Per-run agent workdirs accumulate under `/mnt/HC_Volume_*/multica_workspaces/<wo
 
 ## Workspace notes (MANTA)
 
-- MANTA HAS CI (GitHub Actions on the self-hosted `manta-dev-runner`): `ci.yml` with jobs `typecheck-test`, `duplication-gate`, `E2E Smoke Test`. The ONE required check is `typecheck-test` (it also runs the secret scan and the conditional dependency audit) — read it with `gh pr checks <N>` and confirm green on the head SHA before merging. `npm run typecheck && npm test` locally is your fallback when CI is queued/stuck. There is NO `/merge` command workflow (removed with BET-247); the native `main` branch ruleset is the enforced gate.
+- MANTA HAS CI (GitHub Actions on GitHub-hosted runners): `ci.yml` with jobs `typecheck-test`, `duplication-gate`. The ONE required check is `typecheck-test` (it also runs the secret scan and the conditional dependency audit) — read it with `gh pr checks <N>` and confirm green on the head SHA before merging. `npm run typecheck && npm test` locally is your fallback when CI is queued/stuck. There is NO `/merge` command workflow (removed with BET-247); the native `main` branch ruleset is the enforced gate.
 - MANTA does NOT have a CODEOWNERS file. No human approval is needed for merges.
 - MANTA does NOT have a `close-on-merge` workflow. The Multica daemon handles issue status transitions on merge.
 - MANTA does NOT have agent-driven prod deploys. The finish line is merged-to-`main`-clean. The human owns any subsequent deploy.
