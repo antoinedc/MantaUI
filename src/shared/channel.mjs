@@ -116,3 +116,27 @@ export function channelConfig(channel) {
   }
   return CHANNELS[PROD_CHANNEL];
 }
+
+/**
+ * The channel THIS box process was installed for, read from
+ * `process.env.MANTA_CHANNEL` (install.sh bakes it into the systemd unit /
+ * LaunchAgent plist).
+ *
+ * Lives here rather than in any one consumer because it is now read by two
+ * unrelated subsystems — the pairing QR (which needs the channel's URL scheme)
+ * and the self-updater (which needs its release host + update feed). It began
+ * in pairPage.mjs, and while it stayed there the updater simply hardcoded
+ * prod, which is what silently stranded the staging track.
+ *
+ * Falls back to `prod` for an unset or unrecognised value: a mis-configured
+ * box must still pair and still update, not throw at request time. Re-reads
+ * the env on every call rather than memoizing — it is cheap, and tests mutate
+ * the env between cases.
+ */
+export function resolveBoxChannel() {
+  const raw =
+    typeof process !== "undefined" && process.env
+      ? process.env.MANTA_CHANNEL ?? ""
+      : "";
+  return channelConfig(raw || "prod");
+}

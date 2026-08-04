@@ -93,8 +93,29 @@ if [ "$INSTALL_KIND" = "git" ]; then
 else
   # packaged install — download + verify + extract the release tarball and
   # replace only the payload paths the release owns.
-  host="${MANTA_RELEASE_HOST:-https://mantaui.com}"
+  # Channel-derived release host. This default used to be an unconditional
+  # `https://mantaui.com`, so a box installed with MANTA_CHANNEL=staging
+  # fetched the PROD manifest and updated itself onto PROD builds — the
+  # staging track was published but no box could ever follow it.
+  #
+  # Mirrors `releaseHost` in src/shared/channel.mjs (prod →
+  # https://mantaui.com, staging → https://mantaui.com/staging). Kept as a
+  # small case rather than shelling out to node so this still works when the
+  # bundled runtime is mid-replacement. `dev` maps to the prod host on
+  # purpose: a dev box is a git checkout, which takes the git branch above and
+  # never reaches this code at all.
+  #
+  # MANTA_CHANNEL reaches us from the environment of whoever spawned this
+  # script — manta-server inherits it from its own systemd unit / LaunchAgent,
+  # which install.sh renders with the channel it installed. An unset value
+  # falls back to prod, matching install.sh's own default.
+  case "${MANTA_CHANNEL:-prod}" in
+    staging) channel_release_host="https://mantaui.com/staging" ;;
+    *)       channel_release_host="https://mantaui.com" ;;
+  esac
+  host="${MANTA_RELEASE_HOST:-$channel_release_host}"
   host="${host%/}"
+  log "self-update: channel=${MANTA_CHANNEL:-prod} release host=$host"
 
   INSTALLED_VERSION="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)||"")' "$MANTA_HOME/RELEASE.json")"
 
