@@ -12,7 +12,7 @@
 //     module cycle that is safe because both references are used only at
 //     render time).
 
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { OpencodePart } from "../shared/types";
 import { resolveToolOutput, cssVar } from "./chatUtils";
 import { type ToolState } from "./chatShared";
@@ -234,6 +234,11 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
   const copyText =
     rawTool === "task" ? "" : (diffText ?? resolveToolOutput(state));
 
+  // Tool-call cards are collapsible and start collapsed: the body (diff /
+  // output) is hidden behind the disclosure header until the user expands it.
+  const [expanded, setExpanded] = useState(false);
+  const toggle = () => setExpanded((v) => !v);
+
   return (
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       <ToolCard
@@ -242,8 +247,10 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
         arg={state.title}
         meta={metaNode}
         copyText={copyText || undefined}
+        expanded={expanded}
+        onToggle={toggle}
       >
-        <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
+        {expanded && <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />}
       </ToolCard>
     </div>
   );
