@@ -181,27 +181,57 @@ html, body, #root {
   .manta-streaming > *:last-child::after { animation: none; }
 }
 
-/* Floating glass pill — used for header chips (branch, context, menu) and
-   the model picker chip above the composer. Frosted-glass: a semi-transparent
-   panel surface with backdrop-blur so the transcript content shows through.
-   Works on both dark and light themes because panel-rgb carries the right
-   per-theme value. */
-.manta-glass-pill {
-  background: rgb(var(--panel-rgb) / 0.72);
-  backdrop-filter: blur(12px) saturate(1.5);
-  -webkit-backdrop-filter: blur(12px) saturate(1.5);
-  border: 1px solid rgb(var(--border-rgb) / 0.55);
-  border-radius: var(--r-full);
-  box-shadow: var(--shadow-sm);
+/* Transcript entry motion (transcript-motion).
+   A tool card / text block that appears while the user is watching slides up
+   a few pixels with a fade, so a turn assembles itself instead of each piece
+   teleporting into place. Transform + opacity only (compositor-friendly),
+   `both` fill so the one-shot play holds its end state.
+
+   THE PART IS THE UNIT, not the row. During a turn the parts of a single
+   assistant message mount one at a time over many seconds, so animating the
+   row would mean sliding a container that is already on screen — which is
+   why the earlier whole-row version could never fire: the row was always
+   exempt as "currently streaming" when it mounted, and no longer new by the
+   time it settled. The live-streaming text part is still exempt here because
+   its markdown blocks fade in individually via .manta-streaming (BET-649).
+
+   `entering` (decided in Transcript.tsx by updateEntryMotion) is what keeps
+   history still: a transcript the user merely loaded animates nothing. */
+@keyframes manta-part-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.manta-part-in {
+  animation: manta-part-in 0.22s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
 }
 
-/* Floating composer shell — inherits the glass look with a stronger fill
-   so the input is clearly readable while the transcript shows through below. */
-.manta-float-composer {
-  background: rgb(var(--panel-rgb) / 0.85);
-  backdrop-filter: blur(16px) saturate(1.6);
-  -webkit-backdrop-filter: blur(16px) saturate(1.6);
-  box-shadow: var(--shadow-md);
+/* User bubble send (transcript-motion). iMessage-style send: the bubble
+   springs in from just below where the composer sits — a short rise with a
+   slight scale overshoot so it reads as a single "pop" that the text lands
+   in, rather than a static stamp. The 72% keyframe gives the spring feel
+   without introducing a spring-easing dependency. Origin is the bottom-right
+   corner (where a send originates) so the overshoot scales toward the
+   transcript, not the gutter.
+
+   Applied ONLY when the message arrived live (see MessageBubble): this class
+   was once unconditional, which made every bubble in an opened transcript pop
+   and replayed the user's whole send history on a session switch. */
+@keyframes manta-bubble-in {
+  0%   { opacity: 0; transform: translateY(14px) scale(0.9); }
+  72%  { opacity: 1; transform: translateY(-2px) scale(1.02); }
+  100% { opacity: 1; transform: none; }
+}
+.manta-bubble-in {
+  animation: manta-bubble-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: bottom right;
+}
+
+/* Vestibular safety (MDN prefers-reduced-motion): with reduce set, the
+   transcript never slides — rows and bubbles simply appear. State is
+   unaffected; only the motion is removed. */
+@media (prefers-reduced-motion: reduce) {
+  .manta-part-in,
+  .manta-bubble-in { animation: none; }
 }
 
 /* Scrollbar */
