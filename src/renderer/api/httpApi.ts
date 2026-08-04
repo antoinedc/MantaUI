@@ -332,6 +332,7 @@ type Kind =
   | "agentFile"
   | "desktopNotify"
   | "serverUpdateAvailable"
+  | "serverUpdateProgress"
   | "delegate.updated"
   | "stream";
 
@@ -347,6 +348,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   agentFile: new Set(),
   desktopNotify: new Set(),
   serverUpdateAvailable: new Set(),
+  serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
   stream: new Set(),
 };
@@ -1091,6 +1093,14 @@ export const httpApi: Api = {
   // so the store field stays in sync — actual mobile UI is a later pass.
   onServerUpdateAvailable: (cb) =>
     on<ServerUpdateAvailablePayload>("serverUpdateAvailable", cb),
+
+  // -- server-update progress subscription --
+  // /events WS publishes `{kind: "serverUpdateProgress", payload:{step,total,
+  // label}}` for each MANTA_PROGRESS marker the box's self-update script
+  // emits. The renderer's UpdateBar renders a determinate progress bar from
+  // these while the update is in flight.
+  onServerUpdateProgress: (cb) =>
+    on<{ step: number; total: number; label: string }>("serverUpdateProgress", cb),
 
   // -- plugins (BET-189 / BET-190) --
   // Read the current plugin registry the Mac executor has published. The

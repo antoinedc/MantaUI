@@ -20,6 +20,8 @@ import {
 import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
+import { Modal } from "./Modal";
+import { Button } from "./Button";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -54,6 +56,7 @@ export function App() {
     setBoxIncompatible,
     serverUpdatePrompt,
     setServerUpdatePrompt,
+    serverUpdateProgress,
     connectionState,
     launcherFlags,
   } = useStore();
@@ -442,6 +445,20 @@ export function App() {
     return off;
   }, []);
 
+  // Server-update progress (this ticket): while the box runs
+  // scripts/self-update.sh, manta-server tails its log and republishes each
+  // MANTA_PROGRESS marker as a `serverUpdateProgress` bus event. The renderer
+  // renders a determinate progress bar in the server-update UpdateBar so the
+  // update reads as advancing rather than a frozen button. Mirrors the
+  // onServerUpdateAvailable subscription above.
+  useEffect(() => {
+    if (!window.api.onServerUpdateProgress) return;
+    const off = window.api.onServerUpdateProgress((p) => {
+      useStore.getState().setServerUpdateProgress(p);
+    });
+    return off;
+  }, []);
+
   // Version-skew guard (BET-225 stage 3 Part C). After the renderer is
   // mounted, fetch the client + server version pair ONCE (no second poll,
   // per the stage-3 spec) and let `chooseUpdateSkewVariant` decide
@@ -810,6 +827,12 @@ export function App() {
   // that case; surface it in the EXISTING update-failed banner (the same
   // state the auto-update path already feeds) instead of silently reporting
   // success and leaving the box stale.
+  // Restarting opencode ends every in-flight agent turn, so the box
+  // self-update is gated behind an explicit confirm dialog. The two
+  // server-update UpdateBars open it; "Update & restart" in the dialog is what
+  // actually fires applyServerUpdate().
+  const [confirmServerUpdate, setConfirmServerUpdate] = useState(false);
+
   const applyServerUpdate = async () => {
     try {
       const res = await window.api.serverUpdateApply();
@@ -919,10 +942,9 @@ export function App() {
               </>
             }
             actionLabel="Update & restart"
-            onAction={() => {
-              void applyServerUpdate();
-            }}
+            onAction={() => setConfirmServerUpdate(true)}
             onDismiss={() => setServerUpdatePrompt(null)}
+            progress={serverUpdateProgress ?? undefined}
           />
         )}
         {!showOnboarding &&
@@ -940,10 +962,9 @@ export function App() {
                 </>
               }
               actionLabel="Upgrade box"
-              onAction={() => {
-                void applyServerUpdate();
-              }}
+              onAction={() => setConfirmServerUpdate(true)}
               onDismiss={dismiss}
+              progress={serverUpdateProgress ?? undefined}
             />
           )}
         {!isChatPaneActive && (
@@ -1111,6 +1132,41 @@ export function App() {
       </main>
       {settingsOpen && (
         <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
+      {/* Box self-update confirm: restarting opencode ends every in-flight
+          agent turn, so the destructive restart needs explicit consent before
+          the update starts. */}
+      {confirmServerUpdate && (
+        <Modal
+          size="md"
+          label="Update the box?"
+          onDismiss={() => setConfirmServerUpdate(false)}
+        >
+          <div className="space-y-4">
+            <h3 className="text-title font-semibold">Update the box?</h3>
+            <div className="text-body text-text-faint">
+              This restarts opencode, which will end every agent turn currently
+              running in any session. Any unsaved work in a running turn is lost.
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmServerUpdate(false)}
+                className="px-4 py-2 text-body text-text-muted hover:text-text"
+              >
+                Cancel
+              </button>
+              <Button
+                tone="primary"
+                onClick={() => {
+                  setConfirmServerUpdate(false);
+                  void applyServerUpdate();
+                }}
+              >
+                Update &amp; restart
+              </Button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

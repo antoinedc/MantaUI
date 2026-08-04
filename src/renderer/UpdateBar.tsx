@@ -39,6 +39,9 @@ export type UpdateBarProps = {
   onDismiss?: () => void;
   /** When true (default), show the × button. Skew guard passes false. */
   dismissible?: boolean;
+  /** When set, the bar renders a determinate progress bar in place of the
+   *  action button. */
+  progress?: { step: number; total: number; label: string };
 };
 
 /**
@@ -52,6 +55,7 @@ export function UpdateBar({
   onAction,
   onDismiss,
   dismissible = true,
+  progress,
 }: UpdateBarProps) {
   return (
     // `pr-[…]` (not `px-3`) reserves the OS caption-button strip: this bar
@@ -63,24 +67,49 @@ export function UpdateBar({
     // macOS/Linux (neither defines the `titlebar-area-*` env vars), so this is
     // exactly `px-3` everywhere else.
     <div className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2">
-      <span className="flex-1 truncate">{text}</span>
-      <button
-        onClick={() => {
-          onAction();
-        }}
-        className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
-      >
-        {actionLabel}
-      </button>
-      {dismissible && onDismiss && (
-        <button
-          onClick={() => onDismiss()}
-          className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
-          title="Dismiss"
-          aria-label="Dismiss update"
+      <span className="flex-1 truncate">
+        {progress ? (
+          <>
+            {progress.label} ({progress.step}/{progress.total})
+          </>
+        ) : (
+          text
+        )}
+      </span>
+      {progress ? (
+        <div
+          className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden"
+          role="progressbar"
+          aria-valuenow={progress.step}
+          aria-valuemin={1}
+          aria-valuemax={progress.total}
         >
-          <X size={14} aria-hidden="true" />
-        </button>
+          <div
+            className="h-full bg-accent transition-all"
+            style={{ width: `${(progress.step / progress.total) * 100}%` }}
+          />
+        </div>
+      ) : (
+        <>
+          <button
+            onClick={() => {
+              onAction();
+            }}
+            className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
+          >
+            {actionLabel}
+          </button>
+          {dismissible && onDismiss && (
+            <button
+              onClick={() => onDismiss()}
+              className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
+              title="Dismiss"
+              aria-label="Dismiss update"
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          )}
+        </>
       )}
     </div>
   );

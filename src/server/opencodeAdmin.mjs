@@ -81,17 +81,59 @@ export async function restartOpencode(exec = execFileAsync) {
 export async function runServerSelfUpdate(
   scriptPath,
   spawnFile = execFileCb,
-  { timeoutMs = SELF_UPDATE_WATCH_MS } = {},
+  { timeoutMs = SELF_UPDATE_WATCH_MS, publish } = {},
 ) {
   const logPath = statePath("self-update.log");
+  // NOTE: progress polling below assumes scripts/self-update.sh truncates this
+  // log (`: > "$LOG_FILE"`) as one of its first acts, so anything the poller
+  // reads belongs to the CURRENT run. If a tick ever landed before that
+  // truncation it would latch `highestStep` on the previous run's final step
+  // and publish nothing for this one — the bar would stay empty. The script
+  // truncates within milliseconds of starting and the first tick is 500ms in,
+  // so this is not reachable in practice; it is also benign (no progress bar,
+  // i.e. today's behaviour) and self-corrects on the next update. Do NOT
+  // "fix" it by truncating here — that destroys the log `lastLogLine` reads
+  // to report an early failure.
   try {
     const child = spawnFile(scriptPath, [], { detached: true, stdio: "ignore" });
     child.unref();
     return await new Promise((resolve) => {
       let settled = false;
+      // BET progress: while the child runs, tail the log for `MANTA_PROGRESS
+      // <step>/<total> <label>` markers and republish each NEW (strictly
+      // increasing) step to the bus so the renderer's UpdateBar can render a
+      // determinate progress bar. Optional — no `publish`, no polling. Every
+      // read is defensive: a missing/unreadable log must never throw.
+      let highestStep = 0;
+      let pollTimer = null;
+      if (typeof publish === "function") {
+        pollTimer = setInterval(() => {
+          try {
+            const text = readFileSync(logPath, "utf8");
+            for (const line of text.split(/\r?\n/)) {
+              const p = parseProgressLine(line);
+              if (p && p.step > highestStep) {
+                highestStep = p.step;
+                publish({
+                  kind: "serverUpdateProgress",
+                  payload: { step: p.step, total: p.total, label: p.label },
+                });
+              }
+            }
+          } catch {
+            // Log not yet written / unreadable — try again next tick.
+          }
+        }, 500);
+        if (typeof pollTimer.unref === "function") pollTimer.unref();
+      }
+      const clearPoll = () => {
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = null;
+      };
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        clearPoll();
         // Still running at the watch window → it reached the server restart.
         resolve({ ok: true });
       }, timeoutMs);
@@ -99,6 +141,7 @@ export async function runServerSelfUpdate(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        clearPoll();
         resolve(ok ? { ok: true } : { ok: false, error: lastLogLine(logPath, err) });
       };
       if (typeof child.once === "function") {
@@ -113,6 +156,26 @@ export async function runServerSelfUpdate(
 }
 
 export const SELF_UPDATE_WATCH_MS = 20_000;
+
+/**
+ * Parse a single `MANTA_PROGRESS <step>/<total> <label>` line emitted by
+ * scripts/self-update.sh into `{ step, total, label }`, or `null` when the
+ * line does not match / is malformed (step out of the 1..total range, total
+ * non-positive, non-finite numbers). Pure + tolerant of surrounding
+ * whitespace and null/undefined input.
+ *
+ * @param {unknown} line
+ * @returns {{ step: number, total: number, label: string } | null}
+ */
+export function parseProgressLine(line) {
+  const m = /^MANTA_PROGRESS (\d+)\/(\d+) (.+)$/.exec(String(line ?? "").trim());
+  if (!m) return null;
+  const step = Number(m[1]);
+  const total = Number(m[2]);
+  if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return null;
+  if (step < 1 || step > total) return null;
+  return { step, total, label: m[3].trim() };
+}
 
 // Last non-empty line of the self-update log, or a fallback derived from the
 // error/exit that triggered the failure report. Never throws.
