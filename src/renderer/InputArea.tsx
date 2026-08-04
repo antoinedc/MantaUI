@@ -96,6 +96,24 @@ export function caretRowInfo(el: HTMLTextAreaElement | null): CaretRow | null {
   return { atFirstRow, atLastRow };
 }
 
+// True when a mousedown inside the composer box landed on a real control that
+// owns its own click — the Send button, the mic, a resource-toolbar button, an
+// attachment chip's remove button. Everything else in the box (the padding,
+// the chrome, the text field itself) should end up focusing the message field.
+//
+// WHY THIS EXISTS: on Windows the box could be clicked without the <textarea>
+// ever taking focus — the box lit its `:focus-within` ring (so the click DID
+// resolve to some descendant) but no caret appeared and the field was
+// unusable, while every other input in the app worked. Rather than depend on
+// the browser resolving a click inside the box to the textarea, InputArea now
+// routes focus explicitly (see the box's onMouseDown). Keep the control
+// escape hatch: without it, clicking Send would steal focus back to the field
+// and swallow the button's own click.
+export function isComposerControlTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return !!target.closest("button, a, [role='button']");
+}
+
 export function InputArea({
   input,
   setInput,
@@ -264,6 +282,19 @@ export function InputArea({
               ? "border-accent"
               : "border-border-strong")
         }
+        // Route every non-control click in the box to the message field. This
+        // is what makes the composer focusable on Windows, where a click could
+        // resolve to a sibling and leave the field caret-less (see
+        // isComposerControlTarget). Clicking the textarea itself keeps the
+        // browser default so native caret PLACEMENT still works — we only add
+        // the focus() the platform failed to do.
+        onMouseDown={(e) => {
+          if (isComposerControlTarget(e.target)) return;
+          const el = inputRef.current;
+          if (!el) return;
+          if (e.target !== el) e.preventDefault();
+          if (document.activeElement !== el) el.focus();
+        }}
       >
         {/* Attachment chips live INSIDE the box, above the text line (BET-416
             §B). They are part of the message being composed, so they share
