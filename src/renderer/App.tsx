@@ -26,6 +26,7 @@ import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
+import { ErrorBoundary } from "./ErrorBoundary";
 import type { AvailableLauncher } from "../shared/types";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
@@ -37,7 +38,36 @@ import type { AvailableLauncher } from "../shared/types";
 // `manta://` link can never silently pass through a staging build.
 const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
 
+// The whole app tree is wrapped once in an ErrorBoundary so an uncaught render
+// throw anywhere degrades to a minimal centered "Something went wrong — Reload"
+// (using existing tokens) instead of React 18 unmounting the root to a white
+// screen. AppInner holds the real component; App is the boundary wrapper.
 export function App() {
+  return (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <div className="h-full w-full flex items-center justify-center bg-bg text-text">
+          <div className="bg-danger-bg border border-danger rounded-md px-4 py-3 text-meta text-center">
+            <div className="text-text mb-2 break-words">
+              Something went wrong{err.message ? ` — ${err.message}` : ""}
+            </div>
+            <button
+              type="button"
+              onClick={reset}
+              className="text-accent hover:underline"
+            >
+              Reload
+            </button>
+          </div>
+        </div>
+      )}
+    >
+      <AppInner />
+    </ErrorBoundary>
+  );
+}
+
+function AppInner() {
   const {
     loaded,
     projects,

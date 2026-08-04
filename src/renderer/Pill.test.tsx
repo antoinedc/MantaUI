@@ -60,6 +60,13 @@ describe("Pill", () => {
     expect(el.className).toContain("text-warn");
   });
 
+  it("ok tone renders the --ok-bg surface with a matching --ok foreground (C1)", () => {
+    h = mount(<Pill tone="ok">Recommended</Pill>);
+    const el = pillEl(h);
+    expect(el.className).toContain("bg-ok-bg");
+    expect(el.className).toContain("text-ok");
+  });
+
   it("neutral tone sets no background and reads as a muted label (inherits its surface)", () => {
     h = mount(<Pill tone="neutral">label</Pill>);
     const el = pillEl(h);
@@ -201,19 +208,19 @@ describe("Pill migration — Recommended option tag (BET-534 two-adopter rule)",
     ],
   };
 
-  it("Recommended tag renders through Pill's accent chrome with the --r-full radius (was rounded-xs)", () => {
+  it("Recommended tag renders through Pill's GREEN ok chrome at the label size (BET redesign)", () => {
     h = mount(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} />);
     const pill = Array.from(h.container.querySelectorAll("span.rounded-full")).find(
       (el) => el.textContent === "Recommended",
     ) as HTMLElement;
     expect(pill).toBeTruthy();
-    // The intended delta is exactly the radius: --r-full replaces --r-sm
-    // (rounded-xs), while the accent surface, --accent foreground and the
-    // label size are preserved.
+    // The redesign moves the Recommended tag from accent (blue) to ok (green)
+    // and places it inline; the capsule radius + label size are preserved.
     expect(pill.className).toContain("rounded-full");
     expect(pill.className).not.toContain("rounded-xs");
-    expect(pill.className).toContain("bg-accent-bg");
-    expect(pill.className).toContain("text-accent");
+    expect(pill.className).toContain("bg-ok-bg");
+    expect(pill.className).toContain("text-ok");
+    expect(pill.className).not.toContain("bg-accent-bg");
     expect(pill.className).toContain("text-label");
     expect(pill.className).toContain("px-2");
   });

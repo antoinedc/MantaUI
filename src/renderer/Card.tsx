@@ -20,19 +20,27 @@ const CARD_DANGER_CHROME = "rounded-lg border border-danger bg-danger-bg px-4 py
 
 export function Card({
   danger = false,
+  elevated = false,
   header,
   children,
   actions,
 }: {
   danger?: boolean;
+  /**
+   * Add the `--shadow-md` floating lift. Opt-in (default false) so the shared
+   * primitive's existing adopters (GroupCard in Settings) stay flat; only the
+   * ask cards, which float over the transcript, pass `elevated`.
+   */
+  elevated?: boolean;
   header?: ReactNode;
   children?: ReactNode;
   actions?: ReactNode;
 }) {
   const hasHeader = header !== undefined;
   const hasBody = children !== undefined;
+  const base = danger ? CARD_DANGER_CHROME : CARD_CHROME;
   return (
-    <div className={danger ? CARD_DANGER_CHROME : CARD_CHROME}>
+    <div className={elevated ? `${base} shadow-md` : base}>
       {hasHeader && <div className="flex items-start gap-3">{header}</div>}
       {hasBody && (hasHeader ? <div className="mt-3">{children}</div> : children)}
       {actions !== undefined && (

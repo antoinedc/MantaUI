@@ -15,6 +15,7 @@
 // PermissionCard / QuestionCard call sites below.
 
 import { describe, it, expect, afterEach } from "vitest";
+import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { Card } from "./Card";
 import { PermissionCard, QuestionCard } from "./Cards";
@@ -64,6 +65,16 @@ describe("Card", () => {
     expect(actions.textContent).toBe("Go");
   });
 
+  it("elevated adds the --shadow-md lift; default stays flat", () => {
+    h = mount(<Card>flat</Card>);
+    expect((h.container.firstElementChild as HTMLElement).className).toBe(CHROME);
+    h.unmount();
+    h = mount(<Card elevated>lifted</Card>);
+    expect((h.container.firstElementChild as HTMLElement).className).toBe(
+      `${CHROME} shadow-md`,
+    );
+  });
+
   it("renders children flush to the top when there is no header", () => {
     h = mount(<Card>alone</Card>);
     const chrome = h.container.firstElementChild as HTMLElement;
@@ -111,18 +122,47 @@ describe("Card migration — ask-card call sites (BET-531 two-adopter rule)", ()
     ],
   };
 
-  it("PermissionCard renders through Card's non-danger chrome (no className injection)", () => {
+  it("PermissionCard renders through Card's non-danger chrome + elevated lift (no className injection)", () => {
     h = mount(<PermissionCard perm={perm} onReply={() => {}} />);
-    expect(chromeEl(h).className).toBe(CHROME);
+    // Ask cards float over the transcript, so they carry the elevated lift.
+    expect(chromeEl(h).className).toBe(`${CHROME} shadow-md`);
     expect(h.text()).toContain("Allow once");
     expect(h.text()).toContain("Reject");
     expect(h.text()).toContain("ls -la");
   });
 
-  it("QuestionCard renders through Card's chrome with the action footer", () => {
+  it("QuestionCard renders through Card's elevated chrome with the action footer", () => {
     h = mount(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} />);
-    expect(chromeEl(h).className).toBe(CHROME);
+    expect(chromeEl(h).className).toBe(`${CHROME} shadow-md`);
     expect(h.text()).toContain("Submit");
     expect(h.text()).toContain("Dismiss");
+  });
+
+  it("clicking a QuestionCard option toggles selection without throwing; Submit renders", () => {
+    h = mount(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} />);
+    // Full-width `.opt` option rows are labels wrapping an sr-only control.
+    const inputs = Array.from(
+      h.container.querySelectorAll("input[type='radio'], input[type='checkbox']"),
+    ) as HTMLInputElement[];
+    expect(inputs.length).toBe(2);
+    // Single-select preselects the recommended option (B). Click option A.
+    act(() => inputs[0].click());
+    expect(inputs[0].checked).toBe(true);
+    // No throw, and the primary Submit action still renders.
+    expect(h.text()).toContain("Submit");
+  });
+
+  it("QuestionCard survives a malformed payload (missing options) without throwing", () => {
+    const bad = {
+      id: "qbad",
+      sessionID: "s1",
+      requestId: "que_bad",
+      // A question with NO options array — the defensive guard must not throw.
+      questions: [{ question: "Broken?", header: "Broken" }],
+    } as unknown as QuestionRequest;
+    h = mount(<QuestionCard request={bad} onReply={() => {}} onReject={() => {}} />);
+    // Still renders the shell + actions rather than blanking.
+    expect(h.text()).toContain("Broken");
+    expect(h.text()).toContain("Submit");
   });
 });
