@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
+import { restartOpencode, runServerSelfUpdate, parseProgressLine } from "./opencodeAdmin.mjs";
 import { statePath } from "../shared/paths.mjs";
 
 describe("restartOpencode", () => {
@@ -153,5 +153,105 @@ describe("runServerSelfUpdate", () => {
     assert.equal(result.ok, true);
     // And the child was detached + unref'd even though it kept running.
     assert.equal(calls[0].opts.detached, true);
+  });
+
+  it("publishes each new progress step in ascending order and never republishes one already sent", async () => {
+    // The self-update script emits `MANTA_PROGRESS <step>/<total> <label>`
+    // markers into its log; runServerSelfUpdate tails the log and republishes
+    // each strictly-increasing step as a `serverUpdateProgress` bus event.
+    const logPath = statePath("self-update.log");
+    mkdirSync(dirname(logPath), { recursive: true });
+    // Seed the log with three markers (and unrelated log noise). The poll runs
+    // every 500ms; with a longer timeout the first tick reads all three.
+    writeFileSync(
+      logPath,
+      [
+        "MANTA_PROGRESS 1/6 Checking for updates",
+        "▸ self-update: fetching origin/main",
+        "MANTA_PROGRESS 2/6 Downloading update",
+        "MANTA_PROGRESS 3/6 Installing dependencies",
+        "",
+      ].join("\n"),
+    );
+
+    const events = [];
+    const publish = (e) => events.push(e);
+
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const spawn = () => {
+      // Exit cleanly a little after the first poll tick fires so the poller
+      // has a chance to read the seeded markers.
+      setTimeout(() => child.emit("exit", 0), 600);
+      return child;
+    };
+
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 5000,
+      publish,
+    });
+    assert.equal(result.ok, true);
+
+    const progress = events.filter((e) => e.kind === "serverUpdateProgress");
+    assert.equal(progress.length, 3);
+    assert.deepEqual(
+      progress.map((e) => e.payload.step),
+      [1, 2, 3],
+    );
+    assert.deepEqual(progress[0].payload, {
+      step: 1,
+      total: 6,
+      label: "Checking for updates",
+    });
+    assert.deepEqual(progress[2].payload, {
+      step: 3,
+      total: 6,
+      label: "Installing dependencies",
+    });
+  });
+
+  it("does not throw when publish is omitted (no polling)", async () => {
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => {};
+    const spawn = () => {
+      setImmediate(() => setTimeout(() => child.emit("exit", 0), 0));
+      return child;
+    };
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+      timeoutMs: 500,
+    });
+    assert.equal(result.ok, true);
+  });
+});
+
+describe("parseProgressLine", () => {
+  it("parses a well-formed MANTA_PROGRESS line", () => {
+    assert.deepEqual(parseProgressLine("MANTA_PROGRESS 3/6 Installing dependencies"), {
+      step: 3,
+      total: 6,
+      label: "Installing dependencies",
+    });
+  });
+
+  it("returns null for a non-matching line, empty string, null and undefined", () => {
+    assert.equal(parseProgressLine("▸ self-update: fetching origin/main"), null);
+    assert.equal(parseProgressLine(""), null);
+    assert.equal(parseProgressLine(null), null);
+    assert.equal(parseProgressLine(undefined), null);
+  });
+
+  it("returns null when step > total and when step < 1", () => {
+    assert.equal(parseProgressLine("MANTA_PROGRESS 7/6 Too far"), null);
+    assert.equal(parseProgressLine("MANTA_PROGRESS 0/6 Zero"), null);
+  });
+
+  it("tolerates surrounding whitespace", () => {
+    assert.deepEqual(parseProgressLine("   MANTA_PROGRESS 2/6 Downloading update   "), {
+      step: 2,
+      total: 6,
+      label: "Downloading update",
+    });
   });
 });

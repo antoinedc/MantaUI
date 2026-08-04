@@ -59,6 +59,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onPtyEvent",
   "onScreenshotDetected",
   "onServerUpdateAvailable",
+  "onServerUpdateProgress",
   "openExternal",
   "opencodeAbort",
   "opencodeAgents",

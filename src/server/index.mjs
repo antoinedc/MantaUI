@@ -324,8 +324,12 @@ rpcHandlers = buildHandlers({
   // `server:update-apply` IPC channel. The handler in rpc.mjs calls this
   // with SELF_UPDATE_SCRIPT (resolved at module load from `import.meta.url`).
   // The unit test in rpc.test.mjs passes a stub instead so the channel
-  // routing can be exercised without actually spawning a child.
-  runServerSelfUpdate,
+  // routing can be exercised without actually spawning a child. The bound
+  // `publish` lets the updater tail its log and republish progress markers
+  // (`serverUpdateProgress` bus events) so the renderer can render a
+  // determinate progress bar.
+  runServerSelfUpdate: (scriptPath) =>
+    runServerSelfUpdate(scriptPath, undefined, { publish: (e) => bus.publish(e) }),
 });
 
 // Server-update checker: polls https://mantaui.com/updates/server.json every
