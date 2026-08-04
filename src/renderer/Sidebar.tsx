@@ -23,7 +23,7 @@ import {
   selectCacheTtlMs,
   windowPinId,
 } from "./chatUtils";
-import { MOD_KEY } from "./platform";
+import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SessionRow, type SessionStatus } from "./SessionRow";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
@@ -454,8 +454,19 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   return (
     <aside className="w-64 shrink-0 border-r border-border bg-bg-elev flex flex-col">
-      <div className="titlebar-drag h-12 shrink-0" />
-      <div className="px-3 pb-2 flex items-center justify-between">
+      {/* Top drag strip. On macOS this is dead space the traffic-lights
+          overlay (top-left, over the sidebar) — keep it. On Windows the
+          caption buttons are top-right (over the main area), so the sidebar's
+          top-left corner is free: drop the empty strip and let the Workspace
+          header below sit flush against the top edge instead. The header row
+          becomes the drag region there so the frameless window still moves. */}
+      {IS_WINDOWS ? null : <div className="titlebar-drag h-12 shrink-0" />}
+      <div
+        className={
+          "px-3 pb-2 flex items-center justify-between" +
+          (IS_WINDOWS ? " titlebar-drag" : "")
+        }
+      >
         <div className="flex items-center gap-2 min-w-0">
           <h2 className="text-meta font-semibold uppercase tracking-wider text-text-muted">
             Workspace
@@ -473,7 +484,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div
+          className={
+            "flex items-center gap-1" + (IS_WINDOWS ? " titlebar-no-drag" : "")
+          }
+        >
           <button
             onClick={() => setPaletteOpen(true)}
             className="text-text-muted hover:text-text text-base leading-none"
