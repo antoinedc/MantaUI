@@ -21,6 +21,7 @@ import {
   createUpdateCheck,
   startServerUpdatePoller,
   MANIFEST_URL,
+  manifestUrl,
 } from "./serverUpdate.mjs";
 
 function fakeBus() {
@@ -309,4 +310,90 @@ test("poller: stop() clears the interval timer", async () => {
       `stop() should clear the interval (before=${handlesBefore} after=${handlesAfter})`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Channel routing.
+//
+// THE BUG THIS LOCKS IN: the manifest URL was a hardcoded prod constant, so a
+// box installed with MANTA_CHANNEL=staging checked the PROD manifest and
+// updated itself onto PROD builds. The staging track was published and live,
+// but nothing could follow it — staging drifted versions behind and no one
+// noticed, because the failure is silent and looks exactly like "no update".
+// ---------------------------------------------------------------------------
+
+test("manifestUrl: prod → the prod feed", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "prod";
+  try {
+    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_CHANNEL;
+    else process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("manifestUrl: REGRESSION — staging → the STAGING feed, not prod", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "staging";
+  try {
+    assert.equal(manifestUrl(), "https://mantaui.com/staging/updates/server.json");
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_CHANNEL;
+    else process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("manifestUrl: dev has no feed at all (null, never a prod fallback)", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  process.env.MANTA_CHANNEL = "dev";
+  try {
+    assert.equal(manifestUrl(), null);
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_CHANNEL;
+    else process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("manifestUrl: unset / unrecognised channel falls back to prod", () => {
+  const prev = process.env.MANTA_CHANNEL;
+  delete process.env.MANTA_CHANNEL;
+  try {
+    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
+    process.env.MANTA_CHANNEL = "banana";
+    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_CHANNEL;
+    else process.env.MANTA_CHANNEL = prev;
+  }
+});
+
+test("createUpdateCheck fetches the channel's feed, not a hardcoded one", async () => {
+  const seen = [];
+  const check = createUpdateCheck({
+    currentVersion: "0.0.1",
+    url: "https://mantaui.com/staging/updates/server.json",
+    fetchManifest: async (u) => {
+      seen.push(u);
+      return { version: "9.9.9" };
+    },
+  });
+  const res = await check.tick();
+  assert.deepEqual(seen, ["https://mantaui.com/staging/updates/server.json"]);
+  assert.equal(res.available, true);
+});
+
+test("createUpdateCheck on a feedless (dev) build reports no update and never fetches", async () => {
+  let called = 0;
+  const check = createUpdateCheck({
+    currentVersion: "0.0.1",
+    url: null,
+    fetchManifest: async () => {
+      called++;
+      return { version: "9.9.9" };
+    },
+  });
+  const res = await check.tick();
+  assert.equal(res.available, false);
+  assert.equal(called, 0, "a dev build must not reach for a public feed");
 });

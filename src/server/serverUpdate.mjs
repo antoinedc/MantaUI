@@ -17,12 +17,32 @@
 // fetch failure path are testable without timers, network, or live `push`.
 
 import { isUpdateAvailable } from "../shared/versionCompare.mjs";
+import { resolveBoxChannel } from "../shared/channel.mjs";
 
 const POLL_MS = 6 * 60 * 60 * 1000; // 6h, per the stage-2 spec.
 
-// Hardcoded by design — the update endpoint is part of the deployed website
-// (website/updates/server.json) and is not user-configurable. A box should not
-// be able to override where it learns about a new release.
+// Not user-configurable — the update endpoint is part of the deployed website
+// (website/updates/server.json) and a box must not be able to point itself at
+// an arbitrary source. It IS channel-derived, though.
+//
+// This used to be a hardcoded prod URL, which quietly broke the staging track:
+// a box installed with MANTA_CHANNEL=staging checked the PROD manifest and
+// therefore updated itself onto PROD builds. The staging server track was
+// published and live but nothing could ever follow it — which is why staging
+// sat versions behind with no one noticing.
+//
+// `channelConfig().updateFeed` is the single source for this (prod →
+// /updates, staging → /staging/updates, dev → null). `null` means "this build
+// has no update feed": see startServerUpdatePoller, which skips polling
+// entirely rather than inventing a URL. A local/dev box chasing a public feed
+// is exactly what you don't want.
+export function manifestUrl(channel = resolveBoxChannel()) {
+  const feed = channel?.updateFeed;
+  return feed ? `${feed}/server.json` : null;
+}
+
+/** Back-compat alias for the prod URL — kept because tests and callers import
+ *  it as the default. Prefer `manifestUrl()`, which respects the channel. */
 export const MANIFEST_URL = "https://mantaui.com/updates/server.json";
 
 /**
@@ -58,14 +78,21 @@ export async function defaultFetchManifest(url = MANIFEST_URL) {
  * @param {string} deps.currentVersion
  * @returns {{ tick: () => Promise<{available:boolean, version?:string, notesUrl?:string|null}> }}
  */
-export function createUpdateCheck({ fetchManifest, currentVersion }) {
+export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
   let inFlight = false;
+  // Channel-derived by default (prod → /updates, staging → /staging/updates).
+  // `null` means this build has no feed — see tick().
+  const feedUrl = url === undefined ? manifestUrl() : url;
 
   async function tick() {
     if (inFlight) return { available: false };
+    // A dev build has `updateFeed: null`. Report "no update" rather than
+    // falling back to the prod feed: a local build must never talk a real box
+    // into installing a public release over it.
+    if (!feedUrl) return { available: false };
     inFlight = true;
     try {
-      const manifest = await fetchManifest(MANIFEST_URL);
+      const manifest = await fetchManifest(feedUrl);
       if (!manifest || typeof manifest.version !== "string") {
         return { available: false };
       }

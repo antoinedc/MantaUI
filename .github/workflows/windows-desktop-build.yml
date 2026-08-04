@@ -63,8 +63,17 @@ name: Windows desktop build
 on:
   push:
     tags:
+      # prod channel
       - "win-v*"
+      # staging channel — side-by-side install, staging URL scheme
+      - "win-staging-v*"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel to build"
+        type: choice
+        options: [prod, staging]
+        default: prod
 
 concurrency:
   group: windows-desktop-build
@@ -97,13 +106,57 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Resolve the channel ONCE, from the tag when there is one and from the
+      # dispatch input otherwise, and export it for every later step. A
+      # `win-staging-v*` tag is a staging release; `win-v*` is prod. This
+      # mirrors the mac workflow's MANTA_CHANNEL contract so the two platforms
+      # describe a release the same way.
+      - name: Resolve channel
+        id: channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF='${{ github.ref_name }}'
+          if [[ '${{ github.ref_type }}' == 'tag' ]]; then
+            case "$REF" in
+              win-staging-v*) CHANNEL=staging ;;
+              win-v*)         CHANNEL=prod ;;
+              *) echo "::error::tag '$REF' is neither win-v* nor win-staging-v*"; exit 1 ;;
+            esac
+          else
+            CHANNEL='${{ inputs.channel }}'
+            CHANNEL="${CHANNEL:-prod}"
+          fi
+          case "$CHANNEL" in prod|staging) ;; *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;; esac
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "MANTA_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "Building the $CHANNEL channel"
+
+      # MANTA_CHANNEL is read by electron.vite.config.ts and baked in as
+      # __MANTA_CHANNEL__, which is what decides the app's URL scheme
+      # (manta:// vs manta-staging://) and its userData directory. Without it
+      # a "staging" build would still register the prod scheme and hijack
+      # prod pairing links.
       - name: Build renderer + main bundles
         run: npm run build
 
       - name: Build the installer
         # --publish never: emit latest.yml next to the .exe but upload
         # nothing. Same flag scripts/release/desktop.sh uses for mac/linux.
-        run: npx electron-builder --win --publish never
+        #
+        # Staging overlays electron-builder.staging.yml — a different appId and
+        # productName, so a staging build installs SIDE BY SIDE with prod on
+        # the same machine instead of upgrading over it. That overlay already
+        # existed for mac and its own comments already named Windows; this is
+        # the wiring it was waiting for.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.channel.outputs.channel }}" = "staging" ]; then
+            npx electron-builder --win --publish never --config electron-builder.staging.yml
+          else
+            npx electron-builder --win --publish never
+          fi
 
       # Fail loudly rather than uploading an empty artifact. electron-builder
       # can exit 0 having produced nothing if a target is misconfigured.
@@ -146,11 +199,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
           set -euo pipefail
+          if [ "$CHANNEL" = "staging" ]; then
+            TITLE="Manta UI for Windows (Staging) — $TAG"
+          else
+            TITLE="Manta UI for Windows — $TAG"
+          fi
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "Manta UI for Windows — $TAG" \
+              --title "$TITLE" \
               --prerelease \
               --notes 'Unsigned internal build. Windows SmartScreen will warn on first run: **More info → Run anyway**. Per-user install, no admin rights needed. Auto-update is not wired up for Windows — grab the next release from here.'
           fi
