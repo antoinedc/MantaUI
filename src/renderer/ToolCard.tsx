@@ -20,7 +20,7 @@
 // mono header size.
 
 import type { ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { StatusDot } from "./StatusDot";
 import { CopyButton } from "./CopyButton";
 
@@ -82,10 +82,10 @@ export function ToolCard({
       title={expanded ? "Collapse" : "Expand"}
       className={ACTION}
     >
-      <ChevronDown
+      <ChevronRight
         size={12}
         aria-hidden="true"
-        className={`transition-transform${expanded ? " rotate-180" : ""}`}
+        className={`transition-transform${expanded ? " rotate-90" : ""}`}
       />
     </button>
   ) : null;
