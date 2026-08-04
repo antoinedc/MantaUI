@@ -521,6 +521,26 @@ private struct ChatScreenContent: View {
             // the initial landing to the explicit scroll below, which runs after
             // layout and therefore aims at a height that is actually real.
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            // The transcript does NOT react to the keyboard. Without this it
+            // went BLANK the first time you tapped the composer in a session,
+            // and only came back when the keyboard was dismissed.
+            //
+            // Two mechanisms, both fixed by the same line:
+            //
+            //  * SwiftUI's automatic keyboard avoidance shrinks the bottom
+            //    safe area, which RESIZES this scroll view — and a resize is
+            //    exactly what `.defaultScrollAnchor(.bottom, for: .sizeChanges)`
+            //    listens for. It duly re-pinned to the true bottom of the
+            //    stack, which is the empty `composerReservedHeight` spacer
+            //    sitting AFTER the bottom anchor: a viewport of blank space.
+            //  * The avoidance also offsets the whole stack upward to keep the
+            //    focused editor visible, pushing the conversation off-screen.
+            //
+            // Ignoring the keyboard here keeps the scroll view a fixed size, so
+            // neither fires. The composer is an OVERLAY on the parent (which
+            // still honours the keyboard inset), so it keeps riding up above
+            // the keyboard exactly as before — only the transcript holds still.
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .scrollDismissesKeyboard(.interactively)
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
