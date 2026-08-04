@@ -322,51 +322,44 @@ test("poller: stop() clears the interval timer", async () => {
 // noticed, because the failure is silent and looks exactly like "no update".
 // ---------------------------------------------------------------------------
 
-test("manifestUrl: prod → the prod feed", () => {
+// Run `fn` with MANTA_CHANNEL set to `value` (or unset when null), always
+// restoring the previous value. Shared because these cases differ only in the
+// channel and the expected URL — repeating the save/restore dance per test is
+// what the duplication gate flagged.
+function withChannel(value, fn) {
   const prev = process.env.MANTA_CHANNEL;
-  process.env.MANTA_CHANNEL = "prod";
+  if (value === null) delete process.env.MANTA_CHANNEL;
+  else process.env.MANTA_CHANNEL = value;
   try {
-    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
+    fn();
   } finally {
     if (prev === undefined) delete process.env.MANTA_CHANNEL;
     else process.env.MANTA_CHANNEL = prev;
   }
-});
+}
 
-test("manifestUrl: REGRESSION — staging → the STAGING feed, not prod", () => {
-  const prev = process.env.MANTA_CHANNEL;
-  process.env.MANTA_CHANNEL = "staging";
-  try {
-    assert.equal(manifestUrl(), "https://mantaui.com/staging/updates/server.json");
-  } finally {
-    if (prev === undefined) delete process.env.MANTA_CHANNEL;
-    else process.env.MANTA_CHANNEL = prev;
-  }
-});
+const PROD_FEED = "https://mantaui.com/updates/server.json";
 
-test("manifestUrl: dev has no feed at all (null, never a prod fallback)", () => {
-  const prev = process.env.MANTA_CHANNEL;
-  process.env.MANTA_CHANNEL = "dev";
-  try {
-    assert.equal(manifestUrl(), null);
-  } finally {
-    if (prev === undefined) delete process.env.MANTA_CHANNEL;
-    else process.env.MANTA_CHANNEL = prev;
-  }
-});
-
-test("manifestUrl: unset / unrecognised channel falls back to prod", () => {
-  const prev = process.env.MANTA_CHANNEL;
-  delete process.env.MANTA_CHANNEL;
-  try {
-    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
-    process.env.MANTA_CHANNEL = "banana";
-    assert.equal(manifestUrl(), "https://mantaui.com/updates/server.json");
-  } finally {
-    if (prev === undefined) delete process.env.MANTA_CHANNEL;
-    else process.env.MANTA_CHANNEL = prev;
-  }
-});
+// prod / staging / dev / unset / garbage, in one table. The staging row is THE
+// regression: it used to resolve to PROD_FEED, so a staging box updated itself
+// onto prod builds.
+for (const { name, channel, expected } of [
+  { name: "prod → the prod feed", channel: "prod", expected: PROD_FEED },
+  {
+    name: "REGRESSION staging → the STAGING feed, not prod",
+    channel: "staging",
+    expected: "https://mantaui.com/staging/updates/server.json",
+  },
+  { name: "dev has no feed at all (null, never a prod fallback)", channel: "dev", expected: null },
+  { name: "unset falls back to prod", channel: null, expected: PROD_FEED },
+  { name: "unrecognised falls back to prod", channel: "banana", expected: PROD_FEED },
+]) {
+  test(`manifestUrl: ${name}`, () => {
+    withChannel(channel, () => {
+      assert.equal(manifestUrl(), expected);
+    });
+  });
+}
 
 test("createUpdateCheck fetches the channel's feed, not a hardcoded one", async () => {
   const seen = [];
