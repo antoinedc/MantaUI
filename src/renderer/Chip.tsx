@@ -82,6 +82,13 @@ export function SplitChip({
   leftExpanded,
   rightExpanded,
   popup = false,
+  extra,
+  onExtraClick,
+  extraTitle,
+  extraLabel,
+  extraHook,
+  extraPressed,
+  extraDisabled = false,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
   left: ReactNode;
@@ -124,12 +131,48 @@ export function SplitChip({
    * a non-popup adopter (e.g. a checkbox row) omits it.
    */
   popup?: boolean;
+  /**
+   * OPTIONAL third segment, for a boolean TOGGLE that belongs to the same
+   * control (e.g. the composer's ⚡ fast-mode switch, which modifies the model
+   * the other two segments describe). It is deliberately NOT a popup — it gets
+   * `aria-pressed`, never `aria-haspopup`, so the popup coverage registry does
+   * not count it as a surface that must be closed. Omit it and the chip is the
+   * plain two-segment split.
+   */
+  extra?: ReactNode;
+  onExtraClick?: () => void;
+  /** Native `title` on the extra segment — state-dependent explanatory copy. */
+  extraTitle?: string;
+  /**
+   * STABLE accessible name for the extra segment. Required in practice for an
+   * icon-only toggle: without it the name falls back to `title`, which changes
+   * with state, so the control renames itself as the user toggles it (and every
+   * aria snapshot containing it churns). The label names the control; `title`
+   * explains the state; `aria-pressed` carries the state itself.
+   */
+  extraLabel?: string;
+  /** A stable `manta-*` identity class for the extra segment button. */
+  extraHook?: string;
+  /** `aria-pressed` for the extra segment — its on/off state. */
+  extraPressed?: boolean;
+  /** Render the extra segment non-interactive (dimmed, `disabled`). */
+  extraDisabled?: boolean;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
   const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
   const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
   const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
+  // The toggle segment shares the divider + padding of the right segment, so
+  // the three read as one control. Its tone is the only difference: on =
+  // accent (matching CHIP_ON's text), disabled = --tx4 with no hover.
+  const extraClass =
+    `${extraHook ? `${extraHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border ` +
+    (extraDisabled
+      ? "text-text-quiet cursor-not-allowed"
+      : extraPressed
+        ? "text-accent-tx hover:bg-fill-hover"
+        : "text-text-faint hover:bg-fill-hover hover:text-text");
   return (
     <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
       <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
@@ -138,6 +181,19 @@ export function SplitChip({
       <button type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox} {...rightAria}>
         {right}
       </button>
+      {extra !== undefined && (
+        <button
+          type="button"
+          onClick={onExtraClick}
+          title={extraTitle}
+          aria-label={extraLabel}
+          disabled={extraDisabled}
+          aria-pressed={extraPressed}
+          className={extraClass}
+        >
+          {extra}
+        </button>
+      )}
     </div>
   );
 }

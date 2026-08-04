@@ -1804,3 +1804,124 @@ export function shortModelName(name: string | null | undefined): string | null {
   }
   return trimmed;
 }
+
+// ===== Fast-mode sibling models (composer ⚡ toggle) =====
+//
+// Several providers ship a "fast" flavour of a model as a SEPARATE model id
+// with a `-fast` suffix rather than as a variant: `gpt-5.6` / `gpt-5.6-fast`,
+// `gpt-5.4-mini` / `gpt-5.4-mini-fast`, `databricks-claude-opus-4-7` /
+// `…-4-7-fast`. Listing both in the model dropdown doubles its length and
+// makes an orthogonal speed/quality choice look like two unrelated models.
+//
+// So the composer treats fast as a MODE of the base model: the `-fast` id is
+// hidden from the dropdown (as long as its base twin is also visible, else it
+// would be unreachable) and reached instead through a lightning toggle in the
+// model chip. These helpers are the whole rule — the id arithmetic and the
+// availability predicate — kept pure so the toggle's disabled/on states are
+// testable without a live provider list.
+
+const FAST_SUFFIX = "-fast";
+
+/** True when `modelID` is the fast flavour of some base model. */
+export function isFastModelId(modelID: string): boolean {
+  return modelID.length > FAST_SUFFIX.length && modelID.endsWith(FAST_SUFFIX);
+}
+
+/** `"gpt-5.6-fast"` → `"gpt-5.6"`; a non-fast id is returned unchanged. */
+export function baseModelId(modelID: string): string {
+  return isFastModelId(modelID) ? modelID.slice(0, -FAST_SUFFIX.length) : modelID;
+}
+
+/** `"gpt-5.6"` → `"gpt-5.6-fast"`; a fast id is returned unchanged. */
+export function fastModelId(modelID: string): string {
+  return isFastModelId(modelID) ? modelID : `${modelID}${FAST_SUFFIX}`;
+}
+
+/**
+ * Drop `-fast` models from the grouped dropdown list, but ONLY where the base
+ * twin survives in the same provider group — a `-fast` model whose base is
+ * absent (or deactivated) has no toggle to reach it by, so hiding it would
+ * make it unselectable. Groups left empty are dropped so the menu never
+ * renders a provider heading with nothing under it.
+ */
+export function hideFastSiblingGroups(
+  groups: Array<[string, OpencodeModel[]]>,
+): Array<[string, OpencodeModel[]]> {
+  const out: Array<[string, OpencodeModel[]]> = [];
+  for (const [providerID, models] of groups) {
+    const ids = new Set(models.map((m) => m.id));
+    const kept = models.filter((m) => !(isFastModelId(m.id) && ids.has(baseModelId(m.id))));
+    if (kept.length > 0) out.push([providerID, kept]);
+  }
+  return out;
+}
+
+export type FastToggleState = {
+  /** The toggle can be clicked (a counterpart exists that keeps the effort). */
+  available: boolean;
+  /** The active model IS the fast flavour. */
+  on: boolean;
+  /** The selection a click produces; null when unavailable. */
+  target: { providerID: string; modelID: string; variant?: string } | null;
+  /** Tooltip copy explaining the current state. */
+  title: string;
+};
+
+/**
+ * Resolve the ⚡ toggle for the active model.
+ *
+ * Available only when the counterpart model exists AND still offers the
+ * currently-selected effort/variant — flipping to fast must never silently
+ * drop the user's effort choice, so a fast twin that lacks it reads as "no
+ * fast mode for this effort" and the toggle goes disabled (the user's ask).
+ * With no variant selected, only the counterpart's existence matters.
+ */
+export function resolveFastToggle(
+  models: OpencodeModel[] | null,
+  active: OpencodeModel | null,
+  variantId: string | undefined,
+): FastToggleState {
+  const off = (title: string): FastToggleState => ({ available: false, on: false, target: null, title });
+  if (!active || !models) return off("No fast mode for this model");
+
+  const on = isFastModelId(active.id);
+  const counterpartId = on ? baseModelId(active.id) : fastModelId(active.id);
+  const counterpart =
+    models.find(
+      (m) =>
+        m.providerID === active.providerID &&
+        m.id === counterpartId &&
+        m.enabled !== false &&
+        m.status !== "deprecated",
+    ) ?? null;
+
+  if (!counterpart) {
+    // Already on a fast model whose base vanished: report the truth (on) but
+    // give the user nothing to click, rather than lying that fast is off.
+    return on
+      ? { available: false, on: true, target: null, title: "Fast mode on (no standard model available)" }
+      : off("No fast mode for this model");
+  }
+
+  const keepsVariant =
+    variantId === undefined || (counterpart.variants ?? []).some((v) => v.id === variantId);
+  if (!keepsVariant) {
+    return {
+      available: false,
+      on,
+      target: null,
+      title: `No fast mode at ${variantId} effort`,
+    };
+  }
+
+  return {
+    available: true,
+    on,
+    target: {
+      providerID: counterpart.providerID,
+      modelID: counterpart.id,
+      ...(variantId === undefined ? {} : { variant: variantId }),
+    },
+    title: on ? "Fast mode on — click for the standard model" : "Fast mode off — click for the faster model",
+  };
+}

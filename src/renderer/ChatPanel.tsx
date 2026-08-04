@@ -2249,6 +2249,7 @@ export function ChatPanel({
       <Composer
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
+        onAttachFiles={(files) => void addDroppedFiles(files)}
         typeahead={typeahead}
         typeaheadRows={typeaheadRows}
         onTypeaheadSelect={applyTypeahead}
