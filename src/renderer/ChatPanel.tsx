@@ -61,6 +61,7 @@ import {
   type TaskContextValue,
   type TokenUsage,
 } from "./chatShared";
+import { useModelCatalog } from "./modelCatalog";
 import { RunningIndicator } from "./MessageRow";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
@@ -384,15 +385,12 @@ export function ChatPanel({
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
   const [showThinking, setShowThinking] = useState(false);
-  // Available models + server default (pre-fetched on mount, not lazy — so
-  // the footer can show a meaningful model name before the first response,
-  // and clicking the picker doesn't flash a "Loading…" row). Selection is
-  // per-session and persists via localStorage.
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
-  const [defaultModel, setDefaultModel] = useState<{
-    providerID: string;
-    modelID: string;
-  } | null>(null);
+  // Available models + server default. The catalog is box-level, not
+  // per-session, so it lives in a shared module cache (`useModelCatalog`) — a
+  // panel mounted by `/clear` reads the already-known list synchronously and
+  // the picker never flashes "Loading…" for a list that didn't change.
+  // Selection, by contrast, IS per-session and persists via localStorage.
+  const { models, defaultModel } = useModelCatalog();
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
     readSavedModel(sessionId) ?? configDefaultModel ?? null,
   );
@@ -908,26 +906,6 @@ export function ChatPanel({
     },
     [refreshQuestions],
   );
-
-  // Pre-fetch models + default on session mount so the footer shows the
-  // actual model (not just "opencode") before the first response, and the
-  // dropdown opens populated. Idempotent: skipped when both are already loaded.
-  useEffect(() => {
-    let cancelled = false;
-    if (models == null) {
-      window.api
-        .opencodeModels()
-        .then((list) => { if (!cancelled) setModels(list); })
-        .catch(() => { /* non-fatal */ });
-    }
-    if (defaultModel == null) {
-      window.api
-        .opencodeDefaultModel()
-        .then((d) => { if (!cancelled) setDefaultModel(d); })
-        .catch(() => { /* non-fatal */ });
-    }
-    return () => { cancelled = true; };
-  }, [sessionId, models, defaultModel]);
 
   // Kept for the picker button's onOpen — no-op now that we pre-fetch.
   const ensureModels = useCallback(async () => { /* noop */ }, []);

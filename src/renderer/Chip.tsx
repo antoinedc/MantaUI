@@ -11,11 +11,13 @@
 // Chrome contract (BET-529 inventory): 29px hit area (`h-[29px]`), `--r-md`
 // radius (`rounded-md`), 11px inline padding (`px-[11px]`) and a 6px gap
 // (`gap-[6px]`) — the two off-grid px this primitive carries — plus `text-meta`
-// medium chrome. `Chip` toggles between the rest tone (`CHIP_REST`, a bordered
-// soft chip) and the "on" tone (`CHIP_ON`, accent border on an accent-bg
-// surface — e.g. an enabled worktree). `SplitChip` takes the rest tone for its
-// shell and divides it with a `border-l` divider; `rightAccent` colours the
-// right segment with `--accent-tx` + semibold.
+// chrome. Weight is the one place the two diverge: `Chip` is medium (it is a
+// labelled ACTION), `SplitChip` is regular (it is a status readout you glance
+// at). `Chip` toggles between the rest tone (`CHIP_REST`, a bordered soft chip)
+// and the "on" tone (`CHIP_ON`, accent border on an accent-bg surface — e.g. an
+// enabled worktree). `SplitChip` takes the rest tone for its shell and divides
+// it with a `border-l` divider; `rightAccent` colours the right segment with
+// `--accent-tx` (colour only — no weight change).
 //
 // Split rule (BET-634): the shell hover is the SINGLE chip's (`hover:border
 // -border-strong hover:text-text`) — a split control leaves its shell border
@@ -30,9 +32,15 @@
 
 import type { ReactNode } from "react";
 
-const CHIP_SHELL =
+const CHIP_BASE =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap " +
-  "text-meta font-medium leading-none transition-colors";
+  "text-meta leading-none transition-colors";
+const CHIP_SHELL = `${CHIP_BASE} font-medium`;
+// The SPLIT shell runs one weight lighter than the single chip. A split
+// control is a STATUS readout you change occasionally (the model you're on,
+// the effort it runs at), not a labelled action, and at medium it competed
+// with the transcript for attention every time your eye crossed the composer.
+const SPLIT_SHELL = `${CHIP_BASE} font-normal`;
 const CHIP_REST = "border-border bg-bg-soft text-text-muted";
 const CHIP_HOVER = "hover:border-border-strong hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
@@ -162,19 +170,40 @@ export function SplitChip({
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
   const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
   const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
-  const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx font-semibold" : ""}`;
+  // `rightAccent` is a COLOUR accent only. It used to add `font-semibold` too,
+  // which made the effort label the heaviest text in the composer — the accent
+  // already carries the emphasis, and the extra weight only shouted.
+  const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx" : ""}`;
   // The toggle segment shares the divider + padding of the right segment, so
-  // the three read as one control. Its tone is the only difference: on =
-  // accent (matching CHIP_ON's text), disabled = --tx4 with no hover.
+  // the three read as one control. Only its TONE differs, across three states
+  // that must be told apart at a glance:
+  //
+  //   on        → accent (matching CHIP_ON's text)
+  //   off       → --tx3, and it lights up on hover — the affordance IS the hover
+  //   disabled  → --tx4 AND half-opacity, no hover, `cursor-not-allowed`
+  //
+  // Colour alone was not enough: --tx3 vs --tx4 is one step apart and the
+  // toggle read as merely "off" when it was actually unavailable, so people
+  // clicked it and nothing happened. Opacity is the second, unmistakable
+  // channel (the caller is expected to swap the glyph too — see ModelPicker's
+  // Zap/ZapOff). Tone is resolved BEFORE the disabled check so a control that
+  // is on-but-frozen keeps its accent and dims, instead of flattening to grey
+  // and lying about its state.
+  const extraTone = extraPressed
+    ? "text-accent-tx"
+    : extraDisabled
+      ? "text-text-quiet"
+      : "text-text-faint";
+  const extraInteraction = extraDisabled
+    ? "opacity-50 cursor-not-allowed"
+    : extraPressed
+      ? "hover:bg-fill-hover"
+      : "hover:bg-fill-hover hover:text-text";
   const extraClass =
     `${extraHook ? `${extraHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border ` +
-    (extraDisabled
-      ? "text-text-quiet cursor-not-allowed"
-      : extraPressed
-        ? "text-accent-tx hover:bg-fill-hover"
-        : "text-text-faint hover:bg-fill-hover hover:text-text");
+    `${extraTone} ${extraInteraction}`;
   return (
-    <div className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
+    <div className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
       <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
         {left}
       </button>

@@ -14,8 +14,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
 import { Chip, SplitChip } from "./Chip";
 
-const CHIP_SHELL =
-  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta font-medium leading-none transition-colors";
+const CHIP_BASE =
+  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta leading-none transition-colors";
+// Single chip = medium (a labelled action). Split chip = regular (a status
+// readout). The divergence is deliberate — see Chip.tsx's header.
+const CHIP_SHELL = `${CHIP_BASE} font-medium`;
+const SPLIT_SHELL = `${CHIP_BASE} font-normal`;
 const CHIP_REST = "border-border bg-bg-soft text-text-muted";
 const CHIP_HOVER = "hover:border-border-strong hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
@@ -95,7 +99,7 @@ describe("SplitChip", () => {
       />,
     );
     const shell = h.container.firstElementChild as HTMLElement;
-    expect(shell.className).toBe(`${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
+    expect(shell.className).toBe(`${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
     const [l, r] = buttons();
     expect(l.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`);
     expect(r.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover`);
@@ -124,7 +128,7 @@ describe("SplitChip", () => {
     expect(r.className).toContain("hover:bg-fill-hover");
   });
 
-  it("adds accent-tx + semibold to the right segment only when rightAccent", () => {
+  it("adds accent-tx — COLOUR ONLY, no weight bump — to the right segment only when rightAccent", () => {
     h = mount(
       <SplitChip
         left={<span>L</span>}
@@ -136,7 +140,9 @@ describe("SplitChip", () => {
     );
     const [l, r] = buttons();
     expect(r.className).toContain("text-accent-tx");
-    expect(r.className).toContain("font-semibold");
+    // The accent carries the emphasis; a weight bump on top made the effort
+    // label the heaviest text in the composer.
+    expect(r.className).not.toContain("font-semibold");
     expect(l.className).not.toContain("text-accent-tx");
 
     h.unmount();
