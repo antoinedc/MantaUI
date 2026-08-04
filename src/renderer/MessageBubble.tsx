@@ -30,7 +30,7 @@ import type { ReactNode } from "react";
 export function MessageBubble({ children }: { children: ReactNode }) {
   return (
     <div className="flex justify-end">
-      <div className="bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words">
+      <div className="bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words manta-bubble-in">
         {children}
       </div>
     </div>

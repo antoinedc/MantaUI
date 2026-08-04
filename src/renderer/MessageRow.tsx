@@ -225,6 +225,7 @@ export const MessageRow = memo(function MessageRow({
   truncation,
   commandInfo,
   streaming = false,
+  entering = false,
 }: {
   msg: OpencodeMessage;
   showThinking: boolean;
@@ -251,8 +252,22 @@ export const MessageRow = memo(function MessageRow({
   // trailing caret on its final text part (BET-649). Primitive prop, so the
   // MessageRow memo chain is untouched.
   streaming?: boolean;
+  // True when this row mounted live at the tail of the transcript AFTER the
+  // initial load (transcript-motion). Drives the whole-row slide-up entry; a
+  // session switch (all rows remount) is NOT `entering`, so history never
+  // replays its entrance. The user bubble gets its own send animation inside
+  // MessageBubble, and the streaming row animates its blocks instead, so
+  // `entering` only applies the row slide to settled assistant/card rows.
+  // Primitive prop — memo chain untouched.
+  entering?: boolean;
 }) {
   const isUser = msg.info.role === "user";
+
+  // Whole-row entry motion for newly-mounted, settled assistant rows. The
+  // streaming message's blocks animate via .manta-streaming instead; the user
+  // bubble animates via .manta-bubble-in inside MessageBubble. Reduced-motion
+  // kills the animation in CSS.
+  const rowMotion = entering && !isUser && !streaming ? " manta-row-in" : "";
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
@@ -276,7 +291,7 @@ export const MessageRow = memo(function MessageRow({
   // commands, paths and output), 10px, tabular so the digits don't jitter.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
-    <div className="group relative">
+    <div className={"group relative" + rowMotion}>
       {ts && (
         <span
           className={

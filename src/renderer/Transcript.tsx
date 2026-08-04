@@ -22,6 +22,7 @@
 // stability, so passing it through as a prop keeps that identity intact.
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
+import { useRef } from "react";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
@@ -61,6 +62,42 @@ export function Transcript({
   onReplyQuestion,
   onRejectQuestion,
 }: TranscriptProps) {
+  // Entry-motion tracking (transcript-motion): rows mount live at the tail of
+  // the transcript (a message just sent, an assistant turn that reconciles in
+  // as a whole) should animate a slide-up entry, but the FULL transcript must
+  // NOT replay its entrance on a session switch or the first load. `seen` is
+  // primed with the ids present on the first render where messages become
+  // non-empty, so exactly the rows appended AFTER that prime get `entering`.
+  //
+  // Kept in a ref (not state) — it must not trigger renders, and updating it
+  // during render is safe/idempotent. Per-window refs reset on remount, which
+  // is exactly the session-switch boundary we want to reset on.
+  const seenIdsRef = useRef<Set<string> | null>(null);
+
+  // Compute `entering` per row for this render and advance the seen set.
+  // Mutating a ref during render is fine here: the set converges to the
+  // current message ids and there is no side effect on other components.
+  const seen = seenIdsRef.current;
+  const enteringFor: Record<string, boolean> = {};
+  if (seen == null && messages.length > 0) {
+    // First NON-EMPTY render — the initial population. Nothing animates (the
+    // empty "Welcome" render must not prime the set, or every historically
+    // loaded row would read as new and replay its entrance).
+    seenIdsRef.current = new Set(messages.map((m) => m.info.id));
+  } else if (seen != null) {
+    for (const m of messages) {
+      // The optimistic placeholder a send appends is ALWAYS animated: on a
+      // brand-new session it is the first non-empty render (so would be
+      // primed as "seen"), and it is the exact moment the iMessage send
+      // effect matters most.
+      if (!seen.has(m.info.id) || m.info.id.startsWith("optimistic-user-")) {
+        enteringFor[m.info.id] = true;
+      }
+    }
+    // Merge newly seen ids in so they don't re-enter on the next render.
+    for (const id of Object.keys(enteringFor)) seen.add(id);
+  }
+
   return (
     <div
       ref={scrollRef}
@@ -129,6 +166,7 @@ export function Transcript({
                     // The message being written right now: last in the
                     // transcript, assistant, and the turn still running.
                     streaming={isLastInTranscript && running}
+                    entering={!!enteringFor[m.info.id]}
                   />
                 );
               })}
