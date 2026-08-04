@@ -56,6 +56,11 @@ describe("Checkbox", () => {
     expect(box.className).toContain("bg-accent-solid");
     expect(box.className).toContain("text-on-accent");
     expect(h.container.querySelector("svg")).not.toBeNull();
+    // REGRESSION: the canvas fill must be GONE when checked. Both are
+    // backgroundColor utilities of equal specificity, and Tailwind emits
+    // `.bg-bg` after `.bg-accent-solid`, so keeping both left the box on the
+    // canvas fill with an --on-accent glyph on it — an invisible checkmark.
+    expect(box.className).not.toContain("bg-bg");
   });
 
   it("renders the label prop as text after the box and propagates it as the accessible name", () => {

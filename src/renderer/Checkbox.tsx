@@ -12,6 +12,16 @@
 // that uses `peer` — a class on the input that styles the preceding-sibling
 // box — the checked fill and glyph are driven from the `checked` prop so the
 // glyph stays out of the DOM when unchecked.
+//
+// GOTCHA — the two fills MUST be mutually exclusive. `bg-bg` was originally
+// emitted unconditionally with `bg-accent-solid` appended when checked, on the
+// assumption that the later class in the string wins. It does not: both are
+// backgroundColor utilities of equal specificity, so the winner is whichever
+// Tailwind emits LAST in the compiled sheet — and that is `.bg-bg`. A checked
+// box therefore kept the canvas fill while the glyph was painted in
+// `--on-accent` (near-black on dark, white on light), i.e. an invisible
+// checkmark in both themes. Never put a base fill and a state fill on the same
+// element; pick one in the ternary.
 
 import { Check } from "lucide-react";
 
@@ -52,9 +62,9 @@ export function Checkbox({
       <span
         aria-hidden="true"
         className={
-          "w-4 h-4 rounded-xs border border-border-strong bg-bg inline-grid place-items-center " +
+          "w-4 h-4 rounded-xs border border-border-strong inline-grid place-items-center " +
           "peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-accent " +
-          (checked ? "bg-accent-solid text-on-accent" : "")
+          (checked ? "bg-accent-solid text-on-accent" : "bg-bg")
         }
       >
         {checked && <Check size={12} />}
