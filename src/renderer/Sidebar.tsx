@@ -10,7 +10,7 @@ import {
 import type { ReactElement, ReactNode } from "react";
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
-import { nowMs } from "./clock";
+import { nowMs, useAgeTick } from "./clock";
 import { Modal } from "./Modal";
 import type { Project, TmuxWindow } from "../shared/types";
 import {
@@ -799,6 +799,11 @@ function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; t
 // produces the content.
 function useAge(status: WindowStatusUI | undefined): { text: string | undefined; stale: boolean } {
   const cacheTtl = useStore((s) => s.cacheTtl);
+  // Subscribe to the shared ticker so the label advances on its own (1m → 2m)
+  // instead of only when an unrelated event happens to re-render the sidebar.
+  // Called BEFORE the early return below — hook order must not depend on
+  // whether this row currently has an age to show.
+  useAgeTick();
   const last = status?.lastMessageAt;
   const showAge = last != null && !status?.running && !status?.attention;
   if (!showAge) return { text: undefined, stale: false };
