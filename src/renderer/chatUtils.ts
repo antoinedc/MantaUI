@@ -1701,6 +1701,53 @@ export function computeJobNesting(
   return { hidden, children, orphans };
 }
 
+// Does the window tree disagree with the jobs slice, so the tree needs a
+// re-list?
+//
+// `computeJobNesting` can only render a job it can find a WINDOW for
+// (`byOpencodeId.get(job.childSessionID)`), and drops the job outright when it
+// can't. The two inputs refresh on completely different schedules: the jobs
+// slice re-fetches on every `delegate.updated` bus event, while the window tree
+// is only re-listed by `refresh()` — which the app runs at bootstrap and then
+// only after an action it performed itself. A background job creates its tmux
+// window on the BOX, after boot and without the app doing anything, so its
+// window is absent from the tree and the job renders NOWHERE: not nested, not
+// orphaned, not top-level. That is the "delegated jobs never appear in the
+// sidebar" bug, and it self-heals only if the user happens to do something
+// that re-lists windows.
+//
+// Rather than re-listing tmux on a timer (polling the box for a change that is
+// already announced) or on every `delegate.updated` (activity updates fire
+// every ~10s per job, so that is a tmux call per job per tick), this states the
+// invariant the renderer actually depends on and lets the caller re-list only
+// when it is violated:
+//
+//   - a RUNNING job whose child window is missing  → the tree is behind a
+//     window that was created (job would be invisible)
+//   - a window whose session belongs to a TERMINAL job → the tree is behind a
+//     window that was removed (a finished job's window would otherwise linger
+//     and, once its record is swept, reappear as an ordinary session)
+//
+// Pure so it can be tested without a tree, a socket, or a live job.
+export function shouldResyncWindowsForJobs(
+  projects: Project[],
+  jobs: Record<string, { status: string; childSessionID: string | null }>,
+): boolean {
+  const known = new Set<string>();
+  for (const p of projects) {
+    for (const w of p.windows) {
+      if (w.opencodeSessionId) known.add(w.opencodeSessionId);
+    }
+  }
+  for (const job of Object.values(jobs)) {
+    if (!job.childSessionID) continue;
+    const present = known.has(job.childSessionID);
+    if (job.status === "running" && !present) return true;
+    if (job.status !== "running" && present) return true;
+  }
+  return false;
+}
+
 // Convenience: is a given window a job child that should be nested (i.e.
 // hidden from the top-level list)? Combines isJobRow with the running/viewed
 // gate so the Sidebar's top-level filter stays a single expression.

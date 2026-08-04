@@ -17,7 +17,7 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
-import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ReconnectingBanner } from "./ReconnectingBanner";
@@ -269,7 +269,22 @@ export function App() {
       window.api
         .delegateList()
         .then((list) => {
-          useStore.getState().setJobs(Array.isArray(list) ? list : []);
+          const store = useStore.getState();
+          store.setJobs(Array.isArray(list) ? list : []);
+          // A job's tmux window is created ON THE BOX, so nothing here has
+          // re-listed windows since bootstrap and the tree is missing it.
+          // computeJobNesting drops a job whose window it can't find, so
+          // without this the job is invisible in the sidebar even though the
+          // slice above holds it. Re-list only when the tree actually
+          // disagrees (window created for a running job, or still present for
+          // a finished one) — not on every event, which would mean a tmux call
+          // per job per activity tick.
+          const after = useStore.getState();
+          if (shouldResyncWindowsForJobs(after.projects, after.jobs)) {
+            void after.refresh().catch(() => {
+              /* transport blip — the next tick re-evaluates the invariant */
+            });
+          }
         })
         .catch((e) => {
           // BET-640: a transport blip keeps today's silent behaviour (leave

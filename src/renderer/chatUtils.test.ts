@@ -59,6 +59,7 @@ import {
   resolvePin,
   fuzzySessionScore,
   computeJobNesting,
+  shouldResyncWindowsForJobs,
   isNestedJobChild,
   globCovers,
   isApprovalCoveredByAlways,
@@ -2184,6 +2185,89 @@ describe("fuzzySessionScore", () => {
 
   it("is case-insensitive", () => {
     expect(fuzzySessionScore("AUTH", "auth-service", "BETTER-UI")).toBeGreaterThan(0);
+  });
+});
+
+describe("shouldResyncWindowsForJobs", () => {
+  // THE REGRESSION THIS LOCKS IN: a delegated job creates its tmux window on
+  // the box, so the renderer's window tree — only re-listed at bootstrap and
+  // after the app's own actions — never contains it. computeJobNesting then
+  // drops the job (`if (!childWin) continue`) and it renders NOWHERE, while
+  // the jobs slice happily holds it. The sidebar looked like it ignored
+  // background jobs entirely.
+  it("running job whose window is NOT in the tree → resync (the invisible-job bug)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
+  });
+
+  it("documents WHY it matters: nesting renders a window-less job NOWHERE", () => {
+    // Not nested, not orphaned, not top-level — computeJobNesting's
+    // `if (!childWin) continue` drops it silently. This is the state the
+    // sidebar was permanently in for every delegated job.
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const nesting = computeJobNesting(
+      projects[0],
+      { child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" } },
+      undefined,
+    );
+    expect(nesting.hidden.size).toBe(0);
+    expect(nesting.children.size).toBe(0);
+    expect(nesting.orphans).toEqual([]);
+    // …which is exactly the condition the predicate flags for a re-list.
+    expect(
+      shouldResyncWindowsForJobs(projects, {
+        child1: { status: "running", childSessionID: "child1" },
+      }),
+    ).toBe(true);
+  });
+
+  it("running job whose window IS in the tree → no resync", () => {
+    const projects = [
+      mkProject("p", [
+        { index: 1, name: "parent", opencodeSessionId: "parent" },
+        { index: 2, name: "job", opencodeSessionId: "child1" },
+      ]),
+    ];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("finished job whose window is STILL in the tree → resync (stale window would linger)", () => {
+    const projects = [
+      mkProject("p", [
+        { index: 1, name: "parent", opencodeSessionId: "parent" },
+        { index: 2, name: "job", opencodeSessionId: "child1" },
+      ]),
+    ];
+    const jobs = { child1: { status: "done", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(true);
+  });
+
+  it("finished job already cleaned up → no resync (steady state, no tmux call)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { child1: { status: "done", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("no jobs → no resync", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    expect(shouldResyncWindowsForJobs(projects, {})).toBe(false);
+  });
+
+  it("job with no childSessionID is ignored (mid-start record)", () => {
+    const projects = [mkProject("p", [{ index: 1, name: "parent", opencodeSessionId: "parent" }])];
+    const jobs = { x: { status: "running", childSessionID: null } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+
+  it("finds a job window in ANY project, not just the parent's", () => {
+    const projects = [
+      mkProject("a", [{ index: 1, name: "parent", opencodeSessionId: "parent" }]),
+      mkProject("b", [{ index: 1, name: "job", opencodeSessionId: "child1" }]),
+    ];
+    const jobs = { child1: { status: "running", childSessionID: "child1" } };
+    expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
   });
 });
 
