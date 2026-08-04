@@ -190,25 +190,10 @@ private struct ChatScreenContent: View {
                     modelStore: modelStore
                 )
             }
-            // Scrim: transcript text passing behind the composer fades out
-            // instead of competing with it. Transparent at the top so there is
-            // no visible edge, opaque by the bottom. It sits BEHIND the stack
-            // and ignores the safe area so the home-indicator strip is covered
-            // too. `allowsHitTesting(false)` keeps it from stealing taps meant
-            // for the transcript.
-            .background {
-                LinearGradient(
-                    colors: [
-                        tokens.canvas.opacity(0),
-                        tokens.canvas.opacity(0.75),
-                        tokens.canvas.opacity(0.95),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .ignoresSafeArea(edges: .bottom)
-                .allowsHitTesting(false)
-            }
+            // Transcript text passing behind the composer fades out instead of
+            // competing with it. Shared with the session list's search capsule
+            // — same gesture, one component.
+            .background { BottomScrim(tokens: tokens) }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {

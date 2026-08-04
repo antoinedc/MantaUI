@@ -129,16 +129,35 @@ struct ComposerView: View {
         isTall || !attachments.isEmpty
     }
 
+    /// The editor's measured height for a given number of text lines.
+    ///
+    /// The `+ sp2` is the editor's own internal padding and is the whole reason
+    /// this helper exists: the previous thresholds were bare multiples of
+    /// `lineHeight` and ignored it, so every comparison was off by most of a
+    /// line. Two lines measured 2.45 line-heights, which cleared a "2.4"
+    /// threshold — the box went stacked at TWO lines rather than more than two,
+    /// and the return threshold was similarly mis-placed. Expressing the
+    /// thresholds in LINES and converting here keeps them honest.
+    private func editorHeight(forLines lines: CGFloat) -> CGFloat {
+        lineHeight * lines + Metrics.spacing.sp2
+    }
+
     /// Re-evaluate the layout from a fresh text height, WITH HYSTERESIS: it
     /// takes more height to grow into the stacked form than it takes to fall
     /// back out of it.
     ///
-    /// A single threshold sits exactly where the text is when the layout flips,
-    /// so the flip itself — which changes the box's padding, and so its
-    /// available width — can push the measurement back across the line and
-    /// flip it again. That is an oscillation, and it is what "snapping back and
-    /// forth" is. The gap between the two thresholds is wider than any single
-    /// change the flip can cause, so it cannot self-trigger.
+    /// The two thresholds sit in the GAPS between whole line counts, so each
+    /// one is unambiguous:
+    ///   * grow at 2.5 lines — 2 lines stays compact, 3 goes stacked, which is
+    ///     "pin the controls once it is more than two lines".
+    ///   * shrink at 1.5 lines — back to one line returns to the capsule, while
+    ///     2 lines stays stacked.
+    ///
+    /// The gap between them is a full line, which is what stops the switch
+    /// re-triggering itself: flipping changes the text's available width (the
+    /// controls move out of its row), so the same string re-measures to a
+    /// different height immediately after — a narrower band would let that
+    /// re-measurement cross back and oscillate.
     ///
     /// The animation is applied HERE rather than as a `.animation(value:)` on
     /// the box, so it wraps the state change itself and every dependent piece
@@ -146,9 +165,9 @@ struct ComposerView: View {
     /// curve.
     private func updateLayout(for height: CGFloat) {
         textHeight = height
-        let grow = lineHeight * 2.4   // into stacked
-        let shrink = lineHeight * 1.8 // back to compact
-        let next = isTall ? (height > shrink) : (height > grow)
+        let next = isTall
+            ? height > editorHeight(forLines: 1.5)   // stay stacked?
+            : height > editorHeight(forLines: 2.5)   // become stacked?
         guard next != isTall else { return }
         withAnimation(.smooth(duration: 0.22)) { isTall = next }
     }
@@ -693,6 +712,11 @@ struct ComposerView: View {
         store.send(text: trimmed, attachments: sendAttachments, model: model)
         text = ""
         attachments = []
+        // Return to the compact form explicitly rather than waiting for the
+        // emptied editor to re-measure. The measurement does arrive, but a beat
+        // later — long enough for the box to sit stacked and empty after a
+        // send, which reads as the composer being stuck.
+        withAnimation(.smooth(duration: 0.22)) { isTall = false }
         inputFocused = true
     }
 
