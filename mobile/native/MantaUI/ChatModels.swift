@@ -91,6 +91,34 @@ enum ChatDuration {
     }
 }
 
+/// Wall-clock time for the swipe-to-reveal timestamp gutter (§8).
+///
+/// opencode stamps `time.created` / `time.completed` in epoch MILLISECONDS —
+/// the same values the desktop's `formatClockTime` reads — so the conversion
+/// lives here once rather than at each call site.
+enum ChatClock {
+    /// Locale-aware hour:minute ("20:06" in a 24-hour locale, "8:06 PM" in a
+    /// 12-hour one). The gutter is a fixed-width strip, so the format has to be
+    /// the shortest one that still reads as a time.
+    private static let hourMinute: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.setLocalizedDateFormatFromTemplate("j:mm")
+        return f
+    }()
+
+    static func date(epochMs: Double?) -> Date? {
+        guard let epochMs, epochMs > 0, epochMs.isFinite else { return nil }
+        return Date(timeIntervalSince1970: epochMs / 1000)
+    }
+
+    /// "" for a missing date so a caller can render nothing without a guard.
+    static func time(_ date: Date?) -> String {
+        guard let date else { return "" }
+        return hourMinute.string(from: date)
+    }
+}
+
 /// Map a tool part's `state.status` string onto the StepStatus dot.
 enum StepStatusFromTool {
     static func status(_ raw: String?) -> StepStatus {
@@ -190,7 +218,10 @@ enum ChatTranscriptMapper {
                 let text = textParts(of: msg)
                 if !text.isEmpty {
                     flush(&pending, into: &blocks)
-                    blocks.append(.user(text))
+                    // A prompt is timestamped when it was WRITTEN; a reply when
+                    // it finished. Both are what the reader means by "when did
+                    // this happen".
+                    blocks.append(.user(text, at: ChatClock.date(epochMs: msg.info.time?.created)))
                 }
             case "assistant":
                 // An assistant message still streaming (time.completed == nil)
@@ -199,8 +230,9 @@ enum ChatTranscriptMapper {
                 // refetch. Emitting it now would duplicate the in-progress
                 // text. The box itself keys turn completion on time.completed.
                 guard msg.info.time?.completed != nil else { continue }
+                let at = ChatClock.date(epochMs: msg.info.time?.completed)
                 for part in msg.parts {
-                    process(part, pending: &pending, blocks: &blocks)
+                    process(part, at: at, pending: &pending, blocks: &blocks)
                 }
                 flush(&pending, into: &blocks)
             default:
@@ -221,7 +253,7 @@ enum ChatTranscriptMapper {
         pending = []
     }
 
-    private static func process(_ part: OpencodePart, pending: inout [StepGroupRow], blocks: inout [TranscriptBlock]) {
+    private static func process(_ part: OpencodePart, at: Date?, pending: inout [StepGroupRow], blocks: inout [TranscriptBlock]) {
         if part.ignored == true || part.synthetic == true { return }
         switch part.type {
         case "text":
@@ -232,7 +264,7 @@ enum ChatTranscriptMapper {
             // the next block (BET-632). Same rule as `textParts(of:)`.
             if let t = part.text, !ChatTranscriptMapper.isBlank(t) {
                 flush(&pending, into: &blocks)
-                blocks.append(.prose(t))
+                blocks.append(.prose(t, at: at))
             }
         case "tool":
             let tool = ChatJSON.string(part.extra["tool"]) ?? ""

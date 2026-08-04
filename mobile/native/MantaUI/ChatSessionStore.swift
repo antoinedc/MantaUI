@@ -185,10 +185,7 @@ final class ChatSessionStore: ObservableObject {
     private func applyStreamState() {
         guard let s = eventStore.sessionStates[sessionId] else { return }
 
-        let mergedText = s.textByPart.values
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        inProgressText = mergedText
+        inProgressText = s.liveText
 
         running = s.running == true
         turnComplete = s.turnComplete == true
@@ -220,8 +217,11 @@ final class ChatSessionStore: ObservableObject {
         }
 
         // Refetch the canonical transcript at turn boundaries so a finished
-        // turn's blocks (steps/prose/subagents) land as real content and the
-        // in-progress text is absorbed (no duplication while streaming).
+        // turn's blocks (steps/prose/subagents) land as real content. The fetch
+        // itself retires the live text it now covers (see `fetchTranscript`) —
+        // absorption is an explicit step, not something the refetch does for
+        // free. Assuming it was free is what rendered every finished answer
+        // twice (BET-655).
         //
         // The FIRST call here is not a transition, it is the initial snapshot:
         // `@Published` replays its current value the moment we subscribe, which
@@ -261,11 +261,17 @@ final class ChatSessionStore: ObservableObject {
     /// tail (the streaming assistant text, §8). Keeping them separate makes the
     /// scroll `defaultScrollAnchor(.bottom)` cheap: only the tail mutates
     /// between turn boundaries.
+    ///
+    /// The two sources must never hold the same prose at once — that is a
+    /// visible duplicate, not a harmless overlap. The tail is emptied by the
+    /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
         if inProgressText.isEmpty {
             blocks = transcript
         } else {
-            blocks = transcript + [.prose(inProgressText)]
+            // The live tail has no completion time yet — it gets one when the
+            // turn ends and the canonical refetch replaces this block.
+            blocks = transcript + [.prose(inProgressText, at: nil)]
         }
     }
 
@@ -322,6 +328,19 @@ final class ChatSessionStore: ObservableObject {
                 if !didFail { hasEarlier = loaded.count >= limit }
                 if !didFail || isFirstLoad {
                     transcript = ChatTranscriptMapper.blocks(from: loaded)
+                    // The transcript now carries these messages, so any live
+                    // copy of them is a duplicate — retire it BEFORE rebuilding
+                    // or the finished answer renders twice, once from each
+                    // source (BET-655). Read the pruned text back synchronously:
+                    // the event-store sink lands on a later run-loop turn, too
+                    // late for the rebuild happening right here.
+                    if !didFail {
+                        eventStore.retireCoveredStreamText(
+                            sessionId: sessionId,
+                            covered: Set(loaded.map(\.info.id))
+                        )
+                        inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
+                    }
                     rebuildBlocks()
                 }
             }
@@ -353,14 +372,45 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func replyQuestion(_ request: QuestionRequest, answers: [[String]]) {
+        // opencode's /question/{id}/reply|reject accept ONLY the `que_…`
+        // requestId — NOT the stable card id (a tool callID). Sending the card
+        // id makes the box return HTTP 400 and the question never clears, so
+        // the blocked turn stays blocked and the session looks dead to the
+        // user. A transcript-recovered question has no requestId and is
+        // unanswerable — drop the card locally rather than erroring.
+        guard let requestId = request.requestId else {
+            questions.removeAll { $0.id == request.id }
+            return
+        }
+        // Drop the card optimistically; restore it on failure so a real send
+        // error doesn't silently leave the question gone while the box stays
+        // blocked on it ("can't send messages").
+        questions.removeAll { $0.id == request.id }
         Task {
-            try? await api.questionReply(requestId: request.id, answers: answers, sessionId: sessionId)
+            do {
+                try await api.questionReply(requestId: requestId, answers: answers, sessionId: sessionId)
+            } catch {
+                if !questions.contains(where: { $0.id == request.id }) {
+                    questions.append(request)
+                }
+            }
         }
     }
 
     func rejectQuestion(_ request: QuestionRequest) {
+        guard let requestId = request.requestId else {
+            questions.removeAll { $0.id == request.id }
+            return
+        }
+        questions.removeAll { $0.id == request.id }
         Task {
-            try? await api.questionReject(requestId: request.id, sessionId: sessionId)
+            do {
+                try await api.questionReject(requestId: requestId, sessionId: sessionId)
+            } catch {
+                if !questions.contains(where: { $0.id == request.id }) {
+                    questions.append(request)
+                }
+            }
         }
     }
 
@@ -376,7 +426,7 @@ final class ChatSessionStore: ObservableObject {
         // screen sits completely unchanged after a send, which reads as "the
         // send did nothing".
         if !text.isEmpty {
-            transcript.append(.user(text))
+            transcript.append(.user(text, at: Date()))
             rebuildBlocks()
         }
         running = true

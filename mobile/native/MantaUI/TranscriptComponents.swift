@@ -808,6 +808,18 @@ struct TranscriptView: View {
     let blocks: [TranscriptBlock]
     let tokens: Tokens
 
+    /// How far the transcript slides, and therefore how wide the revealed
+    /// timestamp strip is.
+    private static let gutterWidth: CGFloat = 58
+    /// Finger travel needed for a full reveal. Longer than the strip itself, so
+    /// the strip arrives damped instead of slamming open on a flick.
+    private static let gutterTravel: CGFloat = 96
+
+    /// Live drag offset, negative (leftward) and clamped to the strip width.
+    /// `@GestureState` resets itself the instant the finger lifts, which is what
+    /// springs the transcript back with no release handler of our own.
+    @GestureState private var gutterReveal: CGFloat = 0
+
     var body: some View {
         VStack(spacing: 0) {
             // Iterate over the ELEMENTS, never over indices. `ForEach(blocks
@@ -821,17 +833,58 @@ struct TranscriptView: View {
             // first render is still in flight.
             ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
                 blockView(pair.element)
+                    // The timestamp rides WITH its own block rather than living
+                    // in a parallel column, so it stays aligned to the thing it
+                    // describes no matter how tall that thing is. An overlay
+                    // takes no part in layout, and the offset parks it just
+                    // outside the trailing edge, so nothing about the transcript
+                    // at rest changes: it is off screen until the slide brings
+                    // it in, and the scroll view clips it the rest of the time.
+                    .overlay(alignment: .trailing) {
+                        TimestampGutterLabel(
+                            date: pair.element.timestamp,
+                            width: Self.gutterWidth,
+                            tokens: tokens
+                        )
+                        .offset(x: Self.gutterWidth)
+                    }
             }
         }
+        // The whole transcript slides as ONE piece, the way Messages does it —
+        // per-row swiping would read as "act on this message" (reply/delete),
+        // which is a different gesture with a different outcome.
+        .offset(x: gutterReveal)
+        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.86), value: gutterReveal)
+        .simultaneousGesture(gutterGesture)
+    }
+
+    /// Horizontal-only drag that reveals the timestamps.
+    ///
+    /// Simultaneous with the scroll view's own pan, and deliberately inert
+    /// unless the movement is clearly sideways and leftward: a vertical scroll
+    /// (or a rightward drag, which is the navigation back-swipe) leaves the
+    /// offset at zero, so neither gesture is stolen from the other.
+    private var gutterGesture: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .updating($gutterReveal) { value, state, _ in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard dx < 0, -dx > abs(dy) * 1.5 else {
+                    state = 0
+                    return
+                }
+                let progress = min(1, -dx / Self.gutterTravel)
+                state = -Self.gutterWidth * progress
+            }
     }
 
     @ViewBuilder
     private func blockView(_ block: TranscriptBlock) -> some View {
         switch block {
-        case .user(let text):
+        case .user(let text, _):
             UserBand(text: text, tokens: tokens)
                 .padding(.bottom, Metrics.spacing.sp4)
-        case .prose(let text):
+        case .prose(let text, _):
             AssistantProse(text: text, tokens: tokens)
         case .steps(let content):
             // Machinery is inset to the same margin as prose. Only the USER
@@ -845,10 +898,43 @@ struct TranscriptView: View {
     }
 }
 
+/// The wall-clock time shown in the strip a leftward slide opens up.
+///
+/// Fixed width so every timestamp lands on the same vertical line — a gutter
+/// that ragged-edges as the values change reads as a glitch. Blocks with no
+/// time (machinery) render an empty label of the same width rather than
+/// collapsing, which keeps the rows they sit next to from shifting.
+private struct TimestampGutterLabel: View {
+    let date: Date?
+    let width: CGFloat
+    let tokens: Tokens
+
+    var body: some View {
+        Text(ChatClock.time(date))
+            .font(.system(size: Metrics.type.twoXS))
+            .foregroundColor(tokens.tx4)
+            .monospacedDigit()
+            .lineLimit(1)
+            .frame(width: width, alignment: .center)
+            .accessibilityHidden(true)
+    }
+}
+
 enum TranscriptBlock {
-    case user(String)
-    case prose(String)
+    // The date is the block's wall-clock time, shown only in the swipe-to-reveal
+    // gutter. Machinery (`.steps`) carries none: a step row already states how
+    // long it took, and a second time reading next to it is noise, not detail.
+    case user(String, at: Date?)
+    case prose(String, at: Date?)
     case steps(StepGroupContent)
+
+    /// The time shown in the gutter; nil for blocks that have none.
+    var timestamp: Date? {
+        switch self {
+        case .user(_, let at), .prose(_, let at): return at
+        case .steps: return nil
+        }
+    }
 }
 
 // MARK: - "Load earlier messages"
