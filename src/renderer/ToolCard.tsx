@@ -2,9 +2,18 @@
 //
 // The spec's `.tool` shell plus its header strip `.tool-h`: a bordered card
 // (rounded-md) on the raised surface with a header holding the status dot,
-// bold tool name, a gap, a truncating muted argument, and a right-aligned
-// meta slot (`+38 −4` counts / status word). Optionally the header is a
-// disclosure button (subagent/task card) with an `aria-expanded` chevron.
+// bold tool name, a gap, a truncating muted argument, a right-aligned meta
+// slot (`+38 −4` counts / status word), and — right of the copy icon — a
+// collapse/expand chevron. Card bodies are collapsible: when `onToggle` is
+// supplied the name/arg/meta region becomes a disclosure button and a chevron
+// appears at the header's far right (immediately after the copy button when
+// one is present).
+//
+// The copy button and the chevron are SIBLINGS of the disclosure button, not
+// children of it — a `<button>` cannot legally nest another `<button>`, and a
+// nested one is unclickable. The header is therefore always a plain flex
+// `<div>`; the clickable toggle region (dot + name + arg + meta) is the inner
+// `flex-1` button, and copy + chevron sit beside it on the right.
 //
 // No `className` escape hatch (epic standing decision 3). Off-grid chrome:
 // the `9px` header vertical padding, the `11px` meta size, and the `12.5px`
@@ -22,6 +31,10 @@ const NAME = "text-text font-semibold";
 const ARG = "text-text-faint min-w-0 truncate";
 const META = "ml-auto flex items-center gap-2 text-[11px] text-text-quiet";
 const COPY = "shrink-0 text-text-faint hover:text-text -my-1 p-1 rounded-xs";
+// The disclosure region of a collapsible header + the action buttons to its
+// right. `flex-1` pushes copy/chevron to the header's far right.
+const TOGGLE = "flex items-center gap-2 flex-1 min-w-0 text-left";
+const ACTION = "shrink-0 text-text-faint hover:text-text -my-1 p-1 rounded-xs";
 
 export function ToolCard({
   tone,
@@ -47,56 +60,63 @@ export function ToolCard({
   meta?: ReactNode;
   /**
    * When set, the header carries a copy affordance for this text (the card's
-   * output / diff). It lives in the HEADER, not floating over the body: a
-   * button absolutely positioned inside the output well sat over the first
-   * line of output, and on a short card it read as belonging to the bottom of
-   * the card rather than to the card itself.
-   *
-   * Ignored when `onToggle` is set — that header IS a button, and a button
-   * inside a button is invalid HTML (and unclickable).
+   * output / diff) — rendered as a button sitting just LEFT of the collapse
+   * chevron. It works whether or not `onToggle` is set (the copy button is a
+   * sibling of the disclosure button, never nested inside it).
    */
   copyText?: string;
   /** Expanded state for the disclosure chevron (only meaningful with `onToggle`). */
   expanded?: boolean;
-  /** When supplied the header becomes a toggle button with a chevron. */
+  /** When supplied the header becomes a disclosure (name/arg/meta clickable) with a chevron. */
   onToggle?: () => void;
   /** Optional body — an OutputWell or a diff. */
   children?: ReactNode;
 }) {
-  const headerChrome = `${HEADER}${onToggle ? " w-full text-left cursor-pointer" : ""}`;
+  const copy = copyText ? <CopyButton text={copyText} className={COPY} /> : null;
+
   const chevron = onToggle ? (
-    <ChevronDown
-      size={12}
-      aria-hidden="true"
-      className={`shrink-0 transition-transform${expanded ? " rotate-180" : ""}${meta == null ? " ml-auto" : ""}`}
-    />
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={expanded ? "Collapse" : "Expand"}
+      title={expanded ? "Collapse" : "Expand"}
+      className={ACTION}
+    >
+      <ChevronDown
+        size={12}
+        aria-hidden="true"
+        className={`transition-transform${expanded ? " rotate-180" : ""}`}
+      />
+    </button>
   ) : null;
 
-  const copy =
-    copyText && !onToggle ? (
-      <CopyButton text={copyText} className={`${meta == null ? "ml-auto " : ""}${COPY}`} />
-    ) : null;
-
-  const headerInner = (
+  const info = (
     <>
       {tone != null && <StatusDot tone={tone} />}
       <span className={NAME}>{name}</span>
       {arg != null && <span className={ARG}>{arg}</span>}
-      {meta != null && <span className={META}>{meta}</span>}
-      {copy}
-      {chevron}
     </>
   );
 
+  const metaSlot = meta != null && <span className={META}>{meta}</span>;
+
   return (
     <div className={SHELL}>
-      {onToggle ? (
-        <button type="button" onClick={onToggle} aria-expanded={expanded ?? false} className={headerChrome}>
-          {headerInner}
-        </button>
-      ) : (
-        <div className={headerChrome}>{headerInner}</div>
-      )}
+      <div className={HEADER}>
+        {onToggle ? (
+          <button type="button" onClick={onToggle} aria-expanded={expanded ?? false} className={TOGGLE}>
+            {info}
+            {metaSlot}
+          </button>
+        ) : (
+          <>
+            {info}
+            {metaSlot}
+          </>
+        )}
+        {copy}
+        {chevron}
+      </div>
       {children != null && children}
     </div>
   );

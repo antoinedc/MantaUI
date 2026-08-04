@@ -5,6 +5,7 @@
 // below need jsdom because they mount a real React subtree via
 // `./testHarness`.
 
+import { act } from "react";
 import { describe, it, expect, afterEach } from "vitest";
 import { cssVar } from "./chatUtils";
 import { AssistantPart, bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
@@ -14,6 +15,16 @@ import {
   type Harness,
 } from "./testHarness";
 import type { OpencodePart } from "../shared/types";
+
+// Tool-call cards start COLLAPSED. Mounting a <ToolCall> hides its body until
+// the disclosure is clicked, so tests that assert on the body expand first.
+// The click flips internal expanded state, so it must run inside act() for the
+// re-render to flush before the next synchronous assertion.
+function expandAll(container: Element) {
+  for (const b of Array.from(container.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]'))) {
+    act(() => b.click());
+  }
+}
 
 // Build a tool part with a given lifecycle status.
 function toolPart(status?: string): OpencodePart {
@@ -122,6 +133,8 @@ describe("tool card chrome", () => {
     installMockApi();
     const long = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
     h = mount(<ToolCall part={outputPart(long)} verbose={false} />);
+    // The card is collapsed by default; expand it to render the body.
+    expandAll(h.container);
     const scrollers = h.container.querySelectorAll(".overflow-y-auto");
     expect(scrollers.length).toBe(1);
     // …and it is the <pre>, because that is the element the pin-to-bottom
@@ -140,6 +153,7 @@ describe("tool card chrome", () => {
       state: { status: "completed", output: "To github.com\n  main -> main\n\n\n" },
     } as unknown as OpencodePart;
     h = mount(<ToolCall part={part} verbose={false} />);
+    expandAll(h.container);
     const rows = Array.from(h.container.querySelectorAll("div.whitespace-pre-wrap"));
     expect(rows.map((r) => r.textContent)).toEqual(["To github.com", "  main -> main"]);
   });
@@ -158,12 +172,31 @@ describe("tool card chrome", () => {
 
   it("does not nest a copy button inside a disclosure header (invalid HTML)", () => {
     installMockApi();
-    // The subagent card's header IS a <button>; a copy button inside it would
-    // be unclickable and invalid markup.
+    // The tool card's disclosure header is a <button>; a copy button inside it
+    // would be unclickable and invalid markup — copy and chevron are its
+    // siblings instead.
     h = mount(<ToolCall part={taskPart({ subagent_type: "explore" })} verbose={false} />);
     for (const btn of Array.from(h.container.querySelectorAll("button"))) {
       expect(btn.querySelector("button")).toBeNull();
     }
+  });
+
+  it("renders tool cards collapsed by default and shows the body only when expanded", () => {
+    installMockApi();
+    h = mount(<ToolCall part={outputPart("visible after expand")} verbose={false} />);
+    // Collapsed: the output body is absent from the DOM.
+    expect(h.text()).not.toContain("visible after expand");
+    const toggle = h.container.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    act(() => toggle.click());
+    expect(h.text()).toContain("visible after expand");
+  });
+
+  it("shows both the copy button and the collapse chevron in the header of a standard tool card", () => {
+    installMockApi();
+    h = mount(<ToolCall part={outputPart("copyable output")} verbose={false} />);
+    expect(h.container.querySelector('[aria-label="Copy"]')).toBeTruthy();
+    expect(h.container.querySelector('button[aria-expanded="false"]')).toBeTruthy();
   });
 });
 
@@ -224,6 +257,8 @@ describe("TaskBody subagent row", () => {
         verbose={false}
       />,
     );
+    // The outer tool card is collapsed by default; expand it to mount TaskCard.
+    expandAll(h.container);
     const text = h.text();
     const matches = text.match(/explore/g) ?? [];
     expect(matches.length).toBe(1);
@@ -237,6 +272,7 @@ describe("TaskBody subagent row", () => {
         verbose={false}
       />,
     );
+    expandAll(h.container);
     expect(h.text()).toContain("explore");
   });
 
@@ -248,6 +284,7 @@ describe("TaskBody subagent row", () => {
         verbose={false}
       />,
     );
+    expandAll(h.container);
     // The extractSubagentInfo fallback in chatUtils.ts is the literal
     // string "subagent"; the badge text is the only place that string can
     // appear when subagent_type is absent.

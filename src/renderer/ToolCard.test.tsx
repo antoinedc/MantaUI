@@ -66,14 +66,35 @@ describe("ToolCard", () => {
     expect(h!.container.querySelector(".animate-pulse")).toBeNull();
   });
 
-  it("renders the header as a toggle button with aria-expanded and a chevron when onToggle is supplied", () => {
+  it("renders a disclosure button with aria-expanded when onToggle is supplied", () => {
     let clicks = 0;
     h = mount(<ToolCard name="Task" onToggle={() => clicks++} expanded={false} />);
-    const header = root().firstElementChild as HTMLButtonElement;
-    expect(header.tagName).toBe("BUTTON");
-    expect(header.getAttribute("aria-expanded")).toBe("false");
-    header.click();
+    // The header is a plain flex DIV; the clickable disclosure is the inner
+    // button holding name/arg/meta (it cannot nest the copy/chevron buttons).
+    const header = root().firstElementChild as HTMLElement;
+    expect(header.tagName).toBe("DIV");
+    const toggle = header.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    // The callback fires on click; the rendered aria-expanded reflects the
+    // (controlled) `expanded` prop, which this closure never changes.
+    toggle.click();
     expect(clicks).toBe(1);
+  });
+
+  it("renders the copy button LEFT of the collapse chevron when both are present", () => {
+    let clicks = 0;
+    h = mount(
+      <ToolCard name="Bash" copyText="output" onToggle={() => clicks++} expanded={false} />,
+    );
+    const header = root().firstElementChild as HTMLElement;
+    const copy = header.querySelector('[aria-label="Copy"]') as HTMLElement;
+    const chevron = header.querySelector('[aria-label="Expand"]') as HTMLElement;
+    expect(copy).toBeTruthy();
+    expect(chevron).toBeTruthy();
+    // The chevron sits at the right of the copy icon — i.e. AFTER it in the
+    // header's flex-child order.
+    const children = Array.from(header.children);
+    expect(children.indexOf(copy)).toBeLessThan(children.indexOf(chevron));
   });
 
   it("renders children as the card body", () => {
