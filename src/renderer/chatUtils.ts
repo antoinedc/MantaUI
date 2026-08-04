@@ -339,7 +339,7 @@ export type TodoProgress = {
   settledPct: number;
   /** Width of the amber in-flight segment, 0-100. */
   activePct: number;
-  /** Header label: "4 of 5", or "complete" once nothing is left. */
+  /** Header label: the done/total counter, e.g. "3/5", "7/7". */
   label: string;
   allSettled: boolean;
 };
@@ -373,7 +373,7 @@ export function summarizeTodoProgress(
     inProgress,
     settledPct: pct(settled),
     activePct: pct(inProgress),
-    label: allSettled ? "complete" : `${settled} of ${total}`,
+    label: `${settled}/${total}`,
     allSettled,
   };
 }

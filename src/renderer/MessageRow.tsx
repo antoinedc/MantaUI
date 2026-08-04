@@ -188,7 +188,7 @@ export const ActiveTodos = memo(function ActiveTodos({
   return (
     <div className="rounded-sm border border-border-subtle bg-bg-elev overflow-hidden">
       <div className="flex items-center gap-2 px-3 pt-2 pb-1">
-        <span className="text-micro uppercase text-text-faint">Plan</span>
+        <span className="text-micro uppercase text-text-faint">Todo</span>
         <span
           className="ml-auto text-meta tabular-nums"
           style={{
