@@ -54,7 +54,15 @@ export function UpdateBar({
   dismissible = true,
 }: UpdateBarProps) {
   return (
-    <div className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-2 text-meta text-text flex items-center gap-2">
+    // `pr-[…]` (not `px-3`) reserves the OS caption-button strip: this bar
+    // renders ABOVE the titlebar row, so on Windows (titleBarOverlay) the
+    // minimize/maximize/close buttons are painted over its right edge and sat
+    // on top of the action + dismiss buttons — unclickable. The titlebar row
+    // already reserves this via `.titlebar-inset-right`; a top-of-window bar
+    // needs the same reservation. `--titlebar-inset-right` evaluates to 0 on
+    // macOS/Linux (neither defines the `titlebar-area-*` env vars), so this is
+    // exactly `px-3` everywhere else.
+    <div className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2">
       <span className="flex-1 truncate">{text}</span>
       <button
         onClick={() => {
