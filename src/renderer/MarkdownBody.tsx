@@ -158,9 +158,13 @@ const MD_COMPONENTS: MarkdownComponents = {
   // surrounding transcript prose deliberately — at the old `text-meta` (12px)
   // a table read as shrunken chrome next to the 15px paragraphs around it.
   // Cell padding is on the spacing grid rather than the 1px it used to be, so
-  // rows stay legible at the larger size.
+  // rows stay legible at the larger size. The vertical margin is the same kind
+  // of intentional exception as the heading margins above: a bordered block
+  // butted straight against the paragraph before and after it reads as cramped,
+  // and the container gap alone can't open it up without moving every other
+  // block too.
   table: ({ children }) => (
-    <div className="overflow-x-auto max-w-full">
+    <div className="overflow-x-auto max-w-full" style={{ marginTop: "14px", marginBottom: "14px" }}>
       <table className="text-prose border-collapse">{children}</table>
     </div>
   ),
