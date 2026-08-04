@@ -170,9 +170,15 @@ function renderAssistantPart(
     return <PatchCard part={part} />;
   }
 
-  // File reference (attached file in a prompt, or returned by a tool).
+  // File reference (attached file in a prompt, or returned by a tool). Header
+  // only — filename + mime is the whole of it. Deliberately NO chevron, for the
+  // same reason as the unrecognized-part fallback below: there is no body to
+  // reveal, and a disclosure whose expanded state repeats its own header is
+  // worse than no disclosure at all.
   if (part.type === "file") {
-    return <FileCard part={part} />;
+    const filename = String((part as Record<string, unknown>).filename ?? "");
+    const mime = String((part as Record<string, unknown>).mime ?? "");
+    return <ToolCard tone="ok" name="File" arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`} />;
   }
 
   // Unrecognized part: a card with no body. Deliberately NO chevron — a
@@ -204,36 +210,6 @@ const PatchCard = memo(function PatchCard({ part }: { part: OpencodePart }) {
               {f}
             </div>
           ))}
-        </OutputWell>
-      )}
-    </ToolCard>
-  );
-});
-
-// File reference (attached file in a prompt, or returned by a tool). The header
-// carries all the information (filename + mime), so its "body" is that same
-// detail — collapsible + collapsed-by-default for consistency with every other
-// machine-action card. No minimum-lines gate.
-const FileCard = memo(function FileCard({ part }: { part: OpencodePart }) {
-  const filename = String((part as Record<string, unknown>).filename ?? "");
-  const mime = String((part as Record<string, unknown>).mime ?? "");
-  const [expanded, setExpanded] = useState(false);
-  const toggle = () => setExpanded((v) => !v);
-  return (
-    <ToolCard
-      tone="ok"
-      name="File"
-      arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`}
-      copyText={filename || undefined}
-      expanded={expanded}
-      onToggle={toggle}
-    >
-      {expanded && (
-        <OutputWell variant="attached">
-          <div className="whitespace-pre-wrap break-all text-text-muted">
-            {filename || "(file)"}
-            {mime ? ` · ${mime}` : ""}
-          </div>
         </OutputWell>
       )}
     </ToolCard>

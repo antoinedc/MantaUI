@@ -338,6 +338,15 @@ export function useTranscriptState(params: {
   // This observes SIZE only and re-sticks only when `pinnedToBottom.current` is
   // already true, so it can never drag a user who scrolled up back to the tail.
   // Scrolling does not change content size, so there is no feedback loop.
+  //
+  // GOTCHA — `transcriptMounted` in the deps is load-bearing, not decoration.
+  // ChatPanel returns a "Loading session…" screen while `messages` is null, so
+  // the Transcript (and therefore `contentRef.current`) does NOT exist on the
+  // first render. `stickToBottom` is a `useCallback` with empty deps, i.e.
+  // permanently stable — so with `[stickToBottom]` alone this effect ran exactly
+  // once, against a null ref, and the observer was NEVER attached for any
+  // session. Re-running it when the transcript mounts is what makes it real.
+  const transcriptMounted = messages !== null;
   useEffect(() => {
     const content = contentRef.current;
     if (!content) return;
@@ -351,7 +360,7 @@ export function useTranscriptState(params: {
     });
     ro.observe(content);
     return () => ro.disconnect();
-  }, [stickToBottom]);
+  }, [stickToBottom, transcriptMounted]);
 
   // Post-commit stick layout effect. The stick decision MUST compare the user's
   // pre-commit position against the PREVIOUS render's height (prevScrollHeight),

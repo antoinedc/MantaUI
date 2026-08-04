@@ -263,7 +263,10 @@ describe("non-tool assistant parts", () => {
     expect(h.text()).toContain("/only/one.ts");
   });
 
-  it("renders a file part as a collapsible card, collapsed by default with a working chevron", () => {
+  // A file part is header-only: filename + mime IS the whole card. It gets NO
+  // chevron on purpose — same rule as the unrecognized-part fallback. A
+  // disclosure whose expanded state repeats its own header is worse than none.
+  it("renders a file part as a header-only card with no chevron", () => {
     installMockApi();
     h = mount(
       <AssistantPart
@@ -272,16 +275,9 @@ describe("non-tool assistant parts", () => {
       />,
     );
     expect(h.container.querySelector(".border-border-subtle")).toBeTruthy();
-    // Header always shows the filename/mime.
     expect(h.text()).toContain("report.pdf");
     expect(h.text() ?? "").not.toContain("⎿");
-    // Chevron present, body (the OutputWell copy) hidden until expanded.
-    const toggle = h.container.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
-    expect(toggle).toBeTruthy();
-    const wellsBefore = h.container.querySelectorAll(".whitespace-pre-wrap").length;
-    act(() => toggle.click());
-    const wellsAfter = h.container.querySelectorAll(".whitespace-pre-wrap").length;
-    expect(wellsAfter).toBeGreaterThan(wellsBefore);
+    expect(h.container.querySelector("button[aria-expanded]")).toBeNull();
   });
 });
 
