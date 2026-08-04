@@ -409,7 +409,10 @@ struct ComposerView: View {
             .foregroundColor(tokens.accentTx)
             .padding(.horizontal, Metrics.spacing.sp2)
             .padding(.vertical, Metrics.spacing.sp1)
-            .background(tokens.accentSoft, in: Capsule())
+            // Glass rather than the flat accent-soft fill, so the chip belongs
+            // to the same floating chrome as the box beneath it. The accent
+            // now lives only in the TEXT, which is enough to mark it.
+            .glassEffect(.regular.interactive(), in: .capsule)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Model picker")
@@ -761,7 +764,12 @@ private struct BoxChrome: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         return content
-            .background(.ultraThinMaterial, in: shape)
+            // Liquid Glass, the iOS 26 system material, rather than the flat
+            // `.ultraThinMaterial` this used to fill with — same treatment as
+            // the session list's search capsule and the chat header buttons.
+            // The shape is passed through so the glass morphs with the box
+            // instead of snapping between the two forms.
+            .glassEffect(.regular, in: shape)
             .overlay {
                 shape.strokeBorder(stroke, lineWidth: 1)
             }

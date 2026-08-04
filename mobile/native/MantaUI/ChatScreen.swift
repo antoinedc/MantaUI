@@ -192,8 +192,10 @@ private struct ChatScreenContent: View {
             }
             // Transcript text passing behind the composer fades out instead of
             // competing with it. Shared with the session list's search capsule
-            // — same gesture, one component.
-            .background { BottomScrim(tokens: tokens) }
+            // — same gesture, one component. Bounded to this overlay rather
+            // than the screen, so it rides up with the composer when the
+            // keyboard opens.
+            .background { Scrim(edge: .bottom, tokens: tokens) }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {
@@ -215,6 +217,15 @@ private struct ChatScreenContent: View {
         // carries its own top inset (see `transcript`) — the space is reserved
         // by the scroll content instead of by the header, which is what lets
         // rows pass beneath the glass while still coming to rest below it.
+        // Top scrim UNDER the header buttons (declared first, so it draws
+        // below them). The chat screen hides the navigation bar, so it gets
+        // none of the system's own scroll-edge treatment — which is what the
+        // session list has and why its top edge reads cleanly. Without this
+        // the transcript runs straight under the clock and the battery.
+        .overlay(alignment: .top) {
+            Scrim(edge: .top, tokens: tokens)
+                .frame(height: Self.headerReservedHeight + Metrics.spacing.sp6)
+        }
         .overlay(alignment: .top) { header }
         .sheet(isPresented: $showOverflow) { overflowSheet }
         .sheet(item: $overflowDestination) { destination in
@@ -337,37 +348,44 @@ private struct ChatScreenContent: View {
     /// content to seat, so the bar itself goes too — the buttons float directly
     /// on the transcript and the conversation scrolls beneath them.
     ///
-    /// Each button keeps its own `.ultraThinMaterial` circle, so the glass is
+    /// Each button carries its own glass circle, so the material is
     /// per-control rather than one edge-to-edge sheet.
     private var header: some View {
-        HStack(spacing: Metrics.spacing.sp2) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: Metrics.type.body, weight: .semibold))
-                    .foregroundColor(tokens.tx1)
-                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .accessibilityLabel("Back to sessions")
-            }
-            .buttonStyle(.plain)
+        // Liquid Glass, the iOS 26 system material — the same treatment the
+        // session list's search capsule uses, rather than the flat
+        // `.ultraThinMaterial` disc these carried before. A GlassEffectContainer
+        // groups the two so the system can relate them as one piece of chrome
+        // instead of two unrelated blurs.
+        GlassEffectContainer(spacing: Metrics.spacing.sp2) {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.tx1)
+                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .accessibilityLabel("Back to sessions")
+                }
+                .buttonStyle(.plain)
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
 
-            // Trailing 38×38 glass button (§8) — the overflow sheet, which is
-            // where every session action lives (DECISIONS.md:667-670).
-            Button {
-                showOverflow = true
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: Metrics.type.body, weight: .semibold))
-                    .foregroundColor(tokens.tx1)
-                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                    .background(.ultraThinMaterial, in: Circle())
+                // Trailing 38×38 glass button (§8) — the overflow sheet, which is
+                // where every session action lives (DECISIONS.md:667-670).
+                Button {
+                    showOverflow = true
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.tx1)
+                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Session actions")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Session actions")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)

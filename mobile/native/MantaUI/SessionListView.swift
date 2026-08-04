@@ -464,7 +464,7 @@ struct SessionListView: View {
         // Rows passing behind the floating capsule fade out rather than
         // colliding with it. Same component as the chat composer's scrim, so
         // the two screens read identically.
-        .background { BottomScrim(tokens: tokens) }
+        .background { Scrim(edge: .bottom, tokens: tokens) }
     }
 
     private func presentCreateMenu() {
