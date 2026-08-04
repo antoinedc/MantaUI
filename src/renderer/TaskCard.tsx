@@ -129,10 +129,9 @@ export function TaskCard({ state }: { state: ToolState }) {
                   msg={m}
                   showThinking={showThinking}
                   // Subagent transcripts have their own footers; don't paint
-                  // turn-duration / persistent-todo / truncation overlays
-                  // designed for the top-level conversation.
+                  // the turn-duration / truncation overlays designed for the
+                  // top-level conversation.
                   turnDurationMs={null}
-                  persistentTodos={null}
                   truncation={null}
                   commandInfo={null}
                 />

@@ -147,9 +147,6 @@ export function Transcript({
                     msg={m}
                     showThinking={showThinking}
                     turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                    persistentTodos={
-                      isLastInTranscript && !running ? activeTodos : null
-                    }
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
                     // The message being written right now: last in the
@@ -159,15 +156,23 @@ export function Transcript({
                   />
                 );
               })}
-              {/* Live todos while a turn is running — rendered INSIDE the */}
-              {/* scroll container at the tail of the transcript so the list */}
-              {/* scrolls with the rest of the chat instead of sitting in a */}
-              {/* shrink-0 row above the input (which made it feel "sticky" */}
-              {/* and ate vertical space on long checklists). The */}
-              {/* `!running` branch above still attaches activeTodos to the */}
-              {/* last assistant message via persistentTodos — same data, */}
-              {/* same rendering, just owned by MessageRow once idle. */}
-              {running && activeTodos && activeTodos.length > 0 && (
+              {/* The todo checklist — rendered INSIDE the scroll container at */}
+              {/* the tail of the transcript, so it scrolls with the rest of */}
+              {/* the chat instead of sitting in a shrink-0 row above the */}
+              {/* input (which made it feel "sticky" and ate vertical space on */}
+              {/* long checklists). */}
+              {/* */}
+              {/* ONE mount, running or idle. It used to switch owners at the */}
+              {/* end of a turn — live under this branch, then re-parented into */}
+              {/* the last assistant MessageRow via a `persistentTodos` prop */}
+              {/* once idle. Same data drawn by the same component in two */}
+              {/* places, which cost a prop threaded through MessageRow and */}
+              {/* TaskCard, moved the card by a turn-gap the instant a turn */}
+              {/* ended, and dropped it entirely whenever the last row was a */}
+              {/* USER turn (the prop was gated on the last message being an */}
+              {/* assistant). Anchoring it here keeps it at the bottom of the */}
+              {/* transcript in every state. */}
+              {activeTodos && activeTodos.length > 0 && (
                 <ActiveTodos todos={activeTodos} />
               )}
               {/* Pending question cards. Rendered INSIDE the scroll */}

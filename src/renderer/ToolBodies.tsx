@@ -212,47 +212,6 @@ export function GrepBody({ state, verbose }: { state: ToolState; verbose: boolea
   return <ConnectorOutput body={lines.join("\n")} maxLines={Infinity} />;
 }
 
-// TodoWrite: input.todos is an array of {content, status, ...}. Render as a
-// checklist with status icons. Status values seen: "pending", "in_progress",
-// "completed", "cancelled".
-export function TodoWriteBody({ state }: { state: ToolState }) {
-  const input = state.input ?? {};
-  const todos = (input.todos as Array<Record<string, unknown>> | undefined) ?? [];
-  if (todos.length === 0) return null;
-  return (
-    <div className="text-meta space-y-px">
-      {todos.map((t, i) => {
-        const content = String(t.content ?? "");
-        const status = String(t.status ?? "pending");
-        const icon =
-          status === "completed"
-            ? "☒"
-            : status === "in_progress"
-              ? "◐"
-              : status === "cancelled"
-                ? "⊘"
-                : "☐";
-        const cls =
-          status === "completed"
-            ? "text-text-faint line-through"
-            : status === "in_progress"
-              ? "text-text"
-              : status === "cancelled"
-                ? "text-text-faint line-through opacity-50"
-                : "text-text-muted";
-        return (
-          <div key={i} className={`flex gap-2 ${cls}`}>
-            <span className="select-none shrink-0" style={{ color: status === "in_progress" ? "var(--warn)" : undefined }}>
-              {icon}
-            </span>
-            <span className="flex-1 whitespace-pre-wrap break-words">{content}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 // WebFetch: input has {url, prompt?}. Output is the fetched content / summary.
 export function WebFetchBody({ state }: { state: ToolState }) {
   const input = state.input ?? {};

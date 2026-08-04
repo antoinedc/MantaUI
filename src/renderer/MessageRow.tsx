@@ -2,11 +2,11 @@
 //
 // Extracted from ChatPanel.tsx (M0.5). Renders one transcript row and the
 // small status/todo widgets that sit around the running turn:
-//   - MessageRow: user bar vs. assistant part list, with turn-duration,
-//     truncation, and persistent-todo footers.
+//   - MessageRow: user bar vs. assistant part list, with turn-duration and
+//     truncation footers.
 //   - UserCommandBar: collapsed `/name args` pill for slash-command turns.
-//   - ActiveTodos: the pinned TodoWrite checklist (under the running
-//     indicator while live; under the last assistant message when idle).
+//   - ActiveTodos: the TodoWrite checklist card, mounted once at the tail of
+//     the transcript by Transcript.tsx (running or idle).
 //   - RunningIndicator: the ✻ spinner + elapsed / token line.
 //
 // AssistantPart lives in ./ToolCall; importing it here (and MessageRow back
@@ -23,6 +23,9 @@ import {
   formatTokens,
   formatHiddenTodosSummary,
   selectVisibleTodos,
+  summarizeTodoProgress,
+  todoStatusOf,
+  type TodoStatus,
   type TruncationKind,
 } from "./chatUtils";
 import {
@@ -93,79 +96,149 @@ export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | nu
 
 // ===== Active todos =====
 //
-// Pinned right under the running indicator while a turn is in flight, showing
-// the most recent TodoWrite tool's checklist. As the assistant marks items
-// in_progress/completed and updates the list via subsequent TodoWrite calls,
-// this re-renders automatically (messages refetch on message.part.updated).
+// The TodoWrite checklist, rendered at the TAIL of the transcript inside the
+// scroll container (see Transcript.tsx) — it scrolls with the conversation
+// rather than sitting in a shrink-0 row above the composer. As the assistant
+// marks items in_progress/completed and updates the list via subsequent
+// TodoWrite calls, this re-renders automatically.
 //
-// Visible items show their per-status icon (same as the inline TodoWriteBody);
-// completed items collapse to a count summary so the active focus stays
-// dominant when the list grows.
+// The card replaces the original terminal-transcript treatment (a `⎿` gutter
+// glyph plus `■ ✓ ☐ ⊘` box-drawing characters). Three reasons that had to go:
+// the corner glyph implied a parent tool call that does not exist; the glyphs
+// render at a different size and baseline in every font, and never matched the
+// SwiftUI client's SF Symbols; and nothing in the row communicated PROGRESS —
+// you had to count ticks. The shell (`rounded-sm border bg-bg-elev`) is the
+// same one RetryCard / CompactionCard use, so the checklist now reads as one
+// of the panel's cards instead of as leaked tool output.
+//
+// Status marks are CSS + one inline SVG rather than text glyphs, so they are
+// font-independent and centre exactly: every mark is the SAME 12px circle
+// whose content is centred by `inline-flex items-center justify-center`,
+// which is what keeps the check optically inside the disc at any zoom.
 
-export const ActiveTodos = memo(function ActiveTodos({ todos }: { todos: Array<Record<string, unknown>> }) {
+function TodoMark({ status }: { status: TodoStatus }) {
+  // One 12px disc for all four states; only the fill/border/child changes.
+  // `justify-center` + `items-center` is doing the centring for BOTH the
+  // check and the in-progress pip — no magic offsets to drift.
+  const base =
+    "inline-flex items-center justify-center w-3 h-3 shrink-0 rounded-full border";
+  if (status === "completed") {
+    return (
+      <span
+        className={base}
+        style={{ borderColor: "var(--ok)", backgroundColor: "var(--ok)" }}
+        aria-hidden
+      >
+        <svg viewBox="0 0 10 10" className="w-2 h-2" fill="none">
+          <path
+            d="M2 5.2 4.1 7.2 8 2.9"
+            stroke="var(--canvas)"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </span>
+    );
+  }
+  if (status === "in_progress") {
+    return (
+      <span
+        className={base}
+        style={{
+          borderColor: "var(--warn)",
+          boxShadow: "0 0 0 3px var(--warn-bg)",
+        }}
+        aria-hidden
+      >
+        <span
+          className="w-1 h-1 rounded-full"
+          style={{ backgroundColor: "var(--warn)" }}
+        />
+      </span>
+    );
+  }
+  if (status === "cancelled") {
+    // Dashed + empty: settled, but deliberately not a success mark.
+    return (
+      <span
+        className={`${base} border-dashed border-border-subtle`}
+        aria-hidden
+      />
+    );
+  }
+  return <span className={`${base} border-border-strong`} aria-hidden />;
+}
+
+export const ActiveTodos = memo(function ActiveTodos({
+  todos,
+}: {
+  todos: Array<Record<string, unknown>>;
+}) {
   // Render at most VISIBLE_TODOS_CAP items inline. Order: current
   // (in_progress) → pending → done so the row the model is actively
   // working on is always on screen even when the list grows past the cap.
   // Overflow collapses into a single faint summary row at the bottom:
   // "+ N pending & M done" / "+ N pending" / "+ M done".
-  // Icons: in_progress = filled orange square, pending = empty square,
-  // completed = green ✓ in dim text, cancelled = ⊘ struck through.
   const { visible, hiddenPending, hiddenDone } = selectVisibleTodos(todos);
   const summary = formatHiddenTodosSummary(hiddenPending, hiddenDone);
-  const lastVisibleIdx = visible.length - 1;
+  // Progress counts the WHOLE list, not the visible slice — the bar exists to
+  // report the part the 5-row cap hides.
+  const progress = summarizeTodoProgress(todos);
   return (
-    <div className="pb-2 text-label">
-      {visible.map((t, i) => {
-        const content = String(t.content ?? "");
-        const status = String(t.status ?? "pending");
-        const isInProgress = status === "in_progress";
-        const isCompleted = status === "completed";
-        const isCancelled = status === "cancelled";
-
-        let icon = "☐";
-        let iconColor: string | undefined;
-        let textCls = "text-text-muted";
-        if (isInProgress) {
-          icon = "■";
-          iconColor = "var(--warn)";
-          textCls = "text-text font-semibold";
-        } else if (isCompleted) {
-          icon = "✓";
-          iconColor = "var(--ok)";
-          textCls = "text-text-faint";
-        } else if (isCancelled) {
-          icon = "⊘";
-          textCls = "text-text-faint line-through opacity-60";
-        }
-        // Show the ⎿ corner only on the very first row of the card. The
-        // summary row (when present) replaces the last todo row's leading
-        // slot with a blank so the gutter stays aligned.
-        return (
-          <div key={i} className="flex">
-            <span className="select-none w-5 shrink-0 text-text-faint">
-              {i === 0 ? "⎿" : " "}
-            </span>
-            <span
-              className="select-none w-4 shrink-0"
-              style={{ color: iconColor }}
-            >
-              {icon}
-            </span>
-            <span className={`flex-1 min-w-0 whitespace-pre-wrap break-words ${textCls}`}>
-              {content}
-            </span>
-          </div>
-        );
-      })}
-      {summary && (
-        <div className="flex">
-          <span className="select-none w-5 shrink-0 text-text-faint">
-            {lastVisibleIdx < 0 ? "⎿" : " "}
-          </span>
-          <span className="select-none w-4 shrink-0" />
-            <span className="flex-1 min-w-0 text-text-faint">{summary}</span>
-        </div>
-      )}
+    <div className="rounded-sm border border-border-subtle bg-bg-elev overflow-hidden">
+      <div className="flex items-center gap-2 px-3 pt-2 pb-1">
+        <span className="text-micro uppercase text-text-faint">Plan</span>
+        <span
+          className="ml-auto text-meta tabular-nums"
+          style={{
+            color: progress.allSettled ? "var(--ok)" : "var(--tx4)",
+          }}
+        >
+          {progress.label}
+        </span>
+      </div>
+      {/* Two-segment progress rail. Settled runs green, the in-flight item
+          runs amber; the remainder is the track showing through. 2px so it
+          reads as a rule under the header rather than as a control. */}
+      <div className="flex h-0.5 bg-border-subtle" aria-hidden>
+        <span
+          className="h-full bg-ok"
+          style={{ width: `${progress.settledPct}%` }}
+        />
+        <span
+          className="h-full bg-warn"
+          style={{ width: `${progress.activePct}%` }}
+        />
+      </div>
+      <div className="flex flex-col gap-1 px-3 pt-2 pb-2 text-label">
+        {visible.map((t, i) => {
+          const status = todoStatusOf(t);
+          const textCls =
+            status === "in_progress"
+              ? "text-text font-semibold"
+              : status === "completed"
+                ? "text-text-quiet"
+                : status === "cancelled"
+                  ? "text-text-quiet line-through"
+                  : "text-text-muted";
+          return (
+            <div key={i} className="flex items-start gap-2">
+              {/* mt-px lifts the 12px disc onto the 13px/1.4 text's optical
+                  centre for the first line of a wrapping row. */}
+              <span className="mt-px shrink-0">
+                <TodoMark status={status} />
+              </span>
+              <span
+                className={`flex-1 min-w-0 whitespace-pre-wrap break-words ${textCls}`}
+              >
+                {String(t.content ?? "")}
+              </span>
+            </div>
+          );
+        })}
+        {summary && <div className="text-meta text-text-quiet">{summary}</div>}
+      </div>
     </div>
   );
 });
@@ -214,14 +287,12 @@ const UserCommandBar = memo(function UserCommandBar({
 // message and producing visible input lag past ~50 messages. All props
 // passed in messages.map() are either primitives or stable references
 // (msg from a stable identity; turnInfo / commandInfo / finishBy*
-// Maps are memoized at panel scope; persistentTodos comes from
-// memoized activeTodos). The default shallow-equals check is what we
-// want — no custom comparator needed.
+// Maps are memoized at panel scope). The default shallow-equals check
+// is what we want — no custom comparator needed.
 export const MessageRow = memo(function MessageRow({
   msg,
   showThinking,
   turnDurationMs,
-  persistentTodos,
   truncation,
   commandInfo,
   streaming = false,
@@ -233,10 +304,6 @@ export const MessageRow = memo(function MessageRow({
   // whole turn (all consecutive assistant messages since the last user msg).
   // Intermediate messages get null so they don't show a footer at all.
   turnDurationMs: number | null;
-  // Set ONLY on the LAST assistant message in the entire transcript when not
-  // running — renders the latest TodoWrite list permanently below the footer.
-  // Same data ChatPanel pins under the running indicator while a turn is live.
-  persistentTodos: Array<Record<string, unknown>> | null;
   // Per-message truncation classification from finishByMessageId. Drives
   // the "truncated" badge appended to the turn-duration footer (or as a
   // standalone footer when there's no duration, e.g. mid-turn assistant
@@ -369,9 +436,9 @@ export const MessageRow = memo(function MessageRow({
   // Assistant: render each part on its own. Per the spec (.amsg) the text is
   // plain paragraphs at the reading size with no leading gutter; the bullet
   // column no longer exists (BET-637). todowrite invocations are filtered out —
-  // the latest checklist is already pinned under the running indicator + final
-  // assistant footer (ActiveTodos), so inlining each call too would duplicate
-  // the same list multiple times for any turn that updates todos.
+  // the latest checklist already renders once as the ActiveTodos card at the
+  // tail of the transcript, so inlining each call too would repeat the same
+  // list for every turn that touches todos.
   const visibleParts = msg.parts.filter((p) => {
     if (p.type === "text") return !p.synthetic && !p.ignored && (p.text ?? "").length > 0;
     if (p.type === "step-start" || p.type === "step-finish") return false;
@@ -442,12 +509,6 @@ export const MessageRow = memo(function MessageRow({
             </>
           )}
         </div>
-      )}
-      {/* Persistent todo list — only on the LAST assistant message in the */}
-      {/* transcript, after the turn has ended. While running, the same data */}
-      {/* renders under the RunningIndicator instead (handled by ChatPanel). */}
-      {persistentTodos && persistentTodos.length > 0 && (
-        <ActiveTodos todos={persistentTodos} />
       )}
     </div>,
   );
