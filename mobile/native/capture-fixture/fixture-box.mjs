@@ -17,10 +17,18 @@
 // sheet render from these fixtures.
 
 import http from "node:http";
+import crypto from "node:crypto";
 import { randomBytes } from "node:crypto";
 
 const PORT = Number(process.env.FIXTURE_PORT || 8787);
 const HOST = "127.0.0.1";
+
+// BET-630: how long the `opencode:messages` RPC sleeps before answering. The
+// refetch capture needs the app's `refreshing` window (which drives the ambient
+// composer-hairline sweep) to last long enough to be caught, so the capture
+// runs set this to a few seconds. The mid-turn capture needs it fast so the
+// chat opens promptly.
+const MSGS_DELAY_MS = Number(process.env.FIXTURE_MSGS_DELAY_MS || 0);
 
 const SESSION_ID = "session-1";
 const PROJECT = "Demo";
@@ -134,7 +142,9 @@ function rpc(channel, args) {
     case "tmux:list":
       return PROJECTS;
     case "opencode:messages":
-      return MESSAGES;
+      return new Promise((resolve) => {
+        setTimeout(() => resolve(MESSAGES), MSGS_DELAY_MS);
+      });
     case "opencode:list-sessions":
       return [
         {
@@ -258,27 +268,119 @@ const server = http.createServer((req, res) => {
         /* ignore */
       }
       const channel = decodeURIComponent(pathname.slice("/rpc/".length));
-      const result = rpc(channel, args);
-      console.error(`[rpc] ${channel} args=${JSON.stringify(args)} -> ${JSON.stringify(result).slice(0, 80)}`);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(rpcResult(result));
+      Promise.resolve(rpc(channel, args)).then((result) => {
+        console.error(`[rpc] ${channel} args=${JSON.stringify(args)} -> ${JSON.stringify(result).slice(0, 80)}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(rpcResult(result));
+      });
     });
     return;
   }
 
-  // /events is a WebSocket the app tries to attach for live streaming. The
-  // capture surfaces (sheet + cards) are fed entirely by the HTTP RPC above,
-  // so we accept-and-close rather than implement WS framing. The app treats
-  // the drop as a disconnected stream and keeps rendering from RPC.
+  // Post-a-POST direct control channel — the capture driver hits this to drive
+  // the app's live-stream states deterministically (BET-630). A real box would
+  // emit these as interpreted stream frames; this lets a UI test trigger the
+  // exact running / refetch transition instead of gambling on real model output.
+  if (pathname === "/__control" && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      let action = "";
+      try {
+        action = JSON.parse(body).action || "";
+      } catch {
+        /* ignore */
+      }
+      console.error(`[control] ${action}`);
+      switch (action) {
+        case "baseline": // first frame: idle, so the next transition is not the first snapshot
+          wsSend(wsFrame("running", { running: false }));
+          wsSend(wsFrame("turnComplete", { complete: false, running: false }));
+          break;
+        case "start-turn": // running row appears above the composer (BET-630 D1)
+          wsSend(wsFrame("running", { running: true }));
+          break;
+        case "end-turn": // finished: running=false + turnComplete -> canonical refetch (sweep)
+          wsSend(wsFrame("running", { running: false }));
+          wsSend(wsFrame("turnComplete", { complete: true, running: false }));
+          break;
+        default:
+          break;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, action }));
+    });
+    return;
+  }
+
+  // /events is a WebSocket the app attaches for live streaming. It is a real
+  // upgrade (so the app's stream reaches `connected` and drop→connect can
+  // resync) but carries no frames unless the /__control channel asks it to
+  // (BET-630 keeps the running row / refetch sweep fully deterministic).
   if (pathname === "/events") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("fixture (no event stream)");
+    res.writeHead(426, { "Content-Type": "text/plain" });
+    res.end("upgrade required");
     return;
   }
 
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "not found" }));
 });
+
+function wsFrame(sub, payload) {
+  return { kind: "stream", sub, sessionId: SESSION_ID, payload };
+}
+
+function wsSend(obj) {
+  const sock = currentSocket;
+  if (!sock || sock.destroyed) return;
+  const payload = Buffer.from(JSON.stringify(obj));
+  const len = payload.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.from([0x81, len]);
+  } else if (len < 65536) {
+    header = Buffer.from([0x81, 126, (len >> 8) & 0xff, len & 0xff]);
+  } else {
+    const b = Buffer.alloc(10);
+    b[0] = 0x81;
+    b[1] = 127;
+    b.writeUInt32BE(len, 6);
+    header = b;
+  }
+  sock.write(Buffer.concat([header, payload]));
+}
+
+// Minimal RFC 6455 server handshake + server→client text framing (no masking
+// needed on the server→client leg). Enough for the app's URLSessionWebSocket
+// client to attach; we never have to decode a client frame.
+server.on("upgrade", (req, socket) => {
+  const url = new URL(req.url, `http://${HOST}:${PORT}`);
+  if (url.pathname !== "/events") {
+    socket.destroy();
+    return;
+  }
+  const key = req.headers["sec-websocket-key"];
+  const accept = crypto
+    .createHash("sha1")
+    .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      "Sec-WebSocket-Accept: " +
+      accept +
+      "\r\n\r\n"
+  );
+  currentSocket = socket;
+  socket.on("close", () => {
+    if (currentSocket === socket) currentSocket = null;
+  });
+  socket.on("error", () => {});
+});
+
+let currentSocket = null;
 
 server.listen(PORT, HOST, () => {
   console.log(`fixture-box listening on http://${HOST}:${PORT}`);
