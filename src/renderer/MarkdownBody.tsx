@@ -154,15 +154,19 @@ const MD_COMPONENTS: MarkdownComponents = {
       {children}
     </blockquote>
   ),
-  // Tables: meta size, --border-subtle rules (BET-413).
+  // Tables: prose size, --border-subtle rules (BET-413). The size matches the
+  // surrounding transcript prose deliberately — at the old `text-meta` (12px)
+  // a table read as shrunken chrome next to the 15px paragraphs around it.
+  // Cell padding is on the spacing grid rather than the 1px it used to be, so
+  // rows stay legible at the larger size.
   table: ({ children }) => (
     <div className="overflow-x-auto max-w-full">
-      <table className="text-meta border-collapse">{children}</table>
+      <table className="text-prose border-collapse">{children}</table>
     </div>
   ),
   th: ({ children }) => (
     <th
-      className="px-2 py-px text-left text-text font-medium bg-bg-soft"
+      className="px-3 py-1 text-left text-text font-medium bg-bg-soft"
       style={{ border: "1px solid var(--border-subtle)" }}
     >
       {children}
@@ -170,7 +174,7 @@ const MD_COMPONENTS: MarkdownComponents = {
   ),
   td: ({ children }) => (
     <td
-      className="px-2 py-px text-text"
+      className="px-3 py-1 text-text"
       style={{ border: "1px solid var(--border-subtle)" }}
     >
       {children}
