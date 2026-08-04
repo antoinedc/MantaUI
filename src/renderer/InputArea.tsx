@@ -30,10 +30,10 @@ import {
   type Attachment,
   resolveActiveModel,
 } from "./chatShared";
-import { shortModelName } from "./chatUtils";
+import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
-import { AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
+import { AttachButton, AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
 export { TypeaheadPopup } from "./ComposerParts";
@@ -106,6 +106,7 @@ export function InputArea({
   refreshing,
   attachments,
   onRemoveAttachment,
+  onAttachFiles,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -152,6 +153,10 @@ export function InputArea({
   // context chips (folder / branch) which sit ABOVE the box in the header.
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
+  // Files chosen through the composer's 📎 button. Same sink as drag-drop
+  // (ChatPanel's addDroppedFiles) — the button is a second door, not a second
+  // upload path.
+  onAttachFiles: (files: File[]) => void;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
@@ -202,10 +207,22 @@ export function InputArea({
   // (e.g. "Claude Opus 4.7" → "Opus 4.7"), which sits as its own pill with
   // the effort pill showing the accent. Passed via ModelPicker's existing
   // `labelOverride` (a call-site change — ModelPicker gains no new props).
+  // When the active model is a `-fast` twin, the chip shows the BASE model's
+  // name and lets the lit ⚡ segment carry the mode — "Opus 4.7 Rationale ⚡"
+  // rather than "Opus 4.7 Rationale Fast ⚡", which says it twice. Falls back
+  // to the model's own name whenever the base twin isn't in the list.
   const shortLabel = useMemo(
     () => {
       const activeModel = resolveActiveModel(models, modelOverride, defaultModel);
-      return activeModel ? shortModelName(activeModel.name) : null;
+      if (!activeModel) return null;
+      const base = isFastModelId(activeModel.id)
+        ? models?.find(
+            (m) =>
+              m.providerID === activeModel.providerID &&
+              m.id === baseModelId(activeModel.id),
+          )
+        : null;
+      return shortModelName(base?.name ?? activeModel.name);
     },
     [models, modelOverride, defaultModel],
   );
@@ -332,17 +349,9 @@ export function InputArea({
           className="flex-1 resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
-        {/* Inline mic on desktop — keyboard-driven, glyph-only feedback.
-            The mobile PTT FAB is rendered above the composer wrapper. */}
-        {voiceEnabled && !isMobileShell && (
-          <MicButton
-            phase={voicePhase}
-            mode={voiceMode}
-            onStart={startVoice}
-            onStop={stopVoice}
-            onCancel={cancelVoice}
-          />
-        )}
+        {/* The desktop mic + attach buttons moved DOWN into the meta row
+            beside the model picker; the box now holds only the message and
+            Send. The mobile PTT FAB is still rendered above the composer. */}
         {/* Send button — sits beside the textarea in the composer box (BET-620
             change 4). Accent when there's text to send, muted fill when empty. */}
         <button
@@ -373,6 +382,26 @@ export function InputArea({
             onSelect={onSelectModel}
             labelOverride={shortLabel}
           />
+          {/* Input-mode affordances (🎤 / 📎) sit HERE, beside the model
+              group, rather than inside the input box. They choose HOW you
+              compose — the same category as which model you compose for —
+              whereas the box holds the message itself and its send action.
+              The mic moved out of the box for this reason; the mobile PTT FAB
+              is unaffected (it is positioned by mobile.css, not this row). */}
+          {!isMobileShell && (
+            <span className="flex items-center gap-3">
+              {voiceEnabled && (
+                <MicButton
+                  phase={voicePhase}
+                  mode={voiceMode}
+                  onStart={startVoice}
+                  onStop={stopVoice}
+                  onCancel={cancelVoice}
+                />
+              )}
+              <AttachButton onFiles={onAttachFiles} />
+            </span>
+          )}
         </span>
         <span className="shrink-0 flex items-center gap-3 flex-wrap">
           <SessionToolbar

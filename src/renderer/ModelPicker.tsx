@@ -13,10 +13,10 @@
 // raw id is sent back via onSelect.
 
 import { useMemo, useRef, useState } from "react";
-import { ChevronDown, Sparkles } from "lucide-react";
+import { ChevronDown, Sparkles, Zap } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { titleCase } from "./chatUtils";
+import { hideFastSiblingGroups, resolveFastToggle, titleCase } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
@@ -66,20 +66,39 @@ export function ModelPicker({
     setVariantOpen(false);
   });
 
-  // Group models by providerID so the list reads e.g. "anthropic" → 3 models.
-  const groups = useMemo(() => {
+  // The models a user may actually switch TO: enabled, not deprecated, not
+  // deactivated in Settings. Both the dropdown and the ⚡ toggle read from this
+  // one set, so a model hidden in Settings can't be reached by either route.
+  // (`activeModel` below deliberately resolves against the FULL list — an
+  // already-selected model must keep displaying its own name even if it was
+  // later deactivated.)
+  const selectableModels = useMemo(() => {
     if (!models) return null;
     const deactivatedMain = new Set(deactivatedMainModels ?? []);
+    return models.filter(
+      (m) =>
+        m.enabled !== false &&
+        m.status !== "deprecated" &&
+        !deactivatedMain.has(`${m.providerID}/${m.id}`),
+    );
+  }, [models, deactivatedMainModels]);
+
+  // Group models by providerID so the list reads e.g. "anthropic" → 3 models.
+  const groups = useMemo(() => {
+    if (!selectableModels) return null;
     const map = new Map<string, OpencodeModel[]>();
-    for (const m of models) {
-      if (m.enabled === false || m.status === "deprecated") continue;
-      if (deactivatedMain.has(`${m.providerID}/${m.id}`)) continue;
+    for (const m of selectableModels) {
       const arr = map.get(m.providerID) ?? [];
       arr.push(m);
       map.set(m.providerID, arr);
     }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [models, deactivatedMainModels]);
+    const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+    // "Fast" flavours (`<id>-fast`) are a MODE of their base model, not a
+    // separate choice — they're reached through the ⚡ segment below, so they
+    // don't get a row here. `hideFastSiblingGroups` keeps an orphan whose base
+    // is missing/deactivated, which would otherwise become unreachable.
+    return hideFastSiblingGroups(sorted);
+  }, [selectableModels]);
 
   // Resolve the active model object (for the friendly name + variant list).
   // Shared resolution path with ChatPanel (BET-415 duplication gate).
@@ -116,6 +135,15 @@ export function ModelPicker({
       ? defaultLabel
       : activeModel?.name ?? modelLabel ?? "opencode");
 
+  // ⚡ fast-mode toggle — the third segment. Flipping it swaps the active model
+  // for its `-fast` twin (or back), carrying the selected effort across. It is
+  // disabled when there is no twin, or when the twin doesn't offer the current
+  // effort, so the toggle can never silently change the user's effort choice.
+  const fast = useMemo(
+    () => resolveFastToggle(selectableModels, activeModel, activeVariantId),
+    [selectableModels, activeModel, activeVariantId],
+  );
+
   return (
     <div ref={rootRef} className="overflow-visible min-w-0 relative">
       <SplitChip
@@ -146,6 +174,18 @@ export function ModelPicker({
           setModelOpen(false);
           setVariantOpen((v) => !v);
         }}
+        extra={<Zap size={13} aria-hidden="true" fill={fast.on ? "currentColor" : "none"} />}
+        onExtraClick={() => {
+          if (!fast.available || !fast.target) return;
+          setModelOpen(false);
+          setVariantOpen(false);
+          onSelect(fast.target);
+        }}
+        extraTitle={fast.title}
+        extraLabel="Fast mode"
+        extraHook="manta-fast-toggle-btn"
+        extraPressed={fast.on}
+        extraDisabled={!fast.available}
         rightAccent
         popup
         leftHook="manta-model-picker-btn"

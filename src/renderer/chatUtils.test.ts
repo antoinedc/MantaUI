@@ -63,6 +63,11 @@ import {
   globCovers,
   isApprovalCoveredByAlways,
   shortModelName,
+  isFastModelId,
+  baseModelId,
+  fastModelId,
+  hideFastSiblingGroups,
+  resolveFastToggle,
   filterModelGroups,
   moveMenuHighlight,
 } from "./chatUtils";
@@ -2416,5 +2421,138 @@ describe("shortModelName", () => {
     expect(shortModelName(null)).toBeNull();
     expect(shortModelName(undefined)).toBeNull();
     expect(shortModelName("   ")).toBeNull();
+  });
+});
+
+// ===== Fast-mode sibling models (composer ⚡ toggle) =====
+
+describe("fast-mode model helpers", () => {
+  const M = (
+    providerID: string,
+    id: string,
+    variants?: string[],
+    extra: Partial<OpencodeModel> = {},
+  ): OpencodeModel =>
+    ({
+      id,
+      providerID,
+      name: id,
+      ...(variants ? { variants: variants.map((v) => ({ id: v })) } : {}),
+      ...extra,
+    }) as OpencodeModel;
+
+  it("isFastModelId / baseModelId / fastModelId round-trip", () => {
+    expect(isFastModelId("gpt-5.6-fast")).toBe(true);
+    expect(isFastModelId("gpt-5.6")).toBe(false);
+    // A bare "-fast" is not a fast flavour of anything.
+    expect(isFastModelId("-fast")).toBe(false);
+    expect(baseModelId("gpt-5.6-fast")).toBe("gpt-5.6");
+    expect(baseModelId("gpt-5.6")).toBe("gpt-5.6");
+    expect(fastModelId("gpt-5.6")).toBe("gpt-5.6-fast");
+    expect(fastModelId("gpt-5.6-fast")).toBe("gpt-5.6-fast");
+  });
+
+  it("hideFastSiblingGroups drops a -fast model when its base is present", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["openai", [M("openai", "gpt-5.6"), M("openai", "gpt-5.6-fast"), M("openai", "gpt-5.4-mini")]],
+    ];
+    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual([
+      "gpt-5.6",
+      "gpt-5.4-mini",
+    ]);
+  });
+
+  it("hideFastSiblingGroups KEEPS an orphan -fast model (nothing else reaches it)", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["x", [M("x", "solo-fast")]],
+    ];
+    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual(["solo-fast"]);
+  });
+
+  it("hideFastSiblingGroups drops a group left empty", () => {
+    const groups: Array<[string, OpencodeModel[]]> = [
+      ["a", [M("a", "m"), M("a", "m-fast")]],
+      ["b", [M("b", "only-fast"), M("b", "only")]],
+    ];
+    const out = hideFastSiblingGroups(groups);
+    expect(out.map(([p]) => p)).toEqual(["a", "b"]);
+    expect(out[1][1].map((m) => m.id)).toEqual(["only"]);
+  });
+
+  it("resolveFastToggle: base model with a fast twin is available and off", () => {
+    const models = [M("openai", "gpt-5.6", ["low", "high"]), M("openai", "gpt-5.6-fast", ["low", "high"])];
+    const r = resolveFastToggle(models, models[0], "high");
+    expect(r).toMatchObject({
+      available: true,
+      on: false,
+      target: { providerID: "openai", modelID: "gpt-5.6-fast", variant: "high" },
+    });
+  });
+
+  it("resolveFastToggle: fast model reports on and targets the base", () => {
+    const models = [M("openai", "gpt-5.6", ["low"]), M("openai", "gpt-5.6-fast", ["low"])];
+    const r = resolveFastToggle(models, models[1], "low");
+    expect(r).toMatchObject({
+      available: true,
+      on: true,
+      target: { providerID: "openai", modelID: "gpt-5.6", variant: "low" },
+    });
+  });
+
+  it("resolveFastToggle: no variant selected → target carries no variant", () => {
+    const models = [M("openai", "a"), M("openai", "a-fast")];
+    expect(resolveFastToggle(models, models[0], undefined).target).toEqual({
+      providerID: "openai",
+      modelID: "a-fast",
+    });
+  });
+
+  it("resolveFastToggle: disabled when the twin lacks the selected effort", () => {
+    const models = [
+      M("openai", "a", ["low", "max"]),
+      M("openai", "a-fast", ["low"]),
+    ];
+    const r = resolveFastToggle(models, models[0], "max");
+    expect(r.available).toBe(false);
+    expect(r.target).toBeNull();
+    expect(r.title).toContain("max");
+  });
+
+  it("resolveFastToggle: disabled when no twin exists at all", () => {
+    const models = [M("openai", "solo", ["low"])];
+    expect(resolveFastToggle(models, models[0], "low")).toMatchObject({
+      available: false,
+      on: false,
+      target: null,
+    });
+  });
+
+  it("resolveFastToggle: a twin in a DIFFERENT provider does not count", () => {
+    const models = [M("openai", "a"), M("azure", "a-fast")];
+    expect(resolveFastToggle(models, models[0], undefined).available).toBe(false);
+  });
+
+  it("resolveFastToggle: a deactivated/deprecated twin does not count", () => {
+    const models = [
+      M("openai", "a"),
+      M("openai", "a-fast", undefined, { enabled: false }),
+    ];
+    expect(resolveFastToggle(models, models[0], undefined).available).toBe(false);
+  });
+
+  it("resolveFastToggle: fast model with no base still reports on, but not clickable", () => {
+    const models = [M("openai", "orphan-fast")];
+    expect(resolveFastToggle(models, models[0], undefined)).toMatchObject({
+      available: false,
+      on: true,
+      target: null,
+    });
+  });
+
+  it("resolveFastToggle: null model is off + unavailable", () => {
+    expect(resolveFastToggle([], null, undefined)).toMatchObject({
+      available: false,
+      on: false,
+    });
   });
 });

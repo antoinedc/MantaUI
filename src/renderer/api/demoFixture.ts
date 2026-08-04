@@ -683,6 +683,22 @@ export const demoModels: OpencodeModel[] = [
     capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
     variants: [{ id: "balanced" }, { id: "maximum" }],
   },
+  // The `-fast` twin of the model above, so the composer's ⚡ fast-mode toggle
+  // has something to switch to once that model is selected. It is deliberately
+  // NOT listed in the model dropdown (ModelPicker hides a `-fast` id whose base
+  // is present) — reaching it IS the toggle. It carries only "balanced", which
+  // also exercises the disabled-at-this-effort branch: pick "maximum" on the
+  // base model and the toggle greys out.
+  {
+    id: "claude-opus-4-7-thinking-fast",
+    providerID: "anthropic",
+    name: "Claude Opus 4.7 Rationale Fast",
+    status: "active",
+    enabled: true,
+    limit: { context: 1_000_000, output: 32_000 },
+    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    variants: [{ id: "balanced" }],
+  },
 ];
 
 // AI-CLI TUI launchers the box reports (src/server/launcherRegistry.mjs,
