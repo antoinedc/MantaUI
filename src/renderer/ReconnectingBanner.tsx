@@ -44,7 +44,11 @@ export function ReconnectingBanner({ state, onRetryNow }: ReconnectingBannerProp
     <div
       role="status"
       aria-live="polite"
-      className="shrink-0 bg-accent/10 border-b border-accent/30 px-3 py-2 text-meta text-text flex items-center gap-2"
+      // Same top-of-window caption-button reservation as UpdateBar — this
+      // banner also renders above the titlebar row and also carries a
+      // right-aligned button ("Retry now"), which the Windows caption buttons
+      // covered. 0 on macOS/Linux, so identical to `px-3` there.
+      className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2"
     >
       <span className="flex-1 truncate">
         {renderCopy(state)}
