@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 // ===========================================================================
 // S4 — chat screen wired to live data (BET-596).
@@ -85,6 +86,10 @@ private struct ChatScreenContent: View {
     /// to size the scrim behind it. Measured from an overlay, so it can never
     /// feed back into the transcript's layout.
     @State private var bottomChromeHeight: CGFloat = 0
+    /// Live height of the on-screen keyboard, so the transcript can reserve
+    /// room for it and push its tail up above the composer + keyboard when the
+    /// user is composing. 0 when the keyboard is dismissed.
+    @State private var keyboardInset: CGFloat = 0
 
     /// How far the bottom scrim reaches past the safe area. Comfortably clears
     /// the tallest home indicator; when the keyboard is up it falls behind the
@@ -110,6 +115,15 @@ private struct ChatScreenContent: View {
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    /// The bottom safe-area inset (home indicator). The keyboard frame's
+    /// reported height INCLUDES this strip, but it doesn't cover our content,
+    /// so the overflow is subtracted from the transcript's keyboard inset.
+    private var safeAreaBottomInset: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first?.safeAreaInsets.bottom ?? 0
+    }
 
     var body: some View {
         // ChatScreen is PUSHED within SessionListView's NavigationStack, so it
@@ -488,13 +502,11 @@ private struct ChatScreenContent: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
-                    // Reserve for the floating composer, inside the scroll
-                    // content — the mirror of the header spacer at the top.
-                    // The composer is an overlay and reserves nothing itself,
-                    // so without this the last message would rest underneath
-                    // it. AFTER the anchor, so "scroll to bottom" still lands
-                    // on the last message rather than on empty space.
-                    Color.clear.frame(height: Self.composerReservedHeight)
+                    // NO trailing spacer here. The composer's space is reserved
+                    // as a scroll CONTENT INSET below, not as a row in the stack.
+                    // A spacer positioned AFTER the bottom anchor was what made
+                    // `.defaultScrollAnchor(.bottom, for: .sizeChanges)` pin the
+                    // viewport to blank space on keyboard-driven resizes.
                 }
                 // Pin the content to the scroll view's own width. A vertical scroll
                 // view otherwise sizes itself to its WIDEST child, so one long line
@@ -521,26 +533,37 @@ private struct ChatScreenContent: View {
             // the initial landing to the explicit scroll below, which runs after
             // layout and therefore aims at a height that is actually real.
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            // The transcript does NOT react to the keyboard. Without this it
-            // went BLANK the first time you tapped the composer in a session,
-            // and only came back when the keyboard was dismissed.
+            // The composer is an OVERLAY, so it reserves no scroll space by
+            // itself. Reserve it as a bottom content INSET, tracked by the
+            // keyboard so the tail rises above both the composer (at rest) and
+            // the on-screen keyboard (while composing) instead of the composer
+            // covering the last message.
             //
-            // Two mechanisms, both fixed by the same line:
-            //
-            //  * SwiftUI's automatic keyboard avoidance shrinks the bottom
-            //    safe area, which RESIZES this scroll view — and a resize is
-            //    exactly what `.defaultScrollAnchor(.bottom, for: .sizeChanges)`
-            //    listens for. It duly re-pinned to the true bottom of the
-            //    stack, which is the empty `composerReservedHeight` spacer
-            //    sitting AFTER the bottom anchor: a viewport of blank space.
-            //  * The avoidance also offsets the whole stack upward to keep the
-            //    focused editor visible, pushing the conversation off-screen.
-            //
-            // Ignoring the keyboard here keeps the scroll view a fixed size, so
-            // neither fires. The composer is an OVERLAY on the parent (which
-            // still honours the keyboard inset), so it keeps riding up above
-            // the keyboard exactly as before — only the transcript holds still.
+            // Doing this as an inset rather than a trailing row in the stack is
+            // what keeps the viewport from going blank: `.defaultScrollAnchor`
+            // pins to the END of the scroll content, and a trailing empty
+            // spacer made that end blank space. With no spacer, the end is the
+            // last message, so a keyboard-driven resize (which would otherwise
+            // re-pin) lands on the last message, not on empty space. The scroll
+            // view ignores the keyboard safe area so it never itself resizes;
+            // the inset is what absorbs the keyboard.
+            .contentMargins(
+                .bottom,
+                Self.composerReservedHeight + keyboardInset,
+                for: .scrollContent
+            )
             .ignoresSafeArea(.keyboard, edges: .bottom)
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+            ) { note in
+                let height = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)?.height ?? 0
+                keyboardInset = max(0, height - max(safeAreaBottomInset, 0))
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+            ) { _ in
+                keyboardInset = 0
+            }
             .scrollDismissesKeyboard(.interactively)
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
