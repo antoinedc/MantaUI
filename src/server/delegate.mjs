@@ -185,10 +185,26 @@ export function buildPermissionRuleset(tools) {
     seen.add(key);
     return true;
   });
-  // The catch-all deny MUST be last — it is what stops an unmatched tool from
-  // resolving to `ask` and hanging the job.
-  deduped.push({ permission: "*", pattern: "**", action: "deny" });
-  return deduped;
+  // The catch-all deny MUST be FIRST, with the specific allows after it.
+  //
+  // opencode resolves a tool call against this list LAST-MATCH-WINS, which is
+  // the opposite of what this originally assumed. Appending the catch-all last
+  // meant `{permission:"*", pattern:"**", action:"deny"}` matched every call
+  // and won over every allow that preceded it — so a delegated job could not
+  // run a SINGLE tool, whatever it had been granted. The job then burned a
+  // worktree, a window and a model session doing nothing but reporting that it
+  // was denied.
+  //
+  // Verified against the running opencode (v1.15.12) rather than reasoned
+  // about, because the API accepts either order silently:
+  //   [bash ** allow, * ** deny] → bash DENIED ("a rule prevents you…")
+  //   [* ** deny, bash ** allow] → bash COMPLETED
+  // opencode also prepends its own `{permission:"*", pattern:"*",
+  // action:"allow"}` default ahead of whatever we send, which is why an
+  // explicit catch-all deny is still required to stop an ungranted tool from
+  // resolving to allow/ask — it just has to sit UNDER the grants, not over
+  // them.
+  return [{ permission: "*", pattern: "**", action: "deny" }, ...deduped];
 }
 
 // Find the tmux session that owns a given opencode sessionID. Mirrors the
