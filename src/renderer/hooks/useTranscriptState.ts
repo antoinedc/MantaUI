@@ -42,6 +42,7 @@ export type TranscriptState = {
   messages: OpencodeMessage[] | null;
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
   scrollRef: React.RefObject<HTMLDivElement>;
+  contentRef: React.RefObject<HTMLDivElement>;
   pinnedToBottom: React.MutableRefObject<boolean>;
   stickToBottom: () => void;
   refreshing: boolean;
@@ -83,6 +84,10 @@ export function useTranscriptState(params: {
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The inner content node observed by the ResizeObserver below (the transcript
+  // body inside the scroll container). Separate from scrollRef because we want
+  // to react to the CONTENT growing, not the scroller resizing.
+  const contentRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
   const prevScrollHeight = useRef(0);
   const isActiveRef = useRef(isActive);
@@ -320,6 +325,43 @@ export function useTranscriptState(params: {
     };
   }, []);
 
+  // Follow the tail when the CONTENT grows without a `messages` commit.
+  //
+  // The post-commit layout effect below only fires when the messages array
+  // changes identity. Plenty of growth is not a commit: markdown/code blocks
+  // laying out after the commit, a card expanding or remounting, the working
+  // indicator appearing, a reflow when the window is resized. Each of those
+  // pushes the bottom away from a user who was sitting at it, and nothing put
+  // them back — which is the "new messages stop scrolling the transcript down"
+  // regression.
+  //
+  // This observes SIZE only and re-sticks only when `pinnedToBottom.current` is
+  // already true, so it can never drag a user who scrolled up back to the tail.
+  // Scrolling does not change content size, so there is no feedback loop.
+  //
+  // GOTCHA — `transcriptMounted` in the deps is load-bearing, not decoration.
+  // ChatPanel returns a "Loading session…" screen while `messages` is null, so
+  // the Transcript (and therefore `contentRef.current`) does NOT exist on the
+  // first render. `stickToBottom` is a `useCallback` with empty deps, i.e.
+  // permanently stable — so with `[stickToBottom]` alone this effect ran exactly
+  // once, against a null ref, and the observer was NEVER attached for any
+  // session. Re-running it when the transcript mounts is what makes it real.
+  const transcriptMounted = messages !== null;
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    if (typeof ResizeObserver === "undefined") return; // jsdom / old runtimes
+    const ro = new ResizeObserver(() => {
+      if (!pinnedToBottom.current) return;
+      if (!isActiveRef.current) return; // a hidden panel has no live layout
+      stickToBottom();
+      const el = scrollRef.current;
+      if (el && el.scrollHeight > 0) prevScrollHeight.current = el.scrollHeight;
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [stickToBottom, transcriptMounted]);
+
   // Post-commit stick layout effect. The stick decision MUST compare the user's
   // pre-commit position against the PREVIOUS render's height (prevScrollHeight),
   // not the live post-commit el.scrollHeight — by the time this layout effect
@@ -360,6 +402,7 @@ export function useTranscriptState(params: {
     messages,
     setMessages,
     scrollRef,
+    contentRef,
     pinnedToBottom,
     stickToBottom,
     refreshing,

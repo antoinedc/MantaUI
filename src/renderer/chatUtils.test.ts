@@ -2811,4 +2811,36 @@ describe("updateEntryMotion", () => {
     expect(isOptimisticUserId("optimistic-user-1770000000000")).toBe(true);
     expect(isOptimisticUserId("msg_01ABC")).toBe(false);
   });
+
+  // A hidden panel (App.tsx hides inactive ChatPanels with display:none) folds
+  // its new messages into `seen` as history but must NOT mark them entering —
+  // CSS animations don't run on a display:none element, so the whole batch
+  // would otherwise slide in at the instant the user switches to the session.
+  it("with animate:false, a new id is folded into seen but NOT entering", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]); // prime
+    updateEntryMotion(s, [user("u1"), asst("a1")], false);
+    expect(s.entering.has("a1")).toBe(false);
+    expect(s.seen?.has("a1")).toBe(true);
+  });
+
+  it("an id absorbed as history while inactive stays history when the panel becomes active", () => {
+    // This is the whole point: a turn that landed while hidden must not slide
+    // in on the switch. Re-folding the SAME id with animate:true does nothing
+    // because it is already in `seen`.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]); // prime
+    updateEntryMotion(s, [user("u1"), asst("a1")], false); // hidden turn
+    updateEntryMotion(s, [user("u1"), asst("a1")], true); // user switches in
+    expect(s.entering.has("a1")).toBe(false);
+  });
+
+  it("a genuinely new id after an inactive batch IS marked entering", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]); // prime
+    updateEntryMotion(s, [user("u1"), asst("a1")], false); // absorbed as history
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")], true); // live send
+    expect(s.entering.has("a1")).toBe(false);
+    expect(s.entering.has("u2")).toBe(true);
+  });
 });

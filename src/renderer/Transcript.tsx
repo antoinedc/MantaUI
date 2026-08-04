@@ -15,6 +15,11 @@
 //     ChatPanel measures, so it's passed down, not created here.
 //   - `questionCardRef` — a notification deep-link scrolls the pending
 //     QuestionCard(s) into view; ChatPanel's deferred-scroll effect reads it.
+//   - `contentRef` — forwarded for the same reason: the transcript-state hook's
+//     ResizeObserver measures the inner content node to follow the tail when
+//     content grows without a `messages` commit (markdown laying out, a card
+//     expanding, the working indicator appearing). It MUST be the same node the
+//     hook observes, so it's created by the hook and passed down, not owned here.
 //
 // The `TaskContext.Provider` also lives here (wrapping the scroll body) so
 // TaskBody descendants can read subagent state without prop-drilling; the
@@ -38,10 +43,17 @@ import {
 export type TranscriptProps = {
   messages: OpencodeMessage[];
   scrollRef: React.RefObject<HTMLDivElement>;
+  contentRef: React.RefObject<HTMLDivElement>;
   questionCardRef: React.RefObject<HTMLDivElement>;
   taskContextValue: TaskContextValue;
   showThinking: boolean;
   running: boolean;
+  // Whether the user is actually viewing this panel. App.tsx keeps every
+  // ChatPanel mounted and hides the inactive ones with display:none. Entry
+  // motion is gated on this — a turn landing in a hidden panel is absorbed as
+  // history, not slid in when the user switches to it (updateEntryMotion's
+  // third arg). See the comment on `updateEntryMotion` in chatUtils.
+  isActive: boolean;
   activeTodos: Array<Record<string, unknown>> | null;
   questions: QuestionRequest[];
   // Per-message derived lookups (all memoized at ChatPanel scope so the
@@ -56,10 +68,12 @@ export type TranscriptProps = {
 export function Transcript({
   messages,
   scrollRef,
+  contentRef,
   questionCardRef,
   taskContextValue,
   showThinking,
   running,
+  isActive,
   activeTodos,
   questions,
   turnInfo,
@@ -82,6 +96,7 @@ export function Transcript({
   const motion = updateEntryMotion(
     motionRef.current,
     messages.map((m) => ({ id: m.info.id, role: m.info.role })),
+    isActive,
   );
 
   return (
@@ -106,7 +121,7 @@ export function Transcript({
         {/* Defensive boundary around the whole transcript body: a single */}
         {/* MessageRow / card that throws must not white out the app. */}
         <ErrorBoundary>
-        <div className="flex flex-col justify-end min-h-full">
+        <div ref={contentRef} className="flex flex-col justify-end min-h-full">
           {messages.length === 0 ? (
             // Full width, matching the populated flow below so both states
             // share a left edge (BET-646).

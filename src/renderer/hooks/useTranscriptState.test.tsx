@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "../ChatPanel";
+import { useTranscriptState } from "./useTranscriptState";
 import {
   installMockApi,
   resetStore,
@@ -386,5 +387,59 @@ describe("useTranscriptState via ChatPanel", () => {
 
     // Component should still be mounted and not have crashed
     expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
+});
+
+// Direct hook probe (BET follow-the-tail fix). Mounts the hook in isolation via
+// a tiny probe component and captures its return value, so we can assert the
+// hook's contract (it exposes a contentRef the Transcript attaches to the inner
+// content node for the ResizeObserver) without driving real layout — jsdom has
+// none, so we only check the ref exists and that the ResizeObserver-undefined
+// path doesn't throw.
+describe("useTranscriptState contentRef", () => {
+  let h: ReturnType<typeof mount> | null = null;
+
+  beforeEach(() => {
+    installMockApi();
+    resetStore();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function Probe({
+    onState,
+  }: {
+    onState: (s: ReturnType<typeof useTranscriptState>) => void;
+  }) {
+    const state = useTranscriptState({ sessionId: "ses_probe", isActive: true });
+    onState(state);
+    return <div ref={state.contentRef} />;
+  }
+
+  it("returns a contentRef", () => {
+    let captured: ReturnType<typeof useTranscriptState> | null = null;
+    h = mount(<Probe onState={(s) => (captured = s)} />);
+    expect(captured).not.toBeNull();
+    expect(captured!.contentRef).toBeDefined();
+    expect("current" in captured!.contentRef).toBe(true);
+  });
+
+  it("does not throw when ResizeObserver is undefined", () => {
+    const saved = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    // Simulate a runtime without ResizeObserver (older jsdom). The effect
+    // guards on `typeof ResizeObserver === "undefined"` and must bail cleanly.
+    delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    try {
+      expect(() => {
+        h = mount(<Probe onState={() => {}} />);
+      }).not.toThrow();
+    } finally {
+      if (saved !== undefined) {
+        (globalThis as { ResizeObserver?: unknown }).ResizeObserver = saved;
+      }
+    }
   });
 });

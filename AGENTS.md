@@ -162,13 +162,17 @@ retention short (e.g. 7d, not 90d) and prune old releases, because the
 artifacts — and Actions **cache** is 10 GB/repo. Minutes themselves aren't a
 budget.
 
-Everything lives in `.github/workflows/ci.yml` as **three** jobs:
+Everything lives in `.github/workflows/ci.yml` as **two** jobs:
 
 | Job | Required? | What |
 |---|---|---|
 | `typecheck-test` | **yes — the only one** | `npm run typecheck`, `npm test`, gitleaks secret scan, conditional dependency audit, advisory duplication sticky comment |
 | `duplication-gate` | no | strict jscpd gate; de-required 2026-07-02 (flaky at token boundaries) but still goes red as a signal |
-| `E2E Smoke Test` | no | Electron + Xvfb smoke (runs under `xvfb-run -a`); flakier than the deterministic gates, so a judgment call |
+
+(The `E2E Smoke Test` job — Electron + Xvfb smoke under `xvfb-run -a` — was
+removed from `ci.yml`: it was flakier than the deterministic gates. Its script
+`scripts/check-e2e-smoke.sh` and `tests/e2e/**` stay in the repo, runnable
+locally.)
 
 The GATE-2 tamper-proof property still holds: `typecheck-test` runs on fresh,
 ephemeral GitHub-hosted runners (arguably *more* isolated than the maintainer's
