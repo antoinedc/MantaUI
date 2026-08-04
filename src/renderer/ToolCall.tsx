@@ -72,7 +72,7 @@ export const AssistantPart = memo(function AssistantPart({
   showThinking: boolean;
   // True ONLY for the text part currently being written (last part of the last
   // assistant message while the turn runs). Adds `manta-streaming`, which owns
-  // the per-block fade-in and the trailing caret in index.css. A primitive so
+  // the per-block slide-in and the trailing caret in index.css. A primitive so
   // the memo chain is untouched; false everywhere else, so a settled transcript
   // never animates and never shows a caret.
   streaming?: boolean;
@@ -96,11 +96,14 @@ export const AssistantPart = memo(function AssistantPart({
   //      (ToolCall / CollapsibleLines useState). So we always render a stable
   //      wrapper element and only vary its className.
   //
-  // The streaming TEXT part is exempt: its markdown blocks already fade in
-  // individually via `.manta-streaming > *`, and sliding the whole container on
-  // top of that would animate the same content twice. A tool card has no such
-  // fade, so it must slide — which the old `streaming` guard wrongly suppressed
-  // (a tool card is always the last, streaming, part at the instant it appears).
+  // The streaming TEXT part is exempt — it slides PER MARKDOWN BLOCK instead,
+  // via `.manta-streaming > *`, which runs the very same keyframes. Prose
+  // arrives paragraph by paragraph over many seconds, so the block is its unit
+  // of arrival the way the part is a card's; sliding the container on top of
+  // that would move the same content twice, 8px inside another 8px. A tool card
+  // has no such per-block motion, so the card itself must slide — which the old
+  // `streaming` guard wrongly suppressed (a tool card is always the last, and
+  // therefore "streaming", part at the instant it appears).
   //
   // The slide goes on a WRAPPER rather than the part's own root because the
   // roots are shared primitives (ToolCard, OutputWell) that deliberately expose
