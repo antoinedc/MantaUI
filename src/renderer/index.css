@@ -181,6 +181,53 @@ html, body, #root {
   .manta-streaming > *:last-child::after { animation: none; }
 }
 
+/* Transcript entry motion (transcript-motion).
+   New rows that mount live at the bottom of the transcript (a user message
+   just sent, an assistant turn that reconciles in as a whole, a newly
+   surfaced card) enter by sliding up a few pixels with a fade, so appends
+   read as "settling in" rather than teleporting. Transform + opacity only
+   (compositor-friendly), `both` fill so a one-shot play holds its end state
+   and dropping the class later is seamless.
+
+   WHOLE-ROW animation: the row is the unit, so a card is never assembled
+   piece by piece. The live-streaming message is exempt — its blocks already
+   animate in via .manta-streaming (BET-649), and re-animating the row would
+   double up. `entering` (set in Transcript.tsx) marks rows appended after the
+   initial transcript load, so a session switch never replays the whole
+   history sliding in. */
+@keyframes manta-row-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.manta-row-in {
+  animation: manta-row-in 0.22s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+/* User bubble send (transcript-motion). iMessage-style send: the bubble
+   springs in from just below where the composer sits — a short rise with a
+   slight scale overshoot so it reads as a single "pop" that the text lands
+   in, rather than a static stamp. The 72% keyframe gives the spring feel
+   without introducing a spring-easing dependency. Origin is the bottom-right
+   corner (where a send originates) so the overshoot scales toward the
+   transcript, not the gutter. */
+@keyframes manta-bubble-in {
+  0%   { opacity: 0; transform: translateY(14px) scale(0.9); }
+  72%  { opacity: 1; transform: translateY(-2px) scale(1.02); }
+  100% { opacity: 1; transform: none; }
+}
+.manta-bubble-in {
+  animation: manta-bubble-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: bottom right;
+}
+
+/* Vestibular safety (MDN prefers-reduced-motion): with reduce set, the
+   transcript never slides — rows and bubbles simply appear. State is
+   unaffected; only the motion is removed. */
+@media (prefers-reduced-motion: reduce) {
+  .manta-row-in,
+  .manta-bubble-in { animation: none; }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

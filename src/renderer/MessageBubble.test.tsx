@@ -14,7 +14,7 @@ import { mount, type Harness } from "./testHarness";
 import { MessageBubble } from "./MessageBubble";
 
 const BUBBLE_CHROME =
-  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words";
+  "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text max-w-[min(88%,var(--measure))] whitespace-pre-wrap break-words manta-bubble-in";
 
 describe("MessageBubble", () => {
   let h: Harness | null = null;
