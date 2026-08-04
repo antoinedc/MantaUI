@@ -33,10 +33,28 @@ function msg(id: string, role: "user" | "assistant", text: string): OpencodeMess
   } as unknown as OpencodeMessage;
 }
 
+// An assistant message whose only part is a completed tool call — the unit that
+// actually slides in (a text part is exempt; a tool card is not).
+function toolMsg(id: string, tool: string): OpencodeMessage {
+  return {
+    info: { id, sessionID: "s1", role: "assistant", time: { created: 1_700_000_000_000 } },
+    parts: [
+      {
+        id: `${id}-p0`,
+        messageID: id,
+        type: "tool",
+        tool,
+        state: { status: "completed", output: "done" },
+      },
+    ],
+  } as unknown as OpencodeMessage;
+}
+
 function props(messages: OpencodeMessage[], running = false): TranscriptProps {
   return {
     messages,
     scrollRef: createRef<HTMLDivElement>(),
+    contentRef: createRef<HTMLDivElement>(),
     questionCardRef: createRef<HTMLDivElement>(),
     taskContextValue: {
       childMessages: new Map(),
@@ -46,6 +64,9 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     } as unknown as TranscriptProps["taskContextValue"],
     showThinking: false,
     running,
+    // Entry-motion tests assume the panel is being watched (a hidden panel
+    // never animates — that is the session-switch fix).
+    isActive: true,
     activeTodos: null,
     questions: [],
     turnInfo: new Map(),
@@ -112,21 +133,39 @@ describe("Transcript entry motion", () => {
     expect(bubblesIn(h)).toBe(0);
   });
 
-  it("slides in the assistant's parts once its turn settles", () => {
-    // The whole point of the rewrite. The previous shape exempted the row
-    // while it was streaming and considered it old once it was not, so this
-    // count was 0 at every step of the sequence.
+  it("slides in a tool card that arrives live, immediately at mount", () => {
+    // A tool card is ALWAYS the last (streaming) part at the instant it
+    // appears. The slide decision is frozen at mount: `entering && !(streaming
+    // && text)` — a tool part is not text, so it slides right away and keeps
+    // sliding through the re-render storm (the class is stable, never re-derived
+    // when `streaming` later flips false and the card remounts is avoided by the
+    // always-present wrapper). This is the bug the old `streaming` guard caused:
+    // the tool card was exempted and never slid.
+    h = open();
+    render(h, [...HISTORY, OPTIMISTIC], true);
+
+    const streaming = [...HISTORY, OPTIMISTIC, toolMsg("a_new", "bash")];
+    render(h, streaming, true);
+    expect(partsIn(h)).toBe(1); // slid immediately, mid-stream
+
+    render(h, streaming, false); // turn settles — still exactly one, no remount
+    expect(partsIn(h)).toBe(1);
+  });
+
+  it("does NOT slide the live text part — it owns its own per-block fade", () => {
+    // The streaming TEXT part is the sole exemption: `.manta-streaming` fades
+    // its markdown blocks in individually, so wrapping it in the container
+    // slide too would animate the same content twice. Frozen at mount as
+    // non-sliding, it stays non-sliding even after the turn settles.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, msg("a_new", "assistant", "writing")];
     render(h, streaming, true);
-    // Mid-stream the text part animates its own blocks (.manta-streaming), so
-    // the part wrapper deliberately stays out of it.
     expect(partsIn(h)).toBe(0);
 
     render(h, streaming, false);
-    expect(partsIn(h)).toBe(1);
+    expect(partsIn(h)).toBe(0);
   });
 
   it("leaves history still even after new messages have arrived", () => {

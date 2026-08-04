@@ -218,14 +218,52 @@ describe("non-tool assistant parts", () => {
         showThinking={false}
       />,
     );
-    expect(h.container.firstElementChild?.className).toContain("border-border-subtle");
+    // AssistantPart always wraps its body in a stable slide-wrapper div now, so
+    // the card shell is the wrapper's child rather than the container's first
+    // element — query for it directly.
+    expect(h.container.querySelector(".border-border-subtle")).toBeTruthy();
     expect(h.text()).toContain("Patch");
     expect(h.text()).toContain("2 files");
-    expect(h.text()).toContain("/a/b.py");
     expect(h.text() ?? "").not.toContain("⎿");
   });
 
-  it("renders a file part as a card", () => {
+  // A patch card is collapsible + collapsed by default like every other
+  // machine-action card — no minimum-lines gate; even a one-file patch starts
+  // collapsed behind a chevron.
+  it("renders a patch part collapsed by default with a working chevron", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "patch", files: ["/a/b.py", "/c/d.ts"] } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    // Chevron present, body hidden initially.
+    const toggle = h.container.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    expect(h.text()).not.toContain("/a/b.py");
+    // Expanding reveals the file list.
+    act(() => toggle.click());
+    expect(h.text()).toContain("/a/b.py");
+    expect(h.text()).toContain("/c/d.ts");
+  });
+
+  it("renders a single-file patch collapsed too (no size threshold to collapse)", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "patch", files: ["/only/one.ts"] } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    const toggle = h.container.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    expect(h.text()).not.toContain("/only/one.ts");
+    act(() => toggle.click());
+    expect(h.text()).toContain("/only/one.ts");
+  });
+
+  it("renders a file part as a collapsible card, collapsed by default with a working chevron", () => {
     installMockApi();
     h = mount(
       <AssistantPart
@@ -233,9 +271,17 @@ describe("non-tool assistant parts", () => {
         showThinking={false}
       />,
     );
-    expect(h.container.firstElementChild?.className).toContain("border-border-subtle");
+    expect(h.container.querySelector(".border-border-subtle")).toBeTruthy();
+    // Header always shows the filename/mime.
     expect(h.text()).toContain("report.pdf");
     expect(h.text() ?? "").not.toContain("⎿");
+    // Chevron present, body (the OutputWell copy) hidden until expanded.
+    const toggle = h.container.querySelector('button[aria-expanded="false"]') as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    const wellsBefore = h.container.querySelectorAll(".whitespace-pre-wrap").length;
+    act(() => toggle.click());
+    const wellsAfter = h.container.querySelectorAll(".whitespace-pre-wrap").length;
+    expect(wellsAfter).toBeGreaterThan(wellsBefore);
   });
 });
 

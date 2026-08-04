@@ -12,7 +12,7 @@
 //     module cycle that is safe because both references are used only at
 //     render time).
 
-import { memo, useState } from "react";
+import { memo, useRef, useState } from "react";
 import type { OpencodePart } from "../shared/types";
 import { resolveToolOutput, cssVar } from "./chatUtils";
 import { type ToolState } from "./chatShared";
@@ -84,16 +84,34 @@ export const AssistantPart = memo(function AssistantPart({
   entering?: boolean;
 }) {
   const body = renderAssistantPart(part, showThinking, streaming);
-  // The streaming text part is exempt: its markdown blocks already fade in
+  // Whether this part slides in is DECIDED ONCE, at mount, and frozen in a ref.
+  // Two reasons it cannot be a plain per-render expression:
+  //   1. `streaming` flips to false the moment the NEXT part arrives (only the
+  //      last part of the running message is streaming). Re-evaluating the slide
+  //      then would add the class long after the card appeared — replaying the
+  //      animation at the wrong moment.
+  //   2. Swapping between `body` and a wrapped `body` changes the element TYPE
+  //      at this position, so React unmounts and remounts the card subtree —
+  //      replaying the slide AND throwing away its local expanded state
+  //      (ToolCall / CollapsibleLines useState). So we always render a stable
+  //      wrapper element and only vary its className.
+  //
+  // The streaming TEXT part is exempt: its markdown blocks already fade in
   // individually via `.manta-streaming > *`, and sliding the whole container on
-  // top of that would animate the same content twice.
+  // top of that would animate the same content twice. A tool card has no such
+  // fade, so it must slide — which the old `streaming` guard wrongly suppressed
+  // (a tool card is always the last, streaming, part at the instant it appears).
   //
   // The slide goes on a WRAPPER rather than the part's own root because the
   // roots are shared primitives (ToolCard, OutputWell) that deliberately expose
   // no className escape hatch. The wrapper is a plain block inside the row's
   // existing flex column, so it inherits the gap and changes no layout.
-  if (body == null || !entering || streaming) return body;
-  return <div className="manta-part-in">{body}</div>;
+  const slideRef = useRef<boolean | null>(null);
+  if (slideRef.current === null) {
+    slideRef.current = entering && !(streaming && part.type === "text");
+  }
+  if (body == null) return null;
+  return <div className={slideRef.current ? "manta-part-in" : undefined}>{body}</div>;
 });
 
 function renderAssistantPart(
@@ -149,36 +167,78 @@ function renderAssistantPart(
   // last card reads as tool output that escaped its container. They are the
   // same kind of thing as a tool call, so they get the same chrome.
   if (part.type === "patch") {
-    const files = ((part as Record<string, unknown>).files as string[] | undefined) ?? [];
-    return (
-      <ToolCard
-        tone="ok"
-        name="Patch"
-        arg={files.length === 0 ? undefined : `${files.length} file${files.length === 1 ? "" : "s"}`}
-        copyText={files.join("\n")}
-      >
-        {files.length > 0 && (
-          <OutputWell variant="attached">
-            {files.map((f) => (
-              <div key={f} className="whitespace-pre-wrap break-all text-text-muted">
-                {f}
-              </div>
-            ))}
-          </OutputWell>
-        )}
-      </ToolCard>
-    );
+    return <PatchCard part={part} />;
   }
 
   // File reference (attached file in a prompt, or returned by a tool).
   if (part.type === "file") {
-    const filename = String((part as Record<string, unknown>).filename ?? "");
-    const mime = String((part as Record<string, unknown>).mime ?? "");
-    return <ToolCard tone="ok" name="File" arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`} />;
+    return <FileCard part={part} />;
   }
 
+  // Unrecognized part: a card with no body. Deliberately NO chevron — a
+  // disclosure that reveals nothing is worse than none.
   return <ToolCard name={part.type} />;
 }
+
+// Patch (savepoint after one or more file edits): the list of files touched.
+// Collapsible + collapsed-by-default, exactly like a tool call — there is NO
+// minimum-lines gate; even a one-file patch starts collapsed.
+const PatchCard = memo(function PatchCard({ part }: { part: OpencodePart }) {
+  const files = ((part as Record<string, unknown>).files as string[] | undefined) ?? [];
+  const [expanded, setExpanded] = useState(false);
+  const toggle = () => setExpanded((v) => !v);
+  const hasBody = files.length > 0;
+  return (
+    <ToolCard
+      tone="ok"
+      name="Patch"
+      arg={files.length === 0 ? undefined : `${files.length} file${files.length === 1 ? "" : "s"}`}
+      copyText={files.join("\n")}
+      expanded={hasBody ? expanded : undefined}
+      onToggle={hasBody ? toggle : undefined}
+    >
+      {hasBody && expanded && (
+        <OutputWell variant="attached">
+          {files.map((f) => (
+            <div key={f} className="whitespace-pre-wrap break-all text-text-muted">
+              {f}
+            </div>
+          ))}
+        </OutputWell>
+      )}
+    </ToolCard>
+  );
+});
+
+// File reference (attached file in a prompt, or returned by a tool). The header
+// carries all the information (filename + mime), so its "body" is that same
+// detail — collapsible + collapsed-by-default for consistency with every other
+// machine-action card. No minimum-lines gate.
+const FileCard = memo(function FileCard({ part }: { part: OpencodePart }) {
+  const filename = String((part as Record<string, unknown>).filename ?? "");
+  const mime = String((part as Record<string, unknown>).mime ?? "");
+  const [expanded, setExpanded] = useState(false);
+  const toggle = () => setExpanded((v) => !v);
+  return (
+    <ToolCard
+      tone="ok"
+      name="File"
+      arg={`${filename || "(file)"}${mime ? ` · ${mime}` : ""}`}
+      copyText={filename || undefined}
+      expanded={expanded}
+      onToggle={toggle}
+    >
+      {expanded && (
+        <OutputWell variant="attached">
+          <div className="whitespace-pre-wrap break-all text-text-muted">
+            {filename || "(file)"}
+            {mime ? ` · ${mime}` : ""}
+          </div>
+        </OutputWell>
+      )}
+    </ToolCard>
+  );
+});
 
 // ===== Tool call rendering =====
 //
