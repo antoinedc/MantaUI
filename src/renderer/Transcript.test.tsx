@@ -152,18 +152,23 @@ describe("Transcript entry motion", () => {
     expect(partsIn(h)).toBe(1);
   });
 
-  it("does NOT slide the live text part — it owns its own per-block fade", () => {
-    // The streaming TEXT part is the sole exemption: `.manta-streaming` fades
-    // its markdown blocks in individually, so wrapping it in the container
-    // slide too would animate the same content twice. Frozen at mount as
-    // non-sliding, it stays non-sliding even after the turn settles.
+  it("slides the live text part PER BLOCK, not as a container", () => {
+    // Prose is not exempt from the motion — only from the CONTAINER slide. It
+    // carries `.manta-streaming`, whose `> *` rule runs the same keyframes on
+    // each markdown block as it arrives, so prose and cards slide identically.
+    // Wrapping the container too would move the same content twice, 8px inside
+    // another 8px. Both halves are asserted: no container slide, and the class
+    // that supplies the per-block slide IS present — without that second
+    // assertion this test would still pass if prose animated not at all.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, msg("a_new", "assistant", "writing")];
     render(h, streaming, true);
     expect(partsIn(h)).toBe(0);
+    expect(h.container.querySelectorAll(".manta-streaming").length).toBe(1);
 
+    // Frozen at mount: settling the turn must not retro-add a container slide.
     render(h, streaming, false);
     expect(partsIn(h)).toBe(0);
   });

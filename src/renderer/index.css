@@ -160,20 +160,28 @@ html, body, #root {
    Two effects, both scoped to the ONE message currently being written, so
    nothing in the settled transcript animates or carries a caret.
 
-   1. Block fade-in. Each markdown block enters with a short fade + 3px rise
-      instead of appearing instantly. It fires on MOUNT, so an already-rendered
-      paragraph that merely grows does not re-animate, and the canonical
-      refetch (which reconciles rather than remounts) does not re-fire it.
+   1. Block slide-in. Each markdown block enters with the SAME motion a tool
+      card uses (see manta-part-in below) — same distance, duration and easing —
+      so prose and cards arrive identically and a turn assembles itself in one
+      visual language. It fires on MOUNT, so an already-rendered paragraph that
+      merely grows does not re-animate, and the canonical refetch (which
+      reconciles rather than remounts) does not re-fire it.
+
+      It used to be its own weaker `manta-chunk-in` (3px / 0.18s). At that
+      distance the rise is below the threshold where it reads as movement, so
+      prose looked like it merely faded while cards slid — reported as "prose
+      never slides in". The keyframes are now shared rather than duplicated at
+      matching values, so the two cannot drift apart again.
+
+      NOTE the block is the unit here, and the container is deliberately NOT
+      also slid (AssistantPart exempts the live text part): sliding both would
+      move the same content twice, 8px inside another 8px.
    2. Trailing caret. A thin accent block after the last block's last line,
       marking where output is being written. Drawn with ::after on the last
       child so it sits INLINE at the end of the text — a sibling element would
       break onto its own line after a block-level <p>. */
-@keyframes manta-chunk-in {
-  from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: none; }
-}
 .manta-streaming > * {
-  animation: manta-chunk-in 0.18s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: manta-part-in 0.22s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
 }
 .manta-streaming > *:last-child::after {
   content: "";
@@ -203,7 +211,8 @@ html, body, #root {
    why the earlier whole-row version could never fire: the row was always
    exempt as "currently streaming" when it mounted, and no longer new by the
    time it settled. The live-streaming text part is still exempt here because
-   its markdown blocks fade in individually via .manta-streaming (BET-649).
+   its markdown blocks already run these same keyframes one at a time via
+   .manta-streaming (BET-649) — it slides per block, not as a container.
 
    `entering` (decided in Transcript.tsx by updateEntryMotion) is what keeps
    history still: a transcript the user merely loaded animates nothing. */
