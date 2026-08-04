@@ -81,6 +81,15 @@ private struct ChatScreenContent: View {
     @State private var scheduleCount = 0
     /// Whether the one-shot "open at the newest message" scroll has run.
     @State private var didLandAtBottom = false
+    /// Live height of the bottom chrome (cards + running row + composer), used
+    /// to size the scrim behind it. Measured from an overlay, so it can never
+    /// feed back into the transcript's layout.
+    @State private var bottomChromeHeight: CGFloat = 0
+
+    /// How far the bottom scrim reaches past the safe area. Comfortably clears
+    /// the tallest home indicator; when the keyboard is up it falls behind the
+    /// keyboard, where there is nothing to dim.
+    private static let scrimOverhang: CGFloat = 44
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -156,18 +165,47 @@ private struct ChatScreenContent: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        // The bottom stack is a safeAreaInset, so the composer PUSHES the
-        // transcript up and never covers it, and its space is reserved by
-        // SHRINKING the scroll view rather than by extending scroll content.
+        // The bottom stack is an OVERLAY, not a safeAreaInset.
         //
-        // Extending scroll content below the last message (a trailing spacer
-        // or a bottom contentInset/margin) is exactly what made the viewport
-        // go BLANK: the bottom scroll anchor pins to the END of the scroll
-        // content, so any reserved space after the last message became an
-        // empty screenful the anchor scrolled down to. A safeAreaInset
-        // reserves the space without extending the content, so the anchor's
-        // end is always the last message and there is nothing to pin to but it.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // As an inset, the composer's height was part of the scroll view's
+        // layout: every line the text gained shrank the viewport, and with the
+        // transcript anchored to its bottom the content shifted by the same
+        // amount. So growing the composer scrolled the conversation — on the
+        // first wrap and on every line break after it.
+        //
+        // As an overlay it takes no layout space, so the viewport never
+        // changes size and the transcript does not move at all while the
+        // composer grows; the composer simply covers more of it. The space the
+        // inset used to reserve is now a fixed spacer at the tail of the scroll
+        // content (see `transcript`), sized for the composer at REST — so the
+        // last message still comes to rest above a compact composer, and a
+        // grown one overlaps content that is dimmed by the scrim below rather
+        // than pushing it.
+        // Scrim FIRST so it draws beneath the composer.
+        //
+        // It was a `.background` on the composer stack, which is why it
+        // vanished: a background is sized to its container, so the gradient was
+        // exactly the composer's own bounds — entirely hidden behind the
+        // composer, with nothing extending ABOVE it where the transcript
+        // actually scrolls past. As its own bottom-aligned overlay it is sized
+        // to the composer PLUS a fade margin, so the ramp lives above the
+        // composer's top edge where it can do something.
+        //
+        // Its bounds respect the safe area, so it rides up with the composer
+        // when the keyboard opens instead of being stranded at the display
+        // edge. Below it is the screen's canvas background, which its darkest
+        // stop meets nearly seamlessly.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
+                // Exactly the composer, plus the overhang BELOW it. No margin
+                // above: the fade must not begin before the composer's top
+                // edge, or it reads as a shadow cast onto the transcript
+                // rather than as the composer's own backdrop. Starting at the
+                // edge means the ramp is only ever seen THROUGH the composer's
+                // glass or below it.
+                .frame(height: bottomChromeHeight + Self.scrimOverhang)
+        }
+        .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 bottomCards
                 // BET-630 (D1): the running-state working row. Shown only while a
@@ -184,6 +222,15 @@ private struct ChatScreenContent: View {
                     store: store,
                     modelStore: modelStore
                 )
+            }
+            // Feeds the scrim its height. Safe to measure here: this is an
+            // overlay, so nothing it reports can change the transcript's
+            // layout — which is the property that stopped the composer from
+            // scrolling the conversation in the first place.
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                bottomChromeHeight = height
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -400,6 +447,22 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
+    /// Space the transcript reserves for the floating composer.
+    ///
+    /// FIXED, and deliberately sized for the composer at REST rather than
+    /// tracking its live height. Tracking is what the safeAreaInset used to do,
+    /// and it is precisely why the transcript lurched every time the text
+    /// wrapped. A constant means the viewport never changes, so the
+    /// conversation holds still while the composer grows over it.
+    ///
+    /// Covers the model-chip row, the compact input box and the stack's own
+    /// vertical padding — all from the tokens those are laid out with.
+    private static let composerReservedHeight =
+        Metrics.type.chatHeaderBtn          // compact input row
+        + Metrics.spacing.sp1 * 2           // its vertical padding
+        + Metrics.type.small + Metrics.spacing.sp1 * 2  // model chip row
+        + Metrics.spacing.sp2 * 3           // stack spacing + outer padding
+
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -425,12 +488,13 @@ private struct ChatScreenContent: View {
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
-                    // NO trailing spacer here. The composer's space is reserved
-                    // by the parent's `.safeAreaInset`, which shrinks this scroll
-                    // view rather than extending its content. A spacer or content
-                    // margin AFTER the bottom anchor is what made
-                    // `.defaultScrollAnchor(.bottom, for: .sizeChanges)` pin the
-                    // viewport to blank space on keyboard-driven resizes.
+                    // Reserve for the floating composer, inside the scroll
+                    // content — the mirror of the header spacer at the top.
+                    // The composer is an overlay and reserves nothing itself,
+                    // so without this the last message would rest underneath
+                    // it. AFTER the anchor, so "scroll to bottom" still lands
+                    // on the last message rather than on empty space.
+                    Color.clear.frame(height: Self.composerReservedHeight)
                 }
                 // Pin the content to the scroll view's own width. A vertical scroll
                 // view otherwise sizes itself to its WIDEST child, so one long line
@@ -457,15 +521,6 @@ private struct ChatScreenContent: View {
             // the initial landing to the explicit scroll below, which runs after
             // layout and therefore aims at a height that is actually real.
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            // The composer's space is reserved by the safeAreaInset on the
-            // parent (which shrinks this scroll view), NOT by extending the
-            // scroll content. Extending content below the last message — a
-            // trailing spacer, or a bottom contentInset/margin — made the
-            // bottom anchor pin to blank space whenever the scroll view
-            // resized (keyboard show/hide, composer growth). With the space
-            // reserved by an inset instead, the end of the content is always
-            // the last message, so the anchor lands on it and the transcript
-            // never goes blank. The keyboard rides the safeAreaInset.
             .scrollDismissesKeyboard(.interactively)
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
@@ -487,14 +542,11 @@ private struct ChatScreenContent: View {
     /// over several layout passes, so a single scroll issued on the first pass
     /// lands short of the end; repeating it across the next couple of passes
     /// converges on the real bottom. Each pass is a no-op once the view is
-    /// already there. The trailing 550ms pass exists because prose rows can
-    /// resolve their height a full extra layout pass later than the others —
-    /// without it the "blank transcript that only a manual scroll repairs"
-    /// still bites intermittently.
+    /// already there.
     private func landAtBottom(_ proxy: ScrollViewProxy) async {
         guard !didLandAtBottom else { return }
         didLandAtBottom = true
-        for delayNs in [UInt64(0), 50_000_000, 250_000_000, 550_000_000] {
+        for delayNs in [UInt64(0), 50_000_000, 250_000_000] {
             if delayNs > 0 { try? await Task.sleep(nanoseconds: delayNs) }
             guard !Task.isCancelled else { return }
             proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
