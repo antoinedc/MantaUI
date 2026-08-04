@@ -59,6 +59,21 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
 const bubblesIn = (h: Harness) => h.container.querySelectorAll(".manta-bubble-in").length;
 const partsIn = (h: Harness) => h.container.querySelectorAll(".manta-part-in").length;
 
+// The transcript a session opens with: already on screen, never animated.
+const HISTORY = [msg("u1", "user", "first"), msg("a1", "assistant", "reply")];
+// What a send appends before the server answers.
+const OPTIMISTIC = msg("optimistic-user-1", "user", "new");
+
+/** Mount an opened session, i.e. everything here counts as history. */
+function open(messages: OpencodeMessage[] = HISTORY): Harness {
+  return mount(<Transcript {...props(messages)} />);
+}
+
+/** Push one more render of `messages` through the mounted transcript. */
+function render(h: Harness, messages: OpencodeMessage[], running = false): void {
+  h.rerender(<Transcript {...props(messages, running)} />);
+}
+
 describe("Transcript entry motion", () => {
   let h: Harness | null = null;
   afterEach(() => {
@@ -68,29 +83,15 @@ describe("Transcript entry motion", () => {
 
   it("opens a loaded transcript completely still", () => {
     // The reported symptom: opening a session replayed every user bubble.
-    h = mount(
-      <Transcript
-        {...props([
-          msg("u1", "user", "first"),
-          msg("a1", "assistant", "reply"),
-          msg("u2", "user", "second"),
-          msg("a2", "assistant", "reply two"),
-        ])}
-      />,
-    );
+    h = open([...HISTORY, msg("u2", "user", "second"), msg("a2", "assistant", "reply two")]);
     expect(bubblesIn(h)).toBe(0);
     expect(partsIn(h)).toBe(0);
   });
 
   it("pops the bubble for a message sent right now", () => {
-    h = mount(<Transcript {...props([msg("u1", "user", "first")])} />);
+    h = open();
     expect(bubblesIn(h)).toBe(0);
-
-    h.rerender(
-      <Transcript
-        {...props([msg("u1", "user", "first"), msg("optimistic-user-1", "user", "new")], true)}
-      />,
-    );
+    render(h, [...HISTORY, OPTIMISTIC], true);
     expect(bubblesIn(h)).toBe(1);
   });
 
@@ -98,23 +99,16 @@ describe("Transcript entry motion", () => {
     // This is the regression that made the feature invisible: the flag lasted
     // exactly one render, and a streaming turn re-renders every few ms, so the
     // class was pulled off roughly one frame after the animation started.
-    h = mount(<Transcript {...props([msg("u1", "user", "first")])} />);
-    const sent = [msg("u1", "user", "first"), msg("optimistic-user-1", "user", "new")];
-    h.rerender(<Transcript {...props(sent, true)} />);
-    for (let i = 0; i < 20; i++) h.rerender(<Transcript {...props(sent, true)} />);
+    h = open();
+    const sent = [...HISTORY, OPTIMISTIC];
+    for (let i = 0; i < 20; i++) render(h, sent, true);
     expect(bubblesIn(h)).toBe(1);
   });
 
   it("does not pop a second time when the canonical message replaces the placeholder", () => {
-    h = mount(<Transcript {...props([msg("u1", "user", "first")])} />);
-    h.rerender(
-      <Transcript
-        {...props([msg("u1", "user", "first"), msg("optimistic-user-1", "user", "new")], true)}
-      />,
-    );
-    h.rerender(
-      <Transcript {...props([msg("u1", "user", "first"), msg("msg_real", "user", "new")], true)} />,
-    );
+    h = open();
+    render(h, [...HISTORY, OPTIMISTIC], true);
+    render(h, [...HISTORY, msg("msg_real", "user", "new")], true);
     expect(bubblesIn(h)).toBe(0);
   });
 
@@ -122,33 +116,22 @@ describe("Transcript entry motion", () => {
     // The whole point of the rewrite. The previous shape exempted the row
     // while it was streaming and considered it old once it was not, so this
     // count was 0 at every step of the sequence.
-    h = mount(<Transcript {...props([msg("u1", "user", "first")])} />);
-    const sent = [msg("u1", "user", "first"), msg("optimistic-user-1", "user", "new")];
-    h.rerender(<Transcript {...props(sent, true)} />);
+    h = open();
+    render(h, [...HISTORY, OPTIMISTIC], true);
 
-    const streaming = [...sent, msg("a1", "assistant", "writing")];
-    h.rerender(<Transcript {...props(streaming, true)} />);
+    const streaming = [...HISTORY, OPTIMISTIC, msg("a_new", "assistant", "writing")];
+    render(h, streaming, true);
     // Mid-stream the text part animates its own blocks (.manta-streaming), so
     // the part wrapper deliberately stays out of it.
     expect(partsIn(h)).toBe(0);
 
-    h.rerender(<Transcript {...props(streaming, false)} />);
+    render(h, streaming, false);
     expect(partsIn(h)).toBe(1);
   });
 
   it("leaves history still even after new messages have arrived", () => {
-    h = mount(
-      <Transcript {...props([msg("u1", "user", "first"), msg("a1", "assistant", "reply")])} />,
-    );
-    h.rerender(
-      <Transcript
-        {...props([
-          msg("u1", "user", "first"),
-          msg("a1", "assistant", "reply"),
-          msg("u2", "user", "second"),
-        ])}
-      />,
-    );
+    h = open();
+    render(h, [...HISTORY, msg("u2", "user", "second")]);
     // Exactly the new one — the two rows already on screen are untouched.
     expect(bubblesIn(h)).toBe(1);
     expect(partsIn(h)).toBe(0);
