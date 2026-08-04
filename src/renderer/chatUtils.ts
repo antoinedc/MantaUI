@@ -1972,3 +1972,116 @@ export function resolveFastToggle(
     title: on ? "Fast mode on — click for the standard model" : "Fast mode off — click for the faster model",
   };
 }
+
+// ===== Transcript entry motion =====
+//
+// Which transcript rows are allowed to ANIMATE their arrival. The rule the
+// user actually wants is narrow: a message that lands while they are watching
+// animates; everything else — the transcript they just loaded, the session
+// they just switched into, history paged in above — appears instantly.
+//
+// This is the third attempt at that gate, and the two failures are worth
+// recording because both looked correct in review:
+//
+//   1. The user bubble carried its animation class UNCONDITIONALLY, so every
+//      bubble in a loaded transcript popped on mount. Session switch replayed
+//      the entire history's sends.
+//   2. The assistant row's flag lived for exactly ONE render. React removes
+//      the class on the next render, which CANCELS a running CSS animation and
+//      snaps the element to its end state. During a live turn the transcript
+//      re-renders every few milliseconds, so the animation was destroyed about
+//      one frame after it started — it never visibly played at all.
+//
+// Hence the two invariants this module exists to enforce:
+//
+//   PRIMED — nothing animates until the transcript has been populated once.
+//   The first non-empty render defines "history"; only ids appearing AFTER it
+//   are new. An empty transcript (the "Welcome" state) must NOT prime, or a
+//   brand-new session's first send would be classified as history.
+//
+//   STICKY — once an id is marked entering it STAYS marked for as long as it
+//   is on screen. A CSS animation is a mount-time, play-once effect (fill mode
+//   `both` holds the end state), so keeping the class costs nothing and is the
+//   only way to survive the re-render storm of a streaming turn.
+//
+// Kept pure + mutation-in-place so the caller can hold it in a ref and update
+// it during render without scheduling another one.
+
+/** A message reduced to what the entry-motion gate needs. */
+export type EntryMotionRow = { id: string; role: string };
+
+export type EntryMotionState = {
+  /** Ids already accounted for. `null` until the first non-empty render. */
+  seen: Set<string> | null;
+  /** Ids cleared to animate. Sticky for as long as the id is present. */
+  entering: Set<string>;
+  /** Whether the previous update saw a live optimistic placeholder. */
+  hadOptimistic: boolean;
+};
+
+export function createEntryMotionState(): EntryMotionState {
+  return { seen: null, entering: new Set(), hadOptimistic: false };
+}
+
+/** The renderer's optimistic placeholder id prefix (see ChatPanel `submit`). */
+const OPTIMISTIC_USER_PREFIX = "optimistic-user-";
+
+export function isOptimisticUserId(id: string): boolean {
+  return id.startsWith(OPTIMISTIC_USER_PREFIX);
+}
+
+/**
+ * Fold the current message list into `state`, deciding which ids animate.
+ * MUTATES `state` and returns it (it lives in a ref; a new object per render
+ * would defeat the point).
+ *
+ * The optimistic-placeholder handover is the subtle case. A send appends a
+ * placeholder immediately, then the server's canonical message REPLACES it
+ * under a different id. React sees a different key, so it tears the bubble
+ * down and builds a new one — which would replay the send animation a second
+ * time, a visible double-pop a few hundred milliseconds apart. When a
+ * placeholder retires, the first new user message in that same update is
+ * therefore treated as its continuation and does NOT animate: the bubble it
+ * replaces already played, and the swap should be invisible.
+ */
+export function updateEntryMotion(
+  state: EntryMotionState,
+  rows: EntryMotionRow[],
+): EntryMotionState {
+  const ids = new Set(rows.map((r) => r.id));
+  const hasOptimistic = rows.some((r) => isOptimisticUserId(r.id));
+
+  if (state.seen == null) {
+    // Nothing to do until the transcript is populated — an empty render is
+    // the "Welcome" state, not a history load.
+    if (rows.length === 0) return state;
+    // First non-empty render IS the history. Prime, animate nothing.
+    state.seen = ids;
+    state.hadOptimistic = hasOptimistic;
+    return state;
+  }
+
+  // A placeholder was live last update and is gone now: the canonical message
+  // for that send has landed, and exactly one new user row inherits its
+  // already-played animation instead of starting a fresh one.
+  let handover = state.hadOptimistic && !hasOptimistic;
+
+  for (const row of rows) {
+    if (state.seen.has(row.id)) continue;
+    state.seen.add(row.id);
+    if (handover && row.role === "user" && !isOptimisticUserId(row.id)) {
+      handover = false;
+      continue;
+    }
+    state.entering.add(row.id);
+  }
+
+  // Drop ids that have left the transcript so the sticky set stays bounded
+  // (a cleared/compacted session replaces the whole list).
+  for (const id of state.entering) {
+    if (!ids.has(id)) state.entering.delete(id);
+  }
+
+  state.hadOptimistic = hasOptimistic;
+  return state;
+}
