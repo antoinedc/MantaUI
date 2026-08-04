@@ -67,6 +67,7 @@ export const AssistantPart = memo(function AssistantPart({
   part,
   showThinking,
   streaming = false,
+  entering = false,
 }: {
   part: OpencodePart;
   showThinking: boolean;
@@ -76,7 +77,31 @@ export const AssistantPart = memo(function AssistantPart({
   // the memo chain is untouched; false everywhere else, so a settled transcript
   // never animates and never shows a caret.
   streaming?: boolean;
+  // True when the parent message ARRIVED while the user was watching, so this
+  // part should slide up as it appears (transcript-motion). This is where the
+  // "cards slide in" effect actually lives: during a turn the parts of one
+  // assistant message mount one at a time, so the PART is the unit that enters,
+  // not the row. A loaded transcript passes false and stays still.
+  entering?: boolean;
 }) {
+  const body = renderAssistantPart(part, showThinking, streaming);
+  // The streaming text part is exempt: its markdown blocks already fade in
+  // individually via `.manta-streaming > *`, and sliding the whole container on
+  // top of that would animate the same content twice.
+  //
+  // The slide goes on a WRAPPER rather than the part's own root because the
+  // roots are shared primitives (ToolCard, OutputWell) that deliberately expose
+  // no className escape hatch. The wrapper is a plain block inside the row's
+  // existing flex column, so it inherits the gap and changes no layout.
+  if (body == null || !entering || streaming) return body;
+  return <div className="manta-part-in">{body}</div>;
+});
+
+function renderAssistantPart(
+  part: OpencodePart,
+  showThinking: boolean,
+  streaming: boolean,
+): React.ReactElement | null {
   if (part.type === "text") {
     const text = (part.text ?? "").replace(/^\n+|\n+$/g, "");
     if (!text) return null;
@@ -154,7 +179,7 @@ export const AssistantPart = memo(function AssistantPart({
   }
 
   return <ToolCard name={part.type} />;
-});
+}
 
 // ===== Tool call rendering =====
 //

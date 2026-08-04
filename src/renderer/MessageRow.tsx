@@ -252,22 +252,20 @@ export const MessageRow = memo(function MessageRow({
   // trailing caret on its final text part (BET-649). Primitive prop, so the
   // MessageRow memo chain is untouched.
   streaming?: boolean;
-  // True when this row mounted live at the tail of the transcript AFTER the
-  // initial load (transcript-motion). Drives the whole-row slide-up entry; a
-  // session switch (all rows remount) is NOT `entering`, so history never
-  // replays its entrance. The user bubble gets its own send animation inside
-  // MessageBubble, and the streaming row animates its blocks instead, so
-  // `entering` only applies the row slide to settled assistant/card rows.
-  // Primitive prop — memo chain untouched.
+  // True when this message ARRIVED while the user was watching, as opposed to
+  // being part of the transcript they loaded (transcript-motion). Decided once
+  // in Transcript by `updateEntryMotion` and sticky for the row's whole life —
+  // an earlier version recomputed it per render, which tore the animation's
+  // class off one frame after it started and made the effect invisible.
+  //
+  // The row itself never animates: the user bubble pops (MessageBubble) and an
+  // assistant row's PARTS slide in individually (AssistantPart), because during
+  // a live turn those parts appear one at a time and sliding the container
+  // would mean animating a box that is already on screen. Primitive prop, so
+  // the MessageRow memo chain is untouched.
   entering?: boolean;
 }) {
   const isUser = msg.info.role === "user";
-
-  // Whole-row entry motion for newly-mounted, settled assistant rows. The
-  // streaming message's blocks animate via .manta-streaming instead; the user
-  // bubble animates via .manta-bubble-in inside MessageBubble. Reduced-motion
-  // kills the animation in CSS.
-  const rowMotion = entering && !isUser && !streaming ? " manta-row-in" : "";
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
@@ -291,7 +289,7 @@ export const MessageRow = memo(function MessageRow({
   // commands, paths and output), 10px, tabular so the digits don't jitter.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
-    <div className={"group relative" + rowMotion}>
+    <div className="group relative">
       {ts && (
         <span
           className={
@@ -361,7 +359,7 @@ export const MessageRow = memo(function MessageRow({
               expandedText={text}
             />
           ) : (
-            <MessageBubble>{text}</MessageBubble>
+            <MessageBubble entering={entering}>{text}</MessageBubble>
           )
         )}
       </div>,
@@ -395,6 +393,9 @@ export const MessageRow = memo(function MessageRow({
           // Only the LAST part of the message being written streams — an
           // earlier part is finished even while the turn continues.
           streaming={streaming && i === visibleParts.length - 1}
+          // Slide this part in only when the whole message is new to the user.
+          // A loaded transcript passes `entering=false`, so history is still.
+          entering={entering}
         />
       ))}
       {/* Turn-level duration footer — only on the FINAL assistant message */}

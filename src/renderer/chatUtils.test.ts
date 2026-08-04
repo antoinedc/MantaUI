@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  createEntryMotionState,
+  updateEntryMotion,
+  isOptimisticUserId,
   formatTokens,
   formatBytes,
   formatDuration,
@@ -2638,5 +2641,97 @@ describe("fast-mode model helpers", () => {
       available: false,
       on: false,
     });
+  });
+});
+
+// ===== Transcript entry motion =====
+//
+// The gate that decides which transcript rows animate their arrival. Every
+// case below is a bug that shipped, not a hypothetical: the feature reached
+// production animating exactly the wrong set (all of history, none of the new
+// messages), so these tests pin both halves of the contract.
+
+describe("updateEntryMotion", () => {
+  const user = (id: string) => ({ id, role: "user" });
+  const asst = (id: string) => ({ id, role: "assistant" });
+
+  it("animates nothing on the first populated render — that is history", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")]);
+    expect([...s.entering]).toEqual([]);
+  });
+
+  it("does not prime on an empty transcript, so a new session's first send still animates", () => {
+    // The "Welcome" state renders with zero messages. If that primed the gate,
+    // the very next message would be classified as pre-existing history and a
+    // brand-new session would never animate anything.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, []);
+    expect(s.seen).toBeNull();
+    updateEntryMotion(s, [user("u1")]);
+    expect([...s.entering]).toEqual([]); // u1 IS the first populated render
+  });
+
+  it("animates a message appended after the initial load", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")]);
+    expect([...s.entering]).toEqual(["u2"]);
+  });
+
+  it("KEEPS the flag across later renders — dropping it cancels the animation", () => {
+    // A CSS animation is killed the moment its class is removed, and the
+    // element snaps to its end state. The transcript re-renders every few ms
+    // during a streaming turn, so a flag that lasted one render meant the
+    // animation was destroyed about one frame in and never visibly played.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+    for (let i = 0; i < 50; i++) updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+  });
+
+  it("animates the optimistic placeholder a send appends", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1"), user("optimistic-user-7")]);
+    expect(s.entering.has("optimistic-user-7")).toBe(true);
+  });
+
+  it("does NOT replay the pop when the canonical message replaces the placeholder", () => {
+    // The server's real message arrives under a different id, so React tears
+    // the bubble down and mounts a new one. Without the handover that reads as
+    // a second pop a few hundred ms after the first.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), user("optimistic-user-7")]);
+    updateEntryMotion(s, [user("u1"), user("msg_real")]);
+    expect(s.entering.has("msg_real")).toBe(false);
+  });
+
+  it("still animates the assistant reply that follows a placeholder handover", () => {
+    // The handover must be spent on exactly one user row, never on the
+    // assistant turn that arrives alongside it.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), user("optimistic-user-7")]);
+    updateEntryMotion(s, [user("u1"), user("msg_real"), asst("a_new")]);
+    expect(s.entering.has("msg_real")).toBe(false);
+    expect(s.entering.has("a_new")).toBe(true);
+  });
+
+  it("forgets ids that leave the transcript, so a cleared session stays bounded", () => {
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]);
+    updateEntryMotion(s, [user("u1"), asst("a1")]);
+    expect(s.entering.has("a1")).toBe(true);
+    updateEntryMotion(s, [user("u1")]);
+    expect(s.entering.has("a1")).toBe(false);
+  });
+
+  it("recognises the renderer's optimistic id prefix", () => {
+    expect(isOptimisticUserId("optimistic-user-1770000000000")).toBe(true);
+    expect(isOptimisticUserId("msg_01ABC")).toBe(false);
   });
 });
