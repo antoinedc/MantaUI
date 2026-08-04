@@ -65,23 +65,48 @@ struct Scrim: View {
         .allowsHitTesting(false)
     }
 
-    /// An eased ramp, not a linear one.
+    /// An eased ramp, not a linear one — and a different easing per edge,
+    /// because the two are solving different problems.
     ///
-    /// A straight fade announces itself: the eye finds the point where the
-    /// gradient begins and reads it as a band with an edge. Starting almost
-    /// flat and steepening toward the control puts the visible change where
-    /// the content is already mostly hidden, so the far end has no discernible
-    /// start — while still reaching near-opaque behind the control, which is
-    /// the part that has to actually work.
+    /// A straight fade announces itself either way: the eye finds the point
+    /// where the gradient begins and reads it as a band with an edge. Both
+    /// profiles therefore start almost flat and steepen, putting the visible
+    /// change where content is already mostly hidden.
+    ///
+    /// They differ in how fast they get there. `location` runs from the far
+    /// end of the fade toward the screen edge in both cases.
+    ///
+    ///   * BOTTOM sits behind the composer, which is itself glass and already
+    ///     obscures what is under it. The ramp can stay gentle for most of its
+    ///     length and only go solid at the very end.
+    ///
+    ///   * TOP has to cover the STATUS BAR — the clock, the signal bars, the
+    ///     battery — which occupies roughly the outer 40% of the fade and has
+    ///     no control of its own sitting over it. A gentle ramp leaves the
+    ///     transcript legible right behind the clock, which is the thing being
+    ///     fixed, so this one reaches solid canvas well before the edge and
+    ///     holds it.
     private var stops: [Gradient.Stop] {
-        [
-            .init(color: tokens.canvas.opacity(0), location: 0.0),
-            .init(color: tokens.canvas.opacity(0.10), location: 0.25),
-            .init(color: tokens.canvas.opacity(0.32), location: 0.45),
-            .init(color: tokens.canvas.opacity(0.62), location: 0.62),
-            .init(color: tokens.canvas.opacity(0.88), location: 0.80),
-            .init(color: tokens.canvas.opacity(0.98), location: 0.92),
-            .init(color: tokens.canvas.opacity(1.0), location: 1.0),
-        ]
+        switch edge {
+        case .bottom:
+            return [
+                .init(color: tokens.canvas.opacity(0), location: 0.0),
+                .init(color: tokens.canvas.opacity(0.10), location: 0.25),
+                .init(color: tokens.canvas.opacity(0.32), location: 0.45),
+                .init(color: tokens.canvas.opacity(0.62), location: 0.62),
+                .init(color: tokens.canvas.opacity(0.88), location: 0.80),
+                .init(color: tokens.canvas.opacity(0.98), location: 0.92),
+                .init(color: tokens.canvas.opacity(1.0), location: 1.0),
+            ]
+        case .top:
+            return [
+                .init(color: tokens.canvas.opacity(0), location: 0.0),
+                .init(color: tokens.canvas.opacity(0.30), location: 0.25),
+                .init(color: tokens.canvas.opacity(0.70), location: 0.45),
+                .init(color: tokens.canvas.opacity(0.95), location: 0.60),
+                .init(color: tokens.canvas.opacity(1.0), location: 0.72),
+                .init(color: tokens.canvas.opacity(1.0), location: 1.0),
+            ]
+        }
     }
 }
