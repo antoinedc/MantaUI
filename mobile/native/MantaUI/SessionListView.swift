@@ -463,8 +463,15 @@ struct SessionListView: View {
         .padding(.bottom, Metrics.spacing.sp2)
         // Rows passing behind the floating capsule fade out rather than
         // colliding with it. Same component as the chat composer's scrim, so
-        // the two screens read identically.
-        .background { Scrim(edge: .bottom, tokens: tokens) }
+        // the two screens read identically — including the overhang, without
+        // which the list comes back to full brightness in the strip below the
+        // capsule.
+        // Sized to the capsule itself — a `.background` is exactly its
+        // container — plus the overhang below, matching the chat composer:
+        // the fade starts at the control's top edge, never above it.
+        .background {
+            Scrim(edge: .bottom, tokens: tokens, overhang: Metrics.spacing.sp12)
+        }
     }
 
     private func presentCreateMenu() {

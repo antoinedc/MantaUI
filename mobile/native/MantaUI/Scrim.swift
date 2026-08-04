@@ -24,6 +24,21 @@ struct Scrim: View {
 
     let edge: Edge
     let tokens: Tokens
+    /// How far the fade reaches PAST its container's edge.
+    ///
+    /// The bottom scrim needs this because its container stops at the safe
+    /// area while the transcript does not: content keeps rendering down
+    /// through the home-indicator strip, so a scrim bounded to the safe area
+    /// left that strip undimmed and the text came back to full brightness
+    /// below the composer.
+    ///
+    /// A fixed overhang rather than `ignoresSafeArea`, which is what this
+    /// replaced: ignoring the safe area pins the gradient to the display edge,
+    /// so with the keyboard up it stretched behind the keyboard and stopped
+    /// sitting under the composer at all. An overhang moves WITH the
+    /// container — when the keyboard is up it simply falls behind the
+    /// keyboard, where there is nothing to dim anyway.
+    var overhang: CGFloat = 0
 
     var body: some View {
         LinearGradient(
@@ -31,6 +46,7 @@ struct Scrim: View {
             startPoint: edge == .bottom ? .top : .bottom,
             endPoint: edge == .bottom ? .bottom : .top
         )
+        .padding(edge == .bottom ? .bottom : .top, -overhang)
         // The TOP scrim reaches into the status bar, which is the whole point
         // of it — that strip is where the transcript was running under the
         // clock and the battery.
@@ -49,12 +65,23 @@ struct Scrim: View {
         .allowsHitTesting(false)
     }
 
+    /// An eased ramp, not a linear one.
+    ///
+    /// A straight fade announces itself: the eye finds the point where the
+    /// gradient begins and reads it as a band with an edge. Starting almost
+    /// flat and steepening toward the control puts the visible change where
+    /// the content is already mostly hidden, so the far end has no discernible
+    /// start — while still reaching near-opaque behind the control, which is
+    /// the part that has to actually work.
     private var stops: [Gradient.Stop] {
         [
             .init(color: tokens.canvas.opacity(0), location: 0.0),
-            .init(color: tokens.canvas.opacity(0.55), location: 0.45),
-            .init(color: tokens.canvas.opacity(0.88), location: 0.75),
-            .init(color: tokens.canvas.opacity(0.97), location: 1.0),
+            .init(color: tokens.canvas.opacity(0.10), location: 0.25),
+            .init(color: tokens.canvas.opacity(0.32), location: 0.45),
+            .init(color: tokens.canvas.opacity(0.62), location: 0.62),
+            .init(color: tokens.canvas.opacity(0.88), location: 0.80),
+            .init(color: tokens.canvas.opacity(0.98), location: 0.92),
+            .init(color: tokens.canvas.opacity(1.0), location: 1.0),
         ]
     }
 }

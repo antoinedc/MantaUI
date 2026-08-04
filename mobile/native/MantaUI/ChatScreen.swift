@@ -86,6 +86,11 @@ private struct ChatScreenContent: View {
     /// feed back into the transcript's layout.
     @State private var bottomChromeHeight: CGFloat = 0
 
+    /// How far the bottom scrim reaches past the safe area. Comfortably clears
+    /// the tallest home indicator; when the keyboard is up it falls behind the
+    /// keyboard, where there is nothing to dim.
+    private static let scrimOverhang: CGFloat = 44
+
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
 
@@ -191,8 +196,14 @@ private struct ChatScreenContent: View {
         // edge. Below it is the screen's canvas background, which its darkest
         // stop meets nearly seamlessly.
         .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: bottomChromeHeight + Metrics.spacing.sp12)
+            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
+                // Exactly the composer, plus the overhang BELOW it. No margin
+                // above: the fade must not begin before the composer's top
+                // edge, or it reads as a shadow cast onto the transcript
+                // rather than as the composer's own backdrop. Starting at the
+                // edge means the ramp is only ever seen THROUGH the composer's
+                // glass or below it.
+                .frame(height: bottomChromeHeight + Self.scrimOverhang)
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
