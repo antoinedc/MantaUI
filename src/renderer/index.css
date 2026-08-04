@@ -17,10 +17,20 @@
   overflow-wrap: anywhere;
 }
 
+/* `overflow: clip`, NOT `hidden`. `hidden` still makes the box a SCROLL
+   CONTAINER — it only removes the scrollbars — so the browser is free to
+   scroll it programmatically while the user has no way to scroll it back.
+   Focusing a visually-hidden control (the `sr-only` input inside a question
+   card's option label, the Checkbox primitive, …) makes Chromium scroll every
+   scrollable ancestor to reveal it; when the control sat below the fold that
+   scrolled the WHOLE APP SHELL out of the window — permanently, since nothing
+   can scroll it back — with no error, no log and no way to recover but a
+   reload. `clip` is not scrollable at all, so it can never become a
+   scroll-into-view target. Do not revert to `hidden`. */
 html, body, #root {
   height: 100%;
   margin: 0;
-  overflow: hidden;
+  overflow: clip;
   -webkit-app-region: no-drag;
 }
 

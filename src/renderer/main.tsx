@@ -14,7 +14,6 @@ import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
 import { applyTheme } from "./theme";
 import { pinDemoClock } from "./clock";
-import { installBlankProbe } from "./blankProbe";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -42,11 +41,6 @@ import { installBlankProbe } from "./blankProbe";
 // preload is now only reachable through `?demo` for the visual gates and
 // marketing shots, which never run the real boot path.
 const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
-
-// TEMP DIAG — silent-blank probe: forward window.onerror / unhandledrejection /
-// console.error to the main-process terminal. Must run before React mounts so
-// an early render crash still ships. Remove with the blank-bug probe.
-installBlankProbe(preload);
 
 // Demo mode (BET-302): parsed once at module load so the demo branch is
 // reachable from inside boot() without re-parsing the URL.

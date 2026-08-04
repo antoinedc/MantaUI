@@ -442,12 +442,6 @@ export type AutoUpdateErrorInfo = {
 };
 
 export const IPC = {
-  // TEMP DIAG: renderer → main-process forwarding of uncaught errors /
-  // unhandled rejections / console.error, so a silent blank that shows nothing
-  // in devtools still lands in the launching terminal (main console.log/
-  // console.error). Remove with the blank-bug probe.
-  rendererLog: "renderer:log",
-
   configGet: "config:get",
   configUpdate: "config:update",
 
