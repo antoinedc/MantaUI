@@ -84,6 +84,16 @@ export async function runServerSelfUpdate(
   { timeoutMs = SELF_UPDATE_WATCH_MS, publish } = {},
 ) {
   const logPath = statePath("self-update.log");
+  // NOTE: progress polling below assumes scripts/self-update.sh truncates this
+  // log (`: > "$LOG_FILE"`) as one of its first acts, so anything the poller
+  // reads belongs to the CURRENT run. If a tick ever landed before that
+  // truncation it would latch `highestStep` on the previous run's final step
+  // and publish nothing for this one — the bar would stay empty. The script
+  // truncates within milliseconds of starting and the first tick is 500ms in,
+  // so this is not reachable in practice; it is also benign (no progress bar,
+  // i.e. today's behaviour) and self-corrects on the next update. Do NOT
+  // "fix" it by truncating here — that destroys the log `lastLogLine` reads
+  // to report an early failure.
   try {
     const child = spawnFile(scriptPath, [], { detached: true, stdio: "ignore" });
     child.unref();

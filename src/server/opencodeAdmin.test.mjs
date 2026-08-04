@@ -10,6 +10,20 @@ import { dirname } from "node:path";
 import { restartOpencode, runServerSelfUpdate, parseProgressLine } from "./opencodeAdmin.mjs";
 import { statePath } from "../shared/paths.mjs";
 
+// A fake detached child that exits with `code` once the caller has attached
+// its listeners. Shared because several cases differ ONLY in the exit code and
+// what they assert afterwards — inlining it three times is what the
+// duplication gate (rightly) flagged.
+function exitingChild(code) {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.unref = () => {};
+  return () => {
+    setImmediate(() => setTimeout(() => child.emit("exit", code), 0));
+    return child;
+  };
+}
+
 describe("restartOpencode", () => {
   it("invokes systemctl --user restart opencode-serve with a fixed argv (no shell string)", async () => {
     const calls = [];
@@ -121,14 +135,7 @@ describe("runServerSelfUpdate", () => {
 
   it("resolves ok:true when the child exits zero fast", async () => {
     // An early clean exit ("already at version", no update needed) is success.
-    const child = new EventEmitter();
-    child.pid = 4242;
-    child.unref = () => {};
-    const spawn = () => {
-      setImmediate(() => setTimeout(() => child.emit("exit", 0), 0));
-      return child;
-    };
-    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", exitingChild(0), {
       timeoutMs: 500,
     });
     assert.equal(result.ok, true);
@@ -212,14 +219,7 @@ describe("runServerSelfUpdate", () => {
   });
 
   it("does not throw when publish is omitted (no polling)", async () => {
-    const child = new EventEmitter();
-    child.pid = 4242;
-    child.unref = () => {};
-    const spawn = () => {
-      setImmediate(() => setTimeout(() => child.emit("exit", 0), 0));
-      return child;
-    };
-    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", spawn, {
+    const result = await runServerSelfUpdate("/abs/scripts/self-update.sh", exitingChild(0), {
       timeoutMs: 500,
     });
     assert.equal(result.ok, true);
