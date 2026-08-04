@@ -35,7 +35,7 @@
       - button "Pin"
   - button "Settings…"
 - main:
-  - text: feat/orders-csv-export
+  - text: infra / Deploy new billing service feat/orders-csv-export
   - button "7%"
   - button "Session actions"
   - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py/"
@@ -66,11 +66,11 @@
   - button "Allow once"
   - button "Always allow alembic upgrade *"
   - button "Reject"
-  - button "Opus 4.7"
-  - button "High"
-  - button "Permissions on"
   - textbox "Reply, or describe the next task…"
   - button "Send message"
+  - button "Opus 4.7"
+  - button "High"
   - button "schedules"
   - button "secrets"
   - button "webhooks"
+  - button "Permissions on — click to bypass"

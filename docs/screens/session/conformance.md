@@ -4,17 +4,16 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (33dc528)
+Last reviewed: 2026-08-03 (3a51961)
 
 ## Floating chat chrome (this change)
 
-The header stopped being a bar. It is now a row of floating translucent
-"glass" pills over the transcript, the composer is a floating rounded input,
-and the model chip sits above it. That is a **deliberate departure from
-`mockup.html`, which still draws the pre-floating design** — so the list under
-"Open against the mockup" below is not a list of defects, it is the mockup
-being behind the app. Whoever next revises the mockup should reconcile from
-that direction.
+#558 applied a mobile treatment to the desktop chrome: a floating
+translucent header with no breadcrumb, and a floating composer with the
+model chip moved above the input. Both were reverted — the header bar in
+4f1f85e, the composer meta row in 3a51961 — so the screen matches the
+reference again: a bordered header carrying **workspace / session**, and a
+composer whose meta row sits BELOW the input box.
 
 Baselines regenerated in 33dc528 for the three registry rows that share this
 record (`session`, `session-header`, `session-composer`), pixels and aria
@@ -45,12 +44,6 @@ Fixed here, and visible in the new `session` baseline:
 Recorded from `npm run visual:compare session` at 33dc528. These are app-vs-
 mockup deltas, all of them the app moving ahead of the drawing:
 
-- **Header band → floating pills.** The mockup draws an opaque header with a
-  bottom border and content starting beneath it; the app draws no band, and the
-  transcript scrolls *under* the glass. Intentional (the blur is what keeps the
-  chips legible over moving content).
-- **Breadcrumb dropped.** `infra / Deploy new billing service` is in the
-  mockup's header; the app no longer renders it.
 - **Mode-toggle glyph dropped.** The mockup keeps a `>_` glyph beside the ⋯
   button. Removed by owner direction: it was a second control for a decision
   the ⋯ menu's own Mode section already owns, and it could only ever express
