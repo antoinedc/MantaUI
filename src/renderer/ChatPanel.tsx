@@ -251,6 +251,7 @@ export function ChatPanel({
     messages,
     setMessages,
     scrollRef,
+    contentRef,
     pinnedToBottom,
     stickToBottom,
     refreshing,
@@ -1962,10 +1963,12 @@ export function ChatPanel({
       <Transcript
         messages={messages}
         scrollRef={scrollRef}
+        contentRef={contentRef}
         questionCardRef={questionCardRef}
         taskContextValue={taskContextValue}
         showThinking={showThinking}
         running={running}
+        isActive={isActive}
         activeTodos={activeTodos}
         // BET-418 §D: a job session is read-only — never show its (anyway
         // impossible) question cards. Defensive: a job's pre-flight ruleset

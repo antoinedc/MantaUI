@@ -2111,10 +2111,20 @@ export function isOptimisticUserId(id: string): boolean {
  * placeholder retires, the first new user message in that same update is
  * therefore treated as its continuation and does NOT animate: the bubble it
  * replaces already played, and the swap should be invisible.
+ *
+ * `animate` (default true) is the "is the user actually looking at this panel"
+ * gate. A hidden panel must absorb its new messages as history. CSS animations
+ * do not run on a `display:none` element, so a turn that lands while the panel
+ * is hidden would otherwise slide its whole batch in at the instant the user
+ * switches to it — the exact "history animates on session switch" bug. When
+ * `animate` is false, new ids are still folded into `seen` (and `hadOptimistic`
+ * / the drop-stale sweep still run) but are NOT added to `entering`, so they
+ * are permanently history. Everything else about the function is unchanged.
  */
 export function updateEntryMotion(
   state: EntryMotionState,
   rows: EntryMotionRow[],
+  animate = true,
 ): EntryMotionState {
   const ids = new Set(rows.map((r) => r.id));
   const hasOptimistic = rows.some((r) => isOptimisticUserId(r.id));
@@ -2141,6 +2151,10 @@ export function updateEntryMotion(
       handover = false;
       continue;
     }
+    // A hidden panel folds new ids into `seen` above but never marks them
+    // entering — CSS animations don't run on display:none, so the whole batch
+    // would otherwise slide in the instant the user switches to this session.
+    if (!animate) continue;
     state.entering.add(row.id);
   }
 
