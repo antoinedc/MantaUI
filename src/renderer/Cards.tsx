@@ -13,7 +13,7 @@
 // badge, plain-language titles, checkbox question options and a button ladder.
 
 import { useState, type ReactNode } from "react";
-import { Shield, HelpCircle, Check } from "lucide-react";
+import { Shield, HelpCircle, Check, Send } from "lucide-react";
 import type { PermissionRequest, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 import { Card } from "./Card";
@@ -48,6 +48,7 @@ function AskCardShell({
   return (
     <div className="text-meta">
       <Card
+        elevated
         header={
           <>
             <span
@@ -58,7 +59,7 @@ function AskCardShell({
             </span>
             <div className="min-w-0 flex-1">
               <div className="text-text font-medium mb-px">{title}</div>
-              {subtitle && <div className="text-text-muted mb-px">{subtitle}</div>}
+              {subtitle && <div className="text-text-faint mb-px">{subtitle}</div>}
             </div>
           </>
         }
@@ -202,30 +203,38 @@ export function PermissionCard({
   const desc = permissionDescription(perm);
 
   // Button ladder (the loudest element on screen is the primary action):
-  //   Allow once — the FILLED accent primary.
+  //   Allow once — the FILLED accent primary, with a Check + ⏎ hint.
   //   Always allow <tool> — outlined secondary.
-  //   Reject — text-coloured, pushed to the far right, gains --danger on hover.
+  //   (spacer)
+  //   Reject — ghost, pushed to the far right, gains --danger on hover.
   const actions = (
     <>
       <button
         onClick={() => onReply("once")}
-        className="px-3 py-1 rounded-md text-on-accent text-meta font-medium"
+        className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium"
         style={{ backgroundColor: "var(--accent-solid)" }}
       >
+        <Check size={13} aria-hidden="true" />
         Allow once
+        <span className="text-on-accent opacity-70" aria-hidden="true">
+          ⏎
+        </span>
       </button>
       {alwaysScope ? (
         <button
           onClick={() => onReply("always")}
           title={`Always allow ${alwaysScope}`}
-          className="px-3 py-1 rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta"
+          className="h-8 px-[14px] inline-flex items-center rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta"
         >
-          Always allow <span className="text-text-faint">{alwaysScope}</span>
+          Always allow&nbsp;
+          <span className="text-text-faint">{alwaysScope}</span>
         </button>
       ) : null}
+      {/* spacer pushes Reject to the far right */}
+      <div className="flex-1" />
       <button
         onClick={() => onReply("reject")}
-        className="ml-auto px-3 py-1 rounded-md text-muted hover:text-danger hover:bg-danger-bg text-meta"
+        className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta"
       >
         Reject
       </button>
@@ -276,13 +285,17 @@ export function QuestionCard({
   onReply: (answers: string[][]) => void;
   onReject: () => void;
 }) {
+  // Defensive: a malformed payload (missing `questions`, or a question with no
+  // `options`) must not throw and blank the app. Normalize to safe arrays.
+  const rawQuestions = Array.isArray(request.questions) ? request.questions : [];
+
   // Pre-parse options once: strip "(Recommended)" and track which are
   // recommended so we can preselect (single-select only) and badge them.
   // The ORIGINAL label is kept as `origLabel` (the wire key opencode
   // matches on); `label` is the display text.
-  const parsedQuestions = request.questions.map((info) => ({
+  const parsedQuestions = rawQuestions.map((info) => ({
     info,
-    options: info.options.map((opt) => {
+    options: (Array.isArray(info.options) ? info.options : []).map((opt) => {
       const { text, recommended } = parseRecommended(opt.label);
       return { ...opt, displayLabel: text, origLabel: opt.label, recommended };
     }),
@@ -300,7 +313,7 @@ export function QuestionCard({
     }),
   );
   const [customValues, setCustomValues] = useState<string[]>(() =>
-    request.questions.map(() => ""),
+    rawQuestions.map(() => ""),
   );
 
   function toggleOption(qIdx: number, origLabel: string, multiple: boolean) {
@@ -324,133 +337,175 @@ export function QuestionCard({
   const answeredCount = selected.filter(
     (s, i) => s.size > 0 || (customValues[i] ?? "").trim().length > 0,
   ).length;
-  const totalQuestions = request.questions.length;
+  const totalQuestions = rawQuestions.length;
   const isMulti = totalQuestions > 1;
+  const singleInfo = totalQuestions === 1 ? parsedQuestions[0]?.info : undefined;
+
+  // One option row — the spec's full-width `.opt` button. Selected/hover →
+  // border-accent + accent-bg; the `.mk` mark is the 15px checkbox square,
+  // filled with the accent-solid + Check icon when selected. Rendered as a
+  // real accessible control: an sr-only radio/checkbox drives the same
+  // toggleOption logic (origLabel stays the selection key).
+  function renderOption(
+    qIdx: number,
+    multiple: boolean,
+    opt: { origLabel: string; displayLabel: string; description: string; recommended: boolean },
+  ) {
+    const isSelected = selected[qIdx].has(opt.origLabel);
+    return (
+      <label
+        key={opt.origLabel}
+        className={
+          "flex items-center w-full text-left rounded-md border px-3 py-[10px] cursor-pointer text-label font-medium transition-colors " +
+          (isSelected
+            ? "border-accent bg-accent-bg"
+            : "border-border bg-bg hover:border-accent hover:bg-accent-bg")
+        }
+        title={opt.description}
+      >
+        <span
+          className={
+            "inline-flex items-center justify-center w-[15px] h-[15px] rounded-xs border shrink-0 mr-2 " +
+            (isSelected
+              ? "border-transparent text-on-accent"
+              : "border-border-strong")
+          }
+          style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
+        >
+          {isSelected && <Check size={10} strokeWidth={4} aria-hidden="true" />}
+        </span>
+        <span className="text-text min-w-0">{opt.displayLabel}</span>
+        {opt.recommended && (
+          // The "Recommended" standing tag — a GREEN Pill placed INLINE right
+          // after the label. Pill owns the chrome; ml-2 is the placement.
+          <span className="ml-2 shrink-0">
+            <Pill tone="ok" size="label">
+              Recommended
+            </Pill>
+          </span>
+        )}
+        <input
+          type={multiple ? "checkbox" : "radio"}
+          name={`q-${qIdx}`}
+          checked={isSelected}
+          onChange={() => toggleOption(qIdx, opt.origLabel, multiple)}
+          className="sr-only"
+        />
+      </label>
+    );
+  }
+
+  // The `.ask-free` free-text box — a bordered container with a leading Send
+  // icon and a transparent input. Enter submits when the request is answerable.
+  function renderFreeText(qIdx: number) {
+    return (
+      <div className="flex items-center gap-2 border border-border rounded-md bg-bg px-3 py-2">
+        <Send size={14} aria-hidden="true" className="text-text-quiet shrink-0" />
+        <input
+          type="text"
+          placeholder="Or type your own answer…"
+          value={customValues[qIdx]}
+          onChange={(e) => {
+            const v = e.target.value;
+            setCustomValues((prev) => {
+              const next = [...prev];
+              next[qIdx] = v;
+              return next;
+            });
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && canSubmit) {
+              e.preventDefault();
+              handleSubmit();
+            }
+          }}
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none text-meta text-text placeholder:text-text-faint"
+        />
+      </div>
+    );
+  }
 
   return (
     <AskCardShell
       badge={<HelpCircle size={16} aria-hidden="true" />}
       badgeBg="var(--accent-bg)"
       badgeColor="var(--accent-tx)"
-      title="Question"
-      subtitle={
-        isMulti ? (
-          <span>
-            {answeredCount} of {totalQuestions} answered
-          </span>
-        ) : undefined
-      }
+      // Single question → the header IS the question (2-line: header + question
+      // sub). Multiple → keep a generic "Question" card title; each sub-question
+      // renders its own numbered block in the body.
+      title={isMulti ? "Question" : singleInfo?.header ?? "Question"}
+      subtitle={isMulti ? undefined : singleInfo?.question}
       body={
         <>
           <div className="space-y-3">
-            {parsedQuestions.map(({ info, options }, qIdx) => (
-              <div key={qIdx}>
-                {/* Numbered section header when multiple questions */}
-                {isMulti && (
-                  <div className="text-text-faint text-label mb-px">
-                    {qIdx + 1}. {info.header}
-                  </div>
-                )}
-                {!isMulti && (
-                  <div className="text-text-muted mb-px font-medium">{info.header}</div>
-                )}
-                <div className="text-text mb-2 leading-snug">{info.question}</div>
-
-                {/* Checkbox options — multi-select aware */}
-                <div className="mt-px flex flex-col gap-1">
-                  {options.map((opt) => {
-                    const isSelected = selected[qIdx].has(opt.origLabel);
-                    const multiple = info.multiple ?? false;
-                    return (
-                      <label
-                        key={opt.origLabel}
-                        className={
-                          "flex items-start gap-2 rounded-sm px-2 py-1 cursor-pointer border text-meta transition-colors " +
-                          (isSelected
-                            ? "border-accent bg-accent-bg"
-                            : "border-border hover:bg-bg-soft")
-                        }
-                        title={opt.description}
-                      >
-                        <span
-                          className={
-                            "inline-flex items-center justify-center w-4 h-4 rounded-xs border shrink-0 mt-px " +
-                            (isSelected
-                              ? "bg-accent-solid border-transparent text-on-accent"
-                              : "border-border-strong")
-                          }
-                          style={isSelected ? { backgroundColor: "var(--accent-solid)" } : undefined}
-                        >
-                          {isSelected && <Check size={12} aria-hidden="true" />}
+            {parsedQuestions.map(({ info, options }, qIdx) => {
+              const multiple = info.multiple ?? false;
+              return (
+                <div key={qIdx}>
+                  {/* Multi-question: a numbered `.qb` block with a circular */}
+                  {/* badge + question + `em` context, separated by `.qsep`. */}
+                  {isMulti && (
+                    <>
+                      {qIdx > 0 && <div className="h-px bg-border-subtle mb-3" />}
+                      <div className="flex items-start gap-2 mb-2">
+                        <span className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-full bg-fill-active text-text-faint font-mono font-semibold text-micro shrink-0">
+                          {qIdx + 1}
                         </span>
-                        <span className="text-text min-w-0">{opt.displayLabel}</span>
-                        {opt.recommended && (
-                          // The accent "Recommended" standing tag — a Pill.
-                          // `ml-auto shrink-0` is the flex-row placement (a
-                          // site concern, wrapped here); Pill owns the chrome.
-                          <span className="ml-auto shrink-0">
-                            <Pill tone="accent" size="label">
-                              Recommended
-                            </Pill>
-                          </span>
-                        )}
-                        <input
-                          type={multiple ? "checkbox" : "radio"}
-                          name={`q-${qIdx}`}
-                          checked={isSelected}
-                          onChange={() => toggleOption(qIdx, opt.origLabel, multiple)}
-                          className="sr-only"
-                        />
-                      </label>
-                    );
-                  })}
-                </div>
+                        <div className="min-w-0">
+                          <div className="text-text font-semibold text-label leading-snug">
+                            {info.header}
+                          </div>
+                          <div className="text-text-faint text-meta leading-snug mt-px">
+                            {info.question}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
 
-                {/* Free-text input — always available */}
-                <input
-                  type="text"
-                  placeholder="Or type your own answer…"
-                  value={customValues[qIdx]}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setCustomValues((prev) => {
-                      const next = [...prev];
-                      next[qIdx] = v;
-                      return next;
-                    });
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && canSubmit) {
-                      e.preventDefault();
-                      handleSubmit();
-                    }
-                  }}
-                  className="mt-2 w-full rounded-xs border border-border bg-transparent px-2 py-px text-meta text-text placeholder:text-text-faint focus:outline-none focus:border-border-strong"
-                />
-              </div>
-            ))}
+                  {/* Full-width `.opt` option buttons. */}
+                  <div className="space-y-2">
+                    {options.map((opt) => renderOption(qIdx, multiple, opt))}
+                  </div>
+
+                  {/* `.ask-free` free-text box — always available. */}
+                  <div className="mt-2">{renderFreeText(qIdx)}</div>
+                </div>
+              );
+            })}
           </div>
 
-          <hr className="border-border my-3" />
+          <hr className="border-border-subtle my-3" />
         </>
       }
       actions={
         <>
-          <button
-            onClick={onReject}
-            className="ml-auto px-3 py-1 rounded-md text-muted hover:text-danger hover:bg-danger-bg text-meta"
-            title="Dismiss this question"
-          >
-            Dismiss
-          </button>
-          {/* Submit is the filled accent primary — the loudest element. */}
+          {/* Submit FIRST — the filled accent primary with a trailing ⏎ hint. */}
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className="px-3 py-1 rounded-md text-on-accent text-meta font-medium disabled:opacity-40"
+            className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium disabled:opacity-40"
             style={{ backgroundColor: "var(--accent-solid)" }}
           >
             Submit
+            <span className="text-on-accent opacity-70" aria-hidden="true">
+              ⏎
+            </span>
+          </button>
+          {/* Multi-question progress — mono `.prog`. */}
+          {isMulti && (
+            <span className="text-text-faint text-meta font-mono ml-2">
+              {answeredCount} of {totalQuestions} answered
+            </span>
+          )}
+          {/* spacer pushes Dismiss to the far right */}
+          <div className="flex-1" />
+          <button
+            onClick={onReject}
+            className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta"
+            title="Dismiss this question"
+          >
+            Dismiss
           </button>
         </>
       }
