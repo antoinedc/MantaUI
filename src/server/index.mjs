@@ -254,14 +254,11 @@ const delegateEngine = createDelegateEngine({
   abortSession: (sid) => oc.abortSession(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
-  sessionExists: async (sid) => {
-    try {
-      const sessions = await oc.listSessions();
-      return Array.isArray(sessions) && sessions.some((s) => s?.id === sid);
-    } catch {
-      return true; // best-effort: assume alive on a transient blip
-    }
-  },
+  // Direct lookup, NOT a listSessions scan: `GET /session` is capped at 100
+  // and the unscoped form is box-wide, so a healthy parent that simply isn't
+  // among the 100 most recent sessions read as "gone" and the sweeper stopped
+  // the job. See opencode.mjs:sessionExists.
+  sessionExists: (sid) => oc.sessionExists(sid),
   oc,
 });
 // eslint-disable-next-line no-unused-vars

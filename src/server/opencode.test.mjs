@@ -11,6 +11,7 @@ import {
   forkSession,
   compactSession,
   abortSession,
+  sessionExists,
   listPermissions,
   listQuestions,
   replyPermission,
@@ -1650,4 +1651,113 @@ test("claudeCliStatus prefers ~/.local/bin/claude over /usr/local/bin/claude", (
   // resolveClaudeBinExists walks candidates in order; the home-dir path wins.
   assert.match(status.path, /\.local\/bin\/claude$/);
   assert.equal(status.installed, true);
+});
+
+// ---------------------------------------------------------------------------
+// sessionExists — the delegate sweeper's "is the parent still alive?" probe.
+//
+// THE BUG THIS LOCKS IN: this used to scan `listSessions()`. opencode caps
+// `GET /session` at 100 records and the unscoped form is box-wide, so on a box
+// with real history a healthy parent simply isn't in that page — the scan said
+// "gone", the sweeper stopped the background job as orphaned (BET-418 §B) and
+// stamped it `stopped by user`. Every delegated job died within a sweep tick.
+// ---------------------------------------------------------------------------
+
+test("sessionExists: 200 → alive, via a DIRECT lookup (never a capped list scan)", async () => {
+  const calls = [];
+  await withMockFetch(
+    async (url) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ id: "ses_parent" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      assert.equal(await sessionExists("ses_parent"), true);
+    },
+  );
+  assert.equal(calls.length, 1, "one request, not a list scan");
+  assert.ok(
+    calls[0].endsWith("/session/ses_parent"),
+    `expected a direct /session/{id} lookup, got ${calls[0]}`,
+  );
+  assert.ok(
+    !calls[0].match(/\/session(\?|$)/),
+    `must NOT hit the capped collection endpoint: ${calls[0]}`,
+  );
+});
+
+test("sessionExists: REGRESSION — alive even when absent from the 100-record list page", async () => {
+  // The exact production shape: the collection endpoint returns a full page of
+  // 100 OTHER sessions and does not contain the parent. The old scan-based
+  // implementation returned false here and killed the job.
+  const page = Array.from({ length: 100 }, (_, i) => ({ id: `ses_other_${i}` }));
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.endsWith("/session")) {
+        return new Response(JSON.stringify(page), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // The direct lookup still resolves it — that is the whole point.
+      return new Response(JSON.stringify({ id: "ses_parent" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      assert.equal(await sessionExists("ses_parent"), true);
+    },
+  );
+});
+
+// The remaining cases share one shape — stub a single response, assert the
+// verdict — so they are table-driven rather than five copies of the same body.
+// The asymmetry IS the contract: only a definitive 404 is allowed to be
+// destructive, because that verdict stops a running job and tears down its
+// window and worktree.
+for (const { name, respond, expected } of [
+  {
+    name: "404 → gone (the only negative)",
+    respond: () => new Response(JSON.stringify({ name: "NotFoundError" }), { status: 404 }),
+    expected: false,
+  },
+  {
+    name: "5xx → assume alive (a blip must never orphan a healthy job)",
+    respond: () => new Response("boom", { status: 500 }),
+    expected: true,
+  },
+  {
+    name: "transport throw → assume alive",
+    respond: () => {
+      throw new Error("ECONNREFUSED");
+    },
+    expected: true,
+  },
+]) {
+  test(`sessionExists: ${name}`, async () => {
+    await withMockFetch(
+      async () => respond(),
+      async () => {
+        assert.equal(await sessionExists("ses_probe"), expected);
+      },
+    );
+  });
+}
+
+test("sessionExists: empty id → false without any request", async () => {
+  let called = 0;
+  await withMockFetch(
+    async () => {
+      called++;
+      return new Response(null, { status: 200 });
+    },
+    async () => {
+      assert.equal(await sessionExists(""), false);
+    },
+  );
+  assert.equal(called, 0);
 });
