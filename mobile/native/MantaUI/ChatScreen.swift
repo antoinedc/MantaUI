@@ -81,6 +81,10 @@ private struct ChatScreenContent: View {
     @State private var scheduleCount = 0
     /// Whether the one-shot "open at the newest message" scroll has run.
     @State private var didLandAtBottom = false
+    /// Live height of the bottom chrome (cards + running row + composer), used
+    /// to size the scrim behind it. Measured from an overlay, so it can never
+    /// feed back into the transcript's layout.
+    @State private var bottomChromeHeight: CGFloat = 0
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -172,6 +176,24 @@ private struct ChatScreenContent: View {
         // last message still comes to rest above a compact composer, and a
         // grown one overlaps content that is dimmed by the scrim below rather
         // than pushing it.
+        // Scrim FIRST so it draws beneath the composer.
+        //
+        // It was a `.background` on the composer stack, which is why it
+        // vanished: a background is sized to its container, so the gradient was
+        // exactly the composer's own bounds — entirely hidden behind the
+        // composer, with nothing extending ABOVE it where the transcript
+        // actually scrolls past. As its own bottom-aligned overlay it is sized
+        // to the composer PLUS a fade margin, so the ramp lives above the
+        // composer's top edge where it can do something.
+        //
+        // Its bounds respect the safe area, so it rides up with the composer
+        // when the keyboard opens instead of being stranded at the display
+        // edge. Below it is the screen's canvas background, which its darkest
+        // stop meets nearly seamlessly.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: bottomChromeHeight + Metrics.spacing.sp12)
+        }
         .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 bottomCards
@@ -190,12 +212,15 @@ private struct ChatScreenContent: View {
                     modelStore: modelStore
                 )
             }
-            // Transcript text passing behind the composer fades out instead of
-            // competing with it. Shared with the session list's search capsule
-            // — same gesture, one component. Bounded to this overlay rather
-            // than the screen, so it rides up with the composer when the
-            // keyboard opens.
-            .background { Scrim(edge: .bottom, tokens: tokens) }
+            // Feeds the scrim its height. Safe to measure here: this is an
+            // overlay, so nothing it reports can change the transcript's
+            // layout — which is the property that stopped the composer from
+            // scrolling the conversation in the first place.
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                bottomChromeHeight = height
+            }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {
@@ -358,6 +383,12 @@ private struct ChatScreenContent: View {
         // instead of two unrelated blurs.
         GlassEffectContainer(spacing: Metrics.spacing.sp2) {
             HStack(spacing: Metrics.spacing.sp2) {
+                // The system's own glass BUTTON style, NOT a plain button with
+                // `.glassEffect` layered over its label. The layered form
+                // renders correctly and then eats the touch — the button looks
+                // right and does nothing, which is exactly what happened to the
+                // ⋯ menu here. SessionListView's `+` carries the same note; it
+                // learned this first.
                 Button {
                     dismiss()
                 } label: {
@@ -365,10 +396,10 @@ private struct ChatScreenContent: View {
                         .font(.system(size: Metrics.type.body, weight: .semibold))
                         .foregroundColor(tokens.tx1)
                         .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                        .glassEffect(.regular.interactive(), in: .circle)
-                        .accessibilityLabel("Back to sessions")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
+                .clipShape(.circle)
+                .accessibilityLabel("Back to sessions")
 
                 Spacer(minLength: 0)
 
@@ -381,9 +412,9 @@ private struct ChatScreenContent: View {
                         .font(.system(size: Metrics.type.body, weight: .semibold))
                         .foregroundColor(tokens.tx1)
                         .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                        .glassEffect(.regular.interactive(), in: .circle)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.glass)
+                .clipShape(.circle)
                 .accessibilityLabel("Session actions")
             }
         }

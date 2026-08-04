@@ -409,12 +409,17 @@ struct ComposerView: View {
             .foregroundColor(tokens.accentTx)
             .padding(.horizontal, Metrics.spacing.sp2)
             .padding(.vertical, Metrics.spacing.sp1)
-            // Glass rather than the flat accent-soft fill, so the chip belongs
-            // to the same floating chrome as the box beneath it. The accent
-            // now lives only in the TEXT, which is enough to mark it.
-            .glassEffect(.regular.interactive(), in: .capsule)
         }
-        .buttonStyle(.plain)
+        // Glass rather than the flat accent-soft fill, so the chip belongs to
+        // the same floating chrome as the box beneath it; the accent now lives
+        // in the TEXT alone, which is enough to mark it.
+        //
+        // The system glass BUTTON style, not `.glassEffect` on the label of a
+        // plain button — the layered form renders and then swallows the tap.
+        // This chip had the same defect as the ⋯ menu button; it just was not
+        // tapped before the menu was.
+        .buttonStyle(.glass)
+        .clipShape(.capsule)
         .accessibilityLabel("Model picker")
         .accessibilityIdentifier("model-picker")
     }
