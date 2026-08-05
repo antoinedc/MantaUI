@@ -513,10 +513,10 @@ export function ArtifactsPanel({
         />
 
         {/* Header: title + actions, then the tab bar. Compact and borderless to
-            match the design's `.phead`/`.ptop` rhythm (11px top, 11px gap to
+            match the design's `.phead`/`.ptop` rhythm (sp-3 top, sp-3 gap to
             the tabs) — not a 44px titlebar with a divider. */}
-        <div className="shrink-0 px-3 pt-[11px]">
-          <div className="mb-[11px] flex items-center justify-between">
+        <div className="shrink-0 px-3 pt-3">
+          <div className="mb-3 flex items-center justify-between">
             <span className="min-w-0 truncate text-label font-semibold text-text">
               Artifacts
             </span>
@@ -537,7 +537,7 @@ export function ArtifactsPanel({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search links, images, files…"
-              className="mb-[11px] w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
+              className="mb-3 w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
             />
           )}
 
