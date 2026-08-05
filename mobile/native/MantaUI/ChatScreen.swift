@@ -190,20 +190,16 @@ private struct ChatScreenContent: View {
         // time, rather than floating over it. The tail moving is the correct
         // failure mode; a blank transcript is not.
         //
-        // `.background(tokens.canvas)` is load-bearing: a scroll view still
-        // DRAWS its content underneath a safe-area inset while scrolling, so
-        // without an opaque backdrop the transcript slides visibly under the
-        // composer.
+        // The composer is deliberately JUST its own glass elements — there is
+        // NO opaque backdrop on the inset. A scroll view still DRAWS its
+        // content underneath a safe-area inset while scrolling, so the
+        // transcript visibly slides beneath the glass composer (which blurs
+        // it) instead of behind a solid bar. The running-state row used to
+        // live here; it now floats at the bottom of the transcript (see
+        // `transcript`), so the composer stays a pure glass object.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 bottomCards
-                // BET-630 (D1): the running-state working row. Shown only while a
-                // turn runs; the ambient refetch sweep lives on the composer's
-                // border and means a different thing, so the two never share an
-                // indicator. Not shown during a background refetch.
-                if store.running {
-                    RunningIndicator(store: store)
-                }
                 ComposerView(
                     sessionId: store.sessionId,
                     projectName: projectName,
@@ -212,7 +208,6 @@ private struct ChatScreenContent: View {
                     modelStore: modelStore
                 )
             }
-            .background(tokens.canvas)
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {
@@ -476,6 +471,20 @@ private struct ChatScreenContent: View {
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
         .overlay(alignment: .bottom) {
             if showScrollToBottom { scrollToBottomButton }
+        }
+        // BET-630 (D1): the running-state working row, pinned to the BOTTOM OF
+        // THE TRANSCRIPT — next to the newest message the user is waiting on,
+        // not on the composer (the composer is a pure glass object now). Shown
+        // only while a turn runs; the ambient refetch sweep lives on the
+        // composer's border and means a different thing, so the two never
+        // share an indicator. Not shown during a background refetch. It is an
+        // overlay so it floats over the transcript rather than shifting the
+        // conversation; a glass chip keeps it readable above message text.
+        .overlay(alignment: .bottom) {
+            if store.running {
+                RunningIndicator(store: store)
+                    .padding(.bottom, Metrics.spacing.sp2)
+            }
         }
     }
 
