@@ -24,6 +24,7 @@ import type {
   SecretInput,
   ServerUpdateAvailablePayload,
   ServedPageMeta,
+  OutboxFile,
   WebhookMeta,
   SpawnOptions,
   PtyEvent,
@@ -302,6 +303,12 @@ export interface Api {
   // published/stopped by the AI's `serve_page`/`stop_page` opencode tools, not
   // through any UI channel.
   servePageList(): Promise<ServedPageMeta[]>;
+
+  // Returns the box's outbox (~/.manta-outbox) entries — files the AI dropped
+  // for the user to retrieve — so the artifacts panel's Files tab can show
+  // agent-pushed files alongside user uploads. Read-only; a source is removed
+  // on download (one-shot mailbox).
+  outboxList(): Promise<OutboxFile[]>;
 
   // Background delegation jobs (manta-server owned). list returns the full
   // job records (filtered by parent session when sessionId is passed; all

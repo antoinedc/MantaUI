@@ -47,6 +47,23 @@ test("listOutbox lists files one level deep with their session label", async () 
   }
 });
 
+test("listOutbox reports a numeric mtime per file (for artifacts day-grouping)", async () => {
+  const root = await makeOutbox();
+  try {
+    await writeFile(join(root, "root.txt"), "abc");
+    await mkdir(join(root, "myproj"));
+    await writeFile(join(root, "myproj", "sub.txt"), "def");
+    const entries = await listOutbox(root);
+    for (const e of entries) {
+      assert.equal(typeof e.mtime, "number");
+      assert.ok(e.mtime > 0, "mtime should be a real epoch-ms timestamp");
+    }
+    assert.ok(entries.every((e) => e.path && e.path.length > 0));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("listOutbox does NOT descend past one subdir level", async () => {
   const root = await makeOutbox();
   try {

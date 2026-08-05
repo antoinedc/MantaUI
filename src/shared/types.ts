@@ -758,6 +758,14 @@ export const IPC = {
   // (httpApi); a read has no server write counterpart.
   servePageList: "serve-page:list", // () → ServedPageMeta[]
 
+  // Registry of the box's ~/.manta-outbox mailbox (files the AI dropped for
+  // the user to retrieve). Read-only, used by the artifacts panel's Files tab
+  // so agent-pushed files show up alongside user uploads. The source file is
+  // removed on download (one-shot mailbox), so an entry can drop out on its
+  // own. Mirrors src/shared/types.ts OutboxFile / src/server/outbox.mjs
+  // listOutbox rows.
+  outboxList: "outbox:list", // () → OutboxFile[]
+
   // ---- background delegation jobs (manta-server owned) ----
   // Background jobs are started by the AI's global `delegate` opencode tool
   // (POST /api/delegate); the UI only LISTS / STOPS / DELETES via these
@@ -943,6 +951,18 @@ export type ServedPageMeta = {
   expiresAt: number | null;
   createdAt: number;
   sessionID: string | null;
+};
+
+// One entry in ~/.manta-outbox (the mailbox the AI drops files into for the
+// user to retrieve, surfaced by the artifacts panel's Files tab). Mirrors
+// src/server/outbox.mjs `listOutbox` rows; `mtime` is added server-side so the
+// panel can sort/group by when the file appeared.
+export type OutboxFile = {
+  path: string;
+  name: string;
+  size: number;
+  session: string | null;
+  mtime: number;
 };
 
 // Input shape for secretsSet (UI → store). The value travels renderer → IPC →

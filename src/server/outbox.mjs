@@ -34,8 +34,7 @@ export async function listOutbox(root = defaultOutboxRoot()) {
   for (const ent of topEntries) {
     const full = join(root, ent.name);
     if (ent.isFile()) {
-      const size = await statSize(full);
-      out.push({ path: full, name: ent.name, size, session: null });
+      out.push({ ...(await statMeta(full)), name: ent.name, session: null });
     } else if (ent.isDirectory()) {
       let subEntries;
       try {
@@ -46,20 +45,21 @@ export async function listOutbox(root = defaultOutboxRoot()) {
       for (const sub of subEntries) {
         if (!sub.isFile()) continue;
         const subFull = join(full, sub.name);
-        const size = await statSize(subFull);
-        out.push({ path: subFull, name: sub.name, size, session: ent.name });
+        out.push({ ...(await statMeta(subFull)), name: sub.name, session: ent.name });
       }
     }
   }
   return out;
 }
 
-async function statSize(path) {
+// Row shape: { path, size, mtime } — mtime lets the Artifacts panel sort/group
+// outbox files; the outbox poller ignores it (additive, no behaviour change).
+async function statMeta(path) {
   try {
     const st = await stat(path);
-    return st.size;
+    return { path, size: st.size, mtime: st.mtimeMs };
   } catch {
-    return 0;
+    return { path, size: 0, mtime: 0 };
   }
 }
 

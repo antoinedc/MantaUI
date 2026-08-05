@@ -34,7 +34,7 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
-import type { AvailableLauncher, OpencodeMessage, ServedPageMeta, WorktreeInfo } from "../../shared/types.js";
+import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo } from "../../shared/types.js";
 import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
@@ -474,6 +474,11 @@ const launchersList = (): Promise<AvailableLauncher[]> =>
 // panel's Links tab renders live/soon/expired state pills in the demo capture.
 const servePageList = (): Promise<ServedPageMeta[]> => Promise.resolve(demoState.pages);
 
+// Outbox mailbox listing for the artifacts panel's Files tab — empty in demo
+// captures (the demo has no ~/.manta-outbox), so the Proxy fallback would also
+// have resolved a no-op; keep it explicit for parity with servePageList.
+const outboxList = (): Promise<OutboxFile[]> => Promise.resolve([]);
+
 // Folder picker listing (BET-562). Without these the Proxy fallback resolves
 // null and the picker's folder list renders a raw "Cannot read properties of
 // null" error in the empty-state capture. The listing is fictional (see
@@ -579,6 +584,7 @@ export const explicitMethods = {
   onStreamEvent,
   launchersList,
   servePageList,
+  outboxList,
   fsListDirs,
   gitListWorktrees,
   getClientVersion,

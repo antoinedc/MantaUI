@@ -26,7 +26,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import type { ServedPageMeta } from "../shared/types";
+import type { OutboxFile, ServedPageMeta } from "../shared/types";
 import { useStore } from "./store";
 import {
   countByKind,
@@ -404,6 +404,7 @@ export function ArtifactsPanel({
   const messages = useStore((s) => (sessionId ? s.chatMessages[sessionId] ?? [] : []));
 
   const [pages, setPages] = useState<ServedPageMeta[]>([]);
+  const [outbox, setOutbox] = useState<OutboxFile[]>([]);
   const [width, setWidth] = useState(loadWidth);
   const widthRef = useRef(width);
   widthRef.current = width;
@@ -418,8 +419,9 @@ export function ArtifactsPanel({
   const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  // Page registry: fetch on open + 30s poll while open only. Timer cleared on
-  // close and on session change (mirrors useSessionResources).
+  // Page registry + outbox mailbox: fetch both on open + 30s poll while open
+  // only. Timer cleared on close and on session change (mirrors
+  // useSessionResources).
   useEffect(() => {
     if (!open || !sessionId) return;
     let cancelled = false;
@@ -429,6 +431,12 @@ export function ArtifactsPanel({
         if (!cancelled) setPages(list ?? []);
       } catch {
         /* best-effort page refresh */
+      }
+      try {
+        const entries = await window.api.outboxList();
+        if (!cancelled) setOutbox(entries ?? []);
+      } catch {
+        /* best-effort outbox refresh */
       }
     };
     void refresh();
@@ -451,8 +459,8 @@ export function ArtifactsPanel({
 
   const now = useMemo(() => Date.now(), []);
   const artifacts = useMemo(
-    () => deriveArtifacts(messages, pages, sessionId ?? ""),
-    [messages, pages, sessionId],
+    () => deriveArtifacts(messages, pages, sessionId ?? "", outbox),
+    [messages, pages, outbox, sessionId],
   );
   const counts = useMemo(() => countByKind(artifacts), [artifacts]);
   const tabArtifacts = useMemo(
