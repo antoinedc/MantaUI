@@ -78,6 +78,7 @@
 		F30211F79048035CE5520266 /* RunningIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BA4ADBB2FD5BAC7940D5B69 /* RunningIndicator.swift */; };
 		F84BE156312997C53C3314AF /* MantaDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8879A94FE1BE824F438342AD /* MantaDeepLink.swift */; };
 		FF511A296958C8376966852F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 82EEBB3B72D8F63CF4D8CB7B /* Assets.xcassets */; };
+		A1B2C3D4E5F60718293A4B5C /* EdgeSwipeRestorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FA5E1D2C3B4A59687706152 /* EdgeSwipeRestorer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -99,6 +100,7 @@
 
 /* Begin PBXFileReference section */
 		0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatVoice.swift; sourceTree = "<group>"; };
+		0FA5E1D2C3B4A59687706152 /* EdgeSwipeRestorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeSwipeRestorer.swift; sourceTree = "<group>"; };
 		0C1EE3F998CADE8487D2555E /* terminal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = terminal; path = MantaUI/Resources/terminal; sourceTree = SOURCE_ROOT; };
 		17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAPIClient.swift; sourceTree = "<group>"; };
 		1E1306D325FEB295B7AB874E /* MantaEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStore.swift; sourceTree = "<group>"; };
@@ -276,6 +278,7 @@
 				0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */,
 				C42691C89906181C99929354 /* ComposerView.swift */,
 				20C78DF001E277064070853F /* CrashReports.swift */,
+				0FA5E1D2C3B4A59687706152 /* EdgeSwipeRestorer.swift */,
 				5D71EC917661085ED10E0867 /* FolderPickerView.swift */,
 				5C02DA420B52094269A88E80 /* Info.plist */,
 				6E08743A649A206BA91EDD67 /* KeychainCredentialStore.swift */,
@@ -506,6 +509,7 @@
 				C96C7F34F91F06214FD25523 /* ChatVoice.swift in Sources */,
 				D9266F363BEB86F687C320FC /* ComposerView.swift in Sources */,
 				B8B5D7BF1F4F22B9A3682FEA /* CrashReports.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* EdgeSwipeRestorer.swift in Sources */,
 				95A9EDE98E7304030E438CEF /* FolderPickerView.swift in Sources */,
 				67A2877890E8B008335AD7C0 /* KeychainCredentialStore.swift in Sources */,
 				612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */,

@@ -26,9 +26,14 @@ import UniformTypeIdentifiers
 struct ComposerAttachment: Identifiable, Equatable {
     let id = UUID()
     let filename: String
-    let mime: String
-    let remotePath: String
+    var mime: String
+    /// Set once the upload completes; nil while the attachment is still being
+    /// read + uploaded. A chip with a nil path renders a loading spinner.
+    var remotePath: String?
     let isImage: Bool
+
+    /// True until the upload finishes — the chip is a placeholder.
+    var isUploading: Bool { remotePath == nil }
 }
 
 struct ComposerView: View {
@@ -395,15 +400,23 @@ struct ComposerView: View {
             HStack(spacing: Metrics.spacing.sp1) {
                 Image(systemName: "sparkles")
                     .font(.system(size: Metrics.type.xs, weight: .medium))
-                Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                    .lineLimit(1)
-                if let variant = modelStore.variant, !variant.isEmpty {
-                    Text("·")
-                        .font(.system(size: Metrics.type.small))
-                    Text(variant.capitalized)
+                if modelStore.loaded {
+                    Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .lineLimit(1)
+                    if let variant = modelStore.variant, !variant.isEmpty {
+                        Text("·")
+                            .font(.system(size: Metrics.type.small))
+                        Text(variant.capitalized)
+                            .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                            .lineLimit(1)
+                    }
+                } else {
+                    // Box-wide model list still arriving — show an explicit
+                    // loading state rather than a misleading "Default".
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Loading models")
                 }
             }
             .foregroundColor(tokens.accentTx)
@@ -453,44 +466,99 @@ struct ComposerView: View {
         .accessibilityIdentifier("attach-button")
     }
 
+    /// A picked file shows a placeholder chip immediately, then resolves it via
+    /// a background read + upload. Before, the file was read and uploaded
+    /// before anything appeared, so a large file read looked like nothing
+    /// happened.
     private func handleDocument(_ result: Result<URL, Error>) {
         guard case .success(let url) = result else { return }
         let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         let filename = url.lastPathComponent
-        guard let data = try? Data(contentsOf: url) else {
-            surfaceHint("Couldn't read that file")
-            return
-        }
         let mime = ChatVoice.mime(forFilename: filename)
+        let placeholder = ComposerAttachment(
+            filename: filename, mime: mime, remotePath: nil,
+            isImage: mime.hasPrefix("image/"))
+        attachments.append(placeholder)
+        let id = placeholder.id
         Task {
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                await MainActor.run { failAttachment(id: id, hint: "Couldn't read that file") }
+                return
+            }
             do {
                 let remote = try await api.upload(project: projectName, filename: filename, data: data)
-                await MainActor.run {
-                    attachments.append(ComposerAttachment(filename: filename, mime: mime, remotePath: remote, isImage: mime.hasPrefix("image/")))
-                }
+                await MainActor.run { completeAttachment(id: id, remote: remote, mime: nil) }
             } catch {
-                surfaceHint("Upload failed")
+                await MainActor.run { failAttachment(id: id, hint: "Upload failed") }
             }
         }
     }
 
+    /// Phase-then-load for the PhotosPicker: placeholder chips for EVERY
+    /// selected photo appear on the same tick the picker dismisses, then each
+    /// is read + uploaded and resolved in place. Previously each photo was
+    /// loaded and uploaded before its chip appeared, so the first (and slowest
+    /// — `loadTransferable(type: Data.self)` pulls the full-resolution image)
+    /// stage read as a dead tap.
+    ///
+    /// `@MainActor`: the awaited read/upload suspend but this keeps every
+    /// `@State` mutation on the main actor without `MainActor.run` hops.
+    @MainActor
     private func processPhotos() async {
-        for item in photoItems {
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+        struct Pending {
+            let item: PhotosPickerItem
+            let id: UUID
+            let filename: String
+        }
+
+        let picked = photoItems
+        photoItems = []
+
+        // Phase 1 — one placeholder per photo, synchronously, so there is
+        // never a gap with nothing on screen.
+        var pending: [Pending] = []
+        for (index, item) in picked.enumerated() {
+            let filename = "photo-\(Int(Date().timeIntervalSince1970 * 1000))-\(index).jpg"
+            let placeholder = ComposerAttachment(
+                filename: filename, mime: "image/jpeg", remotePath: nil, isImage: true)
+            attachments.append(placeholder)
+            pending.append(Pending(item: item, id: placeholder.id, filename: filename))
+        }
+
+        // Phase 2 — read + upload each, resolving its chip in place.
+        for entry in pending {
+            guard let data = try? await entry.item.loadTransferable(type: Data.self) else {
+                failAttachment(id: entry.id, hint: "Couldn't load photo")
+                continue
+            }
             let mime = ChatVoice.mime(forImageData: data)
-            let filename = "photo-\(Int(Date().timeIntervalSince1970)).jpg"
             do {
-                let remote = try await api.upload(project: projectName, filename: filename, data: data)
-                await MainActor.run {
-                    attachments.append(ComposerAttachment(filename: filename, mime: mime, remotePath: remote, isImage: true))
-                    surfaceHint("Attached \(filename)")
-                }
+                let remote = try await api.upload(project: projectName, filename: entry.filename, data: data)
+                completeAttachment(id: entry.id, remote: remote, mime: mime)
             } catch {
-                surfaceHint("Photo upload failed")
+                failAttachment(id: entry.id, hint: "Photo upload failed")
             }
         }
-        await MainActor.run { photoItems = [] }
+    }
+
+    /// Move a placeholder chip to its ready state once the remote path is
+    /// known. No-op if the user removed the chip meanwhile (a removed upload
+    /// never resurfaces).
+    @MainActor
+    private func completeAttachment(id: UUID, remote: String, mime: String?) {
+        guard let index = attachments.firstIndex(where: { $0.id == id }) else { return }
+        attachments[index].remotePath = remote
+        if let mime { attachments[index].mime = mime }
+    }
+
+    /// Drop a failed placeholder (the chip never shows a dead state) and
+    /// surface the reason.
+    @MainActor
+    private func failAttachment(id: UUID, hint: String) {
+        guard attachments.contains(where: { $0.id == id }) else { return }
+        attachments.removeAll { $0.id == id }
+        surfaceHint(hint)
     }
 
     /// Zero-size host for the photo/file pickers. See the call site.
@@ -508,9 +576,18 @@ struct ComposerView: View {
             HStack(spacing: Metrics.spacing.sp1) {
                 ForEach(attachments) { attachment in
                     HStack(spacing: Metrics.spacing.sp1) {
-                        Image(systemName: attachment.isImage ? "photo" : "doc")
-                            .font(.system(size: Metrics.type.twoXS))
-                            .foregroundColor(tokens.accentTx)
+                        // A placeholder chip (upload in flight) swaps the icon
+                        // for a spinner so the "something is happening" is
+                        // explicit instead of a static photo glyph.
+                        if attachment.isUploading {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(tokens.accentTx)
+                        } else {
+                            Image(systemName: attachment.isImage ? "photo" : "doc")
+                                .font(.system(size: Metrics.type.twoXS))
+                                .foregroundColor(tokens.accentTx)
+                        }
                         Text(ChatVoice.chipLabel(forFilename: attachment.filename))
                             .font(.system(size: Metrics.type.twoXS))
                             .foregroundColor(tokens.accentTx)
@@ -707,15 +784,22 @@ struct ComposerView: View {
     }
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+        (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+            && !attachments.contains { $0.isUploading }
     }
 
     private func submit() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        // Never send while an attachment is still uploading (the button is
+        // disabled too; this guards the non-button paths like voice submit).
+        guard (!trimmed.isEmpty || !attachments.isEmpty),
+              !attachments.contains(where: { $0.isUploading }) else { return }
         let model = modelStore.promptModel
-        let sendAttachments = attachments.map { attachment in
-            SendPromptInput.Attachment(remotePath: attachment.remotePath, mime: attachment.mime, filename: attachment.filename)
+        // canSend gates on no attachment still uploading, so none are dropped
+        // here; compactMap keeps the unwrap type-safe.
+        let sendAttachments: [SendPromptInput.Attachment] = attachments.compactMap { attachment in
+            guard let remotePath = attachment.remotePath else { return nil }
+            return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
         }
         store.send(text: trimmed, attachments: sendAttachments, model: model)
         text = ""

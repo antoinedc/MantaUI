@@ -15,15 +15,109 @@ import Foundation
 
 enum ChatModel {
 
+    // MARK: - Fast-mode sibling models (desktop ⚡ toggle port)
+
+    /// Several providers ship a "fast" flavour of a model as a SEPARATE model id
+    /// with a `-fast` suffix rather than as a variant (`gpt-5.6` / `gpt-5.6-fast`).
+    /// The picker treats fast as a MODE of the base model: the `-fast` id is
+    /// hidden from the dropdown (as long as its base twin is also visible) and
+    /// reached instead through the fast-mode toggle. Mirrors the desktop's
+    /// `isFastModelId` / `baseModelId` / `fastModelId` / `resolveFastToggle`.
+    static let fastSuffix = "-fast"
+
+    /// True when `modelID` is the fast flavour of some base model.
+    static func isFastModelID(_ modelID: String) -> Bool {
+        modelID.count > fastSuffix.count && modelID.hasSuffix(fastSuffix)
+    }
+
+    /// `"gpt-5.6-fast"` → `"gpt-5.6"`; a non-fast id is returned unchanged.
+    static func baseModelID(_ modelID: String) -> String {
+        isFastModelID(modelID) ? String(modelID.dropLast(fastSuffix.count)) : modelID
+    }
+
+    /// `"gpt-5.6"` → `"gpt-5.6-fast"`; a fast id is returned unchanged.
+    static func fastModelID(_ modelID: String) -> String {
+        isFastModelID(modelID) ? modelID : "\(modelID)\(fastSuffix)"
+    }
+
+    /// The ⚡ fast-mode toggle state for the active model. Available only when
+    /// the counterpart model exists AND still offers the currently-selected
+    /// effort/variant — flipping to fast must never silently drop the effort.
+    /// With no variant selected, only the counterpart's existence matters.
+    /// Mirrors the desktop `resolveFastToggle`.
+    struct FastToggle {
+        /// The toggle can be clicked (a counterpart exists that keeps the effort).
+        let available: Bool
+        /// The active model IS the fast flavour.
+        let on: Bool
+        /// The model a click switches to; nil when unavailable.
+        let target: (providerID: String, modelID: String)?
+        /// Human copy explaining the current state.
+        let title: String
+    }
+
+    static func fastToggle(models: [OpencodeModel], active: OpencodeModel?, variantId: String?) -> FastToggle {
+        let off = FastToggle(available: false, on: false, target: nil, title: "No fast mode for this model")
+        guard let active else { return off }
+        let isFast = isFastModelID(active.id)
+        let counterpartID = isFast ? baseModelID(active.id) : fastModelID(active.id)
+        let counterpart = models.first {
+            $0.providerID == active.providerID &&
+            $0.id == counterpartID &&
+            $0.enabled != false &&
+            $0.status?.lowercased() != "deprecated"
+        }
+        guard let counterpart else {
+            if isFast {
+                return FastToggle(available: false, on: true, target: nil, title: "Fast mode on (no standard model available)")
+            }
+            return off
+        }
+        let keepsVariant = variantId == nil || (counterpart.variants?.contains { $0.id == variantId } == true)
+        return FastToggle(
+            available: keepsVariant,
+            on: isFast,
+            target: (active.providerID, counterpartID),
+            title: isFast
+                ? "You're in fast mode — tap to switch to the standard model"
+                : keepsVariant ? "Run this model in fast mode" : "No fast mode at \(variantId ?? "") effort"
+        )
+    }
+
+    // MARK: - Grouping & filtering (desktop `groups` + `filterModelGroups`)
+
     /// Group models by provider, providers ordered alphabetically (matching
-    /// the desktop `groups`). Enabled-only, deprecated excluded.
+    /// the desktop `groups`). Enabled-only, deprecated excluded, and `-fast`
+    /// siblings dropped where their base twin survives (a fast flavour is a
+    /// MODE of the base, reached through the ⚡ toggle — not a separate choice).
+    /// Groups left empty are dropped so a list never renders a provider heading
+    /// with nothing under it.
     static func groups(_ models: [OpencodeModel]) -> [(provider: String, models: [OpencodeModel])] {
         var map: [String: [OpencodeModel]] = [:]
         for m in models where isPickable(m) {
             map[m.providerID, default: []].append(m)
         }
         return map.keys.sorted().compactMap { provider in
-            map[provider].map { (provider, $0) }
+            guard let all = map[provider] else { return nil }
+            let ids = Set(all.map(\.id))
+            let kept = all.filter { !(isFastModelID($0.id) && ids.contains(baseModelID($0.id))) }
+            return kept.isEmpty ? nil : (provider, kept)
+        }
+    }
+
+    /// Filter already-grouped models by a case-insensitive query against the
+    /// model name, id, or provider. Empty/blank query returns everything.
+    /// Mirrors the desktop `filterModelGroups`.
+    static func filteredGroups(_ groups: [(provider: String, models: [OpencodeModel])], query: String) -> [(provider: String, models: [OpencodeModel])] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return groups }
+        return groups.compactMap { group in
+            let kept = group.models.filter {
+                $0.name.lowercased().contains(q) ||
+                $0.id.lowercased().contains(q) ||
+                group.provider.lowercased().contains(q)
+            }
+            return kept.isEmpty ? nil : (group.provider, kept)
         }
     }
 
