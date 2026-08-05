@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AgentFileReady,
   AppConfig,
+  OpencodeMessage,
   Project,
   TmuxWindow,
   WindowStatus,
@@ -209,6 +210,11 @@ type State = {
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
   jobs: Record<string, JobRow>;
+  // BET-659: per-session live transcript, lifted from each ChatPanel so the
+  // Artifacts panel (mounted as a sibling of <main> in App.tsx) can derive
+  // artifacts WITHOUT a second opencodeMessages fetch. Keyed by sessionId,
+  // written by ChatPanel when its own transcript state changes.
+  chatMessages: Record<string, OpencodeMessage[]>;
   // Single global screenshot toast — see ScreenshotToast type comment.
   screenshotToast: ScreenshotToast | null;
   // Single global agent-file toast: a file the remote AI pushed to its outbox.
@@ -348,6 +354,12 @@ type State = {
   // path the sidebar `·N` indicator would always be 0 for chat windows.
   // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
   setChatSubagents: (sessionId: string, count: number) => void;
+  // BET-659: reflect a chat-mode window's live transcript into the store so
+  // the Artifacts panel can derive artifacts from it. No-op when unchanged
+  // (same guard as setChatSubagents) so keystroke re-renders of ChatPanel —
+  // which leave the `messages` reference stable — don't re-emit the whole
+  // array to every store subscriber.
+  setChatMessages: (sessionId: string, messages: OpencodeMessage[]) => void;
   // One-shot startup replay of chat-mode attention. opencode's SSE stream is
   // forward-only — it does NOT re-emit `question.asked` / `permission.asked`
   // for requests that were already pending when the app (re)connected. So on
@@ -431,6 +443,7 @@ export const useStore = create<State>((set, get) => ({
   activeWindowByProject: {},
   status: {},
   jobs: {},
+  chatMessages: {},
   screenshotToast: null,
   agentFileToast: null,
   updatePrompt: null,
@@ -831,6 +844,12 @@ export const useStore = create<State>((set, get) => ({
           },
         },
       };
+    }),
+
+  setChatMessages: (sessionId, messages) =>
+    set((prev) => {
+      if (prev.chatMessages[sessionId] === messages) return prev;
+      return { chatMessages: { ...prev.chatMessages, [sessionId]: messages } };
     }),
 
   replayChatAttention: async () => {

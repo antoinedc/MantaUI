@@ -3,6 +3,7 @@ import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
+import { ArtifactsPanel } from "./ArtifactsPanel";
 import { Settings } from "./Settings";
 import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
 import { Onboarding } from "./Onboarding";
@@ -37,6 +38,16 @@ import type { AvailableLauncher } from "../shared/types";
 // link can never be misclaimed by a `manta://`-registered app, and a
 // `manta://` link can never silently pass through a staging build.
 const PAIR_PARSE_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
+
+// BET-659: Artifacts panel open/closed — device-local, default CLOSED. Lazy
+// read with try/catch (repo convention — localStorage can throw).
+function loadArtifactsOpen(): boolean {
+  try {
+    return localStorage.getItem("manta:artifacts:open") === "1";
+  } catch {
+    return false;
+  }
+}
 
 // The whole app tree is wrapped once in an ErrorBoundary so an uncaught render
 // throw anywhere degrades to a minimal centered "Something went wrong — Reload"
@@ -736,6 +747,19 @@ function AppInner() {
         e.preventDefault();
         return;
       }
+      // Cmd+I = toggle the Artifacts panel (BET-659). Only meaningful when a
+      // chat pane is active — the panel + its header toggle exist only there.
+      if (
+        (e.key === "i" || e.key === "I") &&
+        !e.shiftKey &&
+        !e.altKey &&
+        activeChatSessionId != null &&
+        mode === "chat"
+      ) {
+        setArtifactsOpen((v) => !v);
+        e.preventDefault();
+        return;
+      }
       // Cmd+1..9 = jump to nth (project, window) tuple in sidebar order
       if (/^[1-9]$/.test(e.key) && !e.altKey) {
         const idx = parseInt(e.key, 10) - 1;
@@ -756,7 +780,7 @@ function AppInner() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [projects, activeProjectName, activeWindowByProject, setActive]);
+  }, [projects, activeProjectName, activeWindowByProject, setActive, activeChatSessionId, mode]);
 
   // Voice command → app-scoped action bus. ChatPanel dispatches a
   // `manta-voice-app-action` CustomEvent for actions it doesn't own
@@ -862,6 +886,18 @@ function AppInner() {
   // server-update UpdateBars open it; "Update & restart" in the dialog is what
   // actually fires applyServerUpdate().
   const [confirmServerUpdate, setConfirmServerUpdate] = useState(false);
+
+  // BET-659: Artifacts panel open/closed. Owned here because the toggle lives
+  // in the SessionHeader (deep inside ChatPanel) while the panel mounts as a
+  // sibling of <main> — both need the same value.
+  const [artifactsOpen, setArtifactsOpen] = useState(loadArtifactsOpen);
+  useEffect(() => {
+    try {
+      localStorage.setItem("manta:artifacts:open", artifactsOpen ? "1" : "0");
+    } catch {
+      /* best-effort persist */
+    }
+  }, [artifactsOpen]);
 
   const applyServerUpdate = async () => {
     try {
@@ -1136,6 +1172,8 @@ function AppInner() {
                       mode={mode}
                       onModeChange={setMode}
                       availableLaunchers={availableLaunchers}
+                      artifactsOpen={artifactsOpen}
+                      onToggleArtifacts={() => setArtifactsOpen((v) => !v)}
                     />
                   </div>
                 );
@@ -1160,6 +1198,17 @@ function AppInner() {
           )}
         </div>
       </main>
+      {/* BET-659: the Artifacts panel — a fixed-width sibling of <main>, so a
+          chat pane is required for it to show (there's no panel to open in a
+          terminal). The outer shell is already `flex` and <main> is
+          `flex-1 min-w-0`, so this needs no layout change. */}
+      {isChatPaneActive && (
+        <ArtifactsPanel
+          sessionId={activeChatSessionId}
+          open={artifactsOpen}
+          onClose={() => setArtifactsOpen(false)}
+        />
+      )}
       {settingsOpen && (
         <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
       )}

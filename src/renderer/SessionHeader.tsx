@@ -11,7 +11,7 @@
 // props by ChatPanel, which owns the session lifecycle.
 
 import { useRef, useState, type CSSProperties } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -63,6 +63,8 @@ export function SessionHeader({
   mode,
   onModeChange,
   availableLaunchers,
+  artifactsOpen,
+  onToggleArtifacts,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -93,6 +95,10 @@ export function SessionHeader({
   // omitted → no launcher entries (desktop callers supply it; mobile owns
   // mode via its own <select> and passes neither this nor onModeChange).
   availableLaunchers?: AvailableLauncher[];
+  // BET-659: the Artifacts panel toggle. `artifactsOpen` labels + tints the
+  // button; onToggle flips the App-owned panel open state.
+  artifactsOpen: boolean;
+  onToggleArtifacts: () => void;
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -157,6 +163,17 @@ export function SessionHeader({
             onClear={onClear}
           />
         )}
+
+        {/* Artifacts toggle (BET-659): toggles a panel, not a popup — so no
+            aria-haspopup (the visual gate scans for it) and no manta hook.
+            Tinted when open. Sits in the no-drag right group so macOS gets the
+            click. */}
+        <IconButton
+          icon={<PanelRight className={artifactsOpen ? "text-[var(--accent-tx)]" : undefined} />}
+          label={artifactsOpen ? "Hide artifacts" : "Show artifacts"}
+          title={artifactsOpen ? "Hide artifacts" : "Show artifacts"}
+          onClick={onToggleArtifacts}
+        />
 
         {hasSession && !readOnly && (
           <SessionMenu
