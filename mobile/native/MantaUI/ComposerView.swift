@@ -42,6 +42,11 @@ struct ComposerView: View {
     let api: MantaAPIClient
     @ObservedObject var store: ChatSessionStore
     @ObservedObject var modelStore: ChatModelStore
+    /// Whether the transcript is scrolled up far enough that the round
+    /// "scroll to bottom" control — in the model-selection row — should show.
+    var showScrollToBottom: Bool = false
+    /// Tapped → scroll the transcript to the newest message.
+    var onScrollToBottom: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var text = ""
@@ -81,10 +86,15 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             expandAnchor
-            // Model chip sits above the input box on its own row.
+            // Model chip sits above the input box on its own row, with the
+            // round scroll-to-bottom control TRAILING in the same row so the
+            // two read as one aligned line of secondary chrome.
             HStack(spacing: Metrics.spacing.sp1) {
                 modelPill
                 Spacer(minLength: 0)
+                if showScrollToBottom {
+                    scrollToBottomChip
+                }
             }
             inputBox
         }
@@ -436,6 +446,32 @@ struct ComposerView: View {
         .accessibilityLabel("Model picker")
         .accessibilityIdentifier("model-picker")
     }
+
+    // MARK: - Scroll to bottom
+
+    /// The round glass "scroll to bottom" control, trailing in the
+    /// model-selection row so it is aligned with the chip. Round and sized to
+    /// the chip's height (not the 38pt header buttons) — it is a secondary
+    /// affordance that must not compete with the composer controls.
+    private var scrollToBottomChip: some View {
+        Button {
+            onScrollToBottom?()
+        } label: {
+            Image(systemName: "arrow.down")
+                .font(.system(size: Metrics.type.xs, weight: .semibold))
+                .foregroundColor(tokens.tx1)
+                .frame(width: Self.scrollChipDiameter, height: Self.scrollChipDiameter)
+        }
+        .buttonStyle(.glass)
+        .clipShape(.circle)
+        .accessibilityLabel("Scroll to bottom")
+    }
+
+    /// Diameter of the round scroll control — the model chip's height (one
+    /// line of its small text plus its vertical padding), so chip and control
+    /// read as one aligned row.
+    private static let scrollChipDiameter: CGFloat =
+        UIFont.systemFont(ofSize: Metrics.type.small).lineHeight + Metrics.spacing.sp1 * 2
 
     // MARK: - Attach
 
