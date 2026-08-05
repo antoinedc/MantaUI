@@ -489,24 +489,16 @@ private struct ChatScreenContent: View {
                 landedViewportHeight = height
                 relandIfArmed(proxy)
             }
-            // Scoped to `.sizeChanges` — the same correction the subagent screen
-            // already carries, for the same reason plus one more:
-            //
-            //  * `.bottom` in its all-roles form also decides the INITIAL offset,
-            //    and it decides it from the content height known at the first
-            //    layout pass. A LazyVStack has not measured the rows below the
-            //    viewport at that point and prose rows resolve their height a
-            //    pass or two later, so the offset it picks stops corresponding to
-            //    the bottom the moment the real heights land — which is the blank
-            //    transcript that only a manual scroll repairs.
-            //  * It also bottom-ALIGNS content shorter than the viewport, leaving
-            //    a screenful of dead space above a short session.
-            //
-            // Keeping only the size-changes role preserves the half that is
-            // wanted (the view sticks to the bottom as a turn streams) and hands
-            // the initial landing to the explicit scroll below, which runs after
-            // layout and therefore aims at a height that is actually real.
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            // No `.defaultScrollAnchor(.bottom, for: .sizeChanges)`. Landing and
+            // tail-following are BOTH handled by `relandIfArmed` on the two
+            // geometry callbacks above (content height + viewport height), and
+            // the anchor's own re-pin-on-resize is the suspect here: it re-aims
+            // the viewport at the bottom on EVERY size change, which, crossing
+            // with a bottom `safeAreaInset` that resizes as the composer grows,
+            // is what a real device turned into a blank transcript (and a hard
+            // SIGTRAP in this modifier chain once extra layout observation was
+            // added). The content-driven re-land below is strictly quieter —
+            // it does nothing unless the content or the viewport actually moves.
             .scrollDismissesKeyboard(.interactively)
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
