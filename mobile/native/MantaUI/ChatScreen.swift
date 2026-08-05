@@ -452,9 +452,6 @@ private struct ChatScreenContent: View {
         ) {
             LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
         })
-        // A tap on the transcript lowers the keyboard. (TiledView handles the
-        // scroll-driven interactive keyboard dismiss itself.)
-        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
         // The floating "scroll to bottom" arrow. It appears only once the user
         // has scrolled up (pointsFromBottom above the threshold) — at the
         // bottom there is nowhere to scroll to, so the button would be noise.
@@ -463,11 +460,20 @@ private struct ChatScreenContent: View {
         // resume when they return to (or tap back to) the bottom — otherwise a
         // streaming reply yanks a reader who has deliberately scrolled up back
         // to the newest turn.
+        //
+        // This must be chained BEFORE `.simultaneousGesture` below:
+        // `onTiledScrollGeometryChange` is a method on the concrete TiledView
+        // type (it returns `Self`), not a `View` modifier — once a `View`
+        // modifier like `.simultaneousGesture` erases the type to `some View`,
+        // the compiler no longer sees it.
         .onTiledScrollGeometryChange { geometry in
             let isNearBottom = geometry.pointsFromBottom < Self.scrollToBottomThreshold
             showScrollToBottom = !isNearBottom
             scrollPosition.autoScrollsToBottomOnAppend = isNearBottom
         }
+        // A tap on the transcript lowers the keyboard. (TiledView handles the
+        // scroll-driven interactive keyboard dismiss itself.)
+        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
         .overlay(alignment: .bottom) {
             if showScrollToBottom { scrollToBottomButton }
         }
