@@ -11,7 +11,7 @@ import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
-import { publicBaseUrl } from "./gatewayRegister.mjs";
+import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
 import {
   listSecrets as secretsListStore,
   setSecret as secretsSetStore,
@@ -864,6 +864,18 @@ export function buildHandlers({
     // reads ~/.manta/auth.json fresh per call, so the list's `url` fields stay
     // correct even if the box's gateway host was provisioned after boot.
     "serve-page:list": async () => servePageListStore({ baseUrl: publicBaseUrl() }),
+
+    // Read-only live listing of the box's outbox (~/.manta-outbox) scoped to
+    // the given opencode session, so the artifacts panel's Files tab shows
+    // only the active conversation's agent-pushed files alongside user
+    // uploads. No write counterpart here — files land via the `send_file` tool
+    // (POST /api/outbox/push — see index.mjs). Non-destructive: entries expire
+    // via the box's TTL sweep, not on download.
+    "outbox:list": async (sessionId) => {
+      const list = await listOutbox();
+      const sid = typeof sessionId === "string" && sessionId ? sessionId : null;
+      return sid ? list.filter((r) => r.sessionID === sid) : list;
+    },
 
     // ---- APNs native-push registration (BET-181) ----
     // iOS Capacitor app registers its APNs device token via the renderer-side

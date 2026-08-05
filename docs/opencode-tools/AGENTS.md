@@ -278,3 +278,23 @@ can watch them the same way you watch any session.
 `docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`
 and run `systemctl --user restart opencode-serve`. A symlinked tool fails
 to resolve `@opencode-ai/plugin` and silently never registers.
+
+## manta send-file
+
+You have a `send_file` tool to hand a file to the user and record it as a
+durable, workspace-linked artifact. Use it whenever you produce or generate a
+file the user should keep — a CSV export, a report, a generated image/document.
+It is NOT a one-shot mailbox:
+
+- The file is copied into `~/.manta-outbox/<sessionID>/` (your working copy is
+  kept) and announced with an "AI sent you a file" toast.
+- It appears in the app's Artifacts panel Files tab **for this conversation**
+  (workspace-linked by the session id).
+- It is **not deleted on download** — it stays retrievable until it expires
+  (default 7 days, or `ttlHours:0` for no expiry), then the box's sweep removes
+  it, so users can re-download any time before then.
+
+Install: `cp <repo>/docs/opencode-tools/send-file.ts
+~/.config/opencode/tools/send-file.ts` and restart `opencode-serve`.
+**Install/update is a COPY, never a symlink** (same `@opencode-ai/plugin`
+resolution gotcha as the other manta tools).

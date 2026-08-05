@@ -1,42 +1,61 @@
-// Agent → device outbox poller for the mobile server.
+// Agent → device artifact mailbox (mobile + desktop).
 //
-// The mobile outbox poller — mobile + desktop both reach the same
-// /api/outbox listing over HTTPS, but the SCAN itself only runs on the box
-// (server IS the box, no SSH hop). The remote AI drops a file into
-// ~/.manta-outbox/ (optionally a session subdir) and we surface it to connected
-// devices as an `agentFile` bus event. Detection is a plain local `readdir`.
+// The box (server IS the box) keeps a durable, workspace-linked mailbox of
+// files the remote AI sends the user. The AI drops a file under
+// ~/.manta-outbox/<sessionID>/ (its opencode session id — the workspace) via
+// the `send_file` tool; a local scanner surfaces it to connected devices as an
+// `agentFile` bus event (the "AI sent you a file" toast). Detection is a plain
+// local `readdir`.
 //
-// IMPORTANT divergence from desktop: on a phone/browser there is no silent
-// "save straight to the user's disk" path — the device must trigger a browser
-// download (httpApi.agentPullFile → GET /api/download). So every detection
-// publishes a CONFIRM toast (autoPulled:false) regardless of allowAgentPush.
-// The actual delete of the remote source happens server-side in
-// /api/download's handler when the device fetches the file (one-shot mailbox),
-// not here — so a file the user never taps stays available across ticks.
+// Durability semantics (reconciled with the old one-shot mailbox):
+//   - WORKSPACE-LINKED: files live in a subdir named by the opencode session
+//     id, so the Artifacts panel shows each conversation only its own files.
+//   - TTL: a file expires `DEFAULT_TTL_MS` (7 days) after it appears and is
+//     swept by `expireArtifacts`. It is NOT deleted on download, so it can be
+//     retrieved any number of times until then — both the artifacts panel's
+//     download (/api/peek) and /api/download leave the source in place.
+//   - The arrival toast (`agentFile`) still fires on new files.
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, copyFile, mkdir, rm } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { outboxRoot as defaultOutboxRoot } from "../shared/paths.mjs";
 
 const POLL_MS = 3000;
+// Default tenure of a pushed artifact (7 days). Overridable per push via
+// `send_file` ttlHours; `ttlHours === 0` means "never expires".
+export const DEFAULT_TTL_MS = 7 * 24 * 3600 * 1000;
+export const SWEEP_MS = 5 * 60 * 1000;
 
-// List every file in the outbox: loose files at the root plus one level of
-// session subdirs (matches the desktop `find -maxdepth 2 -type f`). Returns []
-// when the outbox doesn't exist yet (the steady state until the AI writes).
-export async function listOutbox(root = defaultOutboxRoot()) {
+function resolveExpiry(ttlHours, mtime) {
+  if (ttlHours === 0) return null;
+  const ttl =
+    typeof ttlHours === "number" && Number.isFinite(ttlHours) && ttlHours > 0
+      ? ttlHours * 3600 * 1000
+      : DEFAULT_TTL_MS;
+  return mtime + ttl;
+}
+
+// List the artifact mailbox. Each row is { path, name, size, sessionID, mtime,
+// expiresAt }. `sessionID` is the subdir name — the workspace the file belongs
+// to — or null for a loose root file (the old bare `cp` flow). When `sessionID`
+// is passed, only that workspace's files are returned (loose root files are
+// not workspace-linked and are omitted).
+export async function listOutbox(root = defaultOutboxRoot(), { sessionID } = {}) {
   const out = [];
   let topEntries;
   try {
     topEntries = await readdir(root, { withFileTypes: true });
   } catch {
-    return out; // ENOENT etc. — outbox not created yet.
+    return out; // ENOENT etc. — mailbox not created yet.
   }
+  const now = Date.now();
   for (const ent of topEntries) {
     const full = join(root, ent.name);
     if (ent.isFile()) {
-      const size = await statSize(full);
-      out.push({ path: full, name: ent.name, size, session: null });
+      if (sessionID != null && sessionID !== "") continue;
+      out.push(await statRow(full, ent.name, null, now));
     } else if (ent.isDirectory()) {
+      if (sessionID != null && ent.name !== sessionID) continue;
       let subEntries;
       try {
         subEntries = await readdir(full, { withFileTypes: true });
@@ -45,33 +64,139 @@ export async function listOutbox(root = defaultOutboxRoot()) {
       }
       for (const sub of subEntries) {
         if (!sub.isFile()) continue;
-        const subFull = join(full, sub.name);
-        const size = await statSize(subFull);
-        out.push({ path: subFull, name: sub.name, size, session: ent.name });
+        out.push(await statRow(join(full, sub.name), sub.name, ent.name, now));
       }
     }
   }
   return out;
 }
 
-async function statSize(path) {
+async function statRow(path, name, sessionID, now) {
   try {
     const st = await stat(path);
-    return st.size;
+    return {
+      path,
+      name,
+      size: st.size,
+      sessionID,
+      mtime: st.mtimeMs,
+      expiresAt: resolveExpiry(null, st.mtimeMs, now),
+    };
+  } catch {
+    return { path, name, size: 0, sessionID, mtime: 0, expiresAt: null };
+  }
+}
+
+// Copy a local file into the workspace-linked mailbox and return its row. The
+// source is NOT removed (the push is a copy; the AI keeps its working copy).
+// Used by the `send_file` tool via POST /api/outbox/push.
+export async function pushArtifact(
+  filePath,
+  sessionID,
+  { root = defaultOutboxRoot(), ttlHours } = {},
+) {
+  if (!sessionID || typeof sessionID !== "string" || !sessionID.trim()) {
+    return { ok: false, error: "sessionID is required" };
+  }
+  let src;
+  try {
+    src = await stat(filePath);
+    if (!src.isFile()) return { ok: false, error: `"${filePath}" is not a regular file` };
+  } catch {
+    return { ok: false, error: `Source file "${filePath}" not found or not readable` };
+  }
+  const safe = basename(filePath).replace(/["\\/]/g, "_");
+  const destDir = join(root, sessionID);
+  await mkdir(destDir, { recursive: true });
+  const dest = join(destDir, safe);
+  await copyFile(filePath, dest);
+  const row = await statRow(dest, safe, sessionID, Date.now());
+  if (ttlHours != null) row.expiresAt = resolveExpiry(ttlHours, row.mtime);
+  return { ok: true, row };
+}
+
+// Remove expired artifacts (TTL past) and prune now-empty session dirs.
+// Injectable now/ttlMs so tests need no timers.
+export async function expireArtifacts(
+  root = defaultOutboxRoot(),
+  { ttlMs = DEFAULT_TTL_MS, now = Date.now() } = {},
+) {
+  let topEntries;
+  try {
+    topEntries = await readdir(root, { withFileTypes: true });
   } catch {
     return 0;
   }
+  let removed = 0;
+  for (const ent of topEntries) {
+    if (!ent.isDirectory()) continue;
+    const full = join(root, ent.name);
+    try {
+      const subs = await readdir(full, { withFileTypes: true });
+      for (const sub of subs) {
+        if (!sub.isFile()) continue;
+        const subFull = join(full, sub.name);
+        let st;
+        try {
+          st = await stat(subFull);
+        } catch {
+          continue;
+        }
+        if (now - st.mtimeMs > ttlMs) {
+          await rm(subFull, { force: true });
+          removed++;
+        }
+      }
+      if ((await readdir(full, { withFileTypes: true })).length === 0) {
+        await rm(full, { recursive: true, force: true });
+      }
+    } catch {
+      /* per-dir best effort */
+    }
+  }
+  return removed;
+}
+
+// Thin poller wiring for the box (mirrors servePage's cleanup sweep).
+export function createArtifactSweep({
+  root = defaultOutboxRoot(),
+  intervalMs = SWEEP_MS,
+  ttlMs = DEFAULT_TTL_MS,
+} = {}) {
+  let timer = null;
+  let running = false;
+  const sweep = async () => {
+    if (running) return;
+    running = true;
+    try {
+      await expireArtifacts(root, { ttlMs });
+    } finally {
+      running = false;
+    }
+  };
+  return {
+    start() {
+      void sweep();
+      timer = setInterval(() => void sweep(), intervalMs);
+      if (timer.unref) timer.unref();
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+    sweep,
+  };
 }
 
 /**
  * Build a single outbox scan step (testable without timers). Returns an async
- * `tick()` that scans the outbox once, publishes one `agentFile` event per
+ * `tick()` that scans the mailbox once, publishes one `agentFile` event per
  * newly-seen file, and reconciles its internal seen-set against the live
- * listing (so a removed/downloaded file drops out and a future same-named push
- * is announced again). Re-entrancy guarded.
+ * listing (so a removed/expired file drops out and a future same-named push is
+ * announced again). Re-entrancy guarded.
  *
  * @param {object} bus  - event bus with .publish({ kind, payload })
- * @param {string} root - outbox dir
+ * @param {string} root - mailbox dir
  * @returns {{ tick: () => Promise<void> }}
  */
 export function createOutboxScanner(bus, root) {
@@ -98,8 +223,8 @@ export function createOutboxScanner(bus, root) {
             remotePath: entry.path,
             name: entry.name || basename(entry.path),
             size: entry.size,
-            sessionName: entry.session,
-            // Always a confirm toast on mobile — no silent disk write to a device.
+            sessionName: entry.sessionID,
+            // Always a confirm toast — no silent disk write to a device.
             autoPulled: false,
           },
         });

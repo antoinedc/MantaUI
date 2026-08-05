@@ -41,7 +41,7 @@ import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
-import { startOutboxPoller } from "./outbox.mjs";
+import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
@@ -351,6 +351,12 @@ const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
 // Cleanup sweep for expired pages (runs every 5 min).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopServePageCleanup } = startCleanupPoller();
+
+// Sweep expired artifact-mailbox files (TTL past) every 5 min — non-destructive
+// otherwise: downloads do not delete, the sweep is what reclaims disk.
+// eslint-disable-next-line no-unused-vars
+const artifactSweep = createArtifactSweep();
+artifactSweep.start();
 
 // Proactive pre-expiry Claude credential refresh (BET-281): clocks
 // ~/.claude/.credentials.json every 10 min and refreshes ~30 min ahead of
@@ -667,8 +673,9 @@ async function handleUpload(req, res, url) {
 
 // Agent → device download: stream a file from ~/.manta-outbox/ back to the
 // device as a browser download. Path-traversal guarded — the resolved path
-// must stay inside OUTBOX_ROOT. Deletes the source on success so the outbox
-// stays a one-shot mailbox, matching the desktop pullToDownloads semantics.
+// must stay inside OUTBOX_ROOT. NON-destructive: the source is left in place;
+// the artifact's lifetime is its TTL, swept by `expireArtifacts`, not by a
+// download. Re-download is always allowed until then.
 async function handleDownload(req, res, url) {
   const raw = url.searchParams.get("path") ?? "";
   const resolved = resolve(raw);
@@ -685,8 +692,6 @@ async function handleDownload(req, res, url) {
       "content-disposition": `attachment; filename="${basename(resolved).replace(/"/g, "")}"`,
     });
     await pipeline(createReadStream(resolved), res);
-    // Best-effort one-shot cleanup (ignore failure — re-download is harmless).
-    await rm(resolved, { force: true }).catch(() => {});
   } catch (e) {
     if (!res.headersSent) {
       respondJson(res, 404, { error: String(e?.message ?? e) });
@@ -986,6 +991,26 @@ const handleRequest = async (req, res) => {
 
   if (req.method === "GET" && path === "/api/download") {
     return handleDownload(req, res, url);
+  }
+
+  // ---------- Push a file as a workspace artifact (send_file tool) ----------
+  // POST /api/outbox/push { filePath, sessionID, ttlHours? }
+  // Copies the AI-generated file into ~/.manta-outbox/<sessionID>/ so it shows
+  // in the artifacts panel's Files tab (workspace-linked, TTL'd, not deleted
+  // on download) and announces it via the outbox scanner's agentFile toast.
+  if (req.method === "POST" && path === "/api/outbox/push") {
+    let body;
+    try {
+      body = await readBody(req);
+    } catch {
+      return respondJson(res, 400, { error: "invalid JSON body" });
+    }
+    const result = await pushArtifact(body?.filePath, body?.sessionID, {
+      ttlHours: body?.ttlHours,
+    });
+    return result.ok
+      ? respondJson(res, 200, { ok: true, row: result.row })
+      : respondJson(res, 400, { error: result.error });
   }
 
   // ---------- File peek (HTTP-mode desktop) ----------
