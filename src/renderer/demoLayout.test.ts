@@ -34,6 +34,7 @@ describe("pickDemoState — every member is a valid DemoState", () => {
       "update-failed",
       "server-update",
       "stream",
+      "artifacts",
     ]);
   });
 });

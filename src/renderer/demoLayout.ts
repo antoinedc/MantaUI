@@ -38,6 +38,10 @@
 //                  This is the state the mid-stream capture harness (BET-560)
 //                  drives to prove the transcript assembler produces the same
 //                  result over time, not just in its settled end state.
+// "artifacts"    — the default transcript PLUS one image file artifact (a
+//                  data: URL), isolated here so the preview-overlay capture
+//                  (BET-661) has an image to render without touching the
+//                  shared fixture or any other baseline.
 export const DEMO_STATES = [
   "full",
   "empty",
@@ -47,6 +51,7 @@ export const DEMO_STATES = [
   "update-failed",
   "server-update",
   "stream",
+  "artifacts",
 ] as const;
 export type DemoState = (typeof DEMO_STATES)[number];
 
