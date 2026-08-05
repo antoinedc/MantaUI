@@ -79,6 +79,15 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             expandAnchor
+            // The jump-to-bottom control sits right above the composer,
+            // centered — not in the control row. Shown only while scrolled up.
+            if showScrollToBottom {
+                HStack {
+                    Spacer(minLength: 0)
+                    scrollToBottomChip
+                    Spacer(minLength: 0)
+                }
+            }
             // Two-row composer (BET: model inside the composer): the text input
             // sits at the top and the control row — model selector + attach on
             // the LEFT, mic + send on the RIGHT — is pinned to the box's last
@@ -148,6 +157,14 @@ struct ComposerView: View {
         withAnimation(.smooth(duration: 0.22)) { isTall = next }
     }
 
+    /// Corner radius: slightly MORE rounded on a single line (the resting
+    /// state), easing back to the box's standard radius once the input grows
+    /// past the `isTall` threshold. The radius animates with `isTall` (which
+    /// flips under `withAnimation`), so the box breathes rather than snapping.
+    private var cornerRadius: CGFloat {
+        isTall ? Metrics.radius.lg : Metrics.radius.xl
+    }
+
     /// The input box — the whole composer. The message (and attachment chips
     /// above it) sits at the top; the control row is pinned to the LAST LINE of
     /// the box, inside the same glass, so model + attach / mic + send read as
@@ -169,19 +186,13 @@ struct ComposerView: View {
             // The message line.
             textArea
 
-            // Control row — pinned to the box's final line, with a hairline
-            // above it so it reads as the composer's footer row.
+            // Control row — pinned to the box's final line. No separator above
+            // it: the text and the controls sit on one continuous glass surface.
             controlRow
-                .padding(.top, Metrics.spacing.sp1)
-                .overlay(alignment: .top) {
-                    tokens.borderSubtle
-                        .frame(height: Metrics.spacing.spPx)
-                        .frame(maxWidth: .infinity)
-                }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .modifier(BoxChrome(cornerRadius: Metrics.radius.lg, stroke: borderColor))
+        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor, tint: tokens.panel.opacity(0.9)))
         // The expand control is an OVERLAY, not a row: it must sit in the top
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
@@ -194,18 +205,18 @@ struct ComposerView: View {
         }
     }
 
-    /// The control row — model selector and attach on the LEFT, mic + send on
-    /// the RIGHT, with the round scroll-to-bottom chip trailing the model chip.
-    /// Rendered inside `inputBox`, pinned to its last line, so it reads as the
-    /// composer's footer: type in the box, act on its bottom line.
+    /// The control row — model selector and attach grouped on the LEFT, mic +
+    /// send on the RIGHT. Rendered inside `inputBox`, pinned to its last line,
+    /// so it reads as the composer's footer: type in the box, act on its bottom
+    /// line. The jump-to-bottom control lives above the composer, not here.
     private var controlRow: some View {
         HStack(spacing: Metrics.spacing.sp2) {
-            modelPill
-            attachButton
-            Spacer(minLength: 0)
-            if showScrollToBottom {
-                scrollToBottomChip
+            // Model + attach sit close together; attach hugs the model label.
+            HStack(spacing: Metrics.spacing.sp1) {
+                modelPill
+                attachButton
             }
+            Spacer(minLength: 0)
             if micAvailable {
                 micButton
             }
@@ -221,9 +232,8 @@ struct ComposerView: View {
         store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle
     }
 
-    /// The text field, the sole occupant of the input box. It reports its own
-    /// height so `isTall` can gate the expand overlay once the text wraps past
-    /// two lines.
+    /// The message field at the top of the box. It reports its own height so
+    /// `isTall` can gate the expand overlay once the text wraps past two lines.
     private var textArea: some View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
@@ -360,29 +370,23 @@ struct ComposerView: View {
                 }
             }
             .foregroundColor(tokens.accentTx)
-            .padding(.horizontal, Metrics.spacing.sp2)
+            // Bare accent label, no pill fill: only Send carries a background
+            // in this row. No horizontal padding so the label sits flush at the
+            // box's left edge — the same distance from the border as Send is on
+            // the right. Vertical padding keeps a comfortable tap target.
             .padding(.vertical, Metrics.spacing.sp1)
         }
-        // Glass rather than the flat accent-soft fill, so the chip belongs to
-        // the same floating chrome as the box beneath it; the accent now lives
-        // in the TEXT alone, which is enough to mark it.
-        //
-        // The system glass BUTTON style, not `.glassEffect` on the label of a
-        // plain button — the layered form renders and then swallows the tap.
-        // This chip had the same defect as the ⋯ menu button; it just was not
-        // tapped before the menu was.
-        .buttonStyle(.glass)
-        .clipShape(.capsule)
+        .buttonStyle(.plain)
         .accessibilityLabel("Model picker")
         .accessibilityIdentifier("model-picker")
     }
 
     // MARK: - Scroll to bottom
 
-    /// The round glass "scroll to bottom" control, trailing in the
-    /// model-selection row so it is aligned with the chip. Round and sized to
-    /// the chip's height (not the 38pt header buttons) — it is a secondary
-    /// affordance that must not compete with the composer controls.
+    /// The round glass "jump to bottom" control — floats centered just above
+    /// the composer (not in the control row). Round and small (sized to the
+    /// model chip's height) so it stays a secondary affordance that does not
+    /// compete with the composer controls.
     private var scrollToBottomChip: some View {
         Button {
             onScrollToBottom?()
@@ -815,6 +819,10 @@ struct ComposerView: View {
 private struct BoxChrome: ViewModifier {
     let cornerRadius: CGFloat
     let stroke: Color
+    /// A semi-opaque fill laid UNDER the glass so the box reads less
+    /// transparent — the Liquid Glass stays, but what shows through it is
+    /// dimmed by this panel colour.
+    let tint: Color
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -823,7 +831,9 @@ private struct BoxChrome: ViewModifier {
             // `.ultraThinMaterial` this used to fill with — same treatment as
             // the session list's search capsule and the chat header buttons.
             // The shape is passed through so the glass morphs with the box
-            // instead of snapping between the two forms.
+            // instead of snapping between the two forms. A panel fill sits
+            // beneath the glass so the composer is a bit less see-through.
+            .background(tint, in: shape)
             .glassEffect(.regular, in: shape)
             .overlay {
                 shape.strokeBorder(stroke, lineWidth: 1)
