@@ -679,6 +679,12 @@ private struct TodosCard: View {
     /// case-INSENSITIVELY (the desktop lowercases before comparing, iOS did
     /// not). The mark aligns to the FIRST line so a two-line item keeps the
     /// icon beside its opening words rather than centred against both.
+    // `@MainActor` because this reads `mantaFontWeight`, which is main-actor
+    // isolated. Only `View.body` carries that isolation implicitly, and this is
+    // a plain helper — every other call site in the app happens to sit directly
+    // in a `body`, so the annotation has never been needed before. Harmless if
+    // the isolation is inferred anyway; a build error if it is not.
+    @MainActor
     @ViewBuilder
     private func todoRow(_ item: StreamTodoItem) -> some View {
         let status = (item.status ?? "").lowercased()
