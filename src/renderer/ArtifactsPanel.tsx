@@ -177,6 +177,28 @@ function ActionButton({
   );
 }
 
+// The three shared row actions (attach / download / jump) used by both the
+// image tiles and the file rows, so the button cluster is defined once.
+function RowActions({
+  onAttach,
+  onDownload,
+  onJump,
+  canJump,
+}: {
+  onAttach: () => void;
+  onDownload: () => void;
+  onJump: () => void;
+  canJump: boolean;
+}) {
+  return (
+    <>
+      <ActionButton icon={<Paperclip className="h-3.5 w-3.5" />} label="Attach to message" title="Attach to message" onClick={onAttach} />
+      <ActionButton icon={<Download className="h-3.5 w-3.5" />} label="Download" title="Download" onClick={onDownload} />
+      <ActionButton icon={<ChevronRight className="h-3.5 w-3.5" />} label="Jump to message" title="Jump to message" onClick={onJump} disabled={!canJump} />
+    </>
+  );
+}
+
 // ===== Tab 1 — Links =======================================================
 
 function ExpiryPill({ state, label }: { state: "live" | "soon" | "expired"; label: string }) {
@@ -302,9 +324,12 @@ function ImageTile({
       </span>
       {/* Bottom gradient scrim + hover actions, bottom-right at 26px. */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/40 to-transparent px-2 py-2 opacity-0 transition-opacity group-hover:opacity-100">
-        <ActionButton icon={<Paperclip className="h-3.5 w-3.5" />} label="Attach to message" title="Attach to message" onClick={onAttach} />
-        <ActionButton icon={<Download className="h-3.5 w-3.5" />} label="Download" title="Download" onClick={onDownload} />
-        <ActionButton icon={<ChevronRight className="h-3.5 w-3.5" />} label="Jump to message" title="Jump to message" onClick={onJump} disabled={!artifact.messageId} />
+        <RowActions
+          onAttach={onAttach}
+          onDownload={onDownload}
+          onJump={onJump}
+          canJump={!!artifact.messageId}
+        />
       </div>
     </div>
   );
@@ -355,9 +380,12 @@ function FileRow({
         </div>
       </button>
       <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
-        <ActionButton icon={<Paperclip className="h-3.5 w-3.5" />} label="Attach to message" title="Attach to message" onClick={onAttach} />
-        <ActionButton icon={<Download className="h-3.5 w-3.5" />} label="Download" title="Download" onClick={onDownload} />
-        <ActionButton icon={<ChevronRight className="h-3.5 w-3.5" />} label="Jump to message" title="Jump to message" onClick={onJump} disabled={!artifact.messageId} />
+        <RowActions
+          onAttach={onAttach}
+          onDownload={onDownload}
+          onJump={onJump}
+          canJump={!!artifact.messageId}
+        />
       </div>
     </div>
   );
@@ -597,7 +625,7 @@ export function ArtifactsPanel({
                 <div className="sticky top-0 bg-bg-elev px-3 pt-3 pb-[7px] text-micro font-semibold text-text-faint">
                   {g.label}
                 </div>
-                {tab === "link" && (
+                {tab === "link" ? (
                   <div className="px-3 pb-3">
                     {g.items.map((a) => (
                       <LinkCard
@@ -609,33 +637,23 @@ export function ArtifactsPanel({
                       />
                     ))}
                   </div>
-                )}
-                {tab === "image" && (
-                  <div className="grid grid-cols-2 gap-1 px-3 pb-3">
-                    {g.items.map((a) => (
-                      <ImageTile
-                        key={a.id}
-                        artifact={a}
-                        onOpen={(el) => openRow(a, el)}
-                        onAttach={() => void attachArtifact(a, sessionId ?? "")}
-                        onDownload={() => void downloadArtifact(a)}
-                        onJump={() => jumpToMessage(a)}
-                      />
-                    ))}
-                  </div>
-                )}
-                {tab === "file" && (
-                  <div className="px-2 pb-3">
-                    {g.items.map((a) => (
-                      <FileRow
-                        key={a.id}
-                        artifact={a}
-                        onOpen={(el) => openRow(a, el)}
-                        onAttach={() => void attachArtifact(a, sessionId ?? "")}
-                        onDownload={() => void downloadArtifact(a)}
-                        onJump={() => jumpToMessage(a)}
-                      />
-                    ))}
+                ) : (
+                  // Image tiles and file rows take the same props, so they
+                  // share one render path (the container class differs).
+                  <div className={tab === "image" ? "grid grid-cols-2 gap-1 px-3 pb-3" : "px-2 pb-3"}>
+                    {g.items.map((a) => {
+                      const Row = tab === "image" ? ImageTile : FileRow;
+                      return (
+                        <Row
+                          key={a.id}
+                          artifact={a}
+                          onOpen={(el) => openRow(a, el)}
+                          onAttach={() => void attachArtifact(a, sessionId ?? "")}
+                          onDownload={() => void downloadArtifact(a)}
+                          onJump={() => jumpToMessage(a)}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
