@@ -519,6 +519,11 @@ private struct ChatScreenContent: View {
     /// rather than a delay to tune. Re-landing on every HEIGHT CHANGE removes the
     /// clock: each change is precisely the moment the previous landing became
     /// wrong, and when the height stops changing there is nothing left to fix.
+    /// `@MainActor` because it drives a `ScrollViewProxy`. Only `View.body`
+    /// carries that isolation implicitly, and this is a plain helper reached
+    /// from a geometry callback — the annotation is a no-op if the isolation is
+    /// inferred and a compile fix if it is not.
+    @MainActor
     private func landIfContentGrew(to height: CGFloat, proxy: ScrollViewProxy) {
         guard !landingCancelled else { return }
         let deadline = landingDeadline ?? Date().addingTimeInterval(Self.landingWindow)
