@@ -194,11 +194,21 @@ private struct ChatScreenContent: View {
         // NO opaque backdrop on the inset. A scroll view still DRAWS its
         // content underneath a safe-area inset while scrolling, so the
         // transcript visibly slides beneath the glass composer (which blurs
-        // it) instead of behind a solid bar. The running-state row used to
-        // live here; it now floats at the bottom of the transcript (see
-        // `transcript`), so the composer stays a pure glass object.
+        // it) instead of behind a solid bar. The running-state row and the
+        // todos card are pinned to the BOTTOM of this stack (ordinary content
+        // in the transcript area, not glass), the todo list directly below the
+        // running row.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                // BET-630 (D1): the running-state working row — plain text,
+                // pinned to the bottom of the transcript rather than the
+                // composer. Shown only while a turn runs; the ambient refetch
+                // sweep lives on the composer's border and means a different
+                // thing, so the two never share an indicator. Not shown during
+                // a background refetch.
+                if store.running {
+                    RunningIndicator(store: store)
+                }
                 bottomCards
                 ComposerView(
                     sessionId: store.sessionId,
@@ -471,20 +481,6 @@ private struct ChatScreenContent: View {
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
         .overlay(alignment: .bottom) {
             if showScrollToBottom { scrollToBottomButton }
-        }
-        // BET-630 (D1): the running-state working row, pinned to the BOTTOM OF
-        // THE TRANSCRIPT — next to the newest message the user is waiting on,
-        // not on the composer (the composer is a pure glass object now). Shown
-        // only while a turn runs; the ambient refetch sweep lives on the
-        // composer's border and means a different thing, so the two never
-        // share an indicator. Not shown during a background refetch. It is an
-        // overlay so it floats over the transcript rather than shifting the
-        // conversation; a glass chip keeps it readable above message text.
-        .overlay(alignment: .bottom) {
-            if store.running {
-                RunningIndicator(store: store)
-                    .padding(.bottom, Metrics.spacing.sp2)
-            }
         }
     }
 

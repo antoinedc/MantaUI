@@ -52,17 +52,9 @@ struct RunningIndicator: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        // A glass chip, not a bare row: the indicator now floats over the
-        // transcript (pinned to its bottom edge) rather than sitting on the
-        // opaque composer bar, so it needs a readable backdrop above message
-        // text. `.ultraThinMaterial` keeps it part of the same floating glass
-        // chrome as the composer and the header controls.
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
-        .padding(.horizontal, Metrics.spacing.sp3)
+        // Plain text, deliberately no glass / material backdrop: this row is
+        // pinned to the bottom of the transcript as ordinary content, not a
+        // floating chrome element.
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("running-indicator")
