@@ -429,6 +429,10 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
+    /// How tall the transcript's bottom fade is — mirrors the top scrim's
+    /// visual weight so the two edges read as one treatment (same Scrim ramp).
+    private static let bottomScrimHeight: CGFloat = 80
+
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -487,6 +491,15 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+        // Bottom scrim — the same fade as the top-of-transcript gradient, so
+        // the newest messages ease out as they approach the composer instead of
+        // colliding with it. Attached to the TiledView (whose shrunken viewport
+        // ends exactly at the composer's top edge), which is what the top scrim
+        // overlays the header against.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: Self.bottomScrimHeight)
+        }
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
