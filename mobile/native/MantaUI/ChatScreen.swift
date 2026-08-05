@@ -123,6 +123,9 @@ private struct ChatScreenContent: View {
         content
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
+            // Hiding the bar also kills the left-edge interactive pop gesture;
+            // this re-arms it so sliding back returns to the session list.
+            .background(EdgeSwipeRestorer())
             .onAppear {
                 // Three independent fetches, all started together: the
                 // transcript, the model list (previously not fetched until the
@@ -557,6 +560,7 @@ struct ChatSubagentScreen: View {
         .background(tokens.canvas.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
+        .background(EdgeSwipeRestorer())
         .onAppear { store.start() }
         .onDisappear { store.stop() }
         .accessibilityElement(children: .contain)
