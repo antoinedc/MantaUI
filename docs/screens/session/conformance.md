@@ -4,7 +4,15 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (3a51961)
+Last reviewed: 2026-08-05 (c2fb75a)
+
+## Artifacts toggle added to the header (BET-659)
+
+The header's right `.topb`/`.sp` group gains an Artifacts toggle button
+(panel-right glyph) between the context pill and the session menu — the header
+in the mockup and the app were updated together, and the three registry rows
+that share this record (`session`, `session-header`, `session-composer`) were
+re-baselined at that commit. No other header geometry changed.
 
 ## Floating chat chrome (this change)
 
