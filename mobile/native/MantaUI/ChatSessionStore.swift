@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MessagingUI
 
 // ===========================================================================
 // S4 — chat session store (BET-596).
@@ -34,10 +35,14 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var inProgressText = ""
     @Published private(set) var blocks: [TranscriptBlock] = []
     /// The same transcript as `blocks`, but wrapped in `TranscriptRow` with a
-    /// STABLE id — the shape MessagingUI's `TiledView` consumes. Kept in
-    /// parallel so the subagent screen (and anything else) can keep using
-    /// `blocks` unchanged.
+    /// STABLE id (see `TranscriptRow`). Kept so the subagent screen (and
+    /// anything else) can keep using `blocks` unchanged.
     @Published private(set) var rows: [TranscriptRow] = []
+    /// MessagingUI's incremental data source over `blocks`. Mutated IN PLACE
+    /// via `apply` so its `id` stays stable and TiledView coalesces each turn's
+    /// change as a prepend (loadEarlier) / append (streaming tail) / update
+    /// rather than a full reload — which is what preserves scroll position.
+    @Published private(set) var dataSource: ListDataSource<TranscriptRow> = ListDataSource()
     @Published private(set) var running = false
     @Published private(set) var turnComplete = false
     @Published private(set) var context: StreamContextPayload?
@@ -279,16 +284,21 @@ final class ChatSessionStore: ObservableObject {
     /// visible duplicate, not a harmless overlap. The tail is emptied by the
     /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
+        let newRows: [TranscriptRow]
         if inProgressText.isEmpty {
             blocks = transcript
-            rows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
+            newRows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
         } else {
             // The live tail has no completion time yet — it gets one when the
             // turn ends and the canonical refetch replaces this block.
             blocks = transcript + [.prose(inProgressText, at: nil)]
-            rows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
+            newRows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
                 + [TranscriptRow(id: streamingTailID, block: .prose(inProgressText, at: nil))]
         }
+        rows = newRows
+        // Mutate the data source in place (not `= ...`) so its identity — and
+        // therefore TiledView's scroll position and cell state — survives.
+        dataSource.apply(newRows)
     }
 
     // MARK: - Refetch

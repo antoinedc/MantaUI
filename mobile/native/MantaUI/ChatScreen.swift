@@ -422,7 +422,7 @@ private struct ChatScreenContent: View {
         // replaces the hand-rolled ScrollView + LazyVStack + geometry/keyboard/
         // landing machinery that was the source of the device-only blank-on-
         // open, snap, and disappear-on-scroll bugs.
-        TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
+        TiledView(dataSource: store.dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         // Reserves the floating header's height. The header is an overlay and
