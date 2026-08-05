@@ -1,13 +1,6 @@
 import SwiftUI
 import UIKit
 
-// Diagnostic-only preference: the minY of the transcript's first row in the
-// scroll's coordinate space, i.e. the negative of the scroll offset. Deleted
-// with the landing diagnostics once the blank-on-open bug is fixed.
-private struct LandingOffsetKey: PreferenceKey {
-    nonisolated(unsafe) static var defaultValue: CGFloat = .greatestFiniteMagnitude
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
 
 // ===========================================================================
 // S4 — chat screen wired to live data (BET-596).
@@ -430,9 +423,6 @@ private struct ChatScreenContent: View {
     /// to a real anchor is what makes the landing deterministic (see below).
     private static let bottomAnchorID = "transcript-bottom"
 
-    /// Diagnostic coordinate space for reading the real scroll offset.
-    private static let scrollSpace = "landing-scroll"
-
     /// Space the transcript reserves for the floating header: the 38pt button
     /// plus the header's own vertical padding on both sides. Derived from the
     /// same tokens the header lays itself out with, so retuning the button size
@@ -489,20 +479,6 @@ private struct ChatScreenContent: View {
                     landedContentHeight = height
                     relandIfArmed(proxy)
                 }
-                // A zero-height first row that reports where it sits in the
-                // scroll's coordinate space — the real scroll offset, which is
-                // the one thing that decides whether the viewport is parked on
-                // content or on empty space.
-                .background(GeometryReader { g in
-                    Color.clear.preference(
-                        key: LandingOffsetKey.self,
-                        value: g.frame(in: .named(Self.scrollSpace)).minY
-                    )
-                })
-            }
-            .coordinateSpace(name: Self.scrollSpace)
-            .onPreferenceChange(LandingOffsetKey.self) { minY in
-                LandingTrace.event("offsetFromTop", "\(Int(-minY)) blocks=\(store.blocks.count)")
             }
             .scrollClipDisabled(false)
             // The VIEWPORT's height matters just as much as the content's, and
