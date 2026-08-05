@@ -323,17 +323,21 @@ empty session dirs. Threshold is `uploadCleanupHours` in config (default 1,
 staleness ≈ `uploadCleanupHours + 1h`.
 
 **Agent → laptop push (outbox / download).** The reverse of drag-in: the remote
-AI drops a file into `~/.manta-outbox/` (optionally `~/.manta-outbox/<session>/`)
-and MantaUI pulls it to the Mac's Downloads folder via `GET
-<serverUrl>/api/download?path=<relative>&session=<name>`. Detection is a 3s
-**outbox poller** in `src/main/index.ts` (`pollOutboxOnce` → `GET
-/api/outbox?session=<name>` → JSON listing); it mirrors the screenshot Desktop
-watcher's philosophy (cheap periodic check, push a toast). The outbox is a
-**one-shot mailbox** — the server `rm`s the remote source after a successful
-download, so files aren't re-pulled and don't accumulate. The poller keeps a
-`seenOutboxPaths` set (cleared on host change) reconciled against the live
-listing each tick so a require-confirm toast the user hasn't answered isn't
-re-offered every 3s.
+AI sends a file via the `send_file` tool, which manta-server copies into
+`~/.manta-outbox/<sessionID>/` (the workspace-linked artifact mailbox; the AI
+keeps its working copy). MantaUI detects it and can pull it to the Mac's
+Downloads folder via `GET <serverUrl>/api/download?path=<relative>`.
+Detection is a 3s **outbox poller** (`pollOutboxOnce` → `GET /api/outbox?session=<name>`
+→ JSON listing) / the server-side `startOutboxPoller`, mirroring the screenshot
+Desktop watcher's philosophy (cheap periodic check, push a toast). The outbox is
+a **durable, TTL'd artifact store**, NOT a one-shot mailbox: files are
+**not deleted on download** (both `/api/download` and the artifacts panel's
+`/api/peek` leave the source in place), they're workspace-linked (the subdir is
+the opencode session id, so each artifacts panel shows only its conversation's
+files), and a server sweep (`expireArtifacts`, every 5 min) removes them once
+their TTL elapses (default 7 days). The poller keeps a `seenOutboxPaths` set
+(cleared on host change) reconciled against the live listing each tick so a
+require-confirm toast the user hasn't answered isn't re-offered every 3s.
 
 - **Trust flag `allowAgentPush`** (AppConfig, default OFF, Settings UI). ON =
   download immediately + informational toast ("↓ name · saved to Downloads ·
@@ -347,12 +351,15 @@ re-offered every 3s.
   `agentFileToast` in the store, App.tsx owns the one `onAgentFileReady`
   listener, the active ChatPanel renders it. De-dupe on collision via
   `uniqueLocalPath` (`report.pdf` → `report (1).pdf`).
-- **The AI learns the convention** via the `/send-file` command
-  (`docs/opencode-commands/send-file.md`). Install on the remote opencode host:
-  `ln -sf <repo>/docs/opencode-commands/send-file.md
-  ~/.config/opencode/commands/send-file.md` then restart `opencode-serve`. The
-  command just tells the AI to `cp <file> ~/.manta-outbox/` — no MCP server, works
-  with any model.
+- **The AI sends files via the `send_file` tool** (`docs/opencode-tools/send-file.ts`,
+  a manta-native opencode tool like `serve_page`). It POSTs the file path + its
+  `context.sessionID` to `POST /api/outbox/push`, which copies the file into
+  `~/.manta-outbox/<sessionID>/` (workspace-linked) and hands it a TTL (default
+  7 days, or `ttlHours:0` for never). Install on the remote opencode host:
+  `cp <repo>/docs/opencode-tools/send-file.ts ~/.config/opencode/tools/send-file.ts`
+  then restart `opencode-serve`. The legacy `/send-file` markdown command
+  (`docs/opencode-commands/send-file.md`) still works for a bare `cp` to the
+  root, but that path is NOT workspace-linked.
 - **Mobile** has no Mac Downloads folder (the server IS the box). A server-side
   outbox poller (`src/server/outbox.mjs`, `startOutboxPoller` wired in
   `index.mjs`) `readdir`s `~/.manta-outbox/` locally every 3s and publishes
@@ -360,8 +367,9 @@ re-offered every 3s.
   subscribes to that kind. Every detection is a CONFIRM toast (`autoPulled:false`)
   — there's no silent disk write to a phone/browser. Tapping Save calls
   `agentPullFile`, which triggers a browser download via `GET /api/download`
-  (`src/server/index.mjs`, path-traversal-guarded to `~/.manta-outbox/`, deletes
-  the source on success — the one-shot mailbox). The mobile `agentPullFile`
+  (`src/server/index.mjs`, path-traversal-guarded to `~/.manta-outbox/`). The
+  download is **non-destructive** — the source stays until the TTL sweep
+  reclaims it. The mobile `agentPullFile`
   returns `""` (no OS path to reveal) so the toast dismisses instead of showing
   a dead "Reveal" button; `revealInFolder` is a no-op. `MobileApp.tsx` wires the
   `onAgentFileReady` listener (mirror of `App.tsx`). Pure scan logic

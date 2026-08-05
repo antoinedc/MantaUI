@@ -1,4 +1,4 @@
-import type { OpencodeMessage, OpencodePart, ServedPageMeta } from "../shared/types";
+import type { OpencodeMessage, OpencodePart, OutboxFile, ServedPageMeta } from "../shared/types";
 
 export type ArtifactKind = "link" | "image" | "file";
 export type ArtifactOrigin = "user" | "agent";
@@ -95,12 +95,12 @@ function deriveLinkArtifact(msg: OpencodeMessage, part: OpencodePart, url: strin
   };
 }
 
-// Extension → MIME for files the agent writes (creation, not edit) so
-// generated documents/images render with the right glyph tone and preview
+// Extension → MIME for files the agent pushes via the outbox (~/.manta-outbox)
+// so generated documents/images render with the right glyph tone and preview
 // kind. Unlisted extensions fall back to null; `resolvePreviewType` then maps
 // them by extension for the preview, and unknown types land on the download
-// path. Kept deliberately small — add a type only when a generated artifact
-// needs it.
+// path. Kept deliberately small — add a type only when a pushed artifact needs
+// it.
 const EXT_MIME: Record<string, string> = {
   ".csv": "text/csv",
   ".tsv": "text/tab-separated-values",
@@ -123,31 +123,26 @@ function extOf(p: string): string {
   return i >= 0 ? p.slice(i).toLowerCase() : "";
 }
 
-// An agent-generated file: a `write` tool CREATION (distinct from `edit`,
-// which modifies existing source and stays out). `href` is the written path; a
-// `write` carries no byte size, so `size` is null. Timestamp comes from the
-// tool's start time, falling back to the owning message.
-function deriveWriteArtifact(msg: OpencodeMessage, part: OpencodePart): Artifact | null {
-  const state = (part as {
-    state?: { input?: { filePath?: unknown }; time?: { start?: unknown } };
-  }).state;
-  const filePath = state?.input?.filePath;
-  if (typeof filePath !== "string" || !filePath) return null;
-  const ext = extOf(filePath);
+// An agent-pushed file. The outbox is a durable, workspace-linked mailbox: the
+// row's `sessionID` scopes it to the conversation that pushed it, and
+// `expiresAt` is its TTL (default 7 days) — it is not deleted on download, and
+// drops out only when the box's sweep reclaims it.
+function deriveOutboxArtifact(row: OutboxFile): Artifact {
+  const ext = extOf(row.name);
   const mime = EXT_MIME[ext] ?? null;
   return {
-    id: part.id,
+    id: "outbox:" + row.path,
     kind: mime != null && mime.startsWith("image/") ? "image" : "file",
     origin: "agent",
-    key: filePath.toLowerCase(),
-    label: lastPathSegment(filePath),
-    href: filePath,
+    key: row.path.toLowerCase(),
+    label: row.name,
+    href: row.path,
     mime,
-    size: null,
-    at: typeof state?.time?.start === "number" ? state.time.start : messageCreated(msg),
-    messageId: msg.info.id,
+    size: row.size,
+    at: row.mtime || 0,
+    messageId: null,
     context: null,
-    expiresAt: null,
+    expiresAt: row.expiresAt,
   };
 }
 
@@ -201,6 +196,7 @@ export function deriveArtifacts(
   messages: OpencodeMessage[],
   pages: ServedPageMeta[],
   sessionId: string,
+  outbox: OutboxFile[] = [],
 ): Artifact[] {
   const out: Artifact[] = [];
 
@@ -211,18 +207,9 @@ export function deriveArtifacts(
         out.push(deriveFileArtifact(msg, part));
         continue;
       }
-      // Agent-created files: a `write` tool with a target path is a produced
-      // artifact; every other tool part is excluded.
-      if (part.type === "tool") {
-        if (part.tool === "write") {
-          const generated = deriveWriteArtifact(msg, part);
-          if (generated) out.push(generated);
-        }
-        continue;
-      }
       // Only text parts of USER messages contribute links; every other part
-      // type (patch, step-start, step-finish, reasoning, snapshot, agent) is
-      // explicitly excluded.
+      // type (tool, patch, step-start, step-finish, reasoning, snapshot,
+      // agent) is explicitly excluded.
       if (part.type !== "text" || !isUser) continue;
       if (part.synthetic || part.ignored) continue;
       const text = part.text ?? "";
@@ -243,6 +230,12 @@ export function deriveArtifacts(
   for (const page of pages) {
     if (page.sessionID !== sessionId) continue;
     out.push(derivePageArtifact(page, newestAnnouncingMessage(messages, page.url)));
+  }
+
+  for (const row of outbox) {
+    // Workspace-link: only the conversation that pushed the file sees it.
+    if (row.sessionID !== sessionId) continue;
+    out.push(deriveOutboxArtifact(row));
   }
 
   return dedupeByKey(out).sort((a, b) => b.at - a.at);

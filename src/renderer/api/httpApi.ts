@@ -950,6 +950,10 @@ export const httpApi: Api = {
   // list wrappers.
   servePageList: () => rpcOptional(IPC.servePageList, []),
 
+  // Outbox mailbox listing, scoped to the active conversation — degrades to []
+  // on a box without the channel.
+  outboxList: (sessionId?: string) => rpcOptional(IPC.outboxList, [], sessionId),
+
   // -- background delegation jobs (manta-server owned; in-process on mobile) --
   // list returns the full job records (the engine always returns an array;
   // a no-engine fallback returns {jobs:[]} which we normalize). No create

@@ -136,72 +136,66 @@ describe("deriveArtifacts", () => {
     expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);
   });
 
-  it("tool parts of every kind → NO artifacts (write without a path is no artifact)", () => {
+  it("tool parts of every kind → NO artifacts", () => {
     for (const tool of ["read", "write", "edit", "bash", "webfetch"]) {
       const messages = [msg("a", "assistant", [toolPart(tool)])];
       expect(deriveArtifacts(messages, [], "ses_a"), `tool:${tool}`).toEqual([]);
     }
   });
 
-  it("write tool part with a target path → generated file artifact (origin agent)", () => {
-    const messages = [
-      msg("a", "assistant", [
-        {
-          type: "tool",
-          tool: "write",
-          state: {
-            status: "completed",
-            input: { filePath: "/home/dev/q3-revenue.csv" },
-            time: { start: 5000 },
-          },
-        },
-      ]),
-    ];
-    const got = deriveArtifacts(messages, [], "ses_a");
+  it("outbox file → file artifact (origin agent, scoped to its session)", () => {
+    const got = deriveArtifacts([], [], "ses_a", [
+      { path: "/home/dev/.manta-outbox/q3-revenue.csv", name: "q3-revenue.csv", size: 1204, sessionID: "ses_a", mtime: 5000, expiresAt: 5000 + 604800000 },
+    ]);
     expect(got).toHaveLength(1);
     expect(got[0]).toMatchObject({
       kind: "file",
       origin: "agent",
       label: "q3-revenue.csv",
-      href: "/home/dev/q3-revenue.csv",
+      href: "/home/dev/.manta-outbox/q3-revenue.csv",
       mime: "text/csv",
-      size: null,
+      size: 1204,
       at: 5000,
-      messageId: "a",
+      messageId: null,
       context: null,
-      expiresAt: null,
+      expiresAt: 5000 + 604800000,
     });
   });
 
-  it("write tool part producing an image keeps the generated image", () => {
-    const messages = [
-      msg("a", "assistant", [
-        {
-          type: "tool",
-          tool: "write",
-          state: { status: "completed", input: { filePath: "/tmp/preview-test/chart.png" } },
-        },
-      ]),
-    ];
-    const got = deriveArtifacts(messages, [], "ses_a");
+  it("outbox files from another session are excluded (workspace-linked)", () => {
+    const got = deriveArtifacts([], [], "ses_a", [
+      { path: "/home/dev/.manta-outbox/x.csv", name: "x.csv", size: 1, sessionID: "ses_OTHER", mtime: 1000, expiresAt: null },
+    ]);
+    expect(got).toEqual([]);
+  });
+
+  it("outbox image file → image artifact with its mime", () => {
+    const got = deriveArtifacts([], [], "ses_a", [
+      { path: "/home/dev/.manta-outbox/shot.png", name: "shot.png", size: 2048, sessionID: "ses_a", mtime: 1000, expiresAt: null },
+    ]);
     expect(got).toHaveLength(1);
     expect(got[0].kind).toBe("image");
     expect(got[0].mime).toBe("image/png");
   });
 
-  it("write tool part falls back to the message timestamp when no tool start time", () => {
+  it("outbox file with an unknown extension keeps a null mime (file kind)", () => {
+    const got = deriveArtifacts([], [], "ses_a", [
+      { path: "/home/dev/.manta-outbox/archive.bin", name: "archive.bin", size: 99, sessionID: "ses_a", mtime: 1000, expiresAt: null },
+    ]);
+    expect(got).toHaveLength(1);
+    expect(got[0].kind).toBe("file");
+    expect(got[0].mime).toBeNull();
+  });
+
+  it("user uploads and outbox files both land in the same list", () => {
     const messages = [
-      msg("a", "assistant", [
-        {
-          type: "tool",
-          tool: "write",
-          state: { status: "completed", input: { filePath: "/tmp/report.md" } },
-        },
-      ]),
+      msg("u", "user", [filePart({ filename: "mine.csv", url: "file:///home/dev/.manta-uploads/mine.csv" })]),
     ];
-    const got = deriveArtifacts(messages, [], "ses_a");
-    expect(got.filter((a) => a.kind === "file")).toHaveLength(1);
-    expect(got[0].at).toBe(2000); // the message's created timestamp
+    const got = deriveArtifacts(messages, [], "ses_a", [
+      { path: "/home/dev/.manta-outbox/pushed.pdf", name: "pushed.pdf", size: 100, sessionID: "ses_a", mtime: 2000, expiresAt: null },
+    ]);
+    expect(got.length).toBe(2);
+    expect(got.map((a) => a.origin).sort()).toEqual(["agent", "user"]);
   });
 
   it("edit tool part → NO artifact (modifies existing source, not produced)", () => {

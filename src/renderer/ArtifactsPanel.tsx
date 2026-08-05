@@ -26,7 +26,7 @@ import {
   Search,
   X,
 } from "lucide-react";
-import type { ServedPageMeta } from "../shared/types";
+import type { OutboxFile, ServedPageMeta } from "../shared/types";
 import { useStore } from "./store";
 import {
   countByKind,
@@ -305,6 +305,7 @@ function ImageTile({
   onJump,
 }: {
   artifact: Artifact;
+  now?: number; // shared with FileRow so image tiles span the same render path
   onOpen: (el: HTMLElement) => void;
   onAttach: () => void;
   onDownload: () => void;
@@ -346,18 +347,24 @@ function fileGlyphTone(mime: string | null): string {
 
 function FileRow({
   artifact,
+  now,
   onOpen,
   onAttach,
   onDownload,
   onJump,
 }: {
   artifact: Artifact;
+  now: number;
   onOpen: (el: HTMLElement) => void;
   onAttach: () => void;
   onDownload: () => void;
   onJump: () => void;
 }) {
   const size = artifact.size;
+  // Outbox files carry a TTL and are swept (not deleted) on download, so they
+  // render a live/soon/expired pill just like hosted pages.
+  const expiry =
+    artifact.expiresAt != null ? pageState(artifact.expiresAt, now) : null;
   return (
     <div className="group flex items-center gap-[9px] rounded-sm px-2 py-[7px] hover:bg-fill-hover">
       <button
@@ -377,6 +384,12 @@ function FileRow({
             {size != null && " · "}
             {artifact.origin === "user" ? "you sent this" : "generated"}
           </span>
+          {expiry && artifact.expiresAt != null && (
+            <ExpiryPill
+              state={expiry}
+              label={expiry === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
+            />
+          )}
         </div>
       </button>
       <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
@@ -404,6 +417,7 @@ export function ArtifactsPanel({
   const messages = useStore((s) => (sessionId ? s.chatMessages[sessionId] ?? [] : []));
 
   const [pages, setPages] = useState<ServedPageMeta[]>([]);
+  const [outbox, setOutbox] = useState<OutboxFile[]>([]);
   const [width, setWidth] = useState(loadWidth);
   const widthRef = useRef(width);
   widthRef.current = width;
@@ -418,8 +432,9 @@ export function ArtifactsPanel({
   const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  // Page registry: fetch on open + 30s poll while open only. Timer cleared on
-  // close and on session change (mirrors useSessionResources).
+  // Page registry + outbox mailbox: fetch both on open + 30s poll while open
+  // only. Timer cleared on close and on session change (mirrors
+  // useSessionResources).
   useEffect(() => {
     if (!open || !sessionId) return;
     let cancelled = false;
@@ -429,6 +444,12 @@ export function ArtifactsPanel({
         if (!cancelled) setPages(list ?? []);
       } catch {
         /* best-effort page refresh */
+      }
+      try {
+        const entries = await window.api.outboxList(sessionId ?? "");
+        if (!cancelled) setOutbox(entries ?? []);
+      } catch {
+        /* best-effort outbox refresh */
       }
     };
     void refresh();
@@ -451,8 +472,8 @@ export function ArtifactsPanel({
 
   const now = useMemo(() => Date.now(), []);
   const artifacts = useMemo(
-    () => deriveArtifacts(messages, pages, sessionId ?? ""),
-    [messages, pages, sessionId],
+    () => deriveArtifacts(messages, pages, sessionId ?? "", outbox),
+    [messages, pages, outbox, sessionId],
   );
   const counts = useMemo(() => countByKind(artifacts), [artifacts]);
   const tabArtifacts = useMemo(
@@ -647,6 +668,7 @@ export function ArtifactsPanel({
                         <Row
                           key={a.id}
                           artifact={a}
+                          now={now}
                           onOpen={(el) => openRow(a, el)}
                           onAttach={() => void attachArtifact(a, sessionId ?? "")}
                           onDownload={() => void downloadArtifact(a)}

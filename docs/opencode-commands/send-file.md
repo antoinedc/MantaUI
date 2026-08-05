@@ -1,37 +1,43 @@
 ---
-description: Send a file from this remote box down to the user's laptop (their Downloads folder)
+description: Send a file from this remote box down to the user's machine as a durable artifact
 ---
 
 # /send-file
 
-Deliver a file from this machine to the user's laptop. manta (the desktop app the
-user is running) watches a special outbox directory on this box and pulls any
-file that appears there down to the user's computer — the reverse of the user
-dragging a file into the chat.
+Deliver a file from this machine to the user's machine. manta keeps a durable,
+workspace-linked mailbox on this box (`~/.manta-outbox/<sessionID>/`) and
+announces anything that appears there as an "AI sent you a file" toast; the
+file also shows up in the app's Artifacts panel Files tab for this conversation.
 
-## How to send a file
+## Preferred: the `send_file` tool
 
-Copy the file into `~/.manta-outbox/` on this box. That's it — manta detects it
-within a few seconds and saves it to the user's Downloads folder (or, depending
-on the user's settings, asks them to confirm first). The file is removed from
-the outbox once it's been delivered.
+Use the `send_file` opencode tool (installed at
+`~/.config/opencode/tools/send-file.ts`) — it knows this session's id, so the
+file is automatically workspace-linked. It copies the file (your working copy
+is kept), sets a TTL (default 7 days), and records it in the Files tab.
+
+## Fallback: bare copy (rarely)
+
+Only if the tool is not installed. Copy the file into a subdir named by this
+session's id:
 
 ```bash
-mkdir -p ~/.manta-outbox
-cp /path/to/the/file.pdf ~/.manta-outbox/
+mkdir -p ~/.manta-outbox/<session_id>
+cp /path/to/the/file.pdf ~/.manta-outbox/<session_id>/
 ```
 
-Keep the original filename meaningful — it becomes the name of the file the user
-receives.
+Keep the original filename meaningful — it becomes the name the user receives.
 
-## Notes
+## Semantics
 
-- Only put files the user actually asked for (or that you generated for them)
-  into the outbox. It writes straight to their machine.
+- **Durable, not one-shot.** The file is NOT deleted when the user downloads
+  it; it stays retrievable until it expires (TTL, default 7 days), then the
+  box's sweep removes it.
+- **Workspace-linked.** Files under a `<sessionID>/` subdir show only in that
+  conversation's Artifacts Files tab. A bare copy to the mailbox root is NOT
+  workspace-linked and won't appear per-conversation.
+- Only send files the user actually asked for (or that you generated for them) —
+  it writes straight to their machine.
 - Don't copy huge files or whole directories — send the specific artifact.
-- Scope by session if useful: `~/.manta-outbox/<anything>/file.ext` also works;
-  the subdirectory is shown to the user as a label and otherwise ignored.
 - This is delivery only. To *read* a file the user sent you, look in
   `~/.manta-uploads/` (or use the absolute path manta pasted into the prompt).
-
-$ARGUMENTS
