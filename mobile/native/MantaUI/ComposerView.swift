@@ -79,13 +79,13 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             expandAnchor
-            // Two-row composer (BET: model inside the composer). Row 1 is the
-            // text input; row 2 is a single control bar with the model selector
-            // and attach on the LEFT, mic and send on the RIGHT. Hence the
-            // composer is two rows by default — type up top, act below — rather
-            // than a one-row capsule with inline controls.
+            // Two-row composer (BET: model inside the composer): the text input
+            // sits at the top and the control row — model selector + attach on
+            // the LEFT, mic + send on the RIGHT — is pinned to the box's last
+            // line, INSIDE the same glass as the input. Hence the composer is
+            // two rows by default — type up top, act below — rather than a
+            // one-row capsule with inline controls.
             inputBox
-            controlRow
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -148,12 +148,10 @@ struct ComposerView: View {
         withAnimation(.smooth(duration: 0.22)) { isTall = next }
     }
 
-    /// The input box — row 1 of the two-row composer. It holds ONLY the text
-    /// (and attachment chips above it) now; the attach/mic/send controls moved
-    /// down into `controlRow`. Because it no longer hosts inline controls, the
-    /// box has a single always-rounded form instead of a compact-capsule/tall
-    /// two-form switch, which also removes the keyboard-dropping teardown that
-    /// used to accompany every mode change.
+    /// The input box — the whole composer. The message (and attachment chips
+    /// above it) sits at the top; the control row is pinned to the LAST LINE of
+    /// the box, inside the same glass, so model + attach / mic + send read as
+    /// the box's own footer rather than loose chrome below it.
     private var inputBox: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             // Chips rail — ONLY when something is actually attached. When the
@@ -168,8 +166,18 @@ struct ComposerView: View {
                     .clipped()
             }
 
-            // The text field by itself — controls live below in controlRow.
+            // The message line.
             textArea
+
+            // Control row — pinned to the box's final line, with a hairline
+            // above it so it reads as the composer's footer row.
+            controlRow
+                .padding(.top, Metrics.spacing.sp1)
+                .overlay(alignment: .top) {
+                    tokens.borderSubtle
+                        .frame(height: Metrics.spacing.spPx)
+                        .frame(maxWidth: .infinity)
+                }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -186,11 +194,10 @@ struct ComposerView: View {
         }
     }
 
-    /// Row 2 of the two-row composer — a single control bar spanning the full
-    /// width. Model selector and attach sit at the LEFT; the round
-    /// scroll-to-bottom control trails with the model chip, and mic + send sit
-    /// at the RIGHT. This is the composer's resting shape: type in row 1, act
-    /// in row 2.
+    /// The control row — model selector and attach on the LEFT, mic + send on
+    /// the RIGHT, with the round scroll-to-bottom chip trailing the model chip.
+    /// Rendered inside `inputBox`, pinned to its last line, so it reads as the
+    /// composer's footer: type in the box, act on its bottom line.
     private var controlRow: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             modelPill
