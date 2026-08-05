@@ -310,7 +310,7 @@ describe("M527 primitive rules", () => {
       "tracking-[.1em]": ["Eyebrow.tsx"], // the eyebrow's letter-spaced uppercase signature (BET-614)
       "last:border-b-0": ["SettingsRow.tsx"], // the settings-row trailing-border removal — the .setrow row-divider signature (BET-614)
       "w-[6px]": ["StatusDot.tsx"], // the real 6px status dot — `.tool-h .g` (BET-636)
-      "bg-inset": ["OutputWell.tsx"], // the recessed output well — `.tool-b`/`.ask-cmd` (BET-636)
+      "bg-inset": ["OutputWell.tsx", "ArtifactsPanel.tsx"], // the recessed output well — `.tool-b`/`.ask-cmd` (BET-636); plus the Artifacts panel's segmented tab track, which uses the same recessed-inset surface per its conformance mockup (`.mk-tabs`, BET-659)
       "px-[28px]": ["MeasureColumn.tsx"], // the 28px reading-column side inset — `.wrap`/`.comp-in` (BET-637)
       "max-w-[min(88%,var(--measure))]": ["MessageBubble.tsx"], // the user bubble's 88%/measure min() cap — `.umsg` (BET-637, BET-646)
       "text-[12.5px]": ["ToolCard.tsx", "OutputWell.tsx", "Button.tsx", "SettingsRow.tsx"], // the 12.5px mono chrome — ToolCard header + OutputWell well (BET-636), plus the pre-existing Button label and SettingsRow help which already owned it before this primitive tracked it

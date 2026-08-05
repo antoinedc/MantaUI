@@ -1,1 +1,1 @@
-- text: "/\\d+,\\d+ \\/ \\d+,\\d+,\\d+ tokens\\(7%\\) Fresh input \\d+,\\d+ uncached, paid full rate Cache write 0 warm-up, full rate \\+ surcharge Cache read \\d+,\\d+ cached, ~\\d+% cost Model window: Claude Opus 4\\.7/"
+- dialog "Context usage": /7% [\d,.]+[bkmBKM]+ \/ [\d,.]+[bkmBKM]+ tokens Fresh input [\d,.]+[bkmBKM]+ Cache write 0 Cache read [\d,.]+[bkmBKM]+ Model window · Claude Opus 4\.7/

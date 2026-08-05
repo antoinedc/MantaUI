@@ -545,6 +545,34 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  {
+    // BET-659 §Design conformance: the state this issue actually finishes —
+    // the panel chrome with an empty Links tab. `final`/`region`/`mockupRegion`
+    // crop the real page via the required `.manta-artifacts-panel` hook; the
+    // row compares it against `docs/screens/artifacts/mockup.html` (`.mk-empty`).
+    // Body rows for Links/Images/Files contents stay OUT (BET-660 adds them).
+    id: "artifacts-empty",
+    title: "Artifacts panel — empty Links tab",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-artifacts-panel",
+    region: ".manta-artifacts-panel",
+    mockupRegion: ".mk-empty",
+    mockup: "docs/screens/artifacts/mockup.html",
+    viewport: DESKTOP_VIEWPORT,
+    actions: async (page) => {
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
+    },
+    surfacesClosed: [
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

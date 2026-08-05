@@ -37,11 +37,13 @@
 - main:
   - text: infra / Deploy new billing service feat/orders-csv-export
   - button "7%"
-  - button "Terminal"
+  - button "Show artifacts"
   - button "Session actions"
-  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py/"
+  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\./"
+  - button "Read app/routes/orders.py"
   - button "Copy"
-  - text: /Read \d+ lines \(ctrl\+o to expand\) Added/
+  - button "Expand"
+  - text: Added
   - code: /export.csv
   - text: . It reuses the same filter query as
   - code: GET /orders
@@ -49,7 +51,7 @@
   - code: csv_stream
   - text: ", and writes the header first. Running the test suite now — should turn green on the new"
   - code: test_…
-  - text: "/cases\\. ⎿ ■ Add \\/api\\/v1\\/orders\\/export\\.csv endpoint ☐ Test with \\d+-row synthetic dataset ☐ Update API docs ✓ Inspect existing \\/orders route \\+ filter parser ✓ Confirm streaming response helper signature Question Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - text: "/cases\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"
@@ -57,8 +59,8 @@
   - radio "Custom (specify in notes)"
   - textbox "Or type your own answer…"
   - separator
-  - button "Dismiss"
   - button "Submit" [disabled]
+  - button "Dismiss"
   - text: Run a shell command? bash
   - button "Allow once"
   - button "Always allow alembic upgrade *"
@@ -67,6 +69,8 @@
   - button "Send message"
   - button "Opus 4.7"
   - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
   - button "schedules"
   - button "secrets"
   - button "webhooks"

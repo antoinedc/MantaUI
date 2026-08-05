@@ -286,6 +286,7 @@ Window-scoped, in `App.tsx`. xterm-internal handlers (⌘C/V/F/K) live in
 | ⌘T          | New session in active project                |
 | ⌘1..9       | Jump to nth (project, window) in sidebar     |
 | ⌥⌘↑ / ⌥⌘↓ | Step prev/next session, wraps both ends     |
+| ⌘I          | Toggle the Artifacts panel (chat pane active only) |
 | ⌘,          | Open Settings                                |
 
 Flat order for ⌘1..9 / ⌥⌘ navigation comes from `flatSessions(projects)` —

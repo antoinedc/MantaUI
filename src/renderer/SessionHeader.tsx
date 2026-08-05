@@ -11,7 +11,7 @@
 // props by ChatPanel, which owns the session lifecycle.
 
 import { useRef, useState, type CSSProperties } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -63,6 +63,8 @@ export function SessionHeader({
   mode,
   onModeChange,
   availableLaunchers,
+  artifactsOpen,
+  onToggleArtifacts,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -93,12 +95,20 @@ export function SessionHeader({
   // omitted → no launcher entries (desktop callers supply it; mobile owns
   // mode via its own <select> and passes neither this nor onModeChange).
   availableLaunchers?: AvailableLauncher[];
+  // BET-659: the Artifacts panel toggle. `artifactsOpen` labels + tints the
+  // button; onToggle flips the App-owned panel open state. Optional so test
+  // harnesses / non-desktop callers that don't own the panel omit them.
+  artifactsOpen?: boolean;
+  onToggleArtifacts?: () => void;
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
   const fill = ctxStageColor(pct);
   const showContext = totalInput > 0;
   const stale = staleCache.isStale;
+  const artifactsToggle = onToggleArtifacts
+    ? { isOpen: artifactsOpen === true, toggle: onToggleArtifacts }
+    : null;
   const crumb = breadcrumb
     ? breadcrumb.window
       ? `${breadcrumb.project} / ${breadcrumb.window}`
@@ -155,6 +165,23 @@ export function SessionHeader({
             modelName={modelName}
             staleCache={staleCache}
             onClear={onClear}
+          />
+        )}
+
+        {/* Artifacts toggle (BET-659): toggles a panel, not a popup — so no
+            aria-haspopup (the visual gate scans for it) and no manta hook.
+            Tinted when open. Sits in the no-drag right group so macOS gets the
+            click. Omitted when the caller doesn't own the panel. */}
+        {artifactsToggle && (
+          <IconButton
+            icon={
+              <PanelRight
+                className={artifactsToggle.isOpen ? "text-[var(--accent-tx)]" : undefined}
+              />
+            }
+            label={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
+            title={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
+            onClick={artifactsToggle.toggle}
           />
         )}
 

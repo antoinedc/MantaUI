@@ -142,6 +142,11 @@ type Props = {
   // header's session menu so a launcher mode is reachable from the running UI
   // (the header glyph only toggles Chat ↔ Terminal).
   availableLaunchers?: AvailableLauncher[];
+  // BET-659: the Artifacts panel toggle state + handler, owned by App (which
+  // mounts the panel as a sibling of <main>). Threaded through to the header.
+  // Optional so test harnesses that construct ChatPanel directly omit them.
+  artifactsOpen?: boolean;
+  onToggleArtifacts?: () => void;
 };
 
 export function ChatPanel({
@@ -155,6 +160,8 @@ export function ChatPanel({
   mode = "chat",
   onModeChange,
   availableLaunchers = [],
+  artifactsOpen = false,
+  onToggleArtifacts = () => {},
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
@@ -195,6 +202,7 @@ export function ChatPanel({
     refreshWebhooks,
   } = resources;
   const setChatSubagents = useStore((s) => s.setChatSubagents);
+  const setChatMessages = useStore((s) => s.setChatMessages);
 
   // BET-418 §A: pre-flight background-job approvals. When trust mode is OFF
   // and the model's `delegate` call declared `tools`, the server holds the
@@ -1864,6 +1872,20 @@ export function ChatPanel({
     return () => setChatSubagents(sessionId, 0);
   }, [sessionId, setChatSubagents]);
 
+  // BET-659: lift this session's live transcript into the store so the
+  // Artifacts panel can derive artifacts without a second opencodeMessages
+  // fetch. `messages` only changes on an actual transcript commit (never on a
+  // keystroke re-render), and setChatMessages no-ops when the reference is
+  // unchanged, so this costs nothing during typing.
+  useEffect(() => {
+    setChatMessages(sessionId, messages ?? []);
+  }, [sessionId, messages, setChatMessages]);
+  // Clear the store entry on unmount / session change so a stale transcript
+  // from the previous session doesn't linger in the artifacts derivation.
+  useEffect(() => {
+    return () => setChatMessages(sessionId, []);
+  }, [sessionId, setChatMessages]);
+
   if (error) {
     return (
       <div className="h-full w-full flex items-center justify-center bg-bg text-text-muted p-6 font-mono">
@@ -1936,6 +1958,8 @@ export function ChatPanel({
         mode={mode}
         onModeChange={onModeChange}
         availableLaunchers={availableLaunchers}
+        artifactsOpen={artifactsOpen}
+        onToggleArtifacts={onToggleArtifacts}
       />
 
       <Transcript

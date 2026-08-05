@@ -37,14 +37,19 @@
 - main:
   - text: infra / Deploy new billing service feat/orders-csv-export
   - button "7%"
+  - button "Show artifacts"
   - button "Session actions"
-  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\. Read app\\/routes\\/orders\\.py/"
+  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\./"
+  - button "Read app/routes/orders.py"
   - button "Copy"
-  - text: /Read \d+ lines \(ctrl\+o to expand\) Edit app\/routes\/orders\.py \+\d+ −4/
+  - button "Expand"
+  - button /Edit app\/routes\/orders\.py \+\d+ −4/
   - button "Copy"
-  - text: "/9 9 \\d+ @router\\.get\\(\"\"\\) \\d+ − async def list_orders\\( \\d+ \\+ async def list_orders\\( \\d+ status: str \\| None = Query\\(default=None\\), \\d+ customer_id: str \\| None = Query\\(default=None\\), \\d+ created_after: datetime \\| None = Query\\(default=None\\), \\d+ created_before: datetime \\| None = Query\\(default=None\\), \\d+ session: AsyncSession = Depends\\(get_session\\), \\d+ \\+ \\) -> list\\[dict\\]: \\d+ \\+ \"\"\"Return orders as a JSON array\\.\"\"\" \\d+ query = Order\\.query\\(session\\) \\d+ if status: query = query\\.filter\\(Order\\.status == status\\) \\d+ if customer_id: query = query\\.filter\\(Order\\.customer_id == customer_id\\) \\d+ if created_after: query = query\\.filter\\(Order\\.created_at >= created_after\\) \\d+ if created_before: query = query\\.filter\\(Order\\.created_at <= created_before\\) \\d+ return \\[o\\.to_dict\\(\\) for o in \\(await query\\.all\\(\\)\\)\\.scalars\\(\\)\\] \\d+ \\+ \\d+ \\+ \\d+ \\+ @router\\.get\\(\"\\/export\\.csv\"\\) \\d+ \\+ async def export_orders_csv\\( \\d+ \\+ status: str \\| None = Query\\(default=None\\), \\d+ \\+ customer_id: str \\| None = Query\\(default=None\\), \\d+ \\+ created_after: datetime \\| None = Query\\(default=None\\), \\d+ \\+ created_before: datetime \\| None = Query\\(default=None\\), \\d+ \\+ session: AsyncSession = Depends\\(get_session\\), \\d+ \\+ \\): \\d+ \\+ \"\"\"Stream orders as CSV\\. Header row first\\.\"\"\" \\d+ \\+ query = Order\\.query\\(session\\) \\d+ \\+ if status: query = query\\.filter\\(Order\\.status == status\\) \\d+ \\+ if customer_id: query = query\\.filter\\(Order\\.customer_id == customer_id\\) \\d+ \\+ if created_after: query = query\\.filter\\(Order\\.created_at >= created_after\\) \\d+ \\+ if created_before: query = query\\.filter\\(Order\\.created_at <= created_before\\) \\d+ \\+ result = await query\\.stream\\(\\) \\d+ \\+ return csv_stream\\( \\d+ \\+ result, \\d+ \\+ header=\\[\"id\", \"customer_id\", \"status\", \"amount_cents\", \"created_at\"\\], \\d+ \\+ row=lambda o: \\[o\\.id, o\\.customer_id, o\\.status, o\\.amount_cents, o\\.created_at\\.isoformat\\(\\)\\], \\d+ \\+ \\) Bash pytest tests\\/test_orders_export\\.py -x -q running/"
+  - button "Expand"
+  - button "Bash pytest tests/test_orders_export.py -x -q running"
   - button "Copy"
-  - text: "/… 1 earlier line \\(ctrl\\+o to expand\\) platform linux -- Python \\d+\\.\\d+\\.9, pytest-8\\.0\\.2, pluggy-1\\.5\\.0 rootdir: \\/home\\/dev\\/projects\\/infra\\/services\\/billing collected 5 items tests\\/test_orders_export\\.py::test_header_row \\.\\.\\.\\.\\.\\.\\.\\.\\.\\.\\.\\.\\.\\.\\. Added/"
+  - button "Expand"
+  - text: Added
   - code: /export.csv
   - text: . It reuses the same filter query as
   - code: GET /orders
@@ -52,7 +57,7 @@
   - code: csv_stream
   - text: ", and writes the header first. Running the test suite now — should turn green on the new"
   - code: test_…
-  - text: "/cases\\. ⎿ ■ Add \\/api\\/v1\\/orders\\/export\\.csv endpoint ☐ Test with \\d+-row synthetic dataset ☐ Update API docs ✓ Inspect existing \\/orders route \\+ filter parser ✓ Confirm streaming response helper signature Question Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - text: "/cases\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"
@@ -60,8 +65,8 @@
   - radio "Custom (specify in notes)"
   - textbox "Or type your own answer…"
   - separator
-  - button "Dismiss"
   - button "Submit" [disabled]
+  - button "Dismiss"
   - text: Run a shell command? bash
   - button "Allow once"
   - button "Always allow alembic upgrade *"
@@ -70,6 +75,8 @@
   - button "Send message"
   - button "Opus 4.7"
   - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
   - button "schedules"
   - button "secrets"
   - button "webhooks"
