@@ -171,16 +171,6 @@ private struct ChatScreenContent: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        // Bottom scrim — the same fade as the top-of-transcript gradient, but
-        // anchored UNDER the composer (declared BEFORE the safeAreaInset that
-        // holds it below, so the composer renders over the fade). Content that
-        // scrolls down under the glass composer passes through this band and
-        // eases out, mirroring how the top scrim fades content under the header
-        // — not a gradient band that floats above the composer on the transcript.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: Self.bottomScrimHeight)
-        }
         // The bottom stack is a safeAreaInset, which reserves its space by
         // SHRINKING the scroll view. That is the whole point.
         //
@@ -244,6 +234,15 @@ private struct ChatScreenContent: View {
         // carries its own top inset (see `transcript`) — the space is reserved
         // by the scroll content instead of by the header, which is what lets
         // rows pass beneath the glass while still coming to rest below it.
+        // Bottom scrim — the exact mirror of the top one below: an overlay
+        // aligned to the true bottom edge, applied AFTER the composer's
+        // safeAreaInset so it anchors at the very bottom alongside the composer
+        // (not as a band floating on the shrunken transcript above it).
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: Self.bottomScrimHeight)
+                .allowsHitTesting(false)
+        }
         // Top scrim UNDER the header buttons (declared first, so it draws
         // below them). The chat screen hides the navigation bar, so it gets
         // none of the system's own scroll-edge treatment — which is what the
