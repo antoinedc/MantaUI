@@ -171,6 +171,16 @@ private struct ChatScreenContent: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
+        // Bottom scrim — the same fade as the top-of-transcript gradient, but
+        // anchored UNDER the composer (declared BEFORE the safeAreaInset that
+        // holds it below, so the composer renders over the fade). Content that
+        // scrolls down under the glass composer passes through this band and
+        // eases out, mirroring how the top scrim fades content under the header
+        // — not a gradient band that floats above the composer on the transcript.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: Self.bottomScrimHeight)
+        }
         // The bottom stack is a safeAreaInset, which reserves its space by
         // SHRINKING the scroll view. That is the whole point.
         //
@@ -491,15 +501,6 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // Bottom scrim — the same fade as the top-of-transcript gradient, so
-        // the newest messages ease out as they approach the composer instead of
-        // colliding with it. Attached to the TiledView (whose shrunken viewport
-        // ends exactly at the composer's top edge), which is what the top scrim
-        // overlays the header against.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: Self.bottomScrimHeight)
-        }
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
