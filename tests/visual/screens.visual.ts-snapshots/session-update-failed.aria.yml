@@ -39,13 +39,15 @@
   - button "Download"
   - button "Dismiss update"
   - text: ethernal / Add CSV export feat/orders-csv-export
-  - button "Terminal"
+  - button "Show artifacts"
   - button "Session actions"
   - text: ✻ Welcome. Type a message below to start.
   - textbox "Reply, or describe the next task…"
   - button "Send message"
   - button "Opus 4.7"
   - button "High"
+  - button "Fast mode" [disabled]
+  - button "Attach files"
   - button "schedules"
   - button "secrets"
   - button "webhooks"

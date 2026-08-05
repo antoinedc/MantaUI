@@ -558,14 +558,21 @@ export const SCREENS = [
     final: 'aside[aria-label="Artifacts"]',
     actions: async (page) => {
       await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
-      await page.locator('[aria-label="Show artifacts"]').click();
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: null,
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
       "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },

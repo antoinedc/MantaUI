@@ -37,7 +37,7 @@
 - main:
   - text: infra / Deploy new billing service feat/orders-csv-export
   - button "7%"
-  - button "Show artifacts"
+  - button "Hide artifacts"
   - button "Session actions"
   - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\./"
   - button "Read app/routes/orders.py"
@@ -81,3 +81,12 @@
   - button "secrets"
   - button "webhooks"
   - button "Permissions on — click to bypass"
+- complementary "Artifacts":
+  - text: ""
+  - button "Search artifacts"
+  - button "Close artifacts panel"
+  - tablist "Artifact kind":
+    - tab "Links 0" [selected]
+    - tab "Images 0"
+    - tab "Files 0"
+  - text: No links yet — 0 images, 0 files
