@@ -2167,3 +2167,112 @@ export function updateEntryMotion(
   state.hadOptimistic = hasOptimistic;
   return state;
 }
+
+// =============================================================================
+// Artifact preview (BET-661) — pure helpers for the in-app preview overlay.
+// Type routing, the size-limit guard, and the footer/metadata formatting all
+// live here so the overlay component's per-type body switch is the only
+// renderer-specific bit and everything else is unit-testable.
+// =============================================================================
+
+/** The preview size cap: > <this> bytes and we do not fetch the body at all.
+ *  Exactly this many bytes passes; one more byte refuses (`isWithinPreviewSize`). */
+export const MAX_PREVIEW_BYTES = 25 * 1024 * 1024;
+
+export type PreviewType = "image" | "pdf" | "text" | "refuse";
+
+/** The small text-extension allowlist (the "text renderer" fallback when the
+ *  mime gives no text/*-family answer). `.csv` is deliberately ABSENT — it is
+ *  out of scope and must refuse (download), per BET-661. */
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  ".txt", ".md", ".json", ".log", ".ts", ".tsx", ".js", ".mjs",
+  ".css", ".html", ".yml", ".yaml", ".sh",
+]);
+
+/** Lowercased extension (including the dot) of `filename`, "" when none. */
+export function previewExtension(filename: string): string {
+  const lower = (filename ?? "").toLowerCase();
+  const i = lower.lastIndexOf(".");
+  return i >= 0 ? lower.slice(i) : "";
+}
+
+/** Resolve which renderer an artifact should use, from its mime with a
+ *  fallback to its filename extension. Exactly four renderers plus a refusal:
+ *
+ *    image/*            → image
+ *    application/pdf    → pdf
+ *    text/csv           → refuse (out of scope; downloads)
+ *    text/*             → text
+ *    any other mime     → text when the extension is in the allowlist, else refuse
+ *    (null mime)        → text when the extension is in the allowlist, else refuse
+ *
+ *  The extension fallback therefore applies both when mime is null AND when
+ *  mime is a recognized-but-unknown family (e.g. application/octet-stream for
+ *  a `.ts` source) — either way a known source extension still previews. */
+export function resolvePreviewType(mime: string | null, filename: string): PreviewType {
+  if (mime) {
+    const m = mime.toLowerCase();
+    if (m.startsWith("image/")) return "image";
+    if (m === "application/pdf") return "pdf";
+    if (m === "text/csv") return "refuse";
+    if (m.startsWith("text/")) return "text";
+  }
+  if (TEXT_PREVIEW_EXTENSIONS.has(previewExtension(filename))) return "text";
+  return "refuse";
+}
+
+/** The size guardian — the load-bearing predicate for BET-657's `HEAD` guard.
+ *  Exactly `MAX_PREVIEW_BYTES` (25 MiB) passes; one more byte refuses. */
+export function isWithinPreviewSize(contentLength: number): boolean {
+  return Number.isFinite(contentLength) && contentLength >= 0 && contentLength <= MAX_PREVIEW_BYTES;
+}
+
+/** Origin word for the footer, matching the file rows: `you sent this` for a
+ *  user upload, `generated` for an agent-produced artifact. */
+export function previewOriginWord(origin: "user" | "agent"): string {
+  return origin === "user" ? "you sent this" : "generated";
+}
+
+/** Line count for the text footer — matches CodeBlock's "trim a single
+ *  trailing newline" convention so the reported count is the displayed one. */
+export function countPreviewLines(text: string): number {
+  if (!text) return 0;
+  const cleaned = text.replace(/\n$/, "");
+  return cleaned.length === 0 ? 1 : cleaned.split("\n").length;
+}
+
+/** Language label for the text renderer's CodeBlock, from the filename. Falls
+ *  to "text" (Prism no-op) for anything unmapped. */
+const PREVIEW_LANGUAGE_BY_EXT: Record<string, string> = {
+  ".ts": "typescript", ".tsx": "tsx", ".js": "javascript", ".mjs": "javascript",
+  ".json": "json", ".css": "css", ".html": "markup", ".md": "markdown",
+  ".yml": "yaml", ".yaml": "yaml", ".sh": "bash", ".txt": "text", ".log": "text",
+};
+
+export function previewLanguage(filename: string): string {
+  return PREVIEW_LANGUAGE_BY_EXT[previewExtension(filename)] ?? "text";
+}
+
+/** The preview footer metadata line, per type:
+ *   image → `<width> × <height> · <size> · <origin word>`
+ *   pdf   → `<size>`
+ *   text  → `<n> lines · <language>`
+ * Unknown/absent fields degrade to "0" / "text" rather than crashing the
+ * layout. `formatBytes` (shared with the file rows) supplies the size token. */
+export function formatPreviewFooter(
+  type: PreviewType,
+  info: {
+    size?: number;
+    width?: number;
+    height?: number;
+    lines?: number;
+    language?: string;
+    origin?: "user" | "agent";
+  },
+): string {
+  if (type === "image") {
+    return `${info.width ?? 0} × ${info.height ?? 0} · ${formatBytes(info.size ?? 0)} · ${previewOriginWord(info.origin ?? "agent")}`;
+  }
+  if (type === "pdf") return formatBytes(info.size ?? 0);
+  return `${info.lines ?? 0} lines · ${info.language ?? "text"}`;
+}

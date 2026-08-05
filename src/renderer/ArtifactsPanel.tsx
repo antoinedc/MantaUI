@@ -16,9 +16,58 @@ import {
   countByKind,
   deriveArtifacts,
   groupByDay,
+  type Artifact,
   type ArtifactKind,
 } from "./artifacts";
+import { resolvePreviewType } from "./chatUtils";
 import { IconButton } from "./IconButton";
+import { ArtifactPreview } from "./ArtifactPreview";
+import { authHeaders, clientToken, serverBase } from "./api/httpApi";
+
+// Download an artifact to the user's machine. Read-only: fetches the bytes
+// from /api/peek (no source deletion — unlike the outbox /api/download path)
+// and hands a blob: URL to a synthetic <a download>, the same save pattern
+// httpApi's agentPullFile uses. BET-660's rows reuse this; do not reimplement.
+export async function downloadArtifact(artifact: Artifact): Promise<void> {
+  try {
+    const url = `${serverBase()}/api/peek?path=${encodeURIComponent(artifact.href)}`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = artifact.label;
+    a.rel = "noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  } catch {
+    /* download trigger failed — non-fatal */
+  }
+}
+
+// Re-attach an artifact into the session's composer. Fetches the bytes and
+// hands a File to the existing `manta-attach-files` bridge, which renders the
+// uploading→ready chip and converts it into a FilePart on submit — the same
+// pipeline as every other attach. BET-660's rows reuse this; do not reimplement.
+export async function attachArtifact(artifact: Artifact, sessionId: string): Promise<void> {
+  try {
+    const url = `${serverBase()}/api/peek?path=${encodeURIComponent(artifact.href)}`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const file = new File([blob], artifact.label, {
+      type: artifact.mime ?? "application/octet-stream",
+    });
+    window.dispatchEvent(
+      new CustomEvent("manta-attach-files", { detail: { sessionId, files: [file] } }),
+    );
+  } catch {
+    /* attach failed — non-fatal */
+  }
+}
 
 const WIDTH_KEY = "manta:artifacts:width";
 const MIN_WIDTH = 280;
@@ -90,6 +139,11 @@ export function ArtifactsPanel({
   const [tab, setTab] = useState<ArtifactKind>("link");
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  // The preview overlay: index into `previewable` (the current tab's
+  // preview-aware artifacts), or null when closed. `previewSourceRef` keeps
+  // the row that opened it so focus returns there on close.
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   // Page registry: fetch on open + 30s poll while open only. Timer cleared on
@@ -114,11 +168,13 @@ export function ArtifactsPanel({
   }, [open, sessionId]);
 
   // Reset the tab to the always-Links default + dismiss search on session
-  // change so the panel follows the active chat pane cleanly.
+  // change so the panel follows the active chat pane cleanly. Also close any
+  // open preview (its artifacts belong to the old session).
   useEffect(() => {
     setTab("link");
     setSearchOpen(false);
     setQuery("");
+    setPreviewIndex(null);
   }, [sessionId]);
 
   const artifacts = useMemo(
@@ -130,6 +186,13 @@ export function ArtifactsPanel({
     () => artifacts.filter((a) => a.kind === tab),
     [artifacts, tab],
   );
+  // The arrow-key paging set: the current tab's artifacts with a resolvable
+  // preview renderer, in display order. Refuse-type rows never open the
+  // overlay — for them we download instead (their rows are BET-660's job).
+  const previewable = useMemo(
+    () => tabArtifacts.filter((a) => resolvePreviewType(a.mime, a.label) !== "refuse"),
+    [tabArtifacts],
+  );
   const filtered = useMemo(() => {
     if (!query) return tabArtifacts;
     const q = query.toLowerCase();
@@ -139,14 +202,26 @@ export function ArtifactsPanel({
   }, [tabArtifacts, query]);
   const groups = useMemo(() => groupByDay(filtered, Date.now()), [filtered]);
 
+  const openPreview = (pi: number, el: HTMLElement) => {
+    previewSourceRef.current = el;
+    setPreviewIndex(pi);
+  };
+  const closePreview = () => {
+    setPreviewIndex(null);
+    // Focus returns to the row that opened the overlay (BET-661).
+    previewSourceRef.current?.focus();
+    previewSourceRef.current = null;
+  };
+
   if (!open) return null;
 
   return (
-    <aside
-      className="manta-artifacts-panel relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0"
-      style={{ width }}
-      aria-label="Artifacts"
-    >
+    <>
+      <aside
+        className="manta-artifacts-panel relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0"
+        style={{ width }}
+        aria-label="Artifacts"
+      >
       {/* 4px resize handle on the left edge, pointer events only. Clamp to
           280-520; persist on pointer-up, not on every move. */}
       <div
@@ -242,15 +317,41 @@ export function ArtifactsPanel({
             <div className="sticky top-0 bg-bg-elev px-3 py-1 text-micro font-semibold uppercase text-text-faint">
               {g.label}
             </div>
-            {g.items.map((a) => (
-              <div
-                key={a.id}
-                className="px-3 py-1 text-meta text-text-muted truncate"
-                title={a.href}
-              >
-                {a.label}
-              </div>
-            ))}
+            {g.items.map((a) => {
+              const pi = previewable.findIndex((p) => p.id === a.id);
+              const isPreviewable = pi >= 0;
+              return (
+                <div
+                  key={a.id}
+                  role={isPreviewable ? "button" : undefined}
+                  tabIndex={isPreviewable ? 0 : undefined}
+                  title={a.href}
+                  onClick={
+                    isPreviewable
+                      ? (e) => openPreview(pi, e.currentTarget)
+                      : undefined
+                  }
+                  onKeyDown={
+                    isPreviewable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openPreview(pi, e.currentTarget);
+                          }
+                        }
+                      : undefined
+                  }
+                  className={
+                    "px-3 py-1 text-meta text-text-muted truncate" +
+                    (isPreviewable
+                      ? " rounded-xs cursor-pointer hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent"
+                      : "")
+                  }
+                >
+                  {a.label}
+                </div>
+              );
+            })}
           </div>
         ))}
         {groups.length === 0 && (
@@ -266,6 +367,20 @@ export function ArtifactsPanel({
           </div>
         )}
       </div>
-    </aside>
+      </aside>
+
+      {/* The preview overlay — one surface, a renderer per type. Rendered here
+          (sibling of the panel) so it covers the whole window, not just the
+          panel strip. */}
+      {previewIndex != null && previewable[previewIndex] != null && (
+        <ArtifactPreview
+          artifacts={previewable}
+          index={previewIndex}
+          onClose={closePreview}
+          onDownload={downloadArtifact}
+          onAttach={(a) => void attachArtifact(a, sessionId ?? "")}
+        />
+      )}
+    </>
   );
 }
