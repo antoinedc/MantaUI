@@ -194,21 +194,12 @@ private struct ChatScreenContent: View {
         // NO opaque backdrop on the inset. A scroll view still DRAWS its
         // content underneath a safe-area inset while scrolling, so the
         // transcript visibly slides beneath the glass composer (which blurs
-        // it) instead of behind a solid bar. The running-state row and the
-        // todos card are pinned to the BOTTOM of this stack (ordinary content
-        // in the transcript area, not glass), the todo list directly below the
-        // running row.
+        // it) instead of behind a solid bar. The todos card is pinned to the
+        // bottom of this stack, in the transcript area; the running-state row
+        // lives INSIDE the transcript as its typing indicator (see
+        // `transcript`), so it is not duplicated here.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // BET-630 (D1): the running-state working row — plain text,
-                // pinned to the bottom of the transcript rather than the
-                // composer. Shown only while a turn runs; the ambient refetch
-                // sweep lives on the composer's border and means a different
-                // thing, so the two never share an indicator. Not shown during
-                // a background refetch.
-                if store.running {
-                    RunningIndicator(store: store)
-                }
                 bottomCards
                 ComposerView(
                     sessionId: store.sessionId,
@@ -456,6 +447,16 @@ private struct ChatScreenContent: View {
             isProcessing: store.loadingEarlier
         ) {
             LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
+        })
+        // The running-state working row rendered as MessagingUI's typing
+        // indicator: a genuine row BELOW the last message, inside the scroll
+        // content — not floating chrome. It pins to the bottom because that is
+        // where the newest content sits, appears only while a turn runs, and
+        // vanishes when it ends. (BET-630 D1; the ambient refetch sweep lives
+        // on the composer's border and means a different thing, so the two
+        // never share an indicator.)
+        .typingIndicator(.indicator(isVisible: store.running) {
+            RunningIndicator(store: store)
         })
         // The floating "scroll to bottom" arrow. It appears only once the user
         // has scrolled up (pointsFromBottom above the threshold) — at the
