@@ -288,7 +288,7 @@ function LinkCard({
               ellipsis when tight; the pill is a shrink-0 sibling so name and
               expiry never wrap to a second line. */}
           <div className="flex min-w-0 items-center gap-1">
-            <span className="min-w-0 truncate text-meta font-semibold text-text">
+            <span className="min-w-0 flex-1 truncate text-meta font-semibold text-text">
               {artifact.label}
             </span>
             {/* Expiry chip — present on every hosted page (serve_page), incl. a
@@ -420,7 +420,7 @@ function FileRow({
             an ellipsis when tight; the chip is a shrink-0 sibling so outbox
             files show their TTL next to the name, never wrapped. */}
         <div className="flex min-w-0 items-center gap-1">
-          <span className="min-w-0 truncate font-mono text-meta text-text">{artifact.label}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-meta text-text">{artifact.label}</span>
           {expiry && artifact.expiresAt != null && (
             <ExpiryPill
               state={expiry}
