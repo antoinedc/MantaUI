@@ -136,11 +136,85 @@ describe("deriveArtifacts", () => {
     expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);
   });
 
-  it("tool parts of every kind → NO artifacts", () => {
+  it("tool parts of every kind → NO artifacts (write without a path is no artifact)", () => {
     for (const tool of ["read", "write", "edit", "bash", "webfetch"]) {
       const messages = [msg("a", "assistant", [toolPart(tool)])];
       expect(deriveArtifacts(messages, [], "ses_a"), `tool:${tool}`).toEqual([]);
     }
+  });
+
+  it("write tool part with a target path → generated file artifact (origin agent)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        {
+          type: "tool",
+          tool: "write",
+          state: {
+            status: "completed",
+            input: { filePath: "/home/dev/q3-revenue.csv" },
+            time: { start: 5000 },
+          },
+        },
+      ]),
+    ];
+    const got = deriveArtifacts(messages, [], "ses_a");
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({
+      kind: "file",
+      origin: "agent",
+      label: "q3-revenue.csv",
+      href: "/home/dev/q3-revenue.csv",
+      mime: "text/csv",
+      size: null,
+      at: 5000,
+      messageId: "a",
+      context: null,
+      expiresAt: null,
+    });
+  });
+
+  it("write tool part producing an image keeps the generated image", () => {
+    const messages = [
+      msg("a", "assistant", [
+        {
+          type: "tool",
+          tool: "write",
+          state: { status: "completed", input: { filePath: "/tmp/preview-test/chart.png" } },
+        },
+      ]),
+    ];
+    const got = deriveArtifacts(messages, [], "ses_a");
+    expect(got).toHaveLength(1);
+    expect(got[0].kind).toBe("image");
+    expect(got[0].mime).toBe("image/png");
+  });
+
+  it("write tool part falls back to the message timestamp when no tool start time", () => {
+    const messages = [
+      msg("a", "assistant", [
+        {
+          type: "tool",
+          tool: "write",
+          state: { status: "completed", input: { filePath: "/tmp/report.md" } },
+        },
+      ]),
+    ];
+    const got = deriveArtifacts(messages, [], "ses_a");
+    expect(got.filter((a) => a.kind === "file")).toHaveLength(1);
+    expect(got[0].at).toBe(2000); // the message's created timestamp
+  });
+
+  it("edit tool part → NO artifact (modifies existing source, not produced)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        {
+          type: "tool",
+          tool: "edit",
+          state: { status: "completed", input: { filePath: "/home/dev/q3-revenue.csv" } },
+        },
+      ]),
+    ];
+    expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);
   });
 
   it("patch part → NO artifact", () => {

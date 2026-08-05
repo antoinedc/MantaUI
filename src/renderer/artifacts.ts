@@ -95,6 +95,62 @@ function deriveLinkArtifact(msg: OpencodeMessage, part: OpencodePart, url: strin
   };
 }
 
+// Extension → MIME for files the agent writes (creation, not edit) so
+// generated documents/images render with the right glyph tone and preview
+// kind. Unlisted extensions fall back to null; `resolvePreviewType` then maps
+// them by extension for the preview, and unknown types land on the download
+// path. Kept deliberately small — add a type only when a generated artifact
+// needs it.
+const EXT_MIME: Record<string, string> = {
+  ".csv": "text/csv",
+  ".tsv": "text/tab-separated-values",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".pdf": "application/pdf",
+  ".html": "text/html",
+  ".htm": "text/html",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+};
+
+function extOf(p: string): string {
+  const i = p.lastIndexOf(".");
+  return i >= 0 ? p.slice(i).toLowerCase() : "";
+}
+
+// An agent-generated file: a `write` tool CREATION (distinct from `edit`,
+// which modifies existing source and stays out). `href` is the written path; a
+// `write` carries no byte size, so `size` is null. Timestamp comes from the
+// tool's start time, falling back to the owning message.
+function deriveWriteArtifact(msg: OpencodeMessage, part: OpencodePart): Artifact | null {
+  const state = (part as {
+    state?: { input?: { filePath?: unknown }; time?: { start?: unknown } };
+  }).state;
+  const filePath = state?.input?.filePath;
+  if (typeof filePath !== "string" || !filePath) return null;
+  const ext = extOf(filePath);
+  const mime = EXT_MIME[ext] ?? null;
+  return {
+    id: part.id,
+    kind: mime != null && mime.startsWith("image/") ? "image" : "file",
+    origin: "agent",
+    key: filePath.toLowerCase(),
+    label: lastPathSegment(filePath),
+    href: filePath,
+    mime,
+    size: null,
+    at: typeof state?.time?.start === "number" ? state.time.start : messageCreated(msg),
+    messageId: msg.info.id,
+    context: null,
+    expiresAt: null,
+  };
+}
+
 function derivePageArtifact(page: ServedPageMeta, matched: OpencodeMessage | null): Artifact {
   return {
     id: "page:" + page.subdomain,
@@ -155,9 +211,18 @@ export function deriveArtifacts(
         out.push(deriveFileArtifact(msg, part));
         continue;
       }
+      // Agent-created files: a `write` tool with a target path is a produced
+      // artifact; every other tool part is excluded.
+      if (part.type === "tool") {
+        if (part.tool === "write") {
+          const generated = deriveWriteArtifact(msg, part);
+          if (generated) out.push(generated);
+        }
+        continue;
+      }
       // Only text parts of USER messages contribute links; every other part
-      // type (tool, patch, step-start, step-finish, reasoning, snapshot,
-      // agent) is explicitly excluded.
+      // type (patch, step-start, step-finish, reasoning, snapshot, agent) is
+      // explicitly excluded.
       if (part.type !== "text" || !isUser) continue;
       if (part.synthetic || part.ignored) continue;
       const text = part.text ?? "";
