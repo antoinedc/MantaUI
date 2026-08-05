@@ -648,7 +648,7 @@ struct StepRowView: View {
 // as one" — it is a session, so it lives in the same grouped container as the
 // step rows (so a turn reads as one sequence) but is rendered as a
 // navigation row, not a step.
-enum StepGroupRow: Identifiable {
+enum StepGroupRow: Identifiable, Equatable {
     case step(ToolStep)
     case subagent(SubagentSession)
 
@@ -660,7 +660,7 @@ enum StepGroupRow: Identifiable {
     }
 }
 
-enum StepGroupContent {
+enum StepGroupContent: Equatable {
     case rows([StepGroupRow])
     case rollup(summary: String, rows: [StepGroupRow])
 }
@@ -904,7 +904,7 @@ struct TranscriptView: View {
 /// that ragged-edges as the values change reads as a glitch. Blocks with no
 /// time (machinery) render an empty label of the same width rather than
 /// collapsing, which keeps the rows they sit next to from shifting.
-private struct TimestampGutterLabel: View {
+struct TimestampGutterLabel: View {
     let date: Date?
     let width: CGFloat
     let tokens: Tokens
@@ -920,7 +920,7 @@ private struct TimestampGutterLabel: View {
     }
 }
 
-enum TranscriptBlock {
+enum TranscriptBlock: Equatable {
     // The date is the block's wall-clock time, shown only in the swipe-to-reveal
     // gutter. Machinery (`.steps`) carries none: a step row already states how
     // long it took, and a second time reading next to it is noise, not detail.

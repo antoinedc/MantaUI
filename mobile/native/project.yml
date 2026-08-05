@@ -15,6 +15,9 @@ packages:
   CrashReporter:
     url: https://github.com/microsoft/plcrashreporter
     from: "1.11.1"
+  MessagingUI:
+    url: https://github.com/FluidGroup/swiftui-messaging-ui
+    from: "1.0.0"
 targets:
   MantaUI:
     type: application
@@ -45,6 +48,8 @@ targets:
     dependencies:
       - package: CrashReporter
         product: CrashReporter
+      - package: MessagingUI
+        product: MessagingUI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui

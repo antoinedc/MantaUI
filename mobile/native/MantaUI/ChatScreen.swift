@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import MessagingUI
 
 // ===========================================================================
 // S4 — chat screen wired to live data (BET-596).
@@ -79,19 +80,14 @@ private struct ChatScreenContent: View {
     @State private var overflowDestination: OverflowDestination?
     /// Live scheduled-task count for the overflow sheet's badge (BET-627).
     @State private var scheduleCount = 0
-    /// Height of the scroll CONTENT at the last landing, so a change can drive
-    /// the next one (see `relandIfArmed`).
-    @State private var landedContentHeight: CGFloat = 0
-    /// Height of the VIEWPORT at the last landing. Tracked separately because
-    /// the composer resizes it after the screen is already up — the model chip
-    /// appears when the model list loads, the mic when the config check
-    /// returns — and each of those moves the transcript's bottom edge without
-    /// changing a single row of content.
-    @State private var landedViewportHeight: CGFloat = 0
-    /// Set when the user scrolls. Their scroll wins, permanently: re-landing
-    /// over a deliberate scroll is the exact behaviour the pin-to-bottom work
-    /// spent four revisions removing.
-    @State private var landingCancelled = false
+    /// Drives MessagingUI's `TiledView` scroll layer: stays on the newest
+    /// message as content streams and the composer/keyboard resize, and stops
+    /// following the moment the user scrolls away. This replaces the whole
+    /// hand-rolled geometry/keyboard/landing machinery.
+    @State private var scrollPosition = TiledScrollPosition(
+        autoScrollsToBottomOnAppend: true,
+        scrollsToBottomOnReplace: true
+    )
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -172,15 +168,13 @@ private struct ChatScreenContent: View {
         //
         // Reserving the space the other way — by EXTENDING the scroll content
         // (a trailing spacer, or a bottom contentMargin) — is what blanked the
-        // transcript on every keyboard open. The scroll view carries
-        // `.defaultScrollAnchor(.bottom, for: .sizeChanges)`, so it re-pins the
-        // viewport to the END of its content whenever it resizes; when the
-        // keyboard animates in and the scroll view shrinks, the end of the
-        // content was that reserved blank space, so the conversation scrolled
-        // clean off screen. Shrinking the scroll view instead means the anchor
-        // always re-pins onto a real message. This re-fixes PR #569, which the
-        // later floating-glass work undid by switching the composer back to an
-        // overlay.
+        // transcript on every keyboard open. The old scroll view carried
+        // `.defaultScrollAnchor(.bottom, for:.sizeChanges)` and re-pinned to
+        // the END of its content whenever it resized; with reserved space
+        // inside the content, the end was that blank space and the conversation
+        // scrolled off screen. MessagingUI's TiledView (see `transcript`)
+        // reserves this same space by shrinking the viewport rather than by
+        // extending content, which is the same principle.
         //
         // Accepted trade-off: because the inset shrinks the viewport, the
         // composer now PUSHES the transcript's tail up as it grows a line at a
@@ -413,10 +407,6 @@ private struct ChatScreenContent: View {
 
     // MARK: - Transcript (BET-481 container; anchor + landing corrected)
 
-    /// Id of the zero-height row that marks the end of the transcript. Scrolling
-    /// to a real anchor is what makes the landing deterministic (see below).
-    private static let bottomAnchorID = "transcript-bottom"
-
     /// Space the transcript reserves for the floating header: the 38pt button
     /// plus the header's own vertical padding on both sides. Derived from the
     /// same tokens the header lays itself out with, so retuning the button size
@@ -426,144 +416,31 @@ private struct ChatScreenContent: View {
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    // Reserves the floating header's height INSIDE the scroll
-                    // content. The header is an overlay and reserves nothing
-                    // itself, so without this the first row rests underneath
-                    // the glass instead of below it. Putting the space here
-                    // rather than on the header is what lets content pass under
-                    // the buttons while scrolling and still land clear of them —
-                    // a safeAreaInset would push content down permanently and
-                    // leave nothing to scroll under.
-                    Color.clear.frame(height: Self.headerReservedHeight)
-                    if store.hasEarlier {
-                        LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
-                            store.loadEarlier()
-                        }
-                    }
-                    TranscriptView(blocks: store.blocks, tokens: tokens)
-                    // The end-of-transcript marker, and now the LAST thing in
-                    // the stack. Zero-height and invisible; it exists only so
-                    // `scrollTo` has something stable to aim at that is
-                    // guaranteed to be the last thing. The composer no longer
-                    // needs a spacer here: it sits in a safeAreaInset that
-                    // shrinks the scroll view, so its space is reserved by the
-                    // viewport rather than by the scroll content (see the
-                    // inset note in `loadedLayout`).
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.bottomAnchorID)
-                }
-                // Pin the content to the scroll view's own width. A vertical scroll
-                // view otherwise sizes itself to its WIDEST child, so one long line
-                // of tool output widens the whole screen and drags the composer off
-                // with it.
-                .frame(maxWidth: .infinity, alignment: .leading)
-                // The measured content height drives the landing: each time the
-                // lazy rows materialise and the height jumps, that is the moment
-                // the previous landing became wrong and the moment to re-land.
-                .onGeometryChange(for: CGFloat.self) { geometry in
-                    geometry.size.height
-                } action: { height in
-                    guard height != landedContentHeight else { return }
-                    landedContentHeight = height
-                    relandIfArmed(proxy)
-                }
-            }
-            .scrollClipDisabled(false)
-            // The VIEWPORT's height matters just as much as the content's, and
-            // it is the half this routine used to miss. The composer is no
-            // longer a plain input: its model chip appears when the model list
-            // loads, its mic when the config check returns, and it sits in the
-            // screen's bottom safe-area inset — so each of those late arrivals
-            // shrinks the transcript's viewport a beat AFTER the session opened,
-            // moving the bottom out from under a landing that had already run.
-            // That is why this bug arrived with the composer's enrichment and
-            // not before.
-            .onGeometryChange(for: CGFloat.self) { geometry in
-                geometry.size.height
-            } action: { height in
-                guard height != landedViewportHeight else { return }
-                landedViewportHeight = height
-                relandIfArmed(proxy)
-            }
-            // Scoped to `.sizeChanges` — the same correction the subagent screen
-            // already carries, for the same reason plus one more:
-            //
-            //  * `.bottom` in its all-roles form also decides the INITIAL offset,
-            //    and it decides it from the content height known at the first
-            //    layout pass. A LazyVStack has not measured the rows below the
-            //    viewport at that point and prose rows resolve their height a
-            //    pass or two later, so the offset it picks stops corresponding to
-            //    the bottom the moment the real heights land — which is the blank
-            //    transcript that only a manual scroll repairs.
-            //  * It also bottom-ALIGNS content shorter than the viewport, leaving
-            //    a screenful of dead space above a short session.
-            //
-            // Keeping only the size-changes role preserves the half that is
-            // wanted (the view sticks to the bottom as a turn streams) and hands
-            // the initial landing to the explicit scroll below, which runs after
-            // layout and therefore aims at a height that is actually real.
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
-            .scrollDismissesKeyboard(.interactively)
-            // Dragging the transcript already lowers the keyboard; a TAP on it now
-            // does the same, which is what "put the keyboard away so I can read"
-            // looks like on iOS. A simultaneous gesture, so it neither blocks the
-            // scroll (a tap that moves is not a tap) nor swallows taps on rows that
-            // have their own action — a subagent row still pushes its child.
-            .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-            // A deliberate scroll ends the landing immediately. Without this a user who
-            // starts reading history within the landing window gets yanked back to the
-            // bottom by the next height change — the precise failure the pin-to-bottom
-            // work removed, and it must not come back through this door.
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8).onChanged { _ in landingCancelled = true }
-            )
+        // MessagingUI's TiledView owns the whole scroll layer: smooth
+        // bottom-follow on append/replace, keyboard + safe-area insets, and
+        // prepend-without-jump when older messages load. This deliberately
+        // replaces the hand-rolled ScrollView + LazyVStack + geometry/keyboard/
+        // landing machinery that was the source of the device-only blank-on-
+        // open, snap, and disappear-on-scroll bugs.
+        TiledView(items: store.rows, scrollPosition: $scrollPosition) { row in
+            TranscriptBlockCell(item: row, tokens: tokens)
         }
-    }
-
-    /// Put the freshly-opened session on its newest message, and KEEP it there
-    /// until the user scrolls away.
-    ///
-    /// Called whenever the scroll CONTENT or the VIEWPORT changes height, which
-    /// between them cover every way the bottom can move out from under a
-    /// landing that already ran.
-    ///
-    /// Two failed designs preceded this, and both failed the same way — they
-    /// tried to finish the landing at a moment they picked in advance:
-    ///
-    ///  * Three scrolls on a fixed 0/50/250ms ladder. A fixed time budget racing
-    ///    a variable amount of layout work: it won on a fast Mac's simulator and
-    ///    lost on a real iPhone.
-    ///  * Content-height-driven, but armed for only 3s and blind to the
-    ///    viewport. The screen's FIRST render happens before `onAppear` starts
-    ///    the fetch, so the window opened against an empty store and could
-    ///    expire before the messages arrived; and the composer's own late
-    ///    resizes never reached it at all.
-    ///
-    /// There is no deadline now. "Stay on the newest message until the reader
-    /// deliberately leaves it" is simply what a chat transcript should do, so
-    /// the only thing that ends it is the reader — and a turn streaming into an
-    /// open session keeps following the tail, which is wanted rather than a
-    /// side effect to bound.
-    ///
-    /// Cheap to leave armed: `scrollTo` changes neither height, so this cannot
-    /// feed back into itself, and a session that is already at its bottom is
-    /// re-pinned to where it already is.
-    ///
-    /// `@MainActor` because it drives a `ScrollViewProxy`. Only `View.body`
-    /// carries that isolation implicitly, and this is a plain helper reached
-    /// from a geometry callback.
-    @MainActor
-    private func relandIfArmed(_ proxy: ScrollViewProxy) {
-        guard !landingCancelled else { return }
-        // Nothing to land ON yet. The first render builds this transcript
-        // against an empty store, and aiming at the end marker there would
-        // both waste the landing and, in the previous design, start its clock.
-        guard !store.blocks.isEmpty else { return }
-        proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+        // Reserves the floating header's height. The header is an overlay and
+        // reserves nothing itself, so the conversation must rest below it.
+        .headerContent(.header {
+            Color.clear.frame(height: Self.headerReservedHeight)
+        })
+        // Older messages load as you reach the top; TiledView's virtual layout
+        // inserts them without a scroll jump.
+        .prependLoader(.loader(
+            perform: { store.loadEarlier() },
+            isProcessing: store.loadingEarlier
+        ) {
+            LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
+        })
+        // A tap on the transcript lowers the keyboard. (TiledView handles the
+        // scroll-driven interactive keyboard dismiss itself.)
+        .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
     }
 
     /// Lower the keyboard by asking whoever holds first responder to give it
