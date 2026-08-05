@@ -525,7 +525,7 @@ private struct ChatScreenContent: View {
             // whether the viewport is parked on content or on empty space.
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 -geo.contentOffset.y
-            } action: { offset in
+            } action: { offset, _ in
                 LandingTrace.event("offset", "\(Int(offset))")
             }
             // Dragging the transcript already lowers the keyboard; a TAP on it now
