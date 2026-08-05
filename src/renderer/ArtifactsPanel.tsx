@@ -55,12 +55,19 @@ function persistWidth(width: number) {
   }
 }
 
-// Per-tab empty state: a short line plus the OTHER tabs' counts. This is why a
-// default-Links tab is safe even when Links is empty.
-function emptyMessage(kind: ArtifactKind, counts: { link: number; image: number; file: number }): string {
-  if (kind === "link") return `No links yet — ${counts.image} images, ${counts.file} files`;
-  if (kind === "image") return `No images yet — ${counts.link} links, ${counts.file} files`;
-  return `No files yet — ${counts.link} links, ${counts.image} images`;
+// Per-tab empty state, matching the design's `.empty` block: a leading line
+// (`.big`) plus the OTHER tabs' counts (`.sub`). This is why a default-Links
+// tab is safe even when Links is empty.
+function emptyBig(kind: ArtifactKind): string {
+  if (kind === "link") return "No links yet";
+  if (kind === "image") return "No images yet";
+  return "No files yet";
+}
+
+function emptySub(kind: ArtifactKind, counts: { link: number; image: number; file: number }): string {
+  if (kind === "link") return `${counts.image} images, ${counts.file} files`;
+  if (kind === "image") return `${counts.link} links, ${counts.file} files`;
+  return `${counts.link} links, ${counts.image} images`;
 }
 
 export function ArtifactsPanel({
@@ -189,9 +196,14 @@ export function ArtifactsPanel({
         </div>
       )}
 
-      {/* Tab bar: Links / Images / Files with counts. Links is always the
-          default — a moving default destroys muscle memory. */}
-      <div className="flex gap-1 px-2 py-2 border-b border-border shrink-0" role="tablist" aria-label="Artifact kind">
+      {/* Tab bar: Links / Images / Files with counts, Links always the
+          default — a moving default destroys muscle memory. Segmented control
+          per the design `.mk-tabs` (inset track, raised active, count pills). */}
+      <div
+        className="mx-3 mb-3 flex gap-px p-px bg-inset border border-border-subtle rounded-md shrink-0"
+        role="tablist"
+        aria-label="Artifact kind"
+      >
         {TABS.map((k) => {
           const active = tab === k;
           return (
@@ -202,14 +214,21 @@ export function ArtifactsPanel({
               aria-selected={active}
               onClick={() => setTab(k)}
               className={
-                "px-2 py-1 rounded-xs text-meta font-medium " +
+                "flex-1 inline-flex items-center justify-center gap-1 px-1 py-1 rounded-sm text-meta font-medium " +
                 (active
-                  ? "bg-bg-soft text-text"
-                  : "text-text-muted hover:bg-fill-hover hover:text-text")
+                  ? "bg-raised text-text shadow-sm"
+                  : "text-text-faint hover:text-text")
               }
             >
-              {TAB_LABEL[k]}{" "}
-              <span className="tabular-nums text-text-faint">{counts[k]}</span>
+              {TAB_LABEL[k]}
+              <span
+                className={
+                  "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
+                  (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                }
+              >
+                {counts[k]}
+              </span>
             </button>
           );
         })}
@@ -235,8 +254,15 @@ export function ArtifactsPanel({
           </div>
         ))}
         {groups.length === 0 && (
-          <div className="px-3 py-4 text-meta text-text-faint">
-            {query ? `No matches for “${query}”` : emptyMessage(tab, counts)}
+          <div className="px-4 py-8 text-center">
+            {query ? (
+              <div className="text-label text-text-muted">No matches for “{query}”</div>
+            ) : (
+              <>
+                <div className="text-label text-text-faint">{emptyBig(tab)}</div>
+                <div className="mt-1 text-micro text-text-faint">{emptySub(tab, counts)}</div>
+              </>
+            )}
           </div>
         )}
       </div>
