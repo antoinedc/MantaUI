@@ -27,8 +27,7 @@ import { Pill } from "./Pill";
 import { Tag } from "./Tag";
 import { Dropdown, MenuItem } from "./MenuItem";
 
-// Cache-segment colors — same palette as ContextBar so the header pill and
-// the (retired) footer bar stay in sync visually.
+// Cache-segment colors for the header pill.
 const CACHE_WRITE_COLOR = cssVar("--warn");
 const CACHE_READ_COLOR = cssVar("--info");
 
@@ -108,7 +107,7 @@ export function SessionHeader({
 
   return (
     <div
-      className="manta-session-header flex items-center gap-2 h-11 px-3 border-b border-border shrink-0 min-w-0"
+      className="manta-session-header flex items-center gap-2 h-11 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
       style={{ WebkitAppRegion: "drag" } as CSSProperties}
     >
       {/* Breadcrumb — workspace / session. This names WHERE YOU ARE, and it is

@@ -23,11 +23,11 @@ its Electron preload. See "Mobile / web client" below.
 EVERY renderer data call goes over HTTP. The Electron IPC path (`src/preload/` +
 `src/main/index.ts` handlers) is now vestigial for data — it carries only the
 pre-pairing `authClaim`/`authPair` channels plus the OS bridges. A large
-dead-surface removal is tracked in **BET-124** (docs/preload cleanup) and a
-follow-up epic (delete the redundant `src/main/{schedule,secrets,webhook,
-sharedConfigSync}.ts` HTTPS clients, extract the `Api` type out of the preload
-runtime, retire the two-config LWW sync). Until those land, treat any
-`src/main/*` data client or IPC handler other than pairing + OS bridges as dead.
+dead-surface removal is tracked in **BET-124** (docs/preload cleanup). The
+redundant `src/main/{schedule,secrets,webhook,sharedConfigSync}.ts` HTTPS
+clients are already deleted and the `Api` type now lives in `src/shared/api.ts`.
+Treat any `src/main/*` data client or IPC handler other than pairing + OS
+bridges as dead.
 
 See `README.md` for user-facing intro and `HANDOFF.md` for the most recent
 session-state snapshot.
@@ -59,18 +59,21 @@ session-state snapshot.
     `describeTruncation`, `isTerminalTodo`, `allTodosTerminal`).
     Import from here; don't redeclare them inline in ChatPanel.
 - `src/preload/` — Electron `contextBridge`. Exposes OS-integration bridges as
-  `window.__mantaPreload` and is the `export type Api = typeof api` source that
-  typechecks `httpApi`. NOTE: it still *declares* ~60 methods but ~90% are dead
-  in HTTP mode (their `ipcMain` handlers were removed) — the runtime only needs
-  the OS bridges + `authClaim`/`authPair`. See BET-124 / the preload-shrink
-  epic.
+  `window.__mantaPreload`. The `Api` type it used to own now lives in
+  `src/shared/api.ts`, which typechecks `httpApi`. NOTE: it still *declares*
+  ~30 methods but nearly all are dead in HTTP mode (their `ipcMain` handlers
+  were removed) — the runtime only needs the OS bridges + `authClaim`/`authPair`.
+  Exactly one declared method is dead: `peekRemoteFile`. See BET-124 / the
+  preload-shrink epic.
 - `src/main/` — Electron main process, now **OS-integration + pairing only**:
   screenshot detector, clipboard, drag-drop, `desktopPresence.ts`,
   `desktopNotify.ts`, `autoUpdate.ts`, `auth.ts` (pairing claim), `config.ts`
   (local `{serverUrl, boxId, boxToken, projects}` store). It does NOT own tmux,
-  pty, or opencode anymore — those live in `src/server/`. Any `src/main/*.ts`
-  HTTPS data client (`schedule.ts`, `secrets.ts`, `webhook.ts`,
-  `sharedConfigSync.ts`) is redundant with `httpApi` and slated for deletion.
+  pty, or opencode anymore — those live in `src/server/`. `src/main/` holds
+  only `auth.ts`, `autoUpdate.ts`, `busConsumer.ts`, `capExecutor.ts`,
+  `config.ts`, `desktopNotify.ts`, `desktopPresence.ts`, `index.ts`,
+  `serverUpdateForwarder.ts`, `unpair.ts`, `windowChrome.ts`, plus `installer/`
+  and tests.
 - `src/shared/` — transport mode resolution (`transport.mjs`), plus pure logic
   shared by renderer + server (`groq.mjs`, `subagentSync.mjs`,
   `voiceClassifier.mjs`, `modelGuide.mjs`).
@@ -306,8 +309,8 @@ absolute remote path is written into the PTY for claude to read.
 **Click out (peek).** xterm `LinkProvider` for absolute paths + an explicit
 click handler on `WebLinksAddon`. Path click → `GET
 <serverUrl>/api/peek?path=<abs>&session=<name>` streams the remote file bytes
-back → `__mantaPreload.writeTempAndOpen` writes to a Mac tmpfile and
-`shell.openPath` opens with the OS default app. URL click →
+back → `__mantaPreload.peekRemoteFile` returns them to the renderer, which
+opens the file with the OS default app. URL click →
 `shell.openExternal`. **Don't rely on WebLinksAddon's default** — its
 `window.open` path gets denied by `setWindowOpenHandler` in `main/index.ts`, so
 URLs silently no-op.
@@ -486,7 +489,7 @@ the pairing flow. No tunnels, no ControlMaster, no mosh.
   renderer: `/rpc/<channel>` for method calls, `EventSource` to `GET /events`
   for SSE streaming. Same Bearer token auth.
 - `window.__mantaPreload` (from `src/preload/`) provides OS-integration bridges:
-  `writeTempAndOpen` (file peek), `getPathForFile` (drag-drop paths), clipboard
+  `peekRemoteFile` (file peek), `getPathForFile` (drag-drop paths), clipboard
   access, screenshot detection, native file dialogs. These are Electron-only
   and have no mobile equivalent.
 
@@ -2723,9 +2726,8 @@ functions only — no DOM, no Electron mocking. When adding logic to
 `ChatPanel.tsx` expressible as a pure function, extract to `chatUtils.ts`
 and add a test there. `vitest.config.ts` excludes `src/server/**`.
 
-**Server** (node:test): `src/server/*.test.mjs` — `tmux.test.mjs`,
-`events.test.mjs`, `rpc.test.mjs`, `opencode.test.mjs`, `local.test.mjs`,
-`status.test.mjs`. Run standalone with `npm run test:server`. Pure logic
+**Server** (node:test): every `src/server/*.test.mjs`. Run standalone with
+`npm run test:server`. Pure logic
 only — no live tmux or opencode. Add tests for any new pure-parseable logic
 in the server modules.
 

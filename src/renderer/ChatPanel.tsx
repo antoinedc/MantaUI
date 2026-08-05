@@ -1587,7 +1587,7 @@ export function ChatPanel({
   // **GOTCHA — fall through "empty" tokens.** A freshly-streaming assistant
   // message has `tokens` either absent or all-zeros until the first step
   // boundary lands. The naive "first assistant from the tail" loop returned
-  // that empty object, which made `ctxTokens === 0` and hid the ContextBar
+  // that empty object, which made `ctxTokens === 0` and hid the context bar
   // for the entire streaming turn — the bar only re-appeared after the
   // step.ended event arrived (sometimes minutes later, after a long tool
   // call). Skip empty entries and keep walking back to the PRIOR turn's

@@ -40,7 +40,7 @@ export const COMPONENTS = [
                ["primary", `<button class="btn pri">Create session</button>`],
                ["ghost", `<button class="btn ghost">Skip</button>`],
                ["small", `<button class="btn sm">${ic("plus")} Add</button>`]] },
-  { id: "pill", name: "Status pill", cls: "pill", app: "none — inline in ContextBar / SessionHeader",
+  { id: "pill", name: "Status pill", cls: "pill", app: "none — inline in SessionHeader",
     note: "The bare <code>.pill</code> is an ABSTRACT base — 0 of its 81 uses in the spec omit a modifier, and the base sets no background or colour, so it renders as plain bold text. The React component should require a variant rather than defaulting to none.",
     variants: [["base (abstract — never used alone)", `<span class="pill" style="outline:1px dashed var(--border);outline-offset:2px">draft</span>`],
                ["good", `<span class="pill good">passing</span>`],
