@@ -188,7 +188,7 @@ function ExpiryPill({ state, label }: { state: "live" | "soon" | "expired"; labe
         : "bg-danger-bg text-danger";
   return (
     <span
-      className={`ml-1 inline-flex items-center gap-1 rounded-full px-2 py-[2px] text-micro font-semibold align-middle ${cls}`}
+      className={`ml-1 inline-flex shrink-0 items-center gap-1 rounded-full px-[6px] py-[2px] text-[9.5px] font-semibold align-middle ${cls}`}
     >
       {label}
     </span>
@@ -230,8 +230,13 @@ function LinkCard({
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="line-clamp-2 text-meta font-semibold text-text">
-            {artifact.label}
+          {/* Title + expiry pill on ONE line: the label truncates with an
+              ellipsis when tight; the pill is a shrink-0 sibling so name and
+              expiry never wrap to a second line. */}
+          <div className="flex min-w-0 items-center gap-1">
+            <span className="min-w-0 truncate text-meta font-semibold text-text">
+              {artifact.label}
+            </span>
             {isHosted &&
               state != null && (
                 <ExpiryPill
@@ -507,39 +512,43 @@ export function ArtifactsPanel({
           }}
         />
 
-        {/* Header row: title, search toggle, close. */}
-        <div className="flex items-center gap-1 pl-3 pr-2 h-11 border-b border-border shrink-0">
-          <span className="text-label font-semibold text-text flex-1 min-w-0 truncate">
-            Artifacts
-          </span>
-          <IconButton
-            icon={<Search />}
-            label={searchOpen ? "Hide search" : "Search artifacts"}
-            title={searchOpen ? "Hide search" : "Search"}
-            onClick={() => setSearchOpen((v) => !v)}
-          />
-          <IconButton icon={<X />} label="Close artifacts panel" title="Close" onClick={onClose} />
-        </div>
+        {/* Header: title + actions, then the tab bar. Compact and borderless to
+            match the design's `.phead`/`.ptop` rhythm (11px top, 11px gap to
+            the tabs) — not a 44px titlebar with a divider. */}
+        <div className="shrink-0 px-3 pt-[11px]">
+          <div className="mb-[11px] flex items-center justify-between">
+            <span className="min-w-0 truncate text-label font-semibold text-text">
+              Artifacts
+            </span>
+            <div className="flex items-center gap-px">
+              <IconButton
+                icon={<Search />}
+                label={searchOpen ? "Hide search" : "Search artifacts"}
+                title={searchOpen ? "Hide search" : "Search"}
+                onClick={() => setSearchOpen((v) => !v)}
+              />
+              <IconButton icon={<X />} label="Close artifacts panel" title="Close" onClick={onClose} />
+            </div>
+          </div>
 
-        {searchOpen && (
-          <div className="px-2 py-2 border-b border-border shrink-0">
+          {searchOpen && (
             <input
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search links, images, files…"
-              className="w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
+              className="mb-[11px] w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
             />
-          </div>
-        )}
+          )}
 
-        {/* Tab bar: Links / Images / Files with counts, Links always the
-            default. Segmented control per the design `.mk-tabs`. */}
-        <div
-          className="mx-3 mb-3 flex gap-px p-px bg-inset border border-border-subtle rounded-md shrink-0"
-          role="tablist"
-          aria-label="Artifact kind"
-        >
+          {/* Tab bar: Links / Images / Files with counts, Links always the
+              default. Segmented control per the design `.mk-tabs`. The 12px
+              gap to the content below comes from the body's own top padding. */}
+          <div
+            className="flex gap-px p-px bg-inset border border-border-subtle rounded-md"
+            role="tablist"
+            aria-label="Artifact kind"
+          >
           {TABS.map((k) => {
             const active = tab === k;
             return (
@@ -567,11 +576,11 @@ export function ArtifactsPanel({
             );
           })}
         </div>
+        </div>{/* close the px-3 pt-[11px] header wrapper */}
 
         {/* Body: day-grouped, sticky headers, newest first, one renderer per
             tab. */}
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {groups.length === 0 ? (
+        <div className="flex-1 overflow-y-auto min-h-0">          {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {query ? (
                 <div className="text-label text-text-muted">No matches for “{query}”</div>
