@@ -136,7 +136,7 @@ export function ArtifactsPanel({
 
   return (
     <aside
-      className="relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0"
+      className="manta-artifacts-panel relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0"
       style={{ width }}
       aria-label="Artifacts"
     >
