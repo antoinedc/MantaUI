@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 // ===========================================================================
@@ -500,6 +501,19 @@ private struct ChatScreenContent: View {
             // added). The content-driven re-land below is strictly quieter —
             // it does nothing unless the content or the viewport actually moves.
             .scrollDismissesKeyboard(.interactively)
+            // The keyboard is a discrete, large viewport change, and it must
+            // re-anchor the tail even when an earlier user scroll cancelled the
+            // landing. Opening the composer should show recent context above the
+            // keys; closing it must not leave a keyboard-shaped blank strip at
+            // the bottom. Without this, once you scrolled to read (which sets
+            // `landingCancelled`), the keyboard open/close viewport changes were
+            // ignored and the tail was neither pushed up nor pulled back down.
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                reanchorToBottom(proxy)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                reanchorToBottom(proxy)
+            }
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
             // looks like on iOS. A simultaneous gesture, so it neither blocks the
@@ -556,6 +570,17 @@ private struct ChatScreenContent: View {
         // both waste the landing and, in the previous design, start its clock.
         guard !store.blocks.isEmpty else { return }
         proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
+    }
+
+    /// Re-anchor to the tail for a KEYBOARD event, overriding any earlier
+    /// user scroll that cancelled the landing. The keyboard is a discrete,
+    /// deliberate viewport change — show or hide — and the transcript must
+    /// follow it: opening the composer leaves the recent tail visible above
+    /// the keys, closing it leaves no blank strip where the keyboard was.
+    @MainActor
+    private func reanchorToBottom(_ proxy: ScrollViewProxy) {
+        landingCancelled = false
+        relandIfArmed(proxy)
     }
 
     /// Lower the keyboard by asking whoever holds first responder to give it
