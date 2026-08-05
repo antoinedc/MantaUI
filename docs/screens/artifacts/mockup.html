@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<title>Mockup — Artifacts panel</title>
+
+<!--
+  THE SPEC for the Artifacts panel. This file is the design contract, not a
+  picture of one. Read docs/visual-verification.md before editing.
+
+  PROVENANCE: the approved design proposal reviewed and signed off 2026-08-05,
+  transcribed here token-for-token. The human-facing version of the same design
+  (dark, annotated, with the rationale prose) was published at
+  /pages/artifacts-panel; THIS file is the machine-checkable form and wins on
+  any disagreement.
+
+  Two rules make this a contract rather than decoration:
+
+  1. It loads the app's REAL token stylesheet below. Every colour, spacing step,
+     radius, shadow and type stack resolves to the same variable the app uses at
+     runtime, so `npm run visual:styles` can report a mismatch in TOKEN NAMES
+     ("design says --border-strong, app uses --border") instead of pixels.
+     There is deliberately not one hex literal in the stylesheet below.
+
+  2. It renders in the same browser at the same viewport as the implementation
+     capture, so `npm run visual:compare` yields a fair side-by-side.
+
+  Placeholder content deliberately MATCHES the demo fixture the panel is
+  captured against, so the side-by-side compares layout and not words.
+
+  ============================ CONFORMANCE SCOPE ============================
+  Four regions are under conformance, each paired with a row in
+  scripts/visual/screens.mjs via `mockupRegion`:
+
+    .mk-links     → app `.manta-artifacts-panel` with the Links tab active
+    .mk-images    → app `.manta-artifacts-panel` with the Images tab active
+    .mk-files     → app `.manta-artifacts-panel` with the Files tab active
+    .mk-preview   → app `.manta-artifact-preview`
+
+  The panel TOGGLE is NOT in this file. It lives in the session header, whose
+  design contract is already docs/screens/session/mockup.html (`.topb`) — the
+  toggle is added there so the existing `session-header` row covers it, rather
+  than opening a second contract for one button.
+
+  OUT of conformance scope — present in neither this file nor the app, do not
+  build and do not report as a defect: rich link previews (favicons, Open Graph
+  images), any liveness state on an EXTERNAL link, a References tab, a CSV table
+  renderer, server-side thumbnails.
+-->
+
+<link rel="stylesheet" href="/src/renderer/tokens.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/inter/index.css" />
+<link rel="stylesheet" href="/node_modules/@fontsource-variable/jetbrains-mono/index.css" />
+
+<style>
+  /* ---- page chrome (NOT part of the contract; it only lays the regions out) */
+  body { margin: 0; padding: var(--sp-6); background: var(--canvas);
+         color: var(--tx1); font-family: var(--font-sans); line-height: var(--ui-lh); }
+  .row { display: flex; gap: var(--sp-6); align-items: flex-start; flex-wrap: wrap; }
+  .cap { font-size: var(--font-size-2xs); color: var(--tx4); margin: 0 0 var(--sp-2); }
+
+  /* ================= PANEL — the contract starts here =================== */
+
+  /* 340px is the panel's default width; it is clamped 280-520 at runtime.
+     Not a token: it is a layout dimension owned by this component alone. */
+  .mk-panel { width: 340px; height: 560px; flex: none; display: flex;
+              flex-direction: column; background: var(--panel);
+              border-left: 1px solid var(--border); }
+
+  .mk-head { flex: none; padding: var(--sp-3) var(--sp-3) 0; }
+  .mk-top  { display: flex; align-items: center; justify-content: space-between;
+             margin-bottom: var(--sp-3); }
+  .mk-title { font-size: var(--font-size-small); font-weight: var(--weight-semibold); }
+  .mk-icons { display: flex; gap: var(--sp-px); }
+
+  .ico { width: 26px; height: 26px; border-radius: var(--r-sm); display: grid;
+         place-items: center; color: var(--tx3); border: 0; background: transparent; }
+  .ico svg { width: 15px; height: 15px; stroke: currentColor; fill: none;
+             stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .ico.on { background: var(--accent-bg); color: var(--accent-tx); }
+
+  /* ---- tab bar ---- */
+  .mk-tabs { display: flex; gap: var(--sp-px); padding: var(--sp-px);
+             background: var(--inset); border-radius: var(--r-md);
+             border: 1px solid var(--border-subtle); }
+  .tab { flex: 1; padding: var(--sp-1) var(--sp-1); border-radius: var(--r-sm);
+         border: 0; background: transparent; color: var(--tx3);
+         font-size: var(--font-size-xs); font-family: inherit;
+         font-weight: var(--weight-medium); display: flex; align-items: center;
+         justify-content: center; gap: 5px; }
+  .tab.on { background: var(--raised); color: var(--tx1); box-shadow: var(--shadow-sm); }
+  .cnt { font-size: var(--font-size-2xs); padding: 0 var(--sp-1); min-width: 15px;
+         height: 15px; border-radius: var(--r-full); background: var(--fill);
+         color: var(--tx3); display: grid; place-items: center;
+         font-variant-numeric: tabular-nums; }
+  .tab.on .cnt { background: var(--accent-bg); color: var(--accent-tx); }
+
+  .mk-body { flex: 1; overflow: hidden; padding: var(--sp-3) var(--sp-3) var(--sp-5); }
+
+  /* ---- day group header ---- */
+  .dgrp { font-size: var(--font-size-2xs); font-weight: var(--weight-semibold);
+          color: var(--tx3); padding: var(--sp-3) 2px 7px; }
+  .dgrp:first-child { padding-top: 2px; }
+
+  /* ---- LINKS tab ---- */
+  .lcard { border: 1px solid var(--border-subtle); border-radius: var(--r-md);
+           background: var(--card); overflow: hidden; margin-bottom: 9px; }
+  .lmain { display: flex; gap: var(--sp-3); padding: var(--sp-3); }
+  .lthumb { width: 52px; height: 52px; flex: none; border-radius: var(--r-sm);
+            overflow: hidden; background: var(--inset); display: grid;
+            place-items: center; border: 1px solid var(--border-subtle); }
+  .lthumb svg { width: 20px; height: 20px; stroke: var(--tx4); fill: none;
+                stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .lmeta { min-width: 0; flex: 1; }
+  .ltitle { font-size: var(--font-size-xs); font-weight: var(--weight-semibold);
+            color: var(--tx1); display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; overflow: hidden; }
+  .ldom { font-size: var(--font-size-2xs); color: var(--tx4);
+          font-family: var(--font-mono); margin-top: 3px; white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; }
+  .lctx { border-top: 1px solid var(--border-subtle); padding: 7px var(--sp-3);
+          display: flex; align-items: center; gap: var(--sp-2); background: var(--fill); }
+  .lctxt { flex: 1; min-width: 0; font-size: var(--font-size-2xs); color: var(--tx3);
+           display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+           overflow: hidden; }
+  .chev { width: 14px; height: 14px; flex: none; stroke: var(--tx4); fill: none;
+          stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Expiry pill — hosted pages ONLY. An external link never gets one. */
+  .pill { display: inline-flex; align-items: center; gap: var(--sp-1);
+          font-size: var(--font-size-2xs); font-weight: var(--weight-semibold);
+          padding: 2px var(--sp-2); border-radius: var(--r-full);
+          vertical-align: middle; }
+  .pill.live { background: var(--ok-bg);     color: var(--ok); }
+  .pill.soon { background: var(--warn-bg);   color: var(--warn); }
+  .pill.dead { background: var(--danger-bg); color: var(--danger); }
+  .lcard.expired .lthumb, .lcard.expired .ltitle { opacity: .5; }
+
+  /* ---- IMAGES tab: 2 columns, 4:3. Not 3-up and not square — a 3-up tile is
+         ~102px, too small to tell one UI screenshot from another, and a square
+         crop cuts the sides off a landscape shot. ---- */
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-1); }
+  .tile { position: relative; aspect-ratio: 4/3; border-radius: var(--r-sm);
+          overflow: hidden; background: var(--inset);
+          border: 1px solid var(--border-subtle); }
+  .tile .ph { position: absolute; inset: 0; background: var(--fill-hover); }
+  .tile .ov { position: absolute; inset: 0; display: flex; align-items: flex-end;
+              padding: 5px; }
+  .tile .acts { display: flex; gap: 3px; margin-left: auto; }
+  .mini { width: 26px; height: 26px; border-radius: var(--r-sm);
+          background: var(--raised); border: 1px solid var(--border);
+          display: grid; place-items: center; }
+  .mini svg { width: 13px; height: 13px; stroke: var(--tx1); fill: none;
+              stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .tile .dir { position: absolute; top: 5px; left: 5px; width: 16px; height: 16px;
+               border-radius: var(--r-xs); background: var(--raised);
+               display: grid; place-items: center; }
+
+  /* ---- FILES tab ---- */
+  .frow { display: flex; align-items: center; gap: 9px; padding: 7px var(--sp-2);
+          border-radius: var(--r-sm); }
+  .frow.hover { background: var(--fill-hover); }
+  .fic { width: 30px; height: 30px; flex: none; border-radius: var(--r-sm);
+         display: grid; place-items: center; background: var(--inset);
+         border: 1px solid var(--border-subtle); }
+  .fic svg { width: 14px; height: 14px; fill: none; stroke-width: 1.7;
+             stroke-linecap: round; stroke-linejoin: round; }
+  .fmeta { flex: 1; min-width: 0; }
+  .fname { font-size: var(--font-size-xs); color: var(--tx1); white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
+  .fsub { font-size: var(--font-size-2xs); color: var(--tx4); margin-top: 1px;
+          display: flex; align-items: center; gap: 5px; }
+  .facts { display: flex; gap: var(--sp-px); }
+
+  /* Direction glyph — the ONLY direction affordance. There is no direction filter. */
+  .dirglyph { width: 11px; height: 11px; flex: none; stroke-width: 2.4; fill: none;
+              stroke-linecap: round; stroke-linejoin: round; }
+  .up   { stroke: var(--info); }
+  .down { stroke: var(--ok); }
+
+  /* ---- empty state ---- */
+  .empty { padding: var(--sp-10) var(--sp-4); text-align: center; }
+  .empty .big { font-size: var(--font-size-xs); color: var(--tx3); margin-bottom: 5px; }
+  .empty .sub { font-size: var(--font-size-2xs); color: var(--tx4); }
+
+  /* ================= PREVIEW OVERLAY ==================================== */
+  .mk-stage { position: relative; width: 720px; height: 460px;
+              border: 1px solid var(--border); border-radius: var(--r-lg);
+              overflow: hidden; background: var(--canvas); }
+  .mk-preview { position: absolute; inset: 0; background: rgb(var(--canvas-rgb) / .82);
+                display: grid; place-items: center; padding: var(--sp-6); }
+  .pv { width: 100%; max-width: 560px; background: var(--panel);
+        border: 1px solid var(--border); border-radius: var(--r-lg);
+        overflow: hidden; box-shadow: var(--shadow-lg); }
+  .pvhead { display: flex; align-items: center; gap: var(--sp-3);
+            padding: 9px var(--sp-3); border-bottom: 1px solid var(--border-subtle); }
+  .pvname { flex: 1; min-width: 0; font-size: var(--font-size-xs);
+            font-family: var(--font-mono); color: var(--tx1); white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+  .pvbody { background: var(--inset); height: 240px; display: grid; place-items: center; }
+  .pvbody .ph { width: 100%; height: 100%; background: var(--fill-hover); }
+  .pvfoot { display: flex; align-items: center; gap: var(--sp-2);
+            padding: 7px var(--sp-3); font-size: var(--font-size-2xs);
+            color: var(--tx4); border-top: 1px solid var(--border-subtle); }
+  .nav { position: absolute; top: 50%; transform: translateY(-50%); width: 34px;
+         height: 34px; border-radius: var(--r-full); background: var(--raised);
+         border: 1px solid var(--border); display: grid; place-items: center; }
+  .nav svg { width: 16px; height: 16px; stroke: var(--tx1); fill: none;
+             stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .nav.l { left: var(--sp-4); } .nav.r { right: var(--sp-4); }
+</style>
+</head>
+<body>
+
+<div class="row">
+
+  <!-- ======================= LINKS (default tab) ======================= -->
+  <div>
+    <p class="cap">.mk-links — Links tab, the default</p>
+    <aside class="mk-panel mk-links">
+      <div class="mk-head">
+        <div class="mk-top">
+          <div class="mk-title">Artifacts</div>
+          <div class="mk-icons">
+            <button class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+        <div class="mk-tabs">
+          <button class="tab on">Links <span class="cnt">4</span></button>
+          <button class="tab">Images <span class="cnt">9</span></button>
+          <button class="tab">Files <span class="cnt">7</span></button>
+        </div>
+      </div>
+      <div class="mk-body">
+        <div class="dgrp">Today</div>
+
+        <div class="lcard">
+          <div class="lmain">
+            <div class="lthumb"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
+            <div class="lmeta">
+              <div class="ltitle">artifacts-panel <span class="pill live">23h</span></div>
+              <div class="ldom">boxes.mantaui.com/pages/artifacts-panel</div>
+            </div>
+          </div>
+          <div class="lctx">
+            <div class="lctxt">Both are up — the split view keeps the transcript readable at narrow widths.</div>
+            <svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </div>
+        </div>
+
+        <div class="lcard">
+          <div class="lmain">
+            <div class="lthumb"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
+            <div class="lmeta">
+              <div class="ltitle">composer-v2 <span class="pill soon">2h</span></div>
+              <div class="ldom">boxes.mantaui.com/pages/composer-v2</div>
+            </div>
+          </div>
+          <div class="lctx">
+            <div class="lctxt">Updated and republished. The row height drops from 64 to 52px.</div>
+            <svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </div>
+        </div>
+
+        <div class="dgrp">Yesterday</div>
+
+        <div class="lcard">
+          <div class="lmain">
+            <div class="lthumb"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7l1.7-1.7"/></svg></div>
+            <div class="lmeta">
+              <div class="ltitle">RFC 4180 — Common Format for Comma-Separated Values</div>
+              <div class="ldom">datatracker.ietf.org</div>
+            </div>
+          </div>
+          <div class="lctx">
+            <div class="lctxt">here's the spec, the quoting rules are what always breaks naive parsers</div>
+            <svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </div>
+        </div>
+
+        <div class="lcard expired">
+          <div class="lmain">
+            <div class="lthumb"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></div>
+            <div class="lmeta">
+              <div class="ltitle">sidebar-density <span class="pill dead">expired</span></div>
+              <div class="ldom">boxes.mantaui.com/pages/sidebar-density</div>
+            </div>
+          </div>
+          <div class="lctx">
+            <div class="lctxt">Three densities side by side — compact is the one that survives at 1280px.</div>
+            <svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ======================= IMAGES ======================= -->
+  <div>
+    <p class="cap">.mk-images — 2-up, 4:3, hover actions shown on the first tile</p>
+    <aside class="mk-panel mk-images">
+      <div class="mk-head">
+        <div class="mk-top">
+          <div class="mk-title">Artifacts</div>
+          <div class="mk-icons">
+            <button class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+        <div class="mk-tabs">
+          <button class="tab">Links <span class="cnt">4</span></button>
+          <button class="tab on">Images <span class="cnt">9</span></button>
+          <button class="tab">Files <span class="cnt">7</span></button>
+        </div>
+      </div>
+      <div class="mk-body">
+        <div class="dgrp">Today</div>
+        <div class="grid">
+          <div class="tile">
+            <div class="ph"></div>
+            <div class="dir"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+            <div class="ov"><div class="acts">
+              <div class="mini"><svg viewBox="0 0 24 24"><path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.65 5.66l-9.2 9.19a2 2 0 01-2.82-2.83l8.49-8.48"/></svg></div>
+              <div class="mini"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg></div>
+              <div class="mini"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+            </div></div>
+          </div>
+          <div class="tile"><div class="ph"></div>
+            <div class="dir"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div></div>
+          <div class="tile"><div class="ph"></div>
+            <div class="dir"><svg class="dirglyph down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div></div>
+          <div class="tile"><div class="ph"></div>
+            <div class="dir"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div></div>
+        </div>
+        <div class="dgrp">Mon 3 Aug</div>
+        <div class="grid">
+          <div class="tile"><div class="ph"></div>
+            <div class="dir"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div></div>
+          <div class="tile"><div class="ph"></div>
+            <div class="dir"><svg class="dirglyph down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg></div></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ======================= FILES ======================= -->
+  <div>
+    <p class="cap">.mk-files — actions shown on the hovered first row</p>
+    <aside class="mk-panel mk-files">
+      <div class="mk-head">
+        <div class="mk-top">
+          <div class="mk-title">Artifacts</div>
+          <div class="mk-icons">
+            <button class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+        <div class="mk-tabs">
+          <button class="tab">Links <span class="cnt">4</span></button>
+          <button class="tab">Images <span class="cnt">9</span></button>
+          <button class="tab on">Files <span class="cnt">7</span></button>
+        </div>
+      </div>
+      <div class="mk-body">
+        <div class="dgrp">Today</div>
+
+        <div class="frow hover">
+          <div class="fic"><svg viewBox="0 0 24 24" stroke="var(--ok)"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/></svg></div>
+          <div class="fmeta">
+            <div class="fname">q3-revenue.csv</div>
+            <div class="fsub"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span>1.2 MB · you sent this</span></div>
+          </div>
+          <div class="facts">
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.65 5.66l-9.2 9.19a2 2 0 01-2.82-2.83l8.49-8.48"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+          </div>
+        </div>
+
+        <div class="frow">
+          <div class="fic"><svg viewBox="0 0 24 24" stroke="var(--ok)"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/></svg></div>
+          <div class="fmeta">
+            <div class="fname">cohort-analysis.csv</div>
+            <div class="fsub"><svg class="dirglyph down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg><span>842 KB · generated</span></div>
+          </div>
+        </div>
+
+        <div class="frow">
+          <div class="fic"><svg viewBox="0 0 24 24" stroke="var(--danger)"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/></svg></div>
+          <div class="fmeta">
+            <div class="fname">brand-guidelines.pdf</div>
+            <div class="fsub"><svg class="dirglyph up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span>4.8 MB · you sent this</span></div>
+          </div>
+        </div>
+
+        <div class="dgrp">Yesterday</div>
+
+        <div class="frow">
+          <div class="fic"><svg viewBox="0 0 24 24" stroke="var(--danger)"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/></svg></div>
+          <div class="fmeta">
+            <div class="fname">retention-report.pdf</div>
+            <div class="fsub"><svg class="dirglyph down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg><span>1.1 MB · generated</span></div>
+          </div>
+        </div>
+
+        <div class="frow">
+          <div class="fic"><svg viewBox="0 0 24 24" stroke="var(--accent)"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/></svg></div>
+          <div class="fmeta">
+            <div class="fname">migration-notes.md</div>
+            <div class="fsub"><svg class="dirglyph down" viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg><span>12 KB · generated</span></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ======================= EMPTY STATE ======================= -->
+  <div>
+    <p class="cap">.mk-empty — Links is the default tab and may be empty; it must point sideways</p>
+    <aside class="mk-panel mk-empty">
+      <div class="mk-head">
+        <div class="mk-top">
+          <div class="mk-title">Artifacts</div>
+          <div class="mk-icons">
+            <button class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+            <button class="ico"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+        <div class="mk-tabs">
+          <button class="tab on">Links <span class="cnt">0</span></button>
+          <button class="tab">Images <span class="cnt">9</span></button>
+          <button class="tab">Files <span class="cnt">7</span></button>
+        </div>
+      </div>
+      <div class="mk-body">
+        <div class="empty">
+          <div class="big">No links yet</div>
+          <div class="sub">9 images, 7 files</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+</div>
+
+<!-- ======================= PREVIEW OVERLAY ======================= -->
+<p class="cap" style="margin-top:var(--sp-6)">.mk-preview — one surface, a renderer per type</p>
+<div class="mk-stage">
+  <div class="mk-preview">
+    <div class="pv">
+      <div class="pvhead">
+        <span class="pvname">Screenshot 2026-08-05 at 10.45.17.png</span>
+        <button class="ico"><svg viewBox="0 0 24 24"><path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.65 5.66l-9.2 9.19a2 2 0 01-2.82-2.83l8.49-8.48"/></svg></button>
+        <button class="ico"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></svg></button>
+        <button class="ico"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="pvbody"><div class="ph"></div></div>
+      <div class="pvfoot"><span>2048 × 1108 · 1.4 MB · you sent this</span></div>
+    </div>
+    <div class="nav l"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+    <div class="nav r"><svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+  </div>
+</div>
+
+</body>
+</html>
