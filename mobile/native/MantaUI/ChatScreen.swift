@@ -81,15 +81,6 @@ private struct ChatScreenContent: View {
     @State private var scheduleCount = 0
     /// Whether the one-shot "open at the newest message" scroll has run.
     @State private var didLandAtBottom = false
-    /// Live height of the bottom chrome (cards + running row + composer), used
-    /// to size the scrim behind it. Measured from an overlay, so it can never
-    /// feed back into the transcript's layout.
-    @State private var bottomChromeHeight: CGFloat = 0
-
-    /// How far the bottom scrim reaches past the safe area. Comfortably clears
-    /// the tallest home indicator; when the keyboard is up it falls behind the
-    /// keyboard, where there is nothing to dim.
-    private static let scrimOverhang: CGFloat = 44
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -165,47 +156,31 @@ private struct ChatScreenContent: View {
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        // The bottom stack is an OVERLAY, not a safeAreaInset.
+        // The bottom stack is a safeAreaInset, which reserves its space by
+        // SHRINKING the scroll view. That is the whole point.
         //
-        // As an inset, the composer's height was part of the scroll view's
-        // layout: every line the text gained shrank the viewport, and with the
-        // transcript anchored to its bottom the content shifted by the same
-        // amount. So growing the composer scrolled the conversation — on the
-        // first wrap and on every line break after it.
+        // Reserving the space the other way — by EXTENDING the scroll content
+        // (a trailing spacer, or a bottom contentMargin) — is what blanked the
+        // transcript on every keyboard open. The scroll view carries
+        // `.defaultScrollAnchor(.bottom, for: .sizeChanges)`, so it re-pins the
+        // viewport to the END of its content whenever it resizes; when the
+        // keyboard animates in and the scroll view shrinks, the end of the
+        // content was that reserved blank space, so the conversation scrolled
+        // clean off screen. Shrinking the scroll view instead means the anchor
+        // always re-pins onto a real message. This re-fixes PR #569, which the
+        // later floating-glass work undid by switching the composer back to an
+        // overlay.
         //
-        // As an overlay it takes no layout space, so the viewport never
-        // changes size and the transcript does not move at all while the
-        // composer grows; the composer simply covers more of it. The space the
-        // inset used to reserve is now a fixed spacer at the tail of the scroll
-        // content (see `transcript`), sized for the composer at REST — so the
-        // last message still comes to rest above a compact composer, and a
-        // grown one overlaps content that is dimmed by the scrim below rather
-        // than pushing it.
-        // Scrim FIRST so it draws beneath the composer.
+        // Accepted trade-off: because the inset shrinks the viewport, the
+        // composer now PUSHES the transcript's tail up as it grows a line at a
+        // time, rather than floating over it. The tail moving is the correct
+        // failure mode; a blank transcript is not.
         //
-        // It was a `.background` on the composer stack, which is why it
-        // vanished: a background is sized to its container, so the gradient was
-        // exactly the composer's own bounds — entirely hidden behind the
-        // composer, with nothing extending ABOVE it where the transcript
-        // actually scrolls past. As its own bottom-aligned overlay it is sized
-        // to the composer PLUS a fade margin, so the ramp lives above the
-        // composer's top edge where it can do something.
-        //
-        // Its bounds respect the safe area, so it rides up with the composer
-        // when the keyboard opens instead of being stranded at the display
-        // edge. Below it is the screen's canvas background, which its darkest
-        // stop meets nearly seamlessly.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
-                // Exactly the composer, plus the overhang BELOW it. No margin
-                // above: the fade must not begin before the composer's top
-                // edge, or it reads as a shadow cast onto the transcript
-                // rather than as the composer's own backdrop. Starting at the
-                // edge means the ramp is only ever seen THROUGH the composer's
-                // glass or below it.
-                .frame(height: bottomChromeHeight + Self.scrimOverhang)
-        }
-        .overlay(alignment: .bottom) {
+        // `.background(tokens.canvas)` is load-bearing: a scroll view still
+        // DRAWS its content underneath a safe-area inset while scrolling, so
+        // without an opaque backdrop the transcript slides visibly under the
+        // composer.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 bottomCards
                 // BET-630 (D1): the running-state working row. Shown only while a
@@ -223,15 +198,7 @@ private struct ChatScreenContent: View {
                     modelStore: modelStore
                 )
             }
-            // Feeds the scrim its height. Safe to measure here: this is an
-            // overlay, so nothing it reports can change the transcript's
-            // layout — which is the property that stopped the composer from
-            // scrolling the conversation in the first place.
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.size.height
-            } action: { height in
-                bottomChromeHeight = height
-            }
+            .background(tokens.canvas)
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             if let child = store.store(for: agent.childSessionId) {
@@ -447,22 +414,6 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Space the transcript reserves for the floating composer.
-    ///
-    /// FIXED, and deliberately sized for the composer at REST rather than
-    /// tracking its live height. Tracking is what the safeAreaInset used to do,
-    /// and it is precisely why the transcript lurched every time the text
-    /// wrapped. A constant means the viewport never changes, so the
-    /// conversation holds still while the composer grows over it.
-    ///
-    /// Covers the model-chip row, the compact input box and the stack's own
-    /// vertical padding — all from the tokens those are laid out with.
-    private static let composerReservedHeight =
-        Metrics.type.chatHeaderBtn          // compact input row
-        + Metrics.spacing.sp1 * 2           // its vertical padding
-        + Metrics.type.small + Metrics.spacing.sp1 * 2  // model chip row
-        + Metrics.spacing.sp2 * 3           // stack spacing + outer padding
-
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -482,19 +433,17 @@ private struct ChatScreenContent: View {
                         }
                     }
                     TranscriptView(blocks: store.blocks, tokens: tokens)
-                    // The end-of-transcript marker. Zero-height and invisible;
-                    // it exists only so `scrollTo` has something stable to aim
-                    // at that is guaranteed to be the last thing in the stack.
+                    // The end-of-transcript marker, and now the LAST thing in
+                    // the stack. Zero-height and invisible; it exists only so
+                    // `scrollTo` has something stable to aim at that is
+                    // guaranteed to be the last thing. The composer no longer
+                    // needs a spacer here: it sits in a safeAreaInset that
+                    // shrinks the scroll view, so its space is reserved by the
+                    // viewport rather than by the scroll content (see the
+                    // inset note in `loadedLayout`).
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomAnchorID)
-                    // Reserve for the floating composer, inside the scroll
-                    // content — the mirror of the header spacer at the top.
-                    // The composer is an overlay and reserves nothing itself,
-                    // so without this the last message would rest underneath
-                    // it. AFTER the anchor, so "scroll to bottom" still lands
-                    // on the last message rather than on empty space.
-                    Color.clear.frame(height: Self.composerReservedHeight)
                 }
                 // Pin the content to the scroll view's own width. A vertical scroll
                 // view otherwise sizes itself to its WIDEST child, so one long line
@@ -578,8 +527,8 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
-            if let todos = store.todos, let active = todos.active, !active.isEmpty {
-                TodosCard(items: active, tokens: tokens)
+            if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
+                TodosCard(payload: todos, tokens: tokens)
             }
             if let permission = newestPermission {
                 PermissionCard(permission: permission, tokens: tokens) { reply in
@@ -677,22 +626,42 @@ struct ChatSubagentScreen: View {
 // MARK: - Todos card (scope item 4)
 
 private struct TodosCard: View {
-    let items: [StreamTodoItem]
+    let payload: StreamTodosPayload
     let tokens: Tokens
+
+    /// The rows to draw: the box already computes the "top 5 + hidden counts"
+    /// window (`visible`), so prefer it and fall back to the raw active list.
+    private var rows: [StreamTodoItem] {
+        payload.visible?.visible ?? payload.active ?? []
+    }
+
+    /// The one overflow summary line, or nil when nothing is hidden. Mirrors
+    /// the desktop's formatHiddenTodosSummary: "+ 2 pending & 1 done" /
+    /// "+ 2 pending" / "+ 1 done", omitting a zero side. Singular/plural is
+    /// not varied — the desktop prints "pending"/"done" unchanged.
+    private var overflowSummary: String? {
+        guard let v = payload.visible else { return nil }
+        var parts: [String] = []
+        if v.hiddenPending > 0 { parts.append("\(Int(v.hiddenPending)) pending") }
+        if v.hiddenDone > 0 { parts.append("\(Int(v.hiddenDone)) done") }
+        guard !parts.isEmpty else { return nil }
+        return "+ \(parts.joined(separator: " & "))"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            ForEach(items, id: \.id) { item in
-                HStack(spacing: Metrics.spacing.sp2) {
-                    Image(systemName: item.status == "completed" ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: Metrics.type.xs))
-                        .foregroundColor(item.status == "completed" ? tokens.ok : tokens.accent)
-                    Text(item.content ?? "")
-                        .font(.system(size: Metrics.type.small))
-                        .foregroundColor(tokens.tx2)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
+            // The box's todo items carry NO id field, ever, so every item's
+            // `id` is nil and keying on it gives every row the SAME identity —
+            // SwiftUI then renders one row's content repeated N times. Key on
+            // array POSITION instead: position IS the identity here, exactly as
+            // the desktop card does (src/renderer/MessageRow.tsx, ActiveTodos).
+            ForEach(Array(rows.enumerated()), id: \.offset) { pair in
+                todoRow(pair.element)
+            }
+            if let overflowSummary {
+                Text(overflowSummary)
+                    .font(.system(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx4)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -704,6 +673,59 @@ private struct TodosCard: View {
         )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("todos-card")
+    }
+
+    /// One todo row. Status styling matches the desktop; `status` is compared
+    /// case-INSENSITIVELY (the desktop lowercases before comparing, iOS did
+    /// not). The mark aligns to the FIRST line so a two-line item keeps the
+    /// icon beside its opening words rather than centred against both.
+    // `@MainActor` because this reads `mantaFontWeight`, which is main-actor
+    // isolated. Only `View.body` carries that isolation implicitly, and this is
+    // a plain helper — every other call site in the app happens to sit directly
+    // in a `body`, so the annotation has never been needed before. Harmless if
+    // the isolation is inferred anyway; a build error if it is not.
+    @MainActor
+    @ViewBuilder
+    private func todoRow(_ item: StreamTodoItem) -> some View {
+        let status = (item.status ?? "").lowercased()
+        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
+            Image(systemName: markName(status))
+                .font(.system(size: Metrics.type.xs))
+                .foregroundColor(markColor(status))
+            Text(item.content ?? "")
+                .font(.system(size: Metrics.type.small, weight: status == "in_progress" ? mantaFontWeight(Metrics.type.semibold) : .regular))
+                .foregroundColor(textColor(status))
+                .strikethrough(status == "cancelled")
+                // A todo's text must not be silently clipped to one line.
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func markName(_ status: String) -> String {
+        switch status {
+        case "completed": return "checkmark.circle.fill"
+        case "cancelled": return "xmark.circle"
+        case "in_progress": return "circle.dotted"
+        default: return "circle"
+        }
+    }
+
+    private func markColor(_ status: String) -> Color {
+        switch status {
+        case "completed": return tokens.ok
+        case "in_progress": return tokens.accent
+        default: return tokens.tx4
+        }
+    }
+
+    private func textColor(_ status: String) -> Color {
+        switch status {
+        case "completed", "cancelled": return tokens.tx4
+        case "in_progress": return tokens.tx1
+        default: return tokens.tx2
+        }
     }
 }
 

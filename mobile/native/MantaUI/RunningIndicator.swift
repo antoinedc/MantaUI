@@ -3,13 +3,19 @@ import SwiftUI
 // ===========================================================================
 // BET-630 — the running-state working row (D1, build-order row 5).
 //
-// Ports the desktop RunningIndicator (src/renderer/MessageRow.tsx): a spinner
-// glyph + verb + live elapsed, shown ABOVE the composer while a turn runs. It
-// is deliberately distinct from the ambient refetch sweep on the composer's
-// top divider (the transcript-syncing indicator) — the two mean different
-// things and never share an indicator. The header subtitle (`running · 2m ·
-// 8%`) stays the at-a-glance status; this row is the wait affordance the user
-// is actually looking at.
+// Ports the desktop RunningIndicator (src/renderer/MessageRow.tsx): the app's
+// own loader + verb + live elapsed, shown while a turn runs. It draws the
+// inline MantaLoader rather than a system ProgressView, so a running turn looks
+// like the same "waiting on the box" object as a session load, just smaller.
+//
+// It sits in the screen's bottom safe-area inset, on its own line directly
+// above the composer — it no longer floats over the transcript (that was the
+// old overlay chrome; the inset reserves real space instead). It is
+// deliberately distinct from the ambient refetch sweep on the composer's top
+// divider (the transcript-syncing indicator) — the two mean different things
+// and never share an indicator. The header subtitle (`running · 2m · 8%`)
+// stays the at-a-glance status; this row is the wait affordance the user is
+// actually looking at.
 //
 // Mounted by ChatScreen only while `store.running`, so @State (verb + `now`)
 // reinitializes fresh each time a turn starts; the view leaves the hierarchy
@@ -35,9 +41,7 @@ struct RunningIndicator: View {
 
     var body: some View {
         HStack(spacing: Metrics.spacing.sp2) {
-            ProgressView()
-                .controlSize(.small)
-                .tint(tokens.accent)
+            MantaLoader(tokens: tokens, size: .inline)
             Text("\(verb)…")
                 .font(.system(size: Metrics.type.small))
                 .foregroundColor(tokens.tx1)
@@ -48,6 +52,7 @@ struct RunningIndicator: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("running-indicator")
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
