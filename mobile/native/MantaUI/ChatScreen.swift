@@ -518,6 +518,16 @@ private struct ChatScreenContent: View {
             // layout and therefore aims at a height that is actually real.
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
             .scrollDismissesKeyboard(.interactively)
+            // The real scroll offset, read safely: onScrollGeometryChange (iOS
+            // 18+) exposes contentOffset without a GeometryReader-in-a-lazy-
+            // scroll preference, which is the probe that crashed the transcript
+            // (SIGTRAP inside the getter). This is the one number that decides
+            // whether the viewport is parked on content or on empty space.
+            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                -geo.contentOffset.y
+            } action: { offset in
+                LandingTrace.event("offset", "\(Int(offset))")
+            }
             // Dragging the transcript already lowers the keyboard; a TAP on it now
             // does the same, which is what "put the keyboard away so I can read"
             // looks like on iOS. A simultaneous gesture, so it neither blocks the
