@@ -170,7 +170,7 @@ function ActionButton({
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className="flex h-6 w-6 items-center justify-center rounded-sm text-text-muted hover:bg-fill-hover hover:text-text disabled:pointer-events-none disabled:opacity-40"
+      className="pointer-events-auto flex h-6 w-6 items-center justify-center rounded-sm text-text-muted hover:bg-fill-hover hover:text-text disabled:pointer-events-none disabled:opacity-40"
     >
       {icon}
     </button>
@@ -228,9 +228,9 @@ function LinkCard({
   onOpen: (el: HTMLElement) => void;
   onJump: () => void;
 }) {
-  const state = pageState(artifact.expiresAt, now);
+  const state = artifact.expiresAt != null ? pageState(artifact.expiresAt, now) : null;
   const expired = state === "expired";
-  const isHosted = artifact.expiresAt != null;
+  const isHosted = artifact.isHosted ?? false;
   const hasContext = artifact.context != null;
 
   return (
@@ -259,13 +259,21 @@ function LinkCard({
             <span className="min-w-0 truncate text-meta font-semibold text-text">
               {artifact.label}
             </span>
-            {isHosted &&
-              state != null && (
-                <ExpiryPill
-                  state={state}
-                  label={state === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
-                />
-              )}
+            {/* Expiry chip — present on every hosted page (serve_page), incl. a
+                no-expiry one, so it is never hidden by a long title; the label
+                truncates above. External/pasted links never get a chip. */}
+            {isHosted && (
+              <ExpiryPill
+                state={state ?? "live"}
+                label={
+                  state === "expired"
+                    ? "expired"
+                    : artifact.expiresAt != null
+                      ? expiryLabel(artifact.expiresAt, now)
+                      : "no expiry"
+                }
+              />
+            )}
           </div>
           <div className="mt-1 truncate font-mono text-micro text-text-quiet">
             {artifact.kind === "link" ? artifact.href.replace(/^https?:\/\//, "") : artifact.href}
@@ -381,9 +389,11 @@ function FileRow({
           <DirectionGlyph origin={artifact.origin} />
           <span>
             {size != null && formatBytes(size)}
-            {size != null && " · "}
-            {artifact.origin === "user" ? "you sent this" : "generated"}
+            {size != null && artifact.origin === "user" && " · "}
+            {artifact.origin === "user" && "you sent this"}
           </span>
+          {/* Outbox files carry a TTL and are swept (not deleted) on download,
+              so they render a live/soon/expired pill just like hosted pages. */}
           {expiry && artifact.expiresAt != null && (
             <ExpiryPill
               state={expiry}

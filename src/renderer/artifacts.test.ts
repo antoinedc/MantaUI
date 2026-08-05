@@ -131,6 +131,28 @@ describe("deriveArtifacts", () => {
     expect(new Set(out.map((a) => a.id)).size).toBe(2);
   });
 
+  it("file part carries its owning message id (jump target)", () => {
+    const messages = [msg("u", "user", [filePart()])];
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out[0].messageId).toBe("u");
+  });
+
+  it("a pasted user link carries its owning message id, and is not hosted", () => {
+    const messages = [msg("u", "user", [textPart("see https://example.com/x")])];
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out[0].kind).toBe("link");
+    expect(out[0].messageId).toBe("u");
+    expect(out[0].isHosted).toBeFalsy();
+  });
+
+  it("a hosted page artifact is flagged isHosted (chip always present)", () => {
+    const pages = [
+      page({ subdomain: "preview", url: "https://box/pages/preview", sessionID: "ses_a", createdAt: 100 }),
+    ];
+    const out = deriveArtifacts([], pages, "ses_a");
+    expect(out[0].isHosted).toBe(true);
+  });
+
   it("assistant text part with a URL → NO artifact", () => {
     const messages = [msg("a", "assistant", [textPart("docs at https://example.com/docs")])];
     expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);

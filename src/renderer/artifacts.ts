@@ -13,9 +13,13 @@ export type Artifact = {
   mime: string | null; // null for links
   size: number | null; // byte size for files/images when known (formatBytes), null otherwise
   at: number; // epoch ms, for sorting and day grouping
-  messageId: string | null; // null for pages with no matching message
+  messageId: string | null; // owning message; null for outbox files / pages with no announcing message
   context: string | null; // surrounding message text, links only
   expiresAt: number | null; // hosted pages only; null otherwise
+  // True only for pages the agent published (serve_page). Distinct from
+  // `expiresAt` so a hosted page with no expiry (ttlHours:0) still gets the
+  // expiry chip — external/pasted links never do.
+  isHosted?: boolean;
 };
 
 const URL_RE = /https?:\/\/[^\s<>]+/g;
@@ -65,7 +69,7 @@ function deriveFileArtifact(msg: OpencodeMessage, part: OpencodePart): Artifact 
     mime,
     size: typeof part.size === "number" ? part.size : null,
     at: messageCreated(msg),
-    messageId: null,
+    messageId: msg.info.id,
     context: null,
     expiresAt: null,
   };
@@ -89,7 +93,7 @@ function deriveLinkArtifact(msg: OpencodeMessage, part: OpencodePart, url: strin
     mime: null,
     size: null,
     at: messageCreated(msg),
-    messageId: null,
+    messageId: msg.info.id,
     context: linkContext(part.text ?? "", url),
     expiresAt: null,
   };
@@ -160,6 +164,7 @@ function derivePageArtifact(page: ServedPageMeta, matched: OpencodeMessage | nul
     messageId: matched ? matched.info.id : null,
     context: matched ? collapseAndTrim(messageText(matched)) : null,
     expiresAt: page.expiresAt,
+    isHosted: true,
   };
 }
 
