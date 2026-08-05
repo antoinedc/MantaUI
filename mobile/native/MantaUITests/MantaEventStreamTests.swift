@@ -254,7 +254,33 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.running, true)
         state = MantaStreamRouter.applying(complete, to: state)
         XCTAssertEqual(state.turnComplete, true)
-        XCTAssertEqual(state.running, true) // running is only set by `running` sub
+        // turnComplete ALSO clears `running`: the box never sends running:false
+        // on the `running` sub, so turnComplete's own `running` field is the
+        // only end-of-turn signal (otherwise the flag latches true forever).
+        XCTAssertEqual(state.running, false)
+    }
+
+    /// FINDING: the box never sends `running:false` on the `running` sub —
+    /// every `running` frame observed on a live `/events` capture carried
+    /// `running:true`. The end of a turn is announced ONLY by turnComplete's
+    /// own `running` field, so this is the sole signal that lowers the flag.
+    /// Ignoring it (the old behaviour) latched `running` true for the life of
+    /// the session, keeping the working row and the list timer running forever.
+    func testTurnCompleteLowersTheLatchedRunningFlag() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.running, true)
+
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#),
+            to: state
+        )
+
+        XCTAssertEqual(state.running, false)
+        XCTAssertEqual(state.turnComplete, true)
     }
 
     func testNonStreamFrameLeavesStateUntouched() throws {
@@ -311,20 +337,37 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(retired.liveText, "brand new")
     }
 
-    /// A mid-turn transcript holds only the prose written before the fetch, so
-    /// retiring the streaming message there would split one answer in two and
-    /// drop whatever arrived since. It is kept until the turn ends.
-    func testKeepsTheStreamingMessageEvenWhenCovered() throws {
+    /// The streaming message is protected by the CALLER, not by `retiring`:
+    /// `covered` names only COMPLETED messages (the transcript mapper skips an
+    /// assistant message still in flight), so the in-flight one never appears
+    /// and its live text survives. Here msg_2 completed and is covered; msg_7
+    /// is still streaming and is absent from `covered`, so its tail stays.
+    func testKeepsTextForAMessageTheTranscriptDoesNotRenderYet() throws {
+        var state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "done earlier"), to: nil)
+        state = MantaStreamRouter.applying(try flush("msg_7", "part_2", "still writing"), to: state)
+
+        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2"])
+
+        XCTAssertEqual(retired.liveText, "still writing")
+    }
+
+    /// REGRESSION (BUG A): retirement must NOT depend on the `running` flag.
+    /// A chunk whose message the transcript renders must retire whatever
+    /// `running` says — the old guard kept the last chunk while running, and
+    /// with `running` latched true (BUG B) that left the finished answer live,
+    /// so it rendered twice. `running:true` is applied here to prove it is
+    /// ignored: msg_2 is covered, so it retires and the tail empties.
+    func testRetirementIgnoresTheRunningFlag() throws {
         var state = MantaStreamRouter.applying(
             try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#),
             to: nil
         )
-        state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "done earlier"), to: state)
-        state = MantaStreamRouter.applying(try flush("msg_7", "part_2", "still writing"), to: state)
+        state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "the answer"), to: state)
 
-        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2", "msg_7"])
+        let retired = MantaStreamRouter.retiring(state, covered: ["msg_2"])
 
-        XCTAssertEqual(retired.liveText, "still writing")
+        XCTAssertTrue(retired.chunks.isEmpty)
+        XCTAssertEqual(retired.liveText, "")
     }
 
     /// Retirement runs after every fetch, so it must be idempotent — a second
@@ -594,10 +637,14 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
         )
     }
 
-    /// A canonical transcript carrying one assistant message with `text`.
+    /// A canonical transcript carrying one COMPLETED assistant message. The
+    /// `time.completed` is load-bearing: the transcript mapper skips an
+    /// assistant message without it, and retirement now covers only completed
+    /// messages, so an in-flight message (no `completed`) is neither drawn nor
+    /// retired — exactly what protects the running turn's live tail.
     private func transcriptResult(messageID: String, text: String) -> String {
         """
-        {"result":[{"info":{"id":"\(messageID)","sessionID":"ses_1","role":"assistant"},\
+        {"result":[{"info":{"id":"\(messageID)","sessionID":"ses_1","role":"assistant","time":{"created":1750000000000,"completed":1750000001000}},\
         "parts":[{"type":"text","id":"part_3","messageID":"\(messageID)","text":"\(text)"}]}]}
         """
     }
