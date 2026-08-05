@@ -313,6 +313,11 @@ private struct ChatScreenContent: View {
         let newId = try? await MantaAPIClient.live().clearSession(
             sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
         guard let newId, !newId.isEmpty else { return }
+        // Carry the chosen model + effort to the new session id before the
+        // wrapper rebuilds the stores against it (matching the desktop's clear,
+        // which copies the override into the new session's key). The catalog
+        // already holds the box-wide model list, so nothing reloads.
+        modelStore.rebind(to: newId)
         await MainActor.run { onCleared(newId) }
     }
 

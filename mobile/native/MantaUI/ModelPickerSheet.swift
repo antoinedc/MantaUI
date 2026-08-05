@@ -9,48 +9,83 @@ import SwiftUI
 // from the chosen model and is simply absent for a model that offers none —
 // rather than being a fixed set of levels that silently do nothing.
 //
-// Presented as ONE small sheet with two wheels side by side — model on the
-// left, effort on the right — so both choices are visible and adjustable
-// without navigating away. The effort wheel repopulates from whatever the
-// highlighted model offers, and reads "Not available" for a model with none.
+// Native iOS surface (HIG-aligned): a grouped Form/List in a sheet, ordered
+//                                ...
+//   - "Server default" row pinned first — the effective model when no per-
+//     session override is set.
+//   - A "Fast mode" Toggle, shown only when the active model has a fast twin
+//     available (desktop ⚡ logic). Fast flavours (`<id>-fast`) are a MODE of
+//     the base model, not a separate row, so they are hidden from the groups
+//     and reached through this toggle.
+//   - An "Effort" section listing the active model's variants (Default + each).
+//   - The model list grouped into Section per provider (the desktop menu's
+//     shape), with a search strip and a checkmark on the selected row.
+//
+// Tapping a model sets the per-session override; toggling Fast swaps the
+// override to the model's `-fast` twin (or back), carrying the chosen effort.
 // ===========================================================================
 
 struct ModelPickerSheet: View {
     @ObservedObject var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
 
-    /// `nil` = follow the box's configured default.
-    private var modelSelection: Binding<OpencodeModelID?> {
-        Binding(
-            get: { modelStore.override },
-            set: { modelStore.setOverride($0) }
-        )
+    private var groups: [(provider: String, models: [OpencodeModel])] {
+        ChatModel.filteredGroups(ChatModel.groups(modelStore.models), query: query)
     }
 
-    private var variantSelection: Binding<String?> {
-        Binding(
-            get: { modelStore.variant },
-            set: { modelStore.setVariant($0) }
-        )
+    private var activeModel: OpencodeModel? {
+        ChatModel.activeModel(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+    }
+
+    /// The fast-mode toggle state for the active model (desktop `resolveFastToggle`).
+    private var fast: ChatModel.FastToggle {
+        ChatModel.fastToggle(models: modelStore.models, active: activeModel, variantId: modelStore.variant)
+    }
+
+    private func isSelected(_ m: OpencodeModel) -> Bool {
+        guard let override = modelStore.override else { return false }
+        return override.providerID == m.providerID && override.modelID == m.id
+    }
+
+    private func select(_ m: OpencodeModel) {
+        modelStore.setOverride(OpencodeModelID(providerID: m.providerID, modelID: m.id))
+    }
+
+    /// Apply the fast-mode toggle: switch the override to the model's `-fast`
+    /// twin (or its base), carrying the currently-chosen effort across.
+    private func applyFastToggle(_ on: Bool) {
+        guard let target = fast.target else { return }
+        let currentVariant = modelStore.variant
+        modelStore.setOverride(OpencodeModelID(providerID: target.providerID, modelID: target.modelID))
+        if let currentVariant { modelStore.setVariant(currentVariant) }
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    modelWheel
-                    effortWheel
-                        .frame(width: 116)
+            Group {
+                if modelStore.loaded {
+                    List {
+                        serverDefaultSection
+                        if fast.available || fast.on {
+                            fastSection
+                        }
+                        if !modelStore.activeVariants.isEmpty {
+                            effortSection
+                        }
+                        providerSections
+                    }
+                    .searchable(
+                        text: $query,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Search models"
+                    )
+                } else {
+                    // Box-wide model list still arriving — an explicit loading
+                    // state rather than an empty list.
+                    ProgressView("Loading models…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
-
-                Text(footer)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                    .padding(.bottom, 12)
             }
             .navigationTitle("Model")
             .navigationBarTitleDisplayMode(.inline)
@@ -60,62 +95,96 @@ struct ModelPickerSheet: View {
                 }
             }
         }
-        .presentationDetents([.height(420)])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .onAppear { modelStore.load() }
     }
 
-    private var modelWheel: some View {
-        VStack(spacing: 2) {
+    /// The "Server default" row — the effective model when no override is set.
+    private var serverDefaultSection: some View {
+        Section {
+            Button { modelStore.setOverride(nil) } label: {
+                HStack {
+                    Text("Server default")
+                    Spacer()
+                    if modelStore.override == nil { checkmark }
+                }
+            }
+            .accessibilityIdentifier("model-server-default")
+        } header: {
             Text("Model")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Picker("Model", selection: modelSelection) {
-                Text("Default").tag(OpencodeModelID?.none)
-                ForEach(ChatModel.groups(modelStore.models), id: \.provider) { group in
-                    ForEach(group.models, id: \.id) { model in
-                        Text(model.name)
-                            .tag(Optional(OpencodeModelID(providerID: model.providerID, modelID: model.id)))
+        } footer: {
+            if modelStore.override == nil {
+                Text("Using the model your box is configured to use.")
+            }
+        }
+    }
+
+    /// Fast-mode toggle, present only when it can do something.
+    private var fastSection: some View {
+        Section {
+            Toggle(isOn: Binding(get: { fast.on }, set: applyFastToggle)) {
+                Label("Fast mode", systemImage: fast.on ? "bolt.fill" : "bolt")
+            }
+            .disabled(!fast.available)
+            .accessibilityIdentifier("model-fast-toggle")
+        } footer: {
+            Text(fast.title)
+        }
+    }
+
+    /// Effort/variant list for the ACTIVE model. Absent when it offers none.
+    private var effortSection: some View {
+        Section("Effort") {
+            Button { modelStore.setVariant(nil) } label: {
+                HStack {
+                    Text("Default")
+                    Spacer()
+                    if modelStore.variant == nil { checkmark }
+                }
+            }
+            ForEach(modelStore.activeVariants, id: \.id) { variant in
+                Button { modelStore.setVariant(variant.id) } label: {
+                    HStack {
+                        Text(variant.id.capitalized)
+                        Spacer()
+                        if modelStore.variant == variant.id { checkmark }
                     }
                 }
             }
-            .pickerStyle(.wheel)
-            .labelsHidden()
         }
-        .frame(maxWidth: .infinity)
     }
 
+    /// The model list, grouped into a Section per provider.
     @ViewBuilder
-    private var effortWheel: some View {
-        VStack(spacing: 2) {
-            Text("Effort")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if modelStore.activeVariants.isEmpty {
-                Text("Not available")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-                    .frame(maxHeight: .infinity)
-            } else {
-                Picker("Effort", selection: variantSelection) {
-                    Text("Default").tag(String?.none)
-                    ForEach(modelStore.activeVariants, id: \.id) { variant in
-                        Text(variant.id.capitalized).tag(Optional(variant.id))
+    private var providerSections: some View {
+        if groups.isEmpty {
+            if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Section {
+                    Text("No models match")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            ForEach(groups, id: \.provider) { group in
+                Section(group.provider) {
+                    ForEach(group.models, id: \.id) { m in
+                        Button { select(m) } label: {
+                            HStack {
+                                Text(m.name)
+                                Spacer()
+                                if isSelected(m) { checkmark }
+                            }
+                        }
                     }
                 }
-                .pickerStyle(.wheel)
-                .labelsHidden()
             }
         }
-        .frame(maxWidth: .infinity)
     }
 
-    private var footer: String {
-        if modelStore.override == nil {
-            return "Using the model your box is configured to use."
-        }
-        return modelStore.activeVariants.isEmpty
-            ? "This model has no effort setting. Applies to this session only."
-            : "More effort means more reasoning time. Applies to this session only."
+    private var checkmark: some View {
+        Image(systemName: "checkmark")
+            .font(.system(size: Metrics.type.small, weight: .semibold))
+            .foregroundStyle(.tint)
     }
 }

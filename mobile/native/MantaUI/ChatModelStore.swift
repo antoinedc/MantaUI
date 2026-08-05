@@ -4,12 +4,18 @@ import Combine
 // ===========================================================================
 // S5 — model store for the composer (BET-597).
 //
-// Owns the model list + per-session override. Box-side data comes from the
-// existing `opencode:models` / `opencode:default-model` RPCs; the per-session
-// override is a plain `providerID/modelID` string in UserDefaults (NOT a
-// credential — the raw string encodes provider+model ids only), mirroring the
-// desktop's `manta:chat:<sessionId>:model` localStorage key. Resolution
-// (override ?? default) is pure ChatModel logic, tested separately.
+// Owns the per-SESSION model override + effort variant; the box-wide model
+// list + server default come from the shared `ChatModelCatalog`, fetched once
+// and mirrored here. The per-session override is a plain `providerID/modelID`
+// string in UserDefaults (NOT a credential — the raw string encodes
+// provider+model ids only), mirroring the desktop's
+// `manta:chat:<sessionId>:model` localStorage key.
+//
+// The catalog is why clearing a session does NOT reload models: the clear
+// rebuilds this store for the new session id, but the list is already loaded
+// and shared, so there is no second fetch. The override/variant are carried to
+// the new id by `rebind(to:)` (matching the desktop's clear handler, which
+// copies the override into the new session's key).
 // ===========================================================================
 
 @MainActor
@@ -18,20 +24,44 @@ final class ChatModelStore: ObservableObject {
     @Published private(set) var models: [OpencodeModel] = []
     @Published private(set) var defaultModel: OpencodeModelID?
     @Published private(set) var override: OpencodeModelID?
+    @Published private(set) var loadFailed = false
+    /// True once the shared catalog has its list (mirrored from the catalog).
+    /// Drives the composer pill's loading state.
+    @Published private(set) var loaded = false
     /// Reasoning-effort variant for the selected model (opencode calls these
     /// model "variants"). Model-specific, so it is cleared whenever the model
     /// changes rather than carried onto a model that has no such setting.
     @Published private(set) var variant: String?
-    @Published private(set) var loadFailed = false
 
     let sessionId: String
-    private let api: MantaAPIClient
+    private let catalog: ChatModelCatalog
+    private var cancellables: Set<AnyCancellable> = []
 
-    init(sessionId: String, api: MantaAPIClient) {
+    init(sessionId: String, api: MantaAPIClient, catalog: ChatModelCatalog = .shared) {
         self.sessionId = sessionId
-        self.api = api
+        self.catalog = catalog
         self.override = Self.loadOverride(for: sessionId)
         self.variant = UserDefaults.standard.string(forKey: Self.variantKey(for: sessionId))
+
+        // Seed + mirror the shared catalog so the box-wide list, default and
+        // failure state are published here (keeps every existing caller reading
+        // `modelStore.models` unchanged). A clear rebuilds this store, but the
+        // catalog is already loaded, so it seeds instantly — no refetch.
+        self.models = catalog.models
+        self.defaultModel = catalog.defaultModel
+        self.loadFailed = catalog.loadFailed
+        self.loaded = catalog.loaded
+        catalog.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.mirrorCatalog() }
+            .store(in: &cancellables)
+    }
+
+    private func mirrorCatalog() {
+        models = catalog.models
+        defaultModel = catalog.defaultModel
+        loadFailed = catalog.loadFailed
+        loaded = catalog.loaded
     }
 
     /// The UserDefaults key mirroring the desktop's per-session model key.
@@ -44,14 +74,20 @@ final class ChatModelStore: ObservableObject {
     }
 
     func load() {
-        Task {
-            let modelsResult = (try? await api.models()) ?? []
-            let defaultResult = try? await api.defaultModel()
-            await MainActor.run {
-                self.models = modelsResult
-                self.defaultModel = defaultResult
-                self.loadFailed = modelsResult.isEmpty && defaultResult == nil
-            }
+        catalog.loadIfNeeded()
+    }
+
+    /// Carry the current override + variant to a NEW session id. Called just
+    /// before a clear swaps the id, so the rebuilt store for the new session
+    /// picks up the same model the user had chosen — matching the desktop,
+    /// which copies the override into the new session's key on /clear.
+    func rebind(to newSessionId: String) {
+        guard newSessionId != sessionId else { return }
+        if let override {
+            UserDefaults.standard.set(ChatModel.encode(override), forKey: Self.storageKey(for: newSessionId))
+        }
+        if let variant, !variant.isEmpty {
+            UserDefaults.standard.set(variant, forKey: Self.variantKey(for: newSessionId))
         }
     }
 

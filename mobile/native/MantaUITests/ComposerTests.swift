@@ -94,6 +94,83 @@ final class ComposerTests: XCTestCase {
         XCTAssertNil(ChatModel.decode("no-slash"))
     }
 
+    // MARK: - Fast-mode helpers + grouped picker
+
+    private func variantModel(_ provider: String, _ id: String, variants: [String]) -> OpencodeModel {
+        OpencodeModel(
+            id: id,
+            providerID: provider,
+            name: id,
+            family: nil,
+            status: nil,
+            enabled: nil,
+            variants: variants.map { OpencodeModel.Variant(id: $0) }
+        )
+    }
+
+    func testFastIDArithmetic() {
+        XCTAssertTrue(ChatModel.isFastModelID("gpt-5.6-fast"))
+        XCTAssertFalse(ChatModel.isFastModelID("gpt-5.6"))
+        XCTAssertFalse(ChatModel.isFastModelID("fast"))
+        XCTAssertEqual(ChatModel.baseModelID("gpt-5.6-fast"), "gpt-5.6")
+        XCTAssertEqual(ChatModel.baseModelID("gpt-5.6"), "gpt-5.6")
+        XCTAssertEqual(ChatModel.fastModelID("gpt-5.6"), "gpt-5.6-fast")
+        XCTAssertEqual(ChatModel.fastModelID("gpt-5.6-fast"), "gpt-5.6-fast")
+    }
+
+    func testFastToggleBaseModelWithTwinIsAvailableAndOff() {
+        let models = [variantModel("openai", "gpt-5.6", variants: ["high"]), variantModel("openai", "gpt-5.6-fast", variants: ["high"])]
+        let r = ChatModel.fastToggle(models: models, active: models[0], variantId: "high")
+        XCTAssertTrue(r.available)
+        XCTAssertFalse(r.on)
+        XCTAssertEqual(r.target?.modelID, "gpt-5.6-fast")
+    }
+
+    func testFastToggleFastModelReportsOnAndTargetsBase() {
+        let models = [variantModel("openai", "gpt-5.6", variants: ["high"]), variantModel("openai", "gpt-5.6-fast", variants: ["high"])]
+        let r = ChatModel.fastToggle(models: models, active: models[1], variantId: "low")
+        XCTAssertTrue(r.available)
+        XCTAssertTrue(r.on)
+        XCTAssertEqual(r.target?.modelID, "gpt-5.6")
+    }
+
+    func testFastToggleDisabledWhenTwinLacksSelectedEffort() {
+        let models = [variantModel("openai", "gpt-5.6", variants: ["low"]), variantModel("openai", "gpt-5.6-fast", variants: ["high"])]
+        let r = ChatModel.fastToggle(models: models, active: models[0], variantId: "high")
+        XCTAssertFalse(r.available)
+        XCTAssertNil(r.target)
+    }
+
+    func testFastToggleNullAndNoTwin() {
+        XCTAssertFalse(ChatModel.fastToggle(models: [], active: nil, variantId: nil).available)
+        XCTAssertFalse(ChatModel.fastToggle(models: [variantModel("openai", "gpt-5.6", variants: [])], active: nil, variantId: nil).available)
+        let only = variantModel("openai", "gpt-5.6", variants: [])
+        XCTAssertFalse(ChatModel.fastToggle(models: [only], active: only, variantId: nil).available)
+    }
+
+    func testFastToggleTwinInDifferentProviderDoesNotCount() {
+        let base = variantModel("openai", "gpt-5.6", variants: [])
+        let twin = variantModel("other", "gpt-5.6-fast", variants: [])
+        let r = ChatModel.fastToggle(models: [base, twin], active: base, variantId: nil)
+        XCTAssertFalse(r.available)
+    }
+
+    func testGroupsDropsFastSiblingButKeepsOrphan() {
+        let withBase = [model("openai", "gpt-5.6"), model("openai", "gpt-5.6-fast")]
+        XCTAssertEqual(ChatModel.groups(withBase).first?.models.map(\.id), ["gpt-5.6"])
+        // An orphan fast model (no base) stays reachable via its own row.
+        let orphan = [model("openai", "solo-fast")]
+        XCTAssertEqual(ChatModel.groups(orphan).first?.models.map(\.id), ["solo-fast"])
+    }
+
+    func testFilteredGroupsMatchesNameIdAndProvider() {
+        let g = [("anthropic", [variantModel("anthropic", "claude-sonnet-4-6", variants: []), variantModel("anthropic", "haiku", variants: [])])]
+        XCTAssertEqual(ChatModel.filteredGroups(g, query: "sonnet").first?.models.count, 1)
+        XCTAssertEqual(ChatModel.filteredGroups(g, query: "anthropic").first?.models.count, 2)
+        XCTAssertEqual(ChatModel.filteredGroups(g, query: "nope").count, 0)
+        XCTAssertEqual(ChatModel.filteredGroups(g, query: "  ").first?.models.count, 2)
+    }
+
     // MARK: - ChatVoice.parse
 
     private func classify(_ kind: String, text: String? = nil, choice: String? = nil, query: String? = nil, index: Int? = nil, transcript: String? = nil) -> VoiceClassifyResult {

@@ -400,15 +400,23 @@ struct ComposerView: View {
             HStack(spacing: Metrics.spacing.sp1) {
                 Image(systemName: "sparkles")
                     .font(.system(size: Metrics.type.xs, weight: .medium))
-                Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                    .lineLimit(1)
-                if let variant = modelStore.variant, !variant.isEmpty {
-                    Text("·")
-                        .font(.system(size: Metrics.type.small))
-                    Text(variant.capitalized)
+                if modelStore.loaded {
+                    Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
                         .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .lineLimit(1)
+                    if let variant = modelStore.variant, !variant.isEmpty {
+                        Text("·")
+                            .font(.system(size: Metrics.type.small))
+                        Text(variant.capitalized)
+                            .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                            .lineLimit(1)
+                    }
+                } else {
+                    // Box-wide model list still arriving — show an explicit
+                    // loading state rather than a misleading "Default".
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Loading models")
                 }
             }
             .foregroundColor(tokens.accentTx)
