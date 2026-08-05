@@ -5,7 +5,7 @@ import UIKit
 // scroll's coordinate space, i.e. the negative of the scroll offset. Deleted
 // with the landing diagnostics once the blank-on-open bug is fixed.
 private struct LandingOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = .greatestFiniteMagnitude
+    nonisolated(unsafe) static var defaultValue: CGFloat = .greatestFiniteMagnitude
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
@@ -146,8 +146,8 @@ private struct ChatScreenContent: View {
             .onChange(of: store.loading) { loading in
                 LandingTrace.event("loading", "\(loading) blocks=\(store.blocks.count) hasEarlier=\(store.hasEarlier)")
             }
-            .onChange(of: store.blocks) { blocks in
-                LandingTrace.event("blocks", "count=\(blocks.count)")
+            .onChange(of: store.blocks.count) { count in
+                LandingTrace.event("blocks", "count=\(count)")
             }
             .onDisappear { store.stop() }
             .accessibilityElement(children: .contain)
