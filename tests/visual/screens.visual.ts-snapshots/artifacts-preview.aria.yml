@@ -1,0 +1,7 @@
+- dialog /Preview Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png/:
+  - text: ""
+  - button "Attach"
+  - button "Download"
+  - button "Close preview"
+  - img /Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png/
+  - text: /\d+ × \d+ · \d+ B · you sent this/

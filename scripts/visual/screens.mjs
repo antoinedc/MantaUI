@@ -594,6 +594,13 @@ export const SCREENS = [
     mockup: "docs/screens/artifacts/mockup.html",
     viewport: DESKTOP_VIEWPORT,
     actions: async (page) => {
+      // The demo only mounts the chat panel (and therefore its transcript)
+      // once the fixture's active session is selected in the rail — the same
+      // first action the `session` row uses.
+      await page
+        .locator('.truncate:has-text("Deploy new billing service")')
+        .first()
+        .click();
       await page
         .locator('[aria-label="Show artifacts"]')
         .filter({ visible: true })
@@ -603,8 +610,12 @@ export const SCREENS = [
       await page.getByRole("button", { name: /Screenshot/ }).first().click();
     },
     surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
