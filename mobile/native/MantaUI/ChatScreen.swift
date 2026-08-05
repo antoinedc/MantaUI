@@ -89,10 +89,9 @@ private struct ChatScreenContent: View {
         scrollsToBottomOnReplace: true
     )
     /// Whether the transcript has been scrolled up far enough that the
-    /// "scroll to bottom" arrow should float above the composer. Driven by the
-    /// same geometry that toggles auto-follow: the arrow appears exactly when
-    /// following has stopped, and tapping it (which returns to the bottom)
-    /// makes both disappear together.
+    /// "scroll to bottom" chip should float, bottom-trailing, over it. Driven
+    /// purely by scroll geometry (see `transcript`); it does not touch
+    /// auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
@@ -458,59 +457,65 @@ private struct ChatScreenContent: View {
         .typingIndicator(.indicator(isVisible: store.running) {
             RunningIndicator(store: store)
         })
-        // The floating "scroll to bottom" arrow. It appears only once the user
-        // has scrolled up (pointsFromBottom above the threshold) — at the
-        // bottom there is nowhere to scroll to, so the button would be noise.
-        // The SAME geometry also decides whether to keep auto-following new
-        // messages: stop following the moment the user reads history, and
-        // resume when they return to (or tap back to) the bottom — otherwise a
-        // streaming reply yanks a reader who has deliberately scrolled up back
-        // to the newest turn.
+        // The floating "scroll to bottom" control. It appears only once the
+        // user has scrolled up (pointsFromBottom above the threshold) — at the
+        // bottom there is nowhere to return to, so the button would be noise.
         //
-        // This must be chained BEFORE `.simultaneousGesture` below:
-        // `onTiledScrollGeometryChange` is a method on the concrete TiledView
-        // type (it returns `Self`), not a `View` modifier — once a `View`
-        // modifier like `.simultaneousGesture` erases the type to `some View`,
-        // the compiler no longer sees it.
+        // Auto-follow is left constant (see init) so new messages pin to the
+        // newest turn smoothly. It must NOT be toggled from this geometry
+        // callback: when a message appends while the user is at the bottom,
+        // content grows before the scroll catches up, so pointsFromBottom
+        // briefly spikes past the threshold — toggling auto-follow off there
+        // makes every new event stop following then re-latch, which is exactly
+        // the "transcript goes up and back down" jump. Driving only the button
+        // from geometry keeps that from happening.
+        //
+        // These TiledView-only modifiers must be chained BEFORE
+        // `.simultaneousGesture` below: `onTiledScrollGeometryChange` is a
+        // method on the concrete TiledView type (it returns `Self`), not a
+        // `View` modifier — once a `View` modifier like `.simultaneousGesture`
+        // erases the type to `some View`, the compiler no longer sees it.
         .onTiledScrollGeometryChange { geometry in
-            let isNearBottom = geometry.pointsFromBottom < Self.scrollToBottomThreshold
-            showScrollToBottom = !isNearBottom
-            scrollPosition.autoScrollsToBottomOnAppend = isNearBottom
+            showScrollToBottom = geometry.pointsFromBottom > Self.scrollToBottomThreshold
         }
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .bottomTrailing) {
             if showScrollToBottom { scrollToBottomButton }
         }
     }
 
-    /// How far above the bottom the user must scroll for the arrow to appear
-    /// (and, in the same breath, for auto-follow to stop). Same magnitude
-    /// MessagingUI uses internally for its own "near bottom" checks.
+    /// How far above the bottom the user must scroll for the down-arrow to
+    /// appear. Same magnitude MessagingUI uses internally for its own "near
+    /// bottom" checks.
     private static let scrollToBottomThreshold: CGFloat = 100
 
-    /// The floating glass circle with the down-arrow, bottom-centre over the
-    /// transcript — the counterpart of the two floating glass header circles.
+    /// The small glass "scroll to bottom" chip, bottom-TRAILING over the
+    /// transcript. Sized to match the model-selection chip (same glass capsule,
+    /// same padding), not the 38pt header buttons — it is a secondary affordance
+    /// that must not compete with the composer controls.
     ///
-    /// Tapping it returns to the newest message; the geometry callback above
-    /// then re-enables auto-follow and hides the button itself. Only ever
-    /// rendered while `showScrollToBottom` is true, so it floats only when the
-    /// user has actually scrolled away.
+    /// Tapping it returns to the newest message. Only ever rendered while
+    /// `showScrollToBottom` is true, so it floats only when the user has
+    /// actually scrolled up.
     @ViewBuilder
     private var scrollToBottomButton: some View {
         Button {
             scrollPosition.scrollTo(edge: .bottom, animated: true)
+            showScrollToBottom = false
         } label: {
             Image(systemName: "arrow.down")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.system(size: Metrics.type.xs, weight: .semibold))
                 .foregroundColor(tokens.tx1)
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                .padding(.horizontal, Metrics.spacing.sp2)
+                .padding(.vertical, Metrics.spacing.sp1)
         }
         .buttonStyle(.glass)
-        .clipShape(.circle)
+        .clipShape(.capsule)
         .accessibilityLabel("Scroll to bottom")
         .padding(.bottom, Metrics.spacing.sp4)
+        .padding(.trailing, Metrics.spacing.sp3)
         .shadow(color: .black.opacity(0.12), radius: Metrics.spacing.sp2, y: Metrics.spacing.sp1)
     }
 
