@@ -416,7 +416,18 @@ function FileRow({
         <FileText className={`h-3.5 w-3.5 ${fileGlyphTone(artifact.mime)}`} style={{ strokeWidth: 1.7 }} />
       </button>
       <button type="button" onClick={(e) => onOpen(e.currentTarget)} className="min-w-0 flex-1 text-left">
-        <div className="truncate font-mono text-meta text-text">{artifact.label}</div>
+        {/* Name + expiry chip on ONE line, like links: the label truncates with
+            an ellipsis when tight; the chip is a shrink-0 sibling so outbox
+            files show their TTL next to the name, never wrapped. */}
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 truncate font-mono text-meta text-text">{artifact.label}</span>
+          {expiry && artifact.expiresAt != null && (
+            <ExpiryPill
+              state={expiry}
+              label={expiry === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
+            />
+          )}
+        </div>
         <div className="mt-px flex items-center gap-[5px] text-micro text-text-quiet">
           <DirectionGlyph origin={artifact.origin} />
           <span>
@@ -424,14 +435,6 @@ function FileRow({
             {size != null && artifact.origin === "user" && " · "}
             {artifact.origin === "user" && "you sent this"}
           </span>
-          {/* Outbox files carry a TTL and are swept (not deleted) on download,
-              so they render a live/soon/expired pill just like hosted pages. */}
-          {expiry && artifact.expiresAt != null && (
-            <ExpiryPill
-              state={expiry}
-              label={expiry === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
-            />
-          )}
         </div>
       </button>
       <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
