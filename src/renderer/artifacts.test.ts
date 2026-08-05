@@ -52,6 +52,7 @@ function fileArtifact(overrides: Partial<Artifact> = {}): Artifact {
     label: "report.txt",
     href: "/home/u/report.txt",
     mime: "text/plain",
+    size: null,
     at: 2000,
     messageId: null,
     context: null,
@@ -85,6 +86,21 @@ describe("deriveArtifacts", () => {
     const out = deriveArtifacts(messages, [], "ses_a");
     expect(out[0].origin).toBe("agent");
     expect(out[0].kind).toBe("file");
+  });
+
+  it("threads the file part's byte size through as `size`", () => {
+    const messages = [msg("u", "user", [filePart({ size: 1_258_291 })])];
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out[0].size).toBe(1_258_291);
+  });
+
+  it("leaves size null when the file part carries none (links/pages too)", () => {
+    const withOut = deriveArtifacts([msg("u", "user", [filePart()])], [], "ses_a");
+    expect(withOut[0].size).toBeNull();
+    const link = deriveArtifacts([msg("u", "user", [textPart("https://example.com")])], [], "ses_a");
+    expect(link[0].size).toBeNull();
+    const p = deriveArtifacts([], [page({ createdAt: 0 })], "ses_a");
+    expect(p[0].size).toBeNull();
   });
 
   it("uses filename, falling back to last path segment of url", () => {

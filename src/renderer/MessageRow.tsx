@@ -356,7 +356,7 @@ export const MessageRow = memo(function MessageRow({
   // commands, paths and output), 10px, tabular so the digits don't jitter.
   const ts = formatClockTime(msg.info.time?.created);
   const stampedRow = (children: React.ReactNode) => (
-    <div className="group relative">
+    <div className="group relative" data-message-id={msg.info.id}>
       {ts && (
         <span
           className={

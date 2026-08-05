@@ -5,6 +5,7 @@ import {
   isOptimisticUserId,
   formatTokens,
   formatBytes,
+  expiryLabel,
   formatDuration,
   formatClockTime,
   ctxStageColor,
@@ -222,6 +223,35 @@ describe("formatBytes", () => {
     expect(formatBytes(1024 * 1024)).toBe("1 MB");
     expect(formatBytes(5.5 * 1024 * 1024)).toBe("5.5 MB");
     expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe("3 GB");
+  });
+});
+
+// ===== expiryLabel =====
+
+describe("expiryLabel", () => {
+  const NOW = 1_700_000_000_000;
+  const HOUR = 3_600_000;
+
+  it("returns empty for null / non-finite / NaN expiry", () => {
+    expect(expiryLabel(null, NOW)).toBe("");
+    expect(expiryLabel(undefined, NOW)).toBe("");
+    expect(expiryLabel(NaN, NOW)).toBe("");
+  });
+
+  it("returns empty when already expired", () => {
+    expect(expiryLabel(NOW, NOW)).toBe("");
+    expect(expiryLabel(NOW - 1000, NOW)).toBe("");
+  });
+
+  it("floors to whole hours, never below 1h", () => {
+    expect(expiryLabel(NOW + 23 * HOUR, NOW)).toBe("23h");
+    expect(expiryLabel(NOW + 2 * HOUR, NOW)).toBe("2h");
+    expect(expiryLabel(NOW + 30 * 60 * 1000, NOW)).toBe("1h");
+    expect(expiryLabel(NOW + 100 * 1000, NOW)).toBe("1h");
+  });
+
+  it("floors a fractional remaining hour to the whole hour", () => {
+    expect(expiryLabel(NOW + (23 * HOUR + 30 * 60 * 1000), NOW)).toBe("23h");
   });
 });
 

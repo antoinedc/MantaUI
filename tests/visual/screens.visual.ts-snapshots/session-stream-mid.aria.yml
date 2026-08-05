@@ -47,7 +47,7 @@
   - code: csv_stream
   - text: ", and writes the header first. Running the test suite now — should turn green on the new"
   - code: test_…
-  - text: "/cases\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - text: "/cases\\. q3-revenue\\.csv brand-guidelines\\.pdf Screenshot \\d+-\\d+-\\d+ at \\d+\\.\\d+\\.\\d+\\.png Screenshot \\d+-\\d+-\\d+ at \\d+\\.\\d+\\.\\d+\\.png here's the RFC https:\\/\\/datatracker\\.ietf\\.org\\/doc\\/html\\/rfc4180 — the quoting rules are what always breaks naive parsers Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"

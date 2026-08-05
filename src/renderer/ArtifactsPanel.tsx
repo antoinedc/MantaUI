@@ -1,25 +1,43 @@
-// BET-659: the Artifacts panel shell — a fixed-width sibling of <main> in
+// BET-659/660: the Artifacts panel — a fixed-width sibling of <main> in
 // App.tsx. Owns the open/closed width (device-local via localStorage), the
 // Links / Images / Files tab bar, and the header (title, search, close).
-// The artifact rows themselves are deliberate plain-text placeholders; BET-660
-// renders them real. Rows and preview are NOT built here.
+//
+// BET-661 owns the preview overlay (ArtifactPreview + the row-open wiring in
+// `openPreview`/`previewable`). BET-660 fills the three tabs with their real
+// row grammar — link cards, a 2-up image grid, and compact file rows — and the
+// shared row actions (open / attach / download / jump). Attach and download
+// reuse the `attachArtifact` / `downloadArtifact` helpers BET-661 defined here
+// (bytes via /api/peek, non-destructive); jump scrolls the transcript to the
+// owning message via the `manta-scroll-to-message` window event.
 //
 // Data: the transcript is lifted into the store by ChatPanel (setChatMessages)
 // so this panel can derive artifacts without a second opencodeMessages fetch;
 // served pages come from servePageList on open + a 30s poll while open.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronRight,
+  Download,
+  FileText,
+  Link2,
+  Paperclip,
+  Search,
+  X,
+} from "lucide-react";
 import type { ServedPageMeta } from "../shared/types";
 import { useStore } from "./store";
 import {
   countByKind,
   deriveArtifacts,
   groupByDay,
+  pageState,
   type Artifact,
   type ArtifactKind,
+  type ArtifactOrigin,
 } from "./artifacts";
-import { resolvePreviewType } from "./chatUtils";
+import { expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
@@ -119,6 +137,227 @@ function emptySub(kind: ArtifactKind, counts: { link: number; image: number; fil
   return `${counts.link} links, ${counts.image} images`;
 }
 
+// Direction glyph — the ONLY direction affordance (there is no direction
+// filter). ArrowUp tinted --info for user-sent, ArrowDown tinted --ok for
+// agent-generated. Matches the mockup's `.dirglyph.up/.down`.
+function DirectionGlyph({ origin }: { origin: ArtifactOrigin }) {
+  const Icon = origin === "user" ? ArrowUp : ArrowDown;
+  return (
+    <Icon
+      className={`manta-artifacts-dir h-[11px] w-[11px] flex-none`}
+      style={{ strokeWidth: 2.4, color: origin === "user" ? "var(--info)" : "var(--ok)" }}
+    />
+  );
+}
+
+function ActionButton({
+  icon,
+  label,
+  title,
+  onClick,
+  disabled,
+}: {
+  icon: ReactNode;
+  label: string;
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className="flex h-6 w-6 items-center justify-center rounded-sm text-text-muted hover:bg-fill-hover hover:text-text disabled:pointer-events-none disabled:opacity-40"
+    >
+      {icon}
+    </button>
+  );
+}
+
+// ===== Tab 1 — Links =======================================================
+
+function ExpiryPill({ state, label }: { state: "live" | "soon" | "expired"; label: string }) {
+  const cls =
+    state === "live"
+      ? "bg-ok-bg text-ok"
+      : state === "soon"
+        ? "bg-warn-bg text-warn"
+        : "bg-danger-bg text-danger";
+  return (
+    <span
+      className={`ml-1 inline-flex items-center gap-1 rounded-full px-2 py-[2px] text-micro font-semibold align-middle ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function LinkCard({
+  artifact,
+  now,
+  onOpen,
+  onJump,
+}: {
+  artifact: Artifact;
+  now: number;
+  onOpen: (el: HTMLElement) => void;
+  onJump: () => void;
+}) {
+  const state = pageState(artifact.expiresAt, now);
+  const expired = state === "expired";
+  const isHosted = artifact.expiresAt != null;
+  const hasContext = artifact.context != null;
+
+  return (
+    <div
+      className={`mb-[9px] overflow-hidden rounded-md border border-border-subtle bg-bg-soft ${expired ? "opacity-50" : ""}`}
+    >
+      {/* Row body — opens the artifact. */}
+      <button
+        type="button"
+        onClick={(e) => onOpen(e.currentTarget)}
+        className="flex w-full items-start gap-3 p-3 text-left"
+        aria-label="Open artifact"
+      >
+        <div className="grid h-[52px] w-[52px] flex-none place-items-center rounded-sm border border-border-subtle bg-inset">
+          {isHosted ? (
+            <FileText className="h-5 w-5 text-text-quiet" style={{ strokeWidth: 1.6 }} />
+          ) : (
+            <Link2 className="h-5 w-5 text-text-quiet" style={{ strokeWidth: 1.6 }} />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="line-clamp-2 text-meta font-semibold text-text">
+            {artifact.label}
+            {isHosted &&
+              state != null && (
+                <ExpiryPill
+                  state={state}
+                  label={state === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
+                />
+              )}
+          </div>
+          <div className="mt-1 truncate font-mono text-micro text-text-quiet">
+            {artifact.kind === "link" ? artifact.href.replace(/^https?:\/\//, "") : artifact.href}
+          </div>
+        </div>
+      </button>
+
+      {/* Context strip — omitted entirely when context is null. */}
+      {hasContext && (
+        <div className="flex items-center gap-2 border-t border-border-subtle bg-fill px-3 py-[7px]">
+          <div className="line-clamp-2 min-w-0 flex-1 text-micro text-text-faint">
+            {artifact.context}
+          </div>
+          <button
+            type="button"
+            aria-label="Jump to message"
+            title="Jump to message"
+            disabled={!artifact.messageId}
+            onClick={onJump}
+            className="flex flex-none items-center justify-center text-text-faint hover:text-text disabled:pointer-events-none disabled:opacity-40"
+          >
+            <ChevronRight className="h-3.5 w-3.5" style={{ strokeWidth: 2 }} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Tab 2 — Images ======================================================
+
+function ImageTile({
+  artifact,
+  onOpen,
+  onAttach,
+  onDownload,
+  onJump,
+}: {
+  artifact: Artifact;
+  onOpen: (el: HTMLElement) => void;
+  onAttach: () => void;
+  onDownload: () => void;
+  onJump: () => void;
+}) {
+  return (
+    <div className="group relative aspect-[4/3] overflow-hidden rounded-sm border border-border-subtle bg-inset">
+      <button
+        type="button"
+        onClick={(e) => onOpen(e.currentTarget)}
+        className="absolute inset-0 block bg-fill-hover"
+        aria-label={`Open ${artifact.label}`}
+      />
+      {/* Direction glyph, top-left translucent chip. */}
+      <span className="pointer-events-none absolute left-[5px] top-[5px] grid h-4 w-4 place-items-center rounded-xs bg-raised/80">
+        <DirectionGlyph origin={artifact.origin} />
+      </span>
+      {/* Bottom gradient scrim + hover actions, bottom-right at 26px. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-end bg-gradient-to-t from-black/40 to-transparent px-2 py-2 opacity-0 transition-opacity group-hover:opacity-100">
+        <ActionButton icon={<Paperclip className="h-3.5 w-3.5" />} label="Attach to message" title="Attach to message" onClick={onAttach} />
+        <ActionButton icon={<Download className="h-3.5 w-3.5" />} label="Download" title="Download" onClick={onDownload} />
+        <ActionButton icon={<ChevronRight className="h-3.5 w-3.5" />} label="Jump to message" title="Jump to message" onClick={onJump} disabled={!artifact.messageId} />
+      </div>
+    </div>
+  );
+}
+
+// ===== Tab 3 — Files =======================================================
+
+function fileGlyphTone(mime: string | null): string {
+  if (!mime) return "text-text-muted";
+  if (mime === "application/pdf") return "text-danger";
+  if (mime.startsWith("text/") || mime.includes("csv")) return "text-ok";
+  return "text-accent";
+}
+
+function FileRow({
+  artifact,
+  onOpen,
+  onAttach,
+  onDownload,
+  onJump,
+}: {
+  artifact: Artifact;
+  onOpen: (el: HTMLElement) => void;
+  onAttach: () => void;
+  onDownload: () => void;
+  onJump: () => void;
+}) {
+  const size = artifact.size;
+  return (
+    <div className="group flex items-center gap-[9px] rounded-sm px-2 py-[7px] hover:bg-fill-hover">
+      <button
+        type="button"
+        onClick={(e) => onOpen(e.currentTarget)}
+        className="grid h-[30px] w-[30px] flex-none place-items-center rounded-sm border border-border-subtle bg-inset"
+        aria-label="Open file"
+      >
+        <FileText className={`h-3.5 w-3.5 ${fileGlyphTone(artifact.mime)}`} style={{ strokeWidth: 1.7 }} />
+      </button>
+      <button type="button" onClick={(e) => onOpen(e.currentTarget)} className="min-w-0 flex-1 text-left">
+        <div className="truncate font-mono text-meta text-text">{artifact.label}</div>
+        <div className="mt-px flex items-center gap-[5px] text-micro text-text-quiet">
+          <DirectionGlyph origin={artifact.origin} />
+          <span>
+            {size != null && formatBytes(size)}
+            {size != null && " · "}
+            {artifact.origin === "user" ? "you sent this" : "generated"}
+          </span>
+        </div>
+      </button>
+      <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
+        <ActionButton icon={<Paperclip className="h-3.5 w-3.5" />} label="Attach to message" title="Attach to message" onClick={onAttach} />
+        <ActionButton icon={<Download className="h-3.5 w-3.5" />} label="Download" title="Download" onClick={onDownload} />
+        <ActionButton icon={<ChevronRight className="h-3.5 w-3.5" />} label="Jump to message" title="Jump to message" onClick={onJump} disabled={!artifact.messageId} />
+      </div>
+    </div>
+  );
+}
+
 export function ArtifactsPanel({
   sessionId,
   open,
@@ -177,6 +416,7 @@ export function ArtifactsPanel({
     setPreviewIndex(null);
   }, [sessionId]);
 
+  const now = useMemo(() => Date.now(), []);
   const artifacts = useMemo(
     () => deriveArtifacts(messages, pages, sessionId ?? ""),
     [messages, pages, sessionId],
@@ -188,7 +428,7 @@ export function ArtifactsPanel({
   );
   // The arrow-key paging set: the current tab's artifacts with a resolvable
   // preview renderer, in display order. Refuse-type rows never open the
-  // overlay — for them we download instead (their rows are BET-660's job).
+  // overlay — for them we download instead.
   const previewable = useMemo(
     () => tabArtifacts.filter((a) => resolvePreviewType(a.mime, a.label) !== "refuse"),
     [tabArtifacts],
@@ -200,7 +440,7 @@ export function ArtifactsPanel({
       (a) => a.label.toLowerCase().includes(q) || a.href.toLowerCase().includes(q),
     );
   }, [tabArtifacts, query]);
-  const groups = useMemo(() => groupByDay(filtered, Date.now()), [filtered]);
+  const groups = useMemo(() => groupByDay(filtered, now), [filtered, now]);
 
   const openPreview = (pi: number, el: HTMLElement) => {
     previewSourceRef.current = el;
@@ -213,6 +453,28 @@ export function ArtifactsPanel({
     previewSourceRef.current = null;
   };
 
+  // Row-body "open". Previewables (image/PDF/text) open the BET-661 overlay;
+  // links open externally (no in-app web renderer); everything else downloads.
+  const openRow = (a: Artifact, el: HTMLElement) => {
+    if (a.kind === "link") {
+      void window.api.openExternal(a.href);
+      return;
+    }
+    const pi = previewable.findIndex((p) => p.id === a.id);
+    if (pi >= 0) openPreview(pi, el);
+    else void downloadArtifact(a);
+  };
+
+  // Jump the transcript to the message that owns an artifact.
+  const jumpToMessage = (a: Artifact) => {
+    if (!a.messageId) return;
+    window.dispatchEvent(
+      new CustomEvent("manta-scroll-to-message", {
+        detail: { sessionId, messageId: a.messageId },
+      }),
+    );
+  };
+
   if (!open) return null;
 
   return (
@@ -222,151 +484,155 @@ export function ArtifactsPanel({
         style={{ width }}
         aria-label="Artifacts"
       >
-      {/* 4px resize handle on the left edge, pointer events only. Clamp to
-          280-520; persist on pointer-up, not on every move. */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize touch-none"
-        onPointerDown={(e) => {
-          draggingRef.current = { startX: e.clientX, startWidth: widthRef.current };
-          e.currentTarget.setPointerCapture(e.pointerId);
-        }}
-        onPointerMove={(e) => {
-          const d = draggingRef.current;
-          if (!d) return;
-          const next = d.startWidth - (e.clientX - d.startX);
-          setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
-        }}
-        onPointerUp={() => {
-          persistWidth(widthRef.current);
-          draggingRef.current = null;
-        }}
-        onPointerCancel={() => {
-          draggingRef.current = null;
-        }}
-      />
-
-      {/* Header row: title, search toggle, close. */}
-      <div className="flex items-center gap-1 pl-3 pr-2 h-11 border-b border-border shrink-0">
-        <span className="text-label font-semibold text-text flex-1 min-w-0 truncate">
-          Artifacts
-        </span>
-        <IconButton
-          icon={<Search />}
-          label={searchOpen ? "Hide search" : "Search artifacts"}
-          title={searchOpen ? "Hide search" : "Search"}
-          onClick={() => setSearchOpen((v) => !v)}
+        {/* 4px resize handle on the left edge, pointer events only. Clamp to
+            280-520; persist on pointer-up, not on every move. */}
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize touch-none"
+          onPointerDown={(e) => {
+            draggingRef.current = { startX: e.clientX, startWidth: widthRef.current };
+            e.currentTarget.setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            const d = draggingRef.current;
+            if (!d) return;
+            const next = d.startWidth - (e.clientX - d.startX);
+            setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next)));
+          }}
+          onPointerUp={() => {
+            persistWidth(widthRef.current);
+            draggingRef.current = null;
+          }}
+          onPointerCancel={() => {
+            draggingRef.current = null;
+          }}
         />
-        <IconButton icon={<X />} label="Close artifacts panel" title="Close" onClick={onClose} />
-      </div>
 
-      {searchOpen && (
-        <div className="px-2 py-2 border-b border-border shrink-0">
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search links, images, files…"
-            className="w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
+        {/* Header row: title, search toggle, close. */}
+        <div className="flex items-center gap-1 pl-3 pr-2 h-11 border-b border-border shrink-0">
+          <span className="text-label font-semibold text-text flex-1 min-w-0 truncate">
+            Artifacts
+          </span>
+          <IconButton
+            icon={<Search />}
+            label={searchOpen ? "Hide search" : "Search artifacts"}
+            title={searchOpen ? "Hide search" : "Search"}
+            onClick={() => setSearchOpen((v) => !v)}
           />
+          <IconButton icon={<X />} label="Close artifacts panel" title="Close" onClick={onClose} />
         </div>
-      )}
 
-      {/* Tab bar: Links / Images / Files with counts, Links always the
-          default — a moving default destroys muscle memory. Segmented control
-          per the design `.mk-tabs` (inset track, raised active, count pills). */}
-      <div
-        className="mx-3 mb-3 flex gap-px p-px bg-inset border border-border-subtle rounded-md shrink-0"
-        role="tablist"
-        aria-label="Artifact kind"
-      >
-        {TABS.map((k) => {
-          const active = tab === k;
-          return (
-            <button
-              key={k}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => setTab(k)}
-              className={
-                "flex-1 inline-flex items-center justify-center gap-1 px-1 py-1 rounded-sm text-meta font-medium " +
-                (active
-                  ? "bg-raised text-text shadow-sm"
-                  : "text-text-faint hover:text-text")
-              }
-            >
-              {TAB_LABEL[k]}
-              <span
-                className={
-                  "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
-                  (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
-                }
-              >
-                {counts[k]}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Body: day-grouped, sticky headers, newest first. Placeholder rows
-          render label only — deliberately unstyled. */}
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {groups.map((g) => (
-          <div key={g.label}>
-            <div className="sticky top-0 bg-bg-elev px-3 py-1 text-micro font-semibold uppercase text-text-faint">
-              {g.label}
-            </div>
-            {g.items.map((a) => {
-              const pi = previewable.findIndex((p) => p.id === a.id);
-              const isPreviewable = pi >= 0;
-              return (
-                <div
-                  key={a.id}
-                  role={isPreviewable ? "button" : undefined}
-                  tabIndex={isPreviewable ? 0 : undefined}
-                  title={a.href}
-                  onClick={
-                    isPreviewable
-                      ? (e) => openPreview(pi, e.currentTarget)
-                      : undefined
-                  }
-                  onKeyDown={
-                    isPreviewable
-                      ? (e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            openPreview(pi, e.currentTarget);
-                          }
-                        }
-                      : undefined
-                  }
-                  className={
-                    "px-3 py-1 text-meta text-text-muted truncate" +
-                    (isPreviewable
-                      ? " rounded-xs cursor-pointer hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent"
-                      : "")
-                  }
-                >
-                  {a.label}
-                </div>
-              );
-            })}
-          </div>
-        ))}
-        {groups.length === 0 && (
-          <div className="px-4 py-8 text-center">
-            {query ? (
-              <div className="text-label text-text-muted">No matches for “{query}”</div>
-            ) : (
-              <>
-                <div className="text-label text-text-faint">{emptyBig(tab)}</div>
-                <div className="mt-1 text-micro text-text-faint">{emptySub(tab, counts)}</div>
-              </>
-            )}
+        {searchOpen && (
+          <div className="px-2 py-2 border-b border-border shrink-0">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search links, images, files…"
+              className="w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
+            />
           </div>
         )}
-      </div>
+
+        {/* Tab bar: Links / Images / Files with counts, Links always the
+            default. Segmented control per the design `.mk-tabs`. */}
+        <div
+          className="mx-3 mb-3 flex gap-px p-px bg-inset border border-border-subtle rounded-md shrink-0"
+          role="tablist"
+          aria-label="Artifact kind"
+        >
+          {TABS.map((k) => {
+            const active = tab === k;
+            return (
+              <button
+                key={k}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setTab(k)}
+                className={
+                  "flex-1 inline-flex items-center justify-center gap-1 px-1 py-1 rounded-sm text-meta font-medium " +
+                  (active ? "bg-raised text-text shadow-sm" : "text-text-faint hover:text-text")
+                }
+              >
+                {TAB_LABEL[k]}
+                <span
+                  className={
+                    "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
+                    (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                  }
+                >
+                  {counts[k]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Body: day-grouped, sticky headers, newest first, one renderer per
+            tab. */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {groups.length === 0 ? (
+            <div className="px-4 py-8 text-center">
+              {query ? (
+                <div className="text-label text-text-muted">No matches for “{query}”</div>
+              ) : (
+                <>
+                  <div className="text-label text-text-faint">{emptyBig(tab)}</div>
+                  <div className="mt-1 text-micro text-text-faint">{emptySub(tab, counts)}</div>
+                </>
+              )}
+            </div>
+          ) : (
+            groups.map((g) => (
+              <div key={g.label}>
+                <div className="sticky top-0 bg-bg-elev px-3 pt-3 pb-[7px] text-micro font-semibold text-text-faint">
+                  {g.label}
+                </div>
+                {tab === "link" && (
+                  <div className="px-3 pb-3">
+                    {g.items.map((a) => (
+                      <LinkCard
+                        key={a.id}
+                        artifact={a}
+                        now={now}
+                        onOpen={(el) => openRow(a, el)}
+                        onJump={() => jumpToMessage(a)}
+                      />
+                    ))}
+                  </div>
+                )}
+                {tab === "image" && (
+                  <div className="grid grid-cols-2 gap-1 px-3 pb-3">
+                    {g.items.map((a) => (
+                      <ImageTile
+                        key={a.id}
+                        artifact={a}
+                        onOpen={(el) => openRow(a, el)}
+                        onAttach={() => void attachArtifact(a, sessionId ?? "")}
+                        onDownload={() => void downloadArtifact(a)}
+                        onJump={() => jumpToMessage(a)}
+                      />
+                    ))}
+                  </div>
+                )}
+                {tab === "file" && (
+                  <div className="px-2 pb-3">
+                    {g.items.map((a) => (
+                      <FileRow
+                        key={a.id}
+                        artifact={a}
+                        onOpen={(el) => openRow(a, el)}
+                        onAttach={() => void attachArtifact(a, sessionId ?? "")}
+                        onDownload={() => void downloadArtifact(a)}
+                        onJump={() => jumpToMessage(a)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
       </aside>
 
       {/* The preview overlay — one surface, a renderer per type. Rendered here

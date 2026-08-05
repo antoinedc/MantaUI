@@ -206,6 +206,15 @@ export function formatBytes(n: number): string {
   return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
 }
 
+// Short expiry label for a hosted-page state pill: "23h" / "2h" for live/soon
+// pages (whole hours, floor at 1 so a fresh page never reads "0h"), "" for an
+// expired or unexpiring artifact (the pill is omitted entirely then).
+export function expiryLabel(expiresAt: number | null | undefined, now: number): string {
+  if (expiresAt == null || !Number.isFinite(expiresAt) || expiresAt <= now) return "";
+  const hours = Math.floor((expiresAt - now) / 3_600_000);
+  return `${Math.max(1, hours)}h`;
+}
+
 export function formatDuration(ms: number): string {
   if (ms < 1000) return "<1s";
   const totalSec = Math.round(ms / 1000);

@@ -11,6 +11,7 @@ export type Artifact = {
   label: string; // filename, page title, or URL host+path
   href: string; // absolute box path for files/images, URL for links
   mime: string | null; // null for links
+  size: number | null; // byte size for files/images when known (formatBytes), null otherwise
   at: number; // epoch ms, for sorting and day grouping
   messageId: string | null; // null for pages with no matching message
   context: string | null; // surrounding message text, links only
@@ -62,6 +63,7 @@ function deriveFileArtifact(msg: OpencodeMessage, part: OpencodePart): Artifact 
     label,
     href: pathOnly,
     mime,
+    size: typeof part.size === "number" ? part.size : null,
     at: messageCreated(msg),
     messageId: null,
     context: null,
@@ -85,6 +87,7 @@ function deriveLinkArtifact(msg: OpencodeMessage, part: OpencodePart, url: strin
     label,
     href: url,
     mime: null,
+    size: null,
     at: messageCreated(msg),
     messageId: null,
     context: linkContext(part.text ?? "", url),
@@ -101,6 +104,7 @@ function derivePageArtifact(page: ServedPageMeta, matched: OpencodeMessage | nul
     label: page.subdomain,
     href: page.url,
     mime: null,
+    size: null,
     at: page.createdAt,
     messageId: matched ? matched.info.id : null,
     context: matched ? collapseAndTrim(messageText(matched)) : null,

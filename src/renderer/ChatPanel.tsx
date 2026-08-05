@@ -493,6 +493,29 @@ export function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Artifacts panel → jump-to-message bridge (BET-660). Scrolls the transcript
+  // to the row that owns an artifact's messageId and flashes it for ~1.2s.
+  // Same window-CustomEvent + scrollIntoView pattern as manta-scroll-to-question
+  // (the existing cross-component scroll precedent); the flash is a transient
+  // class that index.css animates out.
+  useEffect(() => {
+    const onScrollToMessage = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { sessionId?: string; messageId?: string }
+        | undefined;
+      if (detail?.sessionId !== sessionId || !detail?.messageId) return;
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      const el = scroller.querySelector<HTMLElement>(`[data-message-id="${detail.messageId}"]`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("manta-message-flash");
+      window.setTimeout(() => el.classList.remove("manta-message-flash"), 1200);
+    };
+    window.addEventListener("manta-scroll-to-message", onScrollToMessage);
+    return () => window.removeEventListener("manta-scroll-to-message", onScrollToMessage);
+  }, [sessionId, scrollRef]);
+
   // Mobile keyboard-bar → /clear bridge (BET-259). The KeyboardBar's
   // `clear` key already showed the user a confirm; this listener hands the
   // clear to ChatPanel's existing /clear builtin path so optimistic-message

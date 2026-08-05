@@ -34,7 +34,7 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
-import type { AvailableLauncher, OpencodeMessage, WorktreeInfo } from "../../shared/types.js";
+import type { AvailableLauncher, OpencodeMessage, ServedPageMeta, WorktreeInfo } from "../../shared/types.js";
 import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
@@ -470,6 +470,10 @@ const onStreamEvent = (cb: (ev: unknown) => void): (() => void) => {
 const launchersList = (): Promise<AvailableLauncher[]> =>
   Promise.resolve(demoState.launchers);
 
+// Served pages (BET-660). Returns the fixture's hosted pages so the artifacts
+// panel's Links tab renders live/soon/expired state pills in the demo capture.
+const servePageList = (): Promise<ServedPageMeta[]> => Promise.resolve(demoState.pages);
+
 // Folder picker listing (BET-562). Without these the Proxy fallback resolves
 // null and the picker's folder list renders a raw "Cannot read properties of
 // null" error in the empty-state capture. The listing is fictional (see
@@ -574,6 +578,7 @@ export const explicitMethods = {
   onOpencodeEvent,
   onStreamEvent,
   launchersList,
+  servePageList,
   fsListDirs,
   gitListWorktrees,
   getClientVersion,

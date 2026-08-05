@@ -29,6 +29,7 @@ import type {
   Project,
   QuestionRequest,
   OpencodeSessionListItem,
+  ServedPageMeta,
   WorktreeInfo,
 } from "../../shared/types.js";
 
@@ -515,6 +516,181 @@ export const demoMessages: OpencodeMessage[] = [
       },
     ],
   },
+  // ===== BET-660 artifact demo content =====
+  // User turn — a pasted external link (the RFC 4180 card), user-"sent" files
+  // (a CSV + PDF in the Files tab) and two user screenshots (Images tab).
+  {
+    info: { id: "msg_u_art", sessionID: SES_INFRA, role: "user", time: { created: DEMO_T0 - 20 * 60_000 } },
+    parts: [
+      {
+        type: "text",
+        id: "prt_u_art",
+        messageID: "msg_u_art",
+        text: "here's the RFC https://datatracker.ietf.org/doc/html/rfc4180 — the quoting rules are what always breaks naive parsers",
+      },
+      {
+        type: "file",
+        id: "prt_u_csv",
+        messageID: "msg_u_art",
+        mime: "text/csv",
+        size: 1_258_291,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/q3-revenue.csv",
+        filename: "q3-revenue.csv",
+      },
+      {
+        type: "file",
+        id: "prt_u_pdf",
+        messageID: "msg_u_art",
+        mime: "application/pdf",
+        size: 5_033_164,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/brand-guidelines.pdf",
+        filename: "brand-guidelines.pdf",
+      },
+      {
+        type: "file",
+        id: "prt_u_img1",
+        messageID: "msg_u_art",
+        mime: "image/png",
+        size: 1_431_656,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/Screenshot 2026-08-05 at 09.12.41.png",
+        filename: "Screenshot 2026-08-05 at 09.12.41.png",
+      },
+      {
+        type: "file",
+        id: "prt_u_img2",
+        messageID: "msg_u_art",
+        mime: "image/png",
+        size: 1_208_314,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/Screenshot 2026-08-05 at 09.15.02.png",
+        filename: "Screenshot 2026-08-05 at 09.15.02.png",
+      },
+    ],
+  },
+  // Assistant turn — agent-"generated" output: a generated CSV, an agent UI
+  // screenshot pair, and the two hosted pages the Links tab renders (their
+  // URLs appear here so deriveArtifacts can match context onto them).
+  {
+    info: { id: "msg_a_art", sessionID: SES_INFRA, role: "assistant", modelID: "claude-opus-4-7", providerID: "anthropic", time: { created: DEMO_T0 - 10 * 60_000 } },
+    parts: [
+      {
+        type: "file",
+        id: "prt_a_csv",
+        messageID: "msg_a_art",
+        mime: "text/csv",
+        size: 862_208,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/cohort-analysis.csv",
+        filename: "cohort-analysis.csv",
+      },
+      {
+        type: "file",
+        id: "prt_a_img1",
+        messageID: "msg_a_art",
+        mime: "image/png",
+        size: 988_160,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/export-preview.png",
+        filename: "export-preview.png",
+      },
+      {
+        type: "file",
+        id: "prt_a_img2",
+        messageID: "msg_a_art",
+        mime: "image/png",
+        size: 1_056_768,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/api-docs-diff.png",
+        filename: "api-docs-diff.png",
+      },
+      {
+        type: "text",
+        id: "prt_a_art_text",
+        messageID: "msg_a_art",
+        text:
+          "Both are up — the split view keeps the transcript readable at narrow widths: " +
+          `${SERVER_URL}/pages/artifacts-panel and ${SERVER_URL}/pages/composer-v2.`,
+      },
+    ],
+  },
+  // A second, older "Yesterday" group: one agent-generated report + migration
+  // notes + two agent screenshots, so Images and Files both span two day groups.
+  {
+    info: { id: "msg_a_art2", sessionID: SES_INFRA, role: "assistant", modelID: "claude-opus-4-7", providerID: "anthropic", time: { created: DEMO_T0 - 86_400_000 - 40 * 60_000 } },
+    parts: [
+      {
+        type: "file",
+        id: "prt_a_retention",
+        messageID: "msg_a_art2",
+        mime: "application/pdf",
+        size: 1_153_433,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/retention-report.pdf",
+        filename: "retention-report.pdf",
+      },
+      {
+        type: "file",
+        id: "prt_a_notes",
+        messageID: "msg_a_art2",
+        mime: "text/markdown",
+        size: 12_288,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/migration-notes.md",
+        filename: "migration-notes.md",
+      },
+      {
+        type: "file",
+        id: "prt_a_oldimg",
+        messageID: "msg_a_art2",
+        mime: "image/png",
+        size: 1_675_568,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/cohort-grid.png",
+        filename: "cohort-grid.png",
+      },
+      {
+        type: "file",
+        id: "prt_a_oldimg2",
+        messageID: "msg_a_art2",
+        mime: "image/png",
+        size: 1_310_720,
+        url: "file:///home/dev/projects/infra/services/billing/uploads/Screenshot 2026-08-03 at 16.40.12.png",
+        filename: "Screenshot 2026-08-03 at 16.40.12.png",
+      },
+      {
+        type: "text",
+        id: "prt_a_art2_text",
+        messageID: "msg_a_art2",
+        text:
+          "Three densities side by side — compact is the one that survives at 1280px: " +
+          `${SERVER_URL}/pages/sidebar-density.`,
+      },
+    ],
+  },
+];
+
+// Hosted pages the artifacts panel's Links tab renders. sessionID matches the
+// active demo session so deriveArtifacts includes them. Expiry anchors to the
+// capture's real "now" (evaluated at module load) — NOT DEMO_T0 — because the
+// panel computes pageState(expiresAt, Date.now()) against the LIVE clock, and a
+// DEMO_T0-anchored expiry (Nov 2023) would render every page "expired" in a
+// real-time capture. Anchoring to now keeps the live/soon/expired pill states
+// faithful to the mockup's `.mk-links`: one live (23h), one soon (2h), one dead.
+export const demoPages: ServedPageMeta[] = [
+  {
+    subdomain: "artifacts-panel",
+    url: `${SERVER_URL}/pages/artifacts-panel`,
+    expiresAt: Date.now() + 23 * 3_600_000,
+    createdAt: Date.now() - 3_600_000,
+    sessionID: SES_INFRA,
+  },
+  {
+    subdomain: "composer-v2",
+    url: `${SERVER_URL}/pages/composer-v2`,
+    expiresAt: Date.now() + 2 * 3_600_000,
+    createdAt: Date.now() - 2 * 3_600_000,
+    sessionID: SES_INFRA,
+  },
+  {
+    subdomain: "sidebar-density",
+    url: `${SERVER_URL}/pages/sidebar-density`,
+    expiresAt: Date.now() - 1_000,
+    createdAt: Date.now() - 86_400_000 - 30 * 60_000,
+    sessionID: SES_INFRA,
+  },
 ];
 
 // Attach cumulative tokens to the in-flight assistant message so the context
@@ -782,6 +958,7 @@ export const demoState = {
   activeSessionId: demoActiveSessionId,
   branch: demoBranch,
   messages: demoMessages,
+  pages: demoPages,
   question: demoQuestion,
   permission: demoPermission,
   sessions: demoSessionList,
@@ -828,6 +1005,7 @@ type DemoStateSnapshot = {
   activeSessionId: string | null;
   branch: string;
   messages: typeof demoState.messages;
+  pages: typeof demoState.pages;
   question: typeof demoQuestion | null;
   permission: typeof demoPermission | null;
   sessions: typeof demoState.sessions;
@@ -1003,6 +1181,7 @@ export function demoStateAt(t: number): DemoStateSnapshot {
     activeSessionId: beat.activeSessionId,
     branch: demoState.branch,
     messages: demoState.messages,
+    pages: demoState.pages,
     question: beat.currentQuestion,
     permission: beat.currentPermission,
     sessions: demoState.sessions,

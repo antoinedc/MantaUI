@@ -4,7 +4,7 @@ App vs `docs/screens/artifacts/mockup.html`, from `npm run visual:compare artifa
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-05 (a281400)
+Last reviewed: 2026-08-05 (f3f5dce)
 
 ## Artifacts panel shell + empty Links tab (BET-659)
 
@@ -84,3 +84,51 @@ report matches the mockup family-by-family.
 - **Footer letter-spacing.** The app uses `text-micro` (its `0.08em` tracking)
   for the `--font-size-2xs` footer line — the same accepted tracking divergence
   as the panel's day-group headers (BET-659).
+
+## Real tab rows — Links / Images / Files (BET-660)
+
+The `artifacts-links` / `artifacts-images` / `artifacts-files` rows crop the
+live `.manta-artifacts-panel` against `.mk-links` / `.mk-images` / `.mk-files`.
+The demo fixture supplies the artifacts the mockup lists: two hosted pages (one
+live ~23h, one soon ~2h), one expired page, one pasted external link, six
+images across two day groups, and five files spanning "you sent this" /
+"generated". Page expiry anchors to `Date.now()` at module load (not DEMO_T0)
+so the live/soon/expired pills resolve against the capture's real clock.
+
+## Resolved against the mockup (BET-660)
+
+- **Row grammar** — open / attach / download / jump all present; attach and
+  download on images+files, jump on all. `Paperclip` is the attach glyph;
+  `Download` and `ChevronRight` the others.
+- **Direction glyph** — `ArrowUp` tinted `--info` (user) / `ArrowDown` tinted
+  `--ok` (agent) via the `manta-artifacts-dir` glyph.
+- **Links** — 52px thumbnail + 2-line title + mono domain; hosted pages carry a
+  `pageState()` pill (ok/warn/danger), expired cards at 50% opacity but stay
+  listed; the context strip is omitted when `context` is null.
+- **Images** — 2-up `aspect-[4/3]` grid, direction chip top-left, hover scrim
+  with actions.
+- **Files** — compact rows with a type-coloured glyph, mono label, and
+  `<dir glyph> <size> · <origin>` sub-line via `formatBytes`.
+- **Size** threaded onto `Artifact` from the file part when present (nullable);
+  expiry labels use a new pure `expiryLabel` helper in `chatUtils.ts`.
+
+## Accepted divergences (BET-660)
+
+- **Rows reuse BET-661's download/attach/preview primitives** — row "open"
+  routes previewables into the BET-661 overlay, links to `openExternal`, and
+  refused types to `downloadArtifact`; attach/download reuse BET-661's
+  `attachArtifact`/`downloadArtifact` (bytes via `/api/peek`, non-destructive).
+- **The capture drives into the infra session first** — the demo's default-active
+  session (projects[0]) is the empty "Add CSV export" shell, so each row's
+  `actions` opens the artifact-rich infra session before the panel (same gesture
+  the `session` and BET-661-preview rows use).
+- **Day-group headers differ in text** — message timestamps stay anchored to
+  DEMO_T0 (transcript determinism) while the panel groups by the real clock, so
+  file/image rows render under 2023 day labels; layout (groups, order, tile/row
+  chrome) matches.
+- **Hosted-page context strips carry the announcing URL** — the mockup elides
+  it, but the app derives context from the full announcing message. Cosmetic.
+- **Remaining Section B deltas** are positional-pairing artefacts between a
+  full-height app panel (280×900) and the mockup fixture card (341×560), plus
+  the app's extra chrome (resize handle, sticky headers); Section A token
+  profiles match (pill colours, card/fill/inset/raised, border-subtle).
