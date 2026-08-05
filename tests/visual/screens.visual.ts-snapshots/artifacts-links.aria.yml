@@ -1,0 +1,23 @@
+- complementary "Artifacts":
+  - text: ""
+  - button "Search artifacts"
+  - button "Close artifacts panel"
+  - tablist "Artifact kind":
+    - tab "Links 4" [selected]
+    - tab "Images 6"
+    - tab "Files 5"
+  - text: Today
+  - button "Open artifact": /artifacts-panel \d+[hmsp]+ 9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e\.boxes\.mantaui\.com\/pages\/artifacts-panel/
+  - text: "Both are up — the split view keeps the transcript readable at narrow widths: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel an"
+  - button "Jump to message"
+  - button "Open artifact": /composer-v2 \d+[hmsp]+ 9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e\.boxes\.mantaui\.com\/pages\/composer-v2/
+  - text: "Both are up — the split view keeps the transcript readable at narrow widths: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel an"
+  - button "Jump to message"
+  - text: Yesterday
+  - button "Open artifact": sidebar-density expired 9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density
+  - text: "Three densities side by side — compact is the one that survives at 1280px: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density."
+  - button "Jump to message"
+  - text: /Tue \d+ Nov/
+  - button "Open artifact": datatracker.ietf.org/doc/html/rfc4180 datatracker.ietf.org/doc/html/rfc4180
+  - text: here's the RFC — the quoting rules are what always breaks naive parsers
+  - button "Jump to message" [disabled]

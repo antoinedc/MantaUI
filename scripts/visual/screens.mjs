@@ -619,6 +619,98 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  {
+    // BET-660 §Design conformance — one region row per real tab. All crop the
+    // real `.manta-artifacts-panel` against the same mockup; they differ only
+    // in the tab the `actions` gesture selects and the `mockupRegion` compared.
+    id: "artifacts-links",
+    title: "Artifacts panel — Links tab",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-artifacts-panel",
+    region: ".manta-artifacts-panel",
+    mockupRegion: ".mk-links",
+    mockup: "docs/screens/artifacts/mockup.html",
+    viewport: DESKTOP_VIEWPORT,
+    actions: async (page) => {
+      // The fixture's artifact content lives on the infra session; open it
+      // (a real user opening that session), then the artifacts panel. Links is
+      // the default tab, so no further gesture.
+      await page.getByText("Deploy new billing service").first().click();
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
+    },
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    id: "artifacts-images",
+    title: "Artifacts panel — Images tab",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-artifacts-panel",
+    region: ".manta-artifacts-panel",
+    mockupRegion: ".mk-images",
+    mockup: "docs/screens/artifacts/mockup.html",
+    viewport: DESKTOP_VIEWPORT,
+    actions: async (page) => {
+      await page.getByText("Deploy new billing service").first().click();
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
+      await page.getByRole("tab", { name: /Images/ }).click();
+    },
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
+    id: "artifacts-files",
+    title: "Artifacts panel — Files tab",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-artifacts-panel",
+    region: ".manta-artifacts-panel",
+    mockupRegion: ".mk-files",
+    mockup: "docs/screens/artifacts/mockup.html",
+    viewport: DESKTOP_VIEWPORT,
+    actions: async (page) => {
+      await page.getByText("Deploy new billing service").first().click();
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
+      await page.getByRole("tab", { name: /Files/ }).click();
+    },
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

@@ -260,3 +260,16 @@ html, body, #root {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-sm); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* Jump-to-message flash (BET-660): a transient row highlight around ~1.2s,
+   added by ChatPanel when an artifact's chevron jumps to its owning message. */
+.manta-message-flash {
+  animation: manta-message-flash 1.2s ease-out;
+}
+@keyframes manta-message-flash {
+  0% { background-color: var(--accent-bg); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-message-flash { animation: none; }
+}

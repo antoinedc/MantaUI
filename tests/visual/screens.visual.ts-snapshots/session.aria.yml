@@ -57,7 +57,16 @@
   - code: csv_stream
   - text: ", and writes the header first. Running the test suite now — should turn green on the new"
   - code: test_…
-  - text: "/cases\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - text: /cases\. q3-revenue\.csv brand-guidelines\.pdf Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png here's the RFC https:\/\/datatracker\.ietf\.org\/doc\/html\/rfc4180 — the quoting rules are what always breaks naive parsers File cohort-analysis\.csv · text\/csv File export-preview\.png · image\/png File api-docs-diff\.png · image\/png Both are up — the split view keeps the transcript readable at narrow widths:/
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel
+  - text: and
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/composer-v2":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/composer-v2
+  - text: /\. File retention-report\.pdf · application\/pdf File migration-notes\.md · text\/markdown File cohort-grid\.png · image\/png File Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png · image\/png Three densities side by side — compact is the one that survives at 1280px:/
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density
+  - text: "/\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"
