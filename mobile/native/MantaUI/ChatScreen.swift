@@ -79,8 +79,17 @@ private struct ChatScreenContent: View {
     @State private var overflowDestination: OverflowDestination?
     /// Live scheduled-task count for the overflow sheet's badge (BET-627).
     @State private var scheduleCount = 0
-    /// Whether the one-shot "open at the newest message" scroll has run.
-    @State private var didLandAtBottom = false
+    /// Height of the scroll content at the last measurement, so a CHANGE can
+    /// drive the landing (see `landIfContentGrew`).
+    @State private var landedContentHeight: CGFloat = 0
+    /// When the landing window closes. The landing is content-driven, but a
+    /// transcript that never stops resizing (a turn streaming into the session
+    /// you just opened) must not re-land forever.
+    @State private var landingDeadline: Date?
+    /// Set when the user scrolls during the landing window. Their scroll wins
+    /// immediately — re-landing over a deliberate scroll is the exact behaviour
+    /// the pin-to-bottom work spent four revisions removing.
+    @State private var landingCancelled = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -450,6 +459,14 @@ private struct ChatScreenContent: View {
                 // of tool output widens the whole screen and drags the composer off
                 // with it.
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // The measured content height drives the landing: each time the
+                // lazy rows materialise and the height jumps, that is the moment
+                // the previous landing became wrong and the moment to re-land.
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    landIfContentGrew(to: height, proxy: proxy)
+                }
             }
             .scrollClipDisabled(false)
             // Scoped to `.sizeChanges` — the same correction the subagent screen
@@ -477,30 +494,46 @@ private struct ChatScreenContent: View {
             // scroll (a tap that moves is not a tap) nor swallows taps on rows that
             // have their own action — a subagent row still pushes its child.
             .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-            .task { await landAtBottom(proxy) }
+            // A deliberate scroll ends the landing immediately. Without this a user who
+            // starts reading history within the landing window gets yanked back to the
+            // bottom by the next height change — the precise failure the pin-to-bottom
+            // work removed, and it must not come back through this door.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8).onChanged { _ in landingCancelled = true }
+            )
         }
     }
 
-    /// Put the freshly-opened session at its newest message.
+    /// Put the freshly-opened session at its newest message, and KEEP it there
+    /// until the content stops resizing.
     ///
-    /// Runs once per screen, never again: re-running it on every content change
-    /// would yank the viewport back down while the user is reading history.
-    /// Streaming stickiness is the scroll anchor's job, not this one's.
+    /// The transcript is a LazyVStack, so at first layout SwiftUI has measured
+    /// only the rows on screen and estimates the rest. A single jump to the end
+    /// therefore aims at an estimated height that is wrong the moment the real
+    /// rows materialise — it overshoots into empty space past the content, which
+    /// is the blank transcript that only the user's own scrolling repairs.
     ///
-    /// It scrolls more than once on purpose. The lazy stack materialises rows
-    /// over several layout passes, so a single scroll issued on the first pass
-    /// lands short of the end; repeating it across the next couple of passes
-    /// converges on the real bottom. Each pass is a no-op once the view is
-    /// already there.
-    private func landAtBottom(_ proxy: ScrollViewProxy) async {
-        guard !didLandAtBottom else { return }
-        didLandAtBottom = true
-        for delayNs in [UInt64(0), 50_000_000, 250_000_000] {
-            if delayNs > 0 { try? await Task.sleep(nanoseconds: delayNs) }
-            guard !Task.isCancelled else { return }
-            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
-        }
+    /// This used to be three scrolls on a fixed 0/50/250ms ladder: a fixed time
+    /// budget racing a variable amount of layout work. It won on a fast Mac's
+    /// simulator and lost on a real iPhone, which is the definition of a race
+    /// rather than a delay to tune. Re-landing on every HEIGHT CHANGE removes the
+    /// clock: each change is precisely the moment the previous landing became
+    /// wrong, and when the height stops changing there is nothing left to fix.
+    private func landIfContentGrew(to height: CGFloat, proxy: ScrollViewProxy) {
+        guard !landingCancelled else { return }
+        let deadline = landingDeadline ?? Date().addingTimeInterval(Self.landingWindow)
+        if landingDeadline == nil { landingDeadline = deadline }
+        guard Date() < deadline else { return }
+        guard height != landedContentHeight else { return }
+        landedContentHeight = height
+        proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
     }
+
+    /// How long the landing keeps correcting itself. Generous, because it costs
+    /// nothing while the height is stable, and a slow device measuring a long
+    /// transcript is the case this exists for. A streaming turn keeps the height
+    /// moving indefinitely, which is why there is a stop at all.
+    private static let landingWindow: TimeInterval = 3
 
     /// Lower the keyboard by asking whoever holds first responder to give it
     /// up. The composer's focus binding lives inside ComposerView, and routing
