@@ -37,21 +37,55 @@ import {
   type ArtifactKind,
   type ArtifactOrigin,
 } from "./artifacts";
-import { expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
+import { decodeDataUri, expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
 
-// Download an artifact to the user's machine. Read-only: fetches the bytes
-// from /api/peek (no source deletion — unlike the outbox /api/download path)
-// and hands a blob: URL to a synthetic <a download>, the same save pattern
-// httpApi's agentPullFile uses. BET-660's rows reuse this; do not reimplement.
+// Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
+// box filesystem path: a self-contained image part carries a `data:` URI (its
+// bytes are IN the href — no network), and a remote URL is a public resource.
+// Only an absolute box path can be streamed through /api/peek.
+async function artifactToBlob(artifact: Artifact): Promise<Blob | null> {
+  const href = artifact.href;
+  if (href.startsWith("data:")) {
+    const decoded = decodeDataUri(href);
+    if (!decoded) return null;
+    const ab = decoded.data.buffer.slice(
+      decoded.data.byteOffset,
+      decoded.data.byteOffset + decoded.data.byteLength,
+    ) as ArrayBuffer;
+    return new Blob([ab], { type: decoded.mime });
+  }
+  if (href.startsWith("http://") || href.startsWith("https://")) {
+    // Remote/private URL — fetch without the box token (it is not a box
+    // resource). Non-ok or cross-origin-refused → null (caller bails).
+    try {
+      const res = await fetch(href);
+      return res.ok ? res.blob() : null;
+    } catch {
+      return null;
+    }
+  }
+  // Absolute box path → stream via /api/peek (non-destructive).
+  try {
+    const url = `${serverBase()}/api/peek?path=${encodeURIComponent(href)}`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    return res.ok ? res.blob() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Download an artifact to the user's machine. Read-only: resolves the bytes
+// (data URI / remote URL / box path via /api/peek — no source deletion, unlike
+// the outbox /api/download path) and hands a blob: URL to a synthetic <a
+// download>, the same save pattern httpApi's agentPullFile uses. BET-660's
+// rows reuse this; do not reimplement.
 export async function downloadArtifact(artifact: Artifact): Promise<void> {
   try {
-    const url = `${serverBase()}/api/peek?path=${encodeURIComponent(artifact.href)}`;
-    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
-    if (!res.ok) return;
-    const blob = await res.blob();
+    const blob = await artifactToBlob(artifact);
+    if (!blob) return;
     const objectUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = objectUrl;
@@ -66,16 +100,14 @@ export async function downloadArtifact(artifact: Artifact): Promise<void> {
   }
 }
 
-// Re-attach an artifact into the session's composer. Fetches the bytes and
+// Re-attach an artifact into the session's composer. Resolves the bytes and
 // hands a File to the existing `manta-attach-files` bridge, which renders the
 // uploading→ready chip and converts it into a FilePart on submit — the same
 // pipeline as every other attach. BET-660's rows reuse this; do not reimplement.
 export async function attachArtifact(artifact: Artifact, sessionId: string): Promise<void> {
   try {
-    const url = `${serverBase()}/api/peek?path=${encodeURIComponent(artifact.href)}`;
-    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
-    if (!res.ok) return;
-    const blob = await res.blob();
+    const blob = await artifactToBlob(artifact);
+    if (!blob) return;
     const file = new File([blob], artifact.label, {
       type: artifact.mime ?? "application/octet-stream",
     });

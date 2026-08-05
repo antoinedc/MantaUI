@@ -84,6 +84,7 @@ import {
   countPreviewLines,
   previewLanguage,
   previewOriginWord,
+  decodeDataUri,
 } from "./chatUtils";
 
 import type { OpencodeModel } from "../shared/types";
@@ -2968,5 +2969,26 @@ describe("artifact preview footer + metadata (BET-661)", () => {
   it("origin word matches the file rows", () => {
     expect(previewOriginWord("user")).toBe("you sent this");
     expect(previewOriginWord("agent")).toBe("generated");
+  });
+});
+
+describe("decodeDataUri", () => {
+  it("decodes a base64 data URI into its mime + bytes", () => {
+    const r = decodeDataUri("data:image/png;base64,aGk="); // base64("hi")
+    expect(r).not.toBeNull();
+    expect(r!.mime).toBe("image/png");
+    expect(Array.from(r!.data)).toEqual([0x68, 0x69]); // "hi"
+  });
+  it("decodes a url-encoded (non-base64) data URI", () => {
+    const r = decodeDataUri("data:text/plain,hello%20world");
+    expect(r!.mime).toBe("text/plain");
+    expect(Array.from(r!.data)).toEqual(Array.from(new TextEncoder().encode("hello world")));
+  });
+  it("returns null for a non-data URI", () => {
+    expect(decodeDataUri("/home/dev/shot.png")).toBeNull();
+    expect(decodeDataUri("https://example.com/x.png")).toBeNull();
+  });
+  it("returns null for a malformed data URI", () => {
+    expect(decodeDataUri("data:image/png")).toBeNull();
   });
 });
