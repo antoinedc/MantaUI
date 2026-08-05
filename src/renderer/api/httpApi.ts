@@ -944,6 +944,12 @@ export const httpApi: Api = {
   webhookList: (sessionId) => rpc(IPC.webhookList, sessionId),
   webhookDelete: (id) => rpc(IPC.webhookDelete, id),
 
+  // -- published serve-page registry (manta-server owned; read-only) --
+  // rpcOptional so an older box (no `serve-page:list` channel) degrades to an
+  // empty list instead of throwing — same resilience as the webhook/secrets
+  // list wrappers.
+  servePageList: () => rpcOptional(IPC.servePageList, []),
+
   // -- background delegation jobs (manta-server owned; in-process on mobile) --
   // list returns the full job records (the engine always returns an array;
   // a no-engine fallback returns {jobs:[]} which we normalize). No create

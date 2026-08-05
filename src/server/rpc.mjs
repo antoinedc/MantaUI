@@ -10,6 +10,8 @@ import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
+import { listPages as servePageListStore } from "./servePage.mjs";
+import { publicBaseUrl } from "./gatewayRegister.mjs";
 import {
   listSecrets as secretsListStore,
   setSecret as secretsSetStore,
@@ -852,6 +854,16 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.webhookDelete, id) → args[0] = id
     "webhook:delete": (id) =>
       webhookDeleteHook(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- published serve-page registry (manta-server owned; read-only) ----
+    // The box already records every page `serve_page` publishes (tagged with
+    // the opencode session that created it); this exposes that registry so the
+    // artifacts panel can render it. No write counterpart — pages are
+    // published/stopped by the AI's global `serve_page`/`stop_page` opencode
+    // tools (POST /api/serve-page), not by a UI channel. `publicBaseUrl`
+    // reads ~/.manta/auth.json fresh per call, so the list's `url` fields stay
+    // correct even if the box's gateway host was provisioned after boot.
+    "serve-page:list": async () => servePageListStore({ baseUrl: publicBaseUrl() }),
 
     // ---- APNs native-push registration (BET-181) ----
     // iOS Capacitor app registers its APNs device token via the renderer-side

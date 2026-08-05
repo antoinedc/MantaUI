@@ -995,7 +995,7 @@ const handleRequest = async (req, res) => {
   // Path is resolved against the caller's home dir (~ expansion) and
   // constrained to stay inside it (path-traversal guard). Content-Type is
   // inferred from the file extension; falls back to application/octet-stream.
-  if (req.method === "GET" && path === "/api/peek") {
+  if ((req.method === "GET" || req.method === "HEAD") && path === "/api/peek") {
     const raw = url.searchParams.get("path") ?? "";
     if (!raw) {
       respondJson(res, 400, { error: "path is required" });
@@ -1034,6 +1034,11 @@ const handleRequest = async (req, res) => {
       "content-length": String(s.size),
       "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
     });
+    // HEAD reports the size via `content-length` without streaming the body.
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     try {
       await pipeline(createReadStream(resolved), res);
     } catch (e) {
