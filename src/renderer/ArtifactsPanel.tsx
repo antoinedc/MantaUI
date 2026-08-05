@@ -24,7 +24,6 @@ import {
   Link2,
   Paperclip,
   Search,
-  X,
 } from "lucide-react";
 import type { OutboxFile, ServedPageMeta } from "../shared/types";
 import { useStore } from "./store";
@@ -452,11 +451,9 @@ function FileRow({
 export function ArtifactsPanel({
   sessionId,
   open,
-  onClose,
 }: {
   sessionId: string | null;
   open: boolean;
-  onClose: () => void;
 }) {
   // The transcript lifted by ChatPanel (reuse — never a second fetch).
   const messages = useStore((s) => (sessionId ? s.chatMessages[sessionId] ?? [] : []));
@@ -468,10 +465,6 @@ export function ArtifactsPanel({
   widthRef.current = width;
 
   const [tab, setTab] = useState<ArtifactKind>("link");
-  // The direction of the last tab switch, for the content slide animation:
-  // null until the first switch, then "left"|"right" keyed to whether the new
-  // tab sits before/after the old one in TABS order.
-  const [slideDir, setSlideDir] = useState<"left" | "right" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   // The preview overlay: index into `previewable` (the current tab's
@@ -545,6 +538,21 @@ export function ArtifactsPanel({
   }, [tabArtifacts, query]);
   const groups = useMemo(() => groupByDay(filtered, now), [filtered, now]);
 
+  // Tab badge counts. Unfiltered → the real per-kind totals. Searching → the
+  // live match count for links and files, and a flat 0 for images (the image
+  // tab is excluded from search, so its badge reads 0 while a query is active).
+  const displayCounts = useMemo(() => {
+    if (!query) return counts;
+    const q = query.toLowerCase();
+    const matches = (a: Artifact) =>
+      a.label.toLowerCase().includes(q) || a.href.toLowerCase().includes(q);
+    return {
+      link: artifacts.filter((a) => a.kind === "link" && matches(a)).length,
+      image: 0,
+      file: artifacts.filter((a) => a.kind === "file" && matches(a)).length,
+    };
+  }, [artifacts, query, counts]);
+
   const openPreview = (pi: number, el: HTMLElement) => {
     previewSourceRef.current = el;
     setPreviewIndex(pi);
@@ -576,16 +584,6 @@ export function ArtifactsPanel({
         detail: { sessionId, messageId: a.messageId },
       }),
     );
-  };
-
-  // Tab switch with direction tracking for the content slide. TABS order gives
-  // the natural reading direction: moving right through Links→Images→Files
-  // slides the incoming content in from the right, going back slides it in
-  // from the left.
-  const selectTab = (k: ArtifactKind) => {
-    if (k === tab) return;
-    setSlideDir(TABS.indexOf(k) > TABS.indexOf(tab) ? "right" : "left");
-    setTab(k);
   };
 
   if (!open) return null;
@@ -635,7 +633,6 @@ export function ArtifactsPanel({
                 title={searchOpen ? "Hide search" : "Search"}
                 onClick={() => setSearchOpen((v) => !v)}
               />
-              <IconButton icon={<X />} label="Close artifacts panel" title="Close" onClick={onClose} />
             </div>
           </div>
 
@@ -644,53 +641,62 @@ export function ArtifactsPanel({
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search links, images, files…"
+              placeholder="Search links & files…"
               className="mb-3 w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
             />
           )}
 
           {/* Tab bar: Links / Images / Files with counts, Links always the
-              default. Segmented control per the design `.mk-tabs`. The 12px
-              gap to the content below comes from the body's own top padding. */}
+              default per the design `.mk-tabs`. The SELECTED highlight is a
+              sliding pill that animates across the three equal-width tabs via a
+              transform transition on the indicator — so switching sections
+              reads as the highlight gliding, not the content swapping. */}
           <div
-            className="flex gap-1 p-1 bg-inset border border-border-subtle rounded-md"
+            className="relative flex p-1 bg-inset border border-border-subtle rounded-md"
             role="tablist"
             aria-label="Artifact kind"
           >
-          {TABS.map((k) => {
-            const active = tab === k;
-            return (
-              <button
-                key={k}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => selectTab(k)}
-                className={
-                  "flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
-                  (active ? "bg-raised text-text shadow-sm" : "text-text-faint hover:text-text")
-                }
-              >
-                {TAB_LABEL[k]}
-                <span
+            <span
+              className="manta-artifacts-tab-indicator absolute left-1 top-1 bottom-1 rounded-sm bg-raised shadow-sm"
+              style={{
+                // One tab's width: the content row is 100% minus the p-1 (0.5rem)
+                // horizontal padding, split across the three flush flex-1 tabs.
+                width: "calc((100% - 0.5rem) / 3)",
+                transform: `translateX(${TABS.indexOf(tab) * 100}%)`,
+              }}
+            />
+            {TABS.map((k) => {
+              const active = tab === k;
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTab(k)}
                   className={
-                    "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
-                    (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                    "relative z-10 flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
+                    (active ? "text-text" : "text-text-faint hover:text-text")
                   }
                 >
-                  {counts[k]}
-                </span>
-              </button>
-            );
-          })}
+                  {TAB_LABEL[k]}
+                  <span
+                    className={
+                      "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
+                      (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                    }
+                  >
+                    {displayCounts[k]}
+                  </span>
+                </button>
+              );
+            })}
         </div>
         </div>{/* close the px-3 pt-[11px] header wrapper */}
 
         {/* Body: day-grouped, sticky headers, newest first, one renderer per
-            tab. The keyed slide wrapper re-mounts + animates the content on
-            every tab switch. */}
+            tab. */}
         <div className="flex-1 overflow-y-auto min-h-0">
-          <div key={tab} className={slideDir ? `manta-artifacts-slide-${slideDir}` : undefined}>
           {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {query ? (
@@ -743,7 +749,6 @@ export function ArtifactsPanel({
               </div>
             ))
           )}
-          </div>{/* close the keyed slide wrapper */}
         </div>
       </aside>
 

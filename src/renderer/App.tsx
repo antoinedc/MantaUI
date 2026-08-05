@@ -1206,7 +1206,6 @@ function AppInner() {
         <ArtifactsPanel
           sessionId={activeChatSessionId}
           open={artifactsOpen}
-          onClose={() => setArtifactsOpen(false)}
         />
       )}
       {settingsOpen && (
