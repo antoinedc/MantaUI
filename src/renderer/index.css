@@ -167,21 +167,25 @@ html, body, #root {
       merely grows does not re-animate, and the canonical refetch (which
       reconciles rather than remounts) does not re-fire it.
 
-      It used to be its own weaker `manta-chunk-in` (3px / 0.18s). At that
-      distance the rise is below the threshold where it reads as movement, so
-      prose looked like it merely faded while cards slid — reported as "prose
-      never slides in". The keyframes are now shared rather than duplicated at
-      matching values, so the two cannot drift apart again.
+      The motion is the "layered drift" used across the transcript: new material
+      glides up from a comfortable vertical distance on a long, calm ease
+      (cubic-bezier(0.16, 1, 0.3, 1)) so it reads as the turn settling into
+      place rather than snapping in. Uniform for prose and cards.
+
+      It used to be its own weaker `manta-chunk-in` (3px / 0.18s), then a shared
+      8px / 0.22s rise. At those distances the rise is below the threshold
+      where it reads as movement — reported as "prose never slides in". The
+      further drift + longer ease is what makes it legible.
 
       NOTE the block is the unit here, and the container is deliberately NOT
       also slid (AssistantPart exempts the live text part): sliding both would
-      move the same content twice, 8px inside another 8px.
+      move the same content twice.
    2. Trailing caret. A thin accent block after the last block's last line,
       marking where output is being written. Drawn with ::after on the last
       child so it sits INLINE at the end of the text — a sibling element would
       break onto its own line after a block-level <p>. */
 .manta-streaming > * {
-  animation: manta-part-in 0.22s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: manta-part-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .manta-streaming > *:last-child::after {
   content: "";
@@ -200,10 +204,10 @@ html, body, #root {
 }
 
 /* Transcript entry motion (transcript-motion).
-   A tool card / text block that appears while the user is watching slides up
-   a few pixels with a fade, so a turn assembles itself instead of each piece
-   teleporting into place. Transform + opacity only (compositor-friendly),
-   `both` fill so the one-shot play holds its end state.
+   A tool card / text block that appears while the user is watching glides up
+   from a comfortable distance with a fade, so a turn assembles itself instead
+   of each piece teleporting into place. Transform + opacity only
+   (compositor-friendly), `both` fill so the one-shot play holds its end state.
 
    THE PART IS THE UNIT, not the row. During a turn the parts of a single
    assistant message mount one at a time over many seconds, so animating the
@@ -217,31 +221,29 @@ html, body, #root {
    `entering` (decided in Transcript.tsx by updateEntryMotion) is what keeps
    history still: a transcript the user merely loaded animates nothing. */
 @keyframes manta-part-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
+  0%   { opacity: 0; transform: translateY(22px) scale(0.985); }
+  100% { opacity: 1; transform: none; }
 }
 .manta-part-in {
-  animation: manta-part-in 0.22s var(--ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+  animation: manta-part-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-/* User bubble send (transcript-motion). iMessage-style send: the bubble
-   springs in from just below where the composer sits — a short rise with a
-   slight scale overshoot so it reads as a single "pop" that the text lands
-   in, rather than a static stamp. The 72% keyframe gives the spring feel
-   without introducing a spring-easing dependency. Origin is the bottom-right
-   corner (where a send originates) so the overshoot scales toward the
-   transcript, not the gutter.
+/* User bubble send (transcript-motion). Layered-drift style: the bubble glides
+   up from just below where the composer sits — same motion family as incoming
+   material (22px rise, gentle 0.985 settle, long calm ease) so the transcript
+   reads as one continuous upward flow rather than the send being a different
+   "language" from the reply. Origin is the bottom-right corner (where a send
+   originates) so the rise scales toward the transcript, not the gutter.
 
    Applied ONLY when the message arrived live (see MessageBubble): this class
-   was once unconditional, which made every bubble in an opened transcript pop
+   was once unconditional, which made every bubble in an opened transcript move
    and replayed the user's whole send history on a session switch. */
 @keyframes manta-bubble-in {
-  0%   { opacity: 0; transform: translateY(14px) scale(0.9); }
-  72%  { opacity: 1; transform: translateY(-2px) scale(1.02); }
+  0%   { opacity: 0; transform: translateY(22px) scale(0.985); }
   100% { opacity: 1; transform: none; }
 }
 .manta-bubble-in {
-  animation: manta-bubble-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: manta-bubble-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   transform-origin: bottom right;
 }
 

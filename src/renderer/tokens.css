@@ -103,9 +103,6 @@
   --prose-lh: 1.55;
   --ui-lh: 1.45;
 
-  /* One easing curve for every transition, so motion reads as one system. */
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
-
   /* Type stacks (BET-451). These MIRROR tailwind.config.js `fontFamily` — the
      app's components get them through font-sans / font-mono utilities, and
      these exist so hand-written CSS and mockups resolve the same stack instead
