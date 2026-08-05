@@ -276,11 +276,17 @@ export function InputArea({
       <div
         className={
           "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
+          // Resting border is `border-subtle`, the SAME token the tool cards
+          // use. It was `border-strong`, which is a control-boundary tone —
+          // on the light canvas that reads as a noticeably heavier rule than
+          // every card on the screen, so the composer looked outlined rather
+          // than contained. Definition now comes from the fill + --shadow-sm;
+          // focus-within still paints the accent border.
           (voiceActive
             ? "manta-recording"
             : refreshing
               ? "border-accent"
-              : "border-border-strong")
+              : "border-border-subtle")
         }
         // Route every non-control click in the box to the message field. This
         // is what makes the composer focusable on Windows, where a click could
@@ -459,7 +465,11 @@ export function InputArea({
         <button
           onClick={() => setChatAutoAllow(!chatAutoAllow)}
           className={
-            "inline-flex items-center gap-2 text-[11.5px] leading-none font-medium py-[6px] px-0 " +
+            // Smaller + regular weight (was 11.5px medium): this is an ambient
+            // state line under the composer, not a call to action. The danger
+            // colour is what makes the bypassing state read — the type does
+            // not need to carry it too.
+            "inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-quiet hover:text-text-muted")

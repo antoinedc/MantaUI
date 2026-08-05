@@ -456,9 +456,11 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         <div
           className={
             "manta-composer-input-row rounded-lg border bg-bg-soft flex items-start gap-3 px-4 py-3 " +
+            // Resting tone matches the session composer (border-subtle, the
+            // tool-card token) — the two must not diverge.
             (voiceRecording
               ? "manta-recording"
-              : "border-border-strong")
+              : "border-border-subtle")
           }
         >
           <textarea

@@ -14,8 +14,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
 import { Chip, SplitChip } from "./Chip";
 
-const CHIP_SHELL =
-  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta font-medium leading-none transition-colors";
+const CHIP_BASE =
+  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta leading-none transition-colors";
+// Single chip = medium (a labelled action). Split chip = regular (a status
+// readout). The divergence is deliberate — see Chip.tsx's header.
+const CHIP_SHELL = `${CHIP_BASE} font-medium`;
+const SPLIT_SHELL = `${CHIP_BASE} font-normal`;
 const CHIP_REST = "border-border bg-bg-soft text-text-muted";
 const CHIP_HOVER = "hover:border-border-strong hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
@@ -79,6 +83,25 @@ describe("SplitChip", () => {
     return Array.from(els) as HTMLButtonElement[];
   }
 
+  // Every case below mounts the same two-segment baseline and varies ONE prop,
+  // so the four required props are supplied here once. Re-mounting inside a
+  // case (the "absent the prop, nothing leaks" half of several tests) goes
+  // through the same helper, which unmounts the previous harness for you.
+  type SplitProps = Partial<Parameters<typeof SplitChip>[0]>;
+  function mountSplit(props: SplitProps = {}): HTMLElement {
+    h?.unmount();
+    h = mount(
+      <SplitChip
+        left={<span>L</span>}
+        right={<span>R</span>}
+        onLeftClick={() => {}}
+        onRightClick={() => {}}
+        {...props}
+      />,
+    );
+    return h.container.firstElementChild as HTMLElement;
+  }
+
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
     // @ts-expect-error — SplitChip must NOT accept className (M527 decision 3)
     void <SplitChip left={<>l</>} right={<>r</>} onLeftClick={() => {}} onRightClick={() => {}} className="bg-red-500" />;
@@ -86,16 +109,8 @@ describe("SplitChip", () => {
   });
 
   it("renders the split shell (rest chrome, no padding) around two segments", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-      />,
-    );
-    const shell = h.container.firstElementChild as HTMLElement;
-    expect(shell.className).toBe(`${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
+    const shell = mountSplit();
+    expect(shell.className).toBe(`${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
     const [l, r] = buttons();
     expect(l.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`);
     expect(r.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover`);
@@ -106,17 +121,8 @@ describe("SplitChip", () => {
     h = mount(<Chip>Hello</Chip>);
     expect(button(h).className).toContain("hover:border-border-strong");
 
-    h.unmount();
     // The split control's shell carries NO outline hover; both segments fill.
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-      />,
-    );
-    const shell = h.container.firstElementChild as HTMLElement;
+    const shell = mountSplit();
     expect(shell.className).not.toContain("hover:border-border-strong");
     expect(shell.className).not.toContain("hover:text-text");
     const [l, r] = buttons();
@@ -124,44 +130,23 @@ describe("SplitChip", () => {
     expect(r.className).toContain("hover:bg-fill-hover");
   });
 
-  it("adds accent-tx + semibold to the right segment only when rightAccent", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        rightAccent
-      />,
-    );
+  it("adds accent-tx — COLOUR ONLY, no weight bump — to the right segment only when rightAccent", () => {
+    mountSplit({ rightAccent: true });
     const [l, r] = buttons();
     expect(r.className).toContain("text-accent-tx");
-    expect(r.className).toContain("font-semibold");
+    // The accent carries the emphasis; a weight bump on top made the effort
+    // label the heaviest text in the composer.
+    expect(r.className).not.toContain("font-semibold");
     expect(l.className).not.toContain("text-accent-tx");
 
-    h.unmount();
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-      />,
-    );
+    mountSplit();
     expect(buttons()[1].className).not.toContain("text-accent-tx");
   });
 
   it("fires onLeftClick and onRightClick independently", () => {
     let l = 0;
     let r = 0;
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => l++}
-        onRightClick={() => r++}
-      />,
-    );
+    mountSplit({ onLeftClick: () => l++, onRightClick: () => r++ });
     const [bl, br] = buttons();
     bl.click();
     expect(l).toBe(1);
@@ -172,33 +157,17 @@ describe("SplitChip", () => {
   });
 
   it("sets leftTitle and rightTitle", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        leftTitle="model"
-        rightTitle="effort"
-      />,
-    );
+    mountSplit({ leftTitle: "model", rightTitle: "effort" });
     const [l, r] = buttons();
     expect(l.title).toBe("model");
     expect(r.title).toBe("effort");
   });
 
   it("applies leftHook/rightHook identity classes to the segment buttons, not just the shell (BET-635)", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        leftHook="manta-model-picker-btn"
-        rightHook="manta-effort-picker-btn"
-      />,
-    );
-    const shell = h.container.firstElementChild as HTMLElement;
+    const shell = mountSplit({
+      leftHook: "manta-model-picker-btn",
+      rightHook: "manta-effort-picker-btn",
+    });
     const [l, r] = buttons();
     // The coverage registry scans the aria-haspopup segment buttons for a
     // `manta-*` class, so the hooks must land on the buttons, not the shell.
@@ -207,74 +176,31 @@ describe("SplitChip", () => {
     expect(l.className).toContain("manta-model-picker-btn");
     expect(r.className).toContain("manta-effort-picker-btn");
     // Absent the props, no hook class leaks onto the buttons.
-    h.unmount();
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-      />,
-    );
+    mountSplit();
     expect(buttons()[0].className).not.toContain("manta-");
     expect(buttons()[1].className).not.toContain("manta-");
   });
 
   it("sets aria-expanded per segment only when the caller provides it (BET-635)", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        popup
-        leftExpanded
-        rightExpanded={false}
-      />,
-    );
+    mountSplit({ popup: true, leftExpanded: true, rightExpanded: false });
     const [l, r] = buttons();
     expect(l.getAttribute("aria-expanded")).toBe("true");
     expect(r.getAttribute("aria-expanded")).toBe("false");
     // Absent the props, no aria-expanded leaks onto the buttons — a non-popup
     // or stateless adopter stays clean.
-    h.unmount();
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        popup
-      />,
-    );
+    mountSplit({ popup: true });
     const [pl, pr] = buttons();
     expect(pl.hasAttribute("aria-expanded")).toBe(false);
     expect(pr.hasAttribute("aria-expanded")).toBe(false);
   });
 
   it("does NOT assume popup semantics: aria-haspopup is absent unless popup is opted in", () => {
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-      />,
-    );
+    mountSplit();
     const [l, r] = buttons();
     expect(l.hasAttribute("aria-haspopup")).toBe(false);
     expect(r.hasAttribute("aria-haspopup")).toBe(false);
 
-    h.unmount();
-    h = mount(
-      <SplitChip
-        left={<span>L</span>}
-        right={<span>R</span>}
-        onLeftClick={() => {}}
-        onRightClick={() => {}}
-        popup
-      />,
-    );
+    mountSplit({ popup: true });
     const [pl, pr] = buttons();
     expect(pl.getAttribute("aria-haspopup")).toBe("listbox");
     expect(pr.getAttribute("aria-haspopup")).toBe("listbox");

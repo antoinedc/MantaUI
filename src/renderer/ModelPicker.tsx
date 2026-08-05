@@ -13,7 +13,7 @@
 // raw id is sent back via onSelect.
 
 import { useMemo, useRef, useState } from "react";
-import { ChevronDown, Sparkles, Zap } from "lucide-react";
+import { ChevronDown, Sparkles, Zap, ZapOff } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { hideFastSiblingGroups, resolveFastToggle, titleCase } from "./chatUtils";
@@ -174,7 +174,22 @@ export function ModelPicker({
           setModelOpen(false);
           setVariantOpen((v) => !v);
         }}
-        extra={<Zap size={13} aria-hidden="true" fill={fast.on ? "currentColor" : "none"} />}
+        // Three states, three glyphs — "unavailable" gets its OWN icon rather
+        // than a dimmer copy of the "off" one. A greyed Zap is indistinguishable
+        // from an un-toggled Zap at 13px, which is why this model has no fast
+        // twin / no fast twin at this effort read as "fast mode is simply off"
+        // and people kept clicking a dead segment. ZapOff says unavailable;
+        // hollow Zap says available-but-off; filled Zap says on. (`fast.on`
+        // wins over availability so an on-but-frozen toggle still shows as on.)
+        extra={
+          fast.on ? (
+            <Zap size={13} aria-hidden="true" fill="currentColor" />
+          ) : fast.available ? (
+            <Zap size={13} aria-hidden="true" fill="none" />
+          ) : (
+            <ZapOff size={13} aria-hidden="true" />
+          )
+        }
         onExtraClick={() => {
           if (!fast.available || !fast.target) return;
           setModelOpen(false);
