@@ -13,39 +13,68 @@ import UIKit
 //
 // Deliberately ONE component with a caption, not a family: every caller passes
 // its own label so the visual is identical everywhere it appears.
+//
+// Two SIZES, though — not two designs. The full waiting state and the inline
+// running row draw the same object at different diameters (see
+// `MantaLoaderSize`), so a wait always looks like the same thing, big or small.
 // ===========================================================================
 
+/// The loader's two forms. `screen` is the full waiting state (a session
+/// opening); `inline` is the running row, beside 13pt text. The two share
+/// one geometry so a wait always looks like the same object — the desktop
+/// client (src/renderer/MantaLoader.tsx) draws the same pair.
+enum MantaLoaderSize {
+    case inline
+    case screen
+
+    /// Outer diameter.
+    var diameter: CGFloat { self == .screen ? 92 : 24 }
+    /// Arc weight. Pinned at 2 below `screen` rather than scaled: holding
+    /// the 92pt ratio at 24pt gives a 0.8pt hairline that disappears
+    /// against the transcript, so the small form is deliberately heavier.
+    var stroke: CGFloat { self == .screen ? 3 : 2 }
+}
+
 struct MantaLoader: View {
-    var caption: String?
+    var caption: String? = nil
     var tokens: Tokens
+    var size: MantaLoaderSize = .screen
 
     @State private var outer = false
     @State private var inner = false
 
-    private let size: CGFloat = 92
-    private let tile: CGFloat = 46
+    private var diameter: CGFloat { size.diameter }
+    private var stroke: CGFloat { size.stroke }
+
+    // The ratios the old 92pt/46pt/72pt numbers already encoded (46/92 = 0.5,
+    // 72/92 ≈ 0.78) — the same values the desktop uses. Kept as ratios so the
+    // inline form is the large form scaled, not a second drawing.
+    private static let outerArc: CGFloat = 0.28
+    private static let innerArc: CGFloat = 0.22
+    private static let innerRatio: CGFloat = 0.78
+    private static let markRatio: CGFloat = 0.5
 
     var body: some View {
         VStack(spacing: Metrics.spacing.sp4) {
             ZStack {
                 // Outer ring: one accent arc, clockwise.
                 Circle()
-                    .trim(from: 0, to: 0.28)
-                    .stroke(tokens.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .frame(width: size, height: size)
+                    .trim(from: 0, to: Self.outerArc)
+                    .stroke(tokens.accent, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+                    .frame(width: diameter, height: diameter)
                     .rotationEffect(.degrees(outer ? 360 : 0))
 
                 // Inner ring: softer, slower, and turning the other way — which
                 // is what stops the pair reading as a single spinning circle.
                 Circle()
-                    .trim(from: 0, to: 0.22)
-                    .stroke(tokens.accent.opacity(0.4), style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                    .frame(width: size - 20, height: size - 20)
+                    .trim(from: 0, to: Self.innerArc)
+                    .stroke(tokens.accent.opacity(0.4), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+                    .frame(width: diameter * Self.innerRatio, height: diameter * Self.innerRatio)
                     .rotationEffect(.degrees(inner ? -360 : 0))
 
                 mark
             }
-            .frame(width: size, height: size)
+            .frame(width: diameter, height: diameter)
             .accessibilityHidden(true)
 
             if let caption {
@@ -71,6 +100,6 @@ struct MantaLoader: View {
         Image(uiImage: UIImage(named: "manta-logo") ?? UIImage(named: "manta-logo.png") ?? UIImage())
             .resizable()
             .scaledToFit()
-            .frame(width: tile, height: tile)
+            .frame(width: diameter * Self.markRatio, height: diameter * Self.markRatio)
     }
 }
