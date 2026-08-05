@@ -144,8 +144,9 @@ type Props = {
   availableLaunchers?: AvailableLauncher[];
   // BET-659: the Artifacts panel toggle state + handler, owned by App (which
   // mounts the panel as a sibling of <main>). Threaded through to the header.
-  artifactsOpen: boolean;
-  onToggleArtifacts: () => void;
+  // Optional so test harnesses that construct ChatPanel directly omit them.
+  artifactsOpen?: boolean;
+  onToggleArtifacts?: () => void;
 };
 
 export function ChatPanel({
@@ -159,8 +160,8 @@ export function ChatPanel({
   mode = "chat",
   onModeChange,
   availableLaunchers = [],
-  artifactsOpen,
-  onToggleArtifacts,
+  artifactsOpen = false,
+  onToggleArtifacts = () => {},
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);

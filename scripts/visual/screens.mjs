@@ -545,6 +545,30 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  {
+    // BET-659: the Artifacts panel, opened from the session header toggle.
+    // Same session fixture as `session`; `actions` opens the panel by clicking
+    // the header's "Show artifacts" button. Rows are placeholders, so the
+    // fixture's transcript yields an empty Links tab — the blank-state chrome
+    // (header, tab bar with counts, empty-state line) is what's covered.
+    id: "artifacts-panel",
+    title: "Artifacts panel open in session view",
+    url: "/app/index.html?demo&desktop",
+    ready: '[data-screen="session"]',
+    final: 'aside[aria-label="Artifacts"]',
+    actions: async (page) => {
+      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
+      await page.locator('[aria-label="Show artifacts"]').click();
+    },
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */

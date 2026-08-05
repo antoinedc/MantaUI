@@ -226,7 +226,7 @@ export function ArtifactsPanel({
             {g.items.map((a) => (
               <div
                 key={a.id}
-                className="px-3 py-1.5 text-meta text-text-muted truncate"
+                className="px-3 py-1 text-meta text-text-muted truncate"
                 title={a.href}
               >
                 {a.label}
