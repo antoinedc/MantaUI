@@ -123,7 +123,7 @@ struct ModelPickerSheet: View {
     /// Fast-mode toggle, present only when it can do something.
     private var fastSection: some View {
         Section {
-            Toggle(isOn: Binding(get: { fast.on }, set: applyFastToggle)) {
+            Toggle(isOn: Binding(get: { fast.on }, set: { applyFastToggle($0) })) {
                 Label("Fast mode", systemImage: fast.on ? "bolt.fill" : "bolt")
             }
             .disabled(!fast.available)
@@ -167,7 +167,7 @@ struct ModelPickerSheet: View {
             }
         } else {
             ForEach(groups, id: \.provider) { group in
-                Section(group.provider) {
+                Section {
                     ForEach(group.models, id: \.id) { m in
                         Button { select(m) } label: {
                             HStack {
@@ -177,6 +177,8 @@ struct ModelPickerSheet: View {
                             }
                         }
                     }
+                } header: {
+                    Text(group.provider)
                 }
             }
         }
