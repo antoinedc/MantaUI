@@ -124,15 +124,25 @@ struct SessionListView: View {
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
+        // Popping the last session off the stack lands us back on the list.
+        // Two jobs on that transition:
+        .onChange(of: path.count) { count in
+            guard count == 0 else { return }
+            // Back on the list means nothing is open, so nothing is highlighted.
+            openRow = nil
+            // …and it is the one moment the list is on screen again after an
+            // unknown amount of time inside a session, during which windows may
+            // have been created, renamed or killed. Nothing else fetches on this
+            // transition, so a list that went stale (or blank) while you were away
+            // stayed that way until a force-quit. `refresh()` coalesces with any
+            // in-flight fetch and never clears what is already on screen.
+            Task { await store.refresh() }
+        }
         // S8 (BET-600): a tapped notification opens the session that fired it,
         // not the list. The push router carries the opencode sessionId; we turn
         // it into the same openTarget the list rows use. onChange covers a
         // warm launch (view already mounted), onAppear the cold-start case
         // (the tap routed before the list appeared).
-        // Back on the list means nothing is open, so nothing is highlighted.
-        .onChange(of: path.count) { count in
-            if count == 0 { openRow = nil }
-        }
         .onAppear { consumePushLink() }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
     }

@@ -163,6 +163,19 @@ final class MantaTransportTests: XCTestCase {
         XCTAssertNoThrow(try MantaAPIClient.decode(data, as: SendPromptResult.self))
     }
 
+    /// `callRequired` turns this nil into a throw. The distinction is the whole
+    /// bug: a null result folded into `[]` made an unanswered `tmux:list` look
+    /// like a box with no sessions.
+    func testNullResultDecodesToNilRatherThanAnEmptyList() throws {
+        let decoded = try MantaAPIClient.decode(json(#"{"result": null}"#), as: [MantaProject].self)
+        XCTAssertNil(decoded)
+    }
+
+    func testEmptyArrayResultDecodesToAnEmptyList() throws {
+        let decoded = try MantaAPIClient.decode(json(#"{"result": []}"#), as: [MantaProject].self)
+        XCTAssertEqual(decoded?.count, 0)
+    }
+
     func testDecodesServerErrorEnvelope() throws {
         let payload = #"{"error":"opencode sendPrompt 500: oops"}"#
         XCTAssertThrowsError(try MantaAPIClient.decode(json(payload), as: [OpencodeMessage].self)) { error in

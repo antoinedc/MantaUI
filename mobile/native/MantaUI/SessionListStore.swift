@@ -123,6 +123,14 @@ final class SessionListStore: ObservableObject {
     /// so the caller resolves the new window against a list that contains it
     /// instead of the pre-create snapshot.
     func applyProjects(_ list: [MantaProject]) {
+        // A project list that has just been mutated CANNOT be empty — the
+        // window we created is in it. An empty one therefore means the reply
+        // was not the list we asked for, and adopting it would blank a list we
+        // had loaded fine. Re-fetch rather than believe it.
+        guard !list.isEmpty else {
+            Task { await refresh() }
+            return
+        }
         projects = list
         loadedOnce = true
         loadError = nil
