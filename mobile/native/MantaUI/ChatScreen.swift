@@ -88,10 +88,10 @@ private struct ChatScreenContent: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
-    /// Whether the transcript has been scrolled up far enough that the
-    /// "scroll to bottom" chip should float, bottom-trailing, over it. Driven
-    /// purely by scroll geometry (see `transcript`); it does not touch
-    /// auto-follow, which stays constant so new messages pin smoothly.
+    /// Whether the transcript has been scrolled up far enough that the round
+    /// "scroll to bottom" control (rendered in ComposerView's model-selection
+    /// row) should be shown. Driven purely by scroll geometry; it does not
+    /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
@@ -205,7 +205,12 @@ private struct ChatScreenContent: View {
                     projectName: projectName,
                     api: MantaAPIClient.live(),
                     store: store,
-                    modelStore: modelStore
+                    modelStore: modelStore,
+                    showScrollToBottom: showScrollToBottom,
+                    onScrollToBottom: {
+                        scrollPosition.scrollTo(edge: .bottom, animated: true)
+                        showScrollToBottom = false
+                    }
                 )
             }
         }
@@ -457,9 +462,10 @@ private struct ChatScreenContent: View {
         .typingIndicator(.indicator(isVisible: store.running) {
             RunningIndicator(store: store)
         })
-        // The floating "scroll to bottom" control. It appears only once the
-        // user has scrolled up (pointsFromBottom above the threshold) — at the
-        // bottom there is nowhere to return to, so the button would be noise.
+        // The "scroll to bottom" control (rendered in ComposerView's
+        // model-selection row). It shows only once the user has scrolled up
+        // (pointsFromBottom above the threshold) — at the bottom there is
+        // nowhere to return to, so the button would be noise.
         //
         // Auto-follow is left constant (see init) so new messages pin to the
         // newest turn smoothly. It must NOT be toggled from this geometry
@@ -481,43 +487,11 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        .overlay(alignment: .bottomTrailing) {
-            if showScrollToBottom { scrollToBottomButton }
-        }
     }
-
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
     /// bottom" checks.
     private static let scrollToBottomThreshold: CGFloat = 100
-
-    /// The small glass "scroll to bottom" chip, bottom-TRAILING over the
-    /// transcript. Sized to match the model-selection chip (same glass capsule,
-    /// same padding), not the 38pt header buttons — it is a secondary affordance
-    /// that must not compete with the composer controls.
-    ///
-    /// Tapping it returns to the newest message. Only ever rendered while
-    /// `showScrollToBottom` is true, so it floats only when the user has
-    /// actually scrolled up.
-    @ViewBuilder
-    private var scrollToBottomButton: some View {
-        Button {
-            scrollPosition.scrollTo(edge: .bottom, animated: true)
-            showScrollToBottom = false
-        } label: {
-            Image(systemName: "arrow.down")
-                .font(.system(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(tokens.tx1)
-                .padding(.horizontal, Metrics.spacing.sp2)
-                .padding(.vertical, Metrics.spacing.sp1)
-        }
-        .buttonStyle(.glass)
-        .clipShape(.capsule)
-        .accessibilityLabel("Scroll to bottom")
-        .padding(.bottom, Metrics.spacing.sp4)
-        .padding(.trailing, Metrics.spacing.sp3)
-        .shadow(color: .black.opacity(0.12), radius: Metrics.spacing.sp2, y: Metrics.spacing.sp1)
-    }
 
     /// Lower the keyboard by asking whoever holds first responder to give it
     /// up. The composer's focus binding lives inside ComposerView, and routing
