@@ -140,7 +140,7 @@ final class MantaAPIClient: Sendable {
 
     /// `tmux:list` — the grouped session list (projects → windows).
     func projects() async throws -> [MantaProject] {
-        try await call("tmux:list", args: [], as: [MantaProject].self) ?? []
+        try await callRequired("tmux:list", args: [], as: [MantaProject].self)
     }
 
     /// `tmux:new-session` — create a new project (tmux session).
@@ -152,7 +152,7 @@ final class MantaAPIClient: Sendable {
             "createDir": input.createDir,
             "chatMode": input.chatMode,
         ]
-        return try await call("tmux:new-session", args: [dict], as: [MantaProject].self) ?? []
+        return try await callRequired("tmux:new-session", args: [dict], as: [MantaProject].self)
     }
 
     /// `tmux:new-window` — create a new session (window) in an existing project.
@@ -165,7 +165,7 @@ final class MantaAPIClient: Sendable {
             "chatMode": input.chatMode,
         ]
         if let cwd = input.cwd { dict["cwd"] = cwd }
-        return try await call("tmux:new-window", args: [dict], as: [MantaProject].self) ?? []
+        return try await callRequired("tmux:new-window", args: [dict], as: [MantaProject].self)
     }
 
     /// `tmux:kill-window` — delete a session (a row in the list).
@@ -407,6 +407,18 @@ final class MantaAPIClient: Sendable {
     private func call<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D? {
         let data = try await transport(channel: channel, args: args)
         return try Self.decode(data, as: type)
+    }
+
+    /// Like `call`, but for a channel whose result is never legitimately
+    /// absent. `decode` returns nil for a missing-or-null `result`, and a
+    /// caller that folds that into an empty collection cannot tell a box that
+    /// answered "nothing" from one that did not answer at all — which is how a
+    /// box full of sessions came up blank, and reported as a success.
+    private func callRequired<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D {
+        guard let value = try await call(channel, args: args, as: type) else {
+            throw MantaError.transport("\(channel) returned no result")
+        }
+        return value
     }
 
     private func callVoid(_ channel: String, args: [Any]) async throws -> VoidResult? {

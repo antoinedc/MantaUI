@@ -46,6 +46,13 @@ final class MantaActionRPCWireTests: XCTestCase {
 
     func testNewSessionSingleWraps() async throws {
         let client = makeClient()
+        // The create channels return the project LIST, and a reply carrying no
+        // result is now an error rather than an empty list (that laundering is
+        // what let an unanswered `tmux:list` blank the session list). These
+        // tests only assert the REQUEST shape, so they need a reply the method
+        // can actually return — the class-wide `{"result": null}` default is
+        // not one for these three.
+        CapturingURLProtocol.result = #"{"result": []}"#
         try await client.newSession(NewSessionInput(name: "p", cwd: "/d", windowName: "w", createDir: true, chatMode: true))
         assertSingleWrapped()
         XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:new-session")
@@ -53,6 +60,7 @@ final class MantaActionRPCWireTests: XCTestCase {
 
     func testNewWindowSingleWraps() async throws {
         let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": []}"#
         try await client.newWindow(NewWindowInput(sessionName: "p", windowName: "w", cwd: nil, chatMode: true))
         assertSingleWrapped()
         XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/tmux:new-window")
@@ -97,6 +105,7 @@ final class MantaActionRPCWireTests: XCTestCase {
 
     func testNewSessionCarriesCreateFields() async throws {
         let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": []}"#
         try await client.newSession(NewSessionInput(name: "proj", cwd: "~/x", windowName: "w", createDir: true, chatMode: false))
         let payload = CapturingURLProtocol.lastPayload()
         XCTAssertEqual(payload?["name"] as? String, "proj")
