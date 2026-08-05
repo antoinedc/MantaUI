@@ -12,7 +12,7 @@ enum LandingTrace {
         Int((DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
     }
 
-    static func event(_ tag: String, _ detail: CustomStringConvertible) {
+    static func event(_ tag: String, _ detail: String) {
         log.info("[landing +\(ms())ms] \(tag): \(detail)")
     }
 }
