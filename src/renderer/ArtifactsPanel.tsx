@@ -468,6 +468,10 @@ export function ArtifactsPanel({
   widthRef.current = width;
 
   const [tab, setTab] = useState<ArtifactKind>("link");
+  // The direction of the last tab switch, for the content slide animation:
+  // null until the first switch, then "left"|"right" keyed to whether the new
+  // tab sits before/after the old one in TABS order.
+  const [slideDir, setSlideDir] = useState<"left" | "right" | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   // The preview overlay: index into `previewable` (the current tab's
@@ -574,6 +578,16 @@ export function ArtifactsPanel({
     );
   };
 
+  // Tab switch with direction tracking for the content slide. TABS order gives
+  // the natural reading direction: moving right through Links→Images→Files
+  // slides the incoming content in from the right, going back slides it in
+  // from the left.
+  const selectTab = (k: ArtifactKind) => {
+    if (k === tab) return;
+    setSlideDir(TABS.indexOf(k) > TABS.indexOf(tab) ? "right" : "left");
+    setTab(k);
+  };
+
   if (!open) return null;
 
   return (
@@ -639,7 +653,7 @@ export function ArtifactsPanel({
               default. Segmented control per the design `.mk-tabs`. The 12px
               gap to the content below comes from the body's own top padding. */}
           <div
-            className="flex gap-px p-px bg-inset border border-border-subtle rounded-md"
+            className="flex gap-1 p-1 bg-inset border border-border-subtle rounded-md"
             role="tablist"
             aria-label="Artifact kind"
           >
@@ -651,9 +665,9 @@ export function ArtifactsPanel({
                 type="button"
                 role="tab"
                 aria-selected={active}
-                onClick={() => setTab(k)}
+                onClick={() => selectTab(k)}
                 className={
-                  "flex-1 inline-flex items-center justify-center gap-1 px-1 py-1 rounded-sm text-meta font-medium " +
+                  "flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
                   (active ? "bg-raised text-text shadow-sm" : "text-text-faint hover:text-text")
                 }
               >
@@ -673,8 +687,11 @@ export function ArtifactsPanel({
         </div>{/* close the px-3 pt-[11px] header wrapper */}
 
         {/* Body: day-grouped, sticky headers, newest first, one renderer per
-            tab. */}
-        <div className="flex-1 overflow-y-auto min-h-0">          {groups.length === 0 ? (
+            tab. The keyed slide wrapper re-mounts + animates the content on
+            every tab switch. */}
+        <div className="flex-1 overflow-y-auto min-h-0">
+          <div key={tab} className={slideDir ? `manta-artifacts-slide-${slideDir}` : undefined}>
+          {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {query ? (
                 <div className="text-label text-text-muted">No matches for “{query}”</div>
@@ -726,6 +743,7 @@ export function ArtifactsPanel({
               </div>
             ))
           )}
+          </div>{/* close the keyed slide wrapper */}
         </div>
       </aside>
 

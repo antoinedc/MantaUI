@@ -255,6 +255,30 @@ html, body, #root {
   .manta-bubble-in { animation: none; }
 }
 
+/* Artifacts tab switch (links/images/files). The selected tab's content slides
+   in horizontally from the direction the user moved: going right through
+   Links→Images→Files, the incoming list enters from the right edge; going back
+   it enters from the left. Short + calm, the same ease family as the
+   transcript, so a tab flip reads as motion of one surface, not a modal. */
+@keyframes manta-artifacts-slide-left {
+  0%   { opacity: 0; transform: translateX(-16px); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes manta-artifacts-slide-right {
+  0%   { opacity: 0; transform: translateX(16px); }
+  100% { opacity: 1; transform: none; }
+}
+.manta-artifacts-slide-left {
+  animation: manta-artifacts-slide-left 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.manta-artifacts-slide-right {
+  animation: manta-artifacts-slide-right 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-artifacts-slide-left,
+  .manta-artifacts-slide-right { animation: none; }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
