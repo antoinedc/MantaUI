@@ -62,19 +62,12 @@ struct ComposerView: View {
     @State private var micMode: VoiceMode = .dictate
     @State private var micRecording = false
     @State private var showModelPicker = false
-    /// Measured height of the text area, used to decide the composer's layout.
-    /// Measured rather than counted because wrapping — not newlines — is what
-    /// makes the box tall: one long pasted sentence is several visual lines.
-    @State private var textHeight: CGFloat = 0
-    /// Whether the box is in its tall (stacked) form. State rather than a
-    /// derived value because the switch is hysteretic — see `updateLayout`.
+    /// Whether the text has grown beyond the expand overlay's threshold — only
+    /// gates the full-screen edit affordance, since the composer is always two
+    /// rows (see `updateLayout`).
     @State private var isTall = false
     /// The near-full-screen editing sheet, opened by the expand control.
     @State private var showExpanded = false
-    /// Ties each control's inline slot to its pinned-bottom slot so the two are
-    /// one moving view rather than two that fade.
-    @Namespace private var controlSlots
-
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
@@ -86,17 +79,13 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             expandAnchor
-            // Model chip sits above the input box on its own row, with the
-            // round scroll-to-bottom control TRAILING in the same row so the
-            // two read as one aligned line of secondary chrome.
-            HStack(spacing: Metrics.spacing.sp1) {
-                modelPill
-                Spacer(minLength: 0)
-                if showScrollToBottom {
-                    scrollToBottomChip
-                }
-            }
+            // Two-row composer (BET: model inside the composer). Row 1 is the
+            // text input; row 2 is a single control bar with the model selector
+            // and attach on the LEFT, mic and send on the RIGHT. Hence the
+            // composer is two rows by default — type up top, act below — rather
+            // than a one-row capsule with inline controls.
             inputBox
+            controlRow
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -107,9 +96,9 @@ struct ComposerView: View {
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(modelStore: modelStore)
         }
-        // Attachments also drive the layout (chips force the stacked form), so
-        // the box must move on the same curve when one is added or removed as
-        // it does when the text grows — otherwise attaching a file snaps.
+        // Attachment chips live inside the box, so adding/removing one moves
+        // the box (and the control row beneath it) on the same curve as the
+        // text growing — no snapping when a chip appears or is dismissed.
         .animation(.smooth(duration: 0.22), value: attachments.count)
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
@@ -129,7 +118,7 @@ struct ComposerView: View {
     // signal moved onto the box's border (see `boxChrome`), so the state is
     // still shown and still never shares an indicator with the running row.
 
-    // MARK: - Input box (two layouts)
+    // MARK: - Input box + control row (two-row composer)
 
     /// One visual line of the input's font — the unit the layout switch is
     /// measured in. Taken from the font itself rather than guessed, so it
@@ -138,88 +127,33 @@ struct ComposerView: View {
         UIFont.systemFont(ofSize: Metrics.type.body).lineHeight
     }
 
-    /// Chips force the stacked form even on a short message: they need a row of
-    /// their own, and there is nowhere to put one inside a single-row capsule.
-    private var isStacked: Bool {
-        isTall || !attachments.isEmpty
-    }
-
     /// The editor's measured height for a given number of text lines.
     ///
     /// The `+ sp2` is the editor's own internal padding and is the whole reason
-    /// this helper exists: the previous thresholds were bare multiples of
-    /// `lineHeight` and ignored it, so every comparison was off by most of a
-    /// line. Two lines measured 2.45 line-heights, which cleared a "2.4"
-    /// threshold — the box went stacked at TWO lines rather than more than two,
-    /// and the return threshold was similarly mis-placed. Expressing the
-    /// thresholds in LINES and converting here keeps them honest.
+    /// this helper exists — the previous mode-switch thresholds were bare
+    /// multiples of `lineHeight` and ignored it, so every comparison was off by
+    /// most of a line. Expressing the thresholds in LINES and converting here
+    /// keeps them honest.
     private func editorHeight(forLines lines: CGFloat) -> CGFloat {
         lineHeight * lines + Metrics.spacing.sp2
     }
 
-    /// Re-evaluate the layout from a fresh text height, WITH HYSTERESIS: it
-    /// takes more height to grow into the stacked form than it takes to fall
-    /// back out of it.
-    ///
-    /// The two thresholds sit in the GAPS between whole line counts, so each
-    /// one is unambiguous:
-    ///   * grow at 2.5 lines — 2 lines stays compact, 3 goes stacked, which is
-    ///     "pin the controls once it is more than two lines".
-    ///   * shrink at 1.5 lines — back to one line returns to the capsule, while
-    ///     2 lines stays stacked.
-    ///
-    /// The gap between them is a full line, which is what stops the switch
-    /// re-triggering itself: flipping changes the text's available width (the
-    /// controls move out of its row), so the same string re-measures to a
-    /// different height immediately after — a narrower band would let that
-    /// re-measurement cross back and oscillate.
-    ///
-    /// The animation is applied HERE rather than as a `.animation(value:)` on
-    /// the box, so it wraps the state change itself and every dependent piece
-    /// of the layout — corner radius, height, control positions — moves on one
-    /// curve.
+    /// Re-evaluate the layout from a fresh text height. `isTall` now only gates
+    /// the expand overlay (the composer is always two rows), so a plain
+    /// "more than two lines" threshold suffices — the hysteresis that used to
+    /// guard a mode switch is gone because there is no mode switch to oscillate.
     private func updateLayout(for height: CGFloat) {
-        textHeight = height
-        let next = isTall
-            ? height > editorHeight(forLines: 1.5)   // stay stacked?
-            : height > editorHeight(forLines: 2.5)   // become stacked?
+        let next = height > editorHeight(forLines: 2)
         guard next != isTall else { return }
         withAnimation(.smooth(duration: 0.22)) { isTall = next }
     }
 
-    /// Corner radius, animated between the two forms rather than swapped.
-    ///
-    /// This used to switch `Capsule` ↔ `RoundedRectangle` through an
-    /// `AnyShape`, which is why the change was abrupt: type-erasing a shape
-    /// discards its animatable data, so there was nothing for SwiftUI to
-    /// interpolate and the corners changed in one frame. One RoundedRectangle
-    /// whose radius animates gives the same two appearances — at half its own
-    /// height a rounded rect IS a capsule — and morphs between them.
-    private var cornerRadius: CGFloat {
-        if isStacked { return Metrics.radius.lg }
-        // Half the compact box's height, derived from the same metrics that
-        // lay it out: the taller of the control row and one line of text, plus
-        // the compact vertical padding.
-        let content = max(Metrics.type.chatHeaderBtn, lineHeight + Metrics.spacing.sp2)
-        return (content + Metrics.spacing.sp1 * 2) / 2
-    }
-
-    /// The input box. ONE view tree for both layouts — this is deliberate and
-    /// load-bearing.
-    ///
-    /// It was previously an `if isStacked { … } else { … }`, which reads more
-    /// clearly but is what DISMISSED THE KEYBOARD on every mode switch: the two
-    /// branches are different view identities, so crossing the threshold tore
-    /// down the TextEditor and built a new one, and focus (and with it the
-    /// keyboard) died with the old instance. Keeping `textArea` at a fixed
-    /// position in this builder keeps its identity — and therefore its
-    /// first-responder status — stable across the switch.
-    ///
-    /// What actually changes between the two modes:
-    ///   * the SHAPE — a capsule when it is one row, a rounded rect once it is
-    ///     tall (a capsule's radius is half its height, so a tall one is a blob)
-    ///   * WHERE the controls sit — inline beside the text when compact, pinned
-    ///     along the bottom when stacked
+    /// The input box — row 1 of the two-row composer. It holds ONLY the text
+    /// (and attachment chips above it) now; the attach/mic/send controls moved
+    /// down into `controlRow`. Because it no longer hosts inline controls, the
+    /// box has a single always-rounded form instead of a compact-capsule/tall
+    /// two-form switch, which also removes the keyboard-dropping teardown that
+    /// used to accompany every mode change.
     private var inputBox: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             // Chips rail — ONLY when something is actually attached. When the
@@ -234,44 +168,12 @@ struct ComposerView: View {
                     .clipped()
             }
 
-            // Text, with the controls inline beside it while compact.
-            //
-            // The controls carry `matchedGeometryEffect` so they TRAVEL between
-            // the two positions instead of cross-fading. Without it the inline
-            // copy is removed and the bottom copy inserted, and SwiftUI's
-            // default for that is opacity — the buttons blink out of one place
-            // and in at another, which reads as the layout snapping even when
-            // the box itself is animating smoothly. Only one copy of each id
-            // exists at a time (the branches are exclusive), which is what the
-            // effect requires.
-            HStack(alignment: .bottom, spacing: Metrics.spacing.sp2) {
-                if !isStacked {
-                    attachButton.matchedGeometryEffect(id: "composer.attach", in: controlSlots)
-                }
-                textArea
-                if !isStacked {
-                    if micAvailable {
-                        micButton.matchedGeometryEffect(id: "composer.mic", in: controlSlots)
-                    }
-                    sendButton.matchedGeometryEffect(id: "composer.send", in: controlSlots)
-                }
-            }
-
-            // …and pinned along the bottom once stacked.
-            if isStacked {
-                HStack(spacing: Metrics.spacing.sp2) {
-                    attachButton.matchedGeometryEffect(id: "composer.attach", in: controlSlots)
-                    Spacer(minLength: 0)
-                    if micAvailable {
-                        micButton.matchedGeometryEffect(id: "composer.mic", in: controlSlots)
-                    }
-                    sendButton.matchedGeometryEffect(id: "composer.send", in: controlSlots)
-                }
-            }
+            // The text field by itself — controls live below in controlRow.
+            textArea
         }
         .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, isStacked ? Metrics.spacing.sp2 : Metrics.spacing.sp1)
-        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor))
+        .padding(.vertical, Metrics.spacing.sp2)
+        .modifier(BoxChrome(cornerRadius: Metrics.radius.lg, stroke: borderColor))
         // The expand control is an OVERLAY, not a row: it must sit in the top
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
@@ -284,6 +186,26 @@ struct ComposerView: View {
         }
     }
 
+    /// Row 2 of the two-row composer — a single control bar spanning the full
+    /// width. Model selector and attach sit at the LEFT; the round
+    /// scroll-to-bottom control trails with the model chip, and mic + send sit
+    /// at the RIGHT. This is the composer's resting shape: type in row 1, act
+    /// in row 2.
+    private var controlRow: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            modelPill
+            attachButton
+            Spacer(minLength: 0)
+            if showScrollToBottom {
+                scrollToBottomChip
+            }
+            if micAvailable {
+                micButton
+            }
+            sendButton
+        }
+    }
+
 
 
     /// Accent while a background refetch is in flight, and never while a turn
@@ -292,8 +214,9 @@ struct ComposerView: View {
         store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle
     }
 
-    /// The text field, shared by both layouts. It reports its own height so the
-    /// layout switch has something real to measure.
+    /// The text field, the sole occupant of the input box. It reports its own
+    /// height so `isTall` can gate the expand overlay once the text wraps past
+    /// two lines.
     private var textArea: some View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
@@ -327,9 +250,9 @@ struct ComposerView: View {
         }
     }
 
-    /// Opens the near-full-screen editing sheet. Only shown in the stacked
-    /// layout, where the message is already long enough for the small box to be
-    /// the constraint.
+    /// Opens the near-full-screen editing sheet. Only shown once the message is
+    /// long enough (past the `isTall` threshold) for the small box to be the
+    /// constraint.
     private var expandButton: some View {
         Button {
             showExpanded = true
