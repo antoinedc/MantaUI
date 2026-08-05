@@ -35,7 +35,7 @@
 
 import type { Api } from "../../shared/api.js";
 import type { AvailableLauncher, OpencodeMessage, WorktreeInfo } from "../../shared/types.js";
-import { demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
+import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
@@ -354,13 +354,41 @@ const forActiveSession = <T>(sessionId: string | undefined, value: T[]): Promise
 
 const isStream = DEMO_STATE === "stream";
 
+// BET-661: an image artifact fixture for the preview-overlay SCREENS capture.
+// Served ONLY in the `artifacts` demo state — never the shared default — so the
+// default fixture and every other committed baseline stay untouched. The file
+// part points at a data: URL, so the preview renders it directly with no box
+// (no HEAD/GET needed). The filename matches the preview mockup's screenshot
+// row so the overlay header reads identically; the fixture decodes to a small
+// 640x360 SVG (dims/size differ from the mockup's prose, acceptable for a
+// self-referential layer-2 baseline).
+const previewArtifactsImageMessage = {
+  info: {
+    id: "msg_preview_img",
+    sessionID: demoState.activeSessionId,
+    role: "user",
+    time: { created: DEMO_T0 - 45_000 },
+  },
+  parts: [
+    {
+      type: "file",
+      id: "prt_preview_img",
+      messageID: "msg_preview_img",
+      mime: "image/svg+xml",
+      filename: "Screenshot 2026-08-05 at 10.45.17.png",
+      url: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIj48cmVjdCB3aWR0aD0iNjQwIiBoZWlnaHQ9IjM2MCIgZmlsbD0iIzMzNDA2YiIvPjxjaXJjbGUgY3g9IjMyMCIgY3k9IjE4MCIgcj0iMTIwIiBmaWxsPSIjNWU2YzliIi8+PC9zdmc+",
+    },
+  ],
+} as OpencodeMessage;
+
 const opencodeMessages = (sessionId: string) =>
   forActiveSession(
     sessionId,
-    // In the `stream` state the transport serves the transcript incrementally
-    // instead of whole — the harness's initial capture sees the `early` phase
-    // here, and later phases arrive via advance()'s message.updated events.
-    isStream ? revealedTranscript(streamStep) : demoState.messages,
+    DEMO_STATE === "artifacts"
+      ? [...demoState.messages, previewArtifactsImageMessage]
+      : isStream
+        ? revealedTranscript(streamStep)
+        : demoState.messages,
   );
 
 // The targeted single-message read the transcript assembler's splice uses.

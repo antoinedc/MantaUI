@@ -76,6 +76,13 @@ import {
   resolveFastToggle,
   filterModelGroups,
   moveMenuHighlight,
+  MAX_PREVIEW_BYTES,
+  resolvePreviewType,
+  isWithinPreviewSize,
+  formatPreviewFooter,
+  countPreviewLines,
+  previewLanguage,
+  previewOriginWord,
 } from "./chatUtils";
 
 import type { OpencodeModel } from "../shared/types";
@@ -2842,5 +2849,94 @@ describe("updateEntryMotion", () => {
     updateEntryMotion(s, [user("u1"), asst("a1"), user("u2")], true); // live send
     expect(s.entering.has("a1")).toBe(false);
     expect(s.entering.has("u2")).toBe(true);
+  });
+});
+
+describe("artifact preview type routing (BET-661)", () => {
+  it("routes each mime family correctly", () => {
+    expect(resolvePreviewType("image/png", "shot.png")).toBe("image");
+    expect(resolvePreviewType("image/svg+xml", "icon.svg")).toBe("image");
+    expect(resolvePreviewType("application/pdf", "guide.pdf")).toBe("pdf");
+    expect(resolvePreviewType("text/plain", "notes.txt")).toBe("text");
+    expect(resolvePreviewType("text/markdown", "README.md")).toBe("text");
+    expect(resolvePreviewType("text/csv", "q3.csv")).toBe("refuse");
+  });
+
+  it("routes an unknown mime with a known extension to text", () => {
+    expect(resolvePreviewType(null, "util.ts")).toBe("text");
+    expect(resolvePreviewType(null, "script.sh")).toBe("text");
+    // A source file mis-detected with a generic/octet-stream mime still previews.
+    expect(resolvePreviewType("application/octet-stream", "main.tsx")).toBe("text");
+  });
+
+  it("refuses an unknown mime with an unknown extension", () => {
+    expect(resolvePreviewType(null, "archive.zip")).toBe("refuse");
+    expect(resolvePreviewType(null, "binary.bin")).toBe("refuse");
+    // .csv with a null mime must refuse too (not in the allowlist).
+    expect(resolvePreviewType(null, "data.csv")).toBe("refuse");
+    expect(resolvePreviewType("application/octet-stream", "blob.xyz")).toBe("refuse");
+  });
+
+  it("routing is case-insensitive on extension and mime", () => {
+    expect(resolvePreviewType(null, "LOG.txt")).toBe("text");
+    expect(resolvePreviewType("IMAGE/PNG", "a.png")).toBe("image");
+    expect(resolvePreviewType("Text/CSV", "a.csv")).toBe("refuse");
+  });
+});
+
+describe("artifact preview size guard (BET-661)", () => {
+  it("allows exactly MAX_PREVIEW_BYTES and refuses one byte more", () => {
+    expect(isWithinPreviewSize(MAX_PREVIEW_BYTES)).toBe(true);
+    expect(isWithinPreviewSize(MAX_PREVIEW_BYTES + 1)).toBe(false);
+  });
+
+  it("allows everything below the cap and refuses negatives/NaN", () => {
+    expect(isWithinPreviewSize(0)).toBe(true);
+    expect(isWithinPreviewSize(1024)).toBe(true);
+    expect(isWithinPreviewSize(-1)).toBe(false);
+    expect(isWithinPreviewSize(Number.NaN)).toBe(false);
+  });
+
+  it("MAX_PREVIEW_BYTES is 25 MiB", () => {
+    expect(MAX_PREVIEW_BYTES).toBe(25 * 1024 * 1024);
+  });
+});
+
+describe("artifact preview footer + metadata (BET-661)", () => {
+  it("formats an image footer with dimensions, size and origin", () => {
+    expect(formatPreviewFooter("image", { width: 2048, height: 1108, size: 1470480, origin: "user" })).toBe(
+      "2048 × 1108 · 1.4 MB · you sent this",
+    );
+    expect(formatPreviewFooter("image", { width: 1200, height: 800, size: 500_000, origin: "agent" })).toBe(
+      "1200 × 800 · 488 KB · generated",
+    );
+  });
+
+  it("formats a pdf footer as the raw size", () => {
+    expect(formatPreviewFooter("pdf", { size: 5_033_164 })).toBe("4.8 MB");
+  });
+
+  it("formats a text footer as lines · language", () => {
+    expect(formatPreviewFooter("text", { lines: 12, language: "typescript" })).toBe("12 lines · typescript");
+    expect(formatPreviewFooter("text", { lines: 0, language: "text" })).toBe("0 lines · text");
+  });
+
+  it("counts lines like CodeBlock (single trailing newline trimmed)", () => {
+    expect(countPreviewLines("a\nb\nc")).toBe(3);
+    expect(countPreviewLines("a\nb\nc\n")).toBe(3);
+    expect(countPreviewLines("")).toBe(0);
+  });
+
+  it("derives a language label from the filename", () => {
+    expect(previewLanguage("foo.ts")).toBe("typescript");
+    expect(previewLanguage("Foo.tsx")).toBe("tsx");
+    expect(previewLanguage("notes.md")).toBe("markdown");
+    expect(previewLanguage("random.txt")).toBe("text");
+    expect(previewLanguage("noext")).toBe("text");
+  });
+
+  it("origin word matches the file rows", () => {
+    expect(previewOriginWord("user")).toBe("you sent this");
+    expect(previewOriginWord("agent")).toBe("generated");
   });
 });

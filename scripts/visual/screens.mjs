@@ -573,6 +573,52 @@ export const SCREENS = [
       "manta-session-menu-trigger",
     ],
   },
+  {
+    // BET-661: the preview overlay, opened from the Images tab's first row.
+    // `snapshot`/`region` are set explicitly because the overlay does not exist
+    // at boot — without `snapshot`, the structure root would fall back to
+    // `ready` and snapshot the whole app shell instead of the dialog
+    // (screens.mjs:26-29, 68-72). The row uses the isolated `artifacts` demo
+    // state, which seeds one image artifact via a data: URL so the overlay
+    // renders without a box. The mockup's `.mk-preview` shows the image
+    // renderer — that is the one under pixel conformance; PDF/text renderers
+    // are covered by the unit tests + manual checks.
+    id: "artifacts-preview",
+    title: "Artifacts panel — preview overlay",
+    url: "/app/index.html?demo&state=artifacts&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-artifact-preview",
+    snapshot: ".manta-artifact-preview",
+    region: ".manta-artifact-preview",
+    mockupRegion: ".mk-preview",
+    mockup: "docs/screens/artifacts/mockup.html",
+    viewport: DESKTOP_VIEWPORT,
+    actions: async (page) => {
+      // The demo only mounts the chat panel (and therefore its transcript)
+      // once the fixture's active session is selected in the rail — the same
+      // first action the `session` row uses.
+      await page
+        .locator('.truncate:has-text("Deploy new billing service")')
+        .first()
+        .click();
+      await page
+        .locator('[aria-label="Show artifacts"]')
+        .filter({ visible: true })
+        .first()
+        .click();
+      await page.getByRole("tab", { name: /Images/ }).click();
+      await page.getByRole("button", { name: /Screenshot/ }).first().click();
+    },
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+      "manta-session-menu-trigger",
+    ],
+  },
 ];
 
 /** Look up one screen by id, or throw with the list of valid ids. */
