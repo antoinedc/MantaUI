@@ -334,10 +334,19 @@ final class ChatSessionStore: ObservableObject {
                     // source (BET-655). Read the pruned text back synchronously:
                     // the event-store sink lands on a later run-loop turn, too
                     // late for the rebuild happening right here.
+                    //
+                    // Cover ONLY completed messages: a chunk may be retired only
+                    // once its message is COMPLETE, because ChatTranscriptMapper
+                    // skips an assistant message that is still in flight
+                    // (`time.completed == nil`). opencode:messages returns the
+                    // in-flight message with no `time.completed`, so naming it
+                    // here would delete the only copy of the running turn's text
+                    // — the transcript refuses to draw it — leaving the screen
+                    // silent until the turn finishes.
                     if !didFail {
                         eventStore.retireCoveredStreamText(
                             sessionId: sessionId,
-                            covered: Set(loaded.map(\.info.id))
+                            covered: Set(loaded.filter { $0.info.time?.completed != nil }.map(\.info.id))
                         )
                         inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
                     }

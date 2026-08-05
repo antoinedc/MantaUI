@@ -110,7 +110,17 @@ enum MantaStreamRouter {
         case "running":
             if let p = try? frame.decodedPayload(StreamRunningPayload.self) { s.running = p.running }
         case "turnComplete":
-            if let p = try? frame.decodedPayload(StreamTurnCompletePayload.self) { s.turnComplete = p.complete }
+            if let p = try? frame.decodedPayload(StreamTurnCompletePayload.self) {
+                s.turnComplete = p.complete
+                // The box only ever publishes `running:true` on the `running`
+                // sub — the end of a turn is carried HERE, by turnComplete's own
+                // `running` field (`session.idle` emits
+                // turnComplete{complete:true, running:false} and no `running`
+                // frame at all). Ignoring it left `running` latched true for the
+                // life of the session, so the working row and session-list timer
+                // never stopped.
+                s.running = p.running
+            }
         case "truncation":
             s.truncation = try? frame.decodedPayload(StreamTruncationPayload.self)
         case "context":
@@ -134,15 +144,24 @@ enum MantaStreamRouter {
     /// Retire the live chunks whose message the canonical transcript now
     /// carries. Pure so the retirement rule is testable without a socket.
     ///
-    /// The chunk for the message STILL STREAMING is kept even when the fetch
-    /// covered it: a mid-turn transcript holds only the prose written before
-    /// that fetch, so retiring the live copy there would split one answer
-    /// across two blocks and drop everything that arrived since. Once the turn
-    /// ends, the next fetch retires it for real.
+    /// The contract is caller-enforced: `covered` names ONLY the message ids
+    /// the canonical transcript actually renders — i.e. COMPLETED assistant
+    /// messages (`ChatTranscriptMapper` skips any assistant message still in
+    /// flight, and `opencode:messages` returns the running one with no
+    /// `time.completed`). So a chunk is retired exactly when a second,
+    /// permanent copy of its prose already exists in the transcript, and the
+    /// still-streaming message is protected simply by never appearing in
+    /// `covered`.
+    ///
+    /// This replaces a "keep the last chunk while running" guard that was wrong
+    /// twice over: one turn is SEVERAL assistant messages (one per step), so
+    /// the last chunk is frequently a completed step rather than the streaming
+    /// one; and it read `running`, a flag that latches true (the box only ever
+    /// publishes `running:true` on the `running` sub — see `applying`), so the
+    /// guard fired against a stale value. Kept pure, same signature, idempotent.
     static func retiring(_ state: MantaSessionStreamState, covered: Set<String>) -> MantaSessionStreamState {
         var s = state
-        let inFlight = s.running == true ? s.chunks.last?.messageID : nil
-        s.chunks.removeAll { covered.contains($0.messageID) && $0.messageID != inFlight }
+        s.chunks.removeAll { covered.contains($0.messageID) }
         return s
     }
 }
