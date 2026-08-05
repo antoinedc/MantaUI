@@ -206,6 +206,29 @@ export function formatBytes(n: number): string {
   return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
 }
 
+// Decode a `data:<mime>;base64,<payload>` (or url-encoded) URI into its MIME
+// type and raw bytes. Used by the artifacts panel so a self-contained inline
+// image (href is a data URI, not a box path) can be downloaded/attached
+// without a network round-trip. Returns null for anything that isn't a data
+// URI. `atob` / `TextEncoder` are global in the browser and Node 16+.
+export function decodeDataUri(dataUri: string): { mime: string; data: Uint8Array } | null {
+  if (!dataUri.startsWith("data:")) return null;
+  const comma = dataUri.indexOf(",");
+  if (comma < 0) return null;
+  const meta = dataUri.slice(5, comma);
+  const mime = /^[^;]+/.exec(meta)?.[0] ?? "application/octet-stream";
+  const payload = dataUri.slice(comma + 1);
+  let data: Uint8Array;
+  if (meta.includes(";base64")) {
+    const bin = atob(payload);
+    data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+  } else {
+    data = new TextEncoder().encode(decodeURIComponent(payload));
+  }
+  return { mime, data };
+}
+
 // Short expiry label for a hosted-page state pill: "23h" / "2h" for live/soon
 // pages (whole hours, floor at 1 so a fresh page never reads "0h"), "" for an
 // expired or unexpiring artifact (the pill is omitted entirely then).
