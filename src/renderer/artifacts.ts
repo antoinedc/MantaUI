@@ -4,7 +4,7 @@ export type ArtifactKind = "link" | "image" | "file";
 export type ArtifactOrigin = "user" | "agent";
 
 export type Artifact = {
-  id: string; // stable: the part id, or "page:<subdomain>"
+  id: string; // stable: the part id (suffixed .0/.1/... when a text part yields many links), or "page:<subdomain>"
   kind: ArtifactKind;
   origin: ArtifactOrigin;
   key: string; // dedupe key
@@ -157,9 +157,16 @@ export function deriveArtifacts(
       if (part.type !== "text" || !isUser) continue;
       if (part.synthetic || part.ignored) continue;
       const text = part.text ?? "";
-      for (const match of text.matchAll(URL_RE)) {
-        const a = deriveLinkArtifact(msg, part, match[0]);
-        if (a) out.push(a);
+      const matches = [...text.matchAll(URL_RE)];
+      for (let i = 0; i < matches.length; i++) {
+        const a = deriveLinkArtifact(msg, part, matches[i][0]);
+        if (!a) continue;
+        // A single text part can yield multiple link artifacts. Each gets a
+        // stable, unique id — the part id, suffixed with the URL index when
+        // the part emits more than one — so ids never collide as React keys
+        // in BET-659. Deterministic, so it stays stable across re-derivations.
+        a.id = matches.length > 1 ? `${part.id}.${i}` : part.id;
+        out.push(a);
       }
     }
   }

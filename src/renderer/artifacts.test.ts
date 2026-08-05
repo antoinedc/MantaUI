@@ -102,6 +102,8 @@ describe("deriveArtifacts", () => {
     expect(out[0].label).toBe("example.com/path");
     expect(out[0].context).toBe("see and more");
     expect(out[0].mime).toBeNull();
+    // single link keeps the part id (spec: "the part id")
+    expect(out[0].id).toBe("u-p0");
   });
 
   it("user text part with two URLs → two artifacts", () => {
@@ -109,6 +111,8 @@ describe("deriveArtifacts", () => {
     const out = deriveArtifacts(messages, [], "ses_a");
     expect(out).toHaveLength(2);
     expect(out.map((a) => a.href).sort()).toEqual(["https://a.com/x", "https://b.com/y"]);
+    // two links from one part must NOT share an id (React-key collision guard)
+    expect(new Set(out.map((a) => a.id)).size).toBe(2);
   });
 
   it("assistant text part with a URL → NO artifact", () => {
