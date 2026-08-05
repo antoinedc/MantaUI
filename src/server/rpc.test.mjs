@@ -9,6 +9,8 @@ import {
   SELF_UPDATE_SCRIPT,
 } from "./rpc.mjs";
 import { gunzipSync } from "node:zlib";
+import { savePages } from "./servePage.mjs";
+import { statePath } from "../shared/paths.mjs";
 
 test("dispatch routes a known channel to its handler with args", async () => {
   const handlers = { "echo:it": async (a, b) => ({ sum: a + b }) };
@@ -733,4 +735,35 @@ test("a /rpc response is sent raw without a gzip Accept-Encoding, and when small
     assert.equal(res.headers["content-encoding"], undefined);
     assert.deepEqual(JSON.parse(res.body.toString("utf8")), { result: { ok: true } });
   }
+});
+
+test("serve-page:list exposes the published-page registry (read-only)", async () => {
+  // Seed the sandboxed store directly so the handler reads real entries.
+  const storePath = statePath("serve-page.json");
+  await savePages(
+    [
+      { subdomain: "preview", expiresAt: null, createdAt: 1700000000000, sessionID: "ses_1" },
+      { subdomain: "hero", expiresAt: 1700003600000, createdAt: 1700000001000, sessionID: null },
+    ],
+    storePath,
+  );
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const pages = await handlers["serve-page:list"]();
+  assert.equal(pages.length, 2);
+  assert.equal(pages[0].subdomain, "preview");
+  assert.equal(pages[0].sessionID, "ses_1");
+  assert.equal(pages[0].expiresAt, null);
+  assert.equal(pages[1].subdomain, "hero");
+  assert.equal(pages[1].sessionID, null);
+  assert.equal(pages[1].expiresAt, 1700003600000);
+  assert.ok(pages.every((p) => typeof p.url === "string" && typeof p.createdAt === "number"));
+});
+
+test("serve-page:list returns an empty list when the store is empty", async () => {
+  await savePages([], statePath("serve-page.json"));
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const pages = await handlers["serve-page:list"]();
+  assert.deepEqual(pages, []);
 });

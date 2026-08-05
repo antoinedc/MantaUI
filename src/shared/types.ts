@@ -750,6 +750,14 @@ export const IPC = {
   webhookList: "webhook:list", // (sessionId?) → WebhookMeta[]
   webhookDelete: "webhook:delete", // (id) → { deleted: boolean }
 
+  // ---- published serve-page registry (manta-server owned) ----
+  // Read-only: returns the box's published-page registry so the artifacts
+  // panel can render it. Pages are published/stopped by the AI's global
+  // `serve_page` / `stop_page` opencode tools (POST /api/serve-page), not by
+  // a UI channel. Desktop + mobile both reach the server store over /rpc
+  // (httpApi); a read has no server write counterpart.
+  servePageList: "serve-page:list", // () → ServedPageMeta[]
+
   // ---- background delegation jobs (manta-server owned) ----
   // Background jobs are started by the AI's global `delegate` opencode tool
   // (POST /api/delegate); the UI only LISTS / STOPS / DELETES via these
@@ -923,6 +931,18 @@ export type SecretMeta = {
   hasValue: boolean; // a value is stored (always true for persisted secrets)
   createdAt: number | null;
   updatedAt: number | null;
+};
+
+// A published serve-page registry entry — what the artifacts panel sees via
+// the read-only `serve-page:list` RPC channel. `url` is "" when the box has no
+// addressable base URL (publicBaseUrl() returned falsy); `sessionID` is the
+// opencode session that called `serve_page`. Store: ~/.manta/serve-page.json.
+export type ServedPageMeta = {
+  subdomain: string;
+  url: string;
+  expiresAt: number | null;
+  createdAt: number;
+  sessionID: string | null;
 };
 
 // Input shape for secretsSet (UI → store). The value travels renderer → IPC →

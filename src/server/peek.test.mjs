@@ -32,6 +32,25 @@ function httpGet(url) {
   });
 }
 
+// Helper: make a HEAD request — same response shape, body expected empty.
+function httpHead(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method: "HEAD" }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 // Helper: start a minimal server with the peek route logic
 async function startPeekServer(testDir) {
   const { readFile, stat: fsStat } = await import("node:fs/promises");
@@ -52,7 +71,7 @@ async function startPeekServer(testDir) {
       const url = new URL(req.url, `http://${req.headers.host}`);
       const path = url.pathname;
 
-      if (req.method === "GET" && path === "/api/peek") {
+      if ((req.method === "GET" || req.method === "HEAD") && path === "/api/peek") {
         try {
           const raw = url.searchParams.get("path") ?? "";
           if (!raw) {
@@ -98,6 +117,10 @@ async function startPeekServer(testDir) {
             "content-length": String(s.size),
             "content-disposition": `inline; filename="${basename(resolved).replace(/"/g, "")}"`,
           });
+          if (req.method === "HEAD") {
+            res.end();
+            return;
+          }
           await pipeline(createReadStream(resolved), res);
         } catch (e) {
           if (!res.headersSent) {
@@ -231,5 +254,53 @@ test("/api/peek serves JSON with correct content-type", async () => {
     }
   } finally {
     await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek HEAD reports content-length without a body", async () => {
+  const testDir = join(homedir(), ".manta-test-peek-head-" + Date.now());
+  await mkdir(testDir, { recursive: true });
+  const testFile = join(testDir, "test.txt");
+  const content = "hello world";
+  await writeFile(testFile, content);
+
+  try {
+    const { server, port } = await startPeekServer(testDir);
+    try {
+      const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(testFile)}`);
+      assert.equal(res.status, 200, `Response body: ${res.body.toString()}`);
+      assert.equal(res.headers["content-type"], "text/plain; charset=utf-8");
+      assert.equal(res.headers["content-length"], String(Buffer.byteLength(content)));
+      assert.equal(res.body.length, 0, "HEAD must not stream a body");
+    } finally {
+      server.close();
+    }
+  } finally {
+    await rm(testDir, { recursive: true, force: true });
+  }
+});
+
+test("/api/peek HEAD rejects path traversal with 403", async () => {
+  const { server, port } = await startPeekServer();
+  try {
+    // Node suppresses the body on HEAD responses; the status must match GET's 403.
+    const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=/etc/passwd`);
+    assert.equal(res.status, 403);
+    assert.equal(res.body.length, 0);
+  } finally {
+    server.close();
+  }
+});
+
+test("/api/peek HEAD returns 404 for non-existent file", async () => {
+  const nonExistent = join(homedir(), "nonexistent-file-12345.txt");
+  const { server, port } = await startPeekServer();
+  try {
+    // Node suppresses the body on HEAD responses; the status must match GET's 404.
+    const res = await httpHead(`http://127.0.0.1:${port}/api/peek?path=${encodeURIComponent(nonExistent)}`);
+    assert.equal(res.status, 404);
+    assert.equal(res.body.length, 0);
+  } finally {
+    server.close();
   }
 });

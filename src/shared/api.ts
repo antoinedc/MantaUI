@@ -23,6 +23,7 @@ import type {
   SecretMeta,
   SecretInput,
   ServerUpdateAvailablePayload,
+  ServedPageMeta,
   WebhookMeta,
   SpawnOptions,
   PtyEvent,
@@ -294,6 +295,13 @@ export interface Api {
   // via the global `webhook` opencode tool, not a UI channel.
   webhookList(sessionId?: string): Promise<WebhookMeta[]>;
   webhookDelete(id: string): Promise<{ deleted: boolean }>;
+
+  // Published serve-page registry (manta-server owned; same box, read-only).
+  // Returns the box's published pages (subdomain, public url, expiry, created,
+  // originating session) so the artifacts panel can render them. Pages are
+  // published/stopped by the AI's `serve_page`/`stop_page` opencode tools, not
+  // through any UI channel.
+  servePageList(): Promise<ServedPageMeta[]>;
 
   // Background delegation jobs (manta-server owned). list returns the full
   // job records (filtered by parent session when sessionId is passed; all
