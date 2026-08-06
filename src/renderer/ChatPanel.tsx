@@ -253,7 +253,7 @@ export function ChatPanel({
   );
   // Forward declaration: submitRef is defined later (depends on submit), but
   // useSseBus needs it now for the drain effect.
-  const submitRef = useRef<() => void>(() => {});
+  const submitRef = useRef<(textOverride?: string) => void>(() => {});
   // Input state must be declared before useSseBus (which needs setInput).
   const [input, setInput] = useState("");
   // Bumped after each submit so useInputHistory re-reads localStorage and the
@@ -659,7 +659,7 @@ export function ChatPanel({
     refreshPermissions();
   }, [isActive, scheduleRefetch, refreshQuestions, refreshPermissions]);
 
-  const submit = useCallback(async () => {
+  const submit = useCallback(async (textOverride?: string) => {
     // Block submit while any attachment is still uploading.
     if (attachments.some((a) => a.status === "uploading")) {
       setSendError("Wait for attachments to finish uploading.");
@@ -671,7 +671,7 @@ export function ChatPanel({
       (a) => a.status === "ready" && !!a.remotePath && a.asPathRef,
     );
     const pathRefText = pathRefAttachments.map((a) => `@${a.remotePath}`).join(" ");
-    const typed = input.trim();
+    const typed = (textOverride ?? input).trim();
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
     // Record the prompt into the per-window localStorage list BEFORE the
@@ -877,9 +877,11 @@ export function ChatPanel({
     // Clearing the store flips autoSubmit → undefined, which re-runs this
     // effect's cleanup (clearTimeout) and would cancel the deferred submit
     // before it fires — the exact "prompt never sent / blank session" bug.
+    // The text is passed EXPLICITLY to submit (textOverride) so we don't depend
+    // on the setInput re-render having committed before the timer fires.
     const t = setTimeout(() => {
       useStore.getState().setAutoSubmitPrompt(null);
-      submitRef.current?.();
+      submitRef.current?.(text);
     }, 0);
     return () => clearTimeout(t);
   }, [autoSubmit, setModelOverride, setInput]);
