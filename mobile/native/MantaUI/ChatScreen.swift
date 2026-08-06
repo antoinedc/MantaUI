@@ -93,15 +93,6 @@ private struct ChatScreenContent: View {
     /// row) should be shown. Driven purely by scroll geometry; it does not
     /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
-    /// Measured height of the floating bottom bar (cards + composer), so the
-    /// transcript can reserve exactly that much space and the newest message is
-    /// never pinned underneath the composer while it floats over the tail.
-    @State private var bottomBarHeight: CGFloat = 0
-
-    /// How far the bottom scrim reaches past the safe area. Comfortably clears
-    /// the tallest home indicator; when the keyboard is up it falls behind the
-    /// keyboard, where there is nothing to dim.
-    private static let scrimOverhang: CGFloat = 44
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -206,28 +197,12 @@ private struct ChatScreenContent: View {
         // bottom of this stack, in the transcript area; the running-state row
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
-        // The bottom chrome (cards + composer) is an OVERLAY, not a safeAreaInset.
-        //
-        // As an inset it shrank the scroll viewport, so content never rendered
-        // UNDER the composer and there was nothing for a scrim to dim. As an
-        // overlay the transcript stays full-bleed and content genuinely passes
-        // beneath the composer while scrolling — where the scrim below fades it.
-        // Scrim FIRST so it draws beneath the composer. It is its own
-        // bottom-aligned overlay sized to the composer plus an OVERHANG past the
-        // safe area, so the ramp darkens content under the composer AND in the
-        // home-indicator strip below it (which a plain safe-area-bounded scrim
-        // leaves bright). No margin above the composer's top edge — the fade
-        // begins exactly at it, so it reads as the composer's backdrop rather
-        // than a shadow cast on the transcript.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
-                .frame(height: bottomBarHeight + Self.scrimOverhang)
-                .allowsHitTesting(false)
-        }
-        .overlay(alignment: .bottom) {
-            // GlassEffectContainer so the composer's liquid-glass material
-            // renders as one floating piece (same as the header buttons) rather
-            // than reading flat against the canvas/scrim behind it.
+        // The composer sits in a bottom safe-area inset, which reserves its
+        // space by SHRINKING the scroll viewport — so the transcript stops
+        // cleanly ABOVE it (content can't bounce behind the glass) while still
+        // sliding beneath it on scroll. Its glass renders as one piece via
+        // GlassEffectContainer (same as the header buttons).
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             GlassEffectContainer(spacing: 0) {
                 VStack(spacing: 0) {
                     bottomCards
@@ -243,14 +218,6 @@ private struct ChatScreenContent: View {
                             showScrollToBottom = false
                         }
                     )
-                }
-                // Feeds the scrim (and the transcript's footer reservation) its
-                // live height. Safe to measure here: it is an overlay, so nothing
-                // it reports changes the transcript's layout.
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.height
-                } action: { height in
-                    bottomBarHeight = height
                 }
             }
         }
@@ -469,12 +436,10 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Space the transcript keeps clear at its bottom edge for the floating
-    /// composer, sized for the composer at rest. FIXED so the scroll content
-    /// doesn't reflow every time the composer grows (that lurch is what the old
-    /// safeAreaInset did). The transcript therefore STOPS above the composer —
-    /// nothing sits behind it, so overscroll can't bounce content into it.
-    private static let composerReservedHeight: CGFloat = 110
+    /// Height of the bottom fade overlaying the transcript — the mirror of the
+    /// top scrim's visual weight, so the newest messages dissolve into the
+    /// canvas at the same rate the first ones dissolve into the header.
+    private static let bottomFadeHeight: CGFloat = 120
 
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
@@ -534,12 +499,18 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // Keep the transcript's bottom edge ABOVE the floating composer so
-        // scroll content never rests behind (and bounces into) it. A content
-        // margin, not a viewport shrink, so the viewport stays full-bleed.
-        // Applied AFTER the TiledView-only chaining above (its type is already
-        // erased to some View here).
-        .contentMargins(.bottom, Self.composerReservedHeight, for: .scrollContent)
+        // Bottom fade — the standard chat-app treatment (researched): a
+        // bottom-aligned gradient overlaying the scroll view fades the newest
+        // content into the canvas as it approaches the composer, the mirror of
+        // the top scrim that fades content under the header. It lives on the
+        // scroll content itself (decoupled from the composer) rather than as a
+        // scrim positioned behind it — that's how apps do it, and it keeps the
+        // composer in its inset (no content bouncing behind it).
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: Self.bottomFadeHeight)
+                .allowsHitTesting(false)
+        }
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
