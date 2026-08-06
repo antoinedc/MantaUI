@@ -327,6 +327,48 @@ export function writeSavedMode(sessionId: string, m: SessionMode): void {
   } catch { /* quota / disabled storage */ }
 }
 
+// ===== Last-active session (restored on refresh / relaunch) =====
+//
+// Persisted in localStorage so a renderer reload / app relaunch lands on the
+// session the user was last using instead of defaulting to the first project.
+// Keyed by the tmux WINDOW (project + window index), the stable identity
+// across opencode sessionIds (a /clear swaps the session id but not the
+// window). Written on every setActive; read by applyProjects when there is no
+// valid selection to restore yet.
+
+export type ActiveSessionPin = { project: string; window: number };
+
+export function activeSessionKey(): string {
+  return "manta:lastActiveSession";
+}
+
+export function readSavedActiveSession(): ActiveSessionPin | null {
+  try {
+    const raw = localStorage.getItem(activeSessionKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.project === "string" &&
+      typeof parsed.window === "number" &&
+      Number.isInteger(parsed.window) &&
+      parsed.window >= 0
+    ) {
+      return { project: parsed.project, window: parsed.window };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSavedActiveSession(pin: ActiveSessionPin | null): void {
+  try {
+    if (pin) localStorage.setItem(activeSessionKey(), JSON.stringify(pin));
+    else localStorage.removeItem(activeSessionKey());
+  } catch { /* quota / disabled storage */ }
+}
+
 // Merge a launcher's flag schema with the user's saved overrides (from
 // AppConfig.launcherFlags), falling back to each flag's registry default for
 // keys the user never touched.

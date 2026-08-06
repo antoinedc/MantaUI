@@ -11,7 +11,11 @@ import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
-import type { ModelSelection } from "./chatShared";
+import {
+  type ModelSelection,
+  readSavedActiveSession,
+  writeSavedActiveSession,
+} from "./chatShared";
 
 // Background-delegation jobs, keyed by the job's child opencode session id.
 // The renderer learns which sidebar windows are jobs (and their per-row
@@ -534,15 +538,19 @@ export const useStore = create<State>((set, get) => ({
     return { projectName: s.activeProjectName, windowIndex: idx };
   },
 
-  setActive: (projectName, windowIndex) =>
+  setActive: (projectName, windowIndex) => {
+    const prev = get();
+    const proj = prev.projects.find((p) => p.tmuxSession === projectName);
+    const w =
+      windowIndex ??
+      prev.activeWindowByProject[projectName] ??
+      proj?.windows.find((x) => x.active)?.index ??
+      proj?.windows[0]?.index ??
+      0;
+    // Remember where the user is so a refresh / relaunch can restore it
+    // (applyProjects reads this when there's no valid selection yet).
+    writeSavedActiveSession({ project: projectName, window: w });
     set((prev) => {
-      const proj = prev.projects.find((p) => p.tmuxSession === projectName);
-      const w =
-        windowIndex ??
-        prev.activeWindowByProject[projectName] ??
-        proj?.windows.find((x) => x.active)?.index ??
-        proj?.windows[0]?.index ??
-        0;
       // Opening a window clears its "needs attention" flag.
       const status = clearAttention(prev.status, projectName, w);
       // BET-414: bump this window to the front of the recency list (⌘K palette
@@ -560,7 +568,8 @@ export const useStore = create<State>((set, get) => ({
         status,
         recentWindows,
       };
-    }),
+    });
+  },
 
   createDraft: (mode) => {
     const id = newDraftId();
@@ -1108,11 +1117,34 @@ export const useStore = create<State>((set, get) => ({
     set((prev) => {
       // Clamp activeProjectName to one that still exists; clamp window choice too.
       let activeProjectName = prev.activeProjectName;
+      // A window to force for the actively-restored project. When we land on a
+      // selection from the saved last-active session, seed this so the window
+      // loop below keeps the saved window instead of picking the tmux-active one.
+      let restoredWindow: number | undefined;
       if (!activeProjectName || !projects.find((p) => p.tmuxSession === activeProjectName)) {
-        activeProjectName = projects[0]?.tmuxSession ?? null;
+        // No valid prior selection (fresh boot / relaunch, or the previously
+        // selected project disappeared) — restore the last-used session so a
+        // refresh lands on where the user left off, not the first project.
+        // Falls back to the first project when the saved window no longer
+        // exists (box wiped, project deleted, session list reset).
+        const saved = readSavedActiveSession();
+        if (saved) {
+          const savedProj = projects.find((p) => p.tmuxSession === saved.project);
+          if (savedProj && savedProj.windows.some((w) => w.index === saved.window)) {
+            activeProjectName = saved.project;
+            restoredWindow = saved.window;
+          }
+        }
+        if (!activeProjectName) activeProjectName = projects[0]?.tmuxSession ?? null;
       }
       const activeWindowByProject = { ...prev.activeWindowByProject };
       for (const p of projects) {
+        // The restored selection wins unconditionally — land the user exactly
+        // on the window they last used, never the tmux-active/first one.
+        if (restoredWindow !== undefined && p.tmuxSession === activeProjectName) {
+          activeWindowByProject[p.tmuxSession] = restoredWindow;
+          continue;
+        }
         const cur = activeWindowByProject[p.tmuxSession];
         if (cur === undefined || !p.windows.find((w) => w.index === cur)) {
           const tmuxActive = p.windows.find((w) => w.active)?.index;
