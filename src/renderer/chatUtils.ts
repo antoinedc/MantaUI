@@ -1178,6 +1178,45 @@ export function chooseUpdateSkewVariant(
   return isClientTooOld(clientVersion, minClient) ? "outdated" : "ok";
 }
 
+// ===== Box self-update: transient network failure vs real failure =====
+//
+// When a box self-upgrade SUCCEEDS, `scripts/self-update.sh` restarts
+// manta-server (its final step) BEFORE the `/rpc/server:update-apply` promise
+// resolves. The renderer's fetch therefore dies mid-flight with a bare
+// `TypeError: Failed to fetch` — an unavoidable side-effect of the success
+// path, NOT a sign the update failed. Surfacing that as the update-failed
+// banner made every successful upgrade look broken.
+//
+// This predicate distinguishes that benign connection-drop from a GENUINE
+// early failure (which the RPC reports as a structured `{ok:false, error}`
+// string, e.g. "self-update: manifest fetch failed: ..."). App.tsx uses it in
+// `applyServerUpdate`'s catch: a transient network error is swallowed (the
+// reconnect + version re-check resolves the real outcome); anything else is a
+// real failure and still raises the banner.
+//
+// Browser fetch throws `TypeError: Failed to fetch` (Chrome) / `Load failed`
+// (Safari) / `NetworkError` (older WebKit) on connection loss; a reconnecting
+// SSE can also surface wrapped variants. The match is deliberately loose but
+// never matches a structured server error string.
+export function isTransientUpdateNetworkError(err: unknown): boolean {
+  if (err == null) return false;
+  const msg = String(err instanceof Error ? err.message : err).toLowerCase();
+  // The box's own structured self-update reports ("self-update: manifest
+  // fetch failed: ...", "self-update: bad tarball ...") are GENUINE early
+  // failures and must never be classified transient — the banner-relevant
+  // resolver's `res.ok === false` branch surfaces them for real.
+  if (msg.includes("self-update:")) return false;
+  return (
+    msg.includes("failed to fetch") ||
+    msg.includes("fetch failed") ||
+    msg.includes("load failed") ||
+    msg.includes("networkerror") ||
+    msg.includes("network error") ||
+    msg.includes("cancelled") ||
+    msg.includes("aborted")
+  );
+}
+
 // ===== Composer arrow-key: history vs caret navigation =====
 //
 // The OLD logic scanned for `\n` before/after the caret to decide "first/last
