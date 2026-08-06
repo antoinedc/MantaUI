@@ -67,7 +67,9 @@ struct ChatScreen: View {
 /// Carries the floating bottom bar's measured height up from its overlay so the
 /// transcript can reserve exactly that much space (see `loadedLayout`).
 private struct BottomBarHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    // Computed, not stored: a stored `static var` is nonisolated global shared
+    // mutable state and fails Swift 6 concurrency checking.
+    static var defaultValue: CGFloat { 0 }
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }
