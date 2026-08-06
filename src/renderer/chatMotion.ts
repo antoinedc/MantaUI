@@ -29,16 +29,24 @@ import type { MotionProps } from "framer-motion";
 type EntryMotionProps = Pick<MotionProps, "initial" | "animate" | "transition">;
 
 /**
- * The "pop": a 14px rise with a scale 0.9 -> 1.02 -> 1 overshoot driven by
- * spring physics. Applied identically to the user bubble, the streaming AI
- * reply, and tool cards when their message arrived live. The overshoot is the
- * point — a hard snap would be a static stamp; the spring makes it a single
- * "pop" the text lands in.
+ * The "smooth appear": a short rise (translateY 12px) with a cross-fade, on a
+ * non-overshooting cubic-bezier ease. Applied identically to the user bubble,
+ * the streaming AI reply, and tool cards when their message arrived live.
+ *
+ * Deliberately NO spring and NO scale. The original variant-A used an
+ * underdamped spring (stiffness 380, damping 26 — below critical ~34.9), which
+ * OVERSHOOTS: `scale` bumped past 1 to ~1.02 and the rise bounced past its end
+ * point a few frames before settling. On a message sitting at the pinned
+ * bottom of an auto-following transcript, that push-down/pull-up visible
+ * wobble is what read as jitter (worse while the text is still streaming and
+ * being re-measured). A cubic-bezier ramp ends EXACTLY at the endpoint with no
+ * oscillation, and translating + fading only (no scale) keeps it a pure
+ * compositor transform — nothing to bounce, so the appear stays smooth.
  */
 export const MESSAGE_IN_ENTER: EntryMotionProps = {
-  initial: { opacity: 0, y: 14, scale: 0.9 },
-  animate: { opacity: 1, y: 0, scale: 1 },
-  transition: { type: "spring", stiffness: 380, damping: 26, mass: 0.8 },
+  initial: { opacity: 0, y: 12 },
+  animate: { opacity: 1, y: 0 },
+  transition: { type: "tween", duration: 0.3, ease: [0.22, 1, 0.36, 1] },
 };
 
 /**
