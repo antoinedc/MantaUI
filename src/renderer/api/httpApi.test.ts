@@ -368,3 +368,57 @@ describe("httpApi auto-update delegation", () => {
     off();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bootstrap metadata RPC fail-fast timeout
+// ---------------------------------------------------------------------------
+//
+// Root-cause fix for "sessions sometimes take forever to load / need a second
+// refresh": configGet + tmuxList (the calls that gate the whole app shell) used
+// plain `rpc()` with NO timeout, so a stalled first connection hung forever with
+// no fail-fast and no recovery — the shell stayed empty until a manual Cmd+R.
+// These two now use a bounded RPC so a stall rejects and the bootstrap's retry
+// can recover. Genuinely long-running RPCs (model catalog, message/session
+// lists, worktree creation, delegation) must stay unbounded.
+
+function jsonResponse(result: unknown): Response {
+  return new Response(JSON.stringify({ result }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+type FetchFn = (url: string, init?: RequestInit) => Promise<Response>;
+function stubFetch(): ReturnType<typeof vi.fn<FetchFn>> {
+  const mock = vi.fn<FetchFn>();
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
+describe("httpApi bootstrap metadata fail-fast timeout", () => {
+  beforeEach(() => {
+    mockLocalStorage["manta_server"] = "https://example.com";
+    mockLocalStorage["manta_token"] = HEX32;
+  });
+
+  it("configGet and tmuxList pass a timeout AbortSignal so a stall fails fast", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({}));
+
+    await httpApi.configGet();
+    await httpApi.tmuxList();
+
+    const calls = fetchMock.mock.calls;
+    expect(calls.length).toBe(2);
+    for (const [, init] of calls) {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it("long-running rpc calls stay unbounded (no timeout signal)", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse([]));
+
+    await httpApi.opencodeModels();
+
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+  });
+});
