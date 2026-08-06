@@ -365,6 +365,11 @@ export function ChatPanel({
     setInput,
   });
 
+  // Manual dismiss of the pinned todo card — the user's escape hatch for a
+  // stale list that's non-terminal. Mirrors the auto-dismiss path in submit().
+  // Stable identity so it doesn't defeat ActiveTodos' React.memo.
+  const dismissTodos = useCallback(() => setTodosDismissed(true), [setTodosDismissed]);
+
   // BET-418 §A5: ref mirror of permissions so the approval poll can read the
   // latest always[] grants without taking permissions as a dep (which would
   // reset the poll timer on every permission change).
@@ -2038,6 +2043,7 @@ export function ChatPanel({
         running={running}
         isActive={isActive}
         activeTodos={activeTodos}
+        onDismissTodos={dismissTodos}
         // BET-418 §D: a job session is read-only — never show its (anyway
         // impossible) question cards. Defensive: a job's pre-flight ruleset
         // means it never generates asks.
