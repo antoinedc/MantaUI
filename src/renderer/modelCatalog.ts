@@ -17,7 +17,6 @@
 
 import { useEffect, useState } from "react";
 import type { OpencodeModel } from "../shared/types";
-import { mergeModelOverrides } from "./chatUtils";
 
 export type ServerDefaultModel = { providerID: string; modelID: string } | null;
 
@@ -57,21 +56,12 @@ function load(): void {
   inFlight = Promise.allSettled([
     window.api.opencodeModels(),
     window.api.opencodeDefaultModel(),
-    window.api.configGet(),
   ])
-    .then(([modelsRes, defaultRes, cfgRes]) => {
+    .then(([modelsRes, defaultRes]) => {
       // Keep the previous value for whichever half failed — a transient error
       // must not blank a catalog we already have.
-      // Model display overrides are applied CLIENT-SIDE (in addition to any
-      // server-side merge) so the composer picker reflects them even when the
-      // box's manta-server predates the server-side merge. Idempotent.
-      const overrides =
-        cfgRes.status === "fulfilled" ? cfgRes.value?.modelOverrides : undefined;
       const next: Snapshot = {
-        models: mergeModelOverrides(
-          modelsRes.status === "fulfilled" ? modelsRes.value : cache.models,
-          overrides,
-        ),
+        models: modelsRes.status === "fulfilled" ? modelsRes.value : cache.models,
         defaultModel: defaultRes.status === "fulfilled" ? defaultRes.value : cache.defaultModel,
       };
       const changed =
@@ -79,11 +69,7 @@ function load(): void {
       cache = next;
       // Only mark fresh once something actually resolved, so a fully-failed
       // attempt retries on the next mount instead of caching the failure.
-      if (
-        modelsRes.status === "fulfilled" ||
-        defaultRes.status === "fulfilled" ||
-        cfgRes.status === "fulfilled"
-      ) {
+      if (modelsRes.status === "fulfilled" || defaultRes.status === "fulfilled") {
         fetchedAt = Date.now();
       }
       if (changed) emit();

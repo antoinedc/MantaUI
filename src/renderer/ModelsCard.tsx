@@ -24,11 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
-import {
-  applyModelOverride,
-  formatModelContextSize,
-  mergeModelOverrides,
-} from "./chatUtils";
+import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
 import type { ModelOverride, OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
@@ -203,15 +199,14 @@ export function ModelsCard() {
       ]);
       const deactivatedMainList = cfg.deactivatedMainModels ?? [];
       const deactivatedSubList = cfg.deactivatedSubagents ?? [];
-      // Apply display overrides CLIENT-SIDE too (idempotent with any server-side
-      // merge) so the table reflects them across reloads even if the running
-      // manta-server predates the server-side merge.
-      const withOverrides = mergeModelOverrides(modelList, cfg.modelOverrides);
+      // The server (opencode:models) is the single source of truth for display
+      // overrides, so the model list it returns is already overridden — use it
+      // as-is.
       const agents = await window.api.opencodeSyncSubagents({
-        models: withOverrides ?? modelList,
+        models: modelList,
         deactivated: deactivatedSubList,
       });
-      setModels(withOverrides);
+      setModels(modelList);
       setDeactivatedMain(new Set(deactivatedMainList));
       setDeactivatedSub(new Set(deactivatedSubList));
       // Result ignored — the consolidated table doesn't show per-agent
@@ -337,12 +332,12 @@ export function ModelsCard() {
   );
 
   // Save a model display override (name / description / context) drafted in the
-  // edit modal. Writes the full modelOverrides map to config, then updates the
-  // local table state in the SAME tick (so the row reflects the change without
-  // waiting for a refetch) and forces the shared model catalog to re-fetch so
-  // the composer's model dropdown picks it up immediately.
+  // edit modal. Writes the full modelOverrides map to config, then re-fetches
+  // the model list from the server (the single source of truth, which applies
+  // the override in opencode:models) so both the table and the composed model
+  // catalog reflect the change in the same tick.
   const saveOverride = useCallback(
-    async (key: string, model: OpencodeModel, override: ModelOverride) => {
+    async (key: string, _model: OpencodeModel, override: ModelOverride) => {
       if (busy) return;
       setBusy(key);
       setGlobalError(null);
@@ -352,16 +347,10 @@ export function ModelsCard() {
         const next = { ...existing };
         if (Object.keys(override).length === 0) delete next[key];
         else next[key] = override;
-        const updated = await window.api.configUpdate({ modelOverrides: next });
-        const resolved = updated.modelOverrides ?? next;
-        setModels(
-          (prev) =>
-            prev?.map((m) =>
-              m.providerID === model.providerID && m.id === model.id
-                ? applyModelOverride(m, resolved[`${model.providerID}/${model.id}`] ?? undefined)
-                : m,
-            ) ?? prev,
-        );
+        await window.api.configUpdate({ modelOverrides: next });
+        // Server re-reads config per opencode:models call, so a fresh fetch is
+        // already overridden.
+        setModels(await window.api.opencodeModels());
         setEditing(null);
         refreshModelCatalog();
       } catch (e) {
