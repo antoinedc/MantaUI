@@ -236,6 +236,10 @@ type State = {
   // the sense that navigating to a real session (setActive) clears it.
   activeDraftId: string | null;
   drafts: NewSessionDraft[];
+  // A one-shot prompt for a freshly-created chat session to auto-submit on its
+  // first mount (draft → new-session flow). Consumed (cleared) by the panel
+  // once it fires, so re-navigating to the session never re-sends it.
+  autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection } | null;
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
   // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
@@ -341,6 +345,9 @@ type State = {
   updateDraft: (id: string, patch: Partial<NewSessionDraft>) => void;
   dismissDraft: (id: string) => void;
   setActiveDraft: (id: string) => void;
+  setAutoSubmitPrompt: (
+    p: { sid: string; text: string; model?: ModelSelection } | null,
+  ) => void;
   refresh: () => Promise<void>;
   // Onboarding lifecycle. `skipOnboarding` persists onboardingSkipped (so the
   // flow doesn't re-trigger) and clears the forced flag. `relaunchOnboarding`
@@ -484,6 +491,7 @@ export const useStore = create<State>((set, get) => ({
   activeWindowByProject: {},
   activeDraftId: null,
   drafts: [],
+  autoSubmitPrompt: null,
   status: {},
   jobs: {},
   chatMessages: {},
@@ -594,6 +602,7 @@ export const useStore = create<State>((set, get) => ({
       return { drafts, activeDraftId };
     }),
   setActiveDraft: (id) => set({ activeDraftId: id }),
+  setAutoSubmitPrompt: (p) => set({ autoSubmitPrompt: p }),
 
   refresh: async () => {
     const cfg = await window.api.configGet();
