@@ -7,20 +7,18 @@
 //   - UserCommandBar: collapsed `/name args` pill for slash-command turns.
 //   - ActiveTodos: the TodoWrite checklist card, mounted once at the tail of
 //     the transcript by Transcript.tsx (running or idle).
-//   - RunningIndicator: the ✻ spinner + elapsed / token line.
 //
 // AssistantPart lives in ./ToolCall; importing it here (and MessageRow back
 // there for subagent transcripts) forms an intentional, render-time-only
 // module cycle.
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { OpencodeMessage } from "../shared/types";
 import {
   describeTruncation,
   formatClockTime,
   formatDuration,
-  formatTokens,
   formatHiddenTodosSummary,
   selectVisibleTodos,
   summarizeTodoProgress,
@@ -28,71 +26,10 @@ import {
   type TodoStatus,
   type TruncationKind,
 } from "./chatUtils";
-import {
-  pastVerbFor,
-  SPINNER_VERBS,
-  type TokenUsage,
-} from "./chatShared";
+import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
-import { MantaLoader, MantaMark } from "./MantaLoader";
+import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
-import { nowMs } from "./clock";
-
-// The working row. The mark inside its two counter-rotating arcs (the app's
-// one waiting image — see MantaLoader), the verb, and the run's numbers.
-//
-// The row appears the moment a prompt is submitted, not when the box reports
-// the turn busy (ChatPanel's submit sets `running` optimistically), so the
-// send → first-token window is never silent. That is why there is no skeleton
-// placeholder here: the loader plus its verb IS the placeholder.
-//
-// Type: all sans — the verb is prose and the elapsed/token readout is chrome,
-// not output, so neither wants the mono face the transcript reserves for
-// commands and tool output. `tabular-nums` (which Inter supports) is what stops
-// the digits jittering as they tick; the mono face was never doing that job.
-export function RunningIndicator({ tokens, atBottom }: { tokens: TokenUsage | null; atBottom: boolean }) {
-  // Tick once per second to drive the elapsed-time re-render.
-  const [, setTick] = useState(0);
-  // `nowMs()` returns the demo mode's deterministic clock when the hero
-  // video is rendering (see src/renderer/clock.ts). Real apps fall back to
-  // Date.now(). This is the *reference* timestamp the elapsed-time label
-  // measures against, so two consecutive renders of the same frame use
-  // the same value (no `Date.now()` label drift).
-  const startRef = useRef<number>(nowMs());
-  // Pick a verb once per indicator mount so it doesn't shuffle between
-  // renders.
-  const verb = useRef<string>(
-    SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)],
-  );
-
-  useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const elapsedMs = nowMs() - startRef.current;
-
-  const outTokens = tokens != null ? tokens.output + tokens.reasoning : 0;
-
-  // pt-0 + pb-3: the scroll container above already has pb-3 (12px), so
-  // dropping the indicator's top padding gives 12px between the last
-  // message and the ✻ glyph. pb-3 matches it on the other side (12px
-  // between context bar / ✻ line and the input divider). No horizontal
-  // padding: the indicator sits inside a MeasureColumn (padded 28px) so it
-  // shares the reading column's left edge with the transcript (BET-637).
-  return (
-    <div className={`shrink-0 pb-3 ${atBottom ? "pt-0" : "pt-1"}`}>
-      <div className="flex items-center gap-2">
-        <MantaLoader />
-        <span className="text-label text-text-muted">{verb.current}…</span>
-        <span className="text-meta tabular-nums text-text-faint">
-          {formatDuration(elapsedMs)}
-          {outTokens > 0 && <> · ↓ {formatTokens(outTokens)}</>}
-        </span>
-      </div>
-    </div>
-  );
-}
 
 // ===== Active todos =====
 //

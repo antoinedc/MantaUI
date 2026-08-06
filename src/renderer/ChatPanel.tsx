@@ -62,7 +62,6 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { useModelCatalog } from "./modelCatalog";
-import { RunningIndicator } from "./MessageRow";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
@@ -2208,22 +2207,6 @@ export function ChatPanel({
           />
         </div>
       )}
-
-      {/* Working indicator. This is the LAST row of the transcript flow, so it
-          aligns with assistant rows — the transcript's full width (BET-646),
-          its own horizontal padding dropped. It is ALWAYS rendered, with the
-          spinner toggled via `visibility` rather than mounted/unmounted: the
-          indicator sits BELOW the transcript scroll container in the fixed
-          composer stack, so conditionally mounting it resized the reading
-          column and pushed the user's prompt up/down every time the turn's
-          running state toggled on send / before streaming. Keeping the slot a
-          constant height means toggling running never reflows the transcript.
-          Hidden (invisible, layout preserved) when idle. */}
-      <MeasureColumn width="full">
-        <div style={{ visibility: running ? "visible" : "hidden" }}>
-          <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
-        </div>
-      </MeasureColumn>
 
       {running && messageQueue.length > 0 && (
             // Queued prompts are about to be submitted, so the notice belongs
