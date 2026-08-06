@@ -298,3 +298,25 @@ Install: `cp <repo>/docs/opencode-tools/send-file.ts
 ~/.config/opencode/tools/send-file.ts` and restart `opencode-serve`.
 **Install/update is a COPY, never a symlink** (same `@opencode-ai/plugin`
 resolution gotcha as the other manta tools).
+
+## manta todo hygiene
+
+Your `todowrite` checklist is pinned in the user's chat panel wherever it is
+non-empty, so keep it current and trustworthy — it is shared UI, not private
+scratch space.
+
+- **Every task you finish: mark it `completed`.** Do not leave a done item
+  sitting `in_progress` or `pending`; the card stops showing the list once
+  every item is terminal and the user sends their next prompt.
+- **When a step becomes irrelevant** (requirements changed, you found a better
+  path, the model you switched to needs different work), **cancel or remove it
+  rather than leaving it to linger** — call `todowrite` again with that item
+  `cancelled` (or drop it from the list entirely). A stale, never-done item is
+  worse than a clear list: it is how an abandoned plan keeps surfacing as
+  "still open" long after it stopped mattering.
+- **Prefer editing the existing list over stacking**: the UI shows your most
+  recent list, so rewrite it as a whole when the plan changes rather than
+  appending a parallel list that contradicts the first.
+- **Don't over-create.** Reserve todos for genuinely multi-step work (≈3+
+  distinct actions). A single-step request doesn't need a checklist, and a
+  wall of noise makes the real items easier to miss.

@@ -13,7 +13,7 @@
 // module cycle.
 
 import { memo, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, X } from "lucide-react";
 import type { OpencodeMessage } from "../shared/types";
 import {
   describeTruncation,
@@ -109,8 +109,10 @@ function TodoMark({ status }: { status: TodoStatus }) {
 
 export const ActiveTodos = memo(function ActiveTodos({
   todos,
+  onDismiss,
 }: {
   todos: Array<Record<string, unknown>>;
+  onDismiss?: () => void;
 }) {
   // Render at most VISIBLE_TODOS_CAP items inline. Order: current
   // (in_progress) → pending → done so the row the model is actively
@@ -134,6 +136,17 @@ export const ActiveTodos = memo(function ActiveTodos({
         >
           {progress.label}
         </span>
+        {onDismiss && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            title="Dismiss todo list"
+            aria-label="Dismiss todo list"
+            className="text-text-faint hover:text-text transition-colors -mr-1 rounded-xs p-1 hover:bg-bg-soft"
+          >
+            <X size={12} aria-hidden="true" />
+          </button>
+        )}
       </div>
       {/* Two-segment progress rail. Settled runs green, the in-flight item
           runs amber; the remainder is the track showing through. 2px so it

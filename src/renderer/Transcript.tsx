@@ -56,6 +56,7 @@ export type TranscriptProps = {
   // third arg). See the comment on `updateEntryMotion` in chatUtils.
   isActive: boolean;
   activeTodos: Array<Record<string, unknown>> | null;
+  onDismissTodos?: () => void;
   questions: QuestionRequest[];
   // Per-message derived lookups (all memoized at ChatPanel scope so the
   // React.memo on MessageRow isn't defeated by fresh object identities).
@@ -76,6 +77,7 @@ export function Transcript({
   running,
   isActive,
   activeTodos,
+  onDismissTodos,
   questions,
   turnInfo,
   finishByMessageId,
@@ -193,7 +195,7 @@ export function Transcript({
               {/* assistant). Anchoring it here keeps it at the bottom of the */}
               {/* transcript in every state. */}
               {activeTodos && activeTodos.length > 0 && (
-                <ActiveTodos todos={activeTodos} />
+                <ActiveTodos todos={activeTodos} onDismiss={onDismissTodos} />
               )}
               {/* Pending question cards. Rendered INSIDE the scroll */}
               {/* container at the tail of the transcript so they scroll */}
