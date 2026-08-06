@@ -238,14 +238,17 @@ export function expiryLabel(expiresAt: number | null | undefined, now: number): 
   return `${Math.max(1, hours)}h`;
 }
 
+// Compact wall-clock duration (no spaces): "59s", "1m44s", "2h3m4s".
+// Used by the turn footer (`✻ 1m44s · 12.4k`) and the live running row so
+// the two read identically.
 export function formatDuration(ms: number): string {
   if (ms < 1000) return "<1s";
   const totalSec = Math.round(ms / 1000);
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
+  if (h > 0) return `${h}h${m}m${s}s`;
+  if (m > 0) return `${m}m${s}s`;
   return `${s}s`;
 }
 

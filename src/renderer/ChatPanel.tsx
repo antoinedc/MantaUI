@@ -1813,11 +1813,17 @@ export function ChatPanel({
 
   // Turn boundary metadata: which assistant messages are the FINAL one of
   // their turn (i.e., immediately followed by a user message or end-of-list),
-  // and the cumulative duration of that turn (first assistant `created` →
-  // last assistant `completed`). Intermediate assistant messages within a
-  // multi-step turn don't get a duration footer — only the final one does.
+  // the cumulative duration of that turn (first assistant `created` →
+  // last assistant `completed`), and the turn's total output tokens (read off
+  // the last assistant message's `info.tokens.output` — the same persisted,
+  // transcript-derived source the context bar uses, so it survives refresh).
+  // Intermediate assistant messages within a multi-step turn get no footer —
+  // only the final one does.
   const turnInfo = useMemo(() => {
-    const out = new Map<string, { turnDurationMs: number | null }>();
+    const out = new Map<
+      string,
+      { turnDurationMs: number | null; outputTokens: number | null }
+    >();
     if (!messages) return out;
     let i = 0;
     while (i < messages.length) {
@@ -1826,11 +1832,18 @@ export function ChatPanel({
         let j = i + 1;
         let firstStart: number | null = null;
         let lastEnd: number | null = null;
+        let lastOutput: number | null = null;
         let lastAssistantId: string | null = null;
         while (j < messages.length && messages[j].info.role === "assistant") {
           const t = messages[j].info.time;
           if (firstStart == null && t?.created != null) firstStart = t.created;
           if (t?.completed != null) lastEnd = t.completed;
+          // OpencodeMessageInfo doesn't surface `tokens` directly — read it
+          // off the underlying record the same way `latestTokens` does.
+          const tok = (
+            messages[j].info as unknown as { tokens?: TokenUsage }
+          ).tokens;
+          if (tok && typeof tok.output === "number") lastOutput = tok.output;
           lastAssistantId = messages[j].info.id;
           j++;
         }
@@ -1840,6 +1853,7 @@ export function ChatPanel({
               firstStart != null && lastEnd != null && lastEnd > firstStart
                 ? lastEnd - firstStart
                 : null,
+            outputTokens: lastOutput,
           });
         }
         i = j;

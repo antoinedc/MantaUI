@@ -60,7 +60,10 @@ export type TranscriptProps = {
   questions: QuestionRequest[];
   // Per-message derived lookups (all memoized at ChatPanel scope so the
   // React.memo on MessageRow isn't defeated by fresh object identities).
-  turnInfo: Map<string, { turnDurationMs: number | null }>;
+  turnInfo: Map<
+    string,
+    { turnDurationMs: number | null; outputTokens: number | null }
+  >;
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
   userCommandInfo: Map<string, { name: string; arguments: string }>;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
@@ -169,6 +172,7 @@ export function Transcript({
                     msg={m}
                     showThinking={showThinking}
                     turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
+                    outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
                     // The message being written right now: last in the

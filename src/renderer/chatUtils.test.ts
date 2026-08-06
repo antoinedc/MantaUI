@@ -271,16 +271,16 @@ describe("formatDuration", () => {
     expect(formatDuration(59_000)).toBe("59s");
   });
 
-  it("returns minutes and seconds", () => {
-    expect(formatDuration(60_000)).toBe("1m 0s");
-    expect(formatDuration(90_000)).toBe("1m 30s");
-    expect(formatDuration(104_000)).toBe("1m 44s");
+  it("returns minutes and seconds (no spaces)", () => {
+    expect(formatDuration(60_000)).toBe("1m0s");
+    expect(formatDuration(90_000)).toBe("1m30s");
+    expect(formatDuration(104_000)).toBe("1m44s");
   });
 
-  it("returns hours, minutes, and seconds", () => {
-    expect(formatDuration(3_600_000)).toBe("1h 0m 0s");
-    expect(formatDuration(3_661_000)).toBe("1h 1m 1s");
-    expect(formatDuration(7_384_000)).toBe("2h 3m 4s");
+  it("returns hours, minutes, and seconds (no spaces)", () => {
+    expect(formatDuration(3_600_000)).toBe("1h0m0s");
+    expect(formatDuration(3_661_000)).toBe("1h1m1s");
+    expect(formatDuration(7_384_000)).toBe("2h3m4s");
   });
 });
 
