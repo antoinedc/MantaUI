@@ -633,7 +633,13 @@ export function useSseBus(params: {
     // so the initial load flashed nothing and the indicator "disappeared".
     setRefreshing(true);
     void window.api.opencodeMessages(sessionId).then((m) => {
-      setMessages(m);
+      // Only seed messages if nothing has been written yet. On a fresh session
+      // with a queued auto-submit, submit() appends its OPTIMISTIC user message
+      // before this fetch resolves; this snapshot predates the prompt POST, so
+      // overwriting would clobber the just-sent prompt out of the transcript
+      // (loader shows, prompt missing). The post-prompt canonical refetch (SSE
+      // + the self-heal below) lands the real message instead.
+      setMessages((prev) => (prev === null ? m : prev));
       for (const cid of collectChildSessionIds(m)) {
         childSessionIds.current.add(cid);
       }

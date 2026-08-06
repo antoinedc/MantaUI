@@ -135,6 +135,41 @@ describe("ChatPanel render harness", () => {
     expect(calls.length).toBe(1);
     expect(calls[0]?.[1]).toBe("build the login page");
   });
+
+  it("keeps the auto-submitted prompt in the transcript when the initial fetch races it", async () => {
+    // Model the real race: the mount-time transcript fetch resolves with the
+    // PRE-prompt snapshot (empty) AFTER submit already appended the optimistic
+    // user message. It must NOT clobber the just-sent prompt out of the
+    // transcript (the loader/running indicator would show, but no prompt).
+    let resolveInitial!: (m: unknown[]) => void;
+    const initialFetch = new Promise<unknown[]>((res) => { resolveInitial = res; });
+    let messagesCalls = 0;
+    const { api } = installMockApi({
+      opencodeMessages: () => {
+        messagesCalls++;
+        return messagesCalls === 1 ? initialFetch : Promise.resolve([]);
+      },
+    });
+    resetStore();
+    h = mount(
+      <ChatPanel
+        {...PROPS}
+        autoSubmit={{ text: "draw the wireframes", model: undefined }}
+      />,
+    );
+    // Let the deferred (setTimeout 0) auto-submit run. The optimistic user
+    // message is now in the transcript, but the initial fetch is still pending.
+    await h.flush();
+    expect(h.text()).toContain("draw the wireframes");
+
+    // The initial fetch lands with the pre-prompt empty snapshot now.
+    act(() => resolveInitial([]));
+    await h.flush();
+
+    // The prompt must still be on screen — the send went through.
+    expect(h.text()).toContain("draw the wireframes");
+    expect(api.calls.opencodePrompt?.[0]?.[1]).toBe("draw the wireframes");
+  });
 });
 
 // ===== useSessionResources integration (via the mounted ChatPanel) =====
