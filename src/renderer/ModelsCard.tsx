@@ -24,7 +24,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
-import { formatModelContextSize } from "./chatUtils";
+import {
+  applyModelOverride,
+  formatModelContextSize,
+  mergeModelOverrides,
+} from "./chatUtils";
 import { useStore } from "./store";
 import type { ModelOverride, OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
@@ -42,25 +46,6 @@ const TIER_CLASS: Record<string, string> = {
   balanced: "bg-accent-bg text-accent-tx",
   deep: "bg-accent-bg text-accent-tx",
 };
-
-// Mirror of the server's applyModelOverride (src/server/opencode.mjs): merge a
-// user-supplied Settings override onto an OpencodeModel for LOCAL, same-tick
-// display in the table. The server applies the same override when it serves
-// opencodeModels(), so a subsequent full refresh is consistent with this.
-function applyOverrideLocally(m: OpencodeModel, override: ModelOverride | undefined): OpencodeModel {
-  if (!override) return m;
-  let next = m;
-  if (typeof override.name === "string" && override.name.trim() !== "") {
-    next = { ...next, name: override.name.trim() };
-  }
-  if (typeof override.description === "string" && override.description.trim() !== "") {
-    next = { ...next, description: override.description.trim() };
-  }
-  if (typeof override.context === "number" && Number.isFinite(override.context) && override.context > 0) {
-    next = { ...next, limit: { ...(m.limit ?? {}), context: override.context } };
-  }
-  return next;
-}
 
 // The overlay dialog for editing a model's display name / description /
 // context size. Prefilled from the model's current effective values; Save
@@ -218,11 +203,15 @@ export function ModelsCard() {
       ]);
       const deactivatedMainList = cfg.deactivatedMainModels ?? [];
       const deactivatedSubList = cfg.deactivatedSubagents ?? [];
+      // Apply display overrides CLIENT-SIDE too (idempotent with any server-side
+      // merge) so the table reflects them across reloads even if the running
+      // manta-server predates the server-side merge.
+      const withOverrides = mergeModelOverrides(modelList, cfg.modelOverrides);
       const agents = await window.api.opencodeSyncSubagents({
-        models: modelList,
+        models: withOverrides ?? modelList,
         deactivated: deactivatedSubList,
       });
-      setModels(modelList);
+      setModels(withOverrides);
       setDeactivatedMain(new Set(deactivatedMainList));
       setDeactivatedSub(new Set(deactivatedSubList));
       // Result ignored — the consolidated table doesn't show per-agent
@@ -369,7 +358,7 @@ export function ModelsCard() {
           (prev) =>
             prev?.map((m) =>
               m.providerID === model.providerID && m.id === model.id
-                ? applyOverrideLocally(m, resolved[`${model.providerID}/${model.id}`] ?? undefined)
+                ? applyModelOverride(m, resolved[`${model.providerID}/${model.id}`] ?? undefined)
                 : m,
             ) ?? prev,
         );
