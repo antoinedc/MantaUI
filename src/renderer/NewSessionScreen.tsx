@@ -290,12 +290,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       }
       createdSid = sess.sessionId;
 
-      // 2. Optimistically show the real chat view; then send the prompt so the
-      //    running indicator streams in. Yield a frame so the panel has mounted
-      //    + subscribed to its session's events first.
+      // 2. Optimistically render the real chat view; its ChatPanel auto-submits
+      //    the first prompt through its OWN path (optimistic user message +
+      //    running indicator appear immediately).
       setCommitting({ sid: createdSid, cwd: dir });
-      await new Promise((r) => setTimeout(r, 0));
-      window.api.opencodePrompt(createdSid, text, draft.model ?? undefined).catch(() => {});
 
       // 3. Create the tmux window/session behind the user's view and stamp it
       //    with the same session id, then reconcile.
@@ -467,6 +465,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           windowIndex={null}
           cwd={committing.cwd}
           isActive
+          autoSubmit={{ text: draft.input.trim(), model: draft.model ?? undefined }}
         />
       </div>
     );
