@@ -156,37 +156,16 @@ html, body, #root {
   .manta-loader-ring-in { animation: none; }
 }
 
-/* Streaming assistant text (BET-649).
-   Two effects, both scoped to the ONE message currently being written, so
-   nothing in the settled transcript animates or carries a caret.
-
-   1. Block slide-in. Each markdown block enters with the SAME motion a tool
-      card uses (see manta-part-in below) — same distance, duration and easing —
-      so prose and cards arrive identically and a turn assembles itself in one
-      visual language. It fires on MOUNT, so an already-rendered paragraph that
-      merely grows does not re-animate, and the canonical refetch (which
-      reconciles rather than remounts) does not re-fire it.
-
-      The motion is the "layered drift" used across the transcript: new material
-      glides up from a comfortable vertical distance on a long, calm ease
-      (cubic-bezier(0.16, 1, 0.3, 1)) so it reads as the turn settling into
-      place rather than snapping in. Uniform for prose and cards.
-
-      It used to be its own weaker `manta-chunk-in` (3px / 0.18s), then a shared
-      8px / 0.22s rise. At those distances the rise is below the threshold
-      where it reads as movement — reported as "prose never slides in". The
-      further drift + longer ease is what makes it legible.
-
-      NOTE the block is the unit here, and the container is deliberately NOT
-      also slid (AssistantPart exempts the live text part): sliding both would
-      move the same content twice.
-   2. Trailing caret. A thin accent block after the last block's last line,
-      marking where output is being written. Drawn with ::after on the last
-      child so it sits INLINE at the end of the text — a sibling element would
-      break onto its own line after a block-level <p>. */
-.manta-streaming > * {
-  animation: manta-part-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
+/* Streaming assistant text — trailing caret only (BET-649, M527).
+   Entry motion for chat messages now lives in framer-motion
+   (`src/renderer/chatMotion.ts`, applied by MessageBubble / AssistantPart), so
+   the per-block and per-card CSS slide-ins are gone. What remains here is the
+   trailing caret that marks the ONE message currently being written: a thin
+   accent block after the last block's last line, drawn with ::after on the
+   last child so it sits INLINE at the end of the text — a sibling element
+   would break onto its own line after a block-level <p>. Nothing in the
+   settled transcript carries a caret, and the entry animation itself is
+   reduced-motion-handled by MotionConfig reducedMotion="user" in Transcript. */
 .manta-streaming > *:last-child::after {
   content: "";
   display: inline-block;
@@ -199,60 +178,7 @@ html, body, #root {
   animation: blink-cursor 1s step-start infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .manta-streaming > * { animation: none; }
   .manta-streaming > *:last-child::after { animation: none; }
-}
-
-/* Transcript entry motion (transcript-motion).
-   A tool card / text block that appears while the user is watching glides up
-   from a comfortable distance with a fade, so a turn assembles itself instead
-   of each piece teleporting into place. Transform + opacity only
-   (compositor-friendly), `both` fill so the one-shot play holds its end state.
-
-   THE PART IS THE UNIT, not the row. During a turn the parts of a single
-   assistant message mount one at a time over many seconds, so animating the
-   row would mean sliding a container that is already on screen — which is
-   why the earlier whole-row version could never fire: the row was always
-   exempt as "currently streaming" when it mounted, and no longer new by the
-   time it settled. The live-streaming text part is still exempt here because
-   its markdown blocks already run these same keyframes one at a time via
-   .manta-streaming (BET-649) — it slides per block, not as a container.
-
-   `entering` (decided in Transcript.tsx by updateEntryMotion) is what keeps
-   history still: a transcript the user merely loaded animates nothing. */
-@keyframes manta-part-in {
-  0%   { opacity: 0; transform: translateY(22px) scale(0.985); }
-  100% { opacity: 1; transform: none; }
-}
-.manta-part-in {
-  animation: manta-part-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-/* User bubble send (transcript-motion). Layered-drift style: the bubble glides
-   up from just below where the composer sits — same motion family as incoming
-   material (22px rise, gentle 0.985 settle, long calm ease) so the transcript
-   reads as one continuous upward flow rather than the send being a different
-   "language" from the reply. Origin is the bottom-right corner (where a send
-   originates) so the rise scales toward the transcript, not the gutter.
-
-   Applied ONLY when the message arrived live (see MessageBubble): this class
-   was once unconditional, which made every bubble in an opened transcript move
-   and replayed the user's whole send history on a session switch. */
-@keyframes manta-bubble-in {
-  0%   { opacity: 0; transform: translateY(22px) scale(0.985); }
-  100% { opacity: 1; transform: none; }
-}
-.manta-bubble-in {
-  animation: manta-bubble-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
-  transform-origin: bottom right;
-}
-
-/* Vestibular safety (MDN prefers-reduced-motion): with reduce set, the
-   transcript never slides — rows and bubbles simply appear. State is
-   unaffected; only the motion is removed. */
-@media (prefers-reduced-motion: reduce) {
-  .manta-part-in,
-  .manta-bubble-in { animation: none; }
 }
 
 /* Artifacts tab switch (links/images/files). The SELECTED highlight is a

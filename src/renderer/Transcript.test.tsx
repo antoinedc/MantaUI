@@ -77,8 +77,11 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
   };
 }
 
-const bubblesIn = (h: Harness) => h.container.querySelectorAll(".manta-bubble-in").length;
-const partsIn = (h: Harness) => h.container.querySelectorAll(".manta-part-in").length;
+// `data-motion` is the framer-motion gate hook: "bubble" on a live user
+// bubble, "part" on a live assistant part (tool card, streaming text). Absent
+// means the element stayed still (history). See MessageBubble / AssistantPart.
+const bubblesIn = (h: Harness) => h.container.querySelectorAll('[data-motion="bubble"]').length;
+const partsIn = (h: Harness) => h.container.querySelectorAll('[data-motion="part"]').length;
 
 // The transcript a session opens with: already on screen, never animated.
 const HISTORY = [msg("u1", "user", "first"), msg("a1", "assistant", "reply")];
@@ -133,44 +136,41 @@ describe("Transcript entry motion", () => {
     expect(bubblesIn(h)).toBe(0);
   });
 
-  it("slides in a tool card that arrives live, immediately at mount", () => {
+  it("pops in a tool card that arrives live, immediately at mount", () => {
     // A tool card is ALWAYS the last (streaming) part at the instant it
-    // appears. The slide decision is frozen at mount: `entering && !(streaming
-    // && text)` — a tool part is not text, so it slides right away and keeps
-    // sliding through the re-render storm (the class is stable, never re-derived
-    // when `streaming` later flips false and the card remounts is avoided by the
-    // always-present wrapper). This is the bug the old `streaming` guard caused:
-    // the tool card was exempted and never slid.
+    // appears. `entering` is frozen at mount: once a part is marked, the
+    // framer-motion wrapper keeps `initial`/`animate` through the re-render
+    // storm (motion plays once on mount), and settling the turn never
+    // re-derives it onto a remounted wrapper — the always-present motion.div
+    // avoids the unmount/remount that would replay the pop.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, toolMsg("a_new", "bash")];
     render(h, streaming, true);
-    expect(partsIn(h)).toBe(1); // slid immediately, mid-stream
+    expect(partsIn(h)).toBe(1); // popped immediately, mid-stream
 
     render(h, streaming, false); // turn settles — still exactly one, no remount
     expect(partsIn(h)).toBe(1);
   });
 
-  it("slides the live text part PER BLOCK, not as a container", () => {
-    // Prose is not exempt from the motion — only from the CONTAINER slide. It
-    // carries `.manta-streaming`, whose `> *` rule runs the same keyframes on
-    // each markdown block as it arrives, so prose and cards slide identically.
-    // Wrapping the container too would move the same content twice, 8px inside
-    // another 8px. Both halves are asserted: no container slide, and the class
-    // that supplies the per-block slide IS present — without that second
-    // assertion this test would still pass if prose animated not at all.
+  it("animates the live streaming text part with the same motion as a card", () => {
+    // Prose is NOT exempt from the motion anymore — every part of a live
+    // message (streaming text included) pops with the same framer-motion
+    // entry, so the AI reply reads like the prompt. The container plays once
+    // on mount; the `.manta-streaming` class still supplies the trailing
+    // caret. Settling the turn must not retro-add a second pop.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, msg("a_new", "assistant", "writing")];
     render(h, streaming, true);
-    expect(partsIn(h)).toBe(0);
+    expect(partsIn(h)).toBe(1);
     expect(h.container.querySelectorAll(".manta-streaming").length).toBe(1);
 
-    // Frozen at mount: settling the turn must not retro-add a container slide.
+    // Frozen at mount: settling the turn must not replay the pop.
     render(h, streaming, false);
-    expect(partsIn(h)).toBe(0);
+    expect(partsIn(h)).toBe(1);
   });
 
   it("leaves history still even after new messages have arrived", () => {

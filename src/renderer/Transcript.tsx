@@ -28,6 +28,7 @@
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
 import { useRef } from "react";
+import { MotionConfig } from "framer-motion";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
@@ -100,6 +101,10 @@ export function Transcript({
   );
 
   return (
+    // Wrap in reducedMotion="user" so framer-motion disables every chat entry
+    // animation for users who prefer reduced motion — the library-native
+    // replacement for the old `prefers-reduced-motion` CSS blocks.
+    <MotionConfig reducedMotion="user">
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto overflow-x-hidden"
@@ -219,5 +224,6 @@ export function Transcript({
         </ErrorBoundary>
       </TaskContext.Provider>
     </div>
+    </MotionConfig>
   );
 }

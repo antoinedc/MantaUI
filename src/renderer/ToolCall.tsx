@@ -12,7 +12,9 @@
 //     module cycle that is safe because both references are used only at
 //     render time).
 
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
+import { motion } from "framer-motion";
+import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
 import { resolveToolOutput, cssVar } from "./chatUtils";
 import { type ToolState } from "./chatShared";
@@ -71,50 +73,37 @@ export const AssistantPart = memo(function AssistantPart({
   part: OpencodePart;
   showThinking: boolean;
   // True ONLY for the text part currently being written (last part of the last
-  // assistant message while the turn runs). Adds `manta-streaming`, which owns
-  // the per-block slide-in and the trailing caret in index.css. A primitive so
-  // the memo chain is untouched; false everywhere else, so a settled transcript
-  // never animates and never shows a caret.
+  // assistant message while the turn runs). Carries the trailing caret; a
+  // settled transcript never shows one.
   streaming?: boolean;
   // True when the parent message ARRIVED while the user was watching, so this
-  // part should slide up as it appears (transcript-motion). This is where the
-  // "cards slide in" effect actually lives: during a turn the parts of one
-  // assistant message mount one at a time, so the PART is the unit that enters,
-  // not the row. A loaded transcript passes false and stays still.
+  // part pops in as it appears. Every part of a live message does the SAME
+  // animation (MESSAGE_IN) — a streaming text reply pops like the prompt,
+  // and a tool card pops the same way — so a turn assembles itself in one
+  // consistent visual language. A loaded transcript passes false and stays
+  // still (`initial={false}` → nothing moves).
   entering?: boolean;
 }) {
   const body = renderAssistantPart(part, showThinking, streaming);
-  // Whether this part slides in is DECIDED ONCE, at mount, and frozen in a ref.
-  // Two reasons it cannot be a plain per-render expression:
-  //   1. `streaming` flips to false the moment the NEXT part arrives (only the
-  //      last part of the running message is streaming). Re-evaluating the slide
-  //      then would add the class long after the card appeared — replaying the
-  //      animation at the wrong moment.
-  //   2. Swapping between `body` and a wrapped `body` changes the element TYPE
-  //      at this position, so React unmounts and remounts the card subtree —
-  //      replaying the slide AND throwing away its local expanded state
-  //      (ToolCall / CollapsibleLines useState). So we always render a stable
-  //      wrapper element and only vary its className.
-  //
-  // The streaming TEXT part is exempt — it slides PER MARKDOWN BLOCK instead,
-  // via `.manta-streaming > *`, which runs the very same keyframes. Prose
-  // arrives paragraph by paragraph over many seconds, so the block is its unit
-  // of arrival the way the part is a card's; sliding the container on top of
-  // that would move the same content twice, 8px inside another 8px. A tool card
-  // has no such per-block motion, so the card itself must slide — which the old
-  // `streaming` guard wrongly suppressed (a tool card is always the last, and
-  // therefore "streaming", part at the instant it appears).
-  //
-  // The slide goes on a WRAPPER rather than the part's own root because the
-  // roots are shared primitives (ToolCard, OutputWell) that deliberately expose
-  // no className escape hatch. The wrapper is a plain block inside the row's
-  // existing flex column, so it inherits the gap and changes no layout.
-  const slideRef = useRef<boolean | null>(null);
-  if (slideRef.current === null) {
-    slideRef.current = entering && !(streaming && part.type === "text");
-  }
   if (body == null) return null;
-  return <div className={slideRef.current ? "manta-part-in" : undefined}>{body}</div>;
+  // The motion goes on an ALWAYS-PRESENT wrapper rather than the part's own
+  // root because the roots are shared primitives (ToolCard, OutputWell) that
+  // deliberately expose no className escape hatch. Keeping the element type
+  // stable (never swapping a plain div for a motion.div) means React never
+  // unmounts the card subtree, so the pop plays once at mount and a settling
+  // turn (or canonical refetch) can never replay it or throw away a part's
+  // local expanded state.
+  return (
+    <motion.div
+      // Test hook: present exactly when this part is animating (live), so the
+      // history-still gate is assertable without depending on framer-motion
+      // internals or a real CSS class.
+      data-motion={entering ? "part" : undefined}
+      {...(entering ? MESSAGE_IN_ENTER : MESSAGE_IN_IDLE)}
+    >
+      {body}
+    </motion.div>
+  );
 });
 
 function renderAssistantPart(
