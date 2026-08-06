@@ -64,17 +64,6 @@ struct ChatScreen: View {
     }
 }
 
-/// Carries the floating bottom bar's measured height up from its overlay so the
-/// transcript can reserve exactly that much space (see `loadedLayout`).
-private struct BottomBarHeightKey: PreferenceKey {
-    // Computed, not stored: a stored `static var` is nonisolated global shared
-    // mutable state and fails Swift 6 concurrency checking.
-    static var defaultValue: CGFloat { 0 }
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 private struct ChatScreenContent: View {
     let title: String
     let projectName: String
@@ -108,6 +97,11 @@ private struct ChatScreenContent: View {
     /// transcript can reserve exactly that much space and the newest message is
     /// never pinned underneath the composer while it floats over the tail.
     @State private var bottomBarHeight: CGFloat = 0
+
+    /// How far the bottom scrim reaches past the safe area. Comfortably clears
+    /// the tallest home indicator; when the keyboard is up it falls behind the
+    /// keyboard, where there is nothing to dim.
+    private static let scrimOverhang: CGFloat = 44
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -212,24 +206,28 @@ private struct ChatScreenContent: View {
         // bottom of this stack, in the transcript area; the running-state row
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            // Reserve exactly the floating bar's measured height so the newest
-            // message is never pinned underneath the composer. A clear spacer (not
-            // content padding) so the transcript keeps shrinking its own viewport
-            // and no trailing spacer becomes the scroll anchor (the blank bug).
-            Color.clear
-                .frame(height: bottomBarHeight)
+        // The bottom chrome (cards + composer) is an OVERLAY, not a safeAreaInset.
+        //
+        // As an inset it shrank the scroll viewport, so content never rendered
+        // UNDER the composer and there was nothing for a scrim to dim. As an
+        // overlay the transcript stays full-bleed and content genuinely passes
+        // beneath the composer while scrolling — where the scrim below fades it.
+        // The space the composer occupies is reserved INSIDE the scroll content
+        // (see `transcript` footer), so the last message still rests clear of a
+        // compact composer; a grown one overlaps content dimmed by the scrim.
+        // Scrim FIRST so it draws beneath the composer. It is its own
+        // bottom-aligned overlay sized to the composer plus an OVERHANG past the
+        // safe area, so the ramp darkens content under the composer AND in the
+        // home-indicator strip below it (which a plain safe-area-bounded scrim
+        // leaves bright). No margin above the composer's top edge — the fade
+        // begins exactly at it, so it reads as the composer's backdrop rather
+        // than a shadow cast on the transcript.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
+                .frame(height: bottomBarHeight + Self.scrimOverhang)
                 .allowsHitTesting(false)
         }
-        // The bottom bar (todos + composer) FLOATS over the transcript as an
-        // overlay, and a scrim sits directly beneath it dimming text that scrolls
-        // under the composer — mirroring the floating header on the way down.
         .overlay(alignment: .bottom) {
-            // Scrim first, so it draws BELOW the composer but still masks the
-            // scrolling content sliding under it.
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: bottomBarHeight + Metrics.spacing.sp4)
-                .allowsHitTesting(false)
             VStack(spacing: 0) {
                 bottomCards
                 ComposerView(
@@ -245,14 +243,12 @@ private struct ChatScreenContent: View {
                     }
                 )
             }
-            // Measure the bar so the transcript's reserved inset follows its real
-            // (dynamic) height rather than a guess.
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: BottomBarHeightKey.self, value: proxy.size.height)
-                }
-            )
-            .onPreferenceChange(BottomBarHeightKey.self) { height in
+            // Feeds the scrim (and the transcript's footer reservation) its
+            // live height. Safe to measure here: it is an overlay, so nothing
+            // it reports changes the transcript's layout.
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
                 bottomBarHeight = height
             }
         }
@@ -471,6 +467,13 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
+    /// Space the transcript reserves at its tail for the floating composer,
+    /// sized for the composer at rest (one input line + the control row + the
+    /// box and stack padding). FIXED so the scroll viewport never changes size
+    /// while the composer grows — the conversation holds still and content
+    /// slides under the composer's scrim instead of being pushed.
+    private static let composerReservedHeight: CGFloat = 88
+
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -485,6 +488,17 @@ private struct ChatScreenContent: View {
         // reserves nothing itself, so the conversation must rest below it.
         .headerContent(.header {
             Color.clear.frame(height: Self.headerReservedHeight)
+        })
+        // Reserves the floating composer's height at the TAIL of the scroll
+        // content (mirror of the header spacer above the transcript). The
+        // composer is an overlay and reserves nothing itself, so without this
+        // the last message would rest underneath it. Tracking is avoided on
+        // purpose: a fixed rest-height keeps the viewport size constant (the
+        // transcript holds still while the composer grows), and this is a
+        // CONTENT reservation, not a viewport shrink — so content still passes
+        // under the composer while scrolling and is dimmed by the scrim there.
+        .footerContent(.footer {
+            Color.clear.frame(height: Self.composerReservedHeight)
         })
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.
