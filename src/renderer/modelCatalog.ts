@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import type { OpencodeModel } from "../shared/types";
+import { mergeModelOverrides } from "./chatUtils";
 
 export type ServerDefaultModel = { providerID: string; modelID: string } | null;
 
@@ -52,16 +53,27 @@ function load(): void {
   // the pre-pairing preload subset installed on `window.api` does not have
   // them, so the runtime check is real even though TS thinks it is redundant.
   const api = window.api as Partial<typeof window.api>;
-  if (!api.opencodeModels || !api.opencodeDefaultModel) return;
+  if (!api.opencodeModels || !api.opencodeDefaultModel || !api.configGet) return;
   inFlight = Promise.allSettled([
     window.api.opencodeModels(),
     window.api.opencodeDefaultModel(),
+    window.api.configGet(),
   ])
-    .then(([modelsRes, defaultRes]) => {
+    .then(([modelsRes, defaultRes, cfgRes]) => {
       // Keep the previous value for whichever half failed — a transient error
       // must not blank a catalog we already have.
+      // Model display overrides are applied CLIENT-SIDE (in addition to any
+      // server-side merge) so the composer picker reflects persisted
+      // name/description/context overrides even when the running box's
+      // manta-server predates the server-side merge. Idempotent — a current
+      // server that already merged them yields a no-op here.
+      const overrides =
+        cfgRes.status === "fulfilled" ? cfgRes.value?.modelOverrides : undefined;
       const next: Snapshot = {
-        models: modelsRes.status === "fulfilled" ? modelsRes.value : cache.models,
+        models: mergeModelOverrides(
+          modelsRes.status === "fulfilled" ? modelsRes.value : cache.models,
+          overrides,
+        ),
         defaultModel: defaultRes.status === "fulfilled" ? defaultRes.value : cache.defaultModel,
       };
       const changed =
@@ -69,7 +81,11 @@ function load(): void {
       cache = next;
       // Only mark fresh once something actually resolved, so a fully-failed
       // attempt retries on the next mount instead of caching the failure.
-      if (modelsRes.status === "fulfilled" || defaultRes.status === "fulfilled") {
+      if (
+        modelsRes.status === "fulfilled" ||
+        defaultRes.status === "fulfilled" ||
+        cfgRes.status === "fulfilled"
+      ) {
         fetchedAt = Date.now();
       }
       if (changed) emit();

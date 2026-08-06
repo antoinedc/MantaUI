@@ -24,7 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
-import { formatModelContextSize } from "./chatUtils";
+import { formatModelContextSize, mergeModelOverrides } from "./chatUtils";
 import { useStore } from "./store";
 import type { ModelOverride, OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
@@ -200,13 +200,17 @@ export function ModelsCard() {
       const deactivatedMainList = cfg.deactivatedMainModels ?? [];
       const deactivatedSubList = cfg.deactivatedSubagents ?? [];
       // The server (opencode:models) is the single source of truth for display
-      // overrides, so the model list it returns is already overridden — use it
-      // as-is.
+      // overrides, so the model list it returns is already overridden. Apply
+      // overrides CLIENT-SIDE too (idempotent with any server-side merge) so
+      // the table reflects them across reloads even if the running box's
+      // manta-server predates the server-side merge (the persisted override
+      // would otherwise be ignored on read and revert to the provider values).
+      const withOverrides = mergeModelOverrides(modelList, cfg.modelOverrides);
       const agents = await window.api.opencodeSyncSubagents({
         models: modelList,
         deactivated: deactivatedSubList,
       });
-      setModels(modelList);
+      setModels(withOverrides);
       setDeactivatedMain(new Set(deactivatedMainList));
       setDeactivatedSub(new Set(deactivatedSubList));
       // Result ignored — the consolidated table doesn't show per-agent
@@ -348,9 +352,11 @@ export function ModelsCard() {
         if (Object.keys(override).length === 0) delete next[key];
         else next[key] = override;
         await window.api.configUpdate({ modelOverrides: next });
-        // Server re-reads config per opencode:models call, so a fresh fetch is
-        // already overridden.
-        setModels(await window.api.opencodeModels());
+        // Re-fetch from the server (single source of truth), then also apply
+        // the override CLIENT-SIDE (idempotent) so the table reflects it in
+        // the same tick even if the running box's manta-server predates the
+        // server-side merge.
+        setModels(mergeModelOverrides(await window.api.opencodeModels(), next));
         setEditing(null);
         refreshModelCatalog();
       } catch (e) {
