@@ -911,4 +911,38 @@ describe("last-active session restore (refresh / relaunch)", () => {
     expect(s.activeProjectName).toBe("alpha");
     expect(s.activeWindowByProject.alpha).toBe(0);
   });
+
+  it("applyProjects clears the auto-created zero-state draft once projects arrive", () => {
+    // Boot races: loaded flips true while projects is still [], which auto-
+    // creates a "welcome" new-project draft. When applyProjects then loads real
+    // sessions, that draft must go away — otherwise its NewSessionScreen
+    // overlay keeps covering the restored session.
+    const id = useStore.getState().createDraft("new-project");
+    useStore.setState({
+      projects: [],
+      activeProjectName: null,
+      activeWindowByProject: {},
+      activeDraftId: id,
+      drafts: useStore.getState().drafts,
+    });
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.projects.length).toBeGreaterThan(0);
+    expect(s.activeDraftId).toBeNull();
+    expect(s.drafts).toEqual([]);
+    // and it still lands on the restored session, not the composer
+    expect(s.activeProjectName).toBe("alpha");
+    expect(s.activeWindowByProject.alpha).toBe(1);
+  });
+
+  it("applyProjects does NOT clear a draft when projects already exist (normal refresh)", () => {
+    useStore.setState({ projects: sessions(), activeProjectName: "alpha" });
+    const id = useStore.getState().createDraft({ projectName: "beta" });
+    // a refresh with an active deliberate draft must keep it
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeDraftId).toBe(id);
+    expect(s.drafts.some((d) => d.id === id)).toBe(true);
+  });
 });

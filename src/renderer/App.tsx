@@ -270,16 +270,37 @@ function AppInner() {
     // for an otherwise-"http" config; a successful re-claim persists a fresh
     // token and finishOnboarding() re-runs the bootstrap. SSH mode never throws
     // this (no Bearer gate), so this is a no-op there.
-    refresh().catch((e: unknown) => {
-      const isAuth =
-        (e as { name?: string })?.name === "AuthRequiredError" ||
-        (e as { status?: number })?.status === 401;
-      if (isAuth) {
-        void useStore.getState().relaunchOnboarding();
+    //
+    // Non-auth bootstrap failures are retried with backoff: on a cold box the
+    // server / tmux may not be up on the very first fetch, and the session list
+    // would otherwise sit empty until the user manually reloads. Each retry
+    // runs applyProjects (which preserves the current selection and drops the
+    // zero-state draft once projects arrive), so the UI heals in place rather
+    // than requiring a second Cmd+R.
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 6;
+    const backoff = (n: number) => Math.min(1000 * 2 ** n, 15000);
+    const attempt = async (): Promise<void> => {
+      try {
+        await refresh();
+      } catch (e) {
+        const isAuth =
+          (e as { name?: string })?.name === "AuthRequiredError" ||
+          (e as { status?: number })?.status === 401;
+        if (isAuth) {
+          void useStore.getState().relaunchOnboarding();
+          return;
+        }
+        // Non-auth failure — retry with backoff, bounded, until success/abort.
+        if (cancelled || ++attempts >= MAX_ATTEMPTS) return;
+        setTimeout(() => void attempt(), backoff(attempts));
       }
-      // Non-auth bootstrap failures (SSH unreachable, etc.) keep the existing
-      // behavior — the app renders its empty/needs-config state.
-    });
+    };
+    void attempt();
+    return () => {
+      cancelled = true;
+    };
   }, [refresh]);
 
   useEffect(() => {
