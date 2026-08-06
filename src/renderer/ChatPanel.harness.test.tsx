@@ -9,8 +9,7 @@
 // if any extraction breaks the mount or the event wiring, a test here fails.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { act, StrictMode } from "react";
-import { createRoot } from "react-dom/client";
+import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import {
   installMockApi,
@@ -121,28 +120,20 @@ describe("ChatPanel render harness", () => {
     // the "prompt stuck in the composer on a fresh session" bug.
     const { api } = installMockApi();
     resetStore();
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    act(() => {
-      root.render(
-        <StrictMode>
-          <ChatPanel
-            {...PROPS}
-            autoSubmit={{ text: "build the login page", model: undefined }}
-          />
-        </StrictMode>,
-      );
-    });
+    h = mount(
+      <ChatPanel
+        {...PROPS}
+        autoSubmit={{ text: "build the login page", model: undefined }}
+      />,
+      // Mount under StrictMode so the component's effects get double-invoked
+      // (setup → cleanup → setup), exercising the exact production path.
+      { strictMode: true },
+    );
     // Let the deferred (setTimeout 0) submit timer fire.
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
+    await h.flush();
     const calls = api.calls["opencodePrompt"] ?? [];
     expect(calls.length).toBe(1);
     expect(calls[0]?.[1]).toBe("build the login page");
-    act(() => root.unmount());
-    container.remove();
   });
 });
 

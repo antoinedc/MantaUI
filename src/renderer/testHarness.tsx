@@ -23,7 +23,7 @@
 // so the 700+ pure-logic vitest files keep running in the default (node)
 // environment with zero DOM overhead.
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
@@ -220,12 +220,20 @@ export type Harness = {
   text: () => string;
 };
 
-export function mount(el: React.ReactElement): Harness {
+export type MountOptions = {
+  // Rendering under React 18 StrictMode double-invokes effects (setup →
+  // cleanup → setup) on mount. Harness code that depends on an effect
+  // surviving that simulated remount opts in here, mirroring the production
+  // app's <React.StrictMode> wrapper (main.tsx).
+  strictMode?: boolean;
+};
+
+export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(el);
+    root.render(opts.strictMode ? <StrictMode>{el}</StrictMode> : el);
   });
   const flush = async () => {
     await act(async () => {
