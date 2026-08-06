@@ -4,7 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
+import type { DelegateApprovalTool, ModelOverride, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -147,6 +147,58 @@ export function titleCase(id: string): string {
     .split(/[-_]/)
     .map((w) => (w.length === 0 ? w : w[0].toUpperCase() + w.slice(1)))
     .join(" ");
+}
+
+// Merge a user-supplied Settings → Models display override (name / description
+// / context size) onto an OpencodeModel. Mirrors the server's applyModelOverride
+// (src/server/opencode.mjs) so the renderer can honor overrides CLIENT-SIDE —
+// this makes the model display persist across reloads and in the composer
+// picker even when the running box's manta-server predates the server-side
+// merge (the persisted ~/.manta/config.json override, if never applied on
+// read, reverts to the provider's original values — BET-644 regression).
+// Applying the same override twice (renderer + a current server) is
+// idempotent. Returns a new model object; a falsy / empty override returns
+// `m` unchanged.
+export function applyModelOverride(
+  m: OpencodeModel,
+  override: ModelOverride | undefined,
+): OpencodeModel {
+  if (!override) return m;
+  let next = m;
+  if (typeof override.name === "string" && override.name.trim() !== "") {
+    next = { ...next, name: override.name.trim() };
+  }
+  if (typeof override.description === "string" && override.description.trim() !== "") {
+    next = { ...next, description: override.description.trim() };
+  }
+  const ctx = override.context;
+  if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
+    next = { ...next, limit: { ...(m.limit ?? {}), context: ctx } };
+  }
+  return next;
+}
+
+// Apply a full "providerID/modelID" → override map onto a model list. Pure and
+// memo-friendly: returns a new array only when an override actually applies,
+// otherwise returns the input array by reference (so a no-op doesn't break a
+// `===` memo comparison downstream).
+export function mergeModelOverrides(
+  models: OpencodeModel[] | null,
+  overrides: Record<string, ModelOverride> | undefined,
+): OpencodeModel[] | null {
+  if (!models || !overrides) return models;
+  const keys = Object.keys(overrides);
+  if (keys.length === 0) return models;
+  const byKey = new Map(keys.map((k) => [k, overrides[k] ?? {}] as const));
+  let changed = false;
+  const out = models.map((m) => {
+    const o = byKey.get(`${m.providerID}/${m.id}`);
+    if (!o) return m;
+    const merged = applyModelOverride(m, o);
+    if (merged !== m) changed = true;
+    return merged;
+  });
+  return changed ? out : models;
 }
 
 // Client-side filter over already-grouped models for the model menu's search

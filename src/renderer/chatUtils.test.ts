@@ -78,6 +78,8 @@ import {
   resolveFastToggle,
   filterModelGroups,
   moveMenuHighlight,
+  applyModelOverride,
+  mergeModelOverrides,
   MAX_PREVIEW_BYTES,
   resolvePreviewType,
   isWithinPreviewSize,
@@ -354,6 +356,94 @@ describe("formatModelContextSize", () => {
   });
 });
 
+// ===== applyModelOverride / mergeModelOverrides =====
+
+function ovModel(id: string, providerID: string, context = 200_000): OpencodeModel {
+  return {
+    id,
+    providerID,
+    name: id,
+    status: "active" as const,
+    capabilities: {},
+    family: "",
+    limit: { context, output: 8000 },
+  };
+}
+
+describe("applyModelOverride", () => {
+  it("returns the model unchanged for a falsy or empty override", () => {
+    const m = ovModel("opus", "anthropic");
+    expect(applyModelOverride(m, undefined)).toBe(m);
+    expect(applyModelOverride(m, {})).toBe(m);
+  });
+
+  it("merges name / description / context onto a NEW object, never mutating", () => {
+    const m = ovModel("default", "voska", 1000);
+    const out = applyModelOverride(m, {
+      name: "  My Model  ",
+      description: "  tuned  ",
+      context: 500_000,
+    });
+    expect(out).not.toBe(m);
+    expect(out.name).toBe("My Model");
+    expect(out.description).toBe("tuned");
+    expect(out.limit?.context).toBe(500_000);
+    // Input untouched, other fields preserved.
+    expect(m.name).toBe("default");
+    expect(m.limit?.context).toBe(1000);
+    expect(out.id).toBe("default");
+    expect(out.providerID).toBe("voska");
+  });
+
+  it("ignores blank / non-positive / non-finite override fields", () => {
+    const m = ovModel("opus", "anthropic");
+    const out = applyModelOverride(m, {
+      name: "   ",
+      description: "",
+      context: 0,
+    });
+    // No field applied → returns the SAME object reference.
+    expect(out).toBe(m);
+  });
+
+  it("keeps the provider's limit shape when only context overrides", () => {
+    const m = ovModel("opus", "anthropic", 200_000);
+    const out = applyModelOverride(m, { context: 500_000 });
+    expect(out.limit).toEqual({ ...m.limit, context: 500_000 });
+  });
+});
+
+describe("mergeModelOverrides", () => {
+  it("returns null/input unchanged when there are no models or no overrides", () => {
+    expect(mergeModelOverrides(null, { a: { name: "x" } })).toBeNull();
+    const list = [ovModel("a", "p")];
+    expect(mergeModelOverrides(list, undefined)).toBe(list);
+    expect(mergeModelOverrides(list, {})).toBe(list);
+  });
+
+  it("applies overrides keyed by providerID/modelID and returns a new array only when something changed", () => {
+    const a = ovModel("a", "p");
+    const b = ovModel("b", "p");
+    const c = ovModel("c", "q");
+    const out = mergeModelOverrides(
+      [a, b, c],
+      { "p/a": { name: "A!" }, "q/c": { context: 999 } },
+    )!;
+    expect(out).not.toBe([a, b, c]);
+    expect(out[0].name).toBe("A!");
+    expect(out[2].limit?.context).toBe(999);
+    // Unmatched model untouched and reference-identical.
+    expect(out[1]).toBe(b);
+    // Non-matching keys are ignored.
+    expect(out).toHaveLength(3);
+  });
+
+  it("returns the same array reference when no override applies (memo-friendly)", () => {
+    const list = [ovModel("a", "p"), ovModel("b", "p")];
+    expect(mergeModelOverrides(list, { "zzz/nope": { name: "x" } })).toBe(list);
+  });
+});
+
 // ===== filterModelGroups =====
 
 function model(id: string, providerID: string): OpencodeModel {
@@ -361,7 +451,10 @@ function model(id: string, providerID: string): OpencodeModel {
     id,
     providerID,
     name: id,
-    limit: { context: 200_000 },
+    status: "active" as const,
+    capabilities: {},
+    family: "",
+    limit: { context: 200_000, output: 8000 },
   };
 }
 
