@@ -257,23 +257,35 @@ async function claimAgainst(
 // Generic JSON-RPC helper
 // ---------------------------------------------------------------------------
 
-async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
+// Shared RPC dispatch. `timeoutMs` optional: when set, the fetch is wrapped in
+// fetchWithTimeout so a stalled connection FAILS FAST (aborts at `timeoutMs`)
+// instead of hanging forever. When unset (the default `rpc()`), the fetch is
+// unbounded — for genuinely long-running operations (model catalog refresh,
+// message/session list fetch, worktree creation, delegation) where a hard
+// timeout would abort real work.
+async function rpcInner<T>(
+  channel: string,
+  args: unknown[],
+  timeoutMs: number | undefined,
+): Promise<T> {
   // BET-187: track timing so we can ship one structured warn event when an
   // RPC call exceeds the 1s slow-call threshold. The instrumentation lives
   // here (single dispatch path — rpcOptional delegates) so every call site
   // is covered without per-call edits. Failures rethrow as before so the
   // existing UI auth/network error handling is untouched.
   const t0 = Date.now();
+  const url = `${serverBase()}/rpc/${encodeURIComponent(channel)}`;
+  const init: RequestInit = {
+    method: "POST",
+    headers: authHeaders(clientToken(), { "content-type": "application/json" }),
+    body: JSON.stringify({ args }),
+  };
   let res: Response;
   try {
-    res = await fetch(
-      `${serverBase()}/rpc/${encodeURIComponent(channel)}`,
-      {
-        method: "POST",
-        headers: authHeaders(clientToken(), { "content-type": "application/json" }),
-        body: JSON.stringify({ args }),
-      },
-    );
+    res =
+      timeoutMs != null
+        ? await fetchWithTimeout(url, init, timeoutMs)
+        : await fetch(url, init);
   } catch (err) {
     ship("error", "rpc failed", { channel, ms: Date.now() - t0, error: String(err) });
     throw err;
@@ -291,6 +303,23 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
   }
   if (ms > 1000) ship("warn", "rpc slow", { channel, ms });
   return json.result as T;
+}
+
+// Default path — unbounded, matching historical behavior (long-lived ops).
+async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
+  return rpcInner(channel, args, undefined);
+}
+
+// Time-bounded variant — for the fast metadata calls that gate the whole app
+// shell (config + project list). A stall here should fail fast and be retried,
+// not pin the empty/new-session screen until a manual reload.
+const RPC_METADATA_TIMEOUT_MS = 15000;
+async function rpcWithTimeout<T>(
+  channel: string,
+  timeoutMs: number,
+  ...args: unknown[]
+): Promise<T> {
+  return rpcInner(channel, args, timeoutMs);
 }
 
 /**
@@ -610,14 +639,18 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 
 export const httpApi: Api = {
   // -- config --
-  configGet: () => rpc(IPC.configGet),
+  // configGet gates the app shell; a stalled connection must fail fast (and be
+  // retried) rather than hang forever on a cold tunnel / waking box.
+  configGet: () => rpcWithTimeout(IPC.configGet, RPC_METADATA_TIMEOUT_MS),
   configUpdate: (patch) => rpc(IPC.configUpdate, patch),
 
   // -- project metadata --
   projectMetaDelete: (tmuxSession) => rpc(IPC.projectMetaDelete, tmuxSession),
 
   // -- tmux operations --
-  tmuxList: () => rpc(IPC.tmuxList),
+  // tmuxList is the bootstrap session load — same fail-fast rationale as
+  // configGet.
+  tmuxList: () => rpcWithTimeout(IPC.tmuxList, RPC_METADATA_TIMEOUT_MS),
   tmuxNewSession: (input) => rpc(IPC.tmuxNewSession, input),
   tmuxNewWindow: (input) => rpc(IPC.tmuxNewWindow, input),
   tmuxRenameSession: (input) => rpc(IPC.tmuxRenameSession, input),

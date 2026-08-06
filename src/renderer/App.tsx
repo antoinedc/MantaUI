@@ -271,12 +271,14 @@ function AppInner() {
     // token and finishOnboarding() re-runs the bootstrap. SSH mode never throws
     // this (no Bearer gate), so this is a no-op there.
     //
-    // Non-auth bootstrap failures are retried with backoff: on a cold box the
-    // server / tmux may not be up on the very first fetch, and the session list
-    // would otherwise sit empty until the user manually reloads. Each retry
-    // runs applyProjects (which preserves the current selection and drops the
-    // zero-state draft once projects arrive), so the UI heals in place rather
-    // than requiring a second Cmd+R.
+    // Non-auth bootstrap failures are retried with backoff. The bootstrap
+    // metadata RPCs (configGet + tmuxList) carry a hard timeout in httpApi, so
+    // a stalled first connection FAILS FAST instead of hanging forever — which
+    // is what makes this retry actually fire (a hanging fetch never rejected,
+    // so the pre-fix shell sat empty until a manual Cmd+R). On a cold box the
+    // first attempt may time out before the server/tmux is up; a short retry
+    // recovers in place. Each retry runs applyProjects (which preserves the
+    // current selection and drops the zero-state draft once projects arrive).
     let cancelled = false;
     let attempts = 0;
     const MAX_ATTEMPTS = 6;
