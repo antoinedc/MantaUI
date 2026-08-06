@@ -33,6 +33,30 @@ import { SessionHeader } from "./SessionHeader";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+// framer-motion mounts motion.div components in jsdom and probes browser APIs
+// jsdom lacks. Without these shims a framer-motion render throws on mount.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(globalThis as any).ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+if (typeof window !== "undefined" && !window.matchMedia) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (window as any).matchMedia = (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  });
+}
+
 // A subscriber registered via the mocked `window.api.onOpencodeEvent`.
 type EventListener = (ev: OpencodeEvent) => void;
 

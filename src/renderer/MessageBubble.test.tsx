@@ -43,16 +43,17 @@ describe("MessageBubble", () => {
   });
 
   // The send animation must be OPT-IN. It shipped unconditional, so opening
-  // any session popped every bubble in the transcript at once.
+  // any session popped every bubble in the transcript at once. `entering`
+  // drives `initial={false}` (no animation) vs the framer-motion pop.
   it("does not animate by default — a loaded transcript stays still", () => {
     h = mount(<MessageBubble>Hello</MessageBubble>);
     const bubble = h.container.querySelector(".flex.justify-end > div") as HTMLElement;
-    expect(bubble.className).not.toContain("manta-bubble-in");
+    expect(bubble.getAttribute("data-motion")).toBeNull();
   });
 
   it("animates the send only when the message arrived live", () => {
     h = mount(<MessageBubble entering>Hello</MessageBubble>);
     const bubble = h.container.querySelector(".flex.justify-end > div") as HTMLElement;
-    expect(bubble.className).toContain("manta-bubble-in");
+    expect(bubble.getAttribute("data-motion")).toBe("bubble");
   });
 });

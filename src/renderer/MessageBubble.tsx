@@ -26,6 +26,8 @@
 // surface need it.
 
 import type { ReactNode } from "react";
+import { motion } from "framer-motion";
+import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 
 export const BUBBLE_CHROME =
   "bg-fill border border-border-subtle rounded-lg px-4 py-[11px] text-prose text-text " +
@@ -37,17 +39,25 @@ export function MessageBubble({
 }: {
   children: ReactNode;
   // The iMessage-style send pop, and the ONE thing that must stay gated: this
-  // class used to be unconditional, so every bubble in a transcript the user
-  // merely opened popped on mount and a session switch replayed every send
-  // they had ever made. Only a message that arrives while they are watching
-  // animates (decided in Transcript, see `updateEntryMotion`).
+  // used to be unconditional, so every bubble in a transcript the user merely
+  // opened popped on mount and a session switch replayed every send they had
+  // ever made. Only a message that arrives while they are watching animates
+  // (decided in Transcript, see `updateEntryMotion`). When false the bubble
+  // renders `initial={false}` — it appears instantly, history stays still.
   entering?: boolean;
 }) {
   return (
     <div className="flex justify-end">
-      <div className={entering ? BUBBLE_CHROME + " manta-bubble-in" : BUBBLE_CHROME}>
+      <motion.div
+        className={BUBBLE_CHROME}
+        // Test hook: present exactly when this bubble is animating (live), so
+        // the history-still gate is assertable without depending on framer-
+        // motion internals or a real CSS class.
+        data-motion={entering ? "bubble" : undefined}
+        {...(entering ? MESSAGE_IN_ENTER : MESSAGE_IN_IDLE)}
+      >
         {children}
-      </div>
+      </motion.div>
     </div>
   );
 }
