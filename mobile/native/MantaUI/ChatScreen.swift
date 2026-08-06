@@ -198,20 +198,31 @@ private struct ChatScreenContent: View {
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                bottomCards
-                ComposerView(
-                    sessionId: store.sessionId,
-                    projectName: projectName,
-                    api: MantaAPIClient.live(),
-                    store: store,
-                    modelStore: modelStore,
-                    showScrollToBottom: showScrollToBottom,
-                    onScrollToBottom: {
-                        scrollPosition.scrollTo(edge: .bottom, animated: true)
-                        showScrollToBottom = false
-                    }
-                )
+            ZStack(alignment: .bottom) {
+                // Bottom-edge fade, at the very bottom of the screen (the
+                // home-indicator strip) BEHIND the composer — the mirror of the
+                // top scrim reaching into the status bar. `.ignoresSafeArea`
+                // lets it run right down to the display edge; the composer
+                // draws over it, so this is strictly "under the composer".
+                Scrim(edge: .bottom, tokens: tokens)
+                    .frame(height: Self.bottomScrimHeight)
+                    .ignoresSafeArea(edges: .bottom)
+                    .allowsHitTesting(false)
+                VStack(spacing: 0) {
+                    bottomCards
+                    ComposerView(
+                        sessionId: store.sessionId,
+                        projectName: projectName,
+                        api: MantaAPIClient.live(),
+                        store: store,
+                        modelStore: modelStore,
+                        showScrollToBottom: showScrollToBottom,
+                        onScrollToBottom: {
+                            scrollPosition.scrollTo(edge: .bottom, animated: true)
+                            showScrollToBottom = false
+                        }
+                    )
+                }
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -234,15 +245,6 @@ private struct ChatScreenContent: View {
         // carries its own top inset (see `transcript`) — the space is reserved
         // by the scroll content instead of by the header, which is what lets
         // rows pass beneath the glass while still coming to rest below it.
-        // Bottom scrim — the exact mirror of the top one below: an overlay
-        // aligned to the true bottom edge, applied AFTER the composer's
-        // safeAreaInset so it anchors at the very bottom alongside the composer
-        // (not as a band floating on the shrunken transcript above it).
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: Self.bottomScrimHeight)
-                .allowsHitTesting(false)
-        }
         // Top scrim UNDER the header buttons (declared first, so it draws
         // below them). The chat screen hides the navigation bar, so it gets
         // none of the system's own scroll-edge treatment — which is what the
@@ -438,9 +440,11 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// How tall the transcript's bottom fade is — mirrors the top scrim's
-    /// visual weight so the two edges read as one treatment (same Scrim ramp).
-    private static let bottomScrimHeight: CGFloat = 80
+    /// Height of the bottom-edge fade behind the composer — sized to the
+    /// home-indicator strip so it reads as the mirror of the top scrim reaching
+    /// into the status bar (same Scrim ramp, at the display edge rather than on
+    /// the transcript).
+    private static let bottomScrimHeight: CGFloat = 60
 
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
