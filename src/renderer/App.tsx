@@ -144,6 +144,9 @@ function AppInner() {
       ? s.drafts.find((d) => d.id === s.activeDraftId) ?? null
       : null,
   );
+  // One-shot first-prompt for a freshly-created session (draft → new session):
+  // App passes it to the matching ChatPanel, which auto-submits then clears it.
+  const autoSubmitPrompt = useStore((s) => s.autoSubmitPrompt);
   const openNewProject = () => createDraft("new-project");
   const openNewSessionInProject = (name: string) =>
     createDraft({ projectName: name });
@@ -1188,6 +1191,9 @@ function AppInner() {
                       availableLaunchers={availableLaunchers}
                       artifactsOpen={artifactsOpen}
                       onToggleArtifacts={() => setArtifactsOpen((v) => !v)}
+                      autoSubmit={
+                        autoSubmitPrompt?.sid === sid ? autoSubmitPrompt : undefined
+                      }
                     />
                   </div>
                 );

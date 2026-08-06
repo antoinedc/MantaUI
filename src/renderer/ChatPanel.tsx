@@ -870,6 +870,8 @@ export function ChatPanel({
   useEffect(() => {
     if (!autoSubmit || autoSubmitted.current) return;
     autoSubmitted.current = true;
+    // Consume the one-shot so re-mounting/re-navigating never re-sends it.
+    useStore.getState().setAutoSubmitPrompt(null);
     setModelOverride(autoSubmit.model ?? null);
     setInput(autoSubmit.text);
     const t = setTimeout(() => submitRef.current?.(), 0);
