@@ -147,6 +147,11 @@ type Props = {
   // Optional so test harnesses that construct ChatPanel directly omit them.
   artifactsOpen?: boolean;
   onToggleArtifacts?: () => void;
+  // A prompt to send through the panel's OWN submit path once, on mount —
+  // used by the optimistic "new session" flow so the first prompt + running
+  // indicator appear immediately in the real chat view. Optional; present
+  // only on the transient panel rendered while the tmux window is created.
+  autoSubmit?: { text: string; model?: ModelSelection };
 };
 
 export function ChatPanel({
@@ -162,6 +167,7 @@ export function ChatPanel({
   availableLaunchers = [],
   artifactsOpen = false,
   onToggleArtifacts = () => {},
+  autoSubmit,
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
@@ -851,6 +857,24 @@ export function ChatPanel({
   // latest version without adding submit to the effect's dependency array
   // (which would re-arm the effect on every keystroke).
   submitRef.current = submit;
+
+  // Optimistic "new session" auto-submit: seed the composer with the draft's
+  // prompt and fire the panel's OWN submit once, on mount. Going through submit
+  // (rather than calling opencodePrompt directly) gives the optimistic user
+  // message + running indicator immediately, exactly like a normal send. The
+  // defer is load-bearing: setInput runs synchronously, and submit is deferred
+  // so the re-render reassigns submitRef.current to a closure holding the new
+  // input (same rule as the queued-drain effect). A ref guard keeps it to one
+  // submission even if the autoSubmit prop identity churns.
+  const autoSubmitted = useRef(false);
+  useEffect(() => {
+    if (!autoSubmit || autoSubmitted.current) return;
+    autoSubmitted.current = true;
+    setModelOverride(autoSubmit.model ?? null);
+    setInput(autoSubmit.text);
+    const t = setTimeout(() => submitRef.current?.(), 0);
+    return () => clearTimeout(t);
+  }, [autoSubmit, setModelOverride, setInput]);
 
   // When the AI goes idle (running flips false) and there are queued
   // messages, dispatch the next one. We restore it into `input` and call
