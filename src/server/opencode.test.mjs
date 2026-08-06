@@ -971,43 +971,37 @@ test("listModels applies per-model display overrides keyed providerID/modelID", 
   );
 });
 
-test("applyModelOverride merges name/description/context, leaves mutables untouched", () => {
+test("applyModelOverride merges name/description/context and omits empty/invalid fields", () => {
   const base = {
-    id: "claude-sonnet-4-6",
+    id: "claude-opus-4-7",
     providerID: "anthropic",
-    name: "Claude Sonnet 4.6",
-    limit: { context: 200_000, output: 64_000 },
+    name: "Claude Opus 4.7",
+    limit: { context: 1_000_000, output: 128_000 },
     variants: [{ id: "high" }],
   };
   const merged = applyModelOverride(base, {
-    name: "  My Claude  ",
-    description: "  My custom blurb  ",
-    context: 1_000_000,
+    name: "  My Opus  ",
+    description: "  Custom  ",
+    context: 200_000,
   });
-  // New object, input untouched.
+  // New object; input untouched.
   assert.notEqual(merged, base);
-  assert.equal(base.name, "Claude Sonnet 4.6");
-  assert.equal(base.limit.context, 200_000);
-  // Trimmed + merged.
-  assert.equal(merged.name, "My Claude");
-  assert.equal(merged.description, "My custom blurb");
-  assert.equal(merged.limit.context, 1_000_000);
-  // limit merges onto the existing object rather than dropping other keys.
-  assert.equal(merged.limit.output, 64_000);
-  assert.equal(merged.variants, base.variants);
-});
-
-test("applyModelOverride omits empty/absent fields and no-ops on falsy override", () => {
-  const base = { id: "gpt-5", providerID: "openai", name: "GPT-5" };
-  // Empty strings for name/description → omitted.
-  const merged = applyModelOverride(base, { name: "   ", description: "", context: 200_000 });
-  assert.equal(merged.name, "GPT-5");
-  assert.equal(merged.description, undefined);
+  assert.equal(base.name, "Claude Opus 4.7");
+  assert.equal(base.limit.context, 1_000_000);
+  // Trimmed fields merged onto a NEW limit (other limit keys preserved).
+  assert.equal(merged.name, "My Opus");
+  assert.equal(merged.description, "Custom");
   assert.equal(merged.limit.context, 200_000);
-  // Invalid context (<= 0 / NaN) → omitted.
-  const noCtx = applyModelOverride(base, { context: 0 });
-  assert.equal(noCtx.limit, undefined);
-  // No override / non-object → same object reference back.
+  assert.equal(merged.limit.output, 128_000);
+  assert.equal(merged.variants, base.variants);
+
+  // Empty/whitespace name+description → omitted; invalid context → omitted.
+  const partial = applyModelOverride(base, { name: "   ", description: "", context: 0 });
+  assert.equal(partial.name, "Claude Opus 4.7");
+  assert.equal(partial.description, undefined);
+  assert.equal(partial.limit?.context, 1_000_000);
+
+  // No / non-object override → same object reference back.
   assert.equal(applyModelOverride(base, undefined), base);
   assert.equal(applyModelOverride(base, null), base);
 });
