@@ -244,6 +244,17 @@ export type Project = {
   mantaOwned?: boolean;
 };
 
+// Return shape of the tmux:new-session / tmux:new-window RPCs. Carries the
+// newly-created window's identity (sessionId + windowIndex) so the caller can
+// navigate + send the first prompt to the RIGHT window — instead of
+// re-locating it by name, which mixed new sessions up with existing ones on
+// name collisions. `projects` is the refreshed listing.
+export type TmuxCreateResult = {
+  sessionId: string | null;
+  windowIndex: number;
+  projects: Project[];
+};
+
 export type TmuxConfigStatus = {
   mantaManaged: boolean;   // ~/.tmux.conf currently has manta's config
   backupExists: boolean; // ~/.tmux.conf.pre-manta exists (restore is possible)

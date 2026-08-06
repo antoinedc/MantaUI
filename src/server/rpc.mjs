@@ -360,14 +360,18 @@ export function buildHandlers({
     // issue is about.
     "tmux:new-session": async (i) => {
       const cwd = await resolveProjectCwd(i.name, i.cwd);
-      const projects = await tmux.newSession({ ...i, cwd, oc });
+      const result = await tmux.newSession({ ...i, cwd, oc });
       await local
         .projectMetaUpsert({
           tmuxSession: i.name,
           defaultCwd: expandTilde(cwd),
         })
         .catch(() => {});
-      return projects;
+      // BET: the create returns the new window's { sessionId, windowIndex,
+      // projects } so callers can navigate + send the first prompt to the
+      // RIGHT session (previously they re-located by name, which mixed new
+      // sessions up with existing ones on name collisions).
+      return result;
     },
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
     // project's stored defaultCwd (set when the workspace was created).

@@ -100,6 +100,7 @@ function AppInner() {
     serverUpdateProgress,
     connectionState,
     launcherFlags,
+    createDraft,
   } = useStore();
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
@@ -130,20 +131,31 @@ function AppInner() {
   // (a box that can't implement the jobs endpoint will 500 on every 30s tick).
   const incompatibleFlaggedRef = useRef(false);
 
-  // BET-417: the new-session screen replaces the old inline forms. null =
-  // not shown. { mode: "new-project" } = new-project (creates a tmux
-  // session). { mode: "new-session", projectName } = new window in an
-  // existing project. The zero-project state (projects.length === 0) shows
-  // it full-panel instead of a dead placeholder.
-  const [newSessionScreen, setNewSessionScreen] = useState<
-    | null
-    | { mode: "new-project" }
-    | { mode: "new-session"; projectName: string }
-  >(null);
-
-  const openNewProject = () => setNewSessionScreen({ mode: "new-project" });
+  // BET-417 (draft model): a "new session" is an in-memory store DRAFT, not an
+  // overlay. Clicking + / ⌘N / ⌘T creates a draft (createDraft) and makes it
+  // the ACTIVE view (activeDraftId). The draft renders as a layer over the
+  // always-mounted session panels, so switching to a real session (setActive
+  // clears activeDraftId) reveals the session with its state intact, and
+  // switching back re-mounts the composer from the stored draft. The
+  // zero-project state (projects.length === 0) auto-creates a new-project
+  // draft so the composer is never a dead placeholder.
+  const activeDraft = useStore((s) =>
+    s.activeDraftId != null
+      ? s.drafts.find((d) => d.id === s.activeDraftId) ?? null
+      : null,
+  );
+  const openNewProject = () => createDraft("new-project");
   const openNewSessionInProject = (name: string) =>
-    setNewSessionScreen({ mode: "new-session", projectName: name });
+    createDraft({ projectName: name });
+
+  // Zero-project state: ensure a new-project draft exists so the composer
+  // (welcome screen) is always the visible view. Re-creates it if the user
+  // abandons the only draft while there are still no projects.
+  useEffect(() => {
+    if (loaded && projects.length === 0 && !activeDraft) {
+      createDraft("new-project");
+    }
+  }, [loaded, projects.length, activeDraft, createDraft]);
 
   // Same pattern for chat-mode windows: mount a ChatPanel for each opencode
   // session we've ever opened, keep it mounted so scroll position + in-flight
@@ -1102,12 +1114,14 @@ function AppInner() {
             // Zero-project state (BET-416 §F / BET-417 §A): the new-session
             // composer IS the app's zero state. An unpaired config routes to
             // onboarding, so this branch is only reached when the box IS
-            // paired but has no projects yet.
-            <NewSessionScreen
-              projectName={null}
-              onDone={() => setNewSessionScreen(null)}
-              onCancel={() => setNewSessionScreen(null)}
-            />
+            // paired but has no projects yet. The auto-create effect above
+            // guarantees an active new-project draft here; use it when present
+            // (and render a blank for the one frame before it lands).
+            activeDraft ? (
+              <NewSessionScreen draftId={activeDraft.id} />
+            ) : (
+              <div className="h-full" />
+            )
           ) : (
             <>
               {/* Terminal / AI-TUI layer (BET-138, BET-347): one per
@@ -1178,20 +1192,15 @@ function AppInner() {
                   </div>
                 );
               })}
-              {/* New-session screen overlay (BET-417): shown over the panel
-                  when the user hits + or Cmd+N/T. Covers the panel area
-                  (sidebar stays visible so the user can click away). */}
-              {newSessionScreen && (
+              {/* New-session DRAFT layer: shown over the always-mounted
+                  session panels when a draft is the active view (user hit +
+                  / Cmd+N/T). The session panels below stay mounted, so
+                  switching back to a real session (setActive clears
+                  activeDraftId) reveals it with state intact. The sidebar
+                  stays visible so the user can click another session. */}
+              {activeDraft && (
                 <div className="absolute inset-0 z-30 bg-bg">
-                  <NewSessionScreen
-                    projectName={
-                      newSessionScreen.mode === "new-project"
-                        ? null
-                        : newSessionScreen.projectName
-                    }
-                    onDone={() => setNewSessionScreen(null)}
-                    onCancel={() => setNewSessionScreen(null)}
-                  />
+                  <NewSessionScreen draftId={activeDraft.id} />
                 </div>
               )}
             </>

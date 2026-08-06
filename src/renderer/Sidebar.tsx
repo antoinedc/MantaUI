@@ -76,6 +76,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     recentWindows,
     togglePin,
     worktreeCleanOnClose,
+    drafts,
+    activeDraftId,
+    setActiveDraft,
+    dismissDraft,
   } = useStore();
   // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
   // Settings entry, not a full-width bar.
@@ -89,6 +93,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const showNotice = (msg: string) => {
     alert(msg);
   };
+
+  // When a new-session DRAFT is the foreground view, no real session should
+  // read as "active" in the rail — the draft row is the highlighted one
+  // (e.g. creating a session over a chat must not leave the old chat lit up).
+  const draftForeground = activeDraftId != null;
 
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
 
@@ -515,6 +524,53 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         data-density="comfortable"
         onKeyDown={onRailKeyDown}
       >
+        {/* New-session drafts (BET draft model): in-memory composers for
+            sessions that don't exist yet. Shown at the TOP of the rail, not
+            nested under any project — a draft is a bare "new session" until it
+            commits. Clicking one makes it the active view (renders the
+            composer); the X abandons it (dismisses, prompt not yet sent). */}
+        {drafts.length > 0 && (
+          <div className="mb-3 space-y-px">
+            {drafts.map((d) => {
+              const isActive = activeDraftId === d.id;
+              const target =
+                d.mode === "new-project"
+                  ? "will create a new project"
+                  : `will open in "${d.mode.projectName}"`;
+              const hint = d.input.trim()
+                ? `"${d.input.trim().slice(0, 40)}" · ${target}`
+                : target;
+              return (
+                <div
+                  key={d.id}
+                  role="button"
+                  aria-selected={isActive}
+                  onClick={() => setActiveDraft(d.id)}
+                  className={`group flex items-center gap-1 px-1 py-1 rounded-xs text-meta cursor-pointer select-none ${
+                    isActive
+                      ? "bg-bg-soft text-text"
+                      : "text-text-muted hover:bg-bg-soft hover:text-text"
+                  }`}
+                  title={`New session — ${hint}`}
+                >
+                  <span className="flex-1 min-w-0 truncate italic">new session</span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dismissDraft(d.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none"
+                    aria-label="Discard this new session"
+                    tabIndex={-1}
+                  >
+                    <X size={13} aria-hidden="true" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {projects.length === 0 && (
           <div className="px-2 py-3 text-meta text-text-faint">
             No projects yet. Click + or press {MOD_KEY}N.
@@ -534,6 +590,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   project={r.project}
                   window={r.window}
                   isActive={
+                    !draftForeground &&
                     activeProjectName === r.project.tmuxSession &&
                     activeWindowByProject[r.project.tmuxSession] === r.window.index
                   }
@@ -582,7 +639,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         {projects.map((p) => {
           const isCollapsed = collapsed.has(p.tmuxSession);
           const activeWinIdx = activeWindowByProject[p.tmuxSession];
-          const isProjectActive = activeProjectName === p.tmuxSession;
+          const isProjectActive = !draftForeground && activeProjectName === p.tmuxSession;
           const n = nesting.get(p.tmuxSession)!;
           const topWindows = p.windows.filter(
             (w) =>

@@ -19,6 +19,7 @@ import type {
   PermissionRequest,
   QuestionRequest,
   Project,
+  TmuxCreateResult,
   ScheduledJob,
   SecretMeta,
   SecretInput,
@@ -76,13 +77,18 @@ export interface Api {
 
   // tmux operations on the remote
   tmuxList(): Promise<Project[]>;
+  // The create RPCs return the newly-created window's identity (sessionId +
+  // windowIndex) alongside the refreshed projects list, so callers can
+  // navigate + send the first prompt to the RIGHT session instead of
+  // re-locating it by name (which mixed new sessions up with existing ones
+  // on name collisions).
   tmuxNewSession(input: {
     name: string;
     cwd: string;
     windowName?: string;
     chatMode?: boolean;
     createDir?: boolean;
-  }): Promise<Project[]>;
+  }): Promise<TmuxCreateResult>;
   tmuxNewWindow(input: {
     sessionName: string;
     windowName: string;
@@ -92,7 +98,7 @@ export interface Api {
     // on `@manta-worktree-path` so clean-on-close knows it owns this
     // worktree. Optional — omitted for non-worktree windows.
     worktreePath?: string;
-  }): Promise<Project[]>;
+  }): Promise<TmuxCreateResult>;
   tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
   tmuxRenameWindow(input: {
     sessionName: string;

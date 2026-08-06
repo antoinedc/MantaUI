@@ -380,9 +380,11 @@ test("startJob allows nesting when the blocking job is terminal", async () => {
   const parentWin = { index: 1, name: "p", opencodeSessionId: "child_done", paneCurrentPath: "/repo" };
   const childWin = { index: 5, name: "nested-work", opencodeSessionId: "c2", paneCurrentPath: "/repo" };
   h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async (input) => [
-    { tmuxSession: input.sessionName, windows: [parentWin, childWin] },
-  ];
+  h.deps.newWindow = async (input) => ({
+    sessionId: "c2",
+    windowIndex: 5,
+    projects: [{ tmuxSession: input.sessionName, windows: [parentWin, childWin] }],
+  });
   const res = await startJob(
     { prompt: "nested work", parentSessionID: "child_done", parentDirectory: "/repo" },
     h.deps,
@@ -613,9 +615,11 @@ test("startJob happy path (non-git cwd) persists a running job and delivers the 
   const parentWin = { index: 1, name: "parent-h", opencodeSessionId: "parent-h", paneCurrentPath: "/repo" };
   const childWin = { index: 2, name: "fix-the-login-bug", opencodeSessionId: "child-h", paneCurrentPath: "/repo" };
   h.deps.listProjects = async () => [{ tmuxSession: "proj", windows: [parentWin] }];
-  h.deps.newWindow = async (input) => [
-    { tmuxSession: input.sessionName, windows: [parentWin, childWin] },
-  ];
+  h.deps.newWindow = async (input) => ({
+    sessionId: "child-h",
+    windowIndex: 2,
+    projects: [{ tmuxSession: input.sessionName, windows: [parentWin, childWin] }],
+  });
   const res = await startJob(
     { prompt: "Fix the login bug please", parentSessionID: "parent-h", parentDirectory: "/repo" },
     h.deps,
@@ -792,7 +796,11 @@ function approvalEngineHarness(initialJobs = []) {
     listProjects: async () => [{ tmuxSession: "proj", windows: [parentWin] }],
     newWindow: async (input) => {
       newWindowCalls.push(input);
-      return [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }];
+      return {
+        sessionId: "ses_child",
+        windowIndex: 2,
+        projects: [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }],
+      };
     },
     oc: {
       createSession: async (input) => {

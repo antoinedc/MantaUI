@@ -724,3 +724,84 @@ describe("deep-link pairing error", () => {
     expect(useStore.getState().pairLinkError).toBeNull();
   });
 });
+
+// ===== New-session drafts (BET draft model) =====
+//
+// A "new session" is an in-memory store draft until it commits. The draft
+// holds the composer workspace; navigating away/back must not lose it, and
+// navigating to a real session (setActive) must exit any draft view.
+
+describe("new-session drafts", () => {
+  beforeEach(() => {
+    useStore.setState({ activeDraftId: null, drafts: [] });
+  });
+
+  it("createDraft adds a draft and makes it the active view", () => {
+    const id = useStore.getState().createDraft("new-project");
+    const s = useStore.getState();
+    expect(s.drafts.map((d) => d.id)).toEqual([id]);
+    expect(s.activeDraftId).toBe(id);
+    const d = s.drafts[0];
+    expect(d.mode).toBe("new-project");
+    expect(d.cwd).toBe("~");
+    expect(d.input).toBe("");
+    expect(d.wantWorktree).toBe(false);
+  });
+
+  it("createDraft new-session mode targets the project and seeds cwd from config", () => {
+    useStore.setState({ worktreePerSession: true });
+    useStore.getState().createDraft({ projectName: "better-ui" });
+    const d = useStore.getState().drafts[0];
+    expect(d.mode).toEqual({ projectName: "better-ui" });
+    // new-session cwd starts empty (resolved from the project later)
+    expect(d.cwd).toBe("");
+    // wantWorktree seeds from the worktreePerSession config for new-session mode
+    expect(d.wantWorktree).toBe(true);
+  });
+
+  it("updateDraft patches only the matching draft", () => {
+    const a = useStore.getState().createDraft("new-project");
+    const b = useStore.getState().createDraft({ projectName: "x" });
+    useStore.getState().updateDraft(a, { input: "hello" });
+    const s = useStore.getState();
+    expect(s.drafts.find((d) => d.id === a)!.input).toBe("hello");
+    expect(s.drafts.find((d) => d.id === b)!.input).toBe("");
+  });
+
+  it("dismissDraft removes it and re-points the active view at another draft", () => {
+    const a = useStore.getState().createDraft("new-project");
+    const b = useStore.getState().createDraft({ projectName: "x" });
+    // dismiss the first (not active) — active stays b
+    useStore.getState().dismissDraft(a);
+    expect(useStore.getState().drafts.map((d) => d.id)).toEqual([b]);
+    expect(useStore.getState().activeDraftId).toBe(b);
+  });
+
+  it("dismissing the ACTIVE draft falls back to a surviving draft, else null", () => {
+    const a = useStore.getState().createDraft("new-project");
+    const s = useStore.getState();
+    expect(s.activeDraftId).toBe(a);
+    useStore.getState().dismissDraft(a);
+    expect(useStore.getState().activeDraftId).toBeNull();
+    expect(useStore.getState().drafts).toEqual([]);
+  });
+
+  it("setActive (a real session) clears the active draft view", () => {
+    useStore.setState({
+      projects: [
+        proj({
+          tmuxSession: "manta",
+          windows: [
+            { index: 0, name: "w", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_a" },
+          ],
+        }),
+      ],
+    });
+    const id = useStore.getState().createDraft({ projectName: "manta" });
+    expect(useStore.getState().activeDraftId).toBe(id);
+    useStore.getState().setActive("manta", 0);
+    expect(useStore.getState().activeDraftId).toBeNull();
+    // the draft itself is untouched — it stays in the sidebar for later use
+    expect(useStore.getState().drafts.some((d) => d.id === id)).toBe(true);
+  });
+});

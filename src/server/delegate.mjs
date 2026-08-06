@@ -343,7 +343,10 @@ export async function startJob(input, deps = {}) {
       throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
     }
     tmuxSession = owner.tmuxSession;
-    const projects = await newWindow({
+    // 6b. The create returns the new window's identity (sessionId +
+    // windowIndex) directly — no need to re-locate it by name from the
+    // refreshed listing (which could catch a same-named sibling window).
+    const created = await newWindow({
       sessionName: tmuxSession,
       windowName: name,
       cwd,
@@ -352,18 +355,14 @@ export async function startJob(input, deps = {}) {
       oc: deps.oc,
       permission: input?.permission,
     });
-    const owner2 = resolveOwner(projects, parentSessionID);
-    const proj = (projects || []).find((p) => p.tmuxSession === tmuxSession);
-    const win = (proj?.windows || []).find(
-      (w) => w.name === name && w.opencodeSessionId,
-    );
-    childSessionID = win?.opencodeSessionId ?? null;
-    windowIndex = win?.index ?? null;
-    // Sanity: if we somehow failed to read the child session id back, abort.
+    const owner2 = resolveOwner(created.projects, parentSessionID);
+    childSessionID = created.sessionId ?? null;
+    windowIndex = created.windowIndex ?? null;
+    void owner2;
+    // Sanity: if we somehow failed to resolve the child session id, abort.
     if (!childSessionID) {
       throw new Error("could not read the new window's opencode session id");
     }
-    void owner2;
   } catch (e) {
     // Undo step 4 in reverse: remove the worktree (force:false, best-effort).
     if (worktree && deps.gitRemoveWorktree) {
