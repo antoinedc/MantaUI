@@ -61,6 +61,14 @@ function formatTimeout(ms: number): string {
 // ===== Dialog semantics (BET-419 §C): focus trap + Esc + focus restore =====
 function useDialog(onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null);
+  // `onClose` is an inline arrow from App (recreated on every App render), so
+  // the effect MUST NOT key off its identity — otherwise ANY App re-render
+  // (e.g. a background SSE/window-status update ticking in every few seconds)
+  // re-runs it and steals focus back to the dialog's first element, yanking
+  // the caret out of whatever the user is typing (e.g. the model-edit modal's
+  // fields). Keep the latest callback in a ref and run the setup ONCE.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
@@ -68,7 +76,7 @@ function useDialog(onClose: () => void) {
     const firstFocusable = root.querySelector<HTMLElement>("h2[tabindex], button, input, select, textarea, a[href]");
     (firstFocusable ?? root).focus();
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+      if (e.key === "Escape") { e.preventDefault(); onCloseRef.current(); return; }
       if (e.key !== "Tab") return;
       const focusables = root.querySelectorAll<HTMLElement>(
         'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
@@ -85,7 +93,8 @@ function useDialog(onClose: () => void) {
       document.removeEventListener("keydown", onKey, true);
       if (opener && typeof opener.focus === "function") opener.focus();
     };
-  }, [onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return ref;
 }
 
