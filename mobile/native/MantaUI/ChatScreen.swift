@@ -491,10 +491,6 @@ private struct ChatScreenContent: View {
         .headerContent(.header {
             Color.clear.frame(height: Self.headerReservedHeight)
         })
-        // Keep the transcript's bottom edge ABOVE the floating composer so
-        // scroll content never rests behind (and bounces into) it. A content
-        // margin, not a viewport shrink, so the viewport stays full-bleed.
-        .contentMargins(.bottom, Self.composerReservedHeight, for: .scrollContent)
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.
         .prependLoader(.loader(
@@ -538,6 +534,12 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+        // Keep the transcript's bottom edge ABOVE the floating composer so
+        // scroll content never rests behind (and bounces into) it. A content
+        // margin, not a viewport shrink, so the viewport stays full-bleed.
+        // Applied AFTER the TiledView-only chaining above (its type is already
+        // erased to some View here).
+        .contentMargins(.bottom, Self.composerReservedHeight, for: .scrollContent)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
