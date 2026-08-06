@@ -2189,19 +2189,23 @@ export function ChatPanel({
         </div>
       )}
 
-      {running && (
-        <>
-          {/* Working indicator: the last row of the transcript flow, so it
-              aligns with assistant rows — the transcript's full width — not
-              with the composer stack below it (BET-646). Its own horizontal
-              padding was dropped. */}
-          <MeasureColumn width="full">
-            <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
-          </MeasureColumn>
-          {/* activeTodos used to render here, sticky above the input. Moved */}
-          {/* into the scroll container above (tail of the transcript) so */}
-          {/* long checklists scroll like normal chat content. */}
-          {messageQueue.length > 0 && (
+      {/* Working indicator. This is the LAST row of the transcript flow, so it
+          aligns with assistant rows — the transcript's full width (BET-646),
+          its own horizontal padding dropped. It is ALWAYS rendered, with the
+          spinner toggled via `visibility` rather than mounted/unmounted: the
+          indicator sits BELOW the transcript scroll container in the fixed
+          composer stack, so conditionally mounting it resized the reading
+          column and pushed the user's prompt up/down every time the turn's
+          running state toggled on send / before streaming. Keeping the slot a
+          constant height means toggling running never reflows the transcript.
+          Hidden (invisible, layout preserved) when idle. */}
+      <MeasureColumn width="full">
+        <div style={{ visibility: running ? "visible" : "hidden" }}>
+          <RunningIndicator tokens={latestTokens} atBottom={pinnedToBottom.current} />
+        </div>
+      </MeasureColumn>
+
+      {running && messageQueue.length > 0 && (
             // Queued prompts are about to be submitted, so the notice belongs
             // to the composer stack — default ("measure") MeasureColumn, which
             // owns the 28px inset (BET-646, supersedes BET-642).
@@ -2227,8 +2231,6 @@ export function ChatPanel({
               </div>
             </MeasureColumn>
           )}
-        </>
-      )}
 
       {/* Send error banner — surfaced from both client-side capability */}
       {/* checks and server-side session.error events. Dismissable. For an */}
