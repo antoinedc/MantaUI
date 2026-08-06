@@ -1115,6 +1115,12 @@ export const useStore = create<State>((set, get) => ({
 
   applyProjects: (projects) =>
     set((prev) => {
+      // If the app had NO projects and now has some (the normal boot path:
+      // loaded flips true before the first tmuxList resolves), the auto-created
+      // zero-state "welcome" draft — whose NewSessionScreen overlay renders on
+      // top of the restored session — is stale. Drop it so the user lands on
+      // their last-used session, not the composer.
+      const clearZeroStateDrafts = prev.projects.length === 0 && projects.length > 0;
       // Clamp activeProjectName to one that still exists; clamp window choice too.
       let activeProjectName = prev.activeProjectName;
       // A window to force for the actively-restored project. When we land on a
@@ -1155,7 +1161,12 @@ export const useStore = create<State>((set, get) => ({
       for (const k of Object.keys(activeWindowByProject)) {
         if (!projects.find((p) => p.tmuxSession === k)) delete activeWindowByProject[k];
       }
-      return { projects, activeProjectName, activeWindowByProject };
+      return {
+        projects,
+        activeProjectName,
+        activeWindowByProject,
+        ...(clearZeroStateDrafts ? { activeDraftId: null, drafts: [] } : {}),
+      };
     }),
 }));
 
