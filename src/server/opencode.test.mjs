@@ -33,7 +33,6 @@ import {
   getProviders,
   getDefaultModel,
   listModels,
-  applyModelOverride,
   claudeCliStatus,
 } from "./opencode.mjs";
 
@@ -936,74 +935,6 @@ test("listModels returns [] on a transport throw (never re-throws)", async () =>
       assert.deepEqual(out, []);
     },
   );
-});
-
-test("listModels applies per-model display overrides keyed providerID/modelID", async () => {
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic"],
-          all: [
-            {
-              id: "anthropic",
-              models: {
-                "claude-sonnet-4-6": { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-              },
-            },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      const out = await listModels({
-        "anthropic/claude-sonnet-4-6": {
-          name: "My Sonnet",
-          description: "Custom",
-          context: 1_000_000,
-        },
-      });
-      assert.equal(out.length, 1);
-      assert.equal(out[0].name, "My Sonnet");
-      assert.equal(out[0].description, "Custom");
-      assert.equal(out[0].limit.context, 1_000_000);
-    },
-  );
-});
-
-test("applyModelOverride merges name/description/context and omits empty/invalid fields", () => {
-  const base = {
-    id: "claude-opus-4-7",
-    providerID: "anthropic",
-    name: "Claude Opus 4.7",
-    limit: { context: 1_000_000, output: 128_000 },
-    variants: [{ id: "high" }],
-  };
-  const merged = applyModelOverride(base, {
-    name: "  My Opus  ",
-    description: "  Custom  ",
-    context: 200_000,
-  });
-  // New object; input untouched.
-  assert.notEqual(merged, base);
-  assert.equal(base.name, "Claude Opus 4.7");
-  assert.equal(base.limit.context, 1_000_000);
-  // Trimmed fields merged onto a NEW limit (other limit keys preserved).
-  assert.equal(merged.name, "My Opus");
-  assert.equal(merged.description, "Custom");
-  assert.equal(merged.limit.context, 200_000);
-  assert.equal(merged.limit.output, 128_000);
-  assert.equal(merged.variants, base.variants);
-
-  // Empty/whitespace name+description → omitted; invalid context → omitted.
-  const partial = applyModelOverride(base, { name: "   ", description: "", context: 0 });
-  assert.equal(partial.name, "Claude Opus 4.7");
-  assert.equal(partial.description, undefined);
-  assert.equal(partial.limit?.context, 1_000_000);
-
-  // No / non-object override → same object reference back.
-  assert.equal(applyModelOverride(base, undefined), base);
-  assert.equal(applyModelOverride(base, null), base);
 });
 
 // Scoped-stream readiness gate (BET-115 fix C)
