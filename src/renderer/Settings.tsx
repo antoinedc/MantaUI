@@ -76,6 +76,12 @@ function useDialog(onClose: () => void) {
     const firstFocusable = root.querySelector<HTMLElement>("h2[tabindex], button, input, select, textarea, a[href]");
     (firstFocusable ?? root).focus();
     const onKey = (e: globalThis.KeyboardEvent) => {
+      // Only respond to events originating INSIDE this dialog. A portal'd
+      // nested modal (e.g. the model-edit dialog, rendered into document.body)
+      // lives outside `root`, so its Esc/Tab must be handled by the modal
+      // itself — otherwise Settings would steal Esc and close itself while
+      // the user is typing in (or dismissing) the nested modal.
+      if (e.target instanceof Node && !root.contains(e.target)) return;
       if (e.key === "Escape") { e.preventDefault(); onCloseRef.current(); return; }
       if (e.key !== "Tab") return;
       const focusables = root.querySelectorAll<HTMLElement>(
