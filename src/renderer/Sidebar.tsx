@@ -541,31 +541,30 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 ? `"${d.input.trim().slice(0, 40)}" · ${target}`
                 : target;
               return (
-                <div
+                <SessionRow
                   key={d.id}
-                  role="button"
-                  aria-selected={isActive}
-                  onClick={() => setActiveDraft(d.id)}
-                  className={`group flex items-center gap-1 px-1 py-1 rounded-xs text-meta cursor-pointer select-none ${
-                    isActive
-                      ? "bg-bg-soft text-text"
-                      : "text-text-muted hover:bg-bg-soft hover:text-text"
-                  }`}
+                  // A draft is never running/blocking — the at-rest "default"
+                  // dot keeps the row chrome identical to a resting session.
+                  status="default"
+                  selected={isActive}
+                  name={<span className="italic">new session</span>}
                   title={`New session — ${hint}`}
-                >
-                  <span className="flex-1 min-w-0 truncate italic">new session</span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dismissDraft(d.id);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none"
-                    aria-label="Discard this new session"
-                    tabIndex={-1}
-                  >
-                    <X size={13} aria-hidden="true" />
-                  </button>
-                </div>
+                  ariaSelected={isActive}
+                  onClick={() => setActiveDraft(d.id)}
+                  trailing={
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dismissDraft(d.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
+                      aria-label="Discard this new session"
+                      tabIndex={-1}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  }
+                />
               );
             })}
           </div>
