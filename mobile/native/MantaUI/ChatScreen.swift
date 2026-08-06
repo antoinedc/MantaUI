@@ -225,28 +225,33 @@ private struct ChatScreenContent: View {
                 .allowsHitTesting(false)
         }
         .overlay(alignment: .bottom) {
-            VStack(spacing: 0) {
-                bottomCards
-                ComposerView(
-                    sessionId: store.sessionId,
-                    projectName: projectName,
-                    api: MantaAPIClient.live(),
-                    store: store,
-                    modelStore: modelStore,
-                    showScrollToBottom: showScrollToBottom,
-                    onScrollToBottom: {
-                        scrollPosition.scrollTo(edge: .bottom, animated: true)
-                        showScrollToBottom = false
-                    }
-                )
-            }
-            // Feeds the scrim (and the transcript's footer reservation) its
-            // live height. Safe to measure here: it is an overlay, so nothing
-            // it reports changes the transcript's layout.
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.size.height
-            } action: { height in
-                bottomBarHeight = height
+            // GlassEffectContainer so the composer's liquid-glass material
+            // renders as one floating piece (same as the header buttons) rather
+            // than reading flat against the canvas/scrim behind it.
+            GlassEffectContainer(spacing: 0) {
+                VStack(spacing: 0) {
+                    bottomCards
+                    ComposerView(
+                        sessionId: store.sessionId,
+                        projectName: projectName,
+                        api: MantaAPIClient.live(),
+                        store: store,
+                        modelStore: modelStore,
+                        showScrollToBottom: showScrollToBottom,
+                        onScrollToBottom: {
+                            scrollPosition.scrollTo(edge: .bottom, animated: true)
+                            showScrollToBottom = false
+                        }
+                    )
+                }
+                // Feeds the scrim (and the transcript's footer reservation) its
+                // live height. Safe to measure here: it is an overlay, so nothing
+                // it reports changes the transcript's layout.
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    bottomBarHeight = height
+                }
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -464,6 +469,13 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
+    /// Space the transcript keeps clear at its bottom edge for the floating
+    /// composer, sized for the composer at rest. FIXED so the scroll content
+    /// doesn't reflow every time the composer grows (that lurch is what the old
+    /// safeAreaInset did). The transcript therefore STOPS above the composer —
+    /// nothing sits behind it, so overscroll can't bounce content into it.
+    private static let composerReservedHeight: CGFloat = 110
+
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -479,6 +491,10 @@ private struct ChatScreenContent: View {
         .headerContent(.header {
             Color.clear.frame(height: Self.headerReservedHeight)
         })
+        // Keep the transcript's bottom edge ABOVE the floating composer so
+        // scroll content never rests behind (and bounces into) it. A content
+        // margin, not a viewport shrink, so the viewport stays full-bleed.
+        .contentMargins(.bottom, Self.composerReservedHeight, for: .scrollContent)
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.
         .prependLoader(.loader(
