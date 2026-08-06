@@ -101,3 +101,15 @@ export function useModelCatalog(): Snapshot {
   }, []);
   return snapshot;
 }
+
+/**
+ * Force the shared model catalog to re-fetch from the server without waiting
+ * for STALE_MS. Called by Settings → Models after saving a model override so
+ * the composer's model dropdown reflects the new name / description / context
+ * on the next load (the settings table updates its own local copy in the same
+ * tick; this reconciles every other reader — chiefly ChatPanel's picker).
+ */
+export function refreshModelCatalog(): void {
+  fetchedAt = 0;
+  if (!inFlight) load();
+}

@@ -102,6 +102,13 @@ export type AppConfig = {
   // this setting use the same shape. When absent, opencode picks its own
   // default (the first connected provider's default model).
   defaultModel?: { providerID: string; modelID: string };
+  // Per-model display overrides (name / description / context size), keyed by
+  // "providerID/modelID". Drafted in Settings → Models → edit and applied
+  // server-side by listModels() when models are fetched, so the settings
+  // table AND the composer model picker both reflect a change on the next
+  // load. Stored in config.json like every other AppConfig field. Absent = no
+  // display overrides.
+  modelOverrides?: Record<string, ModelOverride>;
   // Extra skill registry URLs written to the remote opencode.jsonc as
   // skills.urls. The default registry (https://antoinedc.github.io/manta-skills)
   // is always prepended by the binary once the upstream PR lands; these are
@@ -1364,6 +1371,23 @@ export type OpencodeModel = {
   limit?: { context?: number; output?: number };
   capabilities?: { tools?: boolean; input?: string[]; output?: string[] };
   variants?: Array<{ id: string }>;
+  // User-supplied display override (via Settings → Models → edit). Set by the
+  // server at listModels() time from AppConfig.modelOverrides; absent when the
+  // model has no override. Supersedes the static modelGuide blurb in the
+  // settings table.
+  description?: string;
+};
+
+// A per-model display override. Keyed by "providerID/modelID" in
+// AppConfig.modelOverrides and applied to OpencodeModel at listModels() time,
+// so BOTH the Settings model table and the composer's ModelMenu/ModelPicker
+// (which source from opencodeModels()) reflect it on the next fetch. Each
+// field is optional; an omitted field falls back to the provider's own value /
+// the static modelGuide blurb. `context` is the context window size in tokens.
+export type ModelOverride = {
+  name?: string;
+  description?: string;
+  context?: number;
 };
 
 // Trimmed session list entry from GET /session. `model` is the last model used

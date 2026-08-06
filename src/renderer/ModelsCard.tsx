@@ -21,12 +21,16 @@
 // inside the card).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
-import type { OpencodeModel } from "../shared/types";
+import type { ModelOverride, OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
 import { Tag } from "./Tag";
+import { Modal } from "./Modal";
+import { Button } from "./Button";
+import { refreshModelCatalog } from "./modelCatalog";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -37,6 +41,130 @@ const TIER_CLASS: Record<string, string> = {
   balanced: "bg-accent-bg text-accent-tx",
   deep: "bg-accent-bg text-accent-tx",
 };
+
+// Mirror of the server's applyModelOverride (src/server/opencode.mjs): merge a
+// user-supplied Settings override onto an OpencodeModel for LOCAL, same-tick
+// display in the table. The server applies the same override when it serves
+// opencodeModels(), so a subsequent full refresh is consistent with this.
+function applyOverrideLocally(m: OpencodeModel, override: ModelOverride | undefined): OpencodeModel {
+  if (!override) return m;
+  let next = m;
+  if (typeof override.name === "string" && override.name.trim() !== "") {
+    next = { ...next, name: override.name.trim() };
+  }
+  if (typeof override.description === "string" && override.description.trim() !== "") {
+    next = { ...next, description: override.description.trim() };
+  }
+  if (typeof override.context === "number" && Number.isFinite(override.context) && override.context > 0) {
+    next = { ...next, limit: { ...(m.limit ?? {}), context: override.context } };
+  }
+  return next;
+}
+
+// The overlay dialog for editing a model's display name / description /
+// context size. Prefilled from the model's current effective values; Save
+// returns a ModelOverride with ONLY the fields that differ (empty object = no
+// effective override → the caller removes the model's key from the store).
+function EditModelModal({
+  model,
+  onSave,
+  onCancel,
+}: {
+  model: OpencodeModel;
+  onSave: (override: ModelOverride) => void;
+  onCancel: () => void;
+}) {
+  const info = describeModel(model.providerID, model.id);
+  const [name, setName] = useState(model.name);
+  const [description, setDescription] = useState(
+    model.description ?? info?.blurb ?? "",
+  );
+  const [context, setContext] = useState(
+    typeof model.limit?.context === "number" ? String(model.limit.context) : "",
+  );
+
+  const save = () => {
+    const override: ModelOverride = {};
+    const n = name.trim();
+    if (n !== "" && n !== model.name) override.name = n;
+    const d = description.trim();
+    if (d !== "" && d !== (model.description ?? info?.blurb ?? "")) override.description = d;
+    const c = context.trim();
+    if (c !== "") {
+      const num = Number(c);
+      if (Number.isFinite(num) && num > 0 && num !== model.limit?.context) override.context = num;
+    }
+    onSave(override);
+  };
+
+  const fieldCls =
+    "w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent";
+
+  return (
+    <Modal size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
+      <div className="space-y-4">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="text-body font-semibold text-text">Edit model</div>
+            <div className="text-meta text-text-faint">
+              {model.providerID} / {model.id}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-text-muted hover:text-text leading-none inline-flex items-center"
+            aria-label="Close"
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+
+        <label className="block">
+          <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className={fieldCls}
+            autoFocus
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Description</span>
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+            className={`${fieldCls} resize-y`}
+          />
+        </label>
+
+        <label className="block">
+          <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Context size (tokens)</span>
+          <input
+            type="number"
+            min={1}
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            placeholder="e.g. 200000"
+            className={fieldCls}
+          />
+        </label>
+
+        <div className="text-meta text-text-faint">
+          Leave a field blank to keep the provider's default for it.
+        </div>
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button onClick={onCancel} tone="ghost">Cancel</Button>
+          <Button onClick={save} tone="primary">Save</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
 // The Main + Sub column toggles. Migrated to the Checkbox primitive (BET-589)
 // from the old iOS-style toggle switch; the bound state, disabled flag, and
@@ -58,6 +186,8 @@ export function ModelsCard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  // Key ("providerID/modelID") of the model whose edit dialog is open, or null.
+  const [editing, setEditing] = useState<string | null>(null);
 
   // Load models + config + reconcile subagents on mount. Mirrors the
   // SubagentsCard.refresh() flow (BET-123): every known model is auto-
@@ -200,6 +330,43 @@ export function ModelsCard() {
     [busy, setStoreDefaultModel],
   );
 
+  // Save a model display override (name / description / context) drafted in the
+  // edit modal. Writes the full modelOverrides map to config, then updates the
+  // local table state in the SAME tick (so the row reflects the change without
+  // waiting for a refetch) and forces the shared model catalog to re-fetch so
+  // the composer's model dropdown picks it up immediately.
+  const saveOverride = useCallback(
+    async (key: string, model: OpencodeModel, override: ModelOverride) => {
+      if (busy) return;
+      setBusy(key);
+      setGlobalError(null);
+      try {
+        const cfg = await window.api.configGet();
+        const existing = cfg.modelOverrides ?? {};
+        const next = { ...existing };
+        if (Object.keys(override).length === 0) delete next[key];
+        else next[key] = override;
+        const updated = await window.api.configUpdate({ modelOverrides: next });
+        const resolved = updated.modelOverrides ?? next;
+        setModels(
+          (prev) =>
+            prev?.map((m) =>
+              m.providerID === model.providerID && m.id === model.id
+                ? applyOverrideLocally(m, resolved[`${model.providerID}/${model.id}`] ?? undefined)
+                : m,
+            ) ?? prev,
+        );
+        setEditing(null);
+        refreshModelCatalog();
+      } catch (e) {
+        setGlobalError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy],
+  );
+
   // ---- Render ----
 
   const filtered = useMemo(() => {
@@ -212,6 +379,7 @@ export function ModelsCard() {
         m.name.toLowerCase().includes(q) ||
         m.providerID.toLowerCase().includes(q) ||
         m.id.toLowerCase().includes(q) ||
+        (m.description?.toLowerCase().includes(q) ?? false) ||
         (info?.blurb.toLowerCase().includes(q) ?? false) ||
         (info?.goodFor.some((g) => g.toLowerCase().includes(q)) ?? false)
       );
@@ -290,12 +458,14 @@ export function ModelsCard() {
                   agent
                 </span>
               </th>
+              {/* Unlabeled trailing column: per-row edit affordance. */}
+              <th className="w-[48px]" aria-hidden="true" />
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-3 py-4 text-center text-meta text-text-faint">
+                <td colSpan={5} className="px-3 py-4 text-center text-meta text-text-faint">
                   No models found
                 </td>
               </tr>
@@ -310,6 +480,7 @@ export function ModelsCard() {
                 savedDefault.modelID === m.id;
               const info = describeModel(m.providerID, m.id);
               const ctxSize = formatModelContextSize(m.limit?.context);
+              const desc = m.description ?? info?.blurb;
               const isBusy = busy === key;
               return (
                 <tr key={key} className="border-b border-border/40 hover:bg-bg-soft/40">
@@ -324,9 +495,9 @@ export function ModelsCard() {
                         </span>
                       )}
                     </div>
-                    {info && (
+                    {desc && (
                       <div className="text-label text-text-faint mt-1 max-w-[440px]">
-                        {info.blurb}
+                        {desc}
                       </div>
                     )}
                   </td>
@@ -362,12 +533,36 @@ export function ModelsCard() {
                       ariaLabel={`Sub availability for ${m.name}`}
                     />
                   </td>
+                  <td className="px-3 py-2 align-middle text-center">
+                    <button
+                      type="button"
+                      onClick={() => setEditing(key)}
+                      disabled={isBusy}
+                      className="inline-flex items-center justify-center p-2 rounded-xs text-text-faint hover:text-text hover:bg-fill-hover disabled:opacity-30 disabled:cursor-not-allowed"
+                      aria-label={`Edit ${m.name}`}
+                      title="Edit name / description / context"
+                    >
+                      <Pencil size={14} aria-hidden="true" />
+                    </button>
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      {editing && models && (() => {
+        const target = models.find((m) => modelKey(m.providerID, m.id) === editing);
+        if (!target) return null;
+        return (
+          <EditModelModal
+            model={target}
+            onSave={(override) => void saveOverride(modelKey(target.providerID, target.id), target, override)}
+            onCancel={() => setEditing(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
