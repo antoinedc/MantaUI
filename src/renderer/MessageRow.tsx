@@ -142,7 +142,7 @@ export const ActiveTodos = memo(function ActiveTodos({
             onClick={onDismiss}
             title="Dismiss todo list"
             aria-label="Dismiss todo list"
-            className="text-text-faint hover:text-text transition-colors -mr-1 rounded-xs p-0.5 hover:bg-bg-soft"
+            className="text-text-faint hover:text-text transition-colors -mr-1 rounded-xs p-1 hover:bg-bg-soft"
           >
             <X size={12} aria-hidden="true" />
           </button>
