@@ -48,10 +48,28 @@ import { useVoiceRecorder, type VoiceResult } from "./voice";
 import type { VoiceMode, VoicePhase } from "./voice";
 import type {
   OpencodeModel,
+  Project,
   TmuxCreateResult,
   WorktreeInfo,
 } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
+
+// Normalise the tmux:new-session / new-window response. The (merged) server
+// returns { sessionId, windowIndex, projects }; tolerate an older server that
+// returned just the projects array so submitting a draft never silently drops
+// the first prompt.
+function normalizeCreate(
+  result: TmuxCreateResult | Project[],
+): { sessionId: string | null; windowIndex: number | undefined; projects: Project[] } {
+  if (Array.isArray(result)) {
+    return { sessionId: null, windowIndex: undefined, projects: result };
+  }
+  return {
+    sessionId: result.sessionId ?? null,
+    windowIndex: result.windowIndex,
+    projects: result.projects,
+  };
+}
 
 type Props = {
   // The id of the store draft this composer edits (see NewSessionDraft). The
@@ -93,6 +111,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   if (!draft) return null;
   const refresh = useStore((s) => s.refresh);
   const setActive = useStore((s) => s.setActive);
+  const applyProjects = useStore((s) => s.applyProjects);
   const updateDraft = useStore((s) => s.updateDraft);
   const dismissDraft = useStore((s) => s.dismissDraft);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
@@ -262,21 +281,37 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         });
       }
 
-      await refresh();
+      // Apply the server's refreshed listing directly — no separate (slow)
+      // global re-list — so the view switches to the new transcript right away.
+      const created = normalizeCreate(result);
+      applyProjects(created.projects);
 
-      // Navigate to the new session (this also exits the draft view) and send
-      // the first prompt. The server told us the exact window, so no lookup.
-      setActive(sessionName, result.windowIndex);
-      try {
-        await window.api.tmuxSelectWindow({
-          sessionName,
-          windowIndex: result.windowIndex,
-        });
-      } catch { /* non-fatal */ }
+      // Navigate to the new session (this exits the draft view) and send the
+      // first prompt. The server told us the exact window; the session id is
+      // taken from the create result, falling back to the window's stamped id
+      // (covers older servers that return only the projects array).
+      const proj = useStore
+        .getState()
+        .projects.find((p) => p.tmuxSession === sessionName);
+      const win =
+        created.windowIndex != null
+          ? proj?.windows.find((w) => w.index === created.windowIndex)
+          : proj?.windows.find((w) => w.active) ?? proj?.windows[0];
+      const sessionId = created.sessionId ?? win?.opencodeSessionId ?? null;
 
-      if (result.sessionId) {
+      setActive(sessionName, win?.index ?? created.windowIndex);
+      if (win) {
+        try {
+          await window.api.tmuxSelectWindow({
+            sessionName,
+            windowIndex: win.index,
+          });
+        } catch { /* non-fatal */ }
+      }
+
+      if (sessionId) {
         await window.api.opencodePrompt(
-          result.sessionId,
+          sessionId,
           text,
           draft.model ?? undefined,
         );
@@ -333,18 +368,32 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
       await refresh();
 
-      // The initial window of the new session is the created window.
-      setActive(sessionName, created.windowIndex);
-      try {
-        await window.api.tmuxSelectWindow({
-          sessionName,
-          windowIndex: created.windowIndex,
-        });
-      } catch { /* non-fatal */ }
+      // The initial window of the new session is the created window. The
+      // session id comes from the create result, with a window lookup fallback
+      // for older servers that return only the projects array.
+      const createdNorm = normalizeCreate(created);
+      const proj = useStore
+        .getState()
+        .projects.find((p) => p.tmuxSession === sessionName);
+      const win =
+        createdNorm.windowIndex != null
+          ? proj?.windows.find((w) => w.index === createdNorm.windowIndex)
+          : proj?.windows.find((w) => w.active) ?? proj?.windows[0];
+      const sessionId = createdNorm.sessionId ?? win?.opencodeSessionId ?? null;
 
-      if (created.sessionId && text) {
+      setActive(sessionName, win?.index ?? createdNorm.windowIndex);
+      if (win) {
+        try {
+          await window.api.tmuxSelectWindow({
+            sessionName,
+            windowIndex: win.index,
+          });
+        } catch { /* non-fatal */ }
+      }
+
+      if (sessionId && text) {
         await window.api.opencodePrompt(
-          created.sessionId,
+          sessionId,
           text,
           draft.model ?? undefined,
         );
