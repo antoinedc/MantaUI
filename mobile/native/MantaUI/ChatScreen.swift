@@ -519,10 +519,8 @@ private struct ChatScreenContent: View {
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
         // The composer floats over the full-bleed transcript, so the transcript
         // must NOT bounce at the bottom — otherwise it rubber-bands content
-        // behind the glass. `scrollBounceBehavior` is the SwiftUI-native way;
-        // `DisableScrollBounceHelper` reaches the UIKit scroll view underneath
-        // (TiledView is UIKit-backed) in case the preference isn't honored.
-        .scrollBounceBehavior(.never, axes: .vertical)
+        // behind the glass. `DisableScrollBounceHelper` turns off bounce on the
+        // underlying UIKit scroll view (TiledView is UIKit-backed).
         .background(DisableScrollBounceHelper())
     }
     /// How far above the bottom the user must scroll for the down-arrow to
