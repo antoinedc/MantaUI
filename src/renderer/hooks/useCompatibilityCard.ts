@@ -23,12 +23,17 @@ export type CompatibilityCard = {
   showCard: boolean;
 };
 
-export function useCompatibilityCard(): CompatibilityCard {
+export function useCompatibilityCard(refreshKey?: number): CompatibilityCard {
   const [clientVersion, setClientVersion] = useState<string | null>(null);
   const [serverMinClient, setServerMinClient] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
+  // `refreshKey` (optional) lets the caller force a re-fetch of the version
+  // pair — App passes a value bumped after the box reconnects following a
+  // self-upgrade, so the compatibility check re-reads the box's NEW version
+  // and the "behind" banner clears once the upgrade lands. MobileApp omits it
+  // (no upgrade flow), so default behaviour is unchanged.
   useEffect(() => {
     let cancelled = false;
     void Promise.all([
@@ -43,7 +48,7 @@ export function useCompatibilityCard(): CompatibilityCard {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   const variant = isCompatible({
     desktopVersion: clientVersion,

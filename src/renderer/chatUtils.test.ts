@@ -42,6 +42,7 @@ import {
   shouldReconnectOnAppStateChange,
   runWithConcurrency,
   chooseUpdateSkewVariant,
+  isTransientUpdateNetworkError,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
@@ -1551,6 +1552,35 @@ describe("chooseUpdateSkewVariant", () => {
     expect(chooseUpdateSkewVariant("1.x.3", "0.0.0")).toBe("ok");
     // But once one side has a real version, the compare takes over.
     expect(chooseUpdateSkewVariant("abc", "0.0.1")).toBe("outdated");
+  });
+});
+
+// ===== isTransientUpdateNetworkError =====
+describe("isTransientUpdateNetworkError", () => {
+  it("treats a browser connection-drop during a box upgrade as transient", () => {
+    // A successful self-upgrade restarts manta-server before the RPC resolves,
+    // so the fetch dies with a bare network error — NOT a real failure.
+    expect(isTransientUpdateNetworkError(new TypeError("Failed to fetch"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("Failed to fetch"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("NetworkError when attempting to fetch resource."))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("The operation was aborted"))).toBe(true);
+    expect(isTransientUpdateNetworkError(new Error("Load failed"))).toBe(true);
+  });
+
+  it("does NOT treat a real server-reported early failure as transient", () => {
+    // Genuine failures come back as structured strings from the RPC result,
+    // not as connection errors — these must still raise the update-failed banner.
+    expect(isTransientUpdateNetworkError(new Error("self-update: manifest fetch failed: https://mantaui.com/releases/"))).toBe(false);
+    expect(isTransientUpdateNetworkError(new Error("self-update: manifest is malformed"))).toBe(false);
+    expect(isTransientUpdateNetworkError(new Error("self-update: bad tarball — missing src/server/index.mjs"))).toBe(false);
+    expect(isTransientUpdateNetworkError(new Error("spawn /abs/scripts/self-update.sh EACCES"))).toBe(false);
+  });
+
+  it("is tolerant of null/undefined and arbitrary input", () => {
+    expect(isTransientUpdateNetworkError(null)).toBe(false);
+    expect(isTransientUpdateNetworkError(undefined)).toBe(false);
+    expect(isTransientUpdateNetworkError("")).toBe(false);
+    expect(isTransientUpdateNetworkError(42)).toBe(false);
   });
 });
 

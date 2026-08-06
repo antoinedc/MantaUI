@@ -18,7 +18,7 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
-import { chooseUpdateSkewVariant, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { Modal } from "./Modal";
@@ -537,6 +537,7 @@ function AppInner() {
   //   - "match"        → hide the card.
   // The `serverVersion` is the SAME field MobileSettings already reads
   // for "Server vX.Y.Z" under the URL field — single source of truth.
+  const [updateRefreshKey, setUpdateRefreshKey] = useState(0);
   const {
     clientVersion,
     serverVersion,
@@ -544,7 +545,7 @@ function AppInner() {
     variant: compatibilityVariant,
     showCard: showCompatibilityCard,
     dismiss,
-  } = useCompatibilityCard();
+  } = useCompatibilityCard(updateRefreshKey);
 
   // Sidebar status for chat-mode windows. The PTY-pane poller
   // (src/main/status.ts) can't see chat-mode state — the holder pane
@@ -914,13 +915,45 @@ function AppInner() {
     }
   }, [artifactsOpen]);
 
+  // BET-713 fix: a SUCCESSFUL box self-upgrade restarts manta-server before the
+  // `server:update-apply` RPC resolves, so the renderer's fetch dies with a bare
+  // "Failed to fetch". That restart is the success signal, not a failure — we
+  // only raise the update-failed banner for a STRUCTURED early failure
+  // (`{ok:false, error}`) the RPC reports. To reconcile the real outcome after
+  // the box comes back, we bump `updateRefreshKey` on reconnect (re-fetches the
+  // server version via `useCompatibilityCard`) and clear a stale updateError
+  // once the box is no longer "behind".
+  const [updateAttempted, setUpdateAttempted] = useState(false);
+
+  useEffect(() => {
+    if (connectionState.state !== "connected" && connectionState.state !== "idle") return;
+    if (!updateAttempted) return;
+    setUpdateAttempted(false);
+    setUpdateRefreshKey((k) => k + 1);
+  }, [connectionState.state, updateAttempted]);
+
+  // Once the box has advanced (variant is no longer "behind"), any pending
+  // update-failed banner is stale — the upgrade landed. A REAL early failure
+  // leaves the box behind, so `compatibilityVariant` stays "behind" and the
+  // banner correctly persists.
+  useEffect(() => {
+    if (updateError && (compatibilityVariant === "match" || compatibilityVariant === "unknown")) {
+      setUpdateError(null);
+    }
+  }, [updateError, compatibilityVariant]);
+
   const applyServerUpdate = async () => {
+    setUpdateAttempted(true);
     try {
       const res = await window.api.serverUpdateApply();
       if (res && res.ok === false) {
         setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
       }
     } catch (e) {
+      // A bare connection error is the box restarting itself mid-update (the
+      // success path) — swallow it; the reconnect + version re-check above
+      // resolves the real outcome. Structured failures still raise the banner.
+      if (isTransientUpdateNetworkError(e)) return;
       setUpdateError({
         message: e instanceof Error ? e.message : String(e),
         raw: String(e),
