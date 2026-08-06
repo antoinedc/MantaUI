@@ -20,7 +20,8 @@
 // opt-out semantics (configGet / configUpdate only, no store live mirroring
 // inside the card).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { formatModelContextSize } from "./chatUtils";
@@ -75,6 +76,7 @@ function EditModelModal({
   onCancel: () => void;
 }) {
   const info = describeModel(model.providerID, model.id);
+  const nameRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(model.name);
   const [description, setDescription] = useState(
     model.description ?? info?.blurb ?? "",
@@ -82,6 +84,13 @@ function EditModelModal({
   const [context, setContext] = useState(
     typeof model.limit?.context === "number" ? String(model.limit.context) : "",
   );
+
+  // The dialog lives under a full-screen container that re-renders on store
+  // updates; `autoFocus` can be visually disrupted by sibling re-renders, so
+  // grab focus explicitly once on mount rather than relying on it.
+  useEffect(() => {
+    nameRef.current?.focus();
+  }, []);
 
   const save = () => {
     const override: ModelOverride = {};
@@ -102,7 +111,15 @@ function EditModelModal({
 
   return (
     <Modal size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
-      <div className="space-y-4">
+      <div
+        className="space-y-4"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onCancel();
+          }
+        }}
+      >
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="text-body font-semibold text-text">Edit model</div>
@@ -123,11 +140,11 @@ function EditModelModal({
         <label className="block">
           <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Name</span>
           <input
+            ref={nameRef}
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             className={fieldCls}
-            autoFocus
           />
         </label>
 
@@ -555,12 +572,18 @@ export function ModelsCard() {
       {editing && models && (() => {
         const target = models.find((m) => modelKey(m.providerID, m.id) === editing);
         if (!target) return null;
-        return (
+        // Render through a portal to document.body: the modal is the only one
+        // in the app nested inside the full-screen Settings dialog, and
+        // portaling it out of that frequently re-rendering subtree guarantees
+        // a store-driven Settings re-render can never remount it (which would
+        // drop focus from the field being typed in).
+        return createPortal(
           <EditModelModal
             model={target}
             onSave={(override) => void saveOverride(modelKey(target.providerID, target.id), target, override)}
             onCancel={() => setEditing(null)}
-          />
+          />,
+          document.body,
         );
       })()}
     </div>
