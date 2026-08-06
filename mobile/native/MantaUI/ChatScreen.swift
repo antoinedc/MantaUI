@@ -94,6 +94,14 @@ private struct ChatScreenContent: View {
     /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
 
+    /// Measured height of the floating bottom bar (cards + composer), used to
+    /// size the under-composer scrim so it always covers the glass region.
+    @State private var bottomBarHeight: CGFloat = 0
+
+    /// How far the under-composer scrim reaches past the safe area, so content
+    /// scrolling into the home-indicator strip stays dimmed too.
+    private static let scrimOverhang: CGFloat = 44
+
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
 
@@ -197,12 +205,20 @@ private struct ChatScreenContent: View {
         // bottom of this stack, in the transcript area; the running-state row
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
-        // The composer sits in a bottom safe-area inset, which reserves its
-        // space by SHRINKING the scroll viewport — so the transcript stops
-        // cleanly ABOVE it (content can't bounce behind the glass) while still
-        // sliding beneath it on scroll. Its glass renders as one piece via
-        // GlassEffectContainer (same as the header buttons).
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // The composer FLOATS over the full-bleed transcript (an overlay, not
+        // an inset), so messages genuinely pass under it while scrolling. A
+        // scrim sits directly beneath it dimming that passing content. Bounce
+        // is disabled on the transcript so nothing rubber-bands behind the
+        // glass (see `transcript`).
+        // Scrim FIRST so it draws beneath the composer, sized to the composer
+        // plus an overhang past the safe area — it dims content under the
+        // composer and in the home-indicator strip below it.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
+                .frame(height: bottomBarHeight + Self.scrimOverhang)
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottom) {
             GlassEffectContainer(spacing: 0) {
                 VStack(spacing: 0) {
                     bottomCards
@@ -218,6 +234,13 @@ private struct ChatScreenContent: View {
                             showScrollToBottom = false
                         }
                     )
+                }
+                // Feeds the scrim its height. Safe to measure here: it is an
+                // overlay, so nothing it reports changes the transcript.
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    bottomBarHeight = height
                 }
             }
         }
@@ -436,11 +459,6 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Height of the bottom fade overlaying the transcript — the mirror of the
-    /// top scrim's visual weight, so the newest messages dissolve into the
-    /// canvas at the same rate the first ones dissolve into the header.
-    private static let bottomFadeHeight: CGFloat = 120
-
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -499,18 +517,13 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // Bottom fade — the standard chat-app treatment (researched): a
-        // bottom-aligned gradient overlaying the scroll view fades the newest
-        // content into the canvas as it approaches the composer, the mirror of
-        // the top scrim that fades content under the header. It lives on the
-        // scroll content itself (decoupled from the composer) rather than as a
-        // scrim positioned behind it — that's how apps do it, and it keeps the
-        // composer in its inset (no content bouncing behind it).
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: Self.bottomFadeHeight)
-                .allowsHitTesting(false)
-        }
+        // The composer floats over the full-bleed transcript, so the transcript
+        // must NOT bounce at the bottom — otherwise it rubber-bands content
+        // behind the glass. `scrollBounceBehavior` is the SwiftUI-native way;
+        // `DisableScrollBounceHelper` reaches the UIKit scroll view underneath
+        // (TiledView is UIKit-backed) in case the preference isn't honored.
+        .scrollBounceBehavior(.never, axes: .vertical)
+        .background(DisableScrollBounceHelper())
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
@@ -924,5 +937,34 @@ private struct QuestionCard: View {
                 customText: customText
             )
         )
+    }
+}
+
+/// Disables vertical bounce on the enclosing scroll view from the UIKit side,
+/// as a fallback for `.scrollBounceBehavior` (TiledView is UIKit-backed and may
+/// not honor the SwiftUI preference). Keeps the transcript from rubber-banding
+/// content behind the floating composer.
+struct DisableScrollBounceHelper: UIViewRepresentable {
+    func makeUIView(context: Context) -> some UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        // Give the scroll view a beat to materialise, then kill the bounce.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            view.owningScrollView()?.alwaysBounceVertical = false
+            view.owningScrollView()?.bounces = false
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIViewType, context: Context) {}
+}
+
+extension UIView {
+    /// The nearest `UIScrollView` in the view tree above (or including) self.
+    func owningScrollView() -> UIScrollView? {
+        if let sv = self as? UIScrollView { return sv }
+        if let vc = self as? UICollectionView { return vc }
+        return superview?.owningScrollView()
     }
 }
