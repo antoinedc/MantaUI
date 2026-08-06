@@ -53,6 +53,42 @@ import type {
   WorktreeInfo,
 } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
+import { formatDuration } from "./chatUtils";
+import { MantaLoader } from "./MantaLoader";
+
+// Optimistic "starting a new session" panel. It replaces the composer the
+// INSTANT a draft is submitted, while the session is created in the background
+// (tmux + opencode round-trip takes a couple of seconds). Reuses the app's
+// waiting image + running-verb so it reads as "your prompt was sent and it's
+// working" — mirroring the transcript's running state, so when the real
+// session lands and the panel mounts the real transcript, it continues
+// seamlessly. If creation fails, NewSessionScreen returns to the composer with
+// the error (the draft + typed prompt are preserved).
+function StartingPanel({ input }: { input: string }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="h-full flex flex-col justify-end px-8 pb-10">
+      <div className="w-full max-w-[680px] mx-auto space-y-4">
+        <div className="flex justify-end">
+          <div className="max-w-[70%] whitespace-pre-wrap rounded-xl bg-fill px-4 py-2 text-prose text-text">
+            {input || "…"}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <MantaLoader />
+          <span className="text-label text-text-muted">Musing on this…</span>
+          <span className="text-meta tabular-nums text-text-faint">
+            {formatDuration(elapsed * 1000)}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Normalise the tmux:new-session / new-window response. The (merged) server
 // returns { sessionId, windowIndex, projects }; tolerate an older server that
@@ -431,6 +467,12 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // unchecked and enabled so the picker can choose a folder first.
   const emptyWorktree = isNewProject && !isGitRepo;
   const worktreeChipEnabled = emptyWorktree || isGitRepo;
+
+  // Optimistic: the moment a draft is submitted (sending flips true
+  // synchronously), leave the composer and show the prompt + running indicator
+  // immediately, while the session is created behind it. On failure `sending`
+  // returns to false and this re-renders the composer with the error.
+  if (sending) return <StartingPanel input={draft.input} />;
 
   return (
     // data-screen is the visual harness's handle on this screen (see
