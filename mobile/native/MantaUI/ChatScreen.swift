@@ -198,31 +198,20 @@ private struct ChatScreenContent: View {
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ZStack(alignment: .bottom) {
-                // Bottom-edge fade, at the very bottom of the screen (the
-                // home-indicator strip) BEHIND the composer — the mirror of the
-                // top scrim reaching into the status bar. `.ignoresSafeArea`
-                // lets it run right down to the display edge; the composer
-                // draws over it, so this is strictly "under the composer".
-                Scrim(edge: .bottom, tokens: tokens)
-                    .frame(height: Self.bottomScrimHeight)
-                    .ignoresSafeArea(edges: .bottom)
-                    .allowsHitTesting(false)
-                VStack(spacing: 0) {
-                    bottomCards
-                    ComposerView(
-                        sessionId: store.sessionId,
-                        projectName: projectName,
-                        api: MantaAPIClient.live(),
-                        store: store,
-                        modelStore: modelStore,
-                        showScrollToBottom: showScrollToBottom,
-                        onScrollToBottom: {
-                            scrollPosition.scrollTo(edge: .bottom, animated: true)
-                            showScrollToBottom = false
-                        }
-                    )
-                }
+            VStack(spacing: 0) {
+                bottomCards
+                ComposerView(
+                    sessionId: store.sessionId,
+                    projectName: projectName,
+                    api: MantaAPIClient.live(),
+                    store: store,
+                    modelStore: modelStore,
+                    showScrollToBottom: showScrollToBottom,
+                    onScrollToBottom: {
+                        scrollPosition.scrollTo(edge: .bottom, animated: true)
+                        showScrollToBottom = false
+                    }
+                )
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -440,11 +429,11 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Height of the bottom-edge fade behind the composer — sized to the
-    /// home-indicator strip so it reads as the mirror of the top scrim reaching
-    /// into the status bar (same Scrim ramp, at the display edge rather than on
-    /// the transcript).
-    private static let bottomScrimHeight: CGFloat = 60
+    /// Height of the bottom fade over the transcript's tail — the mirror of the
+    /// top scrim's visual weight, so the last messages dissolve into the
+    /// composer at the same rate the first ones dissolve into the header (same
+    /// Scrim ramp, both edges of the chat).
+    private static let bottomScrimHeight: CGFloat = 80
 
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
@@ -504,6 +493,14 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
+        // Bottom fade — the direct mirror of the top scrim: the last visible
+        // messages dissolve as they approach the bottom edge (where the
+        // transcript meets the composer), instead of ending on a hard line.
+        .overlay(alignment: .bottom) {
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: Self.bottomScrimHeight)
+                .allowsHitTesting(false)
+        }
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
