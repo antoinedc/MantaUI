@@ -42,6 +42,14 @@ export type UpdateBarProps = {
   /** When set, the bar renders a determinate progress bar in place of the
    *  action button. */
   progress?: { step: number; total: number; label: string };
+  /** When true, the bar is in an IN-FLIGHT state: it renders an indeterminate
+   *  progress bar (or the determinate `progress` if supplied) and NO action /
+   *  dismiss buttons. Used while a box self-upgrade is running, so the restart
+   *  phase shows a graceful "Restarting…" state instead of a frozen step. */
+  busy?: boolean;
+  /** Label shown when `busy` is true and `progress` is absent (e.g. a
+   *  determinate step wouldn't make sense during the restart). */
+  busyLabel?: string;
 };
 
 /**
@@ -56,7 +64,14 @@ export function UpdateBar({
   onDismiss,
   dismissible = true,
   progress,
+  busy = false,
+  busyLabel = "Updating…",
 }: UpdateBarProps) {
+  const statusLabel = progress
+    ? `${progress.label} (${progress.step}/${progress.total})`
+    : busy
+      ? busyLabel
+      : text;
   return (
     // `pr-[…]` (not `px-3`) reserves the OS caption-button strip: this bar
     // renders ABOVE the titlebar row, so on Windows (titleBarOverlay) the
@@ -67,16 +82,19 @@ export function UpdateBar({
     // macOS/Linux (neither defines the `titlebar-area-*` env vars), so this is
     // exactly `px-3` everywhere else.
     <div className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2">
-      <span className="flex-1 truncate">
-        {progress ? (
-          <>
-            {progress.label} ({progress.step}/{progress.total})
-          </>
-        ) : (
-          text
-        )}
-      </span>
-      {progress ? (
+      <span className="flex-1 truncate">{statusLabel}</span>
+      {busy ? (
+        <div
+          className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden"
+          role="progressbar"
+          aria-label={busyLabel}
+        >
+          <div
+            className="h-full bg-accent animate-pulse"
+            style={{ width: progress ? `${(progress.step / progress.total) * 100}%` : "55%" }}
+          />
+        </div>
+      ) : progress ? (
         <div
           className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden"
           role="progressbar"
