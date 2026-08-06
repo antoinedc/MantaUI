@@ -919,34 +919,63 @@ function AppInner() {
   // `server:update-apply` RPC resolves, so the renderer's fetch dies with a bare
   // "Failed to fetch". That restart is the success signal, not a failure — we
   // only raise the update-failed banner for a STRUCTURED early failure
-  // (`{ok:false, error}`) the RPC reports. To reconcile the real outcome after
-  // the box comes back, we bump `updateRefreshKey` on reconnect (re-fetches the
-  // server version via `useCompatibilityCard`) and clear a stale updateError
-  // once the box is no longer "behind".
-  const [updateAttempted, setUpdateAttempted] = useState(false);
+  // (`{ok:false, error}`) the RPC reports.
+  //
+  // The graceful flow: while `boxUpgrading` the server-update banner renders an
+  // in-flight state (determinate steps while the box streams them, then an
+  // indeterminate "Restarting the box…" once the restart drops the connection —
+  // the frozen-step look is avoided because the server properly dies mid-step
+  // 5/6 and the bar must not sit on a stale step). On reconnect we re-fetch the
+  // version; once the box is no longer "behind" the whole banner + any stale
+  // error/progress clear.
+  const [boxUpgrading, setBoxUpgrading] = useState(false);
 
+  // Reconnect after a box self-upgrade → re-fetch the version pair so the
+  // compatibility check re-evaluates against the box's NEW version. `boxUpgrading`
+  // stays true until the refetch confirms the box advanced (bind in the reconcile
+  // effect below) so the banner never flashes back to a re-clickable state mid-restart.
   useEffect(() => {
     if (connectionState.state !== "connected" && connectionState.state !== "idle") return;
-    if (!updateAttempted) return;
-    setUpdateAttempted(false);
+    if (!boxUpgrading) return;
     setUpdateRefreshKey((k) => k + 1);
-  }, [connectionState.state, updateAttempted]);
+  }, [connectionState.state, boxUpgrading]);
 
-  // Once the box has advanced (variant is no longer "behind"), any pending
-  // update-failed banner is stale — the upgrade landed. A REAL early failure
-  // leaves the box behind, so `compatibilityVariant` stays "behind" and the
-  // banner correctly persists.
+  // Once the box has advanced (variant is no longer "behind"), end the in-flight
+  // state and clear any stale update-failed banner + frozen progress — the upgrade
+  // landed. A REAL early failure leaves the box behind, so `compatibilityVariant`
+  // stays "behind", `boxUpgrading` is cleared directly in applyServerUpdate, and
+  // the actionable banner persists for retry.
   useEffect(() => {
-    if (updateError && (compatibilityVariant === "match" || compatibilityVariant === "unknown")) {
+    if (!boxUpgrading) return;
+    if (compatibilityVariant === "match" || compatibilityVariant === "unknown") {
+      setBoxUpgrading(false);
+      useStore.getState().setServerUpdateProgress(null);
       setUpdateError(null);
     }
-  }, [updateError, compatibilityVariant]);
+  }, [boxUpgrading, compatibilityVariant]);
+
+  // Safety net: never leave the banner stuck in the in-flight state (e.g. the box
+  // reconnected but somehow never advanced). Cap it; the user can then retry.
+  useEffect(() => {
+    if (!boxUpgrading) return;
+    const t = setTimeout(() => {
+      setBoxUpgrading(false);
+      useStore.getState().setServerUpdateProgress(null);
+    }, 120_000);
+    return () => clearTimeout(t);
+  }, [boxUpgrading]);
+
+  // True while the box is restarting mid-upgrade (connection dropped). Drives the
+  // indeterminate "Restarting the box…" presentation instead of a frozen step.
+  const boxRestarting =
+    boxUpgrading && connectionState.state !== "connected" && connectionState.state !== "idle";
 
   const applyServerUpdate = async () => {
-    setUpdateAttempted(true);
+    setBoxUpgrading(true);
     try {
       const res = await window.api.serverUpdateApply();
       if (res && res.ok === false) {
+        setBoxUpgrading(false);
         setUpdateError({ message: res.error || "Server update failed", raw: res.error ?? "" });
       }
     } catch (e) {
@@ -954,6 +983,7 @@ function AppInner() {
       // success path) — swallow it; the reconnect + version re-check above
       // resolves the real outcome. Structured failures still raise the banner.
       if (isTransientUpdateNetworkError(e)) return;
+      setBoxUpgrading(false);
       setUpdateError({
         message: e instanceof Error ? e.message : String(e),
         raw: String(e),
@@ -1058,7 +1088,9 @@ function AppInner() {
             actionLabel="Update & restart"
             onAction={() => setConfirmServerUpdate(true)}
             onDismiss={() => setServerUpdatePrompt(null)}
-            progress={serverUpdateProgress ?? undefined}
+            busy={boxUpgrading}
+            progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
+            busyLabel={boxRestarting ? "Restarting the box…" : "Updating the box…"}
           />
         )}
         {!showOnboarding &&
@@ -1078,7 +1110,9 @@ function AppInner() {
               actionLabel="Upgrade box"
               onAction={() => setConfirmServerUpdate(true)}
               onDismiss={dismiss}
-              progress={serverUpdateProgress ?? undefined}
+              busy={boxUpgrading}
+              progress={boxUpgrading && !boxRestarting ? serverUpdateProgress ?? undefined : undefined}
+              busyLabel={boxRestarting ? "Restarting the box…" : "Updating the box…"}
             />
           )}
         {!isChatPaneActive && (
