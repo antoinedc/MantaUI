@@ -19,6 +19,7 @@ import {
   describeTruncation,
   formatClockTime,
   formatDuration,
+  formatTokens,
   formatHiddenTodosSummary,
   selectVisibleTodos,
   summarizeTodoProgress,
@@ -243,6 +244,7 @@ export const MessageRow = memo(function MessageRow({
   msg,
   showThinking,
   turnDurationMs,
+  outputTokens,
   truncation,
   commandInfo,
   streaming = false,
@@ -254,7 +256,10 @@ export const MessageRow = memo(function MessageRow({
   // whole turn (all consecutive assistant messages since the last user msg).
   // Intermediate messages get null so they don't show a footer at all.
   turnDurationMs: number | null;
-  // Per-message truncation classification from finishByMessageId. Drives
+  // Output tokens produced by this whole turn (the final assistant message's
+  // `info.tokens.output`). Appended to the duration footer. Transcript-derived,
+  // so it survives refresh. null/0 → omitted.
+  outputTokens: number | null;  // Per-message truncation classification from finishByMessageId. Drives
   // the "truncated" badge appended to the turn-duration footer (or as a
   // standalone footer when there's no duration, e.g. mid-turn assistant
   // messages within a multi-step turn that hit max_tokens). null = no
@@ -423,9 +428,9 @@ export const MessageRow = memo(function MessageRow({
       {/* (most common case: end-of-turn truncation). For mid-turn step */}
       {/* truncations there's no duration footer, so the badge renders on */}
       {/* its own row using the same baseline style. */}
-      {/* Sans, not mono: this is a sentence about the turn ("Brewed for 40s"), */}
-      {/* not a command or a path. In mono it read as terminal output that had */}
-      {/* leaked into the transcript. */}
+      {/* Sans, not mono: this is a sentence about the turn ("Ruminated for
+          1m44s · 12.4k output"), not a command or a path. In mono it read as
+          terminal output that had leaked into the transcript. */}
       {(turnDurationMs != null || truncation != null) && (
         <div className="text-label text-text-muted">
           {turnDurationMs != null && (
@@ -434,6 +439,12 @@ export const MessageRow = memo(function MessageRow({
                   around, held still — the arcs are what meant "in flight". */}
               <MantaMark size={12} />{" "}
               {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
+              {outputTokens != null && outputTokens > 0 && (
+                <>
+                  {" · "}
+                  {formatTokens(outputTokens)}
+                </>
+              )}
             </>
           )}
           {truncation != null && (

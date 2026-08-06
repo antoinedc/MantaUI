@@ -103,7 +103,7 @@ export const TaskContext = createContext<TaskContextValue | null>(null);
 
 // Present-tense verb pool for the running indicator. Picked once per turn
 // so the verb doesn't shuffle between renders. Past-tense pair (same index)
-// is used in the post-turn footer (`✻ Brewed for 1m 44s`).
+// is used in the post-turn footer (`✻ Ruminated for 1m44s`).
 export const SPINNER_VERBS = [
   "Cogitating",
   "Ruminating",
