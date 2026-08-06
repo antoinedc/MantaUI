@@ -109,6 +109,32 @@ describe("ChatPanel render harness", () => {
     await h.flush();
     expect(h.text()).toContain("feat/mobile-footer");
   });
+
+  it("auto-submits the new-session first prompt exactly once even under the StrictMode double-mount", async () => {
+    // The draft → real-panel handoff sets autoSubmitPrompt in the SAME commit
+    // that mounts the session's ChatPanel, so the panel's first render has
+    // autoSubmit already set. React 18 StrictMode runs effects setup → cleanup
+    // → setup on that mount; the auto-submit guard must survive the simulated
+    // unmount or the deferred submit timer is cancelled and never re-armed —
+    // the composer gets seeded but the prompt is never sent. Regression for
+    // the "prompt stuck in the composer on a fresh session" bug.
+    const { api } = installMockApi();
+    resetStore();
+    h = mount(
+      <ChatPanel
+        {...PROPS}
+        autoSubmit={{ text: "build the login page", model: undefined }}
+      />,
+      // Mount under StrictMode so the component's effects get double-invoked
+      // (setup → cleanup → setup), exercising the exact production path.
+      { strictMode: true },
+    );
+    // Let the deferred (setTimeout 0) submit timer fire.
+    await h.flush();
+    const calls = api.calls["opencodePrompt"] ?? [];
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.[1]).toBe("build the login page");
+  });
 });
 
 // ===== useSessionResources integration (via the mounted ChatPanel) =====
@@ -246,9 +272,9 @@ describe("ChatPanel session resources", () => {
   // `manta-attach-files` with the user's selected File[]; ChatPanel hands
   // them to addDroppedFiles, which renders the uploading→ready chip and
   // ships bytes via uploadBuffer (the byte path on mobile — getPathForFile
-  // returns ""). No new upload code lives in ChatPanel; this test pins the
-  // wiring so the bridge can't silently regress to a no-op.
-  it("uploads attached files when the manta-attach-files bridge fires for this session", async () => {
+  // returns ""). No new upload code lives in ChatPanel; the two tests below
+  // pin the wiring so the bridge can't silently regress to a no-op.
+  async function dispatchAttachBridge(sessionId: string): Promise<Harness> {
     ({ api } = installMockApi({
       uploadBuffer: () => Promise.resolve("/remote/img.png"),
     }));
@@ -267,11 +293,16 @@ describe("ChatPanel session resources", () => {
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent("manta-attach-files", {
-          detail: { sessionId: "ses_test", files: [fakeFile] },
+          detail: { sessionId, files: [fakeFile] },
         }),
       );
     });
     await h.flush();
+    return h;
+  }
+
+  it("uploads attached files when the manta-attach-files bridge fires for this session", async () => {
+    const panel = await dispatchAttachBridge("ses_test");
 
     // The bridge routes through addDroppedFiles → uploadBuffer with the
     // correct filename and project. Bytes ride the byte path because
@@ -283,36 +314,18 @@ describe("ChatPanel session resources", () => {
       filename: "img.png",
     });
     // Chip landed in "ready" state — title attr carries the remotePath.
-    const chip = h.container.querySelector('[title="/remote/img.png"]');
+    const chip = panel.container.querySelector('[title="/remote/img.png"]');
     expect(chip).toBeTruthy();
   });
 
   it("ignores a manta-attach-files bridge for another session id", async () => {
-    ({ api } = installMockApi({
-      uploadBuffer: () => Promise.resolve("/remote/img.png"),
-    }));
-    resetStore();
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    const fakeFile = new File(["x"], "img.png", { type: "image/png" });
-    (fakeFile as File & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer =
-      () => Promise.resolve(new ArrayBuffer(1));
-
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent("manta-attach-files", {
-          detail: { sessionId: "ses_OTHER", files: [fakeFile] },
-        }),
-      );
-    });
-    await h.flush();
+    const panel = await dispatchAttachBridge("ses_OTHER");
 
     // A bridge for a different session must NOT upload to THIS panel's
     // session. Without the gate, an accidental global dispatch would
     // attach a file to the wrong tmux window's session.
     expect(api.calls.uploadBuffer ?? []).toEqual([]);
-    expect(h.container.querySelector('[title="/remote/img.png"]')).toBeNull();
+    expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeNull();
   });
 });
 
@@ -479,6 +492,28 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     h = null;
   });
 
+  // Shared scaffold for the Escape-abort tests: flip the turn to running and
+  // press Escape, then assert the abort fired. The reject-bookkeeping that
+  // follows the abort is left to each test, since it depends on whether a
+  // question was pending.
+  async function abortViaEscape(panel: Harness) {
+    await emitStreamAndFlush(bus, panel, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+
+    const textarea = panel.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await panel.flush();
+
+    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
+  }
+
   it("rejects all pending questions and clears the card on Escape-abort", async () => {
     // Question cards render at the tail of the transcript (see Transcript.tsx)
     // which only mounts its message-list branch for a non-empty transcript —
@@ -527,22 +562,9 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     // The question card is up.
     expect(h.text()).toContain("Which approach?");
 
-    // Turn is running.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
+    // Turn is running; pressing Escape aborts it.
+    await abortViaEscape(h);
 
-    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
-    await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-      );
-    });
-    await h.flush();
-
-    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
     // Best-effort reject fired for the orphaned question.
     expect(api.calls.opencodeQuestionReject).toEqual([["que_1", "ses_test"]]);
     // Card is gone locally — no re-latch possible from stale local state.
@@ -555,21 +577,8 @@ describe("ChatPanel abort rejects orphaned questions", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
+    await abortViaEscape(h);
 
-    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
-    await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-      );
-    });
-    await h.flush();
-
-    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
     expect(api.calls.opencodeQuestionReject ?? []).toEqual([]);
   });
 });
@@ -592,6 +601,26 @@ describe("ChatPanel screenshot accept", () => {
     (window as unknown as { __mantaPreload: unknown }).__mantaPreload = null;
   });
 
+  // Shared scaffold for the screenshot tests: mount a fresh panel (the caller
+  // has already installed the preload + window.api mock + store seed) and click
+  // the "Add to chat" toast button, which routes the buffered bytes through
+  // window.api.uploadBuffer. Returns the mounted harness for assertions; the
+  // describe-scoped `h` is also set so the shared afterEach unmounts it.
+  async function mountScreenshotAndClickAddToChat(): Promise<Harness> {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add to chat",
+    ) as HTMLButtonElement;
+    expect(addBtn).toBeTruthy();
+    await act(async () => {
+      addBtn.click();
+    });
+    await h.flush();
+    return h;
+  }
+
   it("clipboard source: reads bytes via preload.clipboardReadImage, uploads via window.api.uploadBuffer", async () => {
     const fakeBuf = new ArrayBuffer(4);
     const clipboardReadImage = () => Promise.resolve(fakeBuf);
@@ -611,17 +640,7 @@ describe("ChatPanel screenshot accept", () => {
       screenshotToast: { source: "clipboard" },
     });
 
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add to chat",
-    ) as HTMLButtonElement;
-    expect(addBtn).toBeTruthy();
-    await act(async () => {
-      addBtn.click();
-    });
-    await h.flush();
+    const panel = await mountScreenshotAndClickAddToChat();
 
     expect(uploadedBuffer).toBe(fakeBuf);
     expect(api.calls.uploadBuffer?.[0]?.[0]).toMatchObject({
@@ -629,7 +648,7 @@ describe("ChatPanel screenshot accept", () => {
       buffer: fakeBuf,
     });
     // Chip landed in the "ready" state — title attr carries the remotePath.
-    const chip = h.container.querySelector('[title="/remote/screenshot-123.png"]');
+    const chip = panel.container.querySelector('[title="/remote/screenshot-123.png"]');
     expect(chip).toBeTruthy();
   });
 
@@ -655,20 +674,11 @@ describe("ChatPanel screenshot accept", () => {
       screenshotToast: { source: "file", path: "/Users/x/Desktop/shot.png" },
     });
 
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add to chat",
-    ) as HTMLButtonElement;
-    await act(async () => {
-      addBtn.click();
-    });
-    await h.flush();
+    const panel = await mountScreenshotAndClickAddToChat();
 
     expect(requestedPath).toBe("/Users/x/Desktop/shot.png");
     expect(uploadedBuffer).toBe(fakeBuf);
-    const chip = h.container.querySelector('[title="/remote/shot.png"]');
+    const chip = panel.container.querySelector('[title="/remote/shot.png"]');
     expect(chip).toBeTruthy();
   });
 
@@ -679,19 +689,10 @@ describe("ChatPanel screenshot accept", () => {
       screenshotToast: { source: "clipboard" },
     });
 
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add to chat",
-    ) as HTMLButtonElement;
-    await act(async () => {
-      addBtn.click();
-    });
-    await h.flush();
+    const panel = await mountScreenshotAndClickAddToChat();
 
     // Errored chip renders with title = errorMsg (see AttachmentStrip).
-    const chip = h.container.querySelector('[title="Screenshot capture requires the desktop app"]');
+    const chip = panel.container.querySelector('[title="Screenshot capture requires the desktop app"]');
     expect(chip).toBeTruthy();
   });
 });
