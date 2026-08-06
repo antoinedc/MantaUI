@@ -78,8 +78,6 @@ import {
   resolveFastToggle,
   filterModelGroups,
   moveMenuHighlight,
-  applyModelOverride,
-  mergeModelOverrides,
   MAX_PREVIEW_BYTES,
   resolvePreviewType,
   isWithinPreviewSize,
@@ -328,60 +326,6 @@ describe("ctxStageColor", () => {
   it("returns danger from 90% and above", () => {
     expect(ctxStageColor(90)).toBe(cssVar("--danger"));
     expect(ctxStageColor(100)).toBe(cssVar("--danger"));
-  });
-});
-
-// ===== model overrides (applyModelOverride / mergeModelOverrides) =====
-
-describe("applyModelOverride", () => {
-  const base: OpencodeModel = {
-    id: "claude-sonnet-4-6",
-    providerID: "anthropic",
-    name: "Claude Sonnet 4.6",
-    limit: { context: 200_000, output: 64_000 },
-  };
-
-  it("trims + merges name, description and context, preserving untouched fields", () => {
-    const out = applyModelOverride(base, {
-      name: "  My Sonnet  ",
-      description: "  Custom  ",
-      context: 1_000_000,
-    });
-    expect(out).not.toBe(base);
-    expect(out.name).toBe("My Sonnet");
-    expect(out.description).toBe("Custom");
-    expect(out.limit?.context).toBe(1_000_000);
-    expect(out.limit?.output).toBe(64_000);
-    // input untouched
-    expect(base.name).toBe("Claude Sonnet 4.6");
-    expect(base.limit?.context).toBe(200_000);
-  });
-
-  it("ignores empty/invalid fields and returns input unchanged for no override", () => {
-    const out = applyModelOverride(base, { name: "   ", description: "", context: 0 });
-    expect(out).toBe(base);
-    expect(applyModelOverride(base, undefined)).toBe(base);
-  });
-});
-
-describe("mergeModelOverrides", () => {
-  const models: OpencodeModel[] = [
-    { id: "a", providerID: "p", name: "A" },
-    { id: "b", providerID: "p", name: "B" },
-  ];
-
-  it("returns the same array reference when nothing applies", () => {
-    expect(mergeModelOverrides(models, undefined)).toBe(models);
-    expect(mergeModelOverrides(models, {})).toBe(models);
-    expect(mergeModelOverrides(models, { "q/x": { name: "Nope" } })).toBe(models);
-  });
-
-  it("applies matching overrides by providerID/id and leaves others untouched", () => {
-    const out = mergeModelOverrides(models, { "p/b": { name: "B2", context: 99 } });
-    expect(out).not.toBe(models);
-    expect(out?.[0]).toBe(models[0]); // untouched model keeps its identity
-    expect(out?.[1].name).toBe("B2");
-    expect(out?.[1].limit?.context).toBe(99);
   });
 });
 
