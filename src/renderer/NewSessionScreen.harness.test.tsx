@@ -22,13 +22,33 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
 import { NewSessionScreen } from "./NewSessionScreen";
+import type { NewSessionDraft } from "./store";
 
 // The two methods that live ONLY on httpApi and are therefore absent from
 // the preload bridge a fresh desktop boot starts on.
 const HTTP_ONLY = ["opencodeModels", "opencodeDefaultModel"];
 
-function noop() {
-  /* the tests assert on mount behaviour, not the callbacks */
+// A minimal new-project draft the composer reads from the store. The screen is
+// draft-backed (NewSessionDraft holds the persisted composer workspace), so
+// every mount under test provisions one and passes its id.
+function draft(overrides: Partial<NewSessionDraft> = {}): NewSessionDraft {
+  return {
+    id: "draft-1",
+    mode: "new-project",
+    cwd: "~",
+    wantWorktree: false,
+    worktreeBranch: "worktree",
+    model: null,
+    modelTouched: false,
+    input: "",
+    ...overrides,
+  };
+}
+
+function mountDraft(overrides: Partial<NewSessionDraft> = {}): Harness {
+  const d = draft(overrides);
+  resetStore({ activeDraftId: d.id, drafts: [d] });
+  return mount(<NewSessionScreen draftId={d.id} />);
 }
 
 describe("NewSessionScreen mount against an unpaired window.api", () => {
@@ -49,9 +69,7 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     expect(api.opencodeModels).toBeUndefined();
     expect(api.opencodeDefaultModel).toBeUndefined();
 
-    h = mount(
-      <NewSessionScreen projectName={null} onDone={noop} onCancel={noop} />,
-    );
+    h = mountDraft();
     await h.flush();
 
     // The screen is still mounted — the pre-fix behaviour was an exception
@@ -68,14 +86,11 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     installMockApi();
     resetStore({ projects: [], worktreePerSession: true });
 
-    h = mount(
-      <NewSessionScreen projectName={null} onDone={noop} onCancel={noop} />,
-    );
+    h = mountDraft();
     await h.flush();
 
     // The worktree toggle is now the Checkbox primitive (BET-589); its input
-    // carries the same accessible name it always did, so select it that way
-    // (the previous selector matched on the checkbox type attribute).
+    // carries the same accessible name it always did, so select it that way.
     const checkbox = h.container.querySelector(
       'input[aria-label="Create in a fresh git worktree"]',
     ) as HTMLInputElement;
@@ -87,9 +102,7 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
   it("still fetches models when window.api IS the paired httpApi", async () => {
     const { api } = installMockApi();
 
-    h = mount(
-      <NewSessionScreen projectName={null} onDone={noop} onCancel={noop} />,
-    );
+    h = mountDraft();
     await h.flush();
 
     // The guard must not have silently disabled the happy path.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveProjectName } from "./NewSessionScreen";
+import { deriveProjectName, promptWindowName } from "./NewSessionScreen";
 
 describe("deriveProjectName", () => {
   it("extracts the basename from a path", () => {
@@ -24,5 +24,23 @@ describe("deriveProjectName", () => {
 
   it("handles single-segment relative", () => {
     expect(deriveProjectName("foo")).toBe("foo");
+  });
+});
+
+describe("promptWindowName", () => {
+  it("derives a readable name from the first word of the prompt", () => {
+    expect(promptWindowName("Deploy the billing service")).toBe("deploy");
+    expect(promptWindowName("fix-login bug")).toBe("fix-login");
+  });
+
+  it("lowercases + strips non [a-z0-9_-] characters", () => {
+    expect(promptWindowName("   ExplODE  ")).toBe("explode");
+    expect(promptWindowName("'quote'")).toBe("quote");
+  });
+
+  it("falls back to 'session' for an empty / non-alphanumeric first word", () => {
+    expect(promptWindowName("")).toBe("session");
+    expect(promptWindowName("   ")).toBe("session");
+    expect(promptWindowName("!!!!")).toBe("session");
   });
 });

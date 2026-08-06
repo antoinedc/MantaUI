@@ -441,7 +441,7 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, o
   // honored — without this the write would silently land on the
   // production default.
   await addOwnedSession(name, { path: ownedSessionsCachePath });
-  return listProjects();
+  return { sessionId: sid ?? null, windowIndex: idx, projects: await listProjects() };
 }
 export async function newWindow({ sessionName, windowName, cwd, chatMode, worktreePath, oc, permission }) {
   // THE tmux-side chokepoint. Resolves before we opencode-create or tmux-call,
@@ -468,7 +468,7 @@ export async function newWindow({ sessionName, windowName, cwd, chatMode, worktr
   // restampSessionId pattern — separate option name so the two stamps
   // never collide.
   if (worktreePath) await stampWorktreePath(sessionName, idx, worktreePath);
-  return listProjects();
+  return { sessionId: sid ?? null, windowIndex: idx, projects: await listProjects() };
 }
 
 export async function renameSession({ oldName, newName }) {

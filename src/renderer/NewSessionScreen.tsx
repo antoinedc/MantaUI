@@ -1,16 +1,25 @@
-// NewSessionScreen.tsx — the pre-session composer (BET-417 §A).
+// NewSessionScreen.tsx — the pre-session composer (BET-417 §A), now
+// draft-backed.
 //
 // Before a session exists, the composer IS the setup form. This is also the
 // app's zero state (BET-416 §F). Two chips only: folder, and a split
 // branch/worktree chip. No host chip — the box connection is already
 // established.
 //
+// The composer edits a STORE DRAFT (NewSessionDraft) rather than owning its
+// own state, so the typed prompt + folder/model/worktree choices survive
+// navigating away and back. A draft is NOT a tmux window or opencode session
+// yet — submit() is what creates them.
+//
 // On submit:
-//   - new-project mode (projectName === null): create a tmux session + first
-//     chat window, derive the project name from the folder basename, then
-//     send the typed prompt as the first message.
-//   - new-session mode (projectName set): create a tmux window in the
-//     existing project, then send the prompt.
+//   - new-project mode (mode === "new-project"): create a tmux session + first
+//     chat window, derive the project name from the folder basename, then send
+//     the typed prompt as the first message.
+//   - new-session mode (mode.projectName set): create a tmux window in that
+//     project, then send the prompt.
+//   The server returns the created window's { sessionId, windowIndex, projects }
+//   so we navigate + send the prompt to the RIGHT session — never a name
+//   lookup (which mixed new sessions up with existing ones on name collision).
 //
 // The folder chip opens FolderPickerModal (§B). Worktree fan-out is asked
 // inside the picker, not as a post-Create interstitial.
@@ -37,18 +46,21 @@ import { FolderPickerModal } from "./FolderPickerModal";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
 import type { VoiceMode, VoicePhase } from "./voice";
-import type { OpencodeModel, WorktreeInfo } from "../shared/types";
+import type {
+  OpencodeModel,
+  TmuxCreateResult,
+  WorktreeInfo,
+} from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 
 type Props = {
-  // null = new-project mode (creates a tmux session). A string = new-session
-  // mode (creates a tmux window in that project).
-  projectName: string | null;
-  // Called after the session is created + the first prompt is sent. The
-  // parent closes the screen and navigates to the new session.
-  onDone: () => void;
-  // Called when the user cancels (Esc / clicks away). The parent closes.
-  onCancel: () => void;
+  // The id of the store draft this composer edits (see NewSessionDraft). The
+  // draft holds the persisted composer workspace; the active view renders this
+  // screen while the draft is active.
+  draftId: string;
+  // Fired after a successful submit. The store has already navigated to the
+  // new session; this lets the caller run any post-commit bookkeeping.
+  onDone?: () => void;
 };
 
 // Derive a tmux session name from a folder path: the basename, fallback to
@@ -61,42 +73,42 @@ export function deriveProjectName(cwd: string): string {
   return parts[parts.length - 1] || "project";
 }
 
-export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
+// A readable, largely-unique window name derived from the first word of the
+// typed prompt (e.g. "Deploy the billing service" → "deploy"). This avoids the
+// old constant "worktree"/"session" that produced a sidebar full of identical
+// rows. Falls back to "session" on a non-alphanumeric or empty first word.
+export function promptWindowName(input: string): string {
+  const clean = (input.trim().split(/\s+/)[0] ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "");
+  return clean ? clean.slice(0, 24) : "session";
+}
+
+export function NewSessionScreen({ draftId, onDone }: Props) {
+  // The draft this composer edits. The App only ever renders this screen for a
+  // draft that exists (activeDraftId always points at a live draft), so a
+  // missing draft is unreachable in practice; the guard keeps TypeScript's
+  // narrowing happy and safely no-ops on the impossible case.
+  const draft = useStore((s) => s.drafts.find((d) => d.id === draftId));
+  if (!draft) return null;
   const refresh = useStore((s) => s.refresh);
   const setActive = useStore((s) => s.setActive);
-  const configDefaultModel = useStore((s) => s.defaultModel);
+  const updateDraft = useStore((s) => s.updateDraft);
+  const dismissDraft = useStore((s) => s.dismissDraft);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   const existingProjects = useStore((s) => s.projects);
-  const worktreePerSession = useStore((s) => s.worktreePerSession);
 
+  const projectName =
+    draft.mode === "new-project" ? null : draft.mode.projectName;
   const isNewProject = projectName === null;
 
-  // Folder state — the selected working directory.
-  const [cwd, setCwd] = useState<string>(isNewProject ? "~" : "");
+  // ---- local (non-persisted) UI state ----
   const [pickerOpen, setPickerOpen] = useState(false);
-
-  // Branch / worktree chip state. Starts OFF in new-project mode: the
-  // composer opens on "~" (never a git repo), so pre-arming the worktree
-  // intent from config would ship a "checked but can't be honored" chip
-  // (BET-445). It stays config-driven for new-session mode, where the cwd is
-  // a real project folder.
-  const [wantWorktree, setWantWorktree] = useState(
-    isNewProject ? false : worktreePerSession,
-  );
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
-  // BET-417 §A: "Ticking worktree makes the branch field editable." When
-  // wantWorktree is true, this is the editable branch name passed to
-  // gitAddWorktree (which deriveWorktree turns into the new branch). Defaults
-  // to a derived name; the user can type over it.
-  const [worktreeBranch, setWorktreeBranch] = useState("worktree");
   // BET-417 §B: fan-out from the folder picker. When set, the picker returned
-  // multiple worktrees and the user chose "One per worktree" — we create one
-  // session with one window per worktree (worktreeName(w) as window name).
+  // multiple worktrees and the user chose "One per worktree".
   const [fanOutWorktrees, setFanOutWorktrees] = useState<WorktreeInfo[] | null>(null);
-
-  // Composer state.
-  const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -107,14 +119,6 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     providerID: string;
     modelID: string;
   } | null>(null);
-  const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    configDefaultModel ?? null,
-  );
-  // Whether the user has explicitly picked a model this session. Until they
-  // do, the pill reads "Auto" (the server default is in effect) even though
-  // `modelOverride` is seeded from the configured default — presentational
-  // only, does not change what model is applied to the new session.
-  const [modelTouched, setModelTouched] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,9 +126,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     // live ONLY on httpApi. On a fresh/unpaired desktop boot `window.api` is
     // still the raw preload OS-bridge subset, where they are undefined —
     // calling them throws synchronously from the commit phase, which `.catch`
-    // cannot see and which unmounts the whole tree. App gates this screen on
-    // `loaded` so it should not mount that early; this keeps a future caller
-    // from re-opening the same hole.
+    // cannot see and which unmounts the whole tree.
     if (window.api.opencodeModels) {
       window.api
         .opencodeModels()
@@ -141,32 +143,32 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   }, []);
 
   const activeModel = useMemo(
-    () => resolveActiveModel(models, modelOverride, serverDefault),
-    [models, modelOverride, serverDefault],
+    () => resolveActiveModel(models, draft.model, serverDefault),
+    [models, draft.model, serverDefault],
   );
-  void activeModel; // used by ModelPicker via models + modelOverride
+  void activeModel; // used by ModelPicker via models + draft.model
 
   // ---- resolve cwd for new-session mode ----
   // In new-session mode, the cwd defaults to the project's cwd (inherited
   // server-side). The user can still browse to a subfolder.
   useEffect(() => {
-    if (!isNewProject && projectName && !cwd) {
+    if (!isNewProject && projectName && !draft.cwd) {
       const proj = existingProjects.find((p) => p.tmuxSession === projectName);
       const dir = proj?.defaultCwd || proj?.windows[0]?.paneCurrentPath || "";
-      if (dir) setCwd(dir);
+      if (dir) updateDraft(draftId, { cwd: dir });
     }
-  }, [isNewProject, projectName, existingProjects, cwd]);
+  }, [isNewProject, projectName, existingProjects, draft.cwd, draftId, updateDraft]);
 
   // ---- probe git state for the current cwd ----
   useEffect(() => {
-    if (!cwd || cwd === "~") {
+    if (!draft.cwd || draft.cwd === "~") {
       setIsGitRepo(false);
       setWorktrees(null);
       return;
     }
     let cancelled = false;
     window.api
-      .gitListWorktrees(cwd)
+      .gitListWorktrees(draft.cwd)
       .then((wts) => {
         if (cancelled) return;
         setWorktrees(wts);
@@ -178,7 +180,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
         setWorktrees(null);
       });
     return () => { cancelled = true; };
-  }, [cwd]);
+  }, [draft.cwd]);
 
   const branchName = useMemo(() => {
     if (!worktrees || worktrees.length === 0) return null;
@@ -190,10 +192,9 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     onResult: (r: VoiceResult) => {
       const text = r.mode === "dictate" ? r.text : "";
       if (!text) return;
-      setInput((prev) => {
-        const sep = prev && !prev.endsWith(" ") ? " " : "";
-        return prev + sep + text;
-      });
+      const prev = useStore.getState().drafts.find((d) => d.id === draftId)?.input ?? "";
+      const sep = prev && !prev.endsWith(" ") ? " " : "";
+      updateDraft(draftId, { input: prev + sep + text });
       requestAnimationFrame(() => {
         const el = inputRef.current;
         if (el) {
@@ -215,18 +216,18 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   // ---- submit: create session + send first prompt ----
   const submit = async () => {
     if (sending) return;
-    const text = input.trim();
+    const text = draft.input.trim();
     if (!text) return;
     setSending(true);
     setError(null);
 
     try {
       let sessionName: string;
-      let windowName: string;
+      let result: TmuxCreateResult;
       let worktreePath: string | undefined;
 
       if (isNewProject) {
-        sessionName = deriveProjectName(cwd);
+        sessionName = deriveProjectName(draft.cwd);
         // Avoid name collision with existing sessions.
         const taken = new Set(existingProjects.map((p) => p.tmuxSession));
         if (taken.has(sessionName)) {
@@ -234,30 +235,28 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           while (taken.has(`${sessionName}-${i}`)) i++;
           sessionName = `${sessionName}-${i}`;
         }
-        windowName = "default";
 
-        if (wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd, name: worktreeBranch });
+        if (draft.wantWorktree && isGitRepo) {
+          const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
           worktreePath = wt.path;
         }
 
-        await window.api.tmuxNewSession({
+        result = await window.api.tmuxNewSession({
           name: sessionName,
-          cwd: worktreePath ?? cwd,
-          windowName,
+          cwd: worktreePath ?? draft.cwd,
+          windowName: "default",
           chatMode: true,
           ...(worktreePath ? {} : { createDir: true }),
         });
       } else {
         sessionName = projectName!;
-        windowName = worktreeBranch || "session";
-        if (wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd, name: worktreeBranch });
+        if (draft.wantWorktree && isGitRepo) {
+          const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
           worktreePath = wt.path;
         }
-        await window.api.tmuxNewWindow({
+        result = await window.api.tmuxNewWindow({
           sessionName,
-          windowName,
+          windowName: promptWindowName(text),
           ...(worktreePath ? { cwd: worktreePath, worktreePath } : {}),
           chatMode: true,
         });
@@ -265,29 +264,27 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
       await refresh();
 
-      // Find the new window's opencode session id.
-      const proj = useStore.getState().projects.find(
-        (p) => p.tmuxSession === sessionName,
-      );
-      const win = proj?.windows.find((w) => w.name === windowName);
-      const sessionId = win?.opencodeSessionId;
+      // Navigate to the new session (this also exits the draft view) and send
+      // the first prompt. The server told us the exact window, so no lookup.
+      setActive(sessionName, result.windowIndex);
+      try {
+        await window.api.tmuxSelectWindow({
+          sessionName,
+          windowIndex: result.windowIndex,
+        });
+      } catch { /* non-fatal */ }
 
-      if (sessionId) {
-        setActive(sessionName, win!.index);
-        try {
-          await window.api.tmuxSelectWindow({
-            sessionName,
-            windowIndex: win!.index,
-          });
-        } catch { /* non-fatal */ }
-        // Send the first prompt.
+      if (result.sessionId) {
         await window.api.opencodePrompt(
-          sessionId,
+          result.sessionId,
           text,
-          modelOverride ?? undefined,
+          draft.model ?? undefined,
         );
       }
-      onDone();
+
+      // Abandon the draft — it is now a real session.
+      dismissDraft(draftId);
+      onDone?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSending(false);
@@ -295,13 +292,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
   };
 
   // ---- fan-out submit: one session, one window per worktree ----
-  // Relocates the old Sidebar createProject("all") logic that was deleted
-  // with the inline forms (BET-417 §B4). Each window is named worktreeName(w)
-  // (path basename, not branch) — so "leasebot" not "main" shows in the
-  // sidebar. The first prompt goes to the first window.
+  // Each window is named worktreeName(w) (path basename, not branch) — so
+  // "leasebot" not "main" shows in the sidebar. The first prompt goes to the
+  // first window.
   const submitFanOut = async (baseCwd: string, wts: WorktreeInfo[]) => {
     if (sending) return;
-    const text = input.trim();
+    const text = draft.input.trim();
     setSending(true);
     setError(null);
     try {
@@ -315,7 +311,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
       })();
 
       const [first, ...rest] = wts;
-      await window.api.tmuxNewSession({
+      const created = await window.api.tmuxNewSession({
         name: sessionName,
         cwd: first.path,
         windowName: worktreeName(first),
@@ -336,27 +332,26 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
       }
 
       await refresh();
-      const proj = useStore.getState().projects.find(
-        (p) => p.tmuxSession === sessionName,
-      );
-      const win = proj?.windows.find((w) => w.name === worktreeName(first));
-      if (win?.opencodeSessionId) {
-        setActive(sessionName, win.index);
-        try {
-          await window.api.tmuxSelectWindow({
-            sessionName,
-            windowIndex: win.index,
-          });
-        } catch { /* non-fatal */ }
-        if (text) {
-          await window.api.opencodePrompt(
-            win.opencodeSessionId,
-            text,
-            modelOverride ?? undefined,
-          );
-        }
+
+      // The initial window of the new session is the created window.
+      setActive(sessionName, created.windowIndex);
+      try {
+        await window.api.tmuxSelectWindow({
+          sessionName,
+          windowIndex: created.windowIndex,
+        });
+      } catch { /* non-fatal */ }
+
+      if (created.sessionId && text) {
+        await window.api.opencodePrompt(
+          created.sessionId,
+          text,
+          draft.model ?? undefined,
+        );
       }
-      onDone();
+
+      dismissDraft(draftId);
+      onDone?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSending(false);
@@ -371,33 +366,29 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
     }
     if (e.key === "Escape") {
       e.preventDefault();
-      onCancel();
+      dismissDraft(draftId);
       return;
     }
   };
 
   const folderLabel = useMemo(() => {
-    if (!cwd || cwd === "~") return "Home";
-    const parts = cwd.split("/").filter(Boolean);
-    return parts[parts.length - 1] || cwd;
-  }, [cwd]);
+    if (!draft.cwd || draft.cwd === "~") return "Home";
+    const parts = draft.cwd.split("/").filter(Boolean);
+    return parts[parts.length - 1] || draft.cwd;
+  }, [draft.cwd]);
 
   // Empty state (BET-445): new-project mode opens on "~", which is never a
   // git repo, so the worktree intent can't be honored yet. Render the chip
-  // unchecked and enabled so the picker can choose a folder first — matching
-  // the mockup. Outside this state the chip is gated on isGitRepo.
+  // unchecked and enabled so the picker can choose a folder first.
   const emptyWorktree = isNewProject && !isGitRepo;
   const worktreeChipEnabled = emptyWorktree || isGitRepo;
 
   return (
     // data-screen is the visual harness's handle on this screen (see
     // scripts/visual/screens.mjs). One stable attribute per screen root, so
-    // the harness never depends on a class name or DOM position — both of
-    // which a redesign is expected to change.
+    // the harness never depends on a class name or DOM position.
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
       <div className="w-full max-w-[720px] rounded-xl border border-border-subtle bg-bg-elev px-6 py-10 flex flex-col gap-2">
-        {/* Heading — the only element centred on the screen; the chip row and
-            the controls row below are both left-aligned to the composer. */}
         <div className="text-center space-y-1 mb-4">
           <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
           <p className="text-body text-text-faint">
@@ -405,33 +396,28 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           </p>
         </div>
 
-        {/* Chip row — folder, then branch + worktree as ONE segmented control
-            (shared border, no gap). Left-aligned: it reads as a property bar
-            belonging to the composer below, not a second heading. */}
+        {/* Chip row — folder, then branch + worktree as ONE segmented control. */}
         <div className="flex items-center gap-2 self-start">
-          <Chip onClick={() => setPickerOpen(true)} title={cwd || "Select folder"}>
+          <Chip
+            onClick={() => setPickerOpen(true)}
+            title={draft.cwd || "Select folder"}
+          >
             <FolderIcon size={13} className="shrink-0 text-text-muted" aria-hidden="true" />
             <span className="truncate max-w-[200px]">{folderLabel}</span>
             <ChevronDown size={13} className="shrink-0 text-text-faint" aria-hidden="true" />
           </Chip>
 
-          {/* Branch / worktree. The branch is a Chip (display) — or a plain,
-              un-nested input while worktree is being named (BET-417 §A). The
-              worktree toggle stays the Checkbox primitive. Neither the input
-              nor the checkbox is wrapped in a <button>: that keeps valid HTML
-              and avoids loading SplitChip's opt-in popup semantics onto a
-              non-popup control. */}
-          {wantWorktree && isGitRepo ? (
+          {draft.wantWorktree && isGitRepo ? (
             <input
-              value={worktreeBranch}
-              onChange={(e) => setWorktreeBranch(e.target.value)}
+              value={draft.worktreeBranch}
+              onChange={(e) => updateDraft(draftId, { worktreeBranch: e.target.value })}
               spellCheck={false}
               className="h-8 w-[132px] rounded-md border border-accent bg-bg-soft px-3 text-meta font-mono text-text outline-none focus:border-accent"
               placeholder="branch-name"
               aria-label="Worktree branch name"
             />
           ) : (
-            <Chip on={wantWorktree} onClick={() => {}} title="Current git branch">
+            <Chip on={draft.wantWorktree} onClick={() => {}} title="Current git branch">
               <GitBranch size={13} className="shrink-0" aria-hidden="true" />
               {branchName ? (
                 <span className="truncate max-w-[120px]">{branchName}</span>
@@ -442,32 +428,26 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           )}
 
           <Checkbox
-            checked={wantWorktree}
+            checked={draft.wantWorktree}
             disabled={!worktreeChipEnabled}
-            onChange={(v) => setWantWorktree(v)}
+            onChange={(v) => updateDraft(draftId, { wantWorktree: v })}
             label="worktree"
             ariaLabel="Create in a fresh git worktree"
           />
         </div>
 
-        {/* Composer — a single tall input card. The submit affordance sits
-            INSIDE the input on the trailing edge, top-aligned, so the input
-            can grow downward without moving it. */}
+        {/* Composer — a single tall input card. */}
         <div
           className={
             "manta-composer-input-row rounded-lg border bg-bg-soft flex items-start gap-3 px-4 py-3 " +
-            // Resting tone matches the session composer (border-subtle, the
-            // tool-card token) — the two must not diverge.
-            (voiceRecording
-              ? "manta-recording"
-              : "border-border-subtle")
+            (voiceRecording ? "manta-recording" : "border-border-subtle")
           }
         >
           <textarea
             ref={inputRef}
             autoFocus
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
+            value={draft.input}
+            onChange={(e) => updateDraft(draftId, { input: e.target.value })}
             onKeyDown={onKeyDown}
             placeholder="Describe a task or ask a question"
             rows={3}
@@ -477,12 +457,12 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
           <button
             onClick={() => void submit()}
-            disabled={sending || !input.trim()}
+            disabled={sending || !draft.input.trim()}
             aria-label="Start a session"
             title={
               sending
                 ? "Starting…"
-                : input.trim()
+                : draft.input.trim()
                   ? "Start a session"
                   : "Describe a task to start"
             }
@@ -496,25 +476,25 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
           </button>
         </div>
 
-        {/* Controls row — model ▸ effort, then attach + dictate. Left-aligned
-            to the composer. */}
+        {/* Controls row — model ▸ effort, then attach + dictate. */}
         <div className="flex items-center gap-2 self-start">
           <ModelPicker
             modelLabel={null}
             models={models}
-            modelOverride={modelOverride}
+            modelOverride={draft.model}
             defaultModel={serverDefault}
             deactivatedMainModels={deactivatedMainModels}
             onOpen={() => {}}
-            onSelect={(m) => {
-              setModelTouched(true);
-              setModelOverride(m);
+            onSelect={(m: ModelSelection | null) => {
+              // null = clear back to the server default ("Auto").
+              updateDraft(draftId, {
+                model: m,
+                modelTouched: m != null,
+              });
             }}
-            labelOverride={modelTouched ? null : "Auto"}
+            labelOverride={draft.modelTouched ? null : "Auto"}
           />
 
-          {/* Attach — no implementation on this screen yet (welcome is
-              create-first). Rendered disabled, per the UI-only constraint. */}
           <IconButton
             icon={<Paperclip />}
             label="Attach a file"
@@ -532,9 +512,6 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
               onCancel={voiceRecorder.cancel}
             />
           ) : (
-            /* Dictate — no voice configured on this box yet (no Groq key).
-               Rendered disabled to match the attach button, so the controls
-               row agrees with the mockup whether or not voice is set up. */
             <IconButton
               icon={<Mic />}
               label="Dictate"
@@ -554,14 +531,14 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
 
       {pickerOpen && (
         <FolderPickerModal
-          initialPath={cwd || "~"}
+          initialPath={draft.cwd || "~"}
           onSelect={(path) => {
-            setCwd(path);
+            updateDraft(draftId, { cwd: path });
             setPickerOpen(false);
           }}
           onFanOut={(baseCwd, wts) => {
             setFanOutWorktrees(wts);
-            setCwd(baseCwd);
+            updateDraft(draftId, { cwd: baseCwd });
             setPickerOpen(false);
           }}
           onCancel={() => setPickerOpen(false)}
@@ -586,7 +563,7 @@ export function NewSessionScreen({ projectName, onDone, onCancel }: Props) {
             </ul>
             <div className="flex gap-2">
               <button
-                onClick={() => void submitFanOut(cwd, fanOutWorktrees)}
+                onClick={() => void submitFanOut(draft.cwd, fanOutWorktrees)}
                 disabled={sending}
                 className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90 disabled:opacity-50"
               >

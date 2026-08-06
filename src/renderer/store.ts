@@ -11,6 +11,7 @@ import type { ConnectionState } from "../shared/net/state.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
+import type { ModelSelection } from "./chatShared";
 
 // Background-delegation jobs, keyed by the job's child opencode session id.
 // The renderer learns which sidebar windows are jobs (and their per-row
@@ -33,6 +34,13 @@ export type JobRow = {
 // Cap on simultaneous in-flight requests for the startup opencode fan-outs
 // (`replayChatAttention`, `backfillLastMessageTimes`) — see BET-135.
 const OPENCODE_FANOUT_CONCURRENCY = 4;
+
+// Monotonic id source for new-session drafts. A plain counter (not
+// crypto.randomUUID) keeps store tests deterministic and needs no crypto stub.
+let draftSeq = 0;
+function newDraftId() {
+  return `draft-${++draftSeq}`;
+}
 
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
 // snapshot. In http mode window.api.configGet() returns the manta-server's config,
@@ -61,6 +69,25 @@ function mergeLocalPairing(cfg: AppConfig): AppConfig {
 export type ActiveSession = {
   projectName: string;
   windowIndex: number;
+};
+
+// A pre-commit "new session" draft: an in-memory composer that owns the typed
+// prompt + folder/model/worktree choices BEFORE any tmux window or opencode
+// session exists. It lives in the store (not component state) so navigating
+// away from it and back loses nothing. `mode` decides what commit creates:
+// "new-project" = a new tmux session (project); { projectName } = a window in
+// an existing project. The ACTIVE view is either a real session
+// (activeProjectName / activeWindowByProject) or a draft (activeDraftId).
+export type NewSessionDraft = {
+  id: string;
+  mode: "new-project" | { projectName: string };
+  cwd: string;
+  wantWorktree: boolean;
+  worktreeBranch: string;
+  // null = auto / not explicitly picked (presentational only until submit).
+  model: ModelSelection | null;
+  modelTouched: boolean;
+  input: string;
 };
 
 // Per-window UI status: live `running`/`subagents` from the poller, plus an
@@ -204,6 +231,11 @@ type State = {
   projects: Project[];
   activeProjectName: string | null;
   activeWindowByProject: Record<string, number>; // projectName -> windowIndex
+  // ACTIVE new-session draft id (see NewSessionDraft), or null when the active
+  // view is a real session. Mutually exclusive with the session active state in
+  // the sense that navigating to a real session (setActive) clears it.
+  activeDraftId: string | null;
+  drafts: NewSessionDraft[];
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
   // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
@@ -300,6 +332,15 @@ type State = {
   configSnapshot: () => Partial<AppConfig>;
   // ----- mutations -----
   setActive: (projectName: string, windowIndex?: number) => void;
+  // New-session draft lifecycle (see NewSessionDraft). createDraft makes +
+  // activates a fresh draft; updateDraft patches one (typed prompt, folder,
+  // model…); dismissDraft abandons it (committed or cancelled) and re-points
+  // the active view; setActiveDraft brings a draft to the foreground. Note
+  // setActive (below) exits any draft view by clearing activeDraftId.
+  createDraft: (mode: NewSessionDraft["mode"]) => string;
+  updateDraft: (id: string, patch: Partial<NewSessionDraft>) => void;
+  dismissDraft: (id: string) => void;
+  setActiveDraft: (id: string) => void;
   refresh: () => Promise<void>;
   // Onboarding lifecycle. `skipOnboarding` persists onboardingSkipped (so the
   // flow doesn't re-trigger) and clears the forced flag. `relaunchOnboarding`
@@ -441,6 +482,8 @@ export const useStore = create<State>((set, get) => ({
   projects: [],
   activeProjectName: null,
   activeWindowByProject: {},
+  activeDraftId: null,
+  drafts: [],
   status: {},
   jobs: {},
   chatMessages: {},
@@ -504,10 +547,53 @@ export const useStore = create<State>((set, get) => ({
           ...prev.activeWindowByProject,
           [projectName]: w,
         },
+        // Navigating to a real session exits any "new session" draft view.
+        activeDraftId: null,
         status,
         recentWindows,
       };
     }),
+
+  createDraft: (mode) => {
+    const id = newDraftId();
+    const worktreePerSession = get().worktreePerSession;
+    set((prev) => ({
+      drafts: [
+        ...prev.drafts,
+        {
+          id,
+          mode,
+          cwd: mode === "new-project" ? "~" : "",
+          wantWorktree: mode === "new-project" ? false : worktreePerSession ?? true,
+          worktreeBranch: "worktree",
+          model: null,
+          modelTouched: false,
+          input: "",
+        },
+      ],
+      activeDraftId: id,
+    }));
+    return id;
+  },
+  updateDraft: (id, patch) =>
+    set((prev) => ({
+      drafts: prev.drafts.map((d) => (d.id === id ? { ...d, ...patch } : d)),
+    })),
+  dismissDraft: (id) =>
+    set((prev) => {
+      const drafts = prev.drafts.filter((d) => d.id !== id);
+      let activeDraftId = prev.activeDraftId;
+      if (activeDraftId === id) {
+        // Re-point the active view at another draft (prefer a surviving
+        // new-project draft), else fall back to the session view (null).
+        activeDraftId =
+          drafts.find((d) => d.mode === "new-project")?.id ??
+          drafts[0]?.id ??
+          null;
+      }
+      return { drafts, activeDraftId };
+    }),
+  setActiveDraft: (id) => set({ activeDraftId: id }),
 
   refresh: async () => {
     const cfg = await window.api.configGet();

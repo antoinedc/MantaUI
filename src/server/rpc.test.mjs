@@ -39,8 +39,14 @@ function makeDeps(projects, liveProjects = []) {
     deps: {
       tmux: {
         listProjects: async () => liveProjects,
-        newWindow: async (i) => { calls.newWindow.push(i); return []; },
-        newSession: async (i) => { calls.newSession.push(i); return []; },
+        newWindow: async (i) => {
+          calls.newWindow.push(i);
+          return { sessionId: null, windowIndex: 1, projects: liveProjects };
+        },
+        newSession: async (i) => {
+          calls.newSession.push(i);
+          return { sessionId: "ses_new", windowIndex: 1, projects: [] };
+        },
         newWindowGetIndex: async (sessionName, windowName, cwd, chatMode) => {
           // BET-307: tmux.newWindowGetIndex now takes an optional 4th chatMode
           // arg (default false). Mirror the production arity so callers and
@@ -348,7 +354,28 @@ test("tmux:new-session swallows projectMetaUpsert failures (best-effort)", async
     windowName: "default",
     chatMode: true,
   });
-  assert.deepEqual(result, [], "tmux.newSession result returned (no throw)");
+  // tmux.newSession result returned (no throw), NOT unboxed to projects.
+  assert.deepEqual(result, { sessionId: "ses_new", windowIndex: 1, projects: [] });
+});
+
+// The create return contract: the renderer needs the newly-created window's
+// identity (sessionId + windowIndex) from the RPC response so it can navigate
+// + send the first prompt to the RIGHT session (previously it re-located by
+// name, which mixed new sessions up with existing ones on name collisions).
+test("tmux:new-window surfaces the created window's sessionId + windowIndex", async () => {
+  const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:new-window"]({
+    sessionName: "better-ui",
+    windowName: "chat",
+    cwd: "",
+    chatMode: true,
+  });
+  assert.equal(out.sessionId, null);
+  assert.equal(out.windowIndex, 1);
+  assert.deepEqual(out.projects, []);
+  // the window's cwd was resolved before hitting tmux.newWindow
+  assert.equal(calls.newWindow.at(-1).cwd, "/home/dev/projects/better-ui");
 });
 
 // ---- BET-309 follow-up (BET-318): opencode:provider-auth `status` -------
