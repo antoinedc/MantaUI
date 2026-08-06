@@ -9,7 +9,8 @@
 // if any extraction breaks the mount or the event wiring, a test here fails.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { act } from "react";
+import { act, StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 import { ChatPanel } from "./ChatPanel";
 import {
   installMockApi,
@@ -108,6 +109,40 @@ describe("ChatPanel render harness", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     expect(h.text()).toContain("feat/mobile-footer");
+  });
+
+  it("auto-submits the new-session first prompt exactly once even under the StrictMode double-mount", async () => {
+    // The draft → real-panel handoff sets autoSubmitPrompt in the SAME commit
+    // that mounts the session's ChatPanel, so the panel's first render has
+    // autoSubmit already set. React 18 StrictMode runs effects setup → cleanup
+    // → setup on that mount; the auto-submit guard must survive the simulated
+    // unmount or the deferred submit timer is cancelled and never re-armed —
+    // the composer gets seeded but the prompt is never sent. Regression for
+    // the "prompt stuck in the composer on a fresh session" bug.
+    const { api } = installMockApi();
+    resetStore();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <ChatPanel
+            {...PROPS}
+            autoSubmit={{ text: "build the login page", model: undefined }}
+          />
+        </StrictMode>,
+      );
+    });
+    // Let the deferred (setTimeout 0) submit timer fire.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const calls = api.calls["opencodePrompt"] ?? [];
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.[1]).toBe("build the login page");
+    act(() => root.unmount());
+    container.remove();
   });
 });
 

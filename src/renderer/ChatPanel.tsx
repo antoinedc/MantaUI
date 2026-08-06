@@ -883,7 +883,17 @@ export function ChatPanel({
       useStore.getState().setAutoSubmitPrompt(null);
       submitRef.current?.(text);
     }, 0);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      // Reset the guard in the cleanup so a React 18 StrictMode double-mount
+      // (setup → cleanup → setup, both before any timeout fires) re-arms the
+      // timer. Without this, the ref set in the first setup persists into the
+      // second, which bails early on autoSubmitted — the composer is seeded
+      // but the prompt is never sent: a blank new session with the text stuck
+      // in the input. Each setup clears its predecessor's timer in its own
+      // cleanup, so there is still exactly one submission per autoSubmit value.
+      autoSubmitted.current = false;
+    };
   }, [autoSubmit, setModelOverride, setInput]);
 
   // When the AI goes idle (running flips false) and there are queued
