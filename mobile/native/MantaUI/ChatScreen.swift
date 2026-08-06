@@ -64,6 +64,15 @@ struct ChatScreen: View {
     }
 }
 
+/// Carries the floating bottom bar's measured height up from its overlay so the
+/// transcript can reserve exactly that much space (see `loadedLayout`).
+private struct BottomBarHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct ChatScreenContent: View {
     let title: String
     let projectName: String
@@ -93,6 +102,10 @@ private struct ChatScreenContent: View {
     /// row) should be shown. Driven purely by scroll geometry; it does not
     /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
+    /// Measured height of the floating bottom bar (cards + composer), so the
+    /// transcript can reserve exactly that much space and the newest message is
+    /// never pinned underneath the composer while it floats over the tail.
+    @State private var bottomBarHeight: CGFloat = 0
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
@@ -198,6 +211,23 @@ private struct ChatScreenContent: View {
         // lives INSIDE the transcript as its typing indicator (see
         // `transcript`), so it is not duplicated here.
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            // Reserve exactly the floating bar's measured height so the newest
+            // message is never pinned underneath the composer. A clear spacer (not
+            // content padding) so the transcript keeps shrinking its own viewport
+            // and no trailing spacer becomes the scroll anchor (the blank bug).
+            Color.clear
+                .frame(height: bottomBarHeight)
+                .allowsHitTesting(false)
+        }
+        // The bottom bar (todos + composer) FLOATS over the transcript as an
+        // overlay, and a scrim sits directly beneath it dimming text that scrolls
+        // under the composer — mirroring the floating header on the way down.
+        .overlay(alignment: .bottom) {
+            // Scrim first, so it draws BELOW the composer but still masks the
+            // scrolling content sliding under it.
+            Scrim(edge: .bottom, tokens: tokens)
+                .frame(height: bottomBarHeight + Metrics.spacing.sp4)
+                .allowsHitTesting(false)
             VStack(spacing: 0) {
                 bottomCards
                 ComposerView(
@@ -212,6 +242,16 @@ private struct ChatScreenContent: View {
                         showScrollToBottom = false
                     }
                 )
+            }
+            // Measure the bar so the transcript's reserved inset follows its real
+            // (dynamic) height rather than a guess.
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: BottomBarHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .onPreferenceChange(BottomBarHeightKey.self) { height in
+                bottomBarHeight = height
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
@@ -429,12 +469,6 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Height of the bottom fade over the transcript's tail — the mirror of the
-    /// top scrim's visual weight, so the last messages dissolve into the
-    /// composer at the same rate the first ones dissolve into the header (same
-    /// Scrim ramp, both edges of the chat).
-    private static let bottomScrimHeight: CGFloat = 80
-
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -493,14 +527,6 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // Bottom fade — the direct mirror of the top scrim: the last visible
-        // messages dissolve as they approach the bottom edge (where the
-        // transcript meets the composer), instead of ending on a hard line.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens)
-                .frame(height: Self.bottomScrimHeight)
-                .allowsHitTesting(false)
-        }
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
