@@ -88,6 +88,10 @@ export interface Api {
     windowName?: string;
     chatMode?: boolean;
     createDir?: boolean;
+    // When set, reuse this opencode session id (already created optimistically
+    // by the draft flow) instead of creating a new one, and stamp it on the
+    // new tmux window.
+    existingSessionId?: string;
   }): Promise<TmuxCreateResult>;
   tmuxNewWindow(input: {
     sessionName: string;
@@ -98,6 +102,9 @@ export interface Api {
     // on `@manta-worktree-path` so clean-on-close knows it owns this
     // worktree. Optional — omitted for non-worktree windows.
     worktreePath?: string;
+    // As above: reuse an optimistically-created opencode session id and stamp
+    // it on the new window.
+    existingSessionId?: string;
   }): Promise<TmuxCreateResult>;
   tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
   tmuxRenameWindow(input: {

@@ -53,42 +53,7 @@ import type {
   WorktreeInfo,
 } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { formatDuration } from "./chatUtils";
-import { MantaLoader } from "./MantaLoader";
-
-// Optimistic "starting a new session" panel. It replaces the composer the
-// INSTANT a draft is submitted, while the session is created in the background
-// (tmux + opencode round-trip takes a couple of seconds). Reuses the app's
-// waiting image + running-verb so it reads as "your prompt was sent and it's
-// working" — mirroring the transcript's running state, so when the real
-// session lands and the panel mounts the real transcript, it continues
-// seamlessly. If creation fails, NewSessionScreen returns to the composer with
-// the error (the draft + typed prompt are preserved).
-function StartingPanel({ input }: { input: string }) {
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <div className="h-full flex flex-col justify-end px-8 pb-10">
-      <div className="w-full max-w-[680px] mx-auto space-y-4">
-        <div className="flex justify-end">
-          <div className="max-w-[70%] whitespace-pre-wrap rounded-xl bg-fill px-4 py-2 text-prose text-text">
-            {input || "…"}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <MantaLoader />
-          <span className="text-label text-text-muted">Musing on this…</span>
-          <span className="text-meta tabular-nums text-text-faint">
-            {formatDuration(elapsed * 1000)}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
+import { ChatPanel } from "./ChatPanel";
 
 // Normalise the tmux:new-session / new-window response. The (merged) server
 // returns { sessionId, windowIndex, projects }; tolerate an older server that
@@ -166,6 +131,11 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [fanOutWorktrees, setFanOutWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Optimistic commit: once the opencode session exists we leave the composer
+  // and render the REAL ChatPanel (transcript + composer) with the first prompt
+  // streaming, while the tmux window is created behind it. `cwd` is the folder
+  // the session was created in (worktree path when one was requested).
+  const [committing, setCommitting] = useState<{ sid: string; cwd: string } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Model state — fetched on mount (same pattern as ChatPanel).
@@ -268,7 +238,18 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceEnabled = !!groqApiKey && typeof MediaRecorder !== "undefined";
 
-  // ---- submit: create session + send first prompt ----
+  // ---- submit: create session + send first prompt (optimistic) ----
+  //
+  // The flow is split so the user sees their prompt being processed immediately:
+  //   1. create the opencode session FIRST (a fast web call) → its directory is
+  //      remembered server-side, which opens the scoped SSE stream,
+  //   2. optimistically render the REAL ChatPanel (transcript + composer) for
+  //      that session and send the first prompt → prompt + running indicator
+  //      appear right away,
+  //   3. create the tmux window/session and stamp it with the SAME session id,
+  //      then reconcile (apply the listing + hand off to the App's session
+  //      layer). If anything fails we roll back the orphan and drop to the
+  //      composer with the error.
   const submit = async () => {
     if (sending) return;
     const text = draft.input.trim();
@@ -276,89 +257,94 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     setSending(true);
     setError(null);
 
+    let createdSid: string | null = null;
     try {
-      let sessionName: string;
-      let result: TmuxCreateResult;
+      // Resolve folder + (optionally) a fresh worktree once, up front.
       let worktreePath: string | undefined;
-
-      if (isNewProject) {
-        sessionName = deriveProjectName(draft.cwd);
-        // Avoid name collision with existing sessions.
-        const taken = new Set(existingProjects.map((p) => p.tmuxSession));
-        if (taken.has(sessionName)) {
-          let i = 2;
-          while (taken.has(`${sessionName}-${i}`)) i++;
-          sessionName = `${sessionName}-${i}`;
-        }
-
-        if (draft.wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
-          worktreePath = wt.path;
-        }
-
-        result = await window.api.tmuxNewSession({
-          name: sessionName,
-          cwd: worktreePath ?? draft.cwd,
-          windowName: "default",
-          chatMode: true,
-          ...(worktreePath ? {} : { createDir: true }),
-        });
-      } else {
-        sessionName = projectName!;
-        if (draft.wantWorktree && isGitRepo) {
-          const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
-          worktreePath = wt.path;
-        }
-        result = await window.api.tmuxNewWindow({
-          sessionName,
-          windowName: promptWindowName(text),
-          ...(worktreePath ? { cwd: worktreePath, worktreePath } : {}),
-          chatMode: true,
-        });
+      if (draft.wantWorktree && isGitRepo) {
+        const wt = await window.api.gitAddWorktree({ cwd: draft.cwd, name: draft.worktreeBranch });
+        worktreePath = wt.path;
       }
+      const dir = worktreePath ?? draft.cwd;
+      const newProject = isNewProject;
+      const sessionName = newProject
+        ? (() => {
+            const base = deriveProjectName(draft.cwd);
+            const taken = new Set(existingProjects.map((p) => p.tmuxSession));
+            if (!taken.has(base)) return base;
+            let i = 2;
+            while (taken.has(`${base}-${i}`)) i++;
+            return `${base}-${i}`;
+          })()
+        : projectName!;
 
-      // Apply the server's refreshed listing directly — no separate (slow)
-      // global re-list — so the view switches to the new transcript right away.
-      const created = normalizeCreate(result);
-      applyProjects(created.projects);
+      // 1. Fast opencode session creation first.
+      const sess = await window.api.opencodeCreateEphemeralSession({
+        directory: dir,
+        title: newProject
+          ? `${sessionName} / default`
+          : `${sessionName} / ${promptWindowName(text)}`,
+      });
+      if (!sess.ok || !sess.sessionId) {
+        throw new Error(sess.error || "could not start the session");
+      }
+      createdSid = sess.sessionId;
 
-      // Navigate to the new session (this exits the draft view) and send the
-      // first prompt. The server told us the exact window; the session id is
-      // taken from the create result, falling back to the window's stamped id
-      // (covers older servers that return only the projects array).
+      // 2. Optimistically show the real chat view; then send the prompt so the
+      //    running indicator streams in. Yield a frame so the panel has mounted
+      //    + subscribed to its session's events first.
+      setCommitting({ sid: createdSid, cwd: dir });
+      await new Promise((r) => setTimeout(r, 0));
+      window.api.opencodePrompt(createdSid, text, draft.model ?? undefined).catch(() => {});
+
+      // 3. Create the tmux window/session behind the user's view and stamp it
+      //    with the same session id, then reconcile.
+      const created = newProject
+        ? await window.api.tmuxNewSession({
+            name: sessionName,
+            cwd: dir,
+            windowName: "default",
+            chatMode: true,
+            existingSessionId: createdSid,
+            ...(worktreePath ? {} : { createDir: true }),
+          })
+        : await window.api.tmuxNewWindow({
+            sessionName,
+            windowName: promptWindowName(text),
+            cwd: dir,
+            chatMode: true,
+            existingSessionId: createdSid,
+            ...(worktreePath ? { worktreePath } : {}),
+          });
+      const createdNorm = normalizeCreate(created);
+      applyProjects(createdNorm.projects);
+
+      // 4. Reconcile: hand the panel off to the App's session layer (same
+      //    session id, same view) and drop the draft.
       const proj = useStore
         .getState()
         .projects.find((p) => p.tmuxSession === sessionName);
       const win =
-        created.windowIndex != null
-          ? proj?.windows.find((w) => w.index === created.windowIndex)
+        createdNorm.windowIndex != null
+          ? proj?.windows.find((w) => w.index === createdNorm.windowIndex)
           : proj?.windows.find((w) => w.active) ?? proj?.windows[0];
-      const sessionId = created.sessionId ?? win?.opencodeSessionId ?? null;
-
-      setActive(sessionName, win?.index ?? created.windowIndex);
+      setActive(sessionName, win?.index ?? createdNorm.windowIndex);
       if (win) {
         try {
-          await window.api.tmuxSelectWindow({
-            sessionName,
-            windowIndex: win.index,
-          });
+          await window.api.tmuxSelectWindow({ sessionName, windowIndex: win.index });
         } catch { /* non-fatal */ }
       }
-
-      if (sessionId) {
-        await window.api.opencodePrompt(
-          sessionId,
-          text,
-          draft.model ?? undefined,
-        );
-      }
-
+      setCommitting(null);
       // Abandon the draft — it is now a real session.
       dismissDraft(draftId);
       onDone?.();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // Roll back: drop the orphaned opencode session (if we created one) and
+      // return to the composer. The draft + typed prompt are preserved.
+      if (createdSid) window.api.opencodeDeleteSessionRaw(createdSid).catch(() => {});
+      setCommitting(null);
       setSending(false);
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -468,11 +454,23 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const emptyWorktree = isNewProject && !isGitRepo;
   const worktreeChipEnabled = emptyWorktree || isGitRepo;
 
-  // Optimistic: the moment a draft is submitted (sending flips true
-  // synchronously), leave the composer and show the prompt + running indicator
-  // immediately, while the session is created behind it. On failure `sending`
-  // returns to false and this re-renders the composer with the error.
-  if (sending) return <StartingPanel input={draft.input} />;
+  // Optimistic: the instant the opencode session exists, leave the composer
+  // and render the REGULAR chat view (transcript + composer) so the first
+  // prompt + running indicator appear immediately, while the tmux window is
+  // created behind the scenes. The real session hand-off happens in submit().
+  if (committing) {
+    return (
+      <div className="h-full w-full bg-bg">
+        <ChatPanel
+          sessionId={committing.sid}
+          tmuxSession={null}
+          windowIndex={null}
+          cwd={committing.cwd}
+          isActive
+        />
+      </div>
+    );
+  }
 
   return (
     // data-screen is the visual harness's handle on this screen (see

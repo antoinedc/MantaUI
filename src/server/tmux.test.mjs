@@ -245,6 +245,58 @@ test("newSession chatMode:false stays a plain session — no session create, no 
   assert.equal(findSetSid(cmds), undefined, "no @manta-session-id stamp for a plain session");
 });
 
+// ---- optimistic draft flow: reuse an existing opencode session id ----------
+// When the draft's submit creates the opencode session first (so the chat view
+// appears immediately) and then asks for a tmux window, the window must reuse
+// that session id rather than create a second one.
+
+test("newWindow with existingSessionId reuses the id and creates no new session", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc();
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-nw-exist-"));
+  try {
+    const out = await newWindow({
+      sessionName: "better-ui",
+      windowName: "chat",
+      cwd,
+      chatMode: true,
+      existingSessionId: "ses_preexisting",
+      oc,
+    });
+    assert.equal(oc.created.length, 0, "no new opencode session created");
+    assert.equal(out.sessionId, "ses_preexisting");
+    const stamp = findSetSid(cmds);
+    assert.ok(stamp, "@manta-session-id stamped");
+    assert.ok(stamp.args.includes("ses_preexisting"), "stamp carries the existing id");
+  } finally {
+    _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("newSession with existingSessionId reuses the id and creates no new session", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc();
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-ns-exist-"));
+  try {
+    const out = await newSession({
+      name: "newproj",
+      cwd,
+      windowName: "default",
+      chatMode: true,
+      existingSessionId: "ses_preexisting",
+      oc,
+    });
+    assert.equal(oc.created.length, 0, "no new opencode session created");
+    assert.equal(out.sessionId, "ses_preexisting");
+    const stamp = findSetSid(cmds);
+    assert.ok(stamp && stamp.args.includes("ses_preexisting"), "stamp carries the existing id");
+  } finally {
+    _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("newWindow chatMode:true throws when no opencode client is injected", async () => {
   installFakeTmux();
   try {
