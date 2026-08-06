@@ -20,6 +20,8 @@ import {
   appendPromptHistory,
   mergePromptHistory,
   resolveActiveModel,
+  readSavedActiveSession,
+  writeSavedActiveSession,
 } from "./chatShared";
 import type { OpencodeModel } from "../shared/types";
 
@@ -346,5 +348,37 @@ describe("mergePromptHistory", () => {
     expect(mergePromptHistory([], ["a"])).toEqual(["a"]);
     expect(mergePromptHistory(["a"], [])).toEqual(["a"]);
     expect(mergePromptHistory([], [])).toEqual([]);
+  });
+});
+
+describe("last-active session persistence (restored on refresh/relaunch)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("returns null when nothing is saved", () => {
+    expect(readSavedActiveSession()).toBeNull();
+  });
+
+  it("round-trips a saved pin", () => {
+    writeSavedActiveSession({ project: "better-ui", window: 3 });
+    expect(readSavedActiveSession()).toEqual({ project: "better-ui", window: 3 });
+  });
+
+  it("writeSavedActiveSession(null) clears the saved pin", () => {
+    writeSavedActiveSession({ project: "better-ui", window: 1 });
+    writeSavedActiveSession(null);
+    expect(readSavedActiveSession()).toBeNull();
+  });
+
+  it("rejects a corrupt or malformed stored value", () => {
+    localStorage.setItem("manta:lastActiveSession", "{not json");
+    expect(readSavedActiveSession()).toBeNull();
+    localStorage.setItem("manta:lastActiveSession", JSON.stringify({ project: 5, window: 0 }));
+    expect(readSavedActiveSession()).toBeNull();
+    localStorage.setItem("manta:lastActiveSession", JSON.stringify({ project: "p", window: -1 }));
+    expect(readSavedActiveSession()).toBeNull();
+    localStorage.setItem("manta:lastActiveSession", JSON.stringify({ project: "p", window: 1.5 }));
+    expect(readSavedActiveSession()).toBeNull();
   });
 });

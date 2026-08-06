@@ -1,5 +1,11 @@
+// @vitest-environment jsdom
+// jsdom required because applyProjects/setActive persist + restore the
+// last-active session via localStorage (readSavedActiveSession /
+// writeSavedActiveSession). The rest of the file doesn't care — the nodenv
+// differences are confined to the persistence helpers' try/catch.
 import { describe, it, expect, beforeEach } from "vitest";
 import { resolveSessionOwner, useStore } from "./store";
+import { writeSavedActiveSession } from "./chatShared";
 import type { Project } from "../shared/types";
 
 function proj(over: Partial<Project> & { tmuxSession: string }): Project {
@@ -803,5 +809,106 @@ describe("new-session drafts", () => {
     expect(useStore.getState().activeDraftId).toBeNull();
     // the draft itself is untouched — it stays in the sidebar for later use
     expect(useStore.getState().drafts.some((d) => d.id === id)).toBe(true);
+  });
+});
+
+// ===== Last-active session restore =====
+//
+// activeProjectName starts null on a fresh boot / renderer reload. Without
+// restore, applyProjects defaulted to projects[0] — landing the user on an
+// arbitrary/first session instead of the one they last used. These tests pin
+// the persistence (setActive writes) + restore (applyProjects reads).
+
+describe("last-active session restore (refresh / relaunch)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useStore.setState({
+      projects: [],
+      activeProjectName: null,
+      activeWindowByProject: {},
+      recentWindows: [],
+    });
+  });
+
+  function sessions() {
+    return [
+      proj({
+        tmuxSession: "alpha",
+        defaultCwd: "~/alpha",
+        windows: [
+          { index: 0, name: "w0", active: true, paneCurrentPath: "/alpha/0", opencodeSessionId: null },
+          { index: 1, name: "w1", active: false, paneCurrentPath: "/alpha/1", opencodeSessionId: null },
+        ],
+      }),
+      proj({
+        tmuxSession: "beta",
+        defaultCwd: "~/beta",
+        windows: [
+          { index: 0, name: "w0", active: true, paneCurrentPath: "/beta/0", opencodeSessionId: null },
+        ],
+      }),
+    ];
+  }
+
+  it("setActive persists the pin to localStorage", () => {
+    useStore.setState({ projects: sessions() });
+    useStore.getState().setActive("beta", 0);
+    expect(localStorage.getItem("manta:lastActiveSession")).toBe(
+      JSON.stringify({ project: "beta", window: 0 }),
+    );
+  });
+
+  it("applyProjects with no prior selection restores the saved last-used session", () => {
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeProjectName).toBe("alpha");
+    expect(s.activeWindowByProject.alpha).toBe(1);
+  });
+
+  it("applyProjects keeps an existing valid selection (mid-session refresh)", () => {
+    useStore.setState({
+      activeProjectName: "beta",
+      activeWindowByProject: { beta: 0 },
+    });
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    // a live refresh must NOT yank the user off the session they're on
+    expect(s.activeProjectName).toBe("beta");
+    expect(s.activeProjectName).not.toBe("alpha");
+  });
+
+  it("applyProjects falls back to projects[0] when the saved session is gone", () => {
+    writeSavedActiveSession({ project: "vanished", window: 0 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeProjectName).toBe("alpha");
+  });
+
+  it("applyProjects falls back to projects[0] when the saved window no longer exists", () => {
+    writeSavedActiveSession({ project: "alpha", window: 9 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeProjectName).toBe("alpha");
+    // window 9 doesn't exist — clamp to the tmux-active / first window
+    expect(s.activeWindowByProject.alpha).toBe(0);
+  });
+
+  it("applyProjects restores the saved window over the tmux-active one", () => {
+    // alpha's tmux-active window is 0, but the user last used window 1 —
+    // restore must win so they land exactly where they left off.
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeProjectName).toBe("alpha");
+    expect(s.activeWindowByProject.alpha).toBe(1);
+  });
+
+  it("applyProjects with no saved pin and no valid selection falls back to projects[0]", () => {
+    useStore.getState().applyProjects(sessions());
+    const s = useStore.getState();
+    expect(s.activeProjectName).toBe("alpha");
+    expect(s.activeWindowByProject.alpha).toBe(0);
   });
 });
