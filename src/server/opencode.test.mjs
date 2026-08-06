@@ -33,6 +33,7 @@ import {
   getProviders,
   getDefaultModel,
   listModels,
+  applyModelOverride,
   claudeCliStatus,
 } from "./opencode.mjs";
 
@@ -935,6 +936,80 @@ test("listModels returns [] on a transport throw (never re-throws)", async () =>
       assert.deepEqual(out, []);
     },
   );
+});
+
+test("listModels applies per-model display overrides keyed providerID/modelID", async () => {
+  await withMockFetch(
+    async () =>
+      new Response(
+        JSON.stringify({
+          connected: ["anthropic"],
+          all: [
+            {
+              id: "anthropic",
+              models: {
+                "claude-sonnet-4-6": { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    async () => {
+      const out = await listModels({
+        "anthropic/claude-sonnet-4-6": {
+          name: "My Sonnet",
+          description: "Custom",
+          context: 1_000_000,
+        },
+      });
+      assert.equal(out.length, 1);
+      assert.equal(out[0].name, "My Sonnet");
+      assert.equal(out[0].description, "Custom");
+      assert.equal(out[0].limit.context, 1_000_000);
+    },
+  );
+});
+
+test("applyModelOverride merges name/description/context, leaves mutables untouched", () => {
+  const base = {
+    id: "claude-sonnet-4-6",
+    providerID: "anthropic",
+    name: "Claude Sonnet 4.6",
+    limit: { context: 200_000, output: 64_000 },
+    variants: [{ id: "high" }],
+  };
+  const merged = applyModelOverride(base, {
+    name: "  My Claude  ",
+    description: "  My custom blurb  ",
+    context: 1_000_000,
+  });
+  // New object, input untouched.
+  assert.notEqual(merged, base);
+  assert.equal(base.name, "Claude Sonnet 4.6");
+  assert.equal(base.limit.context, 200_000);
+  // Trimmed + merged.
+  assert.equal(merged.name, "My Claude");
+  assert.equal(merged.description, "My custom blurb");
+  assert.equal(merged.limit.context, 1_000_000);
+  // limit merges onto the existing object rather than dropping other keys.
+  assert.equal(merged.limit.output, 64_000);
+  assert.equal(merged.variants, base.variants);
+});
+
+test("applyModelOverride omits empty/absent fields and no-ops on falsy override", () => {
+  const base = { id: "gpt-5", providerID: "openai", name: "GPT-5" };
+  // Empty strings for name/description → omitted.
+  const merged = applyModelOverride(base, { name: "   ", description: "", context: 200_000 });
+  assert.equal(merged.name, "GPT-5");
+  assert.equal(merged.description, undefined);
+  assert.equal(merged.limit.context, 200_000);
+  // Invalid context (<= 0 / NaN) → omitted.
+  const noCtx = applyModelOverride(base, { context: 0 });
+  assert.equal(noCtx.limit, undefined);
+  // No override / non-object → same object reference back.
+  assert.equal(applyModelOverride(base, undefined), base);
+  assert.equal(applyModelOverride(base, null), base);
 });
 
 // Scoped-stream readiness gate (BET-115 fix C)

@@ -441,8 +441,14 @@ export function buildHandlers({
     // → opencode.mjs rejectQuestion expects { requestId, sessionId }
     "opencode:question-reject": (input) => oc.rejectQuestion(input),
 
-    // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args
-    "opencode:models": () => oc.listModels(),
+    // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args.
+    // Model display overrides (Settings → Models → edit) are applied here so
+    // every consumer of opencodeModels() — the settings table AND the composer
+    // model picker — sees the same overridden name / description / context.
+    "opencode:models": async () => {
+      const cfg = await local.configGet();
+      return oc.listModels(cfg.modelOverrides ?? {});
+    },
 
     // Provider management — now served from the server (BET-82.3).
     // get-providers: read opencode.jsonc and project the configured provider

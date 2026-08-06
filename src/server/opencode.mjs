@@ -1030,7 +1030,7 @@ export async function getProviders() {
  * exactly one place (BET-342 — sibling of BET-320 for `getDefaultModel`).
  * @returns {Promise<Array<{ id: string, providerID: string, name: string, ... }>>}
  */
-export async function listModels() {
+export async function listModels(overrides = {}) {
   const out = [];
   try {
     const { connected: connectedIds, all } = await getProviders();
@@ -1039,13 +1039,36 @@ export async function listModels() {
     for (const p of all) {
       if (!p.id || !connected.has(p.id)) continue;
       for (const modelId of Object.keys(p.models ?? {})) {
-        out.push(_normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]));
+        const m = _normalizeProviderModel(p.id, modelId, (p.models ?? {})[modelId]);
+        const key = `${m.providerID}/${m.id}`;
+        out.push(applyModelOverride(m, overrides?.[key]));
       }
     }
   } catch {
     /* non-fatal */
   }
   return out;
+}
+
+// applyModelOverride(m, override) — merge a user-supplied Settings → Models
+// display override (name / description / context size) onto a normalized
+// OpencodeModel. Pure and exported for tests. A non-falsy `override` yields a
+// NEW model object (never mutates the input); omitted fields fall back to the
+// provider's own values.
+export function applyModelOverride(m, override) {
+  if (!override || typeof override !== "object") return m;
+  let next = m;
+  if (typeof override.name === "string" && override.name.trim() !== "") {
+    next = { ...next, name: override.name.trim() };
+  }
+  if (typeof override.description === "string" && override.description.trim() !== "") {
+    next = { ...next, description: override.description.trim() };
+  }
+  const ctx = override.context;
+  if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
+    next = { ...next, limit: { ...(m.limit ?? {}), context: ctx } };
+  }
+  return next;
 }
 
 function _normalizeProviderModel(providerID, modelId, m) {
