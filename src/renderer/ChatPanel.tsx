@@ -870,11 +870,17 @@ export function ChatPanel({
   useEffect(() => {
     if (!autoSubmit || autoSubmitted.current) return;
     autoSubmitted.current = true;
-    // Consume the one-shot so re-mounting/re-navigating never re-sends it.
-    useStore.getState().setAutoSubmitPrompt(null);
-    setModelOverride(autoSubmit.model ?? null);
-    setInput(autoSubmit.text);
-    const t = setTimeout(() => submitRef.current?.(), 0);
+    const { text, model } = autoSubmit;
+    setModelOverride(model ?? null);
+    setInput(text);
+    // Clear the one-shot INSIDE the fired timeout, never in the effect body.
+    // Clearing the store flips autoSubmit → undefined, which re-runs this
+    // effect's cleanup (clearTimeout) and would cancel the deferred submit
+    // before it fires — the exact "prompt never sent / blank session" bug.
+    const t = setTimeout(() => {
+      useStore.getState().setAutoSubmitPrompt(null);
+      submitRef.current?.();
+    }, 0);
     return () => clearTimeout(t);
   }, [autoSubmit, setModelOverride, setInput]);
 
