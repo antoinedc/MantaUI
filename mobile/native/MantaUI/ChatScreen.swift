@@ -212,9 +212,6 @@ private struct ChatScreenContent: View {
         // UNDER the composer and there was nothing for a scrim to dim. As an
         // overlay the transcript stays full-bleed and content genuinely passes
         // beneath the composer while scrolling — where the scrim below fades it.
-        // The space the composer occupies is reserved INSIDE the scroll content
-        // (see `transcript` footer), so the last message still rests clear of a
-        // compact composer; a grown one overlaps content dimmed by the scrim.
         // Scrim FIRST so it draws beneath the composer. It is its own
         // bottom-aligned overlay sized to the composer plus an OVERHANG past the
         // safe area, so the ramp darkens content under the composer AND in the
@@ -467,13 +464,6 @@ private struct ChatScreenContent: View {
     private static let headerReservedHeight =
         Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
 
-    /// Space the transcript reserves at its tail for the floating composer,
-    /// sized for the composer at rest (one input line + the control row + the
-    /// box and stack padding). FIXED so the scroll viewport never changes size
-    /// while the composer grows — the conversation holds still and content
-    /// slides under the composer's scrim instead of being pushed.
-    private static let composerReservedHeight: CGFloat = 88
-
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -488,17 +478,6 @@ private struct ChatScreenContent: View {
         // reserves nothing itself, so the conversation must rest below it.
         .headerContent(.header {
             Color.clear.frame(height: Self.headerReservedHeight)
-        })
-        // Reserves the floating composer's height at the TAIL of the scroll
-        // content (mirror of the header spacer above the transcript). The
-        // composer is an overlay and reserves nothing itself, so without this
-        // the last message would rest underneath it. Tracking is avoided on
-        // purpose: a fixed rest-height keeps the viewport size constant (the
-        // transcript holds still while the composer grows), and this is a
-        // CONTENT reservation, not a viewport shrink — so content still passes
-        // under the composer while scrolling and is dimmed by the scrim there.
-        .footerContent(.footer {
-            Color.clear.frame(height: Self.composerReservedHeight)
         })
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.
