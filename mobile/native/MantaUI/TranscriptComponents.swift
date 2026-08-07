@@ -823,13 +823,6 @@ struct TranscriptView: View {
     let blocks: [TranscriptBlock]
     let tokens: Tokens
 
-    /// How far the transcript slides, and therefore how wide the revealed
-    /// timestamp strip is.
-    private static let gutterWidth: CGFloat = 58
-    /// Finger travel needed for a full reveal. Longer than the strip itself, so
-    /// the strip arrives damped instead of slamming open on a flick.
-    private static let gutterTravel: CGFloat = 96
-
     /// Live drag offset, negative (leftward) and clamped to the strip width.
     /// `@GestureState` resets itself the instant the finger lifts, which is what
     /// springs the transcript back with no release handler of our own.
@@ -847,7 +840,7 @@ struct TranscriptView: View {
             // crash on opening a session: the first refetch lands while the
             // first render is still in flight.
             ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
-                blockView(pair.element)
+                transcriptBlockView(pair.element, tokens: tokens)
                     // The timestamp rides WITH its own block rather than living
                     // in a parallel column, so it stays aligned to the thing it
                     // describes no matter how tall that thing is. An overlay
@@ -858,10 +851,10 @@ struct TranscriptView: View {
                     .overlay(alignment: .trailing) {
                         TimestampGutterLabel(
                             date: pair.element.timestamp,
-                            width: Self.gutterWidth,
+                            width: TranscriptGutter.gutterWidth,
                             tokens: tokens
                         )
-                        .offset(x: Self.gutterWidth)
+                        .offset(x: TranscriptGutter.gutterWidth)
                     }
             }
         }
@@ -888,28 +881,9 @@ struct TranscriptView: View {
                     state = 0
                     return
                 }
-                let progress = min(1, -dx / Self.gutterTravel)
-                state = -Self.gutterWidth * progress
+                let progress = min(1, -dx / TranscriptGutter.gutterTravel)
+                state = -TranscriptGutter.gutterWidth * progress
             }
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: TranscriptBlock) -> some View {
-        switch block {
-        case .user(let text, _):
-            UserBand(text: text, tokens: tokens)
-                .padding(.bottom, Metrics.spacing.sp4)
-        case .prose(let text, _):
-            AssistantProse(text: text, tokens: tokens)
-        case .steps(let content):
-            // Machinery is inset to the same margin as prose. Only the USER
-            // band is full-bleed (§8) — that edge-to-edge treatment is what
-            // marks a turn boundary, so letting tool cards share it made every
-            // step group read as a message.
-            StepGroupView(content: content, tokens: tokens)
-                .padding(.horizontal, Metrics.spacing.sp3)
-                .padding(.bottom, Metrics.spacing.sp3)
-        }
     }
 }
 
