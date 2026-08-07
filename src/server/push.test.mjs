@@ -780,106 +780,63 @@ test("sendApnsFanout: prunes every token classified prune:true", async () => {
   }
 });
 
-test("sendApnsFanout: network throw → warn + return (no exception, no prune)", async () => {
-  _resetFanoutFakesForTest();
-  const warns = [];
-  const origWarn = console.warn;
-  console.warn = (...a) => warns.push(a.join(" "));
-  let removeCalls = 0;
-  const fakeFetch = async () => {
-    throw new Error("socket reset");
-  };
-  _setFanoutFakesForTest({
-    fetchImpl: fakeFetch,
-    loadApnsTokens: async () => [
-      { kind: "apns", token: "f1a1", registeredAt: 1 },
-    ],
-    removeApnsToken: async () => {
-      removeCalls++;
-      return { ok: true, count: 0 };
+// The three delivery-failure modes (network throw, 401, 500) share one
+// contract: warn + return, no exception, no prune. Table-driven so the
+// fake wiring and warn-capture scaffolding exist once.
+const FANOUT_FAILURE_CASES = [
+  {
+    label: "network throw",
+    fetchImpl: async () => {
+      throw new Error("socket reset");
     },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await assert.doesNotReject(() =>
-      sendApnsFanout({ kind: "done", title: "T", body: "B" }),
-    );
-    assert.equal(removeCalls, 0, "no prune on network throw");
-    assert.ok(
-      warns.some((w) => /gateway send failed/.test(w) && /socket reset/.test(w)),
-      "warn mentions the underlying failure",
-    );
-  } finally {
-    console.warn = origWarn;
-    _resetFanoutFakesForTest();
-  }
-});
-
-test("sendApnsFanout: gateway 401 → warn + return (no exception, no prune)", async () => {
-  _resetFanoutFakesForTest();
-  const warns = [];
-  const origWarn = console.warn;
-  console.warn = (...a) => warns.push(a.join(" "));
-  let removeCalls = 0;
-  _setFanoutFakesForTest({
+    warnChecks: [/gateway send failed/, /socket reset/],
+  },
+  {
+    label: "gateway 401",
     fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
-    removeApnsToken: async () => {
-      removeCalls++;
-      return { ok: true, count: 0 };
-    },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await assert.doesNotReject(() =>
-      sendApnsFanout({ kind: "done", title: "T", body: "B" }),
-    );
-    assert.equal(removeCalls, 0);
-    assert.ok(warns.some((w) => /status=401/.test(w)), "warn mentions 401");
-  } finally {
-    console.warn = origWarn;
-    _resetFanoutFakesForTest();
-  }
-});
-
-test("sendApnsFanout: gateway 500 → warn + return (no exception, no prune)", async () => {
-  _resetFanoutFakesForTest();
-  const warns = [];
-  const origWarn = console.warn;
-  console.warn = (...a) => warns.push(a.join(" "));
-  let removeCalls = 0;
-  _setFanoutFakesForTest({
+    warnChecks: [/status=401/],
+  },
+  {
+    label: "gateway 500",
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
-    removeApnsToken: async () => {
-      removeCalls++;
-      return { ok: true, count: 0 };
-    },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await assert.doesNotReject(() =>
-      sendApnsFanout({ kind: "done", title: "T", body: "B" }),
-    );
-    assert.equal(removeCalls, 0);
-    assert.ok(warns.some((w) => /status=500/.test(w)), "warn mentions 500");
-  } finally {
-    console.warn = origWarn;
+    warnChecks: [/status=500/],
+  },
+];
+
+for (const c of FANOUT_FAILURE_CASES) {
+  test(`sendApnsFanout: ${c.label} → warn + return (no exception, no prune)`, async () => {
     _resetFanoutFakesForTest();
-  }
-});
+    const warns = [];
+    const origWarn = console.warn;
+    console.warn = (...a) => warns.push(a.join(" "));
+    let removeCalls = 0;
+    _setFanoutFakesForTest({
+      fetchImpl: c.fetchImpl,
+      loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
+      removeApnsToken: async () => {
+        removeCalls++;
+        return { ok: true, count: 0 };
+      },
+      readBoxGatewayIdentity: async () => ({
+        box_id: FANOUT_BOX_ID,
+        gateway_token: FANOUT_GATEWAY_TOKEN,
+      }),
+      gatewayBase: "https://gateway.test.local",
+    });
+    try {
+      await assert.doesNotReject(() =>
+        sendApnsFanout({ kind: "done", title: "T", body: "B" }),
+      );
+      assert.equal(removeCalls, 0, "no prune on delivery failure");
+      for (const re of c.warnChecks) {
+        assert.ok(warns.some((w) => re.test(w)), `warn matches ${re}`);
+      }
+    } finally {
+      console.warn = origWarn;
+      _resetFanoutFakesForTest();
+    }
+  });
+}
 
 test("sendApnsFanout: missing gateway_token in auth.json → warn + no request sent", async () => {
   _resetFanoutFakesForTest();
