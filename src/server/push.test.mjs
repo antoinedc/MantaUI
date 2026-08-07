@@ -18,6 +18,7 @@ import {
   _pendingEscalationTags,
   _resetPushState,
   addApnsToken,
+  isValidApnsToken,
   removeApnsToken,
   sendApnsFanout,
   _loadApnsTokensForTest,
@@ -615,15 +616,15 @@ function makeApnsStorePath(label) {
 test("register-apns upsert: addApnsToken round-trip via temp store", async () => {
   const store = makeApnsStorePath("upsert");
   try {
-    const r1 = await addApnsToken("tok-aaa", { store });
+    const r1 = await addApnsToken("aaaa1111", { store });
     assert.equal(r1.ok, true);
     assert.equal(r1.count, 1);
-    const r2 = await addApnsToken("tok-bbb", { store });
+    const r2 = await addApnsToken("bbbb2222", { store });
     assert.equal(r2.count, 2);
     const tokens = await _loadApnsTokensForTest(store);
     assert.deepEqual(
       tokens.map((t) => t.token).sort(),
-      ["tok-aaa", "tok-bbb"],
+      ["aaaa1111", "bbbb2222"],
     );
     for (const t of tokens) {
       assert.equal(t.kind, "apns");
@@ -638,12 +639,12 @@ test("register-apns upsert: addApnsToken round-trip via temp store", async () =>
 test("register-apns: re-registering same token DE-DUPES (upsert, not append)", async () => {
   const store = makeApnsStorePath("dedupe");
   try {
-    await addApnsToken("tok-dup", { store });
-    await addApnsToken("tok-dup", { store });
-    await addApnsToken("tok-dup", { store });
+    await addApnsToken("dddd1111", { store });
+    await addApnsToken("dddd1111", { store });
+    await addApnsToken("dddd1111", { store });
     const tokens = await _loadApnsTokensForTest(store);
     assert.equal(tokens.length, 1);
-    assert.equal(tokens[0].token, "tok-dup");
+    assert.equal(tokens[0].token, "dddd1111");
   } finally {
     await rm(store, { force: true });
   }
@@ -658,15 +659,15 @@ test("register-apns: rejects an empty / non-string token", async () => {
 test("removeApnsToken: removes a registered token", async () => {
   const store = makeApnsStorePath("remove");
   try {
-    await addApnsToken("tok-keep", { store });
-    await addApnsToken("tok-drop", { store });
-    const r = await removeApnsToken("tok-drop", { store });
+    await addApnsToken("cafe1111", { store });
+    await addApnsToken("cafe2222", { store });
+    const r = await removeApnsToken("cafe2222", { store });
     assert.equal(r.ok, true);
     assert.equal(r.count, 1);
     const tokens = await _loadApnsTokensForTest(store);
     assert.deepEqual(
       tokens.map((t) => t.token),
-      ["tok-keep"],
+      ["cafe1111"],
     );
   } finally {
     await rm(store, { force: true });
@@ -676,8 +677,8 @@ test("removeApnsToken: removes a registered token", async () => {
 test("removeApnsToken: no-op on unknown token (returns count unchanged)", async () => {
   const store = makeApnsStorePath("remove-noop");
   try {
-    await addApnsToken("tok-only", { store });
-    const r = await removeApnsToken("tok-ghost", { store });
+    await addApnsToken("ab01", { store });
+    const r = await removeApnsToken("cd02", { store });
     assert.equal(r.count, 1);
     const tokens = await _loadApnsTokensForTest(store);
     assert.equal(tokens.length, 1);
@@ -710,11 +711,11 @@ test("sendApnsFanout: sends exactly one POST to ${GATEWAY_BASE}/push with Bearer
   const calls = [];
   const fakeFetch = async (url, init) => {
     calls.push({ url, init });
-    return okJson({ results: [{ token: "t1", ok: true, prune: false }] });
+    return okJson({ results: [{ token: "f1a1", ok: true, prune: false }] });
   };
   _setFanoutFakesForTest({
     fetchImpl: fakeFetch,
-    loadApnsTokens: async () => [{ kind: "apns", token: "t1", registeredAt: 1 }],
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
     removeApnsToken: async () => ({ ok: true, count: 0 }),
     readBoxGatewayIdentity: async () => ({
       box_id: FANOUT_BOX_ID,
@@ -734,7 +735,7 @@ test("sendApnsFanout: sends exactly one POST to ${GATEWAY_BASE}/push with Bearer
     );
     const body = JSON.parse(calls[0].init.body);
     assert.equal(body.box_id, FANOUT_BOX_ID);
-    assert.deepEqual(body.tokens, ["t1"]);
+    assert.deepEqual(body.tokens, ["f1a1"]);
     assert.equal(body.payload.kind, "done");
   } finally {
     _resetFanoutFakesForTest();
@@ -747,19 +748,19 @@ test("sendApnsFanout: prunes every token classified prune:true", async () => {
   const fakeFetch = async () =>
     okJson({
       results: [
-        { token: "t-keep", ok: true, prune: false },
-        { token: "t-gone", ok: false, prune: true },
-        { token: "t-bad",  ok: false, prune: true },
-        { token: "t-other", ok: false, prune: false }, // 500-style, keep
+        { token: "beef1111", ok: true, prune: false },
+        { token: "beef2222", ok: false, prune: true },
+        { token: "beef3333",  ok: false, prune: true },
+        { token: "beef4444", ok: false, prune: false }, // 500-style, keep
       ],
     });
   _setFanoutFakesForTest({
     fetchImpl: fakeFetch,
     loadApnsTokens: async () => [
-      { kind: "apns", token: "t-keep", registeredAt: 1 },
-      { kind: "apns", token: "t-gone", registeredAt: 1 },
-      { kind: "apns", token: "t-bad",  registeredAt: 1 },
-      { kind: "apns", token: "t-other", registeredAt: 1 },
+      { kind: "apns", token: "beef1111", registeredAt: 1 },
+      { kind: "apns", token: "beef2222", registeredAt: 1 },
+      { kind: "apns", token: "beef3333",  registeredAt: 1 },
+      { kind: "apns", token: "beef4444", registeredAt: 1 },
     ],
     removeApnsToken: async (tok) => {
       pruned.push(tok);
@@ -773,7 +774,7 @@ test("sendApnsFanout: prunes every token classified prune:true", async () => {
   });
   try {
     await sendApnsFanout({ kind: "done", title: "T", body: "B" });
-    assert.deepEqual(pruned.sort(), ["t-bad", "t-gone"]);
+    assert.deepEqual(pruned.sort(), ["beef2222", "beef3333"]);
   } finally {
     _resetFanoutFakesForTest();
   }
@@ -791,7 +792,7 @@ test("sendApnsFanout: network throw → warn + return (no exception, no prune)",
   _setFanoutFakesForTest({
     fetchImpl: fakeFetch,
     loadApnsTokens: async () => [
-      { kind: "apns", token: "t1", registeredAt: 1 },
+      { kind: "apns", token: "f1a1", registeredAt: 1 },
     ],
     removeApnsToken: async () => {
       removeCalls++;
@@ -826,7 +827,7 @@ test("sendApnsFanout: gateway 401 → warn + return (no exception, no prune)", a
   let removeCalls = 0;
   _setFanoutFakesForTest({
     fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "t1", registeredAt: 1 }],
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
     removeApnsToken: async () => {
       removeCalls++;
       return { ok: true, count: 0 };
@@ -857,7 +858,7 @@ test("sendApnsFanout: gateway 500 → warn + return (no exception, no prune)", a
   let removeCalls = 0;
   _setFanoutFakesForTest({
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "t1", registeredAt: 1 }],
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
     removeApnsToken: async () => {
       removeCalls++;
       return { ok: true, count: 0 };
@@ -891,7 +892,7 @@ test("sendApnsFanout: missing gateway_token in auth.json → warn + no request s
       fetchCalls++;
       return okJson({ results: [] });
     },
-    loadApnsTokens: async () => [{ kind: "apns", token: "t1", registeredAt: 1 }],
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
     removeApnsToken: async () => ({ ok: true, count: 0 }),
     readBoxGatewayIdentity: async () => null, // gateway_token not persisted yet
     gatewayBase: "https://gateway.test.local",
@@ -949,7 +950,7 @@ test("sendApnsFanout: gateway 200 with malformed JSON body → warn + no excepti
         throw new Error("unexpected token");
       },
     }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "t1", registeredAt: 1 }],
+    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
     removeApnsToken: async () => {
       removeCalls++;
       return { ok: true, count: 0 };
@@ -968,6 +969,101 @@ test("sendApnsFanout: gateway 200 with malformed JSON body → warn + no excepti
     assert.ok(warns.some((w) => /malformed JSON/.test(w)));
   } finally {
     console.warn = origWarn;
+    _resetFanoutFakesForTest();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// APNs token-shape validation (2026-08-07). One invalid stored token makes
+// the gateway 400 the ENTIRE /push batch (its isHexToken caps at 128 hex
+// chars) and pruning only runs on a 200 — so a single simulator
+// pseudo-token (80 bytes = 160 hex chars) silenced push for every real
+// device, permanently. Regression tests: the registration chokepoint
+// rejects them, and the fanout self-heals a store poisoned before the
+// validation existed.
+// ---------------------------------------------------------------------------
+
+test("isValidApnsToken: mirrors the gateway's isHexToken bounds", () => {
+  assert.equal(isValidApnsToken("a1".repeat(32)), true, "64-hex real token");
+  assert.equal(isValidApnsToken("a1".repeat(64)), true, "128-hex upper bound");
+  assert.equal(isValidApnsToken("a1".repeat(80)), false, "160-hex simulator pseudo-token");
+  assert.equal(isValidApnsToken("tok-aaa"), false, "non-hex");
+  assert.equal(isValidApnsToken(""), false);
+  assert.equal(isValidApnsToken(null), false);
+});
+
+test("register-apns REGRESSION: rejects a 160-hex simulator pseudo-token and non-hex junk", async () => {
+  const store = makeApnsStorePath("reject-invalid");
+  try {
+    await assert.rejects(() => addApnsToken("80".repeat(80), { store }), /rejected/);
+    await assert.rejects(() => addApnsToken("tok-not-hex", { store }), /rejected/);
+    const tokens = await _loadApnsTokensForTest(store);
+    assert.equal(tokens.length, 0, "nothing persisted");
+  } finally {
+    await rm(store, { force: true });
+  }
+});
+
+test("sendApnsFanout REGRESSION: filters + prunes invalid stored tokens instead of poisoning the batch", async () => {
+  _resetFanoutFakesForTest();
+  const badToken = "80".repeat(80); // 160 hex chars — gateway would 400 the batch
+  const calls = [];
+  const pruned = [];
+  _setFanoutFakesForTest({
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+    },
+    loadApnsTokens: async () => [
+      { kind: "apns", token: "beef1111", registeredAt: 1 },
+      { kind: "apns", token: badToken, registeredAt: 2 },
+    ],
+    removeApnsToken: async (tok) => {
+      pruned.push(tok);
+      return { ok: true, count: 1 };
+    },
+    readBoxGatewayIdentity: async () => ({
+      box_id: FANOUT_BOX_ID,
+      gateway_token: FANOUT_GATEWAY_TOKEN,
+    }),
+    gatewayBase: "https://gateway.test.local",
+  });
+  try {
+    await sendApnsFanout({ kind: "done", title: "T", body: "B" });
+    assert.equal(calls.length, 1, "batch still sent for the valid token");
+    const body = JSON.parse(calls[0].init.body);
+    assert.deepEqual(body.tokens, ["beef1111"], "invalid token excluded from the batch");
+    assert.deepEqual(pruned, [badToken], "invalid token pruned from the store");
+  } finally {
+    _resetFanoutFakesForTest();
+  }
+});
+
+test("sendApnsFanout: all-invalid store prunes everything and sends nothing", async () => {
+  _resetFanoutFakesForTest();
+  let fetchCalls = 0;
+  const pruned = [];
+  _setFanoutFakesForTest({
+    fetchImpl: async () => {
+      fetchCalls++;
+      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+    },
+    loadApnsTokens: async () => [{ kind: "apns", token: "80".repeat(80), registeredAt: 1 }],
+    removeApnsToken: async (tok) => {
+      pruned.push(tok);
+      return { ok: true, count: 0 };
+    },
+    readBoxGatewayIdentity: async () => ({
+      box_id: FANOUT_BOX_ID,
+      gateway_token: FANOUT_GATEWAY_TOKEN,
+    }),
+    gatewayBase: "https://gateway.test.local",
+  });
+  try {
+    await sendApnsFanout({ kind: "done" });
+    assert.equal(fetchCalls, 0, "no POST when nothing valid remains");
+    assert.equal(pruned.length, 1);
+  } finally {
     _resetFanoutFakesForTest();
   }
 });
