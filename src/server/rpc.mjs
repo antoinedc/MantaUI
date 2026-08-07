@@ -369,8 +369,16 @@ export function buildHandlers({
     // { sinceSeq, sinceGen }; the server returns { gen, seq, changed } with
     // only the fields whose version is newer than sinceSeq (or a full
     // snapshot when the cursor is absent / stale generation / impossible).
-    "sync:snapshot": ({ sinceSeq, sinceGen } = {}) =>
-      syncState.payloadSince(sinceSeq, sinceGen),
+    // BET-685: same first-tick guard as tmux:list. Until ANY syncTick has
+    // succeeded, do a synchronous refresh so a client that calls sync:snapshot
+    // right after server boot (BET-678's cold+boot load path) never receives a
+    // confident zero-project snapshot.
+    "sync:snapshot": async ({ sinceSeq, sinceGen } = {}) => {
+      if (!syncState.everSucceeded()) {
+        await syncState.refreshNow();
+      }
+      return syncState.payloadSince(sinceSeq, sinceGen);
+    },
     // chatMode (BET-113): when the new-session dialog's "chat mode (opencode)"
     // toggle is on, tmux.newSession must create an opencode session, launch a
     // holder pane, and stamp @manta-session-id — so it needs the `oc` client.

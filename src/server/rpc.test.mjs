@@ -804,3 +804,38 @@ test("serve-page:list returns an empty list when the store is empty", async () =
   const pages = await handlers["serve-page:list"]();
   assert.deepEqual(pages, []);
 });
+
+// BET-685: sync:snapshot must carry the same first-tick guard as tmux:list.
+// A box that just booted (`everSucceeded() === false`) must do a synchronous
+// refresh before serving its snapshot, so the renderer's boot load never
+// receives a confident zero-project snapshot.
+function makeSnapshotDeps({ everSucceeded, refreshNow }) {
+  const calls = { refreshNow: 0 };
+  const base = makeDeps([]);
+  base.deps.syncState = {
+    refreshNow: async () => {
+      calls.refreshNow += 1;
+      if (refreshNow) await refreshNow();
+    },
+    applyConfig: () => {},
+    snapshot: () => ({ projects: [], config: null, stale: false }),
+    payloadSince: () => ({ gen: "g", seq: 0, changed: [] }),
+    everSucceeded: () => everSucceeded,
+  };
+  return { deps: base.deps, calls };
+}
+
+test("sync:snapshot triggers a synchronous refresh when never succeeded", async () => {
+  const { deps, calls } = makeSnapshotDeps({ everSucceeded: false });
+  const handlers = buildHandlers(deps);
+  await handlers["sync:snapshot"]({});
+  assert.equal(calls.refreshNow, 1);
+});
+
+test("sync:snapshot serves from memory (no refresh) once a tick has succeeded", async () => {
+  const { deps, calls } = makeSnapshotDeps({ everSucceeded: true });
+  const handlers = buildHandlers(deps);
+  const out = await handlers["sync:snapshot"]({ sinceSeq: 1, sinceGen: "g" });
+  assert.equal(calls.refreshNow, 0);
+  assert.deepEqual(out.changed, []);
+});
