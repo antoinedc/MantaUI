@@ -45,6 +45,17 @@ export type TranscriptState = {
   setExpandedTasks: React.Dispatch<React.SetStateAction<Set<string>>>;
   expandedTasksRef: React.MutableRefObject<Set<string>>;
   childMessagesRef: React.MutableRefObject<Map<string, OpencodeMessage[]>>;
+  loadedAllRef: React.MutableRefObject<boolean>;
+  // The options for the next transcript fetch: { limit: TRANSCRIPT_TAIL_LIMIT }
+  // until loadedAllRef flips, then {} (full history).
+  fetchOpts: () => { limit: number } | {};
+  // Tail-first loading for CHILD transcripts (BET-683). `childLoadedAllRef`
+  // maps each childSessionId to whether its FULL history has been pulled (via
+  // "Load earlier"); until true, child fetches pass { limit:
+  // TRANSCRIPT_TAIL_LIMIT }. `loadingChildEarlier` tracks in-flight full-pulls
+  // so the TaskCard's "Load earlier" button can disable + show feedback.
+  childLoadedAllRef: React.MutableRefObject<Map<string, boolean>>;
+  loadingChildEarlier: Set<string>;
   isActiveRef: React.MutableRefObject<boolean>;
   refetchOwedWhileInactive: React.MutableRefObject<boolean>;
   wantQuestionScroll: React.MutableRefObject<boolean>;
@@ -61,14 +72,11 @@ export type TranscriptState = {
   scheduleRefetch: () => void;
   spliceMessage: (messageId: string) => void;
   fetchChildTranscript: (childId: string) => void;
+  // Pull the FULL child transcript once the user clicks "Load earlier" on an
+  // expanded TaskCard. Flips childLoadedAllRef for that child and replaces
+  // the tail with the whole history.
+  loadEarlierChildTranscript: (childId: string) => void;
   toggleTaskExpand: (childId: string) => void;
-  // Whether the full transcript has been loaded (via "Load earlier"). Drives
-  // fetchOpts: until true, fetches pull the tail; once true they pull the
-  // whole history so no earlier message is dropped.
-  loadedAllRef: React.MutableRefObject<boolean>;
-  // The options for the next transcript fetch: { limit: TRANSCRIPT_TAIL_LIMIT }
-  // until loadedAllRef flips, then {} (full history).
-  fetchOpts: () => { limit: number } | {};
 };
 
 export function useTranscriptState(params: {
@@ -122,6 +130,14 @@ export function useTranscriptState(params: {
   useEffect(() => {
     childMessagesRef.current = childMessages;
   }, [childMessages]);
+  // Tail-first loading for child transcripts (BET-683). Mirrors loadedAllRef
+  // but per-child: until an expanded TaskCard's "Load earlier" is clicked, a
+  // child fetch passes { limit: TRANSCRIPT_TAIL_LIMIT }; once clicked it pulls
+  // the full history and sets this child's flag so later refetches stay full.
+  const childLoadedAllRef = useRef<Map<string, boolean>>(new Map());
+  const [loadingChildEarlier, setLoadingChildEarlier] = useState<Set<string>>(
+    () => new Set(),
+  );
   // childRefetchTimers are managed by the ChatPanel caller (see scheduleChildRefetch param).
   const wantQuestionScroll = useRef(false);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -246,8 +262,15 @@ export function useTranscriptState(params: {
   }, [sessionId, scheduleRefetch]);
 
   const fetchChildTranscript = useCallback((childId: string) => {
+    // Tail-first, matching the main session: the first fetch pulls only the
+    // tail unless "Load earlier" has already pulled the full history.
     window.api
-      .opencodeMessages(childId)
+      .opencodeMessages(
+        childId,
+        childLoadedAllRef.current.get(childId)
+          ? {}
+          : { limit: TRANSCRIPT_TAIL_LIMIT },
+      )
       .then((m) => {
         setChildMessages((prev) => {
           const next = new Map(prev);
@@ -256,6 +279,24 @@ export function useTranscriptState(params: {
         });
       })
       .catch(() => { /* non-fatal */ });
+  }, []);
+
+  const loadEarlierChildTranscript = useCallback((childId: string) => {
+    setLoadingChildEarlier((prev) => new Set(prev).add(childId));
+    window.api
+      .opencodeMessages(childId, {})
+      .then((m) => {
+        childLoadedAllRef.current.set(childId, true);
+        setChildMessages((prev) => new Map(prev).set(childId, m));
+      })
+      .catch(() => { /* non-fatal — keep the tail; the button can be retried */ })
+      .finally(() => {
+        setLoadingChildEarlier((prev) => {
+          const next = new Set(prev);
+          next.delete(childId);
+          return next;
+        });
+      });
   }, []);
 
   const toggleTaskExpand = useCallback((childId: string) => {
@@ -274,6 +315,8 @@ export function useTranscriptState(params: {
   // Session-change reset
   useEffect(() => {
     loadedAllRef.current = false;
+    childLoadedAllRef.current.clear();
+    setLoadingChildEarlier(new Set());
     // Cancel any in-flight per-message splice from the PREVIOUS session so a
     // late timer can't refetch + write a stale message into the new session's
     // list. Also clear the max-wait bookkeeping.
@@ -314,8 +357,11 @@ export function useTranscriptState(params: {
     scheduleRefetch,
     spliceMessage,
     fetchChildTranscript,
+    loadEarlierChildTranscript,
     toggleTaskExpand,
     loadedAllRef,
     fetchOpts,
+    childLoadedAllRef,
+    loadingChildEarlier,
   };
 }

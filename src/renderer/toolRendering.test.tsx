@@ -5,8 +5,8 @@
 // below need jsdom because they mount a real React subtree via
 // `./testHarness`.
 
-import { act } from "react";
-import { describe, it, expect, afterEach } from "vitest";
+import { act, useState } from "react";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { cssVar } from "./chatUtils";
 import { AssistantPart, bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
 import {
@@ -14,7 +14,10 @@ import {
   mount,
   type Harness,
 } from "./testHarness";
-import type { OpencodePart } from "../shared/types";
+import { TaskCard } from "./TaskCard";
+import { TaskContext, type TaskContextValue, type ToolState } from "./chatShared";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import type { OpencodePart, OpencodeMessage } from "../shared/types";
 
 // Tool-call cards start COLLAPSED. Mounting a <ToolCall> hides its body until
 // the disclosure is clicked, so tests that assert on the body expand first.
@@ -331,5 +334,119 @@ describe("TaskBody subagent row", () => {
     // string "subagent"; the badge text is the only place that string can
     // appear when subagent_type is absent.
     expect(h.text()).toContain("subagent");
+  });
+});
+
+// ===== TaskCard child-transcript "Load earlier" header (BET-683) =====
+//
+// Once a child's tail-first fetch fills the expanded card (>= TRANSCRIPT_TAIL_LIMIT)
+// and the full history hasn't been pulled, TaskCard renders the shared
+// LoadEarlierHeader above the first child message. Clicking it calls
+// loadEarlierChild(childId); the header hides once the full fetch resolves
+// (childLoadedAllRef flips true). This drives TaskCard directly via a
+// TaskContext.Provider with controlled values.
+describe("TaskCard child 'Load earlier' header", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function childMsg(i: number): OpencodeMessage {
+    return {
+      info: {
+        id: `cmsg_${i}`,
+        sessionID: "ses_child",
+        role: "assistant",
+        time: { created: i, completed: i + 1 },
+      },
+      parts: [
+        { type: "text", id: `prt_${i}`, messageID: `cmsg_${i}`, text: `child message ${i}` },
+      ],
+    } as OpencodeMessage;
+  }
+
+  // A TailHarness owns the childMessages + loadedAll ref so a test can flip the
+  // "full history loaded" state and watch the header appear/disappear.
+  function TailHarness({
+    load,
+  }: {
+    load: (id: string) => void;
+  }) {
+    const [msgs, setMsgs] = useState<OpencodeMessage[]>(() =>
+      Array.from({ length: TRANSCRIPT_TAIL_LIMIT }, (_, i) => childMsg(i)),
+    );
+    const [loadedAll] = useState<{ current: Map<string, boolean> }>(() => ({
+      current: new Map<string, boolean>(),
+    }));
+    const ctx: TaskContextValue = {
+      expanded: new Set(["ses_child"]),
+      toggle: () => {},
+      childMessages: new Map([["ses_child", msgs]]),
+      childLoadedAllRef: loadedAll,
+      loadEarlierChild: (id) => {
+        load(id);
+        loadedAll.current.set(id, true);
+        // Force a re-render so the header re-evaluates (full history resolved).
+        setMsgs((prev) => prev.slice());
+      },
+      loadingChildEarlier: new Set(),
+      liveStatus: new Map(),
+      showThinking: false,
+    };
+    return (
+      <TaskContext.Provider value={ctx}>
+        <TaskCard state={taskPart({ description: "subagent", subagent_type: "explore" }).state as ToolState} />
+      </TaskContext.Provider>
+    );
+  }
+
+  it("shows the header on a full tail, calls loadEarlierChild on click, and hides it when the full fetch resolves", async () => {
+    const load = vi.fn();
+    installMockApi();
+    h = mount(<TailHarness load={load} />);
+    await h.flush();
+
+    // Tail fill (>= TRANSCRIPT_TAIL_LIMIT) + not loaded-all → header renders.
+    expect(h.text()).toContain("Load earlier messages");
+
+    const btn = Array.from(h.container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Load earlier"),
+    ) as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    act(() => btn.click());
+    await h.flush();
+
+    // Clicking calls loadEarlierChild with the child's session id.
+    expect(load).toHaveBeenCalledWith("ses_child");
+    // Full history resolved → the header disappears.
+    expect(h.text()).not.toContain("Load earlier messages");
+  });
+
+  it("does not render the header for a child transcript under the tail limit", async () => {
+    // A sub-tail child transcript (no "Load earlier" affordance).
+    function UnderLimitHarness() {
+      const msgs = Array.from({ length: 3 }, (_, i) => childMsg(i));
+      const ctx: TaskContextValue = {
+        expanded: new Set(["ses_child"]),
+        toggle: () => {},
+        childMessages: new Map([["ses_child", msgs]]),
+        childLoadedAllRef: { current: new Map<string, boolean>() },
+        loadEarlierChild: () => {},
+        loadingChildEarlier: new Set(),
+        liveStatus: new Map(),
+        showThinking: false,
+      };
+      return (
+        <TaskContext.Provider value={ctx}>
+          <TaskCard state={taskPart({ description: "subagent", subagent_type: "explore" }).state as ToolState} />
+        </TaskContext.Provider>
+      );
+    }
+    installMockApi();
+    h = mount(<UnderLimitHarness />);
+    await h.flush();
+    expect(h.text()).not.toContain("Load earlier messages");
   });
 });

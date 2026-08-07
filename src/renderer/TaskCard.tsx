@@ -35,6 +35,8 @@ import { MessageRow } from "./MessageRow";
 import { ToolOutput } from "./ToolBodies";
 import { StatusDot } from "./StatusDot";
 import { ToolCard } from "./ToolCard";
+import { LoadEarlierHeader } from "./Transcript";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 
 export function TaskCard({ state }: { state: ToolState }) {
   const ctx = useContext(TaskContext);
@@ -63,6 +65,17 @@ export function TaskCard({ state }: { state: ToolState }) {
   }
   const isExpanded = ctx?.expanded.has(info.childSessionId) ?? false;
   const childMsgs = childMsgsForSummary;
+  // Tail-first loading (BET-683): once the child's tail fetch has filled the
+  // card (>= TRANSCRIPT_TAIL_LIMIT) and the FULL history hasn't been pulled,
+  // show the same "Load earlier messages" header the main transcript uses.
+  // The children render inline inside the parent's card (which lives in the
+  // parent Virtuoso), so like the main path post-BET-679 there is no manual
+  // scroll math — Virtuoso anchors the parent's item as the card grows upward.
+  const showChildLoadEarlier =
+    !!ctx &&
+    childMsgs != null &&
+    childMsgs.length >= TRANSCRIPT_TAIL_LIMIT &&
+    !ctx.childLoadedAllRef.current.get(info.childSessionId);
   const liveState = ctx?.liveStatus.get(info.childSessionId);
   // Prefer live SSE status over the parent's transcript snapshot (which lags
   // by one refetch cycle). Maps "running" → still going, "idle" → finished.
@@ -123,6 +136,13 @@ export function TaskCard({ state }: { state: ToolState }) {
         <div className="px-4 pb-3 border-l-2 border-border flex flex-col" style={{ gap: "var(--sp-2)" }}>
           {childMsgs && childMsgs.length > 0 && (
             <div className="flex flex-col gap-2">
+              {showChildLoadEarlier && (
+                <LoadEarlierHeader
+                  showLoadEarlier
+                  loadingEarlier={ctx.loadingChildEarlier.has(info.childSessionId)}
+                  onLoadEarlier={() => ctx.loadEarlierChild(info.childSessionId)}
+                />
+              )}
               {childMsgs.map((m) => (
                 <MessageRow
                   key={m.info.id}
