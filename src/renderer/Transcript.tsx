@@ -21,9 +21,11 @@
 import { forwardRef, useEffect, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
-import { TaskContext, type TaskContextValue } from "./chatShared";
+import { TaskContext, type TaskContextValue, presentVerbFor } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { MantaLoader } from "./MantaLoader";
+import { CardMount } from "./components/CardMount";
+import { WORKING_TICK_MS, nowMs, useClockTick } from "./clock";
 import { QuestionCard } from "./Cards";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
@@ -32,7 +34,10 @@ import {
   createEntryMotionState,
   isBackgroundJobCompletionTurn,
   updateEntryMotion,
+  formatDuration,
+  formatTokens,
   type EntryMotionState,
+  type LiveTurn,
 } from "./chatUtils";
 
 // ===== Virtuoso context =====
@@ -45,6 +50,7 @@ import {
 
 type TranscriptContext = {
   running: boolean;
+  liveTurn: LiveTurn | null;
   showLoadEarlier: boolean;
   loadingEarlier: boolean;
   onLoadEarlier: () => void;
@@ -160,29 +166,60 @@ const LoadEarlier = ({ context }: { context: TranscriptContext }) => (
   </div>
 );
 
-// The live "working" indicator (BET-677). A constant-height row at the tail of
-// the transcript that is ALWAYS rendered and toggles `visibility` instead of
-// mounting/unmounting — so flipping `running` on send never reflows the
-// reading column (the exact reflow the deleted pre-BET-664 indicator caused).
-// The slot stays 28px whether a turn is in flight or not. Lives in the
-// virtualized footer (BET-679) so it sits at the tail and scrolls with the
-// conversation, exactly where the hand-rolled scroller drew it.
-export function WorkingIndicator({ running }: { running: boolean }) {
+// The live "working" indicator (BET-677). A real status line at the tail of
+// the transcript, rendered only while a turn is in flight: the loader, a
+// present-tense verb, the elapsed time ticking once per second, and the
+// turn's tokens so far. It mounts and unmounts (animated by CardMount) rather
+// than reserving a permanent slot, so the idle transcript collapses to zero
+// extra height — the opposite of the pre-BET-664 reserved-band design. Lives
+// in the virtualized footer (BET-679) so it sits at the tail and scrolls with
+// the conversation. Deliberately presentational: `running` comes from the
+// event stream, `liveTurn` (the trailing turn's metrics) from computeLiveTurn
+// — this component only renders.
+export function WorkingIndicator({
+  running,
+  liveTurn,
+}: {
+  running: boolean;
+  liveTurn: LiveTurn | null;
+}) {
+  // Re-render (and thus re-read the clock during render) once per second so
+  // the elapsed label advances on its own. The component is only mounted
+  // while running — CardMount unmounts it when idle — so no ticker runs
+  // between turns.
+  useClockTick(WORKING_TICK_MS);
   return (
-    <div
-      className="manta-working-indicator flex items-center gap-2 shrink-0"
-      style={{
-        height: 28,
-        // Virtuoso renders Footer OUTSIDE List, so the List's flex `gap` never
-        // applies between the last row and this one — this margin IS that gap.
-        marginTop: "var(--block-gap)",
-        visibility: running ? "visible" : "hidden",
-      }}
-      aria-hidden={!running}
-    >
-      <MantaLoader />
-      <span className="text-text-faint text-xs">Working…</span>
-    </div>
+    <CardMount show={running} k="working">
+      <div
+        className="manta-working-indicator flex items-center gap-2 shrink-0"
+        style={{
+          // Virtuoso renders Footer OUTSIDE List, so the List's flex `gap`
+          // never applies between the last row and this one — this margin IS
+          // that gap. It sits INSIDE CardMount so the gap collapses along with
+          // the row.
+          marginTop: "var(--block-gap)",
+        }}
+      >
+        <MantaLoader />
+        <span className="text-text-faint text-xs">
+          {liveTurn ? (
+            <>
+              {presentVerbFor(liveTurn.verbSeedId)}…
+              {" · "}
+              {formatDuration(nowMs() - liveTurn.startedAt)}
+              {liveTurn.tokens > 0 && (
+                <>
+                  {" · "}
+                  {formatTokens(liveTurn.tokens)}
+                </>
+              )}
+            </>
+          ) : (
+            "Working…"
+          )}
+        </span>
+      </div>
+    </CardMount>
   );
 }
 
@@ -200,7 +237,7 @@ function TranscriptTail({ context }: { context: TranscriptContext }) {
     // so it needs its own copy of the reading inset (see TRANSCRIPT_INSET) and
     // the trailing gap the scroller's now-removed padding used to imply.
     <div style={{ ...TRANSCRIPT_INSET, paddingBottom: "var(--sp-6)" }}>
-      <WorkingIndicator running={context.running} />
+      <WorkingIndicator running={context.running} liveTurn={context.liveTurn} />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
       )}
@@ -236,6 +273,7 @@ export type TranscriptProps = {
   taskContextValue: TaskContextValue;
   showThinking: boolean;
   running: boolean;
+  liveTurn: LiveTurn | null;
   // Whether the user is actually viewing this panel. App.tsx keeps every
   // ChatPanel mounted and hides the inactive ones with display:none. Entry
   // motion is gated on this — a turn landing in a hidden panel is absorbed as
@@ -275,6 +313,7 @@ export function Transcript({
   taskContextValue,
   showThinking,
   running,
+  liveTurn,
   isActive,
   activeTodos,
   onDismissTodos,
@@ -330,6 +369,7 @@ export function Transcript({
 
   const virtuosoContext: TranscriptContext = {
     running,
+    liveTurn,
     showLoadEarlier:
       !loadedAllRef.current && messages.length >= TRANSCRIPT_TAIL_LIMIT,
     loadingEarlier,

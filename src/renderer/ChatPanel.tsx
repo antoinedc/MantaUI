@@ -7,7 +7,8 @@
 //   - Markdown for text parts (inline code, bold/italic, fenced code blocks,
 //     lists, headers)
 //   - Reasoning rendered as a dimmed italic `✻ Thinking…` block
-//   - Running state shows a cycling spinner glyph + verb + elapsed seconds
+//   - Running state shows a cycling loader + present-tense verb + live
+//     elapsed seconds + tokens so far at the tail of the transcript
 //   - Input is a single bordered box with a `>` prompt prefix
 //
 // No Electron-only deps — only `window.api.*` (the mobile HTTP server will
@@ -36,6 +37,7 @@ import {
   STALE_CACHE_MIN_TOKENS,
   countRunningSubagents,
   computeTurnInfo,
+  computeLiveTurn,
   shouldAutoRename,
   countUserTurns,
   buildTitlePromptInput,
@@ -1857,6 +1859,11 @@ export function ChatPanel({
     [messages, running],
   );
 
+  // Live metrics of the in-flight turn (startedAt, tokens, verb seed) for the
+  // working row at the transcript tail. Recomputes on every messages change;
+  // the row's per-second clock tick advances its elapsed label in place.
+  const liveTurn = useMemo(() => computeLiveTurn(messages), [messages]);
+
   // Slash-command provenance per USER message id. Two-source resolution:
   //
   //   (1) Live: opencode emits `command.executed.messageID` pointing at the
@@ -2067,6 +2074,7 @@ export function ChatPanel({
         taskContextValue={taskContextValue}
         showThinking={showThinking}
         running={running}
+        liveTurn={liveTurn}
         isActive={isActive}
         activeTodos={activeTodos}
         onDismissTodos={dismissTodos}
