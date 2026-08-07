@@ -22,6 +22,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { act, createRef } from "react";
+import type { VirtuosoHandle } from "react-virtuoso";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { Transcript, type TranscriptProps } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
@@ -54,12 +55,11 @@ function toolMsg(id: string, tool: string): OpencodeMessage {
 function props(messages: OpencodeMessage[], running = false): TranscriptProps {
   return {
     messages,
-    scrollRef: createRef<HTMLDivElement>(),
-    contentRef: createRef<HTMLDivElement>(),
-    questionCardRef: createRef<HTMLDivElement>(),
+    virtuosoRef: createRef<VirtuosoHandle>(),
     sessionId: "s1",
     setMessages: () => {},
     loadedAllRef: { current: false },
+    onAtBottomChange: () => {},
     taskContextValue: {
       childMessages: new Map(),
       liveChildStatus: new Map(),
@@ -183,6 +183,23 @@ describe("Transcript entry motion", () => {
     // Exactly the new one — the two rows already on screen are untouched.
     expect(bubblesIn(h)).toBe(1);
     expect(partsIn(h)).toBe(0);
+  });
+});
+
+describe("Transcript virtualization (react-virtuoso)", () => {
+  afterEach(() => {
+    (window as unknown as { api?: unknown }).api = undefined;
+  });
+
+  it("renders only a subset of rows for a long transcript (virtualization active)", () => {
+    const many = Array.from({ length: 150 }, (_, i) =>
+      msg(`m${i}`, i % 2 ? "assistant" : "user", `row ${i}`),
+    );
+    const h = mount(<Transcript {...props(many)} />);
+    const rows = h.container.querySelectorAll("[data-message-id]").length;
+    expect(rows).toBeGreaterThan(0);
+    expect(rows).toBeLessThan(many.length);
+    h.unmount();
   });
 });
 

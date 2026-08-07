@@ -14,6 +14,7 @@
 // shim that surface).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { VirtuosoHandle } from "react-virtuoso";
 import { Clock, X } from "lucide-react";
 import type {
   AvailableLauncher,
@@ -39,7 +40,6 @@ import {
   buildTitlePromptInput,
   buildTitleInstruction,
   sanitizeGeneratedTitle,
-  classifyScrollForPin,
   detectCommandFromText,
   formatBytes,
   type StaleCacheResult,
@@ -268,10 +268,6 @@ export function ChatPanel({
   const {
     messages,
     setMessages,
-    scrollRef,
-    contentRef,
-    pinnedToBottom,
-    stickToBottom,
     refreshing,
     setRefreshing,
     childSessionIds,
@@ -282,8 +278,6 @@ export function ChatPanel({
     childMessagesRef,
     isActiveRef,
     refetchOwedWhileInactive,
-    prevScrollHeight,
-    questionCardRef,
     wantQuestionScroll,
     applyStreamFlush,
     scheduleRefetch,
@@ -292,6 +286,27 @@ export function ChatPanel({
     loadedAllRef,
     fetchOpts,
   } = useTranscriptState({ sessionId, isActive });
+
+  // ===== Virtualized scroll (BET-679) =====
+  // react-virtuoso owns the transcript scroller (see Transcript.tsx). This
+  // component keeps a handle to it for the imperative scroll needs that the
+  // pin machinery used to cover — submit force-pin, re-pin on reactivation,
+  // and the deep-link jumps — plus a live at-bottom flag (the replacement for
+  // the deleted `pinnedToBottom` ref) fed by Virtuoso's atBottomStateChange.
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const atBottomRef = useRef(true);
+  const onAtBottomChange = useCallback((atBottom: boolean) => {
+    atBottomRef.current = atBottom;
+  }, []);
+  // Mirror of `messages` for event listeners (deep-link jumps) that need the
+  // current list without re-registering on every message update.
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const scrollToMessage = useCallback((messageId: string, behavior: "smooth" | "auto" = "smooth") => {
+    const idx = (messagesRef.current ?? []).findIndex((m) => m.info.id === messageId);
+    if (idx < 0) return;
+    virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior });
+  }, []);
 
   // ===== SSE bus state (extracted to useSseBus) =====
   const {
@@ -513,7 +528,9 @@ export function ChatPanel({
       if (detail?.sessionId === sessionId) {
         wantQuestionScroll.current = true;
         if (questions.length > 0) {
-          questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+          // The question cards live in the transcript's footer; scroll the last
+          // row into view so the footer (with the cards) is revealed.
+          virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
           wantQuestionScroll.current = false;
         }
       }
@@ -525,26 +542,31 @@ export function ChatPanel({
 
   // Artifacts panel → jump-to-message bridge (BET-660). Scrolls the transcript
   // to the row that owns an artifact's messageId and flashes it for ~1.2s.
-  // Same window-CustomEvent + scrollIntoView pattern as manta-scroll-to-question
-  // (the existing cross-component scroll precedent); the flash is a transient
-  // class that index.css animates out.
+  // Same window-CustomEvent + scroll pattern as manta-scroll-to-question (the
+  // existing cross-component scroll precedent), but via Virtuoso's
+  // scrollToIndex — the target row may not be in the DOM until Virtuoso
+  // renders it, so we scroll first, then flash once the row is mounted. The
+  // flash is a transient class that index.css animates out.
   useEffect(() => {
     const onScrollToMessage = (e: Event) => {
       const detail = (e as CustomEvent).detail as
         | { sessionId?: string; messageId?: string }
         | undefined;
       if (detail?.sessionId !== sessionId || !detail?.messageId) return;
-      const scroller = scrollRef.current;
-      if (!scroller) return;
-      const el = scroller.querySelector<HTMLElement>(`[data-message-id="${detail.messageId}"]`);
-      if (!el) return;
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.classList.add("manta-message-flash");
-      window.setTimeout(() => el.classList.remove("manta-message-flash"), 1200);
+      scrollToMessage(detail.messageId);
+      // After scrollToIndex, Virtuoso renders the target row; flash it once it
+      // exists (a frame or two later for the smooth scroll).
+      requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-id="${detail.messageId}"]`,
+        );
+        el?.classList.add("manta-message-flash");
+        window.setTimeout(() => el?.classList.remove("manta-message-flash"), 1200);
+      });
     };
     window.addEventListener("manta-scroll-to-message", onScrollToMessage);
     return () => window.removeEventListener("manta-scroll-to-message", onScrollToMessage);
-  }, [sessionId, scrollRef]);
+  }, [sessionId, scrollToMessage]);
 
   // Mobile keyboard-bar → /clear bridge (BET-259). The KeyboardBar's
   // `clear` key already showed the user a confirm; this listener hands the
@@ -575,42 +597,26 @@ export function ChatPanel({
   // start: questions arrive via the async fetch after this panel mounts).
   useEffect(() => {
     if (wantQuestionScroll.current && questions.length > 0) {
-      questionCardRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
       wantQuestionScroll.current = false;
     }
   }, [questions]);
 
   // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
-  // container is pinned to bottom we re-scroll so the input growing pushes
-  // the chat content up rather than sliding over it.
-  //
-  // Reads the LIVE DOM pin state rather than the event-cached
-  // `pinnedToBottom.current`. The cache lags scroll events (rAF-batched
-  // dispatch), so if a user scrolled up to read history and then typed a
-  // character, the cache could be stale=true and we'd snap them back.
-  // The live read uses `classifyScrollForPin` directly against the
-  // pre-resize scrollHeight, which is what the user actually sees.
+  // container is at the bottom we re-scroll so the input growing pushes the
+  // chat content up rather than sliding over it. Follows Virtuoso's live
+  // at-bottom flag (fed by atBottomStateChange) — the replacement for the
+  // deleted pin refs.
   const resizeInput = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
-    const scroller = scrollRef.current;
-    const wasAtBottom = scroller
-      ? classifyScrollForPin({
-          scrollHeight: scroller.scrollHeight,
-          scrollTop: scroller.scrollTop,
-          clientHeight: scroller.clientHeight,
-        })
-      : false;
     el.style.height = "auto";
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
-    if (wasAtBottom) {
-      stickToBottom();
-      // Resync derived state so a subsequent layout effect agrees.
-      pinnedToBottom.current = true;
-      if (scroller) prevScrollHeight.current = scroller.scrollHeight;
+    if (atBottomRef.current) {
+      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
     }
-  }, [stickToBottom]);
+  }, []);
   useEffect(() => {
     resizeInput();
   }, [input, resizeInput]);
@@ -644,28 +650,21 @@ export function ChatPanel({
     return () => cancelAnimationFrame(raf);
   }, [isActive, sessionId, messagesReady]);
 
-  // Re-pin to bottom when this panel becomes active again. GOTCHA: while
-  // App.tsx hides an inactive panel with `display:none`, the scroll
-  // container has no layout — `scrollHeight` reads 0, so the post-commit
-  // layout effect's `el.scrollTop = el.scrollHeight` becomes a no-op write
-  // of 0. New messages keep accumulating in the DOM while hidden, and when
-  // the user switches back the viewport is parked at the top of the (now-
-  // tall) container even though `pinnedToBottom.current` is still true.
-  // RAF after the display flip so layout is live and scrollHeight reflects
-  // the full transcript. Also resync `prevScrollHeight.current` to the
-  // post-stick scrollHeight so the next [messages] layout effect doesn't
-  // see a stale (small) prevScrollHeight and misderive that the user
-  // scrolled up by `currentScrollHeight - prevScrollHeight`.
+  // Re-pin to bottom when this panel becomes active again.
+  //
+  // GOTCHA (inherited from the pin machinery): while App.tsx hides an inactive
+  // panel with `display:none`, the scroller has no layout. New messages keep
+  // accumulating while hidden, and on re-activation the user should be back at
+  // the tail if they were there when the panel was deactivated. `atBottomRef`
+  // retains its last value across the hidden window (hidden panels fire no
+  // at-bottom change), so gating on it reproduces the old "was at bottom when
+  // deactivated" rule. Virtuoso owns the scroll position now, so a single
+  // scrollToIndex on reactivation is all that's needed.
   useEffect(() => {
     if (!isActive) return;
-    if (!pinnedToBottom.current) return;
-    const raf = requestAnimationFrame(() => {
-      stickToBottom();
-      const el = scrollRef.current;
-      if (el) prevScrollHeight.current = el.scrollHeight;
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [isActive, stickToBottom]);
+    if (!atBottomRef.current) return;
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+  }, [isActive]);
 
   // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
   // delta buffer are suppressed (see the gating refs near refetchTimer) so we
@@ -728,10 +727,7 @@ export function ChatPanel({
 
     // Optimistic transcript append — show the user's message NOW. The next
     // message-refetch (triggered by SSE) will overwrite `messages` entirely
-    // with the canonical state. Force-pin to bottom BEFORE the commit so the
-    // layout effect snaps to the freshly-appended turn.
-    pinnedToBottom.current = true;
-    prevScrollHeight.current = 0;
+    // with the canonical state.
     const optimisticUserId = `optimistic-user-${Date.now()}`;
     setMessages((prev) => [
       ...(prev ?? []),
@@ -752,6 +748,10 @@ export function ChatPanel({
         ],
       },
     ]);
+    // Force-pin to the tail after the optimistic append (replaces the deleted
+    // `pinnedToBottom.current = true; prevScrollHeight.current = 0` force-pin —
+    // Virtuoso owns the scroll, so the force-pin is one scrollToIndex).
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
 
     // Slash-command path: manta-local builtins → opencode commands → normal prompt.
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
@@ -2082,9 +2082,7 @@ export function ChatPanel({
 
       <Transcript
         messages={messages}
-        scrollRef={scrollRef}
-        contentRef={contentRef}
-        questionCardRef={questionCardRef}
+        virtuosoRef={virtuosoRef}
         sessionId={sessionId}
         setMessages={setMessages}
         loadedAllRef={loadedAllRef}
@@ -2103,6 +2101,7 @@ export function ChatPanel({
         userCommandInfo={userCommandInfo}
         onReplyQuestion={replyQuestion}
         onRejectQuestion={rejectQuestion}
+        onAtBottomChange={onAtBottomChange}
       />
 
       {/* Pending permission cards. Shown above the running indicator/input */}
