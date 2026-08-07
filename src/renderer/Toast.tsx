@@ -117,11 +117,17 @@ export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
     // serves both the chat column (where the overlay floats just above the
     // composer) and the Settings dialog (which supplies its own fixed
     // bottom-of-dialog wrapper). What this component owns is the framed list:
-    // centred, capped at 420px, each toast animating in/out. The per-toast
-    // `pointer-events-auto` keeps a toast interactive when its caller sets
-    // `pointer-events-none` on the overlay container (toasts only, never the
-    // dead backdrop).
-    <div className="shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2">
+    // centred, capped at 420px, each toast animating in/out.
+    //
+    // The root is `pointer-events-none` even though the stack is always
+    // rendered (it must stay mounted so the LAST toast's exit animation
+    // plays). The empty container still carries its padding, so at the
+    // Settings call site — where it sits inside a click-catching wrapper —
+    // that padding would otherwise read as a permanent invisible strip that
+    // swallows clicks on whatever scrolls under it. Each toast re-enables
+    // pointer events, so both surfaces keep fully interactive toasts and the
+    // dead backdrop never captures a click.
+    <div className="pointer-events-none shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2">
       <AnimatePresence initial={false}>
         {visible.map((t) => (
           <motion.div
