@@ -207,9 +207,10 @@ private struct ChatScreenContent: View {
         // `transcript`), so it is not duplicated here.
         // The composer FLOATS over the full-bleed transcript (an overlay, not
         // an inset), so messages genuinely pass under it while scrolling. A
-        // scrim sits directly beneath it dimming that passing content. Bounce
-        // is disabled on the transcript so nothing rubber-bands behind the
-        // glass (see `transcript`).
+        // scrim sits directly beneath it dimming that passing content. A
+        // bottom content margin on the transcript keeps the newest message
+        // resting above the composer at rest, and natural bounce returns (see
+        // `transcript`).
         // Scrim FIRST so it draws beneath the composer, sized to the composer
         // plus an overhang past the safe area — it dims content under the
         // composer and in the home-indicator strip below it.
@@ -517,11 +518,17 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // The composer floats over the full-bleed transcript, so the transcript
-        // must NOT bounce at the bottom — otherwise it rubber-bands content
-        // behind the glass. `DisableScrollBounceHelper` turns off bounce on the
-        // underlying UIKit scroll view (TiledView is UIKit-backed).
-        .background(DisableScrollBounceHelper())
+        // Keep the transcript's bottom edge ABOVE the floating composer so at
+        // rest the newest message (and typing indicator) rests readable above
+        // it. A content margin, not a viewport shrink, so the viewport stays
+        // full-bleed; `bottomBarHeight` tracks the composer stack as it
+        // grows/shrinks and as cards appear, so the inset follows for free.
+        // Applied AFTER the TiledView-only chaining above — its type is already
+        // erased to some View here, so this plain `View` modifier no longer
+        // hides the TiledView-typed modifiers chained before it. Placing it
+        // here (after the TiledView chain) is what lets TiledScrollPosition's
+        // auto-scroll-to-bottom land the newest message above the composer.
+        .contentMargins(.bottom, bottomBarHeight, for: .scrollContent)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
@@ -935,34 +942,5 @@ private struct QuestionCard: View {
                 customText: customText
             )
         )
-    }
-}
-
-/// Disables vertical bounce on the enclosing scroll view from the UIKit side,
-/// as a fallback for `.scrollBounceBehavior` (TiledView is UIKit-backed and may
-/// not honor the SwiftUI preference). Keeps the transcript from rubber-banding
-/// content behind the floating composer.
-struct DisableScrollBounceHelper: UIViewRepresentable {
-    func makeUIView(context: Context) -> some UIView {
-        let view = UIView(frame: .zero)
-        view.backgroundColor = .clear
-        view.isUserInteractionEnabled = false
-        // Give the scroll view a beat to materialise, then kill the bounce.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            view.owningScrollView()?.alwaysBounceVertical = false
-            view.owningScrollView()?.bounces = false
-        }
-        return view
-    }
-
-    func updateUIView(_ uiView: UIViewType, context: Context) {}
-}
-
-extension UIView {
-    /// The nearest `UIScrollView` in the view tree above (or including) self.
-    func owningScrollView() -> UIScrollView? {
-        if let sv = self as? UIScrollView { return sv }
-        if let vc = self as? UICollectionView { return vc }
-        return superview?.owningScrollView()
     }
 }
