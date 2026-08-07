@@ -181,7 +181,7 @@ export const ActiveTodos = memo(function ActiveTodos({
                 <TodoMark status={status} />
               </span>
               <span
-                className={`flex-1 min-w-0 whitespace-pre-wrap break-words ${textCls}`}
+                className={`flex-1 min-w-0 max-w-full whitespace-pre-wrap break-words ${textCls}`}
               >
                 {String(t.content ?? "")}
               </span>
@@ -223,7 +223,7 @@ const UserCommandBar = memo(function UserCommandBar({
         )}
       </button>
       {expanded && (
-        <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-code font-mono">
+        <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-code font-mono max-w-full">
           {expandedText}
         </div>
       )}

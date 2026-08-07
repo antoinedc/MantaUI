@@ -76,6 +76,7 @@ const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function Transcript
         display: "flex",
         flexDirection: "column",
         gap: "var(--turn-gap)",
+        maxWidth: "100%",
       }}
     >
       {children}
@@ -311,6 +312,7 @@ export function Transcript({
         {!hasMessages && (
           <motion.div
             key="empty"
+            className="flex-1 min-h-0 flex flex-col"
             initial={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ type: "tween", duration: 0.15 }}
@@ -321,7 +323,6 @@ export function Transcript({
               className="flex-1 overflow-y-auto overflow-x-hidden"
               style={{
                 padding: "var(--sp-6) 0",
-                marginBottom: "var(--sp-2)",
                 paddingInline: "var(--transcript-inset)",
               }}
             >
@@ -346,10 +347,9 @@ export function Transcript({
           <ErrorBoundary>
             <Virtuoso<OpencodeMessage, TranscriptContext>
               ref={virtuosoRef}
-              className="flex-1 overflow-x-hidden"
+              className="flex-1 overflow-x-hidden max-w-full"
               style={{
                 padding: "var(--sp-6) 0",
-                marginBottom: "var(--sp-2)",
                 paddingInline: "var(--transcript-inset)",
               }}
               data={messages}
