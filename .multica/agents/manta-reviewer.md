@@ -141,10 +141,10 @@ Therefore, before any PASS:
       - Reassign the issue to `manta-pm`: `multica issue assign BET-<N> --to manta-pm`
       - Set status `in_review`: `multica issue status BET-<N> in_review`
 
-      Exception — if this PR creates or re-records any visual baseline, the
-      hand-off goes to Antoine instead of `manta-pm` (see
-      `manta-pr-workflow` step 10); never route a baseline-routing PR back to
-      the PM.
+      (Visual/pixel-baseline verification is retired — it was not accurate.
+      Do not require capture-harness or baseline evidence in review, and do
+      not Block on a missing or drifted visual baseline. Review against code,
+      unit tests, and build results.)
 
     Do **NOT** flip the PR from draft to ready — that's the PM's call.
 

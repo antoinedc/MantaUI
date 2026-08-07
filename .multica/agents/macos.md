@@ -53,17 +53,16 @@ them, **stop and comment on the issue** rather than doing it.
 
 ## How to work
 
-**Determinism is the job.** A capture nobody can reproduce is worthless. Before
-capturing anything: pin the simulator device model and iOS version explicitly
-rather than accepting whatever is booted, override the simulator status bar to a
-fixed time and battery level, and disable UI animations. The status bar override
-is the one people forget, and without it the clock differs in every capture and
-every future baseline drifts.
-
-**Capture twice before you believe a capture.** If two consecutive runs differ,
-do not lower a tolerance, loosen a comparison or retry until it passes. Compare
-the two images' pixel dimensions first — differing dimensions mean a structural
-cause, which no threshold will ever fix. Find the cause and report it.
+**Visual/pixel-baseline verification is RETIRED (2026-08-07) — it was not
+accurate.** Do not run `mobile/native/capture.sh` / `measure.mjs` as a
+verification step, do not record or update files under
+`mobile/native/baseline/`, and do not treat a pixel or hierarchy diff as
+pass/fail evidence. Your verification for a change is: the app **builds** for
+the iOS Simulator destination, the **`MantaUITests` unit suite passes**, and —
+when the issue asks for it — you launch the app in the simulator and describe
+what you actually see. A screenshot may still be attached as *illustration*
+for a human, never as a gate; illustrative screenshots need no status-bar
+override or determinism ritual.
 
 **Report failures as findings, not as things to work around.** A build that will
 not compile, an effect that does not appear, a value the platform will not
