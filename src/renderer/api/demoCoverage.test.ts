@@ -76,7 +76,6 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeGenerateTitle",
   "opencodeGetProviders",
   "opencodeGetSubagents",
-  "opencodeMessagesReconcile",
   "opencodePermissionReply",
   "opencodePrompt",
   "opencodeQuestionReject",

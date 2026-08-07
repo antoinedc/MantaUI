@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   createEntryMotionState,
   updateEntryMotion,
@@ -86,6 +86,7 @@ import {
   previewLanguage,
   previewOriginWord,
   decodeDataUri,
+  fetchTranscriptWithRetry,
 } from "./chatUtils";
 
 import type { OpencodeModel } from "../shared/types";
@@ -3019,5 +3020,59 @@ describe("decodeDataUri", () => {
   });
   it("returns null for a malformed data URI", () => {
     expect(decodeDataUri("data:image/png")).toBeNull();
+  });
+});
+
+describe("transcript initial-fetch timeout + retry", () => {
+  it("resolves on the first attempt without touching the retry path", async () => {
+    const fetchOnce = vi.fn(() => Promise.resolve(["a"]));
+    await expect(
+      fetchTranscriptWithRetry(fetchOnce, { timeoutMs: 15000, retryDelayMs: 2000 }),
+    ).resolves.toEqual(["a"]);
+    expect(fetchOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out, waits the cooldown, then a retry succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const fetchOnce = vi.fn(() => {
+        calls++;
+        return calls === 1
+          ? new Promise(() => {}) // never resolves → timeout
+          : Promise.resolve(["loaded"]);
+      });
+      const p = fetchTranscriptWithRetry(fetchOnce, {
+        timeoutMs: 1000,
+        retryDelayMs: 2000,
+      });
+      await vi.advanceTimersByTimeAsync(1000); // first attempt times out
+      await vi.advanceTimersByTimeAsync(2000); // cooldown elapses
+      await expect(p).resolves.toEqual(["loaded"]);
+      expect(fetchOnce).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out, cooldown, times out again → rejects (loadError path)", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchOnce = vi.fn(() => new Promise(() => {}));
+      const p = fetchTranscriptWithRetry(fetchOnce, {
+        timeoutMs: 1000,
+        retryDelayMs: 2000,
+      });
+      // Attach the rejection handler EAGERLY — if it's only attached after the
+      // timer advances, the retry's timeout rejection lands as unhandled.
+      const assertion = expect(p).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(1000);
+      await assertion;
+      expect(fetchOnce).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

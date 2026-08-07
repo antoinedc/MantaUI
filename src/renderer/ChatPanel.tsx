@@ -182,7 +182,7 @@ export function ChatPanel({
   // state, refresh callbacks, poll effects, session resets, and the mobile
   // `manta-open-*` window-event bridges. Extracted to a self-contained hook
   // (BET-63) because none of it touches the SSE / pin-to-bottom / message core.
-  const resources = useSessionResources(sessionId);
+  const resources = useSessionResources(sessionId, isActive);
   const {
     showSchedules,
     setShowSchedules,
@@ -226,6 +226,9 @@ export function ChatPanel({
   const [jobOwnership, setJobOwnership] = useState<DelegateJob | null>(null);
   useEffect(() => {
     setJobOwnership(null);
+    // Hidden panel — stop polling; the effect re-runs (and refires once) when
+    // isActive flips back on.
+    if (!isActive) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -238,7 +241,7 @@ export function ChatPanel({
     void poll();
     const t = setInterval(poll, 10_000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [sessionId]);
+  }, [sessionId, isActive]);
 
   const projects = useStore((s) => s.projects);
   const setActive = useStore((s) => s.setActive);
@@ -285,6 +288,8 @@ export function ChatPanel({
     scheduleRefetch,
     spliceMessage,
     toggleTaskExpand,
+    loadedAllRef,
+    fetchOpts,
   } = useTranscriptState({ sessionId, isActive });
 
   // ===== SSE bus state (extracted to useSseBus) =====
@@ -315,12 +320,15 @@ export function ChatPanel({
     rejectAllPendingQuestions,
     refreshPermissions,
     refreshQuestions,
+    transcriptLoadError,
+    retryTranscriptLoad,
   } = useSseBus({
     sessionId,
     cwd,
     setMessages,
     setRefreshing,
     scheduleRefetch,
+    fetchOpts,
     spliceMessage,
     scheduleChildRefetch: (childId: string) => {
       // Per-child debounced refetch — called when a known child's
@@ -380,6 +388,7 @@ export function ChatPanel({
   useEffect(() => {
     setPendingApproval(null);
     if (chatAutoAllowApproval) return; // trust mode → server never requests approval
+    if (!isActive) return; // hidden panel — stop polling; refire once on reactivation
     let cancelled = false;
     const poll = async () => {
       try {
@@ -398,7 +407,7 @@ export function ChatPanel({
     void poll();
     const t = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [sessionId, chatAutoAllowApproval]);
+  }, [sessionId, chatAutoAllowApproval, isActive]);
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
@@ -454,13 +463,23 @@ export function ChatPanel({
     setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
-    // Branch indicator: poll every 5s while this session is mounted.
+    // NOTE: the BRANCH POLL is intentionally NOT here. Chat panels stay
+    // mounted (hidden with display:none) and this reset effect must only run
+    // on a genuine session change — if isActive were a dep here, switching
+    // away and back would re-run the reset and wipe staged attachments, @agent
+    // mentions and the /help notice out of the composer. The poll lives in its
+    // own visibility-gated effect below.
+  }, [sessionId, cwd, refreshBranch]);
+
+  // Branch indicator: poll every 5s while this session is visible. Gated on
+  // isActive — hidden panels stop polling; the effect re-fires (one
+  // refreshBranch on entry) when isActive flips back on.
+  useEffect(() => {
+    if (!isActive) return;
     refreshBranch(cwd);
     const branchPoll = setInterval(() => refreshBranch(cwd), 5000);
-    return () => {
-      clearInterval(branchPoll);
-    };
-  }, [sessionId, cwd, refreshBranch]);
+    return () => clearInterval(branchPoll);
+  }, [cwd, refreshBranch, isActive]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -1971,12 +1990,25 @@ export function ChatPanel({
     return () => setChatMessages(sessionId, []);
   }, [sessionId, setChatMessages]);
 
-  if (error) {
+  if (error || transcriptLoadError) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg text-text-muted p-6 font-mono">
-        <div className="max-w-md text-body">
+      <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-bg text-text-muted p-6 font-mono">
+        <div className="max-w-md text-body text-center">
           <div className="font-semibold text-text mb-2">Couldn't load session</div>
-          <pre className="whitespace-pre-wrap break-words text-meta text-text-faint">{error}</pre>
+          <pre className="whitespace-pre-wrap break-words text-meta text-text-faint">
+            {transcriptLoadError ?? error}
+          </pre>
+          {transcriptLoadError && (
+            <div className="mt-4 flex justify-center">
+              <button
+                type="button"
+                onClick={retryTranscriptLoad}
+                className="rounded-md border border-border px-4 py-2 text-body text-text hover:bg-bg-soft"
+              >
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -2052,6 +2084,9 @@ export function ChatPanel({
         scrollRef={scrollRef}
         contentRef={contentRef}
         questionCardRef={questionCardRef}
+        sessionId={sessionId}
+        setMessages={setMessages}
+        loadedAllRef={loadedAllRef}
         taskContextValue={taskContextValue}
         showThinking={showThinking}
         running={running}

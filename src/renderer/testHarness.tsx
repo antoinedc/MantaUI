@@ -98,8 +98,6 @@ function defaultApiImpl(): Record<string, unknown> {
     opencodeOpenStream: () => Promise.resolve(),
     opencodeCloseStream: () => Promise.resolve(),
     opencodeMessages: () => Promise.resolve([]),
-    opencodeMessagesCached: () => Promise.resolve(null),
-    opencodeMessagesReconcile: () => Promise.resolve([]),
     opencodeModels: () => Promise.resolve([]),
     opencodeDefaultModel: () => Promise.resolve(null),
     opencodeVcsBranch: () => Promise.resolve(null),

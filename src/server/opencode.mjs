@@ -520,14 +520,31 @@ export function slimTranscript(messages) {
     const kept = [];
     for (const part of parts) {
       if (SLIM_DROP_PART_TYPES.has(part?.type)) continue;
-      kept.push(slimPart(part));
+      kept.push(stripDuplicateToolOutputPart(part));
     }
     return { ...msg, parts: kept };
   });
 }
 
+/** Strip a single message's byte-identical duplicate tool output — lossless.
+ *  Only exact duplicates (metadata.output === state.output) are removed; the
+ *  renderer's `resolveToolOutput` prefers `state.output`, so the live text is
+ *  preserved. Applied to EVERY transcript for every client (listMessages and
+ *  the single-message splice getMessage both run it), independent of the
+ *  iOS-only `slim` option. Does not mutate the input. */
+export function stripDuplicateToolOutput(message) {
+  if (!message || !Array.isArray(message.parts)) return message;
+  let changed = false;
+  const parts = message.parts.map((part) => {
+    const next = stripDuplicateToolOutputPart(part);
+    if (next !== part) changed = true;
+    return next;
+  });
+  return changed ? { ...message, parts } : message;
+}
+
 /** Drop a tool part's duplicated stdout. Returns the part unchanged otherwise. */
-function slimPart(part) {
+function stripDuplicateToolOutputPart(part) {
   const state = part?.state;
   const metadata = state?.metadata;
   if (!metadata || typeof metadata !== "object") return part;
@@ -543,8 +560,10 @@ function slimPart(part) {
  *  @param {{limit?: number, slim?: boolean}} [opts]
  *    limit — return only the most recent N messages (opencode's `?limit=`
  *      returns the TAIL, chronologically ordered; verified live). Omit for the
- *      whole history, which is what the desktop still does.
- *    slim  — apply `slimTranscript` (see above). Opt-in; mobile only.
+ *      whole history (the desktop's "Load earlier" / follow-up refetches).
+ *    slim  — additionally drop parts the iOS client never renders (opt-in;
+ *      mobile only). Duplicate tool stdout is ALWAYS stripped for every
+ *      client regardless of `slim` (see stripDuplicateToolOutput).
  */
 export async function listMessages(sessionId, opts = {}) {
   // Open the session's scoped event stream BEFORE reading the transcript
@@ -572,7 +591,8 @@ export async function listMessages(sessionId, opts = {}) {
     throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
   }
   const messages = await res.json();
-  return opts.slim ? slimTranscript(messages) : messages;
+  const stripped = messages.map(stripDuplicateToolOutput);
+  return opts.slim ? slimTranscript(stripped) : stripped;
 }
 
 /** Fetch a single message by id (GET /session/{id}/message/{messageID}).
@@ -588,24 +608,10 @@ export async function getMessage(sessionId, messageId) {
       await discardBody(res);
       return null;
     }
-    return res.json();
+    return stripDuplicateToolOutput(await res.json());
   } catch {
     return null;
   }
-}
-
-/** Reconcile a session's transcript.
- *
- *  The desktop main process keeps a per-session transcript cache and does a
- *  fast tail-merge here. The mobile/web server is a stateless proxy with no
- *  such cache to merge against, so reconcile == a full pull. Mobile thus keeps
- *  its current behavior (no regression); the incremental win is desktop-only,
- *  where the cache exists. Kept as a distinct entry point so the renderer can
- *  call one API on both platforms.
- *  @param {string} sessionId
- */
-export async function reconcileMessages(sessionId) {
-  return listMessages(sessionId);
 }
 
 /**

@@ -569,24 +569,14 @@ export const IPC = {
   desktopNotify: "desktop:notify",
 
   // ---- opencode chat-mode ----
-  // Fetch full transcript for a session id (one-shot HTTP call on the remote).
+  // Fetch a session's transcript (one-shot HTTP call on the remote).
+  // args[1] is an optional {limit} — opencode returns the chronological TAIL.
   opencodeMessages: "opencode:messages",
-  // Synchronous-ish cached transcript lookup. Returns the last successful
-  // `opencodeMessages` payload from disk (or null on miss). Used by the
-  // renderer to paint the chat panel instantly while the slow fresh fetch
-  // runs in the background.
-  opencodeMessagesCached: "opencode:messages-cached",
   // Fetch a single message by id (GET /session/{id}/message/{messageID}, ~20–80ms).
   // Used to splice a finalized/changed message into the renderer's transcript
   // during a live turn instead of re-pulling the whole (up to 3 MB) transcript.
   // Returns null on miss/error so the caller can fall back to a full refetch.
   opencodeMessage: "opencode:message",
-  // Reconcile a session's transcript against the renderer's known message ids
-  // by fetching only the recent tail (GET .../message?limit=N) and merging it
-  // into the cached array. Returns the merged full transcript. Falls back to a
-  // full pull when the tail doesn't overlap the cache (a gap), so history is
-  // never truncated. Replaces the full refetch on session-switch/reconnect.
-  opencodeMessagesReconcile: "opencode:messages-reconcile",
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",

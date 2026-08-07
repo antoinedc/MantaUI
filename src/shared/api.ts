@@ -200,10 +200,11 @@ export interface Api {
   onStatusEvent(cb: (batch: WindowStatus[]) => void): () => void;
 
   // opencode chat-mode bridges.
-  opencodeMessages(sessionId: string): Promise<OpencodeMessage[]>;
-  opencodeMessagesCached(sessionId: string): Promise<OpencodeMessage[] | null>;
-  // Tail-merge reconcile (fast) — returns the merged full transcript.
-  opencodeMessagesReconcile(sessionId: string): Promise<OpencodeMessage[]>;
+  // opts.limit — return only the most recent N messages (opencode returns the
+  //   chronological TAIL). Omit (or pass {}) for the whole history. The
+  //   desktop passes {limit: 100} for the tail-first mount and {} for
+  //   "Load earlier". Duplicate tool stdout is stripped server-side always.
+  opencodeMessages(sessionId: string, opts?: { limit?: number }): Promise<OpencodeMessage[]>;
   // Single-message fetch — returns null on miss so callers can fall back.
   opencodeMessage(sessionId: string, messageId: string): Promise<OpencodeMessage | null>;
   // Open/close the scoped SSE stream for a session. ChatPanel calls open on

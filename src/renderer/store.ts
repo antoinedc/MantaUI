@@ -1002,7 +1002,7 @@ export const useStore = create<State>((set, get) => ({
           // check whether the turn is actually still in flight.
           let inFlight = false;
           try {
-            const messages = await window.api.opencodeMessages(sid);
+            const messages = await window.api.opencodeMessages(sid, { limit: 20 });
             inFlight = isAssistantTurnInProgress(messages);
           } catch {
             // Transcript fetch failed — skip this session this launch rather

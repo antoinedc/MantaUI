@@ -20,7 +20,7 @@
 // the ones that actually fired during mount:
 //
 //   configGet, tmuxList, onStatusEvent,
-//   opencodeMessages, opencodeMessagesCached,
+//   opencodeMessages,
 //   opencodePermissions, opencodeQuestions, opencodeVcsBranch,
 //   opencodeListSessions, opencodeModels, opencodeDefaultModel,
 //   opencodeOpenStream, opencodeCloseStream, onOpencodeEvent,
@@ -381,7 +381,7 @@ const previewArtifactsImageMessage = {
   ],
 } as OpencodeMessage;
 
-const opencodeMessages = (sessionId: string) =>
+const opencodeMessages = (sessionId: string, _opts?: { limit?: number }) =>
   forActiveSession(
     sessionId,
     DEMO_STATE === "artifacts"
@@ -405,11 +405,8 @@ const opencodeMessage = (_sessionId: string, messageId: string) => {
   return Promise.resolve(hit);
 };
 
-// The renderer uses `opencodeMessagesCached` as a fast first paint; a null
-// cache miss means "fall through to opencodeMessages". Match that exact
-// contract — a real cache hit would be the full transcript.
-const opencodeMessagesCached = (_sessionId: string): Promise<unknown[] | null> =>
-  Promise.resolve(null);
+// The renderer fetches transcripts through `opencodeMessages` (with an
+// optional {limit} tail). There is no separate cached/reconcile channel.
 
 const opencodePermissions = (sessionId?: string) => forActiveSession(sessionId, [demoState.permission]);
 const opencodeQuestions = (sessionId?: string) => forActiveSession(sessionId, [demoState.question]);
@@ -570,7 +567,6 @@ export const explicitMethods = {
   tmuxList,
   onStatusEvent,
   opencodeMessages,
-  opencodeMessagesCached,
   opencodeMessage,
   opencodePermissions,
   opencodeQuestions,

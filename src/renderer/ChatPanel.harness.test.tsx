@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import {
   installMockApi,
   resetStore,
@@ -362,13 +363,31 @@ describe("ChatPanel session resources", () => {
     expect(api.calls.uploadBuffer ?? []).toEqual([]);
     expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeNull();
   });
+
+  it("keeps staged attachments when the panel is hidden then reshown (isActive toggle must not reset the composer)", async () => {
+    // Reuse the shared attach-bridge harness (it stages an upload and returns
+    // the mounted panel) rather than duplicating the setup here.
+    const panel = await dispatchAttachBridge("ses_test");
+    expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeTruthy();
+
+    // App.tsx keeps hidden panels MOUNTED (display:none) and flips isActive.
+    // If the visibility toggle re-ran the session-reset effect, the staged
+    // attachment would be wiped here — the regression BET-676 Block 2 caught.
+    panel.rerender(<ChatPanel {...PROPS} isActive={false} />);
+    await panel.flush();
+    panel.rerender(<ChatPanel {...PROPS} isActive={true} />);
+    await panel.flush();
+
+    // The staged attachment survived the hide/reshow cycle.
+    expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeTruthy();
+  });
 });
 
 // ===== Transcript rendering (via the mounted ChatPanel) =====
 //
 // Verifies the extracted <Transcript> renders a fetched transcript: a user
 // turn's text and an assistant turn's text both appear in the DOM. Drives the
-// canonical fetch path (opencodeMessagesReconcile) the container uses on mount.
+// canonical fetch path (opencodeMessages) the container uses on mount.
 describe("ChatPanel transcript rendering", () => {
   let h: Harness | null = null;
 
@@ -398,7 +417,6 @@ describe("ChatPanel transcript rendering", () => {
       },
     ];
     installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     });
     resetStore();
@@ -409,6 +427,33 @@ describe("ChatPanel transcript rendering", () => {
     expect(text).toContain("general kenobi");
     // The empty-state welcome is gone once a transcript is present.
     expect(text).not.toContain("Welcome. Type a message below to start.");
+  });
+
+  it("performs exactly ONE mount fetch, tail-limited, with no self-heal double fetch", async () => {
+    const transcript = [
+      {
+        info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
+        parts: [{ type: "text", id: "prt_u1", messageID: "msg_u1", text: "hello there" }],
+      },
+    ];
+    const fetchCalls: Array<[string, unknown]> = [];
+    installMockApi({
+      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
+        fetchCalls.push([sessionId, opts]);
+        return Promise.resolve(transcript);
+      },
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await h.flush();
+    // Single fetch path — the unconditional self-heal refetch is gone. The
+    // mount fetch pulls the TAIL ({ limit: 100 }) until "Load earlier" flips
+    // loadedAllRef.
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0][0]).toBe("ses_test");
+    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT });
+    expect(h.text()).toContain("hello there");
   });
 });
 
@@ -492,7 +537,6 @@ describe("ChatPanel composer submit", () => {
       },
     ];
     ({ api } = installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     }));
     resetStore();
@@ -567,7 +611,6 @@ describe("ChatPanel abort rejects orphaned questions", () => {
       },
     ];
     ({ api, bus } = installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     }));
     resetStore();
