@@ -290,6 +290,45 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(resulting, original)
     }
 
+    // MARK: - Subagent upsert (BET-672)
+
+    /// A subagent that goes running→done for the SAME child must leave exactly
+    /// one record with status `done`, and its running count over the array must
+    /// be 0 — the previous append left BOTH records and inflated the count.
+    func testSubagentUpsertReplacesByChildSessionID() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_child","status":"running","runningCount":1}}"#),
+            to: state
+        )
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_child","status":"done"}}"#),
+            to: state
+        )
+
+        XCTAssertEqual(state.subagents.count, 1)
+        XCTAssertEqual(state.subagents[0].childSessionId, "ses_child")
+        XCTAssertEqual(state.subagents[0].status, "done")
+        let running = state.subagents.filter { $0.status == "running" }
+        XCTAssertEqual(running.count, 0)
+    }
+
+    /// Distinct children still append — the upsert is keyed by child id, so two
+    /// different children coexist.
+    func testSubagentUpsertAppendsDistinctChildren() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_a","status":"running"}}"#),
+            to: state
+        )
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_b","status":"running"}}"#),
+            to: state
+        )
+
+        XCTAssertEqual(state.subagents.count, 2)
+    }
+
     // MARK: - Retiring covered text (BET-655)
 
     private func flush(_ messageID: String, _ partID: String, _ text: String, field: String = "text") throws -> MantaStreamFrame {
@@ -534,6 +573,62 @@ final class MantaEventStoreTests: XCTestCase {
         XCTAssertTrue(store.sessionStates.isEmpty)
     }
 
+    // MARK: - Turn-complete chunk eviction for unobserved sessions (BET-672)
+
+    /// A turn that COMPLETES with no observer attached has nobody to retire its
+    /// accumulated chunks, so the store must clear them or they accumulate
+    /// without bound for an unopened session.
+    func testTurnCompleteClearsChunksWhenSessionUnobserved() throws {
+        let fake = FakeStreamControl()
+        fake.drive(.connected)
+        let store = makeStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"Hello"}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.textByPart["part_3"], "Hello")
+
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+
+        XCTAssertEqual(store.sessionStates["ses_1"]?.turnComplete, true)
+        XCTAssertTrue(store.sessionStates["ses_1"]?.chunks.isEmpty ?? false)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.liveText, "")
+    }
+
+    /// An OBSERVED session keeps its chunks past completion — the observing
+    /// ChatSessionStore owns retirement via its refetch, and the live text is
+    /// load-bearing for the open transcript.
+    func testTurnCompleteKeepsChunksWhenSessionObserved() throws {
+        let fake = FakeStreamControl()
+        fake.drive(.connected)
+        let store = makeStore(fake)
+        store.registerSession("ses_1")
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"Hello"}}"#)
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+
+        XCTAssertEqual(store.sessionStates["ses_1"]?.turnComplete, true)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.textByPart["part_3"], "Hello")
+    }
+
+    /// Registration is un-done by unregistering, so a session that later stops
+    /// being observed becomes eligible again.
+    func testUnregisterSessionRestoresEviction() throws {
+        let fake = FakeStreamControl()
+        fake.drive(.connected)
+        let store = makeStore(fake)
+        store.registerSession("ses_1")
+
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"Hello"}}"#)
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.textByPart["part_3"], "Hello")
+
+        store.unregisterSession("ses_1")
+        // A fresh turn streams + completes while unobserved -> chunks clear.
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_9","partID":"part_1","field":"text","text":"next"}}"#)
+        fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
+
+        XCTAssertEqual(store.sessionStates["ses_1"]?.liveText, "")
+    }
+
     func testDegradedStopsNewInterpretationButKeepsDeliveredData() throws {
         let fake = FakeStreamControl()
         fake.hasConnectedOnce = true
@@ -702,6 +797,10 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
         fake.hasConnectedOnce = true
         fake.drive(.connected)
         let eventStore = makeEventStore(fake)
+        // This test drives the refetch path, which lives in the observing
+        // ChatSessionStore — register the session as the observed consumer so
+        // turn-complete chunk eviction (BET-672) doesn't apply here.
+        eventStore.registerSession("ses_1")
 
         fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_2","partID":"part_3","field":"text","text":"the answer"}}"#)
         fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
