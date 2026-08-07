@@ -264,8 +264,8 @@ export const demoBranch = BRANCH;
 //
 // The last assistant message has NO `time.completed` so
 // `isAssistantTurnInProgress` returns true → replayChatAttention latches
-// attention correctly, the running indicator / ✻ Ruminating… line is
-// rendered, and the last step's token usage drives the context bar.
+// attention correctly, the working row at the transcript tail is rendered,
+// and the last step's token usage drives the context bar.
 // =============================================================================
 export const demoMessages: OpencodeMessage[] = [
   // User turn — the developer asked for a CSV export endpoint.
@@ -1050,8 +1050,8 @@ function beatState(t: number): {
   // The currently-rendered question request (or null when resolved).
   currentQuestion: typeof demoQuestion | null;
   // Whether the in-flight assistant message is still running (no
-  // `time.completed`) or has finished (time.completed set). Drives the
-  // running dot + "Ruminating…" line.
+  // `time.completed`) or has finished (time.completed set). Drives whether
+  // the working row shows the in-flight state at the transcript tail.
   assistantRunning: boolean;
 } {
   // Default: Beat 1 / desktop / running / pending permission.
@@ -1213,7 +1213,7 @@ export function applyDemoStateAt(t: number): typeof demoState {
   demoState.permission = next.permission as typeof demoState.permission;
   // Stamp a `time.completed` on the in-flight assistant message when the
   // assistant is no longer running. The renderer checks this to decide
-  // whether to render the "Ruminating…" line / pulsing running dot.
+  // whether the working row shows the in-flight state at the transcript tail.
   if (!next.activeSessionId) {
     // No active session; leave the message alone.
   } else if (demoMessages[1].info) {

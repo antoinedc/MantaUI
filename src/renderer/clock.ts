@@ -7,18 +7,18 @@
 // seeds `videoRenderNow` to `DEMO_T0` and `useFrameSync` updates it
 // per-frame from `DEMO_T0 - t*1000`. With this seam, every elapsed-time
 // label that used to read `Date.now()` — Sidebar's session-age chip
-// (`Sidebar.tsx`), ChatPanel's running-indicator "X seconds ago"
-// (`MessageRow.tsx:RunningIndicator`) — becomes a function of the
+// (`Sidebar.tsx`) and the transcript's working row
+// (`Transcript.tsx:WorkingIndicator`) — becomes a function of the
 // fixture's anchored time, not the wall clock. Two consecutive renders
 // are byte-identical for that frame.
 //
 // The renderer was already designed to subscribe to per-frame store
 // updates (via `useStore()` at the top of `Sidebar`), so pushing
 // `videoRenderNow` per-frame from the composition triggers the
-// expected re-renders. `MessageRow.tsx`'s `setInterval(() => setTick)` is
-// now a no-op for elapsed-time purposes (the deterministic clock drives
-// the label) but is kept so the tick-and-re-render cycle continues to
-// run — stripping it would change unrelated behavior.
+// expected re-renders. The working row subscribes to the shared ticker
+// via `useClockTick(WORKING_TICK_MS)` for its elapsed label; under the
+// deterministic clock those ticking re-renders are also byte-identical
+// for the elapsed-time parts of the label.
 import { useSyncExternalStore } from "react";
 import { useStore } from "./store";
 
@@ -59,44 +59,83 @@ export function nowMs(): number {
 // minute boundary to 10s while costing one shallow re-render per 10s.
 export const AGE_TICK_MS = 10_000;
 
-const tickListeners = new Set<() => void>();
-let tickTimer: ReturnType<typeof setInterval> | null = null;
-let tickVersion = 0;
+// The working row's cadence: its elapsed label is second-granular, so it
+// re-renders (and re-reads the clock) once per second while a turn is in
+// flight. Because the row subscribes only while mounted and CardMount unmounts
+// it when idle, no 1s ticker runs between turns.
+export const WORKING_TICK_MS = 1_000;
 
-function subscribeTick(onChange: () => void): () => void {
-  tickListeners.add(onChange);
-  if (tickTimer == null) {
-    tickTimer = setInterval(() => {
-      tickVersion++;
-      for (const fn of tickListeners) {
+// ONE shared interval PER TICK INTERVAL (keyed by intervalMs) — not one per
+// row and not one global — so the 10s age subscribers and the 1s working-row
+// subscriber each own their own timer instead of dragging onto one cadence. N
+// subscribers on the same interval cost N re-renders on one tick, and each
+// bucket is torn down when its last subscriber unmounts. The tick only forces
+// a re-render — the value still comes from `nowMs()`, so demo mode stays
+// deterministic: with `videoRenderNow` pinned, ticking re-renders are
+// byte-identical and the visual baselines are unaffected.
+type TickerBucket = {
+  listeners: Set<() => void>;
+  timer: ReturnType<typeof setInterval> | null;
+  version: number;
+};
+const tickerBuckets = new Map<number, TickerBucket>();
+
+function bucketFor(intervalMs: number): TickerBucket {
+  let b = tickerBuckets.get(intervalMs);
+  if (!b) {
+    b = { listeners: new Set(), timer: null, version: 0 };
+    tickerBuckets.set(intervalMs, b);
+  }
+  return b;
+}
+
+function subscribeTick(intervalMs: number, onChange: () => void): () => void {
+  const b = bucketFor(intervalMs);
+  b.listeners.add(onChange);
+  if (b.timer == null) {
+    b.timer = setInterval(() => {
+      b.version++;
+      for (const fn of b.listeners) {
         try {
           fn();
         } catch {
           /* a listener throwing must not kill the shared ticker */
         }
       }
-    }, AGE_TICK_MS);
+    }, intervalMs);
     // Never hold a test runner (or the process) open for the ticker alone.
-    (tickTimer as { unref?: () => void }).unref?.();
+    (b.timer as { unref?: () => void }).unref?.();
   }
   return () => {
-    tickListeners.delete(onChange);
-    if (tickListeners.size === 0 && tickTimer != null) {
-      clearInterval(tickTimer);
-      tickTimer = null;
+    b.listeners.delete(onChange);
+    if (b.listeners.size === 0 && b.timer != null) {
+      clearInterval(b.timer);
+      b.timer = null;
     }
   };
 }
 
-const readTickVersion = (): number => tickVersion;
+const readTickVersion = (intervalMs: number): number => bucketFor(intervalMs).version;
 
 /**
- * Subscribe the calling component to the shared age ticker so any label
- * derived from `nowMs()` advances on its own. Returns the tick version purely
- * so the subscription is observable in tests; callers normally ignore it.
+ * Subscribe the calling component to the shared ticker for `intervalMs` so any
+ * label derived from `nowMs()` advances on its own at that cadence. Returns
+ * the tick version purely so the subscription is observable in tests; callers
+ * normally ignore it.
+ */
+export function useClockTick(intervalMs: number): number {
+  return useSyncExternalStore(
+    (onChange) => subscribeTick(intervalMs, onChange),
+    () => readTickVersion(intervalMs),
+    () => readTickVersion(intervalMs),
+  );
+}
+
+/**
+ * 10s age tick for the sidebar's session-age labels. See AGE_TICK_MS.
  */
 export function useAgeTick(): number {
-  return useSyncExternalStore(subscribeTick, readTickVersion, readTickVersion);
+  return useClockTick(AGE_TICK_MS);
 }
 
 /**

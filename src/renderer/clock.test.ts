@@ -3,7 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { AGE_TICK_MS, nowMs, pinDemoClock, useAgeTick } from "./clock";
+import {
+  AGE_TICK_MS,
+  WORKING_TICK_MS,
+  nowMs,
+  pinDemoClock,
+  useAgeTick,
+  useClockTick,
+} from "./clock";
 import { useStore } from "./store";
 import { DEMO_T0 } from "./api/demoFixture";
 
@@ -130,5 +137,31 @@ describe("age ticker", () => {
 
   it("is bounded well under a minute so a whole-minute label can't lag visibly", () => {
     expect(AGE_TICK_MS).toBeLessThan(60_000);
+  });
+
+  it("keeps different intervals on independent tickers, and useAgeTick still ticks at AGE_TICK_MS", () => {
+    vi.useFakeTimers();
+    try {
+      const age = mountHook(() => useAgeTick());
+      const work = mountHook(() => useClockTick(WORKING_TICK_MS));
+      const age0 = age.latest()!;
+      const work0 = work.latest()!;
+      // Within the 10s bucket (4.5s) only the 1s bucket fires — independence,
+      // not a shared global tick.
+      act(() => {
+        vi.advanceTimersByTime(4500);
+      });
+      expect(age.latest()).toBe(age0);
+      expect(work.latest()).toBe(work0 + 4);
+      // Cross an AGE_TICK_MS boundary: the 10s bucket ticks exactly once.
+      act(() => {
+        vi.advanceTimersByTime(AGE_TICK_MS - 4500);
+      });
+      expect(age.latest()).toBe(age0 + 1);
+      age.unmount();
+      work.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
