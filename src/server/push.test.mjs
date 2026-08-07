@@ -801,6 +801,17 @@ const FANOUT_FAILURE_CASES = [
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }),
     warnChecks: [/status=500/],
   },
+  {
+    label: "gateway 200 with malformed JSON body",
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error("unexpected token");
+      },
+    }),
+    warnChecks: [/malformed JSON/],
+  },
 ];
 
 for (const c of FANOUT_FAILURE_CASES) {
@@ -889,43 +900,6 @@ test("sendApnsFanout: empty token store → no request sent", async () => {
     await sendApnsFanout({ kind: "done", title: "T", body: "B" });
     assert.equal(fetchCalls, 0);
   } finally {
-    _resetFanoutFakesForTest();
-  }
-});
-
-test("sendApnsFanout: gateway 200 with malformed JSON body → warn + no exception", async () => {
-  _resetFanoutFakesForTest();
-  const warns = [];
-  const origWarn = console.warn;
-  console.warn = (...a) => warns.push(a.join(" "));
-  let removeCalls = 0;
-  _setFanoutFakesForTest({
-    fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new Error("unexpected token");
-      },
-    }),
-    loadApnsTokens: async () => [{ kind: "apns", token: "f1a1", registeredAt: 1 }],
-    removeApnsToken: async () => {
-      removeCalls++;
-      return { ok: true, count: 0 };
-    },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await assert.doesNotReject(() =>
-      sendApnsFanout({ kind: "done", title: "T", body: "B" }),
-    );
-    assert.equal(removeCalls, 0);
-    assert.ok(warns.some((w) => /malformed JSON/.test(w)));
-  } finally {
-    console.warn = origWarn;
     _resetFanoutFakesForTest();
   }
 });
