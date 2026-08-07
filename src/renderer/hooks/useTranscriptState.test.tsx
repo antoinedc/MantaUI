@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "../ChatPanel";
+import { useTranscriptState, TRANSCRIPT_TAIL_LIMIT } from "./useTranscriptState";
 import {
   installMockApi,
   resetStore,
@@ -249,6 +250,106 @@ describe("useTranscriptState via ChatPanel", () => {
 
     // Component should still be mounted.
     expect(h.container.querySelector("textarea")).not.toBeNull();
+  });
+});
+
+// ===== Child transcript tail-first loading (BET-683) =====
+//
+// Mirrors the main-session tail-first policy for subagent child transcripts:
+// fetchChildTranscript passes { limit: TRANSCRIPT_TAIL_LIMIT } until the
+// expanded TaskCard's "Load earlier" pulls the full history (which flips the
+// per-child flag so later fetches stay full). The per-child flag is cleared on
+// session change.
+describe("useTranscriptState child tail-first", () => {
+  type Probe = {
+    fetch: (id: string) => void;
+    loadAll: (id: string) => void;
+    ref: React.MutableRefObject<Map<string, boolean>>;
+  };
+  let probe: Probe | null = null;
+  let h: ReturnType<typeof mount> | null = null;
+
+  // A minimal component that owns the hook and exposes its child functions so
+  // a test can drive them precisely (the repo has no @testing-library).
+  function ChildProbe({ sessionId }: { sessionId: string }) {
+    const {
+      fetchChildTranscript,
+      loadEarlierChildTranscript,
+      childLoadedAllRef,
+    } = useTranscriptState({ sessionId, isActive: true });
+    probe = {
+      fetch: fetchChildTranscript,
+      loadAll: loadEarlierChildTranscript,
+      ref: childLoadedAllRef,
+    };
+    return <div data-testid="child-probe" />;
+  }
+
+  beforeEach(() => {
+    probe = null;
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("fetches a child tail-first, then full after loadEarlier, then stays full", async () => {
+    const fetchCalls: Array<[string, unknown]> = [];
+    installMockApi({
+      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
+        fetchCalls.push([sessionId, opts]);
+        return Promise.resolve([]);
+      },
+    });
+    resetStore();
+    h = mount(<ChildProbe sessionId="ses_a" />);
+    await h.flush();
+
+    // Fresh ref: first child fetch pulls the tail.
+    act(() => probe!.fetch("child_1"));
+    await h.flush();
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT }]);
+
+    // "Load earlier" pulls the whole history and marks the child loaded-all.
+    act(() => probe!.loadAll("child_1"));
+    await h.flush();
+    expect(fetchCalls.at(-1)).toEqual(["child_1", {}]);
+    expect(probe!.ref.current.get("child_1")).toBe(true);
+
+    // A subsequent fetch for the loaded-all child stays full (no tail cut).
+    act(() => probe!.fetch("child_1"));
+    await h.flush();
+    expect(fetchCalls.at(-1)).toEqual(["child_1", {}]);
+  });
+
+  it("clears childLoadedAllRef on session change so a fresh fetch is tail-limited again", async () => {
+    const fetchCalls: Array<[string, unknown]> = [];
+    installMockApi({
+      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
+        fetchCalls.push([sessionId, opts]);
+        return Promise.resolve([]);
+      },
+    });
+    resetStore();
+    h = mount(<ChildProbe sessionId="ses_a" />);
+    await h.flush();
+
+    act(() => probe!.loadAll("child_1"));
+    await h.flush();
+    expect(probe!.ref.current.get("child_1")).toBe(true);
+
+    // Switching sessions clears the per-child loaded-all flags.
+    await act(async () => {
+      h!.rerender(<ChildProbe sessionId="ses_b" />);
+    });
+    await h.flush();
+    expect(probe!.ref.current.get("child_1")).toBeFalsy();
+
+    // A fresh child fetch after the switch is tail-limited again.
+    act(() => probe!.fetch("child_1"));
+    await h.flush();
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT }]);
   });
 });
 
