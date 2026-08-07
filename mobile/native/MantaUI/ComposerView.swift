@@ -60,7 +60,9 @@ struct ComposerView: View {
     @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
-    @State private var micRecording = false
+    /// Auto-dismiss task for the currently shown hint — tied to the hint's own
+    /// identity so a new hint cancels and restarts the 4 s timer.
+    @State private var hintDismissTask: Task<Void, Never>?
     @State private var showModelPicker = false
     /// Whether the text has grown beyond the expand overlay's threshold — only
     /// gates the full-screen edit affordance, since the composer is always two
@@ -87,6 +89,12 @@ struct ComposerView: View {
                     scrollToBottomChip
                     Spacer(minLength: 0)
                 }
+            }
+            // Failure/notice hints surface ABOVE the input row as a capsule.
+            // Show/hide is driven by `showHint` through the composer's existing
+            // `withAnimation` default, so no custom animation is needed.
+            if showHint, let hint {
+                hintCapsule(text: hint)
             }
             // Two-row composer (BET: model inside the composer): the text input
             // sits at the top and the control row — model selector + attach on
@@ -795,10 +803,36 @@ struct ComposerView: View {
 
     // MARK: - Hint
 
+    /// The capsule shown just above the input row while `showHint` is true.
+    /// Single line, truncating tail; text and accent treatment reuse the model
+    /// chip's token lookups (no new literals). Tapping it dismisses at once.
+    private func hintCapsule(text: String) -> some View {
+        Button {
+            hintDismissTask?.cancel()
+            withAnimation { showHint = false }
+        } label: {
+            Text(text)
+                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tokens.accentTx)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, Metrics.spacing.sp2)
+                .padding(.vertical, Metrics.spacing.sp1)
+                .background(tokens.accentSoft, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Dismiss hint")
+    }
+
     private func hintState(_ message: String) {
+        // A new hint replaces the current one: cancel the pending auto-dismiss
+        // so the 4 s timer restarts for the new hint's own identity.
+        hintDismissTask?.cancel()
         hint = message
         withAnimation { showHint = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+        hintDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
             withAnimation { showHint = false }
         }
     }
