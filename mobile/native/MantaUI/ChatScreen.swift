@@ -197,19 +197,11 @@ private struct ChatScreenContent: View {
         .background(tokens.canvas.ignoresSafeArea())
         // The composer FLOATS as an overlay over the full-bleed transcript, so
         // messages genuinely pass under it while scrolling. The measured
-        // `bottomBarHeight` of that floating stack feeds BOTH the scrim beneath
-        // it (which dims passing content and the home-indicator strip) and the
-        // transcript's `additionalContentInset` bottom inset, so at rest the
-        // newest message rests readable above the composer.
-        //
-        // Scrim FIRST so it draws beneath the composer, sized to the composer
-        // plus an overhang past the safe area — it dims content under the
-        // composer and in the home-indicator strip below it.
-        .overlay(alignment: .bottom) {
-            Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
-                .frame(height: bottomBarHeight + Self.scrimOverhang)
-                .allowsHitTesting(false)
-        }
+        // `bottomBarHeight` of that floating stack feeds the transcript's
+        // `additionalContentInset` bottom inset, so at rest the newest message
+        // rests readable above the composer. The bottom scrim rides as the
+        // composer's own background, so its fade (and its solid canvas) tracks
+        // the top of whatever chrome is showing with no measurement.
         .overlay(alignment: .bottom) {
             GlassEffectContainer(spacing: 0) {
                 VStack(spacing: 0) {
@@ -227,13 +219,17 @@ private struct ChatScreenContent: View {
                         }
                     )
                 }
-                // Feeds the scrim its height. Safe to measure here: it is an
-                // overlay, so nothing it reports changes the transcript.
+                // Feeds the transcript's bottom content inset its height. Safe
+                // to measure here: it is an overlay, so nothing it reports
+                // changes the transcript.
                 .onGeometryChange(for: CGFloat.self) { proxy in
                     proxy.size.height
                 } action: { height in
                     bottomBarHeight = height
                 }
+            }
+            .background {
+                Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
