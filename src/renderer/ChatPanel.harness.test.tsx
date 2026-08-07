@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import {
   installMockApi,
   resetStore,
@@ -408,6 +409,33 @@ describe("ChatPanel transcript rendering", () => {
     expect(text).toContain("general kenobi");
     // The empty-state welcome is gone once a transcript is present.
     expect(text).not.toContain("Welcome. Type a message below to start.");
+  });
+
+  it("performs exactly ONE mount fetch, tail-limited, with no self-heal double fetch", async () => {
+    const transcript = [
+      {
+        info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
+        parts: [{ type: "text", id: "prt_u1", messageID: "msg_u1", text: "hello there" }],
+      },
+    ];
+    const fetchCalls: Array<[string, unknown]> = [];
+    installMockApi({
+      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
+        fetchCalls.push([sessionId, opts]);
+        return Promise.resolve(transcript);
+      },
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await h.flush();
+    // Single fetch path — the unconditional self-heal refetch is gone. The
+    // mount fetch pulls the TAIL ({ limit: 100 }) until "Load earlier" flips
+    // loadedAllRef.
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0][0]).toBe("ses_test");
+    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT });
+    expect(h.text()).toContain("hello there");
   });
 });
 

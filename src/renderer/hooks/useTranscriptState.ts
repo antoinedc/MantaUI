@@ -38,6 +38,11 @@ function prefersReducedMotion(): boolean {
   );
 }
 
+/** How many of the most recent messages the tail-first mount fetch pulls.
+ *  "Load earlier" afterwards replaces the tail with the full history. The
+ *  Transcript's LoadEarlier control and every fetchOpts() decision read this. */
+export const TRANSCRIPT_TAIL_LIMIT = 100;
+
 export type TranscriptState = {
   messages: OpencodeMessage[] | null;
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
@@ -73,6 +78,13 @@ export type TranscriptState = {
   spliceMessage: (messageId: string) => void;
   fetchChildTranscript: (childId: string) => void;
   toggleTaskExpand: (childId: string) => void;
+  // Whether the full transcript has been loaded (via "Load earlier"). Drives
+  // fetchOpts: until true, fetches pull the tail; once true they pull the
+  // whole history so no earlier message is dropped.
+  loadedAllRef: React.MutableRefObject<boolean>;
+  // The options for the next transcript fetch: { limit: TRANSCRIPT_TAIL_LIMIT }
+  // until loadedAllRef flips, then {} (full history).
+  fetchOpts: () => { limit: number } | {};
 };
 
 export function useTranscriptState(params: {
@@ -83,6 +95,15 @@ export function useTranscriptState(params: {
 
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Tail-first loading: until the user clicks "Load earlier" (or the full
+  // history has otherwise been pulled), every transcript fetch passes
+  // { limit: TRANSCRIPT_TAIL_LIMIT }. Reset on session change below.
+  const loadedAllRef = useRef(false);
+  const fetchOpts = useCallback(
+    (): { limit: number } | {} =>
+      loadedAllRef.current ? {} : { limit: TRANSCRIPT_TAIL_LIMIT },
+    [],
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   // The inner content node observed by the ResizeObserver below (the transcript
   // body inside the scroll container). Separate from scrollRef because we want
@@ -180,7 +201,7 @@ export function useTranscriptState(params: {
       refetchTimerRef.current = null;
       setRefreshing(true);
       window.api
-        .opencodeMessages(sessionId)
+        .opencodeMessages(sessionId, fetchOpts())
         .then((m) => {
           setMessages(m);
           for (const cid of collectChildSessionIds(m)) {
@@ -190,7 +211,7 @@ export function useTranscriptState(params: {
         .catch(() => { /* keep last-known state */ })
         .finally(() => setRefreshing(false));
     }, 300);
-  }, [sessionId, setRefreshing]);
+  }, [sessionId, setRefreshing, fetchOpts]);
 
   const spliceMessage = useCallback((messageId: string) => {
     if (!messageId) {
@@ -304,6 +325,7 @@ export function useTranscriptState(params: {
   useEffect(() => {
     prevScrollHeight.current = 0;
     pinnedToBottom.current = true;
+    loadedAllRef.current = false;
     // Cancel any in-flight per-message splice from the PREVIOUS session so a
     // late timer can't refetch + write a stale message into the new session's
     // list. Also clear the max-wait bookkeeping.
@@ -424,5 +446,7 @@ export function useTranscriptState(params: {
     spliceMessage,
     fetchChildTranscript,
     toggleTaskExpand,
+    loadedAllRef,
+    fetchOpts,
   };
 }

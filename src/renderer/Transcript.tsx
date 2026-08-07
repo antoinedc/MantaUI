@@ -27,13 +27,14 @@
 // stability, so passing it through as a prop keeps that identity intact.
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { MotionConfig } from "framer-motion";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import {
   createEntryMotionState,
   isBackgroundJobCompletionTurn,
@@ -41,11 +42,79 @@ import {
   type EntryMotionState,
 } from "./chatUtils";
 
+// ===== LoadEarlier =====
+//
+// Self-contained tail→full-history expansion. Renders a slim centered button
+// above the transcript's first row once the tail-first fetch has filled the
+// panel (messages.length >= TRANSCRIPT_TAIL_LIMIT) and the full history hasn't
+// been loaded yet. On click it pulls the WHOLE transcript and splices it in
+// while preserving the user's vertical scroll position.
+//
+// Everything about the fetch + the scroll-preserving commit lives HERE, in one
+// exported component, so the future virtualization refactor can replace it with
+// a clean drop-in rather than untangle logic spread across ChatPanel.
+export function LoadEarlier({
+  sessionId,
+  messages,
+  setMessages,
+  scrollRef,
+  loadedAllRef,
+}: {
+  sessionId: string;
+  messages: OpencodeMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
+  scrollRef: React.RefObject<HTMLDivElement>;
+  loadedAllRef: React.MutableRefObject<boolean>;
+}) {
+  const [loading, setLoading] = useState(false);
+  if (loading || loadedAllRef.current || messages.length < TRANSCRIPT_TAIL_LIMIT) {
+    return null;
+  }
+  const onLoadEarlier = () => {
+    if (loading) return;
+    setLoading(true);
+    const scroller = scrollRef.current;
+    const oldScrollHeight = scroller?.scrollHeight ?? 0;
+    // applyFullHistory — pull the full transcript and splice it in while
+    // preserving the user's scroll position (the list grew by exactly the
+    // pre-existing history now prepended above the current viewport).
+    window.api
+      .opencodeMessages(sessionId, {})
+      .then((newMessages) => {
+        setMessages(newMessages);
+        loadedAllRef.current = true;
+        requestAnimationFrame(() => {
+          if (!scroller) return;
+          scroller.scrollTop += scroller.scrollHeight - oldScrollHeight;
+        });
+      })
+      .catch(() => { /* non-fatal — keep the tail; the button can be retried */ })
+      .finally(() => setLoading(false));
+  };
+  return (
+    <div className="flex justify-center py-3">
+      <button
+        type="button"
+        onClick={onLoadEarlier}
+        className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft"
+      >
+        {loading ? "Loading…" : "Load earlier messages"}
+      </button>
+    </div>
+  );
+}
+
 export type TranscriptProps = {
   messages: OpencodeMessage[];
   scrollRef: React.RefObject<HTMLDivElement>;
   contentRef: React.RefObject<HTMLDivElement>;
   questionCardRef: React.RefObject<HTMLDivElement>;
+  // Tail-first loading (see LoadEarlier). The owning ChatPanel forwards its
+  // sessionId, messages setter, scroller, and the shared loadedAll ref so
+  // "Load earlier" can pull the full history in-place.
+  sessionId: string;
+  setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
+  loadedAllRef: React.MutableRefObject<boolean>;
   taskContextValue: TaskContextValue;
   showThinking: boolean;
   running: boolean;
@@ -75,6 +144,9 @@ export function Transcript({
   scrollRef,
   contentRef,
   questionCardRef,
+  sessionId,
+  setMessages,
+  loadedAllRef,
   taskContextValue,
   showThinking,
   running,
@@ -149,6 +221,15 @@ export function Transcript({
             // the user bubble; the left edge of the centred composer no longer
             // meets the transcript's edge on a wide window, which is intended.
             <MeasureColumn stacked width="full">
+              {/* Tail-first loading: once the tail has filled the panel, offer
+                  pulling the whole history. Rendered above the first row. */}
+              <LoadEarlier
+                sessionId={sessionId}
+                messages={messages}
+                setMessages={setMessages}
+                scrollRef={scrollRef}
+                loadedAllRef={loadedAllRef}
+              />
               {messages.map((m, idx) => {
                 // BET-418 §C: a background job's completion report is injected
                 // as a fake user turn whose first line is the machine marker

@@ -70,10 +70,19 @@ import {
   collectChildSessionIds,
   hydrateQuestion,
   authErrorAdvice,
+  fetchTranscriptWithRetry,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
+
+// Initial mount transcript fetch: a 15s ceiling (open-code is remote and a
+// hung box/network must not leave the panel spinning forever) with ONE retry
+// after a 2s cooldown. On final failure the panel shows the "Couldn't load
+// session" state with a Retry button. Mirror of the rpcWithTimeout pattern.
+const INITIAL_FETCH_TIMEOUT_MS = 15_000;
+const INITIAL_FETCH_RETRY_DELAY_MS = 2_000;
+
 
 export type SseBus = {
   running: boolean;
@@ -132,6 +141,13 @@ export type SseBus = {
   rejectAllPendingQuestions: () => void;
   refreshPermissions: () => Promise<void>;
   refreshQuestions: () => Promise<void>;
+  // Whether the initial mount transcript fetch failed (timeout + retry both
+  // exhausted). ChatPanel renders the "Couldn't load session" panel + a Retry
+  // button that calls retryTranscriptLoad.
+  transcriptLoadError: string | null;
+  // Re-run the initial mount fetch (timeout + retry). Clears transcriptLoadError
+  // on success. Kept callable from the panel's Retry button across renders.
+  retryTranscriptLoad: () => void;
 };
 
 export function useSseBus(params: {
@@ -140,6 +156,8 @@ export function useSseBus(params: {
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
   setRefreshing: React.Dispatch<React.SetStateAction<boolean>>;
   scheduleRefetch: () => void;
+  // Options for every transcript fetch (tail limit until "Load earlier").
+  fetchOpts: () => { limit: number } | {};
   spliceMessage: (messageId: string) => void;
   scheduleChildRefetch: (childId: string) => void;
   childSessionIds: React.MutableRefObject<Set<string>>;
@@ -171,6 +189,7 @@ export function useSseBus(params: {
     setMessages,
     setRefreshing,
     scheduleRefetch,
+    fetchOpts,
     spliceMessage,
     scheduleChildRefetch,
     childSessionIds,
@@ -230,6 +249,16 @@ export function useSseBus(params: {
     Map<string, "running" | "idle">
   >(() => new Map());
   const [branch, setBranch] = useState<string | null>(null);
+  // Initial mount transcript fetch failure (see transcriptLoadError in the
+  // SseBus type). Held here because this hook owns the fetch; ChatPanel reads
+  // it to render the "Couldn't load session" panel + Retry button.
+  const [transcriptLoadError, setTranscriptLoadError] = useState<string | null>(null);
+  // The latest initial-fetch closure, kept in a ref so the panel's Retry button
+  // (rendered outside the SSE effect) can re-run the same fetch.
+  const initialFetchRef = useRef<() => void>(() => {});
+  const retryTranscriptLoad = useCallback(() => {
+    initialFetchRef.current();
+  }, []);
 
   // Preserve last-known branch on a transient null. getVcsBranch resolves
   // null (never rejects) for a git-index-lock / spawn blip as well as a
@@ -631,23 +660,43 @@ export function useSseBus(params: {
     // ambient loading divider shows during the REAL transcript load when a
     // session first opens — previously only background refetches drove the bar,
     // so the initial load flashed nothing and the indicator "disappeared".
-    setRefreshing(true);
-    void window.api.opencodeMessages(sessionId).then((m) => {
-      // Only seed messages if nothing has been written yet. On a fresh session
-      // with a queued auto-submit, submit() appends its OPTIMISTIC user message
-      // before this fetch resolves; this snapshot predates the prompt POST, so
-      // overwriting would clobber the just-sent prompt out of the transcript
-      // (loader shows, prompt missing). The post-prompt canonical refetch (SSE
-      // + the self-heal below) lands the real message instead.
-      setMessages((prev) => (prev === null ? m : prev));
-      for (const cid of collectChildSessionIds(m)) {
-        childSessionIds.current.add(cid);
-      }
-      // Self-heal: one debounced refetch after the stream is (now) live, in
-      // case an event slipped through during stream warm-up. Idempotent,
-      // gated on active panel by scheduleRefetch itself.
-      scheduleRefetch();
-    }).catch(() => { /* non-fatal */ }).finally(() => setRefreshing(false));
+    //
+    // Wrapped in a 15s timeout (the box is remote; a hung network must not
+    // spin the panel forever) with ONE retry after a 2s cooldown. On final
+    // failure transcriptLoadError is set and ChatPanel renders the
+    // "Couldn't load session" panel + Retry (which re-runs this same function
+    // via initialFetchRef). Fetches the TAIL (fetchOpts), not the full history.
+    const doInitialFetch = () => {
+      setTranscriptLoadError(null);
+      setRefreshing(true);
+      fetchTranscriptWithRetry(
+        () => window.api.opencodeMessages(sessionId, fetchOpts()),
+        { timeoutMs: INITIAL_FETCH_TIMEOUT_MS, retryDelayMs: INITIAL_FETCH_RETRY_DELAY_MS },
+      )
+        .then((m) => {
+          // Only seed messages if nothing has been written yet. On a fresh
+          // session with a queued auto-submit, submit() appends its OPTIMISTIC
+          // user message before this fetch resolves; this snapshot predates the
+          // prompt POST, so overwriting would clobber the just-sent prompt out
+          // of the transcript (loader shows, prompt missing). The post-prompt
+          // canonical refetch (the SSE-driven scheduleRefetch below) lands the
+          // real message instead. No unconditional self-heal is needed — a
+          // successful initial fetch IS the fresh snapshot, and the stream was
+          // opened (ensureStreamForDirectory) before it, so nothing slipped.
+          setMessages((prev) => (prev === null ? m : prev));
+          for (const cid of collectChildSessionIds(m)) {
+            childSessionIds.current.add(cid);
+          }
+        })
+        .catch(() => {
+          setTranscriptLoadError(
+            "Couldn't load the transcript. Check your connection and try again.",
+          );
+        })
+        .finally(() => setRefreshing(false));
+    };
+    initialFetchRef.current = doInitialFetch;
+    doInitialFetch();
 
     // Box-side interpreted stream events (BET-551 / §17). The box derives
     // running, delta-flush, todos, truncation, questions and subagent/child
@@ -801,5 +850,7 @@ export function useSseBus(params: {
     rejectAllPendingQuestions,
     refreshPermissions,
     refreshQuestions,
+    transcriptLoadError,
+    retryTranscriptLoad,
   };
 }

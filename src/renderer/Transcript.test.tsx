@@ -21,9 +21,10 @@
 // message sequence ChatPanel produces.
 
 import { describe, it, expect, afterEach } from "vitest";
-import { createRef } from "react";
-import { mount, type Harness } from "./testHarness";
+import { act, createRef } from "react";
+import { mount, installMockApi, type Harness } from "./testHarness";
 import { Transcript, type TranscriptProps } from "./Transcript";
+import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage } from "../shared/types";
 
 function msg(id: string, role: "user" | "assistant", text: string): OpencodeMessage {
@@ -56,6 +57,9 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     scrollRef: createRef<HTMLDivElement>(),
     contentRef: createRef<HTMLDivElement>(),
     questionCardRef: createRef<HTMLDivElement>(),
+    sessionId: "s1",
+    setMessages: () => {},
+    loadedAllRef: { current: false },
     taskContextValue: {
       childMessages: new Map(),
       liveChildStatus: new Map(),
@@ -179,5 +183,51 @@ describe("Transcript entry motion", () => {
     // Exactly the new one — the two rows already on screen are untouched.
     expect(bubblesIn(h)).toBe(1);
     expect(partsIn(h)).toBe(0);
+  });
+});
+
+describe("Transcript LoadEarlier (tail-first loading)", () => {
+  afterEach(() => {
+    // Leave the harness's window.api mock in a clean state.
+    (window as unknown as { api?: unknown }).api = undefined;
+  });
+
+  it("hides the button until the tail fills the panel", () => {
+    const few = [msg("u1", "user", "first"), msg("a1", "assistant", "reply")];
+    const h = mount(<Transcript {...props(few)} />);
+    expect(h.text()).not.toContain("Load earlier");
+    h.unmount();
+  });
+
+  it("pulls the FULL history on click, marks loadedAll, and forwards no limit", async () => {
+    const many = Array.from({ length: TRANSCRIPT_TAIL_LIMIT }, (_, i) =>
+      msg(`m${i}`, i % 2 ? "assistant" : "user", `row ${i}`),
+    );
+    const loadedAllRef = { current: false };
+    const fetchCalls: Array<[string, unknown]> = [];
+    installMockApi({
+      opencodeMessages: (sessionId: string, opts?: { limit?: number }) => {
+        fetchCalls.push([sessionId, opts]);
+        return Promise.resolve(many);
+      },
+    });
+    const h = mount(
+      <Transcript
+        {...props(many)}
+        setMessages={() => {}}
+        loadedAllRef={loadedAllRef}
+      />,
+    );
+    const loadBtn = Array.from(h.container.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Load earlier"),
+    );
+    expect(loadBtn).not.toBeNull();
+    await act(async () => loadBtn!.click());
+    await h.flush();
+    // applied the full-history fetch (no limit) and flipped loadedAll so the
+    // button disappears and future fetches pull everything.
+    expect(fetchCalls).toEqual([["s1", {}]]);
+    expect(loadedAllRef.current).toBe(true);
+    h.unmount();
   });
 });

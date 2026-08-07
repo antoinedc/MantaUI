@@ -55,7 +55,7 @@ export type SessionResources = {
   refreshWebhooks: () => Promise<void>;
 };
 
-export function useSessionResources(sessionId: string): SessionResources {
+export function useSessionResources(sessionId: string, isActive: boolean): SessionResources {
   // ----- Scheduled prompts (the ⏰ ScheduledTasksCard) -----
   // Jobs are server-owned (manta-server fires them); here we only list + delete
   // via the schedule:* window.api channels. Refetch-driven (open + open-poll +
@@ -139,13 +139,16 @@ export function useSessionResources(sessionId: string): SessionResources {
   // the poll up (10s) for snappy create/fire feedback; while closed a slower
   // 30s background poll keeps the "(N)" count current so a model-created job
   // shows up without the user having to open the card first. Refetch-driven
-  // (no bus event) so it behaves identically on desktop and mobile.
+  // (no bus event) so it behaves identically on desktop and mobile. The
+  // background poll stops while the panel is hidden — the effect re-runs (and
+  // refires once) when isActive flips back on.
   useEffect(() => {
+    if (!isActive) return;
     void refreshSchedules();
     const intervalMs = showSchedules ? 10_000 : 30_000;
     const poll = setInterval(() => void refreshSchedules(), intervalMs);
     return () => clearInterval(poll);
-  }, [showSchedules, refreshSchedules]);
+  }, [showSchedules, refreshSchedules, isActive]);
 
   // Secrets are only fetched while the card is open (no toolbar count badge to
   // keep current in the background — unlike schedules). Refetch on open + 10s
