@@ -53,6 +53,28 @@ type PromptAgentMention = {
   source: { value: string; start: number; end: number };
 };
 
+// BET-675/678: the sync cursor/delta payload a client exchanges with the box.
+// `syncSnapshot({sinceSeq, sinceGen})` returns this; `sync` bus envelopes on
+// the events stream carry the same shape. `changed` holds only the fields
+// newer than the client's cursor (or a full snapshot when the cursor is
+// absent / a different server generation).
+export type SyncPayload = {
+  gen: string;
+  seq: number;
+  changed: {
+    projects?: Project[];
+    config?: AppConfig;
+    stale?: boolean;
+  };
+};
+
+// The synthetic resync marker httpApi fires on every events-stream reconnect
+// (mirror of fireResync's `server.connected` for opencode). `{ resync: true }`
+// tells the app layer to re-pull its snapshot from its cursor.
+export type SyncDelta =
+  | SyncPayload
+  | { resync: true };
+
 /**
  * The full `window.api` contract.
  *
@@ -73,10 +95,19 @@ export interface Api {
   configGet(): Promise<AppConfig>;
   configUpdate(patch: Partial<AppConfig>): Promise<AppConfig>;
 
+  // BET-678: cursor snapshot/delta — the single bootstrap + resync RPC.
+  // Pass the client's last-seen { sinceSeq, sinceGen }; the box returns only
+  // the fields newer than the cursor (or a full snapshot when the cursor is
+  // absent / stale generation). Same 15s fail-fast timeout as configGet.
+  syncSnapshot(args: { sinceSeq?: number; sinceGen?: string }): Promise<SyncPayload>;
+  // Live `sync` bus envelopes {@link SyncPayload} as state changes on the box,
+  // plus a synthetic `{ resync: true }` marker on events-stream reconnect so
+  // the app layer re-pulls from its cursor.
+  onSyncDelta(cb: (delta: SyncDelta) => void): () => void;
+
   projectMetaDelete(tmuxSession: string): Promise<AppConfig>;
 
   // tmux operations on the remote
-  tmuxList(): Promise<Project[]>;
   // The create RPCs return the newly-created window's identity (sessionId +
   // windowIndex) alongside the refreshed projects list, so callers can
   // navigate + send the first prompt to the RIGHT session instead of

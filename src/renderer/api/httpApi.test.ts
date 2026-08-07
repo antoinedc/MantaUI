@@ -401,11 +401,11 @@ describe("httpApi bootstrap metadata fail-fast timeout", () => {
     mockLocalStorage["manta_token"] = HEX32;
   });
 
-  it("configGet and tmuxList pass a timeout AbortSignal so a stall fails fast", async () => {
+  it("configGet and syncSnapshot pass a timeout AbortSignal so a stall fails fast", async () => {
     const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({}));
 
     await httpApi.configGet();
-    await httpApi.tmuxList();
+    await httpApi.syncSnapshot({});
 
     const calls = fetchMock.mock.calls;
     expect(calls.length).toBe(2);

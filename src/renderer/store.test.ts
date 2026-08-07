@@ -4,7 +4,7 @@
 // writeSavedActiveSession). The rest of the file doesn't care — the nodenv
 // differences are confined to the persistence helpers' try/catch.
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveSessionOwner, useStore } from "./store";
+import { loadPersistedSnapshot, resolveSessionOwner, useStore } from "./store";
 import { writeSavedActiveSession } from "./chatShared";
 import type { Project } from "../shared/types";
 
@@ -850,6 +850,15 @@ describe("last-active session restore (refresh / relaunch)", () => {
     ];
   }
 
+  // Shared restore path: the saved last-used session is alpha/window 1 and the
+  // tree has alpha/beta. Used by several tests below whose saved-cursor differs
+  // only by what surrounds the applyProjects call.
+  function savedAlphaAfterApply() {
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    return useStore.getState();
+  }
+
   it("setActive persists the pin to localStorage", () => {
     useStore.setState({ projects: sessions() });
     useStore.getState().setActive("beta", 0);
@@ -859,9 +868,7 @@ describe("last-active session restore (refresh / relaunch)", () => {
   });
 
   it("applyProjects with no prior selection restores the saved last-used session", () => {
-    writeSavedActiveSession({ project: "alpha", window: 1 });
-    useStore.getState().applyProjects(sessions());
-    const s = useStore.getState();
+    const s = savedAlphaAfterApply();
     expect(s.activeProjectName).toBe("alpha");
     expect(s.activeWindowByProject.alpha).toBe(1);
   });
@@ -898,9 +905,7 @@ describe("last-active session restore (refresh / relaunch)", () => {
   it("applyProjects restores the saved window over the tmux-active one", () => {
     // alpha's tmux-active window is 0, but the user last used window 1 —
     // restore must win so they land exactly where they left off.
-    writeSavedActiveSession({ project: "alpha", window: 1 });
-    useStore.getState().applyProjects(sessions());
-    const s = useStore.getState();
+    const s = savedAlphaAfterApply();
     expect(s.activeProjectName).toBe("alpha");
     expect(s.activeWindowByProject.alpha).toBe(1);
   });
@@ -944,5 +949,164 @@ describe("last-active session restore (refresh / relaunch)", () => {
     const s = useStore.getState();
     expect(s.activeDraftId).toBe(id);
     expect(s.drafts.some((d) => d.id === id)).toBe(true);
+  });
+});
+
+// ===== Sync snapshot / delta persistence (BET-678) =====
+//
+// applySyncPayload is the single choke point that routes sync snapshots +
+// live deltas into the store (projects/config/stale), advances the cursor,
+// and schedules the persisted snapshot write. loadPersistedSnapshot restores
+// it on cold boot. refresh() drives syncSnapshot with the stored cursor.
+
+describe("sync snapshot / applySyncPayload (BET-678)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useStore.setState({
+      projects: [],
+      activeProjectName: null,
+      activeWindowByProject: {},
+      loaded: false,
+      syncGen: null,
+      syncSeq: null,
+      boxStale: false,
+    });
+  });
+
+  it("routes config + projects, advances the cursor, clears boxStale", () => {
+    useStore.getState().applySyncPayload({
+      gen: "g1",
+      seq: 5,
+      changed: {
+        projects: [proj({ tmuxSession: "s1" })],
+        config: { serverUrl: "u", chatAutoAllow: true, projects: [] },
+        stale: false,
+      },
+    });
+    const s = useStore.getState();
+    expect(s.syncGen).toBe("g1");
+    expect(s.syncSeq).toBe(5);
+    expect(s.boxStale).toBe(false);
+    expect(s.loaded).toBe(true);
+    expect(s.projects.map((p) => p.tmuxSession)).toEqual(["s1"]);
+  });
+
+  it("sets boxStale when a stale field is present and true", () => {
+    useStore.getState().applySyncPayload({ gen: "g", seq: 1, changed: { stale: true } });
+    expect(useStore.getState().boxStale).toBe(true);
+  });
+
+  it("ignores a stale-seq envelope (same gen, lower/equal seq)", () => {
+    const st = useStore.getState();
+    st.applySyncPayload({ gen: "g", seq: 10, changed: { projects: [proj({ tmuxSession: "a" })] } });
+    const before = useStore.getState().projects;
+    st.applySyncPayload({ gen: "g", seq: 8, changed: { projects: [proj({ tmuxSession: "b" })] } });
+    const s = useStore.getState();
+    expect(s.projects).toEqual(before);
+    expect(s.syncSeq).toBe(10);
+  });
+
+  it("persisted snapshot round-trips: apply → save → load applies projects/config", async () => {
+    useStore.getState().applySyncPayload({
+      gen: "g2",
+      seq: 3,
+      changed: {
+        projects: [proj({ tmuxSession: "persisted" })],
+        config: { chatAutoAllow: true, projects: [] },
+      },
+    });
+    // flush the 1s debounced write
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(localStorage.getItem("manta:sync:snapshot")).toBeTruthy();
+
+    // wipe in-memory state, then restore from the persisted snapshot
+    useStore.setState({
+      projects: [],
+      loaded: false,
+      syncGen: null,
+      syncSeq: null,
+      boxStale: false,
+    });
+    loadPersistedSnapshot();
+    const s = useStore.getState();
+    expect(s.syncGen).toBe("g2");
+    expect(s.syncSeq).toBe(3);
+    expect(s.projects.map((p) => p.tmuxSession)).toEqual(["persisted"]);
+    expect(s.loaded).toBe(true);
+  });
+
+  it("corrupt JSON in the snapshot key is removed and does not throw", () => {
+    localStorage.setItem("manta:sync:snapshot", "{not json");
+    expect(() => loadPersistedSnapshot()).not.toThrow();
+    expect(localStorage.getItem("manta:sync:snapshot")).toBeNull();
+  });
+
+  it("refresh() sends the stored cursor and applies the response", async () => {
+    const calls: Array<{ sinceSeq?: number; sinceGen?: string }> = [];
+    const prev = (window as unknown as { api?: unknown }).api;
+    (window as unknown as { api: unknown }).api = {
+      syncSnapshot: async (args: { sinceSeq?: number; sinceGen?: string }) => {
+        calls.push(args);
+        return {
+          gen: "g3",
+          seq: 9,
+          changed: { projects: [proj({ tmuxSession: "r" })] },
+        };
+      },
+    };
+    useStore.setState({ syncGen: "g3", syncSeq: 7 });
+    await useStore.getState().refresh();
+    expect(calls).toEqual([{ sinceSeq: 7, sinceGen: "g3" }]);
+    expect(useStore.getState().projects.map((p) => p.tmuxSession)).toEqual(["r"]);
+    expect(useStore.getState().syncSeq).toBe(9);
+    expect(useStore.getState().syncGen).toBe("g3");
+    (window as unknown as { api?: unknown }).api = prev;
+  });
+
+  // Drive the REAL write path (loadPersistedSnapshot → applySyncPayload →
+  // debounced persist), so the fields the snapshot carries are exactly what
+  // schedulePersist writes — not a value planted by hand. `boxId` seeds the
+  // desktop-local spawn ref, mirroring main.tsx's loadPersistedSnapshot(config.boxId).
+  async function seedSnapshot(boxId: string, changed: { stale?: boolean; projects?: Project[] }) {
+    loadPersistedSnapshot(boxId);
+    useStore.getState().applySyncPayload({ gen: "g", seq: 10, changed });
+    await new Promise((r) => setTimeout(r, 1100)); // flush the 1s debounce
+  }
+
+  it("persists and replays the stale flag (cold boot against an unreachable box)", async () => {
+    await seedSnapshot("boxA", { stale: true });
+    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as {
+      stale: boolean;
+      boxId: string;
+    };
+    expect(saved.stale).toBe(true);
+    // a cold boot must replay boxStale instead of hardcoding "not stale" —
+    // otherwise the restored cursor would make the box withhold stale and the
+    // amber "last known state" pill would silently never appear.
+    useStore.setState({ boxStale: false, syncGen: null, syncSeq: null, projects: [], loaded: false });
+    loadPersistedSnapshot("boxA");
+    expect(useStore.getState().boxStale).toBe(true);
+  });
+
+  it("write path stamps the desktop-local boxId, and a different box's snapshot is dropped", async () => {
+    await seedSnapshot("boxA", { projects: [proj({ tmuxSession: "a" })] });
+    // The persisted stamp must be the desktop-local boxId passed to
+    // loadPersistedSnapshot — this would be "" if the write path read
+    // store.boxId (empty in http mode), which is the exact dead-code bug.
+    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as { boxId: string };
+    expect(saved.boxId).toBe("boxA");
+    // Re-pair to a different box: the guard must drop the old box's snapshot.
+    useStore.setState({ projects: [], syncGen: null, syncSeq: null, loaded: false });
+    loadPersistedSnapshot("boxB");
+    expect(localStorage.getItem("manta:sync:snapshot")).toBeNull();
+    expect(useStore.getState().projects).toEqual([]);
+  });
+
+  it("loadPersistedSnapshot restores a snapshot owned by the same box", async () => {
+    await seedSnapshot("boxA", { projects: [proj({ tmuxSession: "a" })] });
+    useStore.setState({ projects: [], syncGen: null, syncSeq: null, loaded: false });
+    loadPersistedSnapshot("boxA");
+    expect(useStore.getState().projects.map((p) => p.tmuxSession)).toEqual(["a"]);
+    expect(useStore.getState().syncSeq).toBe(10);
   });
 });

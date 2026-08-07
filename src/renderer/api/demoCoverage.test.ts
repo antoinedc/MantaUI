@@ -60,6 +60,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onScreenshotDetected",
   "onServerUpdateAvailable",
   "onServerUpdateProgress",
+  "onSyncDelta",
   "openExternal",
   "opencodeAbort",
   "opencodeAgents",
