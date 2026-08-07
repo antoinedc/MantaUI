@@ -28,6 +28,113 @@ import MessagingUI
 // handlers (owned by SessionListStore) are never clobbered.
 // ===========================================================================
 
+// ===========================================================================
+// Single-writer stream merge (BET-668).
+//
+// The chat screen has TWO writers for the same turn state — the optimistic
+// LOCAL updates (`send()`, `replyQuestion`/`rejectQuestion`) and the incoming
+// interpreted-stream frames — and the stream frame used to unconditionally
+// clobber the optimistic value. All the merge decisions below are PURE so
+// they are unit-testable; the store applies the returned state.
+// ===========================================================================
+
+/// The subset of turn state the stream-merge decisions own.
+struct ChatStreamTurnState: Equatable {
+    var running: Bool
+    var turnComplete: Bool
+    var streamingTailID: String
+    var locallyAnsweredQuestionIDs: Set<String>
+    var questions: [QuestionRequest]
+
+    init(
+        running: Bool = false,
+        turnComplete: Bool = false,
+        streamingTailID: String = "",
+        locallyAnsweredQuestionIDs: Set<String> = [],
+        questions: [QuestionRequest] = []
+    ) {
+        self.running = running
+        self.turnComplete = turnComplete
+        self.streamingTailID = streamingTailID
+        self.locallyAnsweredQuestionIDs = locallyAnsweredQuestionIDs
+        self.questions = questions
+    }
+}
+
+enum ChatStreamMerge {
+    /// Apply the per-frame lifecycle facts of one interpreted-stream frame to
+    /// the turn state.
+    ///
+    /// - `frameTurnComplete`: non-nil ONLY when THIS frame carried a completion
+    ///   flag (a genuine `turnComplete` frame). This is the only thing that
+    ///   resets the streaming tail — never a bare `running == false` write and
+    ///   never a STALE accumulated completion left over from a previous turn.
+    /// - `frameStartedRunning`: true when THIS frame began a turn (a carrying
+    ///   `running` frame whose value was true) — clears any stale completion
+    ///   flag from a previous turn.
+    ///
+    /// `running`, `questions` and the streaming-tail MINT are NOT handled here:
+    /// they are read straight from the accumulated snapshot / seeded in the
+    /// store. The store mints a tail id whenever a running turn has none, which
+    /// subsumes the old per-frame mint edge (BET-668 review cycle 3).
+    static func applying(
+        frameTurnComplete: Bool?,
+        frameStartedRunning: Bool,
+        to state: ChatStreamTurnState
+    ) -> ChatStreamTurnState {
+        var s = state
+        if let t = frameTurnComplete { s.turnComplete = t }
+        if frameStartedRunning { s.turnComplete = false }
+        // Reset the tail identity only on a genuine completion edge.
+        if frameTurnComplete == true {
+            s.streamingTailID = ""
+        }
+        return s
+    }
+
+    /// State after a FAILED `send()`: the optimistic running/tail is rolled
+    /// back so the UI doesn't sit on a forever-spinner. The user's prompt is
+    /// NOT lost — the caller restores the input text — so this only clears the
+    /// fake "in progress" flags, leaving the question tombstones untouched.
+    static func afterSendFailure(to state: ChatStreamTurnState) -> ChatStreamTurnState {
+        var s = state
+        s.running = false
+        s.turnComplete = false
+        s.streamingTailID = ""
+        return s
+    }
+}
+
+/// Which per-frame lifecycle facts the most recently applied stream frame
+/// carried, derived from the routing `sub` and whether it targeted this
+/// session. Used to separate the frame's DELTA from the accumulated snapshot
+/// (which is sticky across turns).
+struct ChatStreamFrameCarried: Equatable {
+    /// True when this frame carried a running value (the `running` or
+    /// `turnComplete` sub).
+    var running: Bool
+    /// True when this frame carried a completion flag (the `turnComplete` sub).
+    var turnComplete: Bool
+}
+
+enum ChatStreamDelta {
+    /// The carried facts of the most recently applied frame. A non-carrying
+    /// sub, or a frame aimed at a different session, yields neither flag —
+    /// so a republish that isn't a genuine turn-state frame (e.g. a retire or
+    /// a foreign-session frame) can't apply a stale value.
+    static func carried(sessionIsTarget: Bool, sub: String?) -> ChatStreamFrameCarried {
+        guard sessionIsTarget else {
+            return ChatStreamFrameCarried(running: false, turnComplete: false)
+        }
+        switch sub {
+        case "running", "turnComplete":
+            return ChatStreamFrameCarried(running: true, turnComplete: sub == "turnComplete")
+        default:
+            return ChatStreamFrameCarried(running: false, turnComplete: false)
+        }
+    }
+}
+
 @MainActor
 final class ChatSessionStore: ObservableObject {
 
@@ -89,8 +196,23 @@ final class ChatSessionStore: ObservableObject {
     /// turn. The tail's TEXT grows every delta, so a content-derived id would
     /// change each time and thrash TiledView; this id doesn't. Reset when the
     /// turn ends and the tail is absorbed into the canonical transcript.
-    private var streamingTailID: String = ""
+    private(set) var streamingTailID: String = ""
+    /// Question ids the user answered/rejected on-device. The incoming stream
+    /// keeps publishing an answered question until the box catches up, so this
+    /// tombstone set filters it out locally in the meantime (BET-668); an id
+    /// leaves the set once the box stops publishing it.
+    private var locallyAnsweredQuestionIDs: Set<String> = []
+    /// True between `send()` and the box's first running acknowledgment. While
+    /// set, the snapshot's accumulated `running` (still the previous turn's
+    /// `false`) must not clobber the optimistic `true` — but once the box
+    /// reports running at all, the snapshot is authoritative.
+    private var optimisticRunning = false
     private var didRunOnce = false
+    /// Test seams (internal, readable via `@testable`): count one-time vs
+    /// resumable work so tests can assert the split without touching live
+    /// timers or the network.
+    private(set) var transcriptFetchCount = 0
+    private(set) var permissionPollStartedCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
     /// How many recent messages the CURRENT window covers. Every refetch reuses
@@ -120,12 +242,12 @@ final class ChatSessionStore: ObservableObject {
         self.isReadOnly = isReadOnly
 
         eventStore.$sessionStates
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyStreamState() }
             .store(in: &cancellables)
 
         eventStore.$connectionState
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
             .store(in: &cancellables)
     }
@@ -133,11 +255,16 @@ final class ChatSessionStore: ObservableObject {
     // MARK: - Lifecycle
 
     /// Begin loading the session and (for the parent) start the light
-    /// permission poll. Idempotent.
+    /// permission poll. One-time setup is split from resumable work: the
+    /// initial transcript fetch runs once under the `didRunOnce` guard, while
+    /// the permission poll is (re)started whenever it is not already running,
+    /// so a subagent push (`stop`) then pop (`start`) keeps polling without a
+    /// re-fetch.
     func start() {
-        guard !didRunOnce else { return }
-        didRunOnce = true
-        load()
+        if !didRunOnce {
+            didRunOnce = true
+            load()
+        }
         if !isReadOnly {
             startPermissionPoll()
         }
@@ -202,23 +329,75 @@ final class ChatSessionStore: ObservableObject {
 
         inProgressText = s.liveText
 
-        running = s.running == true
-        turnComplete = s.turnComplete == true
+        // Fields that are copied straight through from the latest frame (the
+        // stream is the single writer for these — no optimistic value to
+        // protect).
         context = s.context
         cache = s.cache
         truncation = s.truncation
         todos = s.todos
-        questions = s.questions?.questions ?? []
         subagents = s.subagents
 
-        // Track running-this-turn for the header timer, and mint the streaming
-        // tail's stable id exactly once per turn.
-        if running && runningSince == nil {
-            runningSince = Date()
+        // Which frame (if any) just changed this session's stream state. The
+        // `$sessionStates` sink fires on every republish, so the stamp only
+        // counts when it names THIS session; retirement nulls it so a stale
+        // frame never replays over optimistic state.
+        let stamp = eventStore.lastStreamFrame
+        let carried = ChatStreamDelta.carried(sessionIsTarget: stamp?.sessionId == sessionId, sub: stamp?.sub)
+
+        // --- running: the accumulated snapshot is authoritative, seeded when
+        // a session is opened (a mid-turn session shows its working indicator),
+        // EXCEPT the optimistic `true` `send()` just set — which the snapshot's
+        // stale previous-turn `false` must not clobber while the box hasn't yet
+        // confirmed. Reading the snapshot (not a per-frame stamp) also makes
+        // this robust to frames that coalesce between publishes.
+        if optimisticRunning, (carried.running || s.running == true) {
+            optimisticRunning = false
+        }
+        running = optimisticRunning ? true : (s.running == true)
+
+        // --- questions: the accumulated snapshot's pending questions, filtered
+        // against the tombstone set (so an answered/rejected card is held until
+        // the box catches up) and aged only when an actual payload exists.
+        // Seeded on open — a session with a question already waiting shows its
+        // card immediately.
+        if let questionPayload = s.questions {
+            let incoming = questionPayload.questions
+            locallyAnsweredQuestionIDs.formIntersection(Set(incoming.map(\.id)))
+            questions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
+        }
+
+        // --- the turn lifecycle (`turnComplete` flag + streaming-tail RESET)
+        // is per-frame: only a genuine `turnComplete` frame clears the tail.
+        // `running` and `questions` are NOT touched by this merge (handled
+        // above), and neither is the tail MINT (handled below).
+        let frameStartedRunning = carried.running && (s.running == true)
+        let merged = ChatStreamMerge.applying(
+            frameTurnComplete: carried.turnComplete ? s.turnComplete : nil,
+            frameStartedRunning: frameStartedRunning,
+            to: ChatStreamTurnState(
+                running: running,
+                turnComplete: turnComplete,
+                streamingTailID: streamingTailID,
+                locallyAnsweredQuestionIDs: locallyAnsweredQuestionIDs,
+                questions: questions
+            )
+        )
+        turnComplete = merged.turnComplete
+        streamingTailID = merged.streamingTailID
+        // Seed a stable tail id whenever a running turn has none — however we
+        // learned it is running: a fresh turn edge, a mid-turn session open
+        // (seeded from the snapshot), or a stamp nulled between a running frame
+        // and its deferred sink. A non-empty id is kept, so the streaming row
+        // is never replaced mid-turn.
+        if running, streamingTailID.isEmpty {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
-        } else if !running {
+        }
+        // runningSince tracks the turn that's running for the header timer.
+        if running {
+            if runningSince == nil { runningSince = Date() }
+        } else {
             runningSince = nil
-            streamingTailID = ""
         }
 
         // Register a store for any subagent that has a child session id, so the
@@ -323,6 +502,7 @@ final class ChatSessionStore: ObservableObject {
     /// unreachable box can hang a request for the URLSession default (a minute
     /// or more), leaving the screen on its skeleton with no way out.
     private func fetchTranscript(isFirstLoad: Bool) async {
+        transcriptFetchCount += 1
         if fetchInFlight {
             fetchPending = true
             return
@@ -385,6 +565,8 @@ final class ChatSessionStore: ObservableObject {
     // MARK: - Permissions (S1a answerable)
 
     private func startPermissionPoll() {
+        guard permissionPoll == nil else { return }
+        permissionPollStartedCount += 1
         let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshPermissions() }
         }
@@ -417,14 +599,17 @@ final class ChatSessionStore: ObservableObject {
             questions.removeAll { $0.id == request.id }
             return
         }
-        // Drop the card optimistically; restore it on failure so a real send
-        // error doesn't silently leave the question gone while the box stays
-        // blocked on it ("can't send messages").
+        // Drop the card optimistically and tombstone its id so the incoming
+        // stream can't flash it back before the box catches up; restore both
+        // on failure so a real send error doesn't silently leave the question
+        // gone while the box stays blocked on it ("can't send messages").
         questions.removeAll { $0.id == request.id }
+        locallyAnsweredQuestionIDs.insert(request.id)
         Task {
             do {
                 try await api.questionReply(requestId: requestId, answers: answers, sessionId: sessionId)
             } catch {
+                locallyAnsweredQuestionIDs.remove(request.id)
                 if !questions.contains(where: { $0.id == request.id }) {
                     questions.append(request)
                 }
@@ -438,10 +623,12 @@ final class ChatSessionStore: ObservableObject {
             return
         }
         questions.removeAll { $0.id == request.id }
+        locallyAnsweredQuestionIDs.insert(request.id)
         Task {
             do {
                 try await api.questionReject(requestId: requestId, sessionId: sessionId)
             } catch {
+                locallyAnsweredQuestionIDs.remove(request.id)
                 if !questions.contains(where: { $0.id == request.id }) {
                     questions.append(request)
                 }
@@ -454,17 +641,26 @@ final class ChatSessionStore: ObservableObject {
     /// Send a prompt for this session. `text` needs no trimming here (the
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
-    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+    ///
+    /// Returns `true` when the box accepted the prompt, `false` when the RPC
+    /// failed. On failure the optimistic running/tail state is rolled back so
+    /// the UI doesn't sit on a forever-spinner, and the caller is told so it
+    /// can restore the user's typed text.
+    @discardableResult
+    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) async -> Bool {
         // Echo the message straight into the transcript and assume the turn is
         // running. The box confirms both within a second (running frame, then
         // the canonical refetch replaces this block), but without the echo the
         // screen sits completely unchanged after a send, which reads as "the
         // send did nothing".
+        var optimisticUserIndex: Int?
         if !text.isEmpty {
+            optimisticUserIndex = transcript.count
             transcript.append(.user(text, at: Date()))
             rebuildBlocks()
         }
         running = true
+        optimisticRunning = true
         turnComplete = false
         if runningSince == nil {
             runningSince = Date()
@@ -472,13 +668,40 @@ final class ChatSessionStore: ObservableObject {
             // mint this from), so mint the streaming tail's stable id here too.
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
         }
-        Task {
-            try? await api.sendPrompt(SendPromptInput(
+        do {
+            try await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,
                 text: text,
                 model: model,
                 attachments: attachments.isEmpty ? nil : attachments
             ))
+            return true
+        } catch {
+            // Surface the failure instead of swallowing it: stop the running
+            // state and clear the optimistic tail so the spinner doesn't stay
+            // on forever, and let the caller restore the lost message.
+            optimisticRunning = false
+            let rolledBack = ChatStreamMerge.afterSendFailure(to: ChatStreamTurnState(
+                running: running,
+                turnComplete: turnComplete,
+                streamingTailID: streamingTailID,
+                locallyAnsweredQuestionIDs: locallyAnsweredQuestionIDs,
+                questions: questions
+            ))
+            running = rolledBack.running
+            turnComplete = rolledBack.turnComplete
+            streamingTailID = rolledBack.streamingTailID
+            // Remove THIS send's optimistic echo: the box never received the
+            // message, so it belongs back in the composer input (which the
+            // caller restores), not standing in the transcript as if sent.
+            // `fetchTranscript` can replace the whole array, so guard on the
+            // captured index still holding our echo before removing it.
+            if let idx = optimisticUserIndex, idx < transcript.count,
+               case .user(let echoed, _) = transcript[idx], echoed == text {
+                transcript.remove(at: idx)
+                rebuildBlocks()
+            }
+            return false
         }
     }
 

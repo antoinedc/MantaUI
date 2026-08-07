@@ -2,10 +2,10 @@
 //
 // Extracted from ChatPanel.tsx (BET-63). The scrolling message list: the
 // virtualized scroll container, the per-message `MessageRow`, the tail-of-
-// transcript live-todos card, and the pending-question cards. Purely
-// presentational — every piece of state (messages, the derived per-message
-// maps, running, activeTodos, questions) and every callback (replyQuestion /
-// rejectQuestion) is passed in by ChatPanel.
+// transcript live-todos card, the working indicator, and the pending-question
+// cards. Purely presentational — every piece of state (messages, the derived
+// per-message maps, running, activeTodos, questions) and every callback
+// (replyQuestion / rejectQuestion) is passed in by ChatPanel.
 //
 // BET-679 replaces the hand-rolled v4 scroll/pin machinery (four generations
 // of pin-to-bottom bugs, see AGENTS.md "Chat transcript pin-to-bottom") with
@@ -23,6 +23,7 @@ import { MotionConfig } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
+import { MantaLoader } from "./MantaLoader";
 import { QuestionCard } from "./Cards";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
@@ -40,9 +41,10 @@ import {
 // `context` prop (passed once to <Virtuoso>). This keeps their identities
 // stable at module scope so Virtuoso doesn't remount them on every parent
 // render, while still letting them read the live tail state (todos, question
-// cards) and the load-earlier state.
+// cards, the working indicator) and the load-earlier state.
 
 type TranscriptContext = {
+  running: boolean;
   showLoadEarlier: boolean;
   loadingEarlier: boolean;
   onLoadEarlier: () => void;
@@ -104,17 +106,45 @@ function LoadEarlierHeader({ context }: { context: TranscriptContext }) {
   );
 }
 
+// The live "working" indicator (BET-677). A constant-height row at the tail of
+// the transcript that is ALWAYS rendered and toggles `visibility` instead of
+// mounting/unmounting — so flipping `running` on send never reflows the
+// reading column (the exact reflow the deleted pre-BET-664 indicator caused).
+// The slot stays 28px whether a turn is in flight or not. Lives in the
+// virtualized footer (BET-679) so it sits at the tail and scrolls with the
+// conversation, exactly where the hand-rolled scroller drew it.
+export function WorkingIndicator({ running }: { running: boolean }) {
+  return (
+    <div
+      className="manta-working-indicator flex items-center gap-2 shrink-0"
+      style={{
+        height: 28,
+        // Sit flush under the last message: cancel the transcript column's
+        // inter-row `--turn-gap` so the reserved idle slot is EXACTLY its own
+        // 28px, not 28px + the turn gap (a stray extra band when idle).
+        marginTop: "calc(var(--turn-gap) * -1)",
+        visibility: running ? "visible" : "hidden",
+      }}
+      aria-hidden={!running}
+    >
+      <MantaLoader />
+      <span className="text-text-faint text-xs">Working…</span>
+    </div>
+  );
+}
+
 // ===== Footer: transcript tail =====
 //
 // Renders everything that appeared after the message rows inside the old
-// scroller: the live todo checklist and the pending question cards. They
-// scroll with the conversation instead of sitting in a shrink-0 row above the
-// input (see the comment history in the old Transcript for the design
-// decision — anchoring them at the tail keeps them at the bottom of the
-// transcript in every state).
+// scroller: the working indicator (BET-677), the live todo checklist, and the
+// pending question cards. They scroll with the conversation instead of sitting
+// in a shrink-0 row above the input (see the comment history in the old
+// Transcript for the design decision — anchoring them at the tail keeps them at
+// the bottom of the transcript in every state).
 function TranscriptTail({ context }: { context: TranscriptContext }) {
   return (
     <>
+      <WorkingIndicator running={context.running} />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
       )}
@@ -234,6 +264,7 @@ export function Transcript({
   };
 
   const virtuosoContext: TranscriptContext = {
+    running,
     showLoadEarlier:
       !loadedAllRef.current && messages.length >= TRANSCRIPT_TAIL_LIMIT,
     loadingEarlier,
@@ -286,9 +317,9 @@ export function Transcript({
       </div>
     ) : (
       // BET-646 (supersedes BET-413/BET-637's single-edge goal): the transcript
-      // runs the full width of the session panel by owner decision — 28px/inset
-      // from each edge, no measure cap, no centring. The vertical sp-6 padding
-      // and horizontal --transcript-inset live on the Virtuoso root (inside the
+      // runs the full width of the session panel by owner decision — inset from
+      // each edge, no measure cap, no centring. The vertical sp-6 padding and
+      // horizontal --transcript-inset live on the Virtuoso root (inside the
       // scroller, so they scroll with it, exactly as the old container's own
       // padding did).
       <TaskContext.Provider value={taskContextValue}>

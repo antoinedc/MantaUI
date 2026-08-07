@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { MotionConfig } from "framer-motion";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
@@ -18,6 +19,7 @@ import {
   writeSavedMode,
   resolveLauncherFlags,
 } from "./chatShared";
+import type { SyncPayload } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
@@ -28,6 +30,7 @@ import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
 import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { MantaLoader } from "./MantaLoader";
 import type { AvailableLauncher } from "../shared/types";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
@@ -73,7 +76,13 @@ export function App() {
         </div>
       )}
     >
-      <AppInner />
+      {/* App-level reduced motion (BET-677): wraps the whole tree so EVERY
+          framer-motion animation — chat entry, CardMount card mounts, toast
+          in/out — respects the OS `prefers-reduced-motion` setting, not just
+          the transcript's. The old transcript-local duplicate was removed. */}
+      <MotionConfig reducedMotion="user">
+        <AppInner />
+      </MotionConfig>
     </ErrorBoundary>
   );
 }
@@ -101,6 +110,7 @@ function AppInner() {
     connectionState,
     launcherFlags,
     createDraft,
+    boxStale,
   } = useStore();
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
@@ -262,47 +272,73 @@ function AppInner() {
   activeChatRef.current = activeChatSessionId;
 
   useEffect(() => {
-    // Bootstrap. In HTTP mode (paired to a manta-server) refresh() can reject
-    // with AuthRequiredError when the box answers 401 — a revoked/rotated
-    // box_token mid-session. Route that to the pairing screen (onboarding step
-    // 1) instead of letting the app sit dead with no sessions and no
-    // explanation. relaunchOnboarding() forces the full-screen flow open even
-    // for an otherwise-"http" config; a successful re-claim persists a fresh
-    // token and finishOnboarding() re-runs the bootstrap. SSH mode never throws
-    // this (no Bearer gate), so this is a no-op there.
+    // Bootstrap (BET-678). The first paint is INSTANT — read from the persisted
+    // local snapshot restored in main.tsx (zero round trips). This effect only
+    // needs to SYNC the cursor with the box: one refresh() on mount, retried on
+    // a plain 10s interval while it fails (cleared on first success). After the
+    // first success, live `sync` deltas + the reconnect marker (below) own
+    // freshness — no polling.
     //
-    // Non-auth bootstrap failures are retried with backoff. The bootstrap
-    // metadata RPCs (configGet + tmuxList) carry a hard timeout in httpApi, so
-    // a stalled first connection FAILS FAST instead of hanging forever — which
-    // is what makes this retry actually fire (a hanging fetch never rejected,
-    // so the pre-fix shell sat empty until a manual Cmd+R). On a cold box the
-    // first attempt may time out before the server/tmux is up; a short retry
-    // recovers in place. Each retry runs applyProjects (which preserves the
-    // current selection and drops the zero-state draft once projects arrive).
+    // refresh() can still reject with AuthRequiredError when the box answers
+    // 401 — a revoked/rotated box_token mid-session. Route that to the pairing
+    // screen (onboarding step 1) instead of letting the app sit dead with no
+    // sessions and no explanation. relaunchOnboarding() forces the full-screen
+    // flow open even for an otherwise-"http" config; a successful re-claim
+    // persists a fresh token and finishOnboarding() re-runs the bootstrap.
     let cancelled = false;
-    let attempts = 0;
-    const MAX_ATTEMPTS = 6;
-    const backoff = (n: number) => Math.min(1000 * 2 ** n, 15000);
-    const attempt = async (): Promise<void> => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const attempt = async (): Promise<boolean> => {
       try {
         await refresh();
+        return true;
       } catch (e) {
         const isAuth =
           (e as { name?: string })?.name === "AuthRequiredError" ||
           (e as { status?: number })?.status === 401;
         if (isAuth) {
           void useStore.getState().relaunchOnboarding();
-          return;
+          return true; // onboarding owns the flow now — stop the retry loop
         }
-        // Non-auth failure — retry with backoff, bounded, until success/abort.
-        if (cancelled || ++attempts >= MAX_ATTEMPTS) return;
-        setTimeout(() => void attempt(), backoff(attempts));
+        return false; // transient failure — keep retrying
       }
     };
-    void attempt();
+    void attempt().then((ok) => {
+      if (cancelled) return;
+      if (!ok) {
+        timer = setInterval(() => {
+          if (cancelled) return;
+          void attempt().then((ok2) => {
+            if (ok2 && timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+          });
+        }, 10_000);
+      }
+    });
     return () => {
       cancelled = true;
+      if (timer) clearInterval(timer);
     };
+  }, [refresh]);
+
+  useEffect(() => {
+    // BET-678: live sync deltas own freshness after the initial sync. The box
+    // publishes `{kind:"sync"}` envelopes (full current values for changed
+    // fields); the events stream ALSO fires a synthetic `{ resync: true }`
+    // marker on every reconnect so we re-pull from our cursor for anything we
+    // missed while disconnected.
+    if (!window.api.onSyncDelta) return;
+    const off = window.api.onSyncDelta((delta) => {
+      const isResync = "resync" in delta && delta.resync === true;
+      if (isResync) {
+        void refresh();
+        return;
+      }
+      // applySyncPayload owns the stale-envelope guard (same gen, lower seq).
+      useStore.getState().applySyncPayload(delta as SyncPayload);
+    });
+    return off;
   }, [refresh]);
 
   useEffect(() => {
@@ -1164,6 +1200,23 @@ function AppInner() {
                   · {describeConnection(connectionState)}
                 </span>
               )}
+            {/* BET-678: the box's tmux is unreachable — its last refresh tick
+                failed. Keep serving the last-known session list but surface a
+                subtle amber marker so "stale data" isn't read as "the box is
+                empty". */}
+            {boxStale && (
+              <span
+                className="shrink-0 inline-flex items-center gap-1 text-text-faint"
+                title="The box's tmux is unreachable — showing the last known session list."
+              >
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: "#f59e0b" }}
+                  aria-hidden="true"
+                />
+                last known state
+              </span>
+            )}
           </div>
 
           {/* Session-mode toggle (BET-459): a terminal glyph that swaps
@@ -1202,7 +1255,9 @@ function AppInner() {
             // unmounting the tree BEFORE onboarding could ever render (the
             // whole app went blank on first launch). Onboarding needs `loaded`
             // too, so neither branch may render until config is in.
-            <div className="h-full" />
+            <div className="h-full w-full flex items-center justify-center">
+              <MantaLoader size="screen" />
+            </div>
           ) : projects.length === 0 ? (
             // Zero-project state (BET-416 §F / BET-417 §A): the new-session
             // composer IS the app's zero state. An unpaired config routes to
@@ -1213,7 +1268,9 @@ function AppInner() {
             activeDraft ? (
               <NewSessionScreen draftId={activeDraft.id} />
             ) : (
-              <div className="h-full" />
+              <div className="h-full w-full flex items-center justify-center">
+                <MantaLoader />
+              </div>
             )
           ) : (
             <>

@@ -172,45 +172,18 @@ private struct ChatScreenContent: View {
         Group {
             if store.loadFailed {
                 loadFailure
-            } else if store.loading {
-                loadingSkeleton
             } else {
                 transcript
             }
         }
         .background(tokens.canvas.ignoresSafeArea())
-        // The bottom stack is a safeAreaInset, which reserves its space by
-        // SHRINKING the scroll view. That is the whole point.
+        // The composer FLOATS as an overlay over the full-bleed transcript, so
+        // messages genuinely pass under it while scrolling. The measured
+        // `bottomBarHeight` of that floating stack feeds BOTH the scrim beneath
+        // it (which dims passing content and the home-indicator strip) and the
+        // transcript's `.contentMargins` bottom inset, so at rest the newest
+        // message rests readable above the composer.
         //
-        // Reserving the space the other way — by EXTENDING the scroll content
-        // (a trailing spacer, or a bottom contentMargin) — is what blanked the
-        // transcript on every keyboard open. The old scroll view carried
-        // `.defaultScrollAnchor(.bottom, for:.sizeChanges)` and re-pinned to
-        // the END of its content whenever it resized; with reserved space
-        // inside the content, the end was that blank space and the conversation
-        // scrolled off screen. MessagingUI's TiledView (see `transcript`)
-        // reserves this same space by shrinking the viewport rather than by
-        // extending content, which is the same principle.
-        //
-        // Accepted trade-off: because the inset shrinks the viewport, the
-        // composer now PUSHES the transcript's tail up as it grows a line at a
-        // time, rather than floating over it. The tail moving is the correct
-        // failure mode; a blank transcript is not.
-        //
-        // The composer is deliberately JUST its own glass elements — there is
-        // NO opaque backdrop on the inset. A scroll view still DRAWS its
-        // content underneath a safe-area inset while scrolling, so the
-        // transcript visibly slides beneath the glass composer (which blurs
-        // it) instead of behind a solid bar. The todos card is pinned to the
-        // bottom of this stack, in the transcript area; the running-state row
-        // lives INSIDE the transcript as its typing indicator (see
-        // `transcript`), so it is not duplicated here.
-        // The composer FLOATS over the full-bleed transcript (an overlay, not
-        // an inset), so messages genuinely pass under it while scrolling. A
-        // scrim sits directly beneath it dimming that passing content. A
-        // bottom content margin on the transcript keeps the newest message
-        // resting above the composer at rest, and natural bounce returns (see
-        // `transcript`).
         // Scrim FIRST so it draws beneath the composer, sized to the composer
         // plus an overhang past the safe area — it dims content under the
         // composer and in the home-indicator strip below it.
@@ -546,14 +519,11 @@ private struct ChatScreenContent: View {
 
     // MARK: - Loading skeleton (D2 / BET-631)
 
-    /// Transcript-shaped loading placeholder, shown while the session's first
-    /// transcript fetch is in flight. Renders the shared `ChatLoadingSkeleton`
-    /// (single source of truth — the same one the capture fixture uses) which
-    /// replaces the transcript in place: no layout shift, no full-screen
-    /// spinner.
-    private var loadingSkeleton: some View {
-        ChatLoadingSkeleton()
-    }
+    // The loading skeleton (`ChatLoadingSkeleton`) is no longer rendered from
+    // the chat screen — `content` already shows the full-screen loader while
+    // `store.loading`, so the in-place skeleton branch was unreachable. The
+    // skeleton is KEPT, but only as the harness scene `ChatLoadingScene`
+    // (MantaAppRoot) that the capture fixture drives.
 
     // MARK: - Live cards (todos / permission / question)
 
@@ -612,8 +582,12 @@ private struct ChatScreenContent: View {
 
 /// The pushed subagent screen. Unlike the S4b frozen fixture screen, this one
 /// binds to a LIVE ChatSessionStore for the child opencode session — the
-/// transcript streams while the child is open. Reuses the existing
-/// SubagentHeader + TranscriptView (no second renderer).
+/// transcript streams while the child is open. Built on the SAME TiledView +
+/// `TranscriptRow` machinery as the parent chat (BET-670): the child store
+/// produces rows exactly like the parent, so the wiring is identical — same
+/// scroll-position config, same `.headerContent` spacer pattern (for its own
+/// header), same cell, prepend loader and running indicator. No composer, no
+/// cards, no scrim — the child is read-only.
 struct ChatSubagentScreen: View {
     let title: String
     let subtitle: String
@@ -621,30 +595,47 @@ struct ChatSubagentScreen: View {
     let tokens: Tokens
     @Environment(\.dismiss) private var dismiss
 
+    /// Drives MessagingUI's `TiledView` scroll layer for the child transcript:
+    /// stays on the newest message as the child streams, and stops following
+    /// the moment the user scrolls away. Same config as the parent chat.
+    @State private var scrollPosition = TiledScrollPosition(
+        autoScrollsToBottomOnAppend: true,
+        scrollsToBottomOnReplace: true
+    )
+
+    /// Measured height of the subagent's own header, so the conversation rests
+    /// below it. The header floats as an overlay (reserving nothing itself), so
+    /// `.headerContent` reserves its space the same way the parent's does.
+    @State private var headerHeight: CGFloat = 0
+
     var body: some View {
-        VStack(spacing: 0) {
+        TiledView(dataSource: store.dataSource, scrollPosition: $scrollPosition) { row in
+            TranscriptBlockCell(item: row, tokens: tokens)
+        }
+        .headerContent(.header {
+            Color.clear.frame(height: headerHeight)
+        })
+        .prependLoader(.loader(
+            perform: { store.loadEarlier() },
+            isProcessing: store.loadingEarlier
+        ) {
+            LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
+        })
+        .typingIndicator(.indicator(isVisible: store.running) {
+            RunningIndicator(store: store)
+        })
+        .overlay(alignment: .top) {
             SubagentHeader(
                 title: title,
                 subtitle: subtitle,
                 onBack: { dismiss() },
                 tokens: tokens
             )
-            // `.bottom` ALONE also aligns SHORT content to the bottom, which
-            // is what put a screenful of dead space above a subagent report
-            // that does not fill the view. Scoping the anchor to `.sizeChanges`
-            // keeps the useful half — the view sticks to the bottom as the
-            // child streams — while content that fits simply starts at the top.
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if store.hasEarlier {
-                        LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {
-                            store.loadEarlier()
-                        }
-                    }
-                    TranscriptView(blocks: store.blocks, tokens: tokens)
-                }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                headerHeight = height
             }
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
         }
         .background(tokens.canvas.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)

@@ -14,6 +14,7 @@ import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
 import { applyTheme } from "./theme";
 import { pinDemoClock } from "./clock";
+import { loadPersistedSnapshot } from "./store";
 
 // Demo mode (BET-302): `?demo` in the URL swaps the real httpApi for a
 // fixture-backed transport and skips pairing / config / credential logic
@@ -112,6 +113,13 @@ async function chooseDesktopTransport(realPreload: Api): Promise<void> {
       // SAME session. On localStorage failure it falls back to the preload
       // bridge (window.api stays as-is).
       installHttpTransport(seed);
+      // BET-678: restore the persisted local snapshot BEFORE the React root
+      // renders so the first paint is instant (zero round trips). Only on the
+      // paired/http path — there is no snapshot to restore pre-pairing. The
+      // App bootstrap effect then syncs the cursor with the box. boxId scopes
+      // the cache so a re-pair to another box never replays the old box's
+      // sessions/config.
+      loadPersistedSnapshot(config.boxId);
     }
   } catch (e) {
     console.warn("[bui] configGet failed at entry:", e);

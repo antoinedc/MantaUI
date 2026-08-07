@@ -161,7 +161,10 @@ describe("demo fixture — config (transport-mode resolver lands on 'http')", ()
 
 describe("demoApi — Proxy fallback", () => {  it("explicit methods return the fixture values", async () => {
     expect(await demoApi.configGet()).toBe(demoState.config);
-    expect(await demoApi.tmuxList()).toEqual(demoState.projects);
+    const snap = await demoApi.syncSnapshot({});
+    expect((snap as { changed: { projects: unknown[] } }).changed.projects).toEqual(
+      demoState.projects,
+    );
     const messages = await demoApi.opencodeMessages(demoState.activeSessionId);
     expect(messages).toBe(demoState.messages);
     expect(await demoApi.opencodeQuestions(demoState.activeSessionId)).toEqual([
