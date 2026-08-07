@@ -7,6 +7,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Wrap unbreakable tokens (URLs, long file paths) instead of overflowing.
+   Tailwind's `break-words` is `overflow-wrap: break-word`, which does NOT
+   break a long path/URL that has no break opportunity; `anywhere` does.
+   Applied globally so every surface behaves identically (BET-230).
+   Deleting this rule makes a pasted URL or a long `a/b/c/d.tsx` path run off
+   the right edge of the transcript — do not remove it again. */
+.break-words {
+  overflow-wrap: anywhere;
+}
+
 /* `overflow: clip`, NOT `hidden`. `hidden` still makes the box a SCROLL
    CONTAINER — it only removes the scrollbars — so the browser is free to
    scroll it programmatically while the user has no way to scroll it back.
