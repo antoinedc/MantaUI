@@ -35,6 +35,7 @@ import {
   resolveContextLimit,
   STALE_CACHE_MIN_TOKENS,
   countRunningSubagents,
+  computeTurnInfo,
   shouldAutoRename,
   countUserTurns,
   buildTitlePromptInput,
@@ -1848,51 +1849,13 @@ export function ChatPanel({
   // the last assistant message's `info.tokens.output` — the same persisted,
   // transcript-derived source the context bar uses, so it survives refresh).
   // Intermediate assistant messages within a multi-step turn get no footer —
-  // only the final one does.
-  const turnInfo = useMemo(() => {
-    const out = new Map<
-      string,
-      { turnDurationMs: number | null; outputTokens: number | null }
-    >();
-    if (!messages) return out;
-    let i = 0;
-    while (i < messages.length) {
-      if (messages[i].info.role === "user") {
-        // Walk forward over the run of assistant messages that follow.
-        let j = i + 1;
-        let firstStart: number | null = null;
-        let lastEnd: number | null = null;
-        let lastOutput: number | null = null;
-        let lastAssistantId: string | null = null;
-        while (j < messages.length && messages[j].info.role === "assistant") {
-          const t = messages[j].info.time;
-          if (firstStart == null && t?.created != null) firstStart = t.created;
-          if (t?.completed != null) lastEnd = t.completed;
-          // OpencodeMessageInfo doesn't surface `tokens` directly — read it
-          // off the underlying record the same way `latestTokens` does.
-          const tok = (
-            messages[j].info as unknown as { tokens?: TokenUsage }
-          ).tokens;
-          if (tok && typeof tok.output === "number") lastOutput = tok.output;
-          lastAssistantId = messages[j].info.id;
-          j++;
-        }
-        if (lastAssistantId) {
-          out.set(lastAssistantId, {
-            turnDurationMs:
-              firstStart != null && lastEnd != null && lastEnd > firstStart
-                ? lastEnd - firstStart
-                : null,
-            outputTokens: lastOutput,
-          });
-        }
-        i = j;
-      } else {
-        i++;
-      }
-    }
-    return out;
-  }, [messages]);
+  // only the final one does. While the turn is running, the footer is gated off
+  // its still-streaming final assistant message (it would render behind the
+  // working indicator); it appears once running flips false.
+  const turnInfo = useMemo(
+    () => computeTurnInfo(messages, running),
+    [messages, running],
+  );
 
   // Slash-command provenance per USER message id. Two-source resolution:
   //
