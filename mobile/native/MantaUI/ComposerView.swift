@@ -779,7 +779,16 @@ struct ComposerView: View {
             guard let remotePath = attachment.remotePath else { return nil }
             return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
         }
-        store.send(text: trimmed, attachments: sendAttachments, model: model)
+        let sentText = trimmed
+        Task { @MainActor in
+            // On a failed send the store rolled its running state back; restore
+            // the user's message so it is never silently lost, and surface why.
+            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model)
+            if !ok {
+                text = sentText
+                surfaceHint("Send failed — message restored")
+            }
+        }
         text = ""
         attachments = []
         // Return to the compact form explicitly rather than waiting for the
