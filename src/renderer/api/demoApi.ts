@@ -320,8 +320,27 @@ if (DEMO_STATE === "stream" && typeof window !== "undefined") {
 const configGet = (): Promise<typeof demoState.config> =>
   Promise.resolve(demoState.config);
 
-const tmuxList = (): Promise<typeof demoState.projects> =>
-  Promise.resolve(DEMO_STATE === "empty" ? [] : demoState.projects);
+// BET-678: refresh() now boots + resyncs via the single syncSnapshot RPC
+// instead of configGet→tmuxList. The demo transport must satisfy it with a
+// full fixture snapshot so the bootstrap effect paints the sidebar.
+const syncSnapshot = (): Promise<{
+  gen: string;
+  seq: number;
+  changed: {
+    projects: unknown[];
+    config: typeof demoState.config;
+    stale: boolean;
+  };
+}> =>
+  Promise.resolve({
+    gen: "demo",
+    seq: 1,
+    changed: {
+      projects: DEMO_STATE === "empty" ? [] : demoState.projects,
+      config: demoState.config,
+      stale: false,
+    },
+  });
 
 // SSE-style push subscription. The renderer (App.tsx) registers one
 // onStatusEvent listener; we call it back once with the full fixture status
@@ -567,7 +586,7 @@ const claudeLoginCancel = (_sessionKey: string): Promise<{ ok: boolean }> => {
 // ===========================================================================
 export const explicitMethods = {
   configGet,
-  tmuxList,
+  syncSnapshot,
   onStatusEvent,
   opencodeMessages,
   opencodeMessagesCached,

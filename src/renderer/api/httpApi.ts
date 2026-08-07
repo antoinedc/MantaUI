@@ -14,7 +14,7 @@ import {
   type StreamEnvelope,
   type WindowStatus,
 } from "../../shared/types.js";
-import type { Api } from "../../shared/api.js";
+import type { Api, SyncDelta } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
 // origin is src/shared/claim.mjs — desktop main (src/main/auth.ts) and the
@@ -363,7 +363,8 @@ type Kind =
   | "serverUpdateAvailable"
   | "serverUpdateProgress"
   | "delegate.updated"
-  | "stream";
+  | "stream"
+  | "sync";
 
 // Stream-kind listeners receive the DERIVED envelope `{sub, sessionId, payload}`
 // (see dispatchFrame), not just `payload` — the bus event carries the extra
@@ -380,6 +381,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
   stream: new Set(),
+  sync: new Set(),
 };
 
 // The live event stream is a WebSocket (not SSE/EventSource): iOS standalone
@@ -429,9 +431,17 @@ function fireResync() {
   setTimeout(() => {
     _resyncing = false;
     const set = listeners.opencode;
-    if (set.size === 0) return; // no listeners yet — nothing to do
     const ev: OpencodeEvent = { type: "server.connected", properties: {} };
     for (const fn of set) { try { fn(ev); } catch { /* listener error — ignore, see onmessage */ } }
+    // BET-678: also tell the app-layer sync listener to re-pull its snapshot
+    // from its persisted cursor — live deltas were issued while we were
+    // disconnected, so the in-place store state may have missed some.
+    const sync = listeners.sync;
+    if (sync.size > 0) {
+      const marker: SyncDelta = { resync: true };
+      for (const fn of sync) { try { fn(marker); } catch { /* listener error — ignore */ } }
+    }
+    if (set.size === 0 && sync.size === 0) return; // no listeners yet — nothing to do
   }, 0);
   ship("info", "ws resync");
 }
@@ -648,9 +658,11 @@ export const httpApi: Api = {
   projectMetaDelete: (tmuxSession) => rpc(IPC.projectMetaDelete, tmuxSession),
 
   // -- tmux operations --
-  // tmuxList is the bootstrap session load — same fail-fast rationale as
-  // configGet.
-  tmuxList: () => rpcWithTimeout(IPC.tmuxList, RPC_METADATA_TIMEOUT_MS),
+  // BET-678: syncSnapshot is the bootstrap + resync session/config load —
+  // same fail-fast rationale as configGet (a stalled connection must fail
+  // fast and be retried rather than pin the empty screen).
+  syncSnapshot: (args) =>
+    rpcWithTimeout(IPC.syncSnapshot, RPC_METADATA_TIMEOUT_MS, args),
   tmuxNewSession: (input) => rpc(IPC.tmuxNewSession, input),
   tmuxNewWindow: (input) => rpc(IPC.tmuxNewWindow, input),
   tmuxRenameSession: (input) => rpc(IPC.tmuxRenameSession, input),
@@ -875,6 +887,13 @@ export const httpApi: Api = {
 
   // -- window status --
   onStatusEvent: (cb) => on<WindowStatus[]>("status", cb),
+
+  // -- sync deltas (BET-678) --
+  // Live `{kind:"sync"}` bus envelopes (full current values for the changed
+  // fields) plus the synthetic `{ resync: true }` marker fired on reconnect
+  // (see fireResync). The app layer routes envelope → applySyncPayload and
+  // marker → refresh() from its cursor.
+  onSyncDelta: (cb) => on<SyncDelta>("sync", cb),
 
   // -- opencode chat --
   opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),

@@ -463,6 +463,9 @@ export const IPC = {
   configGet: "config:get",
   configUpdate: "config:update",
 
+  // BET-678: sync cursor snapshot/delta RPC (the single bootstrap + resync).
+  syncSnapshot: "sync:snapshot",
+
   // Project metadata (local-only)
   projectMetaDelete: "project:meta:delete",
 

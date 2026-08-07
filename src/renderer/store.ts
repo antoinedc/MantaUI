@@ -8,6 +8,7 @@ import type {
   WindowStatus,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
+import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
@@ -67,6 +68,92 @@ function mergeLocalPairing(cfg: AppConfig): AppConfig {
     serverUrl: serverUrl || cfg.serverUrl,
     boxToken: boxToken || cfg.boxToken,
   };
+}
+
+// BET-678: persisted local snapshot of the last known sync state, so the
+// renderer paints instantly from it on cold boot (zero round trips), then
+// syncs via the server's cursor protocol (`syncSnapshot` with the stored
+// cursor) and applies live `sync` deltas / reconnect markers.
+//
+// `lastRaw*` hold the last RAW payload values so the debounced write
+// serializes exactly what was applied. config is stored PRE local-pairing
+// overlay (the device-local serverUrl/boxToken are re-derived on load via
+// applyConfig→mergeLocalPairing, never baked into the cache).
+const SNAPSHOT_KEY = "manta:sync:snapshot";
+let lastRawProjects: Project[] = [];
+let lastRawConfig: AppConfig | null = null;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Debounced 1s after each applySyncPayload — coalesces a burst of deltas (a
+// reconnect re-pull + a follow-up live delta) into one write rather than
+// hammering localStorage per envelope.
+function schedulePersist(): void {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    const { syncGen, syncSeq } = useStore.getState();
+    if (syncGen == null || syncSeq == null) return;
+    const snapshot = {
+      gen: syncGen,
+      seq: syncSeq,
+      projects: lastRawProjects,
+      config: lastRawConfig,
+      savedAt: Date.now(),
+    };
+    try {
+      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    } catch {
+      /* localStorage unavailable (private mode / SSR) — cache is best-effort */
+    }
+  }, 1000);
+}
+
+// Cold-boot restore: parse the persisted snapshot and apply it through
+// applySyncPayload so the cursor + projects/config/boxStale all come up in
+// one shot. Any parse/shape error drops the key and returns null (fall back
+// to a normal server boot). Called from main.tsx BEFORE the React root
+// renders, only on the paired/http path.
+export function loadPersistedSnapshot(): void {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(SNAPSHOT_KEY);
+  } catch {
+    return; // localStorage unavailable — nothing to restore
+  }
+  if (!raw) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    try { localStorage.removeItem(SNAPSHOT_KEY); } catch { /* ignore */ }
+    return;
+  }
+  const s = parsed as {
+    gen?: unknown;
+    seq?: unknown;
+    projects?: unknown;
+    config?: unknown;
+  };
+  if (
+    typeof s?.gen !== "string" ||
+    typeof s?.seq !== "number" ||
+    !Array.isArray(s.projects) ||
+    typeof s.config !== "object" ||
+    s.config === null
+  ) {
+    // Corrupt/incomplete shape — drop it and fall back to a server boot.
+    try { localStorage.removeItem(SNAPSHOT_KEY); } catch { /* ignore */ }
+    return;
+  }
+  useStore.getState().applySyncPayload({
+    gen: s.gen,
+    seq: s.seq,
+    changed: {
+      projects: s.projects as Project[],
+      config: s.config as AppConfig,
+      stale: false,
+    },
+  });
 }
 
 // "Active session" in our UI = (projectName, windowIndex) tuple
@@ -137,6 +224,14 @@ export type ScreenshotToast = {
 
 type State = {
   loaded: boolean;
+  // BET-678: the sync cursor + stale flag. `syncGen`/`syncSeq` are the client's
+  // last-confirmed cursor, sent back to the box on every syncSnapshot call so
+  // it returns only the deltas we missed. `boxStale` is true when the box's
+  // last refresh tick couldn't reach tmux — the sidebar shows an amber "last
+  // known state" indicator and keeps serving the last good list.
+  syncGen: string | null;
+  syncSeq: number | null;
+  boxStale: boolean;
   // ----- HTTP transport + onboarding (M6, BET-49) -----
   // Mirrored from AppConfig so App.tsx can resolve the transport mode
   // (resolveTransportMode) and the onboarding shell can resume. `boxToken`
@@ -369,6 +464,11 @@ type State = {
   setDefaultModel: (model: { providerID: string; modelID: string }) => Promise<void>;
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
+  // BET-678: apply one sync payload — routes each changed field to the right
+  // applier, updates the cursor cursor, and schedules the persisted snapshot
+  // write. Ignores nothing; callers are expected to guard for stale envelopes
+  // (same gen, lower seq) before calling when they care.
+  applySyncPayload: (p: SyncPayload) => void;
   // Reflect a successful onboarding claim (BET-49-T2) into store state so
   // resolveTransportMode reads "http" immediately. main already persisted these
   // to config.json via the auth:claim handler; this just mirrors them so the
@@ -464,6 +564,9 @@ type State = {
 
 export const useStore = create<State>((set, get) => ({
   loaded: false,
+  syncGen: null,
+  syncSeq: null,
+  boxStale: false,
   serverUrl: "",
   boxId: "",
   boxToken: "",
@@ -614,17 +717,39 @@ export const useStore = create<State>((set, get) => ({
   setAutoSubmitPrompt: (p) => set({ autoSubmitPrompt: p }),
 
   refresh: async () => {
-    const cfg = await window.api.configGet();
-    // In http mode window.api.configGet() returns the manta-SERVER's config,
-    // which structurally lacks the desktop-local pairing secrets
-    // (serverUrl/boxId/boxToken). Those live only on this desktop — mirrored
-    // into localStorage["manta_server"]/["manta_token"] by main.tsx at boot (and by
-    // the pairing step via applyPairing). Overlay them so applyConfig doesn't
-    // blank the pairing and flip the app back into onboarding on every refresh.
-    get().applyConfig(mergeLocalPairing(cfg));
-    // Un-gated: always fetch projects via httpApi (SSH main path gone, BET-82).
-    const projects = await window.api.tmuxList();
-    get().applyProjects(projects);
+    // BET-678: single cursor RPC. Pass the last-confirmed cursor so the box
+    // returns only the deltas we missed (or a full snapshot when the cursor
+    // is absent / a new server generation). ApplySyncPayload routes each
+    // changed field, updates the cursor, and persists the snapshot.
+    const payload = await window.api.syncSnapshot({
+      sinceSeq: get().syncSeq ?? undefined,
+      sinceGen: get().syncGen ?? undefined,
+    });
+    get().applySyncPayload(payload);
+  },
+
+  applySyncPayload: (p) => {
+    // Ignore stale envelopes: the same generation at a lower/equal seq has
+    // already been applied (or a newer snapshot supersedes it).
+    const cur = get();
+    if (p.gen === cur.syncGen && (cur.syncSeq == null || p.seq <= cur.syncSeq)) return;
+    if (p.changed.config) {
+      lastRawConfig = p.changed.config;
+      // The box's config structurally lacks the desktop-local pairing secrets;
+      // overlay them so applyConfig doesn't blank the pairing and flip the app
+      // back into onboarding on every refresh. The overlay is NOT persisted
+      // (lastRawConfig holds the raw value; secrets are device-local).
+      get().applyConfig(mergeLocalPairing(p.changed.config));
+    }
+    if (p.changed.projects) {
+      lastRawProjects = p.changed.projects;
+      get().applyProjects(p.changed.projects);
+    }
+    if ("stale" in p.changed) {
+      set({ boxStale: !!p.changed.stale });
+    }
+    set({ syncSeq: p.seq, syncGen: p.gen });
+    schedulePersist();
   },
 
   skipOnboarding: async () => {
