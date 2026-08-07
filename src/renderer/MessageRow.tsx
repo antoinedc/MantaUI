@@ -244,7 +244,8 @@ export const MessageRow = memo(function MessageRow({
   msg,
   showThinking,
   turnDurationMs,
-  outputTokens,
+  turnTokens,
+  verbSeedId,
   truncation,
   commandInfo,
   streaming = false,
@@ -256,11 +257,16 @@ export const MessageRow = memo(function MessageRow({
   // whole turn (all consecutive assistant messages since the last user msg).
   // Intermediate messages get null so they don't show a footer at all.
   turnDurationMs: number | null;
-  // Output tokens produced by this whole turn (the final assistant message's
-  // `info.tokens.output`). Appended to the duration footer. Transcript-derived,
+  // Tokens produced by this whole turn (`output + reasoning`, summed across
+  // every assistant step). Appended to the duration footer. Transcript-derived,
   // so it survives refresh. null/0 → omitted.
-  outputTokens: number | null;  // Per-message truncation classification from finishByMessageId. Drives
-  // the "truncated" badge appended to the turn-duration footer (or as a
+  turnTokens: number | null;
+  // Seed id the footer verb is derived from — the turn's FIRST assistant
+  // message, so the live working-row verb (seeded the same way) and the
+  // finished-footer verb agree for one turn.
+  verbSeedId: string | null;
+  // Per-message truncation classification from finishByMessageId. Drives the
+  // "truncated" badge appended to the turn-duration footer (or as a
   // standalone footer when there's no duration, e.g. mid-turn assistant
   // messages within a multi-step turn that hit max_tokens). null = no
   // truncation, no badge.
@@ -438,11 +444,11 @@ export const MessageRow = memo(function MessageRow({
               {/* The finished turn keeps the mark the working row was built
                   around, held still — the arcs are what meant "in flight". */}
               <MantaMark size={12} />{" "}
-              {pastVerbFor(msg.info.id)} for {formatDuration(turnDurationMs)}
-              {outputTokens != null && outputTokens > 0 && (
+              {pastVerbFor(verbSeedId ?? msg.info.id)} for {formatDuration(turnDurationMs)}
+              {turnTokens != null && turnTokens > 0 && (
                 <>
                   {" · "}
-                  {formatTokens(outputTokens)}
+                  {formatTokens(turnTokens)}
                 </>
               )}
             </>

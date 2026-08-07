@@ -8,6 +8,7 @@ import {
   SPINNER_VERBS,
   SPINNER_VERBS_PAST,
   pastVerbFor,
+  presentVerbFor,
   guessMime,
   mimeToInputMode,
   modelInputModes,
@@ -53,6 +54,16 @@ describe("pastVerbFor", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 200; i++) seen.add(pastVerbFor(`id-${i}`));
     expect(seen.size).toBeGreaterThan(1);
+  });
+});
+
+describe("presentVerbFor / pastVerbFor", () => {
+  it("resolve to the SAME index of their respective pools for the same id", () => {
+    for (const id of ["msg-abc", "message-1", "", "🙂", "x".repeat(50)]) {
+      const presentIndex = SPINNER_VERBS.indexOf(presentVerbFor(id));
+      const pastIndex = SPINNER_VERBS_PAST.indexOf(pastVerbFor(id));
+      expect(presentIndex).toBe(pastIndex);
+    }
   });
 });
 
