@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { MotionConfig } from "framer-motion";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
@@ -73,7 +74,13 @@ export function App() {
         </div>
       )}
     >
-      <AppInner />
+      {/* App-level reduced motion (BET-677): wraps the whole tree so EVERY
+          framer-motion animation — chat entry, CardMount card mounts, toast
+          in/out — respects the OS `prefers-reduced-motion` setting, not just
+          the transcript's. The old transcript-local duplicate was removed. */}
+      <MotionConfig reducedMotion="user">
+        <AppInner />
+      </MotionConfig>
     </ErrorBoundary>
   );
 }

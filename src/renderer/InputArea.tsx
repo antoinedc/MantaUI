@@ -275,7 +275,7 @@ export function InputArea({
           padding is --sp-4 (16px) per the BET-423 spacing ruling. */}
       <div
         className={
-          "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 " +
+          "manta-composer-input-row mb-2 rounded-lg border bg-bg-soft flex flex-col gap-2 px-4 py-3 transition-colors duration-200 " +
           // Resting border is `border-subtle`, the SAME token the tool cards
           // use. It was `border-strong`, which is a control-boundary tone —
           // on the light canvas that reads as a noticeably heavier rule than

@@ -20,6 +20,7 @@
 // unit-tested without mounting the component.
 
 import { useEffect, type ReactNode } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
 
 export type ToastAction = {
@@ -107,19 +108,40 @@ export type ToastStackProps = {
 export const MAX_TOASTS = 3;
 
 export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
-  if (toasts.length === 0) return null;
   // Newest on top, capped at MAX_TOASTS.
   const visible = toasts.slice(0, MAX_TOASTS);
   return (
-    // Bottom-centre stack. pb-2 + safe-area inset so it clears the composer on
-    // mobile; the stack sits above the composer (rendered before it in flow).
-    <div
-      className="shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2"
-      style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 8px)" }}
-    >
-      {visible.map((t) => (
-        <Toast key={t.id} toast={t} onDismiss={onDismiss} />
-      ))}
+    // Layout-neutral stack (BET-677): it does NOT position itself absolutely.
+    // Surface-specific overlay framing — the fixed/absolute container, its
+    // bottom anchor and z-order — belongs to the CALLER so the same component
+    // serves both the chat column (where the overlay floats just above the
+    // composer) and the Settings dialog (which supplies its own fixed
+    // bottom-of-dialog wrapper). What this component owns is the framed list:
+    // centred, capped at 420px, each toast animating in/out.
+    //
+    // The root is `pointer-events-none` even though the stack is always
+    // rendered (it must stay mounted so the LAST toast's exit animation
+    // plays). The empty container still carries its padding, so at the
+    // Settings call site — where it sits inside a click-catching wrapper —
+    // that padding would otherwise read as a permanent invisible strip that
+    // swallows clicks on whatever scrolls under it. Each toast re-enables
+    // pointer events, so both surfaces keep fully interactive toasts and the
+    // dead backdrop never captures a click.
+    <div className="pointer-events-none shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2">
+      <AnimatePresence initial={false}>
+        {visible.map((t) => (
+          <motion.div
+            key={t.id}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.2 }}
+            className="pointer-events-auto w-full max-w-[420px]"
+          >
+            <Toast toast={t} onDismiss={onDismiss} />
+          </motion.div>
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
