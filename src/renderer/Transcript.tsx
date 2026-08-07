@@ -75,11 +75,17 @@ const TRANSCRIPT_INSET: React.CSSProperties = {
 
 // ===== List (spacing) =====
 //
-// Preserves the reading-column layout the hand-rolled scroller drew: the
-// messages are laid out as a flex column with `--turn-gap` between rows, plus
-// the reading inset and the vertical breathing room at the ends of the run
-// (both formerly on the Virtuoso root, where they were silently inert).
-const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function TranscriptList(
+// Preserves the reading-column layout: messages laid out as a flex column with
+// `--turn-gap` between rows, plus the reading inset.
+//
+// NEVER set paddingTop / paddingBottom / paddingBlock / padding here.
+// react-virtuoso writes the virtualization offsets into THIS element's inline
+// style (`paddingTop: offsetTop`, `paddingBottom: offsetBottom`); overwriting
+// them makes the list report a box shorter than its content, and the Footer is
+// then drawn inside the last rendered row (the "loader overlaps the last
+// message" bug). The transcript's vertical breathing room lives on Header and
+// Footer instead, where padding is ours to set.
+export const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function TranscriptList(
   props,
   ref,
 ) {
@@ -95,7 +101,6 @@ const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function Transcript
         gap: "var(--turn-gap)",
         maxWidth: "100%",
         ...TRANSCRIPT_INSET,
-        paddingBlock: "var(--sp-6)",
       }}
     >
       {children}
@@ -146,7 +151,7 @@ export function LoadEarlierHeader({
 // component stays inset-free so TaskCard can render it inside an already-
 // inset column.
 const LoadEarlier = ({ context }: { context: TranscriptContext }) => (
-  <div style={TRANSCRIPT_INSET}>
+  <div style={{ ...TRANSCRIPT_INSET, paddingTop: "var(--sp-6)" }}>
     <LoadEarlierHeader
       showLoadEarlier={context.showLoadEarlier}
       loadingEarlier={context.loadingEarlier}
@@ -168,10 +173,9 @@ export function WorkingIndicator({ running }: { running: boolean }) {
       className="manta-working-indicator flex items-center gap-2 shrink-0"
       style={{
         height: 28,
-        // Sit flush under the last message: cancel the transcript column's
-        // inter-row `--turn-gap` so the reserved idle slot is EXACTLY its own
-        // 28px, not 28px + the turn gap (a stray extra band when idle).
-        marginTop: "calc(var(--turn-gap) * -1)",
+        // Virtuoso renders Footer OUTSIDE List, so the List's flex `gap` never
+        // applies between the last row and this one — this margin IS that gap.
+        marginTop: "var(--block-gap)",
         visibility: running ? "visible" : "hidden",
       }}
       aria-hidden={!running}

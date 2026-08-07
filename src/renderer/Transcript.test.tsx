@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { act, createRef } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
 import { mount, installMockApi, type Harness } from "./testHarness";
-import { Transcript, type TranscriptProps } from "./Transcript";
+import { Transcript, TranscriptList, type TranscriptProps } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage } from "../shared/types";
 import type { EntryMotionState } from "./chatUtils";
@@ -209,6 +209,27 @@ describe("Transcript virtualization (react-virtuoso)", () => {
     const rows = h.container.querySelectorAll("[data-message-id]").length;
     expect(rows).toBeGreaterThan(0);
     expect(rows).toBeLessThan(many.length);
+    h.unmount();
+  });
+});
+
+describe("TranscriptList padding pass-through (BET-691)", () => {
+  it("leaves Virtuoso's vertical offsets intact on the list element", () => {
+    // react-virtuoso writes the virtualization offsets into this element's
+    // inline style as paddingTop/paddingBottom. The list adapter must never
+    // overwrite them, or the Footer (the working row) is drawn inside the last
+    // rendered row instead of below it.
+    const h = mount(
+      <TranscriptList
+        data-testid="transcript-list"
+        style={{ paddingTop: 111, paddingBottom: 222 }}
+      >
+        <span>row</span>
+      </TranscriptList>,
+    );
+    const el = h.container.firstElementChild as HTMLElement;
+    expect(el.style.paddingTop).toBe("111px");
+    expect(el.style.paddingBottom).toBe("222px");
     h.unmount();
   });
 });
