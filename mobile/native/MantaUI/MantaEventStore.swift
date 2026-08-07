@@ -132,7 +132,18 @@ enum MantaStreamRouter {
         case "questions":
             s.questions = try? frame.decodedPayload(StreamQuestionsPayload.self)
         case "subagent":
-            if let p = try? frame.decodedPayload(StreamSubagentPayload.self) { s.subagents.append(p) }
+            if let p = try? frame.decodedPayload(StreamSubagentPayload.self) {
+                // Upsert keyed by the subagent's child-session id (BET-672): a
+                // subagent that goes running→done would otherwise leave BOTH
+                // records, so the session list's running-count counts a stale
+                // "running" and the array grows without bound. An incoming
+                // payload replaces the record for its child, else appends.
+                if let i = s.subagents.firstIndex(where: { $0.childSessionId == p.childSessionId }) {
+                    s.subagents[i] = p
+                } else {
+                    s.subagents.append(p)
+                }
+            }
         case "subagent.child", "autoRename":
             break // registration / rename triggers consumed by later stages
         default:
@@ -232,6 +243,12 @@ final class MantaEventStore: ObservableObject {
     private let controller: any MantaEventStreamControl
     private var lastFrameAt: Date
     private var watchdog: Timer?
+    /// Sessions that have a live observer attached (a `ChatSessionStore` that
+    /// has `start()`ed and not yet `stop()`ed). The store clears a session's
+    /// accumulated stream chunks when its turn completes while NO observer is
+    /// attached — nothing would ever retire them, so they'd otherwise
+    /// accumulate without bound (BET-672).
+    private(set) var registeredSessionIDs: Set<String> = []
     /// No frame (heartbeats included) for this long means the socket is dead
     /// even if it claims otherwise. Shared by the watchdog and `resume()`.
     private let staleFrameMs: Double = 45_000
@@ -337,9 +354,30 @@ final class MantaEventStore: ObservableObject {
         // already-published state while unreachable.
         guard !degraded else { return }
         let sid = frame.sessionId ?? ""
-        let next = MantaStreamRouter.applying(frame, to: sessionStates[sid])
+        var next = MantaStreamRouter.applying(frame, to: sessionStates[sid])
+        // A turn that COMPLETED with no observer attached has no one who will
+        // retire its accumulated chunks (retirement lives in the observing
+        // ChatSessionStore's refetch path). Clear them here so an unopened
+        // session's stream text can't accumulate forever (BET-672). An OBSERVED
+        // session is never cleared — its live text is load-bearing for the open
+        // transcript.
+        if next.turnComplete == true, !registeredSessionIDs.contains(sid) {
+            next.chunks.removeAll()
+        }
         sessionStates[sid] = next
         lastStreamFrame = StreamFrameStamp(sessionId: sid, sub: frame.sub)
+    }
+
+    /// Mark a session as having a live observer. Only an observed session keeps
+    /// its accumulated chunks past a completed turn (BET-672).
+    func registerSession(_ sessionId: String) {
+        registeredSessionIDs.insert(sessionId)
+    }
+
+    /// Mark a session as no longer observed. Its turn-complete chunks become
+    /// eligible for eviction on the next routing pass.
+    func unregisterSession(_ sessionId: String) {
+        registeredSessionIDs.remove(sessionId)
     }
 
     /// Retire live stream text the canonical transcript now carries. A session

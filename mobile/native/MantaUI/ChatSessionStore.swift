@@ -241,8 +241,18 @@ final class ChatSessionStore: ObservableObject {
         self.api = api
         self.isReadOnly = isReadOnly
 
+        // Per-session subscription (BET-672): sink on THIS session's state
+        // alone, filtered to distinct values. The whole-dictionary sink used to
+        // fire on every stream frame of ANY session — including backgrounded
+        // ones — so every flush elsewhere in the box forced a full
+        // `applyStreamState` → `rebuildBlocks` transcript re-map in the open
+        // chat. `MantaSessionStreamState` is value-typed and derives
+        // `Equatable`, so `removeDuplicates()` on the mapped per-session value
+        // emits only when THIS session's state actually changes.
         eventStore.$sessionStates
             .receive(on: DispatchQueue.main)
+            .compactMap { $0[sessionId] }
+            .removeDuplicates()
             .sink { [weak self] _ in self?.applyStreamState() }
             .store(in: &cancellables)
 
@@ -268,11 +278,21 @@ final class ChatSessionStore: ObservableObject {
         if !isReadOnly {
             startPermissionPoll()
         }
+        // Register as an observer so the event store knows a consumer is
+        // attached (BET-672): a session it completes with NO observer has its
+        // accumulated stream chunks evicted to bound memory.
+        eventStore.registerSession(sessionId)
     }
 
     func stop() {
         permissionPoll?.invalidate()
         permissionPoll = nil
+        // The session is leaving the screen: it is no longer a consumer of
+        // this session's stream chunks, and its subagent stores can all go
+        // (BET-672). Dropping the dictionary here is the teardown-path half of
+        // child-store eviction — the transcript-capped half runs per rebuild.
+        eventStore.unregisterSession(sessionId)
+        childStores.removeAll()
     }
 
     func load() {
@@ -478,6 +498,39 @@ final class ChatSessionStore: ObservableObject {
         // Mutate the data source in place (not `= ...`) so its identity — and
         // therefore TiledView's scroll position and cell state — survives.
         dataSource.apply(newRows)
+        // Cap the subagent stores at the children the CURRENT transcript can
+        // actually drill into; stores left over from a previous transcript no
+        // longer show a row the user could open (BET-672).
+        evictChildStores()
+    }
+
+    /// The child session ids present in the CURRENT transcript's subagent rows.
+    /// The drill-in only ever happens from these rows, so they are exactly the
+    /// set a live `childStores` needs to hold; anything else is a leak.
+    private var childIDsInTranscript: Set<String> {
+        var ids = Set<String>()
+        for block in transcript {
+            guard case .steps(let content) = block else { continue }
+            let rows: [StepGroupRow]
+            switch content {
+            case .rows(let r): rows = r
+            case .rollup(_, let r): rows = r
+            }
+            for row in rows {
+                if case .subagent(let agent) = row, let id = agent.childSessionId, !id.isEmpty {
+                    ids.insert(id)
+                }
+            }
+        }
+        return ids
+    }
+
+    private func evictChildStores() {
+        guard !childStores.isEmpty else { return }
+        let live = childIDsInTranscript
+        for id in childStores.keys where !live.contains(id) {
+            childStores.removeValue(forKey: id)
+        }
     }
 
     // MARK: - Refetch

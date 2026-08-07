@@ -180,13 +180,22 @@ final class SessionListStore: ObservableObject {
     /// session "needs you" signal for the §7.1 warn dot + §7.1a subtitle.
     private func trackAttention(frame: MantaStreamFrame) {
         guard let kind = kind(frame), let sid = frame.sessionId else { return }
+        // Compute the new value first and publish ONLY when it actually differs
+        // from the stored one (BET-672): the raw frame surface carries a row
+        // for every raw event, so an unconditional `objectWillChange.send()`
+        // re-rendered the whole session list per frame even when the attention
+        // set did not change.
+        var changed = false
         if kind == "question.asked" || kind == "permission.asked" {
-            attentionSessions.insert(sid)
+            if !attentionSessions.contains(sid) {
+                attentionSessions.insert(sid)
+                changed = true
+            }
         } else if kind == "question.replied" || kind == "question.rejected"
             || kind == "permission.replied" || kind == "permission.rejected" {
-            attentionSessions.remove(sid)
+            changed = attentionSessions.remove(sid) != nil
         }
-        objectWillChange.send()
+        if changed { objectWillChange.send() }
     }
 
     private func kind(_ frame: MantaStreamFrame) -> String? {
