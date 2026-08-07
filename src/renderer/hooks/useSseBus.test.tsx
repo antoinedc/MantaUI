@@ -6,9 +6,11 @@
 // child-session routing, and state transitions. Uses the render harness to
 // mount ChatPanel and emit events through the mock bus.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { act } from "react";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { act, useRef, useState } from "react";
 import { ChatPanel } from "../ChatPanel";
+import { useSseBus, TURN_SETTLE_MS, type SseBus } from "./useSseBus";
+import type { OpencodeMessage } from "../../shared/types";
 import {
   installMockApi,
   resetStore,
@@ -625,12 +627,119 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
       sessionId: "ses_test",
       payload: { complete: true, running: false },
     });
+    // BET-692: a turnComplete running:false is settled only after TURN_SETTLE_MS,
+    // so wait out the settle window before the drain effect can run.
+    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
     await h.flush();
 
     const promptCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
       JSON.stringify(args).includes("second message"),
     );
     expect(promptCalls.length).toBe(1);
+  });
+});
+
+// BET-692 — running must only flip false on a SETTLED completion. The box
+// derives turnComplete from the transcript, so at every tool-step boundary the
+// just-finished step's message is momentarily the transcript tail and a
+// turnComplete with running:false fires mid-turn, re-armed by the next
+// session.status busy 0-134ms later. RunningProbe owns useSseBus directly so
+// the tests can assert the running boolean precisely.
+describe("useSseBus running settle on turnComplete (BET-692)", () => {
+  let probe: { running: boolean } | null = null;
+  let h: ReturnType<typeof mount> | null = null;
+  let bus: ReturnType<typeof installMockApi>["bus"];
+
+  function RunningProbe() {
+    const [, setMessages] = useState<OpencodeMessage[] | null>(null);
+    const childSessionIds = useRef<Set<string>>(new Set());
+    const childMessagesRef = useRef<Map<string, OpencodeMessage[]>>(new Map());
+    const expandedTasksRef = useRef<Set<string>>(new Set());
+    const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    const isActiveRef = useRef<boolean>(true);
+    const refetchOwedWhileInactive = useRef<boolean>(false);
+    const submitRef = useRef<() => void>(() => {});
+    const sse: SseBus = useSseBus({
+      sessionId: "ses_test",
+      cwd: "/home/dev/projects/x",
+      setMessages,
+      setRefreshing: () => {},
+      scheduleRefetch: () => {},
+      fetchOpts: () => ({}),
+      spliceMessage: () => {},
+      scheduleChildRefetch: () => {},
+      childSessionIds,
+      childMessagesRef,
+      expandedTasksRef,
+      childRefetchTimers,
+      isActiveRef,
+      refetchOwedWhileInactive,
+      applyStreamFlush: () => 0,
+      providerID: null,
+      submit: () => {},
+      submitRef,
+      setInput: () => {},
+    });
+    probe = { running: sse.running };
+    return <div data-testid="running-probe" />;
+  }
+
+  const emit = (sub: "running" | "turnComplete", payload: { running: boolean; complete?: boolean }) =>
+    act(() => bus.emitStream({ sub, sessionId: "ses_test", payload }));
+
+  beforeEach(() => {
+    ({ bus } = installMockApi());
+    resetStore();
+    probe = null;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    vi.useRealTimers();
+  });
+
+  it("absorbs the mid-turn flicker at a tool-step boundary", () => {
+    h = mount(<RunningProbe />);
+
+    // Session busy.
+    emit("running", { running: true });
+    expect(probe!.running).toBe(true);
+
+    // Mid-turn tool-step boundary: the just-finished step's message is
+    // momentarily the transcript tail, so a turnComplete running:false fires.
+    emit("turnComplete", { complete: true, running: false });
+    act(() => { vi.advanceTimersByTime(100); });
+    // Not believed yet — the turn is still marked running.
+    expect(probe!.running).toBe(true);
+
+    // Next session.status busy re-arms running before the settle would fire.
+    emit("running", { running: true });
+    act(() => { vi.advanceTimersByTime(1000); });
+    // The settle timer was cancelled, not merely delayed.
+    expect(probe!.running).toBe(true);
+  });
+
+  it("ends the turn only after the settle window on a genuine completion", () => {
+    h = mount(<RunningProbe />);
+
+    emit("running", { running: true });
+    emit("turnComplete", { complete: true, running: false });
+    // Still pending within the settle window.
+    expect(probe!.running).toBe(true);
+
+    act(() => { vi.advanceTimersByTime(TURN_SETTLE_MS); });
+    expect(probe!.running).toBe(false);
+  });
+
+  it("honours the hard running signal immediately, with no settle delay", () => {
+    h = mount(<RunningProbe />);
+
+    emit("running", { running: true });
+    emit("running", { running: false });
+    // The authoritative running event clears immediately — no timer advance.
+    expect(probe!.running).toBe(false);
   });
 });
 
