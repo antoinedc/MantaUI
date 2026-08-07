@@ -28,6 +28,108 @@ import MessagingUI
 // handlers (owned by SessionListStore) are never clobbered.
 // ===========================================================================
 
+// ===========================================================================
+// Single-writer stream merge (BET-668).
+//
+// The chat screen has TWO writers for the same turn state — the optimistic
+// LOCAL updates (`send()`, `replyQuestion`/`rejectQuestion`) and the incoming
+// interpreted-stream frames — and the stream frame used to unconditionally
+// clobber the optimistic value. All the merge decisions below are PURE so
+// they are unit-testable; the store applies the returned state.
+// ===========================================================================
+
+/// The subset of turn state the stream-merge decisions own.
+struct ChatStreamTurnState: Equatable {
+    var running: Bool
+    var turnComplete: Bool
+    var streamingTailID: String
+    var locallyAnsweredQuestionIDs: Set<String>
+    var questions: [QuestionRequest]
+
+    init(
+        running: Bool = false,
+        turnComplete: Bool = false,
+        streamingTailID: String = "",
+        locallyAnsweredQuestionIDs: Set<String> = [],
+        questions: [QuestionRequest] = []
+    ) {
+        self.running = running
+        self.turnComplete = turnComplete
+        self.streamingTailID = streamingTailID
+        self.locallyAnsweredQuestionIDs = locallyAnsweredQuestionIDs
+        self.questions = questions
+    }
+}
+
+enum ChatStreamMerge {
+    struct Result: Equatable {
+        var state: ChatStreamTurnState
+        /// True when a NEW streaming-tail id must be minted (the first running
+        /// false->true edge of a turn). The store mints it (it needs a UUID).
+        var mintsNewTail: Bool
+    }
+
+    /// Apply one interpreted-stream frame's fields to the turn state.
+    ///
+    /// - `frameRunning` / `frameTurnComplete`: nil means the frame carries no
+    ///   opinion for that field; the current value (including an optimistic
+    ///   one) is left alone.
+    /// - `frameQuestions`: nil means the frame carries no questions payload;
+    ///   the current questions are left alone.
+    static func applying(
+        frameRunning: Bool?,
+        frameTurnComplete: Bool?,
+        frameQuestions: [QuestionRequest]?,
+        to state: ChatStreamTurnState
+    ) -> Result {
+        var s = state
+
+        // `running` is written ONLY when the frame carries the field. A frame
+        // without one (e.g. a context frame) must NOT flip the value back to
+        // false — doing so used to reset `runningSince`, re-mint the tail id,
+        // and flash the running row at every such frame.
+        if let r = frameRunning { s.running = r }
+        if let t = frameTurnComplete { s.turnComplete = t }
+
+        // Questions: filter incoming against the tombstone set. A tombstoned
+        // id is held back until the box actually stops publishing it; once an
+        // incoming payload no longer contains the id, the box has caught up
+        // and that tombstone is dropped.
+        if let incoming = frameQuestions {
+            let incomingIDs = Set(incoming.map(\.id))
+            s.locallyAnsweredQuestionIDs.formIntersection(incomingIDs)
+            s.questions = incoming.filter { !s.locallyAnsweredQuestionIDs.contains($0.id) }
+        }
+        // (no questions payload this frame: current questions + tombstones are
+        //  left alone — nothing to clobber.)
+
+        // Tail identity: minted at most once per turn, reset ONLY on the
+        // turnComplete edge — never by a bare `running == false` write.
+        var mintsNewTail = false
+        if s.turnComplete {
+            s.streamingTailID = ""
+        } else if s.running, s.streamingTailID.isEmpty {
+            mintsNewTail = true
+        }
+
+        return Result(state: s, mintsNewTail: mintsNewTail)
+    }
+
+    /// State after a FAILED `send()`: the optimistic running/tail is rolled
+    /// back so the UI doesn't sit on a forever-spinner. The user's prompt is
+    /// NOT lost — `send()` echoed it optimistically into the transcript and
+    /// the caller restores the input text — so this only clears the fake
+    /// "in progress" flags, leaving the transcript and question tombstones
+    /// untouched.
+    static func afterSendFailure(to state: ChatStreamTurnState) -> ChatStreamTurnState {
+        var s = state
+        s.running = false
+        s.turnComplete = false
+        s.streamingTailID = ""
+        return s
+    }
+}
+
 @MainActor
 final class ChatSessionStore: ObservableObject {
 
@@ -90,6 +192,11 @@ final class ChatSessionStore: ObservableObject {
     /// change each time and thrash TiledView; this id doesn't. Reset when the
     /// turn ends and the tail is absorbed into the canonical transcript.
     private var streamingTailID: String = ""
+    /// Question ids the user answered/rejected on-device. The incoming stream
+    /// keeps publishing an answered question until the box catches up, so this
+    /// tombstone set filters it out locally in the meantime (BET-668); an id
+    /// leaves the set once the box stops publishing it.
+    private var locallyAnsweredQuestionIDs: Set<String> = []
     private var didRunOnce = false
     private var lastRunning: Bool?
     private var lastComplete: Bool?
@@ -120,12 +227,12 @@ final class ChatSessionStore: ObservableObject {
         self.isReadOnly = isReadOnly
 
         eventStore.$sessionStates
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyStreamState() }
             .store(in: &cancellables)
 
         eventStore.$connectionState
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
             .store(in: &cancellables)
     }
@@ -202,23 +309,48 @@ final class ChatSessionStore: ObservableObject {
 
         inProgressText = s.liveText
 
-        running = s.running == true
-        turnComplete = s.turnComplete == true
+        // Fields that are copied straight through from the latest frame (the
+        // stream is the single writer for these — no optimistic value to
+        // protect).
         context = s.context
         cache = s.cache
         truncation = s.truncation
         todos = s.todos
-        questions = s.questions?.questions ?? []
         subagents = s.subagents
 
-        // Track running-this-turn for the header timer, and mint the streaming
-        // tail's stable id exactly once per turn.
-        if running && runningSince == nil {
-            runningSince = Date()
+        // The turn-state fields (`running`, `turnComplete`, questions, tail
+        // identity) have TWO writers — optimistic local mutations and the
+        // stream — so they go through the pure single-writer merge.
+        let result = ChatStreamMerge.applying(
+            frameRunning: s.running,
+            frameTurnComplete: s.turnComplete,
+            frameQuestions: s.questions?.questions,
+            to: ChatStreamTurnState(
+                running: running,
+                turnComplete: turnComplete,
+                streamingTailID: streamingTailID,
+                locallyAnsweredQuestionIDs: locallyAnsweredQuestionIDs,
+                questions: questions
+            )
+        )
+        let merged = result.state
+        running = merged.running
+        turnComplete = merged.turnComplete
+        questions = merged.questions
+        locallyAnsweredQuestionIDs = merged.locallyAnsweredQuestionIDs
+        streamingTailID = merged.streamingTailID
+        // A fresh tail is minted exactly once per turn (first running
+        // false->true edge that finds no existing tail).
+        if result.mintsNewTail {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
-        } else if !running {
+        }
+        // runningSince tracks the turn that's running for the header timer;
+        // it follows the running flag (started when running, cleared when the
+        // turn stops — e.g. on turnComplete).
+        if merged.running {
+            if runningSince == nil { runningSince = Date() }
+        } else {
             runningSince = nil
-            streamingTailID = ""
         }
 
         // Register a store for any subagent that has a child session id, so the
@@ -417,14 +549,17 @@ final class ChatSessionStore: ObservableObject {
             questions.removeAll { $0.id == request.id }
             return
         }
-        // Drop the card optimistically; restore it on failure so a real send
-        // error doesn't silently leave the question gone while the box stays
-        // blocked on it ("can't send messages").
+        // Drop the card optimistically and tombstone its id so the incoming
+        // stream can't flash it back before the box catches up; restore both
+        // on failure so a real send error doesn't silently leave the question
+        // gone while the box stays blocked on it ("can't send messages").
         questions.removeAll { $0.id == request.id }
+        locallyAnsweredQuestionIDs.insert(request.id)
         Task {
             do {
                 try await api.questionReply(requestId: requestId, answers: answers, sessionId: sessionId)
             } catch {
+                locallyAnsweredQuestionIDs.remove(request.id)
                 if !questions.contains(where: { $0.id == request.id }) {
                     questions.append(request)
                 }
@@ -438,10 +573,12 @@ final class ChatSessionStore: ObservableObject {
             return
         }
         questions.removeAll { $0.id == request.id }
+        locallyAnsweredQuestionIDs.insert(request.id)
         Task {
             do {
                 try await api.questionReject(requestId: requestId, sessionId: sessionId)
             } catch {
+                locallyAnsweredQuestionIDs.remove(request.id)
                 if !questions.contains(where: { $0.id == request.id }) {
                     questions.append(request)
                 }
@@ -454,7 +591,13 @@ final class ChatSessionStore: ObservableObject {
     /// Send a prompt for this session. `text` needs no trimming here (the
     /// composer trims); attachments + model are optional and flow through the
     /// unchanged `opencode:prompt` surface.
-    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) {
+    ///
+    /// Returns `true` when the box accepted the prompt, `false` when the RPC
+    /// failed. On failure the optimistic running/tail state is rolled back so
+    /// the UI doesn't sit on a forever-spinner, and the caller is told so it
+    /// can restore the user's typed text.
+    @discardableResult
+    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) async -> Bool {
         // Echo the message straight into the transcript and assume the turn is
         // running. The box confirms both within a second (running frame, then
         // the canonical refetch replaces this block), but without the echo the
@@ -472,13 +615,29 @@ final class ChatSessionStore: ObservableObject {
             // mint this from), so mint the streaming tail's stable id here too.
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
         }
-        Task {
-            try? await api.sendPrompt(SendPromptInput(
+        do {
+            try await api.sendPrompt(SendPromptInput(
                 sessionId: sessionId,
                 text: text,
                 model: model,
                 attachments: attachments.isEmpty ? nil : attachments
             ))
+            return true
+        } catch {
+            // Surface the failure instead of swallowing it: stop the running
+            // state and clear the optimistic tail so the spinner doesn't stay
+            // on forever, and let the caller restore the lost message.
+            let rolledBack = ChatStreamMerge.afterSendFailure(to: ChatStreamTurnState(
+                running: running,
+                turnComplete: turnComplete,
+                streamingTailID: streamingTailID,
+                locallyAnsweredQuestionIDs: locallyAnsweredQuestionIDs,
+                questions: questions
+            ))
+            running = rolledBack.running
+            turnComplete = rolledBack.turnComplete
+            streamingTailID = rolledBack.streamingTailID
+            return false
         }
     }
 

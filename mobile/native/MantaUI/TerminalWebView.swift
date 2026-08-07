@@ -339,7 +339,7 @@ final class TerminalContainerController: UIViewController {
         // derives `isRunning` from the session list store; the controller maps
         // it onto the accessory.
         state.$isRunning
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] running in self?.keyBar.escIsDanger = running }
             .store(in: &cancellables)
         keyBar.escIsDanger = state.isRunning

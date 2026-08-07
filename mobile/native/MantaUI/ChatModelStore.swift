@@ -52,7 +52,7 @@ final class ChatModelStore: ObservableObject {
         self.loadFailed = catalog.loadFailed
         self.loaded = catalog.loaded
         catalog.objectWillChange
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.mirrorCatalog() }
             .store(in: &cancellables)
     }

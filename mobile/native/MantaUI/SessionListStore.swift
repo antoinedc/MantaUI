@@ -60,7 +60,7 @@ final class SessionListStore: ObservableObject {
             self?.trackAttention(frame: frame)
         }
         eventStore.$sessionStates
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.trackRunning(now: Date()) }
             .store(in: &cancellables)
     }
