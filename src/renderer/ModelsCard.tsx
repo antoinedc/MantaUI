@@ -49,10 +49,14 @@ const TIER_CLASS: Record<string, string> = {
 // effective override → the caller removes the model's key from the store).
 function EditModelModal({
   model,
+  open = true,
   onSave,
   onCancel,
 }: {
   model: OpencodeModel;
+  // Controlled presence. The modal stays mounted (portaled) so Modal can play
+  // its exit; `open` comes from the caller's editing state.
+  open?: boolean;
   onSave: (override: ModelOverride) => void;
   onCancel: () => void;
 }) {
@@ -91,7 +95,7 @@ function EditModelModal({
     "w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent";
 
   return (
-    <Modal size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
+    <Modal open={open} size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
       <div
         className="space-y-4"
         onKeyDown={(e) => {
@@ -186,6 +190,9 @@ export function ModelsCard() {
   const [searchQuery, setSearchQuery] = useState("");
   // Key ("providerID/modelID") of the model whose edit dialog is open, or null.
   const [editing, setEditing] = useState<string | null>(null);
+  // Keeps the edit modal rendered with the last-edited model while it plays
+  // its close exit (see the portal below).
+  const lastEditModel = useRef<OpencodeModel | null>(null);
 
   // Load models + config + reconcile subagents on mount. Mirrors the
   // SubagentsCard.refresh() flow (BET-123): every known model is auto-
@@ -547,9 +554,15 @@ export function ModelsCard() {
         </table>
       </div>
 
-      {editing && models && (() => {
-        const target = models.find((m) => modelKey(m.providerID, m.id) === editing);
-        if (!target) return null;
+      {models && (() => {
+        const target = editing
+          ? (models.find((m) => modelKey(m.providerID, m.id) === editing) ?? null)
+          : null;
+        // Keep the modal MOUNTED (so Modal can play its exit) even after the
+        // user closes it; during the fade the last-edited model still renders.
+        if (target) lastEditModel.current = target;
+        const model = lastEditModel.current ?? models[0];
+        if (!model) return null;
         // Render through a portal to document.body: the modal is the only one
         // in the app nested inside the full-screen Settings dialog, and
         // portaling it out of that frequently re-rendering subtree guarantees
@@ -557,8 +570,9 @@ export function ModelsCard() {
         // drop focus from the field being typed in).
         return createPortal(
           <EditModelModal
-            model={target}
-            onSave={(override) => void saveOverride(modelKey(target.providerID, target.id), target, override)}
+            model={model}
+            open={!!target}
+            onSave={(override) => void saveOverride(modelKey(model.providerID, model.id), model, override)}
             onCancel={() => setEditing(null)}
           />,
           document.body,

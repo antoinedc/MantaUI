@@ -791,8 +791,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         </button>
       </div>
 
-      {paletteOpen && (
-        <CommandPalette
+      <CommandPalette
+          open={paletteOpen}
           query={paletteQuery}
           setQuery={(v) => {
             setPaletteQuery(v);
@@ -808,7 +808,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             setPaletteOpen(false);
           }}
         />
-      )}
     </aside>
   );
 });
@@ -1215,6 +1214,7 @@ function GroupHeader({
 // second flattener. Empty query shows the full list; no match shows a plain
 // "No sessions match" row.
 function CommandPalette({
+  open,
   query,
   setQuery,
   results,
@@ -1224,6 +1224,7 @@ function CommandPalette({
   onClose,
   onActivate,
 }: {
+  open: boolean;
   query: string;
   setQuery: (v: string) => void;
   results: Array<{ project: Project; window: TmuxWindow; score: number }>;
@@ -1234,11 +1235,14 @@ function CommandPalette({
   onActivate: (project: Project, windowIndex: number) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // The palette stays MOUNTED (so Modal can play its exit), so grab focus only
+  // when it actually opens — otherwise the always-mounted input would steal
+  // focus on every Sidebar mount.
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (open) inputRef.current?.focus();
+  }, [open]);
   return (
-    <Modal size="sm" padded={false} onDismiss={onClose} label="Command palette">
+    <Modal open={open} size="sm" padded={false} onDismiss={onClose} label="Command palette">
         <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
           <Search size={14} className="text-text-faint" aria-hidden="true" />
           <input

@@ -919,8 +919,7 @@ export function Settings({
       </div>
 
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
-      {confirmRemove && (
-        <Modal size="md" label="Remove this box?">
+      <Modal open={confirmRemove} size="md" label="Remove this box?">
           <div className="space-y-4">
             <h3 className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
@@ -930,11 +929,9 @@ export function Settings({
             </div>
           </div>
         </Modal>
-      )}
 
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
-      {confirmReset && (
-        <Modal size="md" label="Reset all settings?">
+      <Modal open={confirmReset} size="md" label="Reset all settings?">
           <div className="space-y-4">
             <h3 className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
@@ -944,7 +941,6 @@ export function Settings({
             </div>
           </div>
         </Modal>
-      )}
     </div>
   );
 }

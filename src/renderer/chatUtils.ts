@@ -2034,6 +2034,32 @@ export function isOptimisticUserId(id: string): boolean {
 }
 
 /**
+ * Register a canonical message id as already-entered because it REPLACED an
+ * optimistic placeholder in this same state update.
+ *
+ * `updateEntryMotion` consults `state.seen` as the "already accounted for"
+ * set: an id already there is folded in as history and never marked
+ * `entering`. Registering the canonical id here, at the exact moment it swaps
+ * in for the placeholder the user just watched animate, makes the swap
+ * invisible — the bubble the placeholder already played must not "pop" a
+ * second time under the server's real id. This is strictly more reliable than
+ * `updateEntryMotion`'s `hadOptimistic` handover heuristic, which can be
+ * spent on the wrong row (or never fire) when sends overlap.
+ *
+ * Call this from the reconcile site immediately before the canonical row is
+ * committed to the transcript.
+ */
+export function markReconciledFromOptimistic(
+  state: EntryMotionState,
+  canonicalId: string,
+): void {
+  // `seen` is null only before the transcript has primed; in that window the
+  // canonical message would be absorbed as the first-populated history
+  // render anyway, so there is nothing to suppress.
+  if (state.seen) state.seen.add(canonicalId);
+}
+
+/**
  * Fold the current message list into `state`, deciding which ids animate.
  * MUTATES `state` and returns it (it lives in a ref; a new object per render
  * would defeat the point).

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createEntryMotionState,
   updateEntryMotion,
+  markReconciledFromOptimistic,
   isOptimisticUserId,
   formatTokens,
   formatBytes,
@@ -2706,6 +2707,22 @@ describe("updateEntryMotion", () => {
     updateEntryMotion(s, [user("u1"), user("msg_real"), asst("a_new")]);
     expect(s.entering.has("msg_real")).toBe(false);
     expect(s.entering.has("a_new")).toBe(true);
+  });
+
+  it("a message id registered as reconciled-from-optimistic is NOT marked entering", () => {
+    // BET-680 step 6: when useTranscriptState's reconcile swaps the optimistic
+    // placeholder for the canonical server id, it registers the canonical id
+    // via markReconciledFromOptimistic. updateEntryMotion consults the same
+    // state and must not mark it entering — otherwise the bubble pops twice.
+    const s = createEntryMotionState();
+    updateEntryMotion(s, [user("u1")]); // prime
+    updateEntryMotion(s, [user("u1"), user("optimistic-user-9")]);
+    expect(s.entering.has("optimistic-user-9")).toBe(true); // placeholder pops
+    // The canonical id now replaces the placeholder and is registered.
+    markReconciledFromOptimistic(s, "msg_real");
+    expect(s.seen?.has("msg_real")).toBe(true);
+    updateEntryMotion(s, [user("u1"), user("msg_real")]);
+    expect(s.entering.has("msg_real")).toBe(false);
   });
 
   it("forgets ids that leave the transcript, so a cleared session stays bounded", () => {

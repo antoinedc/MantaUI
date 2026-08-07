@@ -23,6 +23,9 @@ import {
   mergeBufferedDeltas,
   collectChildSessionIds,
   reconcileOptimisticUser,
+  markReconciledFromOptimistic,
+  createEntryMotionState,
+  type EntryMotionState,
 } from "../chatUtils";
 
 /** How many of the most recent messages the tail-first mount fetch pulls.
@@ -71,8 +74,14 @@ export type TranscriptState = {
 export function useTranscriptState(params: {
   sessionId: string;
   isActive: boolean;
+  // The entry-motion state, owned by the parent (ChatPanel) and shared with
+  // Transcript. The reconcile path registers a canonical id here so the swap
+  // from its optimistic placeholder is treated as already-entered (no second
+  // "pop"). Optional: when absent, the reconcile just skips the registration.
+  motionStateRef?: React.MutableRefObject<EntryMotionState | null>;
 }): TranscriptState {
-  const { sessionId, isActive } = params;
+  const { sessionId, isActive, motionStateRef } = params;
+  if (motionStateRef) motionStateRef.current ??= createEntryMotionState();
 
   const [messages, setMessages] = useState<OpencodeMessage[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -212,6 +221,12 @@ export function useTranscriptState(params: {
               // otherwise survive as a duplicate. The splice below then
               // appends the canonical message into its time-sorted position.
               const cleaned = reconcileOptimisticUser(prev, msg) ?? prev;
+              // The canonical id that replaced an optimistic placeholder must
+              // not replay the entry pop — its bubble already animated. (The
+              // handover heuristic alone can miss this when sends overlap.)
+              if (cleaned !== prev && motionStateRef?.current) {
+                markReconciledFromOptimistic(motionStateRef.current, msg.info.id);
+              }
               const t = msg.info.time?.created ?? 0;
               const insertAt = cleaned.findIndex(
                 (m) => (m.info.time?.created ?? 0) > t,

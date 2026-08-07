@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
@@ -50,6 +50,36 @@ function loadArtifactsOpen(): boolean {
   } catch {
     return false;
   }
+}
+
+// PanelShell (BET-680 step 2): the always-mounted session/chat pane wrappers.
+// Panels stay mounted (that is the transcript cache) and are toggled with
+// display:none — UNCHANGED here. When a pane becomes visible we add a short
+// 120ms fade-in (`panel-enter` class, see index.css) so switching sessions
+// reads as a subtle cross-fade instead of a hard blank-frame swap. Purely
+// visual: focus handling runs unchanged, and the fade is dropped under
+// prefers-reduced-motion via the CSS guard.
+function PanelShell({ active, children }: { active: boolean; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!active || !el) return;
+    el.classList.add("panel-enter");
+    const onEnd = (e: AnimationEvent) => {
+      if (e.target === el) el.classList.remove("panel-enter");
+    };
+    el.addEventListener("animationend", onEnd);
+    return () => el.removeEventListener("animationend", onEnd);
+  }, [active]);
+  return (
+    <div
+      ref={ref}
+      className="absolute inset-0"
+      style={{ display: active ? "block" : "none" }}
+    >
+      {children}
+    </div>
+  );
 }
 
 // The whole app tree is wrapped once in an ErrorBoundary so an uncaught render
@@ -1290,11 +1320,7 @@ function AppInner() {
                   ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
                   : undefined;
                 return (
-                  <div
-                    key={`term:${key}`}
-                    className="absolute inset-0"
-                    style={{ display: isActiveThisMode ? "block" : "none" }}
-                  >
+                  <PanelShell key={`term:${key}`} active={isActiveThisMode}>
                     <Terminal
                       sessionKey={key}
                       cwd={m.cwd}
@@ -1302,7 +1328,7 @@ function AppInner() {
                       tmuxTarget={m.tmuxTarget}
                       active={isActiveThisMode}
                     />
-                  </div>
+                  </PanelShell>
                 );
               })}
               {/* Chat panels (opencode chat-mode windows): one per visited */}
@@ -1320,11 +1346,7 @@ function AppInner() {
                       ?.windows.find((w) => w.index === owner.windowIndex)?.name ?? null)
                   : null;
                 return (
-                  <div
-                    key={`chat:${sid}`}
-                    className="absolute inset-0"
-                    style={{ display: isActiveChat ? "block" : "none" }}
-                  >
+                  <PanelShell key={`chat:${sid}`} active={isActiveChat}>
                     <ChatPanel
                       sessionId={sid}
                       tmuxSession={owner?.tmuxSession ?? null}
@@ -1342,7 +1364,7 @@ function AppInner() {
                         autoSubmitPrompt?.sid === sid ? autoSubmitPrompt : undefined
                       }
                     />
-                  </div>
+                  </PanelShell>
                 );
               })}
               {/* New-session DRAFT layer: shown over the always-mounted
@@ -1376,8 +1398,8 @@ function AppInner() {
       {/* Box self-update confirm: restarting opencode ends every in-flight
           agent turn, so the destructive restart needs explicit consent before
           the update starts. */}
-      {confirmServerUpdate && (
-        <Modal
+      <Modal
+          open={confirmServerUpdate}
           size="md"
           label="Update the box?"
           onDismiss={() => setConfirmServerUpdate(false)}
@@ -1407,7 +1429,6 @@ function AppInner() {
             </div>
           </div>
         </Modal>
-      )}
     </div>
   );
 }

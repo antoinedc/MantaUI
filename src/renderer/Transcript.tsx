@@ -18,8 +18,8 @@
 // provider VALUE is memoized by ChatPanel (`taskContextValue`) for keystroke
 // stability, so passing it through as a prop keeps that identity intact.
 
-import { forwardRef, useEffect, useRef, useState } from "react";
-import { MotionConfig } from "framer-motion";
+import { forwardRef, useEffect, useState } from "react";
+import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
@@ -200,6 +200,10 @@ export type TranscriptProps = {
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
   onAtBottomChange: (atBottom: boolean) => void;
+  // The shared entry-motion state (owned by ChatPanel, registered to here and
+  // to useTranscriptState's reconcile path). Using the parent's ref keeps the
+  // reconcile registration and the render fold on the SAME state object.
+  motionStateRef: React.MutableRefObject<EntryMotionState | null>;
 };
 
 export function Transcript({
@@ -221,6 +225,7 @@ export function Transcript({
   onReplyQuestion,
   onRejectQuestion,
   onAtBottomChange,
+  motionStateRef,
 }: TranscriptProps) {
   // Entry motion (transcript-motion). A message that arrives while the user is
   // watching animates in; a transcript they merely LOADED does not. The whole
@@ -228,13 +233,13 @@ export function Transcript({
   // comment there for the two invariants (primed / sticky) and the two earlier
   // bugs that made this feature fire on history and never on new messages.
   //
-  // Held in a ref, not state: it must not schedule a render, and folding the
-  // current message list into it during render is idempotent. The ref resets
-  // when Transcript remounts, which is exactly the session-switch boundary.
-  const motionRef = useRef<EntryMotionState | null>(null);
-  motionRef.current ??= createEntryMotionState();
-  const motion = updateEntryMotion(
-    motionRef.current,
+  // The state lives in the parent-provided ref (shared with useTranscriptState,
+  // which registers reconciled ids against the same object) rather than a
+  // local one. Held in a ref, not state: it must not schedule a render, and
+  // folding the current message list into it during render is idempotent.
+  motionStateRef.current ??= createEntryMotionState();
+  const entryMotion = updateEntryMotion(
+    motionStateRef.current,
     messages.map((m) => ({ id: m.info.id, role: m.info.role })),
     isActive,
   );
@@ -298,92 +303,105 @@ export function Transcript({
     // animation for users who prefer reduced motion — the library-native
     // replacement for the old `prefers-reduced-motion` CSS blocks.
     <MotionConfig reducedMotion="user">
-    {messages.length === 0 ? (
-      // Empty state: rendered INSTEAD of the virtualized list. Full width,
-      // matching the populated flow below so both states share a left edge
-      // (BET-646).
-      <div
-        className="flex-1 overflow-y-auto overflow-x-hidden"
-        style={{
-          padding: "var(--sp-6) 0",
-          marginBottom: "var(--sp-2)",
-          paddingInline: "var(--transcript-inset)",
-        }}
-      >
-        <div className="text-text-faint">
-          <span style={{ color: "var(--accent)" }}>✻</span>{" "}
-          Welcome. Type a message below to start.
-        </div>
-      </div>
-    ) : (
-      // BET-646 (supersedes BET-413/BET-637's single-edge goal): the transcript
-      // runs the full width of the session panel by owner decision — inset from
-      // each edge, no measure cap, no centring. The vertical sp-6 padding and
-      // horizontal --transcript-inset live on the Virtuoso root (inside the
-      // scroller, so they scroll with it, exactly as the old container's own
-      // padding did).
-      <TaskContext.Provider value={taskContextValue}>
-        {/* Defensive boundary around the whole transcript body: a single */}
-        {/* MessageRow / card that throws must not white out the app. */}
-        <ErrorBoundary>
-          <Virtuoso<OpencodeMessage, TranscriptContext>
-            ref={virtuosoRef}
-            className="flex-1 overflow-x-hidden"
-            style={{
-              padding: "var(--sp-6) 0",
-              marginBottom: "var(--sp-2)",
-              paddingInline: "var(--transcript-inset)",
-            }}
-            data={messages}
-            context={virtuosoContext}
-            computeItemKey={(_, m) => m.info.id}
-            itemContent={(_, m) => {
-              // BET-418 §C: a background job's completion report is injected
-              // as a fake user turn whose first line is the machine marker
-              // `[background job "<name>" <status>]`. The model still sees it,
-              // but the user must not — skip rendering the row entirely so it
-              // never appears as a right-aligned user bubble.
-              if (isBackgroundJobCompletionTurn(m)) return null;
-              const isLastInTranscript =
-                m.info.id === lastId && m.info.role === "assistant";
-              // cmdInfo comes from `userCommandInfo` (memoized at panel
-              // scope on [messages, commandByMessageId, commands]).
-              // O(1) Map lookup here means MessageRow can be React.memo'd
-              // without keystrokes invalidating the prop reference.
-              const cmdInfo =
-                m.info.role === "user"
-                  ? userCommandInfo.get(m.info.id) ?? null
-                  : null;
-              return (
-                <MessageRow
-                  msg={m}
-                  showThinking={showThinking}
-                  turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                  outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
-                  truncation={finishByMessageId.get(m.info.id) ?? null}
-                  commandInfo={cmdInfo}
-                  // The message being written right now: last in the
-                  // transcript, assistant, and the turn still running.
-                  streaming={isLastInTranscript && running}
-                  entering={motion.entering.has(m.info.id)}
-                />
-              );
-            }}
-            followOutput={(isAtBottom) => (isAtBottom ? "smooth" : false)}
-            atBottomStateChange={onAtBottomChange}
-            atBottomThreshold={8}
-            firstItemIndex={firstItemIndex}
-            alignToBottom
-            increaseViewportBy={{ top: 600, bottom: 200 }}
-            components={{
-              Header: LoadEarlierHeader,
-              Footer: TranscriptTail,
-              List: TranscriptList,
-            }}
-          />
-        </ErrorBoundary>
-      </TaskContext.Provider>
-    )}
+      {/* BET-680 step 5: the "Welcome" empty state fades out (0.15s) when the
+          first message arrives instead of being hard-replaced. It renders
+          INSTEAD of the virtualized list; the populated list below stays OUT
+          of the AnimatePresence so Virtuoso's lifecycle is untouched. */}
+      <AnimatePresence initial={false}>
+        {!hasMessages && (
+          <motion.div
+            key="empty"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ type: "tween", duration: 0.15 }}
+          >
+            {/* Empty state: full width, matching the populated flow below so
+                both states share a left edge (BET-646). */}
+            <div
+              className="flex-1 overflow-y-auto overflow-x-hidden"
+              style={{
+                padding: "var(--sp-6) 0",
+                marginBottom: "var(--sp-2)",
+                paddingInline: "var(--transcript-inset)",
+              }}
+            >
+              <div className="text-text-faint">
+                <span style={{ color: "var(--accent)" }}>✻</span>{" "}
+                Welcome. Type a message below to start.
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {hasMessages && (
+        // BET-646 (supersedes BET-413/BET-637's single-edge goal): the transcript
+        // runs the full width of the session panel by owner decision — inset from
+        // each edge, no measure cap, no centring. The vertical sp-6 padding and
+        // horizontal --transcript-inset live on the Virtuoso root (inside the
+        // scroller, so they scroll with it, exactly as the old container's own
+        // padding did).
+        <TaskContext.Provider value={taskContextValue}>
+          {/* Defensive boundary around the whole transcript body: a single */}
+          {/* MessageRow / card that throws must not white out the app. */}
+          <ErrorBoundary>
+            <Virtuoso<OpencodeMessage, TranscriptContext>
+              ref={virtuosoRef}
+              className="flex-1 overflow-x-hidden"
+              style={{
+                padding: "var(--sp-6) 0",
+                marginBottom: "var(--sp-2)",
+                paddingInline: "var(--transcript-inset)",
+              }}
+              data={messages}
+              context={virtuosoContext}
+              computeItemKey={(_, m) => m.info.id}
+              itemContent={(_, m) => {
+                // BET-418 §C: a background job's completion report is injected
+                // as a fake user turn whose first line is the machine marker
+                // `[background job "<name>" <status>]`. The model still sees it,
+                // but the user must not — skip rendering the row entirely so it
+                // never appears as a right-aligned user bubble.
+                if (isBackgroundJobCompletionTurn(m)) return null;
+                const isLastInTranscript =
+                  m.info.id === lastId && m.info.role === "assistant";
+                // cmdInfo comes from `userCommandInfo` (memoized at panel
+                // scope on [messages, commandByMessageId, commands]).
+                // O(1) Map lookup here means MessageRow can be React.memo'd
+                // without keystrokes invalidating the prop reference.
+                const cmdInfo =
+                  m.info.role === "user"
+                    ? userCommandInfo.get(m.info.id) ?? null
+                    : null;
+                return (
+                  <MessageRow
+                    msg={m}
+                    showThinking={showThinking}
+                    turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
+                    outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
+                    truncation={finishByMessageId.get(m.info.id) ?? null}
+                    commandInfo={cmdInfo}
+                    // The message being written right now: last in the
+                    // transcript, assistant, and the turn still running.
+                    streaming={isLastInTranscript && running}
+                    entering={entryMotion.entering.has(m.info.id)}
+                  />
+                );
+              }}
+              followOutput={(isAtBottom) => (isAtBottom ? "smooth" : false)}
+              atBottomStateChange={onAtBottomChange}
+              atBottomThreshold={8}
+              firstItemIndex={firstItemIndex}
+              alignToBottom
+              increaseViewportBy={{ top: 600, bottom: 200 }}
+              components={{
+                Header: LoadEarlierHeader,
+                Footer: TranscriptTail,
+                List: TranscriptList,
+              }}
+            />
+          </ErrorBoundary>
+        </TaskContext.Provider>
+      )}
     </MotionConfig>
   );
 }

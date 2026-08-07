@@ -31,6 +31,7 @@ import {
 import { ToolCard } from "./ToolCard";
 import { OutputWell } from "./OutputWell";
 import { TaskCard } from "./TaskCard";
+import { CardMount } from "./components/CardMount";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
 // right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
@@ -278,7 +279,9 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
         expanded={expanded}
         onToggle={toggle}
       >
-        {expanded && <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />}
+        <CardMount show={expanded} k={part.id}>
+          <ToolBody tool={rawTool} state={state} diffText={diffText} verbose={verbose} />
+        </CardMount>
       </ToolCard>
     </div>
   );

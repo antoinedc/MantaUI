@@ -170,6 +170,20 @@ html, body, #root {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--r-sm); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
+/* Session/chat panel swap (BET-680 step 2). Panels are always-mounted and
+   toggled with display:none (the transcript cache); when one becomes visible
+   a 120ms fade-in keeps a fast tab-cycle from feeling like a hard blank-frame
+   swap. Fades from 0.4, not 0, so quick tab-cycling never blanks the pane.
+   The class is added by PanelShell in App.tsx and removed at animationend. */
+.panel-enter { animation: panelFadeIn 120ms ease-out; }
+@keyframes panelFadeIn {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-enter { animation: none; }
+}
+
 /* Jump-to-message flash (BET-660): a transient row highlight around ~1.2s,
    added by ChatPanel when an artifact's chevron jumps to its owning message. */
 .manta-message-flash {

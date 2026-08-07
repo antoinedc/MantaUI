@@ -27,6 +27,14 @@ import { mount, installMockApi, type Harness } from "./testHarness";
 import { Transcript, type TranscriptProps } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage } from "../shared/types";
+import type { EntryMotionState } from "./chatUtils";
+
+// Mirrors ChatPanel's SINGLE `motionStateRef`: one ref per mounted transcript.
+// `open()` resets it so each opened session starts a fresh gate; `render()`
+// reuses it so the gate persists across the re-render storm of a live turn
+// (the prime/sticky contract). Passing a fresh object per re-render would
+// reset the gate and break the sticky/prime assertions.
+let motionStateRef: React.MutableRefObject<EntryMotionState | null> = { current: null };
 
 function msg(id: string, role: "user" | "assistant", text: string): OpencodeMessage {
   return {
@@ -78,6 +86,7 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     userCommandInfo: new Map(),
     onReplyQuestion: () => {},
     onRejectQuestion: () => {},
+    motionStateRef,
   };
 }
 
@@ -94,6 +103,7 @@ const OPTIMISTIC = msg("optimistic-user-1", "user", "new");
 
 /** Mount an opened session, i.e. everything here counts as history. */
 function open(messages: OpencodeMessage[] = HISTORY): Harness {
+  motionStateRef = { current: null };
   return mount(<Transcript {...props(messages)} />);
 }
 
