@@ -2347,7 +2347,20 @@ export function ChatPanel({
           Only the active panel renders it — the toasts live in global store
           state (screenshot / agent-file) or panel-local state (systemNotice),
           one instance app-wide. */}
-      {isActive && <ToastStack toasts={toasts} onDismiss={dismissToast} />}
+      {/* Bottom cluster: a relative wrapper around the composer so the toast
+          overlay can anchor to the composer's OWN top edge (bottom:100%)
+          instead of a fixed pixel guess. Toasts therefore stay just above the
+          box however tall it grows with the input, and as a pure overlay they
+          never shift the transcript or composer layout (BET-677). */}
+      <div className="relative shrink-0">
+        {isActive && (
+          <div
+            className="pointer-events-none absolute inset-x-0 z-40"
+            style={{ bottom: "100%" }}
+          >
+            <ToastStack toasts={toasts} onDismiss={dismissToast} />
+          </div>
+        )}
 
       {jobOwnership ? (
         <ReadOnlyJobBar
@@ -2453,6 +2466,7 @@ export function ChatPanel({
         onPaste={onPaste}
       />
       )}
+      </div>
     </div>
   );
 }

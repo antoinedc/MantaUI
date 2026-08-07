@@ -121,7 +121,14 @@ export function WorkingIndicator({ running }: { running: boolean }) {
   return (
     <div
       className="manta-working-indicator flex items-center gap-2 shrink-0"
-      style={{ height: 28, visibility: running ? "visible" : "hidden" }}
+      style={{
+        height: 28,
+        // Sit flush under the last message: cancel the transcript column's
+        // inter-row `--turn-gap` so the reserved idle slot is EXACTLY its own
+        // 28px, not 28px + the turn gap (a stray extra band when idle).
+        marginTop: "calc(var(--turn-gap) * -1)",
+        visibility: running ? "visible" : "hidden",
+      }}
       aria-hidden={!running}
     >
       <MantaLoader />

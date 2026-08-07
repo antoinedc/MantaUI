@@ -107,30 +107,21 @@ export type ToastStackProps = {
 /** Max simultaneous toasts (spec: three stacked). */
 export const MAX_TOASTS = 3;
 
-// How far above the bottom of the chat column the toast stack floats. This is
-// the composer cluster's approximate height, so a toast hovers JUST ABOVE the
-// composer (input box + model/effort row) instead of covering it. The stack is
-// absolutely positioned, so this is a pure overlay — it never shifts the
-// layout of the transcript or composer (BET-677).
-const TOAST_BOTTOM = 112;
-
 export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
   // Newest on top, capped at MAX_TOASTS.
   const visible = toasts.slice(0, MAX_TOASTS);
   return (
-    // Overlay (BET-677): no longer an in-flow row that pushes the composer
-    // down. Anchored just above the composer, horizontally centred, above the
-    // transcript's z-order. The container is pointer-events-none so it never
-    // blocks clicks on what it floats over; only each toast re-enables
-    // pointer events. The safe-area inset keeps it clear of the bottom edge on
-    // devices with a home indicator.
-    <div
-      className="pointer-events-none absolute inset-x-0 z-40 flex flex-col items-center gap-2 px-4"
-      style={{
-        bottom: TOAST_BOTTOM,
-        paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0px)",
-      }}
-    >
+    // Layout-neutral stack (BET-677): it does NOT position itself absolutely.
+    // Surface-specific overlay framing — the fixed/absolute container, its
+    // bottom anchor and z-order — belongs to the CALLER so the same component
+    // serves both the chat column (where the overlay floats just above the
+    // composer) and the Settings dialog (which supplies its own fixed
+    // bottom-of-dialog wrapper). What this component owns is the framed list:
+    // centred, capped at 420px, each toast animating in/out. The per-toast
+    // `pointer-events-auto` keeps a toast interactive when its caller sets
+    // `pointer-events-none` on the overlay container (toasts only, never the
+    // dead backdrop).
+    <div className="shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2">
       <AnimatePresence initial={false}>
         {visible.map((t) => (
           <motion.div
@@ -139,7 +130,7 @@ export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.2 }}
-            className="pointer-events-auto flex w-full justify-center"
+            className="pointer-events-auto w-full max-w-[420px]"
           >
             <Toast toast={t} onDismiss={onDismiss} />
           </motion.div>

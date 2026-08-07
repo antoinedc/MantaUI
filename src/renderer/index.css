@@ -136,7 +136,7 @@ html, body, #root {
    last child so it sits INLINE at the end of the text — a sibling element
    would break onto its own line after a block-level <p>. Nothing in the
    settled transcript carries a caret, and the entry animation itself is
-   reduced-motion-handled by MotionConfig reducedMotion="user" in Transcript. */
+   reduced-motion-handled by the app-root MotionConfig reducedMotion="user". */
 .manta-streaming > *:last-child::after {
   content: "";
   display: inline-block;
