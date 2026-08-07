@@ -62,13 +62,6 @@ struct ChatStreamTurnState: Equatable {
 }
 
 enum ChatStreamMerge {
-    struct Result: Equatable {
-        var state: ChatStreamTurnState
-        /// True when a NEW streaming-tail id must be minted (the first running
-        /// false->true edge of a turn). The store mints it (it needs a UUID).
-        var mintsNewTail: Bool
-    }
-
     /// Apply the per-frame lifecycle facts of one interpreted-stream frame to
     /// the turn state.
     ///
@@ -78,28 +71,25 @@ enum ChatStreamMerge {
     ///   never a STALE accumulated completion left over from a previous turn.
     /// - `frameStartedRunning`: true when THIS frame began a turn (a carrying
     ///   `running` frame whose value was true) — clears any stale completion
-    ///   flag and mints a fresh tail id if none exists yet.
+    ///   flag from a previous turn.
     ///
-    /// `running` and `questions` are NOT touched here: they are read straight
-    /// from the accumulated snapshot in the store (the snapshot is authoritative
-    /// for both once an optimistic value is accounted for).
+    /// `running`, `questions` and the streaming-tail MINT are NOT handled here:
+    /// they are read straight from the accumulated snapshot / seeded in the
+    /// store. The store mints a tail id whenever a running turn has none, which
+    /// subsumes the old per-frame mint edge (BET-668 review cycle 3).
     static func applying(
         frameTurnComplete: Bool?,
         frameStartedRunning: Bool,
         to state: ChatStreamTurnState
-    ) -> Result {
+    ) -> ChatStreamTurnState {
         var s = state
         if let t = frameTurnComplete { s.turnComplete = t }
         if frameStartedRunning { s.turnComplete = false }
-
-        var mintsNewTail = false
+        // Reset the tail identity only on a genuine completion edge.
         if frameTurnComplete == true {
             s.streamingTailID = ""
-        } else if frameStartedRunning, s.streamingTailID.isEmpty {
-            mintsNewTail = true
         }
-
-        return Result(state: s, mintsNewTail: mintsNewTail)
+        return s
     }
 
     /// State after a FAILED `send()`: the optimistic running/tail is rolled
@@ -367,12 +357,12 @@ final class ChatSessionStore: ObservableObject {
             questions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
         }
 
-        // --- the turn lifecycle (`turnComplete` flag + streaming-tail identity)
-        // is per-frame: only a genuine `turnComplete` frame resets the tail, and
-        // only a genuine `running`-true frame starts a fresh turn. `running` and
-        // `questions` are NOT touched by this merge (handled above).
+        // --- the turn lifecycle (`turnComplete` flag + streaming-tail RESET)
+        // is per-frame: only a genuine `turnComplete` frame clears the tail.
+        // `running` and `questions` are NOT touched by this merge (handled
+        // above), and neither is the tail MINT (handled below).
         let frameStartedRunning = carried.running && (s.running == true)
-        let result = ChatStreamMerge.applying(
+        let merged = ChatStreamMerge.applying(
             frameTurnComplete: carried.turnComplete ? s.turnComplete : nil,
             frameStartedRunning: frameStartedRunning,
             to: ChatStreamTurnState(
@@ -383,11 +373,14 @@ final class ChatSessionStore: ObservableObject {
                 questions: questions
             )
         )
-        turnComplete = result.state.turnComplete
-        streamingTailID = result.state.streamingTailID
-        // A fresh tail id is minted exactly once per turn (when the turn begins
-        // running with no existing tail).
-        if result.mintsNewTail {
+        turnComplete = merged.turnComplete
+        streamingTailID = merged.streamingTailID
+        // Seed a stable tail id whenever a running turn has none — however we
+        // learned it is running: a fresh turn edge, a mid-turn session open
+        // (seeded from the snapshot), or a stamp nulled between a running frame
+        // and its deferred sink. A non-empty id is kept, so the streaming row
+        // is never replaced mid-turn.
+        if running, streamingTailID.isEmpty {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
         }
         // runningSince tracks the turn that's running for the header timer.

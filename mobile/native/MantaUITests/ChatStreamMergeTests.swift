@@ -35,32 +35,15 @@ final class ChatStreamMergeTests: XCTestCase {
     func testTurnCompleteResetsTailID() {
         let state = turnState(tail: "tail")
         let result = ChatStreamMerge.applying(frameTurnComplete: true, frameStartedRunning: false, to: state)
-        XCTAssertEqual(result.state.streamingTailID, "")
+        XCTAssertEqual(result.streamingTailID, "")
     }
 
-    /// The first running start of a turn requests a fresh tail id; a turn that
-    /// already has one never mints again (no mid-turn re-mint → no streaming row
-    /// replacement / flicker).
-    func testTailMintedOncePerTurn() {
-        let idle = turnState(tail: "")
-        let first = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: idle)
-        XCTAssertTrue(first.mintsNewTail)
-
-        // The store writes the actual id; a later running frame sees it and
-        // must not mint a second time.
-        var running = first.state
-        running.streamingTailID = "live-ses-UUID"
-        let second = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: running)
-        XCTAssertFalse(second.mintsNewTail, "a turn that already has a tail must not mint again")
-    }
-
-    /// A STALE `turnComplete == true` left over from a previous turn must not
-    /// suppress minting when a new turn starts running.
-    func testStickyTurnCompleteDoesNotSuppressMintOnRunningFrame() {
+    /// A STALE `turnComplete == true` left over from a previous turn clears
+    /// when a new turn starts running.
+    func testRunningStartClearsStaleComplete() {
         let state = turnState(turnComplete: true, tail: "")
         let result = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: state)
-        XCTAssertTrue(result.mintsNewTail, "a running frame must mint a tail even with a stale turnComplete")
-        XCTAssertFalse(result.state.turnComplete, "a running frame starts a turn, clearing the completion flag")
+        XCTAssertFalse(result.turnComplete, "a running frame starts a turn, clearing the completion flag")
     }
 
     /// A frame that carries neither a completion edge nor a turn start (e.g. a
@@ -69,9 +52,8 @@ final class ChatStreamMergeTests: XCTestCase {
     func testNonCarryingFrameClobbersNeitherTurnCompleteNorTail() {
         let state = turnState(turnComplete: false, tail: "tail")
         let result = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: false, to: state)
-        XCTAssertEqual(result.state.turnComplete, false)
-        XCTAssertEqual(result.state.streamingTailID, "tail")
-        XCTAssertFalse(result.mintsNewTail)
+        XCTAssertEqual(result.turnComplete, false)
+        XCTAssertEqual(result.streamingTailID, "tail")
     }
 
     // MARK: - Failed send
@@ -105,6 +87,16 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         await Task.yield()
         XCTAssertTrue(store.running, "opening a mid-turn session must show its working indicator")
+        XCTAssertFalse(store.streamingTailID.isEmpty,
+                       "opening a mid-turn session must have a stable tail id")
+
+        // The tail id must be STABLE across later frames, so the streaming row
+        // is never replaced mid-turn (seeding, not a per-edge re-mint).
+        let minted = store.streamingTailID
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m2","partID":"p2","field":"text","text":"more"}}"#)
+        await Task.yield()
+        XCTAssertEqual(store.streamingTailID, minted,
+                       "a running turn's tail id must not change across frames")
     }
 
     /// Block 1: opening a session with a question already waiting must show the
