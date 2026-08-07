@@ -66,6 +66,21 @@ async function loadApnsTokens(path = APNS_TOKENS_PATH) {
   return Array.isArray(arr) ? arr : [];
 }
 
+/**
+ * Token-shape gate. MUST stay in sync with the gateway's `isHexToken`
+ * (src/gateway/index.mjs): the gateway 400s the ENTIRE /push batch when ANY
+ * token fails its check, so one bad stored token silences push for every
+ * real device and — because pruning only runs on a 200 — the bad entry can
+ * never self-heal. Concretely: the iOS Simulator "registers" 80-byte
+ * (160-hex-char) pseudo-tokens that APNs cannot route; real APNs device
+ * tokens are 32 bytes (64 hex chars) today, and Apple documents the length
+ * may change — hence the same 1..128 bound the gateway enforces, not a
+ * hardcoded 64.
+ */
+export function isValidApnsToken(t) {
+  return typeof t === "string" && /^[0-9a-fA-F]{1,128}$/.test(t);
+}
+
 async function saveApnsTokens(tokens, path = APNS_TOKENS_PATH) {
   await writeJsonAtomic(path, JSON.stringify(tokens, null, 2));
 }
@@ -76,6 +91,15 @@ async function saveApnsTokens(tokens, path = APNS_TOKENS_PATH) {
 export async function addApnsToken(token, { store } = {}) {
   if (typeof token !== "string" || !token) {
     throw new Error("token must be a non-empty string");
+  }
+  if (!isValidApnsToken(token)) {
+    // Reject at the single registration chokepoint (both the HTTP route and
+    // the rpc channel funnel here) — see isValidApnsToken for why one bad
+    // token in the store kills push for every device.
+    throw new Error(
+      `token rejected: not a 1-128 char hex APNs device token (len=${token.length}); ` +
+        "simulator pseudo-tokens are not registrable",
+    );
   }
   const path = store ?? APNS_TOKENS_PATH;
   const tokens = await loadApnsTokens(path);
@@ -693,7 +717,22 @@ export async function sendApnsFanout(payload, opts = {}) {
     ? _loadApnsTokensOverride()
     : loadApnsTokens());
   if (!Array.isArray(tokens) || tokens.length === 0) return;
-  const tokenValues = tokens.map((t) => t?.token).filter((t) => typeof t === "string");
+  const allValues = tokens.map((t) => t?.token).filter((t) => typeof t === "string");
+  // Self-heal: drop store entries the gateway would reject — one invalid
+  // token 400s the WHOLE batch (see isValidApnsToken), so a store poisoned
+  // before registration validation existed would otherwise silence push
+  // forever. Remove them here so the next send is clean.
+  const invalid = allValues.filter((t) => !isValidApnsToken(t));
+  if (invalid.length > 0) {
+    const remove = _removeApnsTokenOverride ?? removeApnsToken;
+    for (const t of invalid) {
+      await remove(t).catch(() => {});
+    }
+    console.warn(
+      `[push] pruned ${invalid.length} invalid stored token(s) the gateway would reject`,
+    );
+  }
+  const tokenValues = allValues.filter((t) => isValidApnsToken(t));
   if (tokenValues.length === 0) return;
 
   // Resolve the box identity + gateway_token from auth.json.
