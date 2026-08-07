@@ -63,6 +63,16 @@ function makeDeps(projects, liveProjects = []) {
       },
       pty: {},
       bus: {},
+      // BET-675: minimal syncState stub — the cwd-resolution tests only need
+      // it to not throw; the materialized-state behaviour is covered by the
+      // dedicated syncState.test.mjs.
+      syncState: {
+        refreshNow: async () => {},
+        applyConfig: () => {},
+        snapshot: () => ({ projects: liveProjects }),
+        payloadSince: (s, g) => ({ gen: g, seq: 0, changed: {} }),
+        everSucceeded: () => true,
+      },
       local: {
         configGet: async () => ({ projects }),
         // BET-307: server-side projectMetaUpsert fires from tmux:new-session

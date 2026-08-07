@@ -40,6 +40,7 @@ import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
+import { createSyncState } from "./syncState.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -108,6 +109,18 @@ const streamInterp = createStreamInterpreter({ publish: (evt) => bus.publish(evt
 // store entry uses this same deps object.
 const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
 
+// BET-675: materialized in-memory session/config state. tmux:list is served
+// from memory (never a per-request tmux shell-out), and `sync` deltas are
+// published on the bus as state changes so clients can recover just what they
+// missed. `refreshNow()` is driven by the poller below; `tmux:list` lazily
+// guarantees a first tick before serving anything.
+const syncState = createSyncState({
+  listProjects: () => tmux.listProjects(),
+  publish: (env) => bus.publish(env),
+});
+// Seed the config baseline at startup so the first snapshot already carries it.
+syncState.applyConfig(await local.configGet());
+
 // DELETE handler for /api/<store> endpoints: `?id=<id>` → store.deleteFn(id,
 // BUS_PUBLISH_DEPS) → 200 {deleted:bool}. The boilerplate (id-required 400,
 // the await + publish-deps call, the success response) is identical across
@@ -156,6 +169,25 @@ push.setDesktopSink((payload) =>
 // mobile sidebar's activity/attention dots work (parity with desktop status.ts).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopStatusPoller } = startStatusPoller(bus, { intervalMs: 2000 });
+
+// BET-675: sync-state poller — materialize tmux session/config state in memory
+// every 2s. Follows the exact shape of the other pollers (in-flight guard +
+// unref'd timer so the poller alone never holds the process open). Fire one
+// tick immediately at startup (not awaited) so state is warm without waiting a
+// full interval.
+let syncInFlight = false;
+async function syncTick() {
+  if (syncInFlight) return;
+  syncInFlight = true;
+  try {
+    await syncState.refreshNow();
+  } finally {
+    syncInFlight = false;
+  }
+}
+void syncTick();
+const syncTimer = setInterval(() => void syncTick(), 2000);
+syncTimer.unref();
 
 // Agent → device file push: watch ~/.manta-outbox/ for files the AI drops and
 // publish `agentFile` bus events so connected devices show a "Save" toast
@@ -315,6 +347,7 @@ rpcHandlers = buildHandlers({
   pty,
   bus,
   local,
+  syncState,
   authPair: () => authEngine.pair(),
   push,
   serverVersion: SERVER_VERSION,

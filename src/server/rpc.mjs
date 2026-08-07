@@ -198,6 +198,7 @@ export function buildHandlers({
   pty,
   bus,
   local,
+  syncState,
   authPair,
   push,
   serverVersion,
@@ -258,7 +259,13 @@ export function buildHandlers({
     "config:get": () => local.configGet(),
 
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
-    "config:update": (patch) => local.configUpdate(patch),
+    // BET-675: after a successful write, push the new config into syncState so
+    // the materialized config delta is published for sync subscribers.
+    "config:update": async (patch) => {
+      const next = await local.configUpdate(patch);
+      syncState.applyConfig(next);
+      return next;
+    },
 
     // preload: ipcRenderer.invoke(IPC.projectMetaDelete, tmuxSession)  → args[0] = tmuxSession (string)
     "project:meta:delete": (tmuxSession) => local.projectMetaDelete(tmuxSession),
@@ -345,7 +352,25 @@ export function buildHandlers({
     "upload:files": (input) => local.uploadFiles(input),
 
     // ---- tmux (8 channels) ----
-    "tmux:list": () => tmux.listProjects(),
+    // BET-675: serve tmux:list from the materialized in-memory sync state
+    // instead of shelling out to tmux on every request. A transient tmux
+    // failure used to be misclassified as "zero sessions" (empty sidebar,
+    // pruned ownership sidecar). From memory we always have a last-known-good
+    // list, plus a `stale` flag. Guard: until ANY listProjects tick has ever
+    // succeeded, do a synchronous refresh so the first call doesn't return a
+    // hardcoded empty list to a box that just booted.
+    "tmux:list": async () => {
+      if (!syncState.everSucceeded()) {
+        await syncState.refreshNow();
+      }
+      return syncState.snapshot().projects;
+    },
+    // BET-675: cursor snapshot/delta RPC. Client passes its last-seen
+    // { sinceSeq, sinceGen }; the server returns { gen, seq, changed } with
+    // only the fields whose version is newer than sinceSeq (or a full
+    // snapshot when the cursor is absent / stale generation / impossible).
+    "sync:snapshot": ({ sinceSeq, sinceGen } = {}) =>
+      syncState.payloadSince(sinceSeq, sinceGen),
     // chatMode (BET-113): when the new-session dialog's "chat mode (opencode)"
     // toggle is on, tmux.newSession must create an opencode session, launch a
     // holder pane, and stamp @manta-session-id — so it needs the `oc` client.
@@ -371,6 +396,8 @@ export function buildHandlers({
       // projects } so callers can navigate + send the first prompt to the
       // RIGHT session (previously they re-located by name, which mixed new
       // sessions up with existing ones on name collisions).
+      // BET-675: refresh materialized state so the sync delta publishes now.
+      await syncState.refreshNow();
       return result;
     },
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
@@ -379,12 +406,31 @@ export function buildHandlers({
     // tmux's default cwd (usually $HOME) instead of the workspace path.
     // Pass `oc` so a chatMode window creates + stamps an opencode session
     // (BET-113 regression: this used to silently drop chatMode).
-    "tmux:new-window": async (i) =>
-      tmux.newWindow({ ...i, cwd: await resolveProjectCwd(i.sessionName, i.cwd), oc }),
-    "tmux:rename-session": (i) => tmux.renameSession(i),
-    "tmux:rename-window": (i) => tmux.renameWindow(i),
-    "tmux:kill-session": (n) => tmux.killSession(n),
-    "tmux:kill-window": (i) => tmux.killWindow(i),
+    "tmux:new-window": async (i) => {
+      const result = await tmux.newWindow({ ...i, cwd: await resolveProjectCwd(i.sessionName, i.cwd), oc });
+      await syncState.refreshNow();
+      return result;
+    },
+    "tmux:rename-session": async (i) => {
+      const result = await tmux.renameSession(i);
+      await syncState.refreshNow();
+      return result;
+    },
+    "tmux:rename-window": async (i) => {
+      const result = await tmux.renameWindow(i);
+      await syncState.refreshNow();
+      return result;
+    },
+    "tmux:kill-session": async (n) => {
+      const result = await tmux.killSession(n);
+      await syncState.refreshNow();
+      return result;
+    },
+    "tmux:kill-window": async (i) => {
+      const result = await tmux.killWindow(i);
+      await syncState.refreshNow();
+      return result;
+    },
     "tmux:select-window": (i) => tmux.selectWindow(i),
 
     // ---- opencode: simple pass-throughs ----
@@ -557,6 +603,8 @@ export function buildHandlers({
       const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, resolvedCwd);
       await tmux.restampSessionId(sessionName, windowIndex, forked.id);
       const projects = await tmux.listProjects();
+      // BET-675: refresh materialized state so the new window's delta publishes now.
+      await syncState.refreshNow();
       return { newSessionId: forked.id, projects };
     },
 
@@ -572,6 +620,8 @@ export function buildHandlers({
       const sess = await oc.createSession({ directory, title });
       await tmux.restampSessionId(sessionName, windowIndex, sess.id);
       const projects = await tmux.listProjects();
+      // BET-675: refresh materialized state so the change publishes now.
+      await syncState.refreshNow();
       return { newSessionId: sess.id, projects };
     },
 
@@ -585,7 +635,10 @@ export function buildHandlers({
     "opencode:delete-session": async ({ sessionId, sessionName, windowIndex }) => {
       await oc.deleteSessionRaw(sessionId);
       await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
-      return tmux.listProjects();
+      const projects = await tmux.listProjects();
+      // BET-675: refresh materialized state so the removed window publishes now.
+      await syncState.refreshNow();
+      return projects;
     },
 
     // BET-421: bare session lifecycle for the onboarding verifier. create
