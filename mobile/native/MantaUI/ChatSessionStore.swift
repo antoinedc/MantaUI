@@ -208,6 +208,11 @@ final class ChatSessionStore: ObservableObject {
     /// reports running at all, the snapshot is authoritative.
     private var optimisticRunning = false
     private var didRunOnce = false
+    /// Test seams (internal, readable via `@testable`): count one-time vs
+    /// resumable work so tests can assert the split without touching live
+    /// timers or the network.
+    private(set) var transcriptFetchCount = 0
+    private(set) var permissionPollStartedCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
     /// How many recent messages the CURRENT window covers. Every refetch reuses
@@ -250,11 +255,16 @@ final class ChatSessionStore: ObservableObject {
     // MARK: - Lifecycle
 
     /// Begin loading the session and (for the parent) start the light
-    /// permission poll. Idempotent.
+    /// permission poll. One-time setup is split from resumable work: the
+    /// initial transcript fetch runs once under the `didRunOnce` guard, while
+    /// the permission poll is (re)started whenever it is not already running,
+    /// so a subagent push (`stop`) then pop (`start`) keeps polling without a
+    /// re-fetch.
     func start() {
-        guard !didRunOnce else { return }
-        didRunOnce = true
-        load()
+        if !didRunOnce {
+            didRunOnce = true
+            load()
+        }
         if !isReadOnly {
             startPermissionPoll()
         }
@@ -492,6 +502,7 @@ final class ChatSessionStore: ObservableObject {
     /// unreachable box can hang a request for the URLSession default (a minute
     /// or more), leaving the screen on its skeleton with no way out.
     private func fetchTranscript(isFirstLoad: Bool) async {
+        transcriptFetchCount += 1
         if fetchInFlight {
             fetchPending = true
             return
@@ -554,6 +565,8 @@ final class ChatSessionStore: ObservableObject {
     // MARK: - Permissions (S1a answerable)
 
     private func startPermissionPoll() {
+        guard permissionPoll == nil else { return }
+        permissionPollStartedCount += 1
         let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshPermissions() }
         }

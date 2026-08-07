@@ -209,6 +209,46 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(userBlocks.count, 0, "a failed send must not leave the message in the transcript")
     }
 
+    // MARK: - Permission poll lifecycle (BET-669)
+
+    private func makeLifecycleStore() -> ChatSessionStore {
+        ChatSessionStore(
+            sessionId: "ses",
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+    }
+
+    /// start → stop → start leaves exactly one active poll: the poll is
+    /// resumable work, so `stop()` clears it and the resumed `start()`
+    /// creates a fresh single poll — and an extra `start()` does not pile on a
+    /// second one.
+    func testStartStopStartLeavesOneActivePoll() async {
+        let store = makeLifecycleStore()
+        store.start()
+        XCTAssertEqual(store.permissionPollStartedCount, 1)
+        store.stop()
+        store.start()
+        XCTAssertEqual(store.permissionPollStartedCount, 2,
+                       "stop() then start() must resume the poll as a new single one")
+        store.start()
+        XCTAssertEqual(store.permissionPollStartedCount, 2,
+                       "restarting an already-running poll must not create a second timer")
+    }
+
+    /// start → start must not double the one-time work: one transcript fetch
+    /// and one poll, even when the loading branch fires twice in a row.
+    func testStartTwiceCreatesOnePollAndOneFetch() async {
+        let store = makeLifecycleStore()
+        store.start()
+        store.start()
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(store.transcriptFetchCount, 1,
+                       "start() twice must not double-fetch the transcript")
+        XCTAssertEqual(store.permissionPollStartedCount, 1,
+                       "start() twice must not create two poll timers")
+    }
+
     // MARK: - Mock transport
 
     private static func failingSession() -> URLSession {
