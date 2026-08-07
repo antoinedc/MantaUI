@@ -36,8 +36,13 @@ extension TranscriptBlock {
     /// instead of this one (see `streamingTailID`).
     var stableScrollID: String {
         switch self {
-        case .user(let text, let at): return "u\(text)@\(at?.timeIntervalSince1970 ?? 0)"
-        case .prose(let text, let at): return "p\(text)@\(at?.timeIntervalSince1970 ?? 0)"
+        case .user(let text, let at):
+            // `text.hashValue` is process-stable, which is all scroll identity
+            // needs — embedding the whole text made ids huge for long prose and
+            // let two identical texts sharing a timestamp collide.
+            return "u\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
+        case .prose(let text, let at):
+            return "p\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
         case .steps(let content): return "s" + content.rows.map(\.id).joined(separator: "|")
         }
     }

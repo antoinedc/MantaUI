@@ -574,12 +574,27 @@ enum StepStatus: Hashable {
 }
 
 struct ToolStep: Identifiable, Hashable {
-    let id = UUID()
+    /// STABLE across rebuilds — the mapper derives it deterministically from
+    /// the wire data (see `ChatTranscriptMapper.step(from:...)`), so a step's
+    /// identity survives a canonical refetch. It used to be a fresh random id
+    /// minted on every mapping pass, which made the diffing list see every
+    /// step as removed+reinserted at each turn boundary and made the rows
+    /// flash/jump (same bug the subagent rows already fixed).
+    let id: String
     let verb: String
     let target: String
     let duration: String
     let status: StepStatus
     let output: String?
+
+    init(id: String, verb: String, target: String, duration: String, status: StepStatus, output: String?) {
+        self.id = id
+        self.verb = verb
+        self.target = target
+        self.duration = duration
+        self.status = status
+        self.output = output
+    }
 }
 
 struct StepRowView: View {
@@ -654,7 +669,7 @@ enum StepGroupRow: Identifiable, Equatable {
 
     var id: String {
         switch self {
-        case .step(let step): return step.id.uuidString
+        case .step(let step): return step.id
         case .subagent(let agent): return agent.id
         }
     }

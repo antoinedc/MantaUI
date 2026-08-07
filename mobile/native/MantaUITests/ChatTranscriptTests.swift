@@ -470,4 +470,45 @@ final class ChatTranscriptTests: XCTestCase {
             .paragraph("second para"),
         ])
     }
+
+    // MARK: - Stable step identity (BET-666)
+    //
+    // The diffing list treats a removed+reinserted row as a flash/jump at every
+    // turn boundary. A step's id must therefore be deterministic across refetch
+    // (derived from the wire data, not a fresh random id).
+
+    private func stepIDs(from blocks: [TranscriptBlock]) -> [String] {
+        blocks.flatMap { block -> [String] in
+            guard case .steps(let content) = block else { return [] }
+            return content.rows.compactMap { row in
+                guard case .step(let step) = row else { return nil }
+                return step.id
+            }
+        }
+    }
+
+    func testStepIdsAreIdenticalAcrossRefetch() {
+        let msgs = [message(id: "m1", role: "assistant", parts: [
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
+            toolPart("t2", "m1", tool: "read", status: "completed", input: ["filePath": str("a.ts")]),
+        ])]
+        let first = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
+        let second = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
+        XCTAssertFalse(first.isEmpty, "expected at least one step id")
+        XCTAssertEqual(first, second, "mapping the same transcript twice must yield identical step ids")
+    }
+
+    func testStepIdsSurviveAppendingANewMessage() {
+        let msgs = [message(id: "m1", role: "assistant", parts: [
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("run tests")]),
+        ])]
+        let before = stepIDs(from: ChatTranscriptMapper.blocks(from: msgs))
+        let extended = msgs + [message(id: "m2", role: "assistant", parts: [
+            toolPart("t3", "m2", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
+        ])]
+        let after = stepIDs(from: ChatTranscriptMapper.blocks(from: extended))
+        let preserved = after.prefix(before.count)
+        XCTAssertEqual(Array(preserved), before,
+                       "pre-existing step ids must be preserved when a new message is appended")
+    }
 }
