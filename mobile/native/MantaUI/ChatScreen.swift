@@ -199,8 +199,8 @@ private struct ChatScreenContent: View {
         // messages genuinely pass under it while scrolling. The measured
         // `bottomBarHeight` of that floating stack feeds BOTH the scrim beneath
         // it (which dims passing content and the home-indicator strip) and the
-        // transcript's `.contentMargins` bottom inset, so at rest the newest
-        // message rests readable above the composer.
+        // transcript's `additionalContentInset` bottom inset, so at rest the
+        // newest message rests readable above the composer.
         //
         // Scrim FIRST so it draws beneath the composer, sized to the composer
         // plus an overhang past the safe area — it dims content under the
@@ -484,6 +484,15 @@ private struct ChatScreenContent: View {
         .typingIndicator(.indicator(isVisible: store.running) {
             RunningIndicator(store: store)
         })
+        // Reserves the floating composer's height inside the scroll CONTENT, so
+        // at rest the newest message and the typing indicator come to rest
+        // ABOVE the composer while still passing under it mid-scroll.
+        // `additionalContentInset` is MessagingUI's own inset channel; TiledView
+        // combines it with the SwiftUI safe area, which already carries the home
+        // indicator and the keyboard — so no extra arithmetic is needed here.
+        .additionalContentInset(
+            EdgeInsets(top: 0, leading: 0, bottom: bottomBarHeight, trailing: 0)
+        )
         // The "scroll to bottom" control (rendered in ComposerView's
         // model-selection row). It shows only once the user has scrolled up
         // (pointsFromBottom above the threshold) — at the bottom there is
@@ -509,17 +518,6 @@ private struct ChatScreenContent: View {
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
-        // Keep the transcript's bottom edge ABOVE the floating composer so at
-        // rest the newest message (and typing indicator) rests readable above
-        // it. A content margin, not a viewport shrink, so the viewport stays
-        // full-bleed; `bottomBarHeight` tracks the composer stack as it
-        // grows/shrinks and as cards appear, so the inset follows for free.
-        // Applied AFTER the TiledView-only chaining above — its type is already
-        // erased to some View here, so this plain `View` modifier no longer
-        // hides the TiledView-typed modifiers chained before it. Placing it
-        // here (after the TiledView chain) is what lets TiledScrollPosition's
-        // auto-scroll-to-bottom land the newest message above the composer.
-        .contentMargins(.bottom, bottomBarHeight, for: .scrollContent)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
