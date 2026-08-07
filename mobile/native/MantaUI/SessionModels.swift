@@ -323,3 +323,19 @@ enum SessionHapticKind: Sendable, Equatable {
     case warning       // destructive confirm for a running session
     case success       // a delete finally lands
 }
+
+/// Pure decision for the BET-673 turn-complete success haptic. The chat fires
+/// ONE success haptic only when a turn just completed (the false→true edge of
+/// `turnComplete`) while the user has scrolled up (the scroll-to-bottom chip is
+/// showing) and the scene is foreground/active, and only while haptics are
+/// enabled. Mirrors the §7.4 attention model: no edge, chip, scene or setting
+/// → no haptic. No haptic when at the bottom (completion is visible) and no
+/// haptic from `running` oscillations — only the genuine completion edge.
+func shouldFireTurnCompleteHaptic(
+    turnCompleteEdge: Bool,
+    showScrollToBottom: Bool,
+    isActive: Bool,
+    hapticsEnabled: Bool
+) -> Bool {
+    turnCompleteEdge && showScrollToBottom && isActive && hapticsEnabled
+}
