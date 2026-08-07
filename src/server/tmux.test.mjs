@@ -357,10 +357,14 @@ test("isNoTmuxServerError separates 'no tmux server' from a real fault", () => {
     isNoTmuxServerError(new Error("tmux exited 1: no server running on /tmp/tmux-1000/default")),
     true,
   );
+  // BET-675: "error connecting … (No such file or directory)" / "Connection
+  // refused" indicate a restarted server / socket race, NOT a genuinely empty
+  // box — so they are no longer treated as "no tmux server".
   assert.equal(
     isNoTmuxServerError(new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)")),
-    true,
+    false,
   );
+  assert.equal(isNoTmuxServerError(new Error("tmux exited 1: no sessions")), true);
   assert.equal(isNoTmuxServerError(new Error("spawn tmux ENOENT")), false);
   assert.equal(isNoTmuxServerError(new Error("tmux exited 1: lost server")), false);
   assert.equal(isNoTmuxServerError(undefined), false);
@@ -387,6 +391,22 @@ test("listProjects THROWS on a tmux fault rather than reporting zero sessions", 
   });
   try {
     await assert.rejects(() => listProjects(), /ENOENT/);
+  } finally {
+    _setRun(null);
+    _resetOwnedSessionsCache();
+  }
+});
+
+// BET-675: a socket race ("error connecting … (No such file or directory)")
+// is a FAULT, not an empty box — it must throw out of listProjects, never
+// quietly return an empty list.
+test("listProjects THROWS on a tmux socket-race fault, not empty", async () => {
+  _resetOwnedSessionsCache();
+  _setRun(async () => {
+    throw new Error("tmux exited 1: error connecting to /tmp/tmux-1000/default (No such file or directory)");
+  });
+  try {
+    await assert.rejects(() => listProjects(), /No such file or directory/);
   } finally {
     _setRun(null);
     _resetOwnedSessionsCache();

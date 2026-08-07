@@ -7,6 +7,13 @@ import { atomicWrite } from "./storeUtils.mjs";
 
 const FS = "\t";
 
+// Upper bound on any single tmux child-process invocation. A wedged tmux
+// binary (e.g. a server mid-crash holding the socket with no progress) would
+// otherwise hang the server forever — `tmux:list` and the sync poller would
+// stall on the child. On expiry we SIGKILL the child and reject with a fault
+// error so the caller treats it as a tmux failure rather than an empty box.
+const SPAWN_TIMEOUT_MS = 10_000;
+
 /**
  * The environment tmux must be invoked with.
  *
@@ -38,12 +45,22 @@ function spawnRun(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: tmuxSpawnEnv() });
     let stdout = "", stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      try { p.kill("SIGKILL"); } catch { /* already gone */ }
+      settled = true;
+      reject(new Error("tmux timed out after 10s"));
+    }, SPAWN_TIMEOUT_MS);
+    timeout.unref();
+    const finish = () => { if (!settled) { settled = true; clearTimeout(timeout); } };
     p.stdout.on("data", (b) => (stdout += b.toString()));
     p.stderr.on("data", (b) => (stderr += b.toString()));
-    p.on("error", reject);
-    p.on("exit", (code) =>
+    p.on("error", (e) => { finish(); reject(e); });
+    p.on("exit", (code) => {
+      finish();
       code === 0 ? resolve({ stdout, stderr })
-                 : reject(new Error(`${cmd} exited ${code}: ${stderr.trim() || stdout.trim()}`)));
+                 : reject(new Error(`${cmd} exited ${code}: ${stderr.trim() || stdout.trim()}`));
+    });
   });
 }
 
@@ -257,14 +274,19 @@ export function parseSessions(sessStdout, winStdout, owned = new Set()) {
 // (or no session) to talk to — i.e. the box really does have zero sessions.
 // Anything else is a FAULT and must not be reported as "zero sessions".
 //
+// We deliberately match ONLY "no server running" and "no sessions". The
+// `error connecting to … (No such file or directory)` / `Connection refused`
+// variants are NOT genuine-empty: they indicate a restarted server or a
+// socket race, so they must surface as a fault (throw) rather than masquerade
+// as an empty box (BET-675).
+//
 // Pure + exported for tests.
 export function isNoTmuxServerError(err) {
   const msg = typeof err?.message === "string" ? err.message : "";
   if (!msg) return false;
   return (
     /no server running on/i.test(msg) ||
-    /no sessions?$/im.test(msg) ||
-    /error connecting to .*(no such file or directory|connection refused)/i.test(msg)
+    /no sessions?$/im.test(msg)
   );
 }
 
