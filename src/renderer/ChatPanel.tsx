@@ -289,9 +289,12 @@ export function ChatPanel({
     applyStreamFlush,
     scheduleRefetch,
     spliceMessage,
+    loadEarlierChildTranscript,
     toggleTaskExpand,
     loadedAllRef,
     fetchOpts,
+    childLoadedAllRef,
+    loadingChildEarlier,
   } = useTranscriptState({ sessionId, isActive, motionStateRef });
 
   // ===== Virtualized scroll (BET-679) =====
@@ -1953,6 +1956,9 @@ export function ChatPanel({
       expanded: expandedTasks,
       toggle: toggleTaskExpand,
       childMessages,
+      childLoadedAllRef,
+      loadEarlierChild: loadEarlierChildTranscript,
+      loadingChildEarlier,
       liveStatus: liveChildStatus,
       showThinking,
     }),
@@ -1960,6 +1966,8 @@ export function ChatPanel({
       expandedTasks,
       toggleTaskExpand,
       childMessages,
+      loadEarlierChildTranscript,
+      loadingChildEarlier,
       liveChildStatus,
       showThinking,
     ],

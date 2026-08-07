@@ -85,26 +85,50 @@ const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function Transcript
 
 // ===== Header: Load earlier =====
 //
-// Renders the slim centered "Load earlier messages" button once the
-// tail-first fetch has filled the panel (messages.length >=
-// TRANSCRIPT_TAIL_LIMIT) and the full history hasn't been loaded yet. On click
-// it pulls the WHOLE transcript and splices it in via `firstItemIndex`, so the
-// user's vertical position is preserved by Virtuoso (no scroll math here).
-function LoadEarlierHeader({ context }: { context: TranscriptContext }) {
-  if (!context.showLoadEarlier) return null;
+// The slim centered "Load earlier messages" button shown once a tail-first
+// fetch has filled the list (>= TRANSCRIPT_TAIL_LIMIT) and the full history
+// hasn't been loaded yet. On click it pulls the WHOLE transcript.
+//
+// Shared additively between the main transcript (which passes the current
+// tail state from its Virtuoso context) and TaskCard's child transcript
+// (which passes a per-child bound context) — one component, never forked.
+// The main transcript's prepend is preserved via Virtuoso's firstItemIndex;
+// the child's lives inline inside the parent's card (see TaskCard).
+export type LoadEarlierHeaderProps = {
+  showLoadEarlier: boolean;
+  loadingEarlier: boolean;
+  onLoadEarlier: () => void;
+};
+export function LoadEarlierHeader({
+  showLoadEarlier,
+  loadingEarlier,
+  onLoadEarlier,
+}: LoadEarlierHeaderProps) {
+  if (!showLoadEarlier) return null;
   return (
     <div className="flex justify-center py-3">
       <button
         type="button"
-        onClick={context.onLoadEarlier}
-        disabled={context.loadingEarlier}
+        onClick={onLoadEarlier}
+        disabled={loadingEarlier}
         className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {context.loadingEarlier ? "Loading…" : "Load earlier messages"}
+        {loadingEarlier ? "Loading…" : "Load earlier messages"}
       </button>
     </div>
   );
 }
+
+// Virtuoso Header adapter: Virtuoso invokes its Header component with the
+// TranscriptContext (the `context` prop), so bridge it to the shared
+// LoadEarlierHeader's discrete props.
+const LoadEarlier = ({ context }: { context: TranscriptContext }) => (
+  <LoadEarlierHeader
+    showLoadEarlier={context.showLoadEarlier}
+    loadingEarlier={context.loadingEarlier}
+    onLoadEarlier={context.onLoadEarlier}
+  />
+);
 
 // The live "working" indicator (BET-677). A constant-height row at the tail of
 // the transcript that is ALWAYS rendered and toggles `visibility` instead of
@@ -394,7 +418,7 @@ export function Transcript({
               alignToBottom
               increaseViewportBy={{ top: 600, bottom: 200 }}
               components={{
-                Header: LoadEarlierHeader,
+                Header: LoadEarlier,
                 Footer: TranscriptTail,
                 List: TranscriptList,
               }}

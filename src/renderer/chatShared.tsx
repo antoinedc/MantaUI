@@ -92,6 +92,13 @@ export type TaskContextValue = {
   // has no cached messages yet; TaskBody renders its collapsed header only in
   // that case (no separate loading/fetch state is tracked here).
   childMessages: Map<string, OpencodeMessage[]>;
+  // Tail-first loading for the child transcript (BET-683). Maps each childId
+  // to whether its FULL history has been pulled (via "Load earlier"); until
+  // true, child fetches pull only TRANSCRIPT_TAIL_LIMIT. Drives the "Load
+  // earlier" header on an expanded TaskCard.
+  childLoadedAllRef: React.MutableRefObject<Map<string, boolean>>;
+  loadEarlierChild: (childId: string) => void;
+  loadingChildEarlier: Set<string>;
   // Live child running/idle from session.status / session.idle events.
   // Overrides the parent's stale `state.status` for the running pulse.
   liveStatus: Map<string, "running" | "idle">;
