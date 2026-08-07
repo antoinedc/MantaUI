@@ -42,6 +42,7 @@ import {
   sanitizeGeneratedTitle,
   detectCommandFromText,
   formatBytes,
+  type EntryMotionState,
   type StaleCacheResult,
   isApprovalCoveredByAlways,
 } from "./chatUtils";
@@ -265,6 +266,12 @@ export function ChatPanel({
   const [historyEpoch, setHistoryEpoch] = useState(0);
 
   // ===== Transcript state (extracted to useTranscriptState) =====
+  // The entry-motion state is owned HERE and shared with both Transcript
+  // (rendering) and useTranscriptState (whose reconcile registers canonical
+  // ids against it so an optimistic placeholder's handover never replays the
+  // entry "pop"). One ChatPanel instance is bound to one session, so a single
+  // ref per panel is the right lifetime.
+  const motionStateRef = useRef<EntryMotionState | null>(null);
   const {
     messages,
     setMessages,
@@ -285,7 +292,7 @@ export function ChatPanel({
     toggleTaskExpand,
     loadedAllRef,
     fetchOpts,
-  } = useTranscriptState({ sessionId, isActive });
+  } = useTranscriptState({ sessionId, isActive, motionStateRef });
 
   // ===== Virtualized scroll (BET-679) =====
   // react-virtuoso owns the transcript scroller (see Transcript.tsx). This
@@ -2102,6 +2109,7 @@ export function ChatPanel({
         onReplyQuestion={replyQuestion}
         onRejectQuestion={rejectQuestion}
         onAtBottomChange={onAtBottomChange}
+        motionStateRef={motionStateRef}
       />
 
       {/* Pending permission cards. Shown above the running indicator/input */}

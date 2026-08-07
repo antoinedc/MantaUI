@@ -15,6 +15,7 @@
 // adopter set that clears the two-adopter rule (Sidebar / NewSessionScreen /
 // Settings ×2 / FolderPickerModal).
 
+import { motion, AnimatePresence } from "framer-motion";
 import type { MouseEvent, ReactNode } from "react";
 
 const SIZES = {
@@ -23,12 +24,26 @@ const SIZES = {
   lg: "w-[560px]",
 } as const;
 
+// The modal chrome's entrance/exit ease — the same cubic-bezier as the chat
+// message entry animation (MESSAGE_IN_ENTER in chatMotion.ts) and the
+// Artifacts-panel slide, so every in-app transition reads in one motion
+// language. 0.18s for the panel scale+fade.
+const MODAL_PANEL_TRANSITION = { type: "tween", duration: 0.18, ease: [0.22, 1, 0.36, 1] } as const;
+
+// backdrop fade is a touch faster (0.15s) than the panel (0.18s).
+const MODAL_BACKDROP_TRANSITION = { type: "tween", duration: 0.15 } as const;
+
 export function Modal({
   size = "md",
   padded = true,
   tall = false,
   onDismiss,
   label,
+  // Controlled presence. Callers render <Modal open={cond}> and keep it
+  // MOUNTED so AnimatePresence can play the exit; the chrome is removed only
+  // after the close animation completes. Default true keeps the primitive
+  // drop-in for callers that gate mounting themselves.
+  open = true,
   children,
 }: {
   size?: "sm" | "md" | "lg";
@@ -36,6 +51,7 @@ export function Modal({
   tall?: boolean;
   onDismiss?: () => void;
   label: string;
+  open?: boolean;
   children?: ReactNode;
 }) {
   const panel = [
@@ -47,19 +63,31 @@ export function Modal({
     .filter(Boolean)
     .join(" ");
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onClick={onDismiss}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        className={panel}
-        onClick={(e: MouseEvent) => e.stopPropagation()}
-      >
-        {children}
-      </div>
-    </div>
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={onDismiss}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={MODAL_BACKDROP_TRANSITION}
+        >
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label={label}
+            className={panel}
+            onClick={(e: MouseEvent) => e.stopPropagation()}
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={MODAL_PANEL_TRANSITION}
+          >
+            {children}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }

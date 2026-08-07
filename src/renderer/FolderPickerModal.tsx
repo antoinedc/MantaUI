@@ -37,6 +37,8 @@ import { Modal } from "./Modal";
 import { Button } from "./Button";
 
 type Props = {
+  // Controlled presence. Kept MOUNTED so Modal can play its exit animation.
+  open: boolean;
   // The initial path the picker opens at. Usually "~" or the project's cwd.
   initialPath: string;
   // Called when the user picks a single folder (no fan-out).
@@ -64,10 +66,15 @@ type FanOut =
   | null
   | { worktrees: WorktreeInfo[]; cwd: string };
 
-export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }: Props) {
+export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCancel }: Props) {
   const [path, setPath] = useState(initialPath);
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The picker stays MOUNTED (so Modal can play its exit); reset the browse
+  // location each time it re-opens, preserving the old per-open fresh-start.
+  useEffect(() => {
+    if (open) setPath(initialPath);
+  }, [open, initialPath]);
   const [rows, setRows] = useState<Row[]>([]);
   // Per-directory worktree probe. Keyed by the row's full path; null = not
   // probed yet / not a repo. We probe each row lazily after the listing
@@ -231,7 +238,7 @@ export function FolderPickerModal({ initialPath, onSelect, onFanOut, onCancel }:
   const crumbs = breadcrumbs(path);
 
   return (
-    <Modal size="lg" padded={false} tall onDismiss={onCancel} label="Select folder">
+    <Modal open={open} size="lg" padded={false} tall onDismiss={onCancel} label="Select folder">
       <div className="manta-folder-picker flex flex-col flex-1 min-h-0">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">

@@ -568,8 +568,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         )}
       </div>
 
-      {pickerOpen && (
-        <FolderPickerModal
+      <FolderPickerModal
+          open={pickerOpen}
           initialPath={draft.cwd || "~"}
           onSelect={(path) => {
             updateDraft(draftId, { cwd: path });
@@ -582,18 +582,16 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           }}
           onCancel={() => setPickerOpen(false)}
         />
-      )}
 
-      {fanOutWorktrees && (
-        <Modal size="md" label="Fan-out confirmed">
+      <Modal open={!!fanOutWorktrees} size="md" label="Fan-out confirmed">
           <div className="space-y-3">
             <div className="text-body font-semibold text-text">Fan-out confirmed</div>
             <div className="text-meta text-text-muted">
-              Creating one session with {fanOutWorktrees.length} windows (one per
+              Creating one session with {fanOutWorktrees?.length ?? 0} windows (one per
               worktree). The first window gets your prompt.
             </div>
             <ul className="text-label text-text-faint space-y-px max-h-40 overflow-y-auto">
-              {fanOutWorktrees.map((w) => (
+              {(fanOutWorktrees ?? []).map((w) => (
                 <li key={w.path} className="truncate">
                   <span className="text-text-muted">{worktreeName(w)}</span>
                   {" "}<span className="text-text-faint">— {w.path}</span>
@@ -602,7 +600,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             </ul>
             <div className="flex gap-2">
               <button
-                onClick={() => void submitFanOut(draft.cwd, fanOutWorktrees)}
+                onClick={() => void submitFanOut(draft.cwd, fanOutWorktrees ?? [])}
                 disabled={sending}
                 className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90 disabled:opacity-50"
               >
@@ -618,7 +616,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             </div>
           </div>
         </Modal>
-      )}
     </div>
   );
 }

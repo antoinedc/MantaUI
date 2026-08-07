@@ -15,6 +15,7 @@
 // served pages come from servePageList on open + a 30s poll while open.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { motion } from "framer-motion";
 import {
   ArrowDown,
   ArrowUp,
@@ -586,15 +587,27 @@ export function ArtifactsPanel({
     );
   };
 
-  if (!open) return null;
-
   return (
     <>
-      <aside
-        className="manta-artifacts-panel relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0"
-        style={{ width }}
+      <motion.aside
+        className="manta-artifacts-panel relative shrink-0 border-l border-border bg-bg-elev flex flex-col min-w-0 overflow-hidden"
+        // The panel stays MOUNTED and slides its width 0↔panelWidth (0.25s)
+        // instead of mounting/unmounting in one frame (which reflowed the
+        // chat). `initial={false}` so it renders at its resting width on first
+        // mount rather than sliding in on app boot.
+        initial={false}
+        animate={{ width: open ? width : 0 }}
+        transition={{ type: "tween", duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
         aria-label="Artifacts"
       >
+        {/* Inner content holds a FIXED width equal to the panel width so text
+            does not reflow while the container width animates; hidden
+            (`visibility`) + clipped (overflow-hidden) when fully closed so its
+            focusable children aren't reachable. */}
+        <div
+          className="flex flex-col h-full"
+          style={{ width, visibility: open ? "visible" : "hidden" }}
+        >
         {/* 4px resize handle on the left edge, pointer events only. Clamp to
             280-520; persist on pointer-up, not on every move. */}
         <div
@@ -750,7 +763,8 @@ export function ArtifactsPanel({
             ))
           )}
         </div>
-      </aside>
+        </div>
+      </motion.aside>
 
       {/* The preview overlay — one surface, a renderer per type. Rendered here
           (sibling of the panel) so it covers the whole window, not just the

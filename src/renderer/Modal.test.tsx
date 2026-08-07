@@ -17,6 +17,7 @@
 // clean.
 
 import { describe, it, expect, afterEach } from "vitest";
+import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { Modal } from "./Modal";
 
@@ -98,5 +99,30 @@ describe("Modal", () => {
     // @ts-expect-error — Modal must NOT accept className (M527 decision 3)
     void <Modal label="L" className="bg-red-500">x</Modal>;
     expect(true).toBe(true);
+  });
+
+  it("renders children while open (default true)", () => {
+    h = mount(<Modal label="L">content</Modal>);
+    expect(h.text()).toContain("content");
+  });
+
+  it("renders nothing when open is false", () => {
+    h = mount(<Modal open={false} label="L">content</Modal>);
+    expect(h.text()).not.toContain("content");
+    expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
+  });
+
+  it("removes the dialog from the DOM after close + exit animation", async () => {
+    // Modal stays MOUNTED while open; when `open` flips false, the exit
+    // animation runs and AnimatePresence removes the chrome only afterwards.
+    h = mount(<Modal label="L">content</Modal>);
+    expect(h.text()).toContain("content");
+    h.rerender(<Modal open={false} label="L">content</Modal>);
+    // Let the 0.18s exit run to completion; 400ms comfortably exceeds it.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(h.text()).not.toContain("content");
+    expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
   });
 });
