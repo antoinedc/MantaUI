@@ -877,23 +877,13 @@ export const httpApi: Api = {
   onStatusEvent: (cb) => on<WindowStatus[]>("status", cb),
 
   // -- opencode chat --
-  opencodeMessages: (sessionId) => rpc(IPC.opencodeMessages, sessionId),
-  // These three are DESKTOP-ONLY optimizations with no server-side handler:
-  //   • messages-cached — reads main's in-process transcript cache for an
-  //     instant first paint. The manta-server keeps no such cache, so there's
-  //     nothing to serve; returning null is the documented "cache miss" and the
-  //     ChatPanel falls through to its background opencodeMessages() fetch.
-  //   • open-/close-stream — main refcounts a per-directory opencode SSE stream.
-  //     The server's event bus already streams ALL open sessions globally, so
-  //     these are no-ops here.
-  // The server's rpc registry doesn't define these channels, so calling them
-  // returns 500 "unknown rpc channel". rpcOptional() swallows exactly that
-  // (a stale/older box also 500s the same way) and yields the graceful
-  // fallback, instead of a red console 500 on every ChatPanel mount/unmount.
-  opencodeMessagesCached: (sessionId) =>
-    rpcOptional(IPC.opencodeMessagesCached, null, sessionId),
-  opencodeMessagesReconcile: (sessionId) =>
-    rpc(IPC.opencodeMessagesReconcile, sessionId),
+  opencodeMessages: (sessionId, opts) =>
+    rpc(IPC.opencodeMessages, sessionId, opts ?? {}),
+  // open-/close-stream are no-ops here: the server's event bus streams ALL
+  // open sessions globally, so there's nothing to refcount per-directory. The
+  // rpc registry doesn't define them, so calling them would 500 "unknown rpc
+  // channel"; rpcOptional() swallows exactly that and yields the graceful
+  // no-op instead of a red console 500 on every ChatPanel mount/unmount.
   opencodeMessage: (sessionId, messageId) =>
     rpc(IPC.opencodeMessage, sessionId, messageId),
   opencodeOpenStream: (sessionId) =>

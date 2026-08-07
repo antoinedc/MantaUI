@@ -435,20 +435,14 @@ export function buildHandlers({
 
     // ---- opencode: simple pass-throughs ----
 
-    // preload: ipcRenderer.invoke(IPC.opencodeMessages, sessionId)
-    // → args[0] = sessionId (string), args[1] = optional {limit, slim}.
+    // preload: ipcRenderer.invoke(IPC.opencodeMessages, sessionId, opts?)
+    // → args[0] = sessionId (string), args[1] = optional {limit}.
     //
-    // The desktop passes ONE arg and so keeps the whole, unabridged history —
-    // its renderer draws reasoning/patch/file parts and needs every message.
-    // The native iOS client passes {limit, slim} to fetch only the recent tail
-    // with the parts it never renders (and the duplicated tool stdout)
-    // stripped. See `slimTranscript` in opencode.mjs for why slim is opt-in.
+    // The desktop passes `{limit} = {limit: 100}` for the tail-first mount
+    // fetch and `{}` (whole history) for "Load earlier"; no limit at all keeps
+    // the full transcript. The native iOS client passes {limit, slim}. The
+    // duplicated tool stdout is stripped server-side for every client.
     "opencode:messages": (sessionId, opts) => oc.listMessages(sessionId, opts ?? {}),
-
-    // Reconcile == full pull on the server (no transcript cache to merge
-    // against; the tail-merge win is desktop-only). Same renderer API on both.
-    "opencode:messages-reconcile": (sessionId) =>
-      oc.reconcileMessages(sessionId),
 
     // Single-message fetch for live-turn splice (returns null on miss).
     "opencode:message": (sessionId, messageId) =>

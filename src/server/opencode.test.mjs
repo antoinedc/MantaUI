@@ -6,7 +6,9 @@ import {
   createSession,
   sendPrompt,
   listMessages,
+  getMessage,
   slimTranscript,
+  stripDuplicateToolOutput,
   runCommand,
   forkSession,
   compactSession,
@@ -1109,7 +1111,7 @@ test("listMessages passes ?limit through and leaves the tail slim-untouched by d
       parts: [
         { type: "step-start" },
         { type: "text", text: "hi" },
-        { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
+        { type: "tool", state: { output: "OUT", metadata: { output: "META", exit: 0 } } },
       ],
     },
   ];
@@ -1138,6 +1140,119 @@ test("listMessages passes ?limit through and leaves the tail slim-untouched by d
       assert.ok(!urls.some((u) => u.includes("limit=")), "a non-positive limit must be ignored");
     },
   );
+});
+
+test("listMessages ALWAYS strips a byte-identical tool stdout duplicate (no slim needed)", async () => {
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  const raw = [
+    {
+      id: "m1",
+      parts: [
+        { type: "text", text: "hi" },
+        { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
+      ],
+    },
+  ];
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/message")) {
+        return new Response(JSON.stringify(raw), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const full = await listMessages("ses_strip_dup");
+      assert.deepEqual(
+        full[0].parts[1].state,
+        { output: "OUT", metadata: { exit: 0 } },
+        "the duplicate metadata.output must be dropped for every client",
+      );
+      assert.equal(full[0].parts[0].type, "text", "non-tool parts untouched");
+      assert.equal(
+        raw[0].parts[1].state.metadata.output,
+        "OUT",
+        "the input fixture must not be mutated",
+      );
+    },
+  );
+});
+
+test("getMessage strips a byte-identical tool stdout duplicate (splice path)", async () => {
+  const raw = {
+    id: "m1",
+    parts: [
+      { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
+    ],
+  };
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/message/m1")) {
+        return new Response(JSON.stringify(raw), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const msg = await getMessage("ses_get_strip", "m1");
+      assert.deepEqual(
+        msg.parts[0].state,
+        { output: "OUT", metadata: { exit: 0 } },
+        "the duplicate metadata.output must be dropped in the single-message splice too",
+      );
+    },
+  );
+});
+
+test("getMessage leaves a NON-identical metadata.output (live streaming) untouched", async () => {
+  const raw = {
+    id: "m1",
+    parts: [
+      { type: "tool", state: { output: "final", metadata: { output: "partial", exit: 0 } } },
+    ],
+  };
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/message/m1")) {
+        return new Response(JSON.stringify(raw), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const msg = await getMessage("ses_get_live", "m1");
+      assert.deepEqual(
+        msg.parts[0].state.metadata.output,
+        "partial",
+        "different metadata.output must survive (running tool)",
+      );
+    },
+  );
+});
+
+test("stripDuplicateToolOutput is lossless and tolerant", () => {
+  // Exact duplicate removed.
+  assert.deepEqual(
+    stripDuplicateToolOutput({
+      id: "m",
+      parts: [{ type: "tool", state: { output: "X", metadata: { output: "X", a: 1 } } }],
+    }).parts[0].state,
+    { output: "X", metadata: { a: 1 } },
+  );
+  // Not an object / missing → left alone.
+  assert.deepEqual(stripDuplicateToolOutput({ id: "m" }), { id: "m" });
+  assert.deepEqual(stripDuplicateToolOutput(null), null);
+  assert.deepEqual(stripDuplicateToolOutput({ id: "m", parts: [{ type: "tool" }] }), {
+    id: "m",
+    parts: [{ type: "tool" }],
+  });
 });
 
 test("slimTranscript drops unrendered parts + the duplicated tool stdout", () => {

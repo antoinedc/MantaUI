@@ -368,7 +368,7 @@ describe("ChatPanel session resources", () => {
 //
 // Verifies the extracted <Transcript> renders a fetched transcript: a user
 // turn's text and an assistant turn's text both appear in the DOM. Drives the
-// canonical fetch path (opencodeMessagesReconcile) the container uses on mount.
+// canonical fetch path (opencodeMessages) the container uses on mount.
 describe("ChatPanel transcript rendering", () => {
   let h: Harness | null = null;
 
@@ -398,7 +398,6 @@ describe("ChatPanel transcript rendering", () => {
       },
     ];
     installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     });
     resetStore();
@@ -492,7 +491,6 @@ describe("ChatPanel composer submit", () => {
       },
     ];
     ({ api } = installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     }));
     resetStore();
@@ -567,7 +565,6 @@ describe("ChatPanel abort rejects orphaned questions", () => {
       },
     ];
     ({ api, bus } = installMockApi({
-      opencodeMessagesReconcile: () => Promise.resolve(transcript),
       opencodeMessages: () => Promise.resolve(transcript),
     }));
     resetStore();
