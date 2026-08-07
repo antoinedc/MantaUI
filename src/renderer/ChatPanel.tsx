@@ -1051,7 +1051,7 @@ export function ChatPanel({
 
   // Session ops. All three depend on tmuxSession/windowIndex being non-null
   // (the panel hides the buttons otherwise). The store will pick up the new
-  // project list automatically via the next refresh / tmuxList call.
+  // project list automatically via the next refresh / sync delta call.
   const refresh = useStore((s) => s.refresh);
 
   const forkSession = useCallback(async () => {

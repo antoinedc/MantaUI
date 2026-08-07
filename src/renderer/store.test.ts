@@ -850,6 +850,15 @@ describe("last-active session restore (refresh / relaunch)", () => {
     ];
   }
 
+  // Shared restore path: the saved last-used session is alpha/window 1 and the
+  // tree has alpha/beta. Used by several tests below whose saved-cursor differs
+  // only by what surrounds the applyProjects call.
+  function savedAlphaAfterApply() {
+    writeSavedActiveSession({ project: "alpha", window: 1 });
+    useStore.getState().applyProjects(sessions());
+    return useStore.getState();
+  }
+
   it("setActive persists the pin to localStorage", () => {
     useStore.setState({ projects: sessions() });
     useStore.getState().setActive("beta", 0);
@@ -859,9 +868,7 @@ describe("last-active session restore (refresh / relaunch)", () => {
   });
 
   it("applyProjects with no prior selection restores the saved last-used session", () => {
-    writeSavedActiveSession({ project: "alpha", window: 1 });
-    useStore.getState().applyProjects(sessions());
-    const s = useStore.getState();
+    const s = savedAlphaAfterApply();
     expect(s.activeProjectName).toBe("alpha");
     expect(s.activeWindowByProject.alpha).toBe(1);
   });
@@ -898,9 +905,7 @@ describe("last-active session restore (refresh / relaunch)", () => {
   it("applyProjects restores the saved window over the tmux-active one", () => {
     // alpha's tmux-active window is 0, but the user last used window 1 —
     // restore must win so they land exactly where they left off.
-    writeSavedActiveSession({ project: "alpha", window: 1 });
-    useStore.getState().applyProjects(sessions());
-    const s = useStore.getState();
+    const s = savedAlphaAfterApply();
     expect(s.activeProjectName).toBe("alpha");
     expect(s.activeWindowByProject.alpha).toBe(1);
   });
@@ -1056,5 +1061,52 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
     expect(useStore.getState().syncSeq).toBe(9);
     expect(useStore.getState().syncGen).toBe("g3");
     (window as unknown as { api?: unknown }).api = prev;
+  });
+
+  it("persists and replays the stale flag (cold boot against an unreachable box)", async () => {
+    useStore.setState({ boxId: "boxA", boxStale: false });
+    useStore.getState().applySyncPayload({ gen: "g", seq: 5, changed: { stale: true } });
+    // flush the 1s debounced write
+    await new Promise((r) => setTimeout(r, 1100));
+    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as { stale: boolean };
+    expect(saved.stale).toBe(true);
+    // a cold boot must replay boxStale instead of hardcoding "not stale" —
+    // otherwise the restored cursor would make the box withhold stale and the
+    // amber "last known state" pill would silently never appear.
+    useStore.setState({ boxStale: false, syncGen: null, syncSeq: null, projects: [], loaded: false });
+    loadPersistedSnapshot("boxA");
+    expect(useStore.getState().boxStale).toBe(true);
+  });
+
+  it("loadPersistedSnapshot drops a snapshot owned by a different box (re-pair bleed guard)", () => {
+    localStorage.setItem(
+      "manta:sync:snapshot",
+      JSON.stringify({
+        gen: "g",
+        seq: 1,
+        boxId: "boxA",
+        projects: [proj({ tmuxSession: "a" })],
+        config: {},
+      }),
+    );
+    loadPersistedSnapshot("boxB");
+    expect(localStorage.getItem("manta:sync:snapshot")).toBeNull();
+    expect(useStore.getState().projects).toEqual([]);
+  });
+
+  it("loadPersistedSnapshot restores a snapshot owned by the same box", () => {
+    localStorage.setItem(
+      "manta:sync:snapshot",
+      JSON.stringify({
+        gen: "g",
+        seq: 2,
+        boxId: "boxA",
+        projects: [proj({ tmuxSession: "a" })],
+        config: {},
+      }),
+    );
+    loadPersistedSnapshot("boxA");
+    expect(useStore.getState().projects.map((p) => p.tmuxSession)).toEqual(["a"]);
+    expect(useStore.getState().syncSeq).toBe(2);
   });
 });

@@ -148,8 +148,8 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   // Order is load-bearing: the transport swap MUST happen before
   // store.refresh(). On the SSH auto-claim path the credentials are persisted
   // by main and window.api is still the Electron preload bridge, which has no
-  // tmuxList — so refresh() would throw before the swap ever happened, and the
-  // wizard would never leave step 1.
+  // syncSnapshot — so refresh() would throw before the swap ever happened, and
+  // the wizard would never leave step 1.
   //
   // window.api.configGet() is what makes the freshly-minted boxToken visible
   // here; it exists on BOTH transports. In http mode it returns the manta

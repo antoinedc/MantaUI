@@ -441,7 +441,6 @@ function fireResync() {
       const marker: SyncDelta = { resync: true };
       for (const fn of sync) { try { fn(marker); } catch { /* listener error — ignore */ } }
     }
-    if (set.size === 0 && sync.size === 0) return; // no listeners yet — nothing to do
   }, 0);
   ship("info", "ws resync");
 }

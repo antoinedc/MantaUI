@@ -75,6 +75,18 @@ function mergeLocalPairing(cfg: AppConfig): AppConfig {
 // syncs via the server's cursor protocol (`syncSnapshot` with the stored
 // cursor) and applies live `sync` deltas / reconnect markers.
 //
+// The payload ALSO persists `stale` (the box-reported unreachability flag)
+// so the amber "last known state" indicator survives a cold boot: without it,
+// the restored cursor would be sent to the box, which — still being in the
+// same stale state — would withhold `stale` (versions.stale === sinceSeq, not
+// `> sinceSeq`) and the client would come back looking healthy with no warning.
+// Persisting + replaying the flag keeps step 8 honest across restarts.
+//
+// The cache is scoped by `boxId` so a re-pair to a DIFFERENT box never replays
+// the previous box's project list/config on first paint (the cursor protocol
+// would self-correct within one round trip, but the surprise paint is worth
+// preventing).
+//
 // `lastRaw*` hold the last RAW payload values so the debounced write
 // serializes exactly what was applied. config is stored PRE local-pairing
 // overlay (the device-local serverUrl/boxToken are re-derived on load via
@@ -91,14 +103,15 @@ function schedulePersist(): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    const { syncGen, syncSeq } = useStore.getState();
+    const { syncGen, syncSeq, boxStale, boxId } = useStore.getState();
     if (syncGen == null || syncSeq == null) return;
     const snapshot = {
       gen: syncGen,
       seq: syncSeq,
+      boxId,
       projects: lastRawProjects,
       config: lastRawConfig,
-      savedAt: Date.now(),
+      stale: boxStale,
     };
     try {
       localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
@@ -110,10 +123,12 @@ function schedulePersist(): void {
 
 // Cold-boot restore: parse the persisted snapshot and apply it through
 // applySyncPayload so the cursor + projects/config/boxStale all come up in
-// one shot. Any parse/shape error drops the key and returns null (fall back
-// to a normal server boot). Called from main.tsx BEFORE the React root
-// renders, only on the paired/http path.
-export function loadPersistedSnapshot(): void {
+// one shot, then the box takes over via the cursor RPC. Any parse/shape error
+// drops the key and returns null (fall back to a normal server boot). A
+// snapshot stamped for a DIFFERENT boxId is dropped too (re-pair — see above).
+// Called from main.tsx BEFORE the React root renders, only on the paired/http
+// path, passing the paired box's boxId.
+export function loadPersistedSnapshot(currentBoxId?: string): void {
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(SNAPSHOT_KEY);
@@ -133,6 +148,8 @@ export function loadPersistedSnapshot(): void {
     seq?: unknown;
     projects?: unknown;
     config?: unknown;
+    boxId?: unknown;
+    stale?: unknown;
   };
   if (
     typeof s?.gen !== "string" ||
@@ -145,13 +162,25 @@ export function loadPersistedSnapshot(): void {
     try { localStorage.removeItem(SNAPSHOT_KEY); } catch { /* ignore */ }
     return;
   }
+  // Cross-box bleed guard: a snapshot owned by a different box must not
+  // briefly show that box's sessions/config. Drop it (no restore).
+  if (
+    typeof s.boxId === "string" &&
+    s.boxId !== "" &&
+    typeof currentBoxId === "string" &&
+    currentBoxId !== "" &&
+    s.boxId !== currentBoxId
+  ) {
+    try { localStorage.removeItem(SNAPSHOT_KEY); } catch { /* ignore */ }
+    return;
+  }
   useStore.getState().applySyncPayload({
     gen: s.gen,
     seq: s.seq,
     changed: {
       projects: s.projects as Project[],
       config: s.config as AppConfig,
-      stale: false,
+      stale: typeof s.stale === "boolean" ? s.stale : false,
     },
   });
 }
@@ -465,9 +494,10 @@ type State = {
   applyProjects: (projects: Project[]) => void;
   applyConfig: (c: AppConfig) => void;
   // BET-678: apply one sync payload — routes each changed field to the right
-  // applier, updates the cursor cursor, and schedules the persisted snapshot
-  // write. Ignores nothing; callers are expected to guard for stale envelopes
-  // (same gen, lower seq) before calling when they care.
+  // applier, advances the cursor, and schedules the persisted snapshot write.
+  // Owns the stale-envelope guard: envelopes at the same generation with a
+  // lower/equal seq are ignored (already applied, or superseded by a newer
+  // snapshot).
   applySyncPayload: (p: SyncPayload) => void;
   // Reflect a successful onboarding claim (BET-49-T2) into store state so
   // resolveTransportMode reads "http" immediately. main already persisted these
