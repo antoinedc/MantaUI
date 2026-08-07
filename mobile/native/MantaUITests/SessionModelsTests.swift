@@ -155,4 +155,31 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(WorktreeInfoLogic.gitStateLabel([wt("/a", branch: "main")]), "⎇ main")
         XCTAssertEqual(WorktreeInfoLogic.gitStateLabel([]), "")
     }
+
+    // MARK: - BET-673 turn-complete haptic (all four gates)
+
+    func testTurnCompleteHapticFiresWhenAllGatesPass() {
+        XCTAssertTrue(shouldFireTurnCompleteHaptic(
+            turnCompleteEdge: true, showScrollToBottom: true, isActive: true, hapticsEnabled: true))
+    }
+
+    func testTurnCompleteHapticNoEdge() {
+        XCTAssertFalse(shouldFireTurnCompleteHaptic(
+            turnCompleteEdge: false, showScrollToBottom: true, isActive: true, hapticsEnabled: true))
+    }
+
+    func testTurnCompleteHapticNoScrolledUp() {
+        XCTAssertFalse(shouldFireTurnCompleteHaptic(
+            turnCompleteEdge: true, showScrollToBottom: false, isActive: true, hapticsEnabled: true))
+    }
+
+    func testTurnCompleteHapticInactiveScene() {
+        XCTAssertFalse(shouldFireTurnCompleteHaptic(
+            turnCompleteEdge: true, showScrollToBottom: true, isActive: false, hapticsEnabled: true))
+    }
+
+    func testTurnCompleteHapticHapticsDisabled() {
+        XCTAssertFalse(shouldFireTurnCompleteHaptic(
+            turnCompleteEdge: true, showScrollToBottom: true, isActive: true, hapticsEnabled: false))
+    }
 }

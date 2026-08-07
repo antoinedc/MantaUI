@@ -73,6 +73,8 @@ private struct ChatScreenContent: View {
     @StateObject private var modelStore: ChatModelStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @EnvironmentObject private var sessionStore: SessionListStore
     @State private var showOverflow = false
     @State private var branch: String?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
@@ -149,6 +151,22 @@ private struct ChatScreenContent: View {
                 Task { await resolveWindowAndBranch() }
             }
             .onDisappear { store.stop() }
+            // BET-673: fire one success haptic when a turn completes while the
+            // user has scrolled up (scroll-to-bottom chip showing) and the scene
+            // is active and haptics are enabled. `onChange` fires exactly once
+            // per false→true edge of `turnComplete`, so there is exactly one
+            // haptic per completion, none on `running` oscillations, and none
+            // when at the bottom.
+            .onChange(of: store.turnComplete) { _, completed in
+                if shouldFireTurnCompleteHaptic(
+                    turnCompleteEdge: completed,
+                    showScrollToBottom: showScrollToBottom,
+                    isActive: scenePhase == .active,
+                    hapticsEnabled: sessionStore.hapticsEnabled
+                ) {
+                    SessionHaptics.fire(.success, enabled: true)
+                }
+            }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("chat-screen")
     }
