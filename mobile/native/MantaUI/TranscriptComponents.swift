@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import MarkdownView
 
 // Shared helper: map a generated font-weight metric (500 / 600 from
 // --weight-medium / --weight-semibold) onto the nearest Font.Weight. The
@@ -52,510 +53,77 @@ struct UserBand: View {
 }
 
 
-// MARK: - Inline markdown
+// MARK: - Manta prose
 //
-// The native transcript has no markdown renderer (the spike explicitly did not
-// build one), so assistant turns showed their source: `**bold**`, backticked
-// code and link syntax appeared verbatim. This covers the INLINE subset that
-// SwiftUI can parse natively — emphasis, strong, inline code, links —
-// preserving newlines so paragraph structure survives.
-//
-// BLOCK-level markdown is handled by `MantaMarkdownParser` below, which splits
-// a turn into blocks and hands each block's TEXT back through this renderer for
-// its inline spans.
-enum MantaInlineMarkdown {
-    static func render(_ raw: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-        return (try? AttributedString(markdown: raw, options: options)) ?? AttributedString(raw)
-    }
-}
-
-// MARK: - Block markdown
-//
-// `AttributedString(markdown:)` with `.inlineOnlyPreservingWhitespace` parses
-// ONLY inline spans, and passes every block construct through as literal text.
-// So a turn that opened with `## How it compares` and laid its answer out as a
-// GFM table rendered as its own source: a heading line with two hashes, then
-// `| Latency | record → upload |` and a `|---|---|---|` rule, verbatim.
-//
-// This is the block layer. It is deliberately a small, total, PURE function —
-// no library, no dependency, and no throwing path: anything it does not
-// recognise stays a paragraph and still gets inline rendering, so an
-// unsupported construct degrades to exactly today's behaviour rather than
-// disappearing.
-enum MantaMarkdownBlock: Equatable {
-    case paragraph(String)
-    case heading(level: Int, text: String)
-    /// One list item. `ordered` drives the marker; `depth` its indent.
-    case listItem(depth: Int, marker: String, text: String)
-    case code(language: String?, text: String)
-    case quote(String)
-    case rule
-    case table(MantaMarkdownTable)
-}
-
-enum MantaTableAlignment: Equatable {
-    case leading, center, trailing
-}
-
-struct MantaMarkdownTable: Equatable {
-    var header: [String]
-    var alignments: [MantaTableAlignment]
-    var rows: [[String]]
-
-    /// Header + body, padded/truncated to the header's column count so the grid
-    /// is always rectangular (a ragged row is legal GFM and must not crash or
-    /// misalign the columns).
-    var normalizedRows: [[String]] {
-        rows.map { row in
-            (0..<header.count).map { i in i < row.count ? row[i] : "" }
-        }
-    }
-
-    func alignment(_ column: Int) -> MantaTableAlignment {
-        column < alignments.count ? alignments[column] : .leading
-    }
-}
-
-enum MantaMarkdownParser {
-
-    /// Split a turn's text into blocks. Total: never throws, never drops input.
-    static func blocks(_ raw: String) -> [MantaMarkdownBlock] {
-        let lines = raw.components(separatedBy: "\n")
-        var out: [MantaMarkdownBlock] = []
-        var paragraph: [String] = []
-        var i = 0
-
-        func flushParagraph() {
-            let text = paragraph.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            paragraph.removeAll()
-            if !text.isEmpty { out.append(.paragraph(text)) }
-        }
-
-        while i < lines.count {
-            let line = lines[i]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            // Fenced code. Consumes to the closing fence, or to the end of the
-            // input when the fence never closes (the streaming case — a half
-            // written block must still render as code, not as loose prose).
-            if let fence = fenceToken(trimmed) {
-                flushParagraph()
-                let language = String(trimmed.dropFirst(fence.count)).trimmingCharacters(in: .whitespaces)
-                var body: [String] = []
-                i += 1
-                while i < lines.count {
-                    let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                    if candidate.hasPrefix(fence) { i += 1; break }
-                    body.append(lines[i])
-                    i += 1
-                }
-                out.append(.code(language: language.isEmpty ? nil : language,
-                                 text: body.joined(separator: "\n")))
-                continue
-            }
-
-            if trimmed.isEmpty {
-                flushParagraph()
-                i += 1
-                continue
-            }
-
-            if isThematicBreak(trimmed) {
-                flushParagraph()
-                out.append(.rule)
-                i += 1
-                continue
-            }
-
-            if let heading = parseHeading(trimmed) {
-                flushParagraph()
-                out.append(heading)
-                i += 1
-                continue
-            }
-
-            // GFM table: a header row plus a delimiter row. Checked BEFORE the
-            // paragraph fallback and before list parsing, because both would
-            // otherwise swallow the pipes as ordinary text.
-            if let parsed = parseTable(lines, from: i) {
-                flushParagraph()
-                out.append(.table(parsed.table))
-                i = parsed.next
-                continue
-            }
-
-            if let item = parseListItem(line) {
-                flushParagraph()
-                out.append(item)
-                i += 1
-                continue
-            }
-
-            if trimmed.hasPrefix(">") {
-                flushParagraph()
-                var body: [String] = []
-                while i < lines.count {
-                    let candidate = lines[i].trimmingCharacters(in: .whitespaces)
-                    guard candidate.hasPrefix(">") else { break }
-                    body.append(String(candidate.dropFirst()).trimmingCharacters(in: .whitespaces))
-                    i += 1
-                }
-                out.append(.quote(body.joined(separator: "\n")))
-                continue
-            }
-
-            paragraph.append(line)
-            i += 1
-        }
-
-        flushParagraph()
-        return out
-    }
-
-    // MARK: - Line classifiers (each pure + individually testable)
-
-    /// The ``` / ~~~ opener, or nil.
-    static func fenceToken(_ trimmed: String) -> String? {
-        for token in ["```", "~~~"] where trimmed.hasPrefix(token) {
-            return token
-        }
-        return nil
-    }
-
-    static func isThematicBreak(_ trimmed: String) -> Bool {
-        for ch in ["-", "*", "_"] {
-            let stripped = trimmed.replacingOccurrences(of: " ", with: "")
-            if stripped.count >= 3, stripped.allSatisfy({ String($0) == ch }) { return true }
-        }
-        return false
-    }
-
-    static func parseHeading(_ trimmed: String) -> MantaMarkdownBlock? {
-        guard trimmed.hasPrefix("#") else { return nil }
-        let hashes = trimmed.prefix(while: { $0 == "#" })
-        guard hashes.count <= 6 else { return nil }
-        let rest = trimmed.dropFirst(hashes.count)
-        // `#hashtag` is not a heading — ATX requires a space after the run.
-        guard rest.first == " " || rest.isEmpty else { return nil }
-        let text = rest.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
-        return .heading(level: hashes.count, text: text)
-    }
-
-    static func parseListItem(_ line: String) -> MantaMarkdownBlock? {
-        let indent = line.prefix(while: { $0 == " " || $0 == "\t" }).count
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let depth = min(indent / 2, 3)
-
-        for bullet in ["- ", "* ", "+ "] where trimmed.hasPrefix(bullet) {
-            let text = String(trimmed.dropFirst(bullet.count)).trimmingCharacters(in: .whitespaces)
-            guard !text.isEmpty else { return nil }
-            return .listItem(depth: depth, marker: "•", text: text)
-        }
-
-        // `12. text` / `12) text`
-        let digits = trimmed.prefix(while: { $0.isNumber })
-        if !digits.isEmpty, digits.count <= 9 {
-            let rest = trimmed.dropFirst(digits.count)
-            if let sep = rest.first, sep == "." || sep == ")" {
-                let text = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces)
-                guard !text.isEmpty else { return nil }
-                return .listItem(depth: depth, marker: "\(digits).", text: text)
-            }
-        }
-        return nil
-    }
-
-    // MARK: - Table
-
-    /// Parse a GFM table starting at `start`, returning it plus the index of
-    /// the first line AFTER it. nil when the two-line header+delimiter shape
-    /// isn't there — which is what keeps a lone pipe-bearing prose line prose.
-    static func parseTable(_ lines: [String], from start: Int) -> (table: MantaMarkdownTable, next: Int)? {
-        guard start + 1 < lines.count else { return nil }
-        let headerLine = lines[start].trimmingCharacters(in: .whitespaces)
-        guard headerLine.contains("|") else { return nil }
-        let delimiterLine = lines[start + 1].trimmingCharacters(in: .whitespaces)
-        guard let alignments = parseDelimiterRow(delimiterLine) else { return nil }
-
-        let header = splitRow(headerLine)
-        guard header.count == alignments.count else { return nil }
-
-        var rows: [[String]] = []
-        var cursor = start + 2
-        while cursor < lines.count {
-            let candidate = lines[cursor].trimmingCharacters(in: .whitespaces)
-            guard !candidate.isEmpty, candidate.contains("|") else { break }
-            rows.append(splitRow(candidate))
-            cursor += 1
-        }
-        return (MantaMarkdownTable(header: header, alignments: alignments, rows: rows), cursor)
-    }
-
-    /// `|---|:--:|---:|` -> per-column alignment, or nil when the line is not a
-    /// delimiter row (which is what makes a lone pipe-bearing prose line stay
-    /// prose).
-    static func parseDelimiterRow(_ line: String) -> [MantaTableAlignment]? {
-        guard line.contains("|"), line.contains("-") else { return nil }
-        let cells = splitRow(line)
-        guard !cells.isEmpty else { return nil }
-        var out: [MantaTableAlignment] = []
-        for cell in cells {
-            let c = cell.trimmingCharacters(in: .whitespaces)
-            guard !c.isEmpty else { return nil }
-            let left = c.hasPrefix(":")
-            let right = c.hasSuffix(":")
-            let dashes = c.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
-            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
-            if left && right { out.append(.center) }
-            else if right { out.append(.trailing) }
-            else { out.append(.leading) }
-        }
-        return out
-    }
-
-    /// Split one table row into cells, honouring `\|` escapes and dropping the
-    /// optional leading/trailing pipe. An EMPTY first header cell is legal and
-    /// common (a corner cell), so we must not trim empties away wholesale —
-    /// only the delimiters the row shape contributes.
-    static func splitRow(_ line: String) -> [String] {
-        var body = line
-        if body.hasPrefix("|") { body.removeFirst() }
-        if body.hasSuffix("|") && !body.hasSuffix("\\|") { body.removeLast() }
-
-        var cells: [String] = []
-        var current = ""
-        var escaped = false
-        for ch in body {
-            if escaped {
-                current.append(ch == "|" ? "|" : ch)
-                escaped = false
-                continue
-            }
-            if ch == "\\" { escaped = true; continue }
-            if ch == "|" {
-                cells.append(current.trimmingCharacters(in: .whitespaces))
-                current = ""
-                continue
-            }
-            current.append(ch)
-        }
-        if escaped { current.append("\\") }
-        cells.append(current.trimmingCharacters(in: .whitespaces))
-        return cells
-    }
-}
-
-// MARK: - Assistant prose
-//
-// §8: full width, `tx1`, 15px/`--prose-lh`, margin-bottom `--sp-3`.
-struct AssistantProse: View {
+// THE single wrapper seam for assistant prose. Every place that renders
+// assistant text goes through this view, which delegates to the MarkdownView
+// library (LiYanan2004/MarkdownView, built on swift-markdown) — so a future
+// library swap touches exactly one file. Style is mapped from the generated
+// tokens exactly as the hand-rolled renderer did: body text at the body
+// size / tx1 colour / prose line-height, code in the mono face at the code
+// size, links in the accent colour, headings kept near body size (a transcript
+// turn is not a document — an h1 set at display size would shout over the user
+// band).
+struct MantaProse: View {
     let text: String
     let tokens: Tokens
 
-    private var blocks: [MantaMarkdownBlock] { MantaMarkdownParser.blocks(text) }
-
     var body: some View {
-        // Spacing 0 + a per-block bottom gap: a uniform VStack spacing would
-        // set consecutive list items as far apart as two paragraphs, which
-        // stops a list reading as one list.
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { pair in
-                blockView(pair.element)
-                    .padding(.bottom, gapBelow(pair.element))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.bottom, Metrics.spacing.sp3)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("assistant-prose")
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: MantaMarkdownBlock) -> some View {
-        switch block {
-        case .paragraph(let content):
-            proseText(content)
-        case .heading(let level, let content):
-            Text(MantaInlineMarkdown.render(content))
-                .font(.system(size: headingSize(level), weight: .semibold))
-                .kerning(Metrics.type.headingTracking * headingSize(level))
-                .foregroundColor(tokens.tx1)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, Metrics.spacing.sp2)
-        case .listItem(let depth, let marker, let content):
-            HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
-                Text(marker)
-                    .font(.system(size: Metrics.type.body))
-                    .foregroundColor(tokens.tx4)
-                    .monospacedDigit()
-                proseText(content)
-            }
-            .padding(.leading, CGFloat(depth) * Metrics.spacing.sp4)
-        case .code(let language, let content):
-            MarkdownCodeBlock(language: language, text: content, tokens: tokens)
-        case .quote(let content):
-            proseText(content)
-                .foregroundColor(tokens.tx2)
-                .padding(.leading, Metrics.spacing.sp3)
-                .overlay(alignment: .leading) {
-                    tokens.borderSubtle.frame(width: Metrics.spacing.spPx * 2)
-                }
-        case .rule:
-            tokens.borderSubtle
-                .frame(height: Metrics.spacing.spPx)
-                .padding(.vertical, Metrics.spacing.sp1)
-        case .table(let table):
-            MarkdownTableView(table: table, tokens: tokens)
-        }
-    }
-
-    // `fixedSize(horizontal: false, …)` is what keeps a long unbreakable token
-    // (a shell command, a URL, a path) INSIDE the screen. Without it such a
-    // token makes the text demand its full unwrapped width, the scroll view
-    // adopts that width, and every sibling — including the composer, which
-    // shares the same layout — is laid out wider than the display: text stops
-    // appearing to wrap, the send button sits off screen, and each keystroke
-    // re-lays out an oversized view, which is what made typing crawl.
-    private func proseText(_ content: String) -> some View {
-        Text(MantaInlineMarkdown.render(content))
-            .font(.system(size: Metrics.type.body))
+        MarkdownView(text)
+            .font(.system(size: Metrics.type.body), for: .body)
+            .font(.system(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
+            .font(.system(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
+            .font(.system(size: Metrics.type.body + 1, weight: .semibold), for: .h3)
+            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h4)
+            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h5)
+            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h6)
+            .font(.system(size: Metrics.type.xs, design: .monospaced), for: .codeBlock)
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
-            .fixedSize(horizontal: false, vertical: true)
+            .tint(tokens.accent, for: .link)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func gapBelow(_ block: MantaMarkdownBlock) -> CGFloat {
-        switch block {
-        case .listItem, .heading, .rule: return Metrics.spacing.sp1
-        case .paragraph, .code, .quote, .table: return Metrics.spacing.sp2
-        }
-    }
-
-    /// `#` is the turn's own top level, so it is only slightly larger than
-    /// body; deeper levels converge on body size. A transcript turn is not a
-    /// document — an `h1` set at display size would shout over the user band.
-    private func headingSize(_ level: Int) -> CGFloat {
-        switch level {
-        case 1: return Metrics.type.body + 4
-        case 2: return Metrics.type.body + 2
-        case 3: return Metrics.type.body + 1
-        default: return Metrics.type.body
-        }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("assistant-prose")
     }
 }
 
-// MARK: - Fenced code
+// ===========================================================================
+// Capture-harness scene (MANTA_SCENE=chat-markdown).
 //
-// Horizontal scroll rather than wrapping: a wrapped command line is a command
-// line you cannot read, and (per the note in `proseText`) letting an
-// unwrappable token dictate the width blows out the whole transcript layout.
-// A horizontal ScrollView takes the width it is GIVEN, so it bounds itself.
-struct MarkdownCodeBlock: View {
-    let language: String?
-    let text: String
-    let tokens: Tokens
+// A deterministic fixture that renders the REAL `MantaProse` wrapper against a
+// sample assistant turn — bold/italic/inline code, a fenced code block, and a
+// GFM table — the BET-671 acceptance fixtures. Reachable with no live paired
+// box, mirroring the D2 `ChatLoadingScene` pattern. It exists to be driven by
+// the capture harness, not shipped as app UI.
+// ===========================================================================
+
+struct MantaProseCaptureScene: View {
+    private static let sample = """
+    This turn has **bold**, *italic*, and `inline code`.
+
+    ```swift
+    let greeting = "hello"
+    ```
+
+    | Latency | On-device |
+    |---|---|
+    | record → upload | live partials |
+    """
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let language, !language.isEmpty {
-                Text(language)
-                    .font(.system(size: Metrics.type.twoXS, weight: .medium))
-                    .foregroundColor(tokens.tx4)
-                    .padding(.horizontal, Metrics.spacing.sp2)
-                    .padding(.top, Metrics.spacing.sp2)
+        ZStack {
+            tokens.canvas.ignoresSafeArea()
+            ScrollView {
+                MantaProse(text: Self.sample, tokens: tokens)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(text)
-                    .font(.system(size: Metrics.type.xs, design: .monospaced))
-                    .foregroundColor(tokens.tx1)
-                    .textSelection(.enabled)
-                    .padding(Metrics.spacing.sp2)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        }
-        .accessibilityIdentifier("markdown-code")
-    }
-}
-
-// MARK: - GFM table
-//
-// Rows are HStacks of equal-share (`maxWidth: .infinity`) cells, NOT a `Grid`.
-// A Grid sizes each column to its widest cell's IDEAL width, and a prose cell's
-// ideal width is its UNWRAPPED width — the exact layout blow-out the note in
-// `proseText` describes, where one long cell widens the scroll view and drags
-// the composer off screen with it. Equal shares of the width we are actually
-// given can't overflow, and every cell wraps inside its share.
-//
-// Column rules are deliberately omitted: keeping vertical hairlines aligned
-// needs equal-height cells, which needs a height the transcript can't propose.
-// Row hairlines plus a filled header row carry the structure on a phone.
-struct MarkdownTableView: View {
-    let table: MantaMarkdownTable
-    let tokens: Tokens
-
-    var body: some View {
-        VStack(spacing: 0) {
-            row(table.header, header: true)
-            ForEach(Array(table.normalizedRows.enumerated()), id: \.offset) { pair in
-                Divider().overlay(tokens.borderSubtle)
-                row(pair.element, header: false)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tokens.card)
-        // Clip BEFORE the stroke: the header row's own fill is a plain
-        // rectangle and would otherwise square off the container's top corners.
-        .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("markdown-table")
-    }
-
-    private func row(_ cells: [String], header: Bool) -> some View {
-        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
-            ForEach(Array(cells.enumerated()), id: \.offset) { pair in
-                Text(MantaInlineMarkdown.render(pair.element))
-                    .font(.system(size: Metrics.type.xs, weight: header ? .semibold : .regular))
-                    .foregroundColor(header ? tokens.tx1 : tokens.tx2)
-                    .multilineTextAlignment(textAlignment(pair.offset))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: frameAlignment(pair.offset))
-            }
-        }
-        .padding(.horizontal, Metrics.spacing.sp2)
-        .padding(.vertical, Metrics.spacing.sp2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(header ? tokens.panel : Color.clear)
-    }
-
-    private func textAlignment(_ column: Int) -> TextAlignment {
-        switch table.alignment(column) {
-        case .leading: return .leading
-        case .center: return .center
-        case .trailing: return .trailing
-        }
-    }
-
-    private func frameAlignment(_ column: Int) -> Alignment {
-        switch table.alignment(column) {
-        case .leading: return .leading
-        case .center: return .center
-        case .trailing: return .trailing
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("chat-markdown-scene")
         }
     }
 }

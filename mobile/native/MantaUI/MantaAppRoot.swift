@@ -62,6 +62,11 @@ struct MantaAppRoot: View {
                 // skeleton as a deterministic measurement scene (real
                 // `ChatLoadingSkeleton`, no live box required).
                 ChatLoadingScene()
+            } else if let scene, scene == "chat-markdown" {
+                // BET-671 fixture: render the real `MantaProse` wrapper against a
+                // sample turn (bold/italic/inline code, fenced code, table) —
+                // the acceptance fixtures, no live box required.
+                MantaProseCaptureScene()
             } else if let scene, !scene.isEmpty {
                 // Capture-harness fixture mode — bypass the pair gate so the
                 // measurement scenes stay reachable (S4b parent/child baseline).

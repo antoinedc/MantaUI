@@ -21,6 +21,7 @@
 		3354E683F0CE92566A77C7D3 /* MantaPairingModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3531B9EF3162D19FB6C30756 /* MantaPairingModels.swift */; };
 		33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1306D325FEB295B7AB874E /* MantaEventStore.swift */; };
 		3A14CB75D91300937752389C /* MantaAppRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD646A4951E292E750890CCB /* MantaAppRoot.swift */; };
+		3CE79341ACF08E7F836522FD /* ChatStreamMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0504A23AC9360042B3D51B /* ChatStreamMergeTests.swift */; };
 		3F3FF5F6BE28352901513A14 /* MantaAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25870866D56CCE59805BCC0E /* MantaAppDelegate.swift */; };
 		404DB0475FB78037D65B6734 /* SessionResourceCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = D178D08102AB83BF93B82D16 /* SessionResourceCards.swift */; };
 		431A66604F73FFBD59781D92 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 942605E2D67D55C6DCCE83AC /* TerminalScreen.swift */; };
@@ -32,6 +33,7 @@
 		5CDC4D3B2FD207C5E38A9AA1 /* MultilineTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */; };
 		5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */; };
 		5E0226E9FAFF3F9CA9F45F8F /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E78B0F5B521937B40937DC /* SettingsScreen.swift */; };
+		5F85B39269B52E1E816CBA1B /* SettingsSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = 988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */; };
 		61062DC85A5139A0AB22BC24 /* TerminalSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88D3B9B782BF819EEBEBF1D /* TerminalSocket.swift */; };
 		612658EEF8599BDB18369375 /* MantaAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */; };
 		61441105C65E4D7385DAF363 /* TerminalWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BDC7F6FA94631DA4C55A948 /* TerminalWebView.swift */; };
@@ -55,7 +57,6 @@
 		959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */; };
 		95A9EDE98E7304030E438CEF /* FolderPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D71EC917661085ED10E0867 /* FolderPickerView.swift */; };
 		96F128D3EBC0D1432F603FDB /* ComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 938AB4A14437119280E1B53A /* ComposerTests.swift */; };
-		2A3B4C5D6E7F8192A4B5C6D7 /* ChatStreamMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708192A3B4C5 /* ChatStreamMergeTests.swift */; };
 		98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B4BD7922C8909E3A3961957 /* VoiceRecorder.swift */; };
 		9BF6855A825F539665FF1563 /* MantaEventStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */; };
 		9CF891D747797006729FDBD3 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4E84DF65831DE58599C53BD /* RootView.swift */; };
@@ -64,6 +65,7 @@
 		B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */; };
 		B8B5D7BF1F4F22B9A3682FEA /* CrashReports.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C78DF001E277064070853F /* CrashReports.swift */; };
 		B97905DC3BE32E36E682EF0C /* MantaLiveChatClearCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E1D5B31C8FB29B23AB2A577 /* MantaLiveChatClearCaptureUITests.swift */; };
+		BFC5BB268D33C67CB9C66A9E /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = F69CF621A0341F78A09CFF85 /* MarkdownView */; };
 		C2C89BEF7843F4F3460A926F /* MantaOverflowCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */; };
 		C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */; };
 		C96C7F34F91F06214FD25523 /* ChatVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */; };
@@ -71,9 +73,9 @@
 		D776E336456236DC1493565F /* ChatModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 229392FD3405558D301D0809 /* ChatModel.swift */; };
 		D8B312D02500D61F791EF275 /* MantaPairingDriverUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD55034506C4DF218AD7300E /* MantaPairingDriverUITests.swift */; };
 		D9266F363BEB86F687C320FC /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42691C89906181C99929354 /* ComposerView.swift */; };
-		D9C75533ECC7411285919C8C /* SettingsSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBFB51C8FD346EC94C79EA7A /* SettingsSchema.swift */; };
 		DB494E7C3511EA8E1D01F8B1 /* CrashReporter in Frameworks */ = {isa = PBXBuildFile; productRef = FD13380CB87B92A40F879A1F /* CrashReporter */; };
 		E013C537E1082259B979DF35 /* SessionModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9803742B79E4302F8813EFCC /* SessionModelsTests.swift */; };
+		E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799EED7CC4F10C6684A5662C /* Theme.swift */; };
 		E0DE29696DA12A52BE7FCD0D /* TerminalModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3C09F5D2FEAE01B1C9CF1E /* TerminalModels.swift */; };
 		E12FC0E7284E2760AD3A6C4C /* ChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 436675A65BF149932C1EADE0 /* ChatScreen.swift */; };
 		E394FF8B718A3D7871EC749C /* ChatModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4098461F579869804595B0A3 /* ChatModelCatalog.swift */; };
@@ -82,7 +84,6 @@
 		ED03A3C1AAFA1094A92A9ECA /* MantaDeepLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B7A1F140660F9AC7AF07E00 /* MantaDeepLinkUITests.swift */; };
 		EDFF1716E461980191B71C85 /* MantaPairFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D8A1A5388E54F31462D616F /* MantaPairFixture.swift */; };
 		EE22C75492152C8594275C5C /* ChatOverflowSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA460F4E709501AE6C65D08A /* ChatOverflowSheet.swift */; };
-		EEB3F591860B779C1A17EBF9 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB8309A90D6F325B8BCB042 /* Theme.swift */; };
 		F30211F79048035CE5520266 /* RunningIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BA4ADBB2FD5BAC7940D5B69 /* RunningIndicator.swift */; };
 		F84BE156312997C53C3314AF /* MantaDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8879A94FE1BE824F438342AD /* MantaDeepLink.swift */; };
 		FF511A296958C8376966852F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 82EEBB3B72D8F63CF4D8CB7B /* Assets.xcassets */; };
@@ -146,6 +147,7 @@
 		72E2CCAF6C565AEE489E1618 /* EdgeSwipeRestorer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeSwipeRestorer.swift; sourceTree = "<group>"; };
 		74A048582549409FE0949053 /* TranscriptRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRow.swift; sourceTree = "<group>"; };
 		772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaReconnectController.swift; sourceTree = "<group>"; };
+		799EED7CC4F10C6684A5662C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		7D7BC8920829E8847057C8DA /* TerminalKeyRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalKeyRow.swift; sourceTree = "<group>"; };
 		7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaStreamModels.swift; sourceTree = "<group>"; };
 		81FE763828641B50BF496F4D /* TerminalSessionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionState.swift; sourceTree = "<group>"; };
@@ -159,6 +161,7 @@
 		938AB4A14437119280E1B53A /* ComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTests.swift; sourceTree = "<group>"; };
 		942605E2D67D55C6DCCE83AC /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		9803742B79E4302F8813EFCC /* SessionModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionModelsTests.swift; sourceTree = "<group>"; };
+		988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSchema.swift; sourceTree = "<group>"; };
 		989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAuthClientTests.swift; sourceTree = "<group>"; };
 		9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaTransportTests.swift; sourceTree = "<group>"; };
 		9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaActionRPCWireTests.swift; sourceTree = "<group>"; };
@@ -174,20 +177,18 @@
 		BA460F4E709501AE6C65D08A /* ChatOverflowSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatOverflowSheet.swift; sourceTree = "<group>"; };
 		C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilineTextView.swift; sourceTree = "<group>"; };
 		C25DFE9E1AD1E939DBF7101D /* ChatTranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptTests.swift; sourceTree = "<group>"; };
-		1A2B3C4D5E6F708192A3B4C5 /* ChatStreamMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamMergeTests.swift; sourceTree = "<group>"; };
 		C42691C89906181C99929354 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
 		C7F564F718747579264A4370 /* MantaUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MantaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D06ECCB6D27DBD73D1FF3189 /* SessionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListView.swift; sourceTree = "<group>"; };
 		D178D08102AB83BF93B82D16 /* SessionResourceCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionResourceCards.swift; sourceTree = "<group>"; };
 		DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalModelsTests.swift; sourceTree = "<group>"; };
-		DBFB51C8FD346EC94C79EA7A /* SettingsSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSchema.swift; sourceTree = "<group>"; };
 		DC240598BDE45C3D43B46191 /* MantaUI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MantaUI.entitlements; sourceTree = "<group>"; };
 		DD646A4951E292E750890CCB /* MantaAppRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAppRoot.swift; sourceTree = "<group>"; };
 		E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLoadingSkeleton.swift; sourceTree = "<group>"; };
 		EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaResourceCardModelsTests.swift; sourceTree = "<group>"; };
+		EE0504A23AC9360042B3D51B /* ChatStreamMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamMergeTests.swift; sourceTree = "<group>"; };
 		EF45305B46745A80925FC1A4 /* MantaEventStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStreamTests.swift; sourceTree = "<group>"; };
 		F88D3B9B782BF819EEBEBF1D /* TerminalSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSocket.swift; sourceTree = "<group>"; };
-		FEB8309A90D6F325B8BCB042 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -197,6 +198,7 @@
 			files = (
 				DB494E7C3511EA8E1D01F8B1 /* CrashReporter in Frameworks */,
 				B46B35ED65EDB8F13002F091 /* MessagingUI in Frameworks */,
+				BFC5BB268D33C67CB9C66A9E /* MarkdownView in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -213,12 +215,13 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		316B9A4B30B184F228A03894 /* generated */ = {
+		50A0ACE5FA8F3A848B41986E /* MantaUI */ = {
 			isa = PBXGroup;
 			children = (
-				D542284D2C621841629D8DB6 /* swift */,
+				B72EDCFA9E8A4AE9662EC299 /* generated */,
 			);
-			path = generated;
+			name = MantaUI;
+			path = ../..;
 			sourceTree = "<group>";
 		};
 		6C581AFB55001DF333A22728 /* Resources */ = {
@@ -233,8 +236,8 @@
 		7168FDC00E99AA075ACA9698 /* MantaUITests */ = {
 			isa = PBXGroup;
 			children = (
+				EE0504A23AC9360042B3D51B /* ChatStreamMergeTests.swift */,
 				C25DFE9E1AD1E939DBF7101D /* ChatTranscriptTests.swift */,
-				1A2B3C4D5E6F708192A3B4C5 /* ChatStreamMergeTests.swift */,
 				938AB4A14437119280E1B53A /* ComposerTests.swift */,
 				9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */,
 				989AB507C4722A4CF012C3B8 /* MantaAuthClientTests.swift */,
@@ -252,30 +255,29 @@
 		855545FE3D464DDBA2B48C48 = {
 			isa = PBXGroup;
 			children = (
-				B36D4927604F649B2C09BBB8 /* manta-bet665 */,
 				D7128F5AAFA315FE875EEC98 /* MantaUI */,
+				50A0ACE5FA8F3A848B41986E /* MantaUI */,
 				7168FDC00E99AA075ACA9698 /* MantaUITests */,
 				DF70760D7D88A6A31A5243DA /* MantaUIUITests */,
 				0141B3CF9BBB5EB026BDA8C5 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		B36D4927604F649B2C09BBB8 /* manta-bet665 */ = {
+		A2F2688921C397D0D4B331A3 /* swift */ = {
 			isa = PBXGroup;
 			children = (
-				316B9A4B30B184F228A03894 /* generated */,
-			);
-			name = "manta-bet665";
-			path = ../..;
-			sourceTree = "<group>";
-		};
-		D542284D2C621841629D8DB6 /* swift */ = {
-			isa = PBXGroup;
-			children = (
-				DBFB51C8FD346EC94C79EA7A /* SettingsSchema.swift */,
-				FEB8309A90D6F325B8BCB042 /* Theme.swift */,
+				988B5D51F20F0D3BC838E083 /* SettingsSchema.swift */,
+				799EED7CC4F10C6684A5662C /* Theme.swift */,
 			);
 			path = swift;
+			sourceTree = "<group>";
+		};
+		B72EDCFA9E8A4AE9662EC299 /* generated */ = {
+			isa = PBXGroup;
+			children = (
+				A2F2688921C397D0D4B331A3 /* swift */,
+			);
+			path = generated;
 			sourceTree = "<group>";
 		};
 		D7128F5AAFA315FE875EEC98 /* MantaUI */ = {
@@ -401,6 +403,7 @@
 			packageProductDependencies = (
 				FD13380CB87B92A40F879A1F /* CrashReporter */,
 				2B48EABB4EC8AF086CA5C6AB /* MessagingUI */,
+				F69CF621A0341F78A09CFF85 /* MarkdownView */,
 			);
 			productName = MantaUI;
 			productReference = 35ECC10E3DB9A931F8EB5420 /* MantaUI.app */;
@@ -456,6 +459,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				47C82525F78B395F5BC96245 /* XCRemoteSwiftPackageReference "plcrashreporter" */,
+				B8F506AA56F1A90C2F5F7E32 /* XCRemoteSwiftPackageReference "MarkdownView" */,
 				E05AB3E0DD965872E0023A07 /* XCRemoteSwiftPackageReference "swiftui-messaging-ui" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -504,8 +508,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3CE79341ACF08E7F836522FD /* ChatStreamMergeTests.swift in Sources */,
 				650862947C7F0D6C393C94BB /* ChatTranscriptTests.swift in Sources */,
-				2A3B4C5D6E7F8192A4B5C6D7 /* ChatStreamMergeTests.swift in Sources */,
 				96F128D3EBC0D1432F603FDB /* ComposerTests.swift in Sources */,
 				5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */,
 				0129D15936E52427A46702E7 /* MantaAuthClientTests.swift in Sources */,
@@ -564,7 +568,7 @@
 				94493F871005DA7F4DA19ED7 /* SessionListView.swift in Sources */,
 				7E8C2A70A3D5C0F949D79FF5 /* SessionModels.swift in Sources */,
 				404DB0475FB78037D65B6734 /* SessionResourceCards.swift in Sources */,
-				D9C75533ECC7411285919C8C /* SettingsSchema.swift in Sources */,
+				5F85B39269B52E1E816CBA1B /* SettingsSchema.swift in Sources */,
 				5E0226E9FAFF3F9CA9F45F8F /* SettingsScreen.swift in Sources */,
 				0488B71F794FC6E64CDC0B23 /* TerminalKeyRow.swift in Sources */,
 				E0DE29696DA12A52BE7FCD0D /* TerminalModels.swift in Sources */,
@@ -572,7 +576,7 @@
 				261925E9ADC090271FED15DE /* TerminalSessionState.swift in Sources */,
 				61062DC85A5139A0AB22BC24 /* TerminalSocket.swift in Sources */,
 				61441105C65E4D7385DAF363 /* TerminalWebView.swift in Sources */,
-				EEB3F591860B779C1A17EBF9 /* Theme.swift in Sources */,
+				E096BAD9FD8E87E15481B646 /* Theme.swift in Sources */,
 				95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */,
 				2F0CAA1B1DC211D065AC4761 /* TranscriptRow.swift in Sources */,
 				98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */,
@@ -900,6 +904,14 @@
 				minimumVersion = 1.11.1;
 			};
 		};
+		B8F506AA56F1A90C2F5F7E32 /* XCRemoteSwiftPackageReference "MarkdownView" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/LiYanan2004/MarkdownView";
+			requirement = {
+				kind = exactVersion;
+				version = 3.0.0;
+			};
+		};
 		E05AB3E0DD965872E0023A07 /* XCRemoteSwiftPackageReference "swiftui-messaging-ui" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/FluidGroup/swiftui-messaging-ui";
@@ -915,6 +927,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = E05AB3E0DD965872E0023A07 /* XCRemoteSwiftPackageReference "swiftui-messaging-ui" */;
 			productName = MessagingUI;
+		};
+		F69CF621A0341F78A09CFF85 /* MarkdownView */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B8F506AA56F1A90C2F5F7E32 /* XCRemoteSwiftPackageReference "MarkdownView" */;
+			productName = MarkdownView;
 		};
 		FD13380CB87B92A40F879A1F /* CrashReporter */ = {
 			isa = XCSwiftPackageProductDependency;

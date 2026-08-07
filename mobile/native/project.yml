@@ -18,6 +18,9 @@ packages:
   MessagingUI:
     url: https://github.com/FluidGroup/swiftui-messaging-ui
     from: "1.0.0"
+  MarkdownView:
+    url: https://github.com/LiYanan2004/MarkdownView
+    exactVersion: "3.0.0"
 targets:
   MantaUI:
     type: application
@@ -50,6 +53,8 @@ targets:
         product: CrashReporter
       - package: MessagingUI
         product: MessagingUI
+      - package: MarkdownView
+        product: MarkdownView
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.antoinedc.mantaui

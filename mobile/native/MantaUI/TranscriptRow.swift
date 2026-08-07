@@ -13,7 +13,7 @@ import MessagingUI
 // keyboard/safe-area handling, and prepend-without-jump for us.
 //
 // The CONTENT rendering is deliberately unchanged: each block still renders
-// through UserBand / AssistantProse / StepGroupView. Only the container moved.
+// through UserBand / MantaProse / StepGroupView. Only the container moved.
 // ===========================================================================
 
 /// A transcript block wrapped with a STABLE identity for `TiledView`.
@@ -62,7 +62,7 @@ extension StepGroupContent {
 // MARK: - Cell
 
 /// Renders ONE transcript block inside `TiledView`, reusing the same
-/// `UserBand` / `AssistantProse` / `StepGroupView` components the rest of the
+/// `UserBand` / `MantaProse` / `StepGroupView` components the rest of the
 /// chat uses — this is not a parallel renderer.
 ///
 /// The wall-clock timestamp gutter rides WITH the cell: an overlay parks it off
@@ -104,7 +104,7 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
         UserBand(text: text, tokens: tokens)
             .padding(.bottom, Metrics.spacing.sp4)
     case .prose(let text, _):
-        AssistantProse(text: text, tokens: tokens)
+        MantaProse(text: text, tokens: tokens)
     case .steps(let content):
         // Machinery is inset to the same margin as prose. Only the USER
         // band is full-bleed (§8) — that edge-to-edge treatment is what
