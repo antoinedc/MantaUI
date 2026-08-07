@@ -4,8 +4,8 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
-import type { SessionMode } from "./chatShared";
+import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
+import type { SessionMode, TokenUsage } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -2270,4 +2270,77 @@ export async function fetchTranscriptWithRetry<T>(
     await new Promise((r) => setTimeout(r, opts.retryDelayMs));
     return withTranscriptFetchTimeout(fetchOnce, opts.timeoutMs);
   }
+}
+
+// Turn boundary metadata: which assistant messages are the FINAL one of their
+// turn (i.e., immediately followed by a user message or end-of-list), the
+// cumulative duration of that turn (first assistant `created` → last assistant
+// `completed`), and the turn's total output tokens (read off the last assistant
+// message's `info.tokens.output` — the same persisted, transcript-derived source
+// the context bar uses, so it survives refresh). Intermediate assistant messages
+// within a multi-step turn get no footer — only the final one does.
+//
+// The `running` gate: while a turn is still in progress we do NOT stamp the
+// footer on its in-progress last assistant message — it would render behind the
+// working indicator at the transcript tail. When `running` flips false the turn
+// is complete and its footer computes normally. When the transcript's last
+// message is a USER message (just submitted), `lastAssistantId` belongs to the
+// previous, already-complete turn, so the gate's comparison is false and that
+// turn keeps its footer.
+export function computeTurnInfo(
+  messages: OpencodeMessage[] | null,
+  running: boolean,
+): Map<string, { turnDurationMs: number | null; outputTokens: number | null }> {
+  const out = new Map<
+    string,
+    { turnDurationMs: number | null; outputTokens: number | null }
+  >();
+  if (!messages) return out;
+  let i = 0;
+  while (i < messages.length) {
+    if (messages[i].info.role === "user") {
+      // Walk forward over the run of assistant messages that follow.
+      let j = i + 1;
+      let firstStart: number | null = null;
+      let lastEnd: number | null = null;
+      let lastOutput: number | null = null;
+      let lastAssistantId: string | null = null;
+      while (j < messages.length && messages[j].info.role === "assistant") {
+        const t = messages[j].info.time;
+        if (firstStart == null && t?.created != null) firstStart = t.created;
+        if (t?.completed != null) lastEnd = t.completed;
+        // OpencodeMessageInfo doesn't surface `tokens` directly — read it
+        // off the underlying record the same way `latestTokens` does.
+        const tok = (
+          messages[j].info as unknown as { tokens?: TokenUsage }
+        ).tokens;
+        if (tok && typeof tok.output === "number") lastOutput = tok.output;
+        lastAssistantId = messages[j].info.id;
+        j++;
+      }
+      // Mid-turn: don't stamp the footer on the in-progress turn's last
+      // assistant message — it renders behind the working indicator. It
+      // appears once running flips false (BET per owner decision).
+      if (
+        running &&
+        lastAssistantId === messages[messages.length - 1]?.info.id
+      ) {
+        i = j;
+        continue;
+      }
+      if (lastAssistantId) {
+        out.set(lastAssistantId, {
+          turnDurationMs:
+            firstStart != null && lastEnd != null && lastEnd > firstStart
+              ? lastEnd - firstStart
+              : null,
+          outputTokens: lastOutput,
+        });
+      }
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  return out;
 }

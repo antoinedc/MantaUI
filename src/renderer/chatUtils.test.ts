@@ -4,6 +4,7 @@ import {
   updateEntryMotion,
   markReconciledFromOptimistic,
   isOptimisticUserId,
+  computeTurnInfo,
   formatTokens,
   formatBytes,
   expiryLabel,
@@ -2933,5 +2934,90 @@ describe("transcript initial-fetch timeout + retry", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ===== computeTurnInfo (BET-688) =====
+
+describe("computeTurnInfo", () => {
+  const userMsg = (id: string) => ({
+    info: { role: "user", id },
+    parts: [],
+  });
+
+  const assistantMsg = (
+    id: string,
+    opts: { created?: number; completed?: number; output?: number } = {},
+  ) => ({
+    info: {
+      role: "assistant",
+      id,
+      time:
+        opts.created != null || opts.completed != null
+          ? { created: opts.created, completed: opts.completed }
+          : undefined,
+      tokens:
+        opts.output != null ? { input: 0, output: opts.output, reasoning: 0, cache: { read: 0, write: 0 } } : undefined,
+    } as never,
+    parts: [],
+  });
+
+  it("running: true, transcript ending in an assistant message → no footer entry for it", () => {
+    const messages = [
+      userMsg("u1"),
+      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
+    ];
+    const info = computeTurnInfo(messages as never, true);
+    expect(info.size).toBe(0);
+    expect(info.has("a1")).toBe(false);
+  });
+
+  it("running: false, same transcript → footer entry with same duration/tokens", () => {
+    const messages = [
+      userMsg("u1"),
+      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
+    ];
+    const info = computeTurnInfo(messages as never, false);
+    expect(info.has("a1")).toBe(true);
+    expect(info.get("a1")).toEqual({ turnDurationMs: 4000, outputTokens: 42 });
+  });
+
+  it("running: true, transcript ending with a USER message → completed turn footer PRESENT", () => {
+    const messages = [
+      userMsg("u1"),
+      assistantMsg("a1", { created: 1000, completed: 5000, output: 9 }),
+      userMsg("u2"),
+    ];
+    const info = computeTurnInfo(messages as never, true);
+    expect(info.has("a1")).toBe(true);
+    expect(info.get("a1")).toEqual({ turnDurationMs: 4000, outputTokens: 9 });
+  });
+
+  it("multi-step turn, running: false → entry only on the final assistant message", () => {
+    const messages = [
+      userMsg("u1"),
+      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
+      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
+    ];
+    const info = computeTurnInfo(messages as never, false);
+    expect(info.has("a1")).toBe(false);
+    expect(info.has("a2")).toBe(true);
+    expect(info.get("a2")).toEqual({ turnDurationMs: 5000, outputTokens: 20 });
+  });
+
+  it("multi-step turn, running: true → the still-streaming final assistant gets NO footer", () => {
+    const messages = [
+      userMsg("u1"),
+      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
+      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
+    ];
+    const info = computeTurnInfo(messages as never, true);
+    expect(info.has("a1")).toBe(false);
+    expect(info.has("a2")).toBe(false);
+  });
+
+  it("returns empty map for a null transcript", () => {
+    expect(computeTurnInfo(null, false).size).toBe(0);
+    expect(computeTurnInfo(null, true).size).toBe(0);
   });
 });
