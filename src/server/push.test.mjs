@@ -983,6 +983,36 @@ test("sendApnsFanout: gateway 200 with malformed JSON body → warn + no excepti
 // validation existed.
 // ---------------------------------------------------------------------------
 
+// Shared harness for the validation fanout tests: installs the standard
+// identity/gateway fakes, records POSTs + prunes, runs `fn`, and always
+// resets. Keeps the fake wiring in ONE place instead of per-test copies.
+async function withValidationFanout({ storeTokens }, fn) {
+  _resetFanoutFakesForTest();
+  const calls = [];
+  const pruned = [];
+  _setFanoutFakesForTest({
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+    },
+    loadApnsTokens: async () => storeTokens,
+    removeApnsToken: async (tok) => {
+      pruned.push(tok);
+      return { ok: true, count: 0 };
+    },
+    readBoxGatewayIdentity: async () => ({
+      box_id: FANOUT_BOX_ID,
+      gateway_token: FANOUT_GATEWAY_TOKEN,
+    }),
+    gatewayBase: "https://gateway.test.local",
+  });
+  try {
+    await fn({ calls, pruned });
+  } finally {
+    _resetFanoutFakesForTest();
+  }
+}
+
 test("isValidApnsToken: mirrors the gateway's isHexToken bounds", () => {
   assert.equal(isValidApnsToken("a1".repeat(32)), true, "64-hex real token");
   assert.equal(isValidApnsToken("a1".repeat(64)), true, "128-hex upper bound");
@@ -1005,65 +1035,31 @@ test("register-apns REGRESSION: rejects a 160-hex simulator pseudo-token and non
 });
 
 test("sendApnsFanout REGRESSION: filters + prunes invalid stored tokens instead of poisoning the batch", async () => {
-  _resetFanoutFakesForTest();
   const badToken = "80".repeat(80); // 160 hex chars — gateway would 400 the batch
-  const calls = [];
-  const pruned = [];
-  _setFanoutFakesForTest({
-    fetchImpl: async (url, init) => {
-      calls.push({ url, init });
-      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+  await withValidationFanout(
+    {
+      storeTokens: [
+        { kind: "apns", token: "beef1111", registeredAt: 1 },
+        { kind: "apns", token: badToken, registeredAt: 2 },
+      ],
     },
-    loadApnsTokens: async () => [
-      { kind: "apns", token: "beef1111", registeredAt: 1 },
-      { kind: "apns", token: badToken, registeredAt: 2 },
-    ],
-    removeApnsToken: async (tok) => {
-      pruned.push(tok);
-      return { ok: true, count: 1 };
+    async ({ calls, pruned }) => {
+      await sendApnsFanout({ kind: "done", title: "T", body: "B" });
+      assert.equal(calls.length, 1, "batch still sent for the valid token");
+      const body = JSON.parse(calls[0].init.body);
+      assert.deepEqual(body.tokens, ["beef1111"], "invalid token excluded from the batch");
+      assert.deepEqual(pruned, [badToken], "invalid token pruned from the store");
     },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await sendApnsFanout({ kind: "done", title: "T", body: "B" });
-    assert.equal(calls.length, 1, "batch still sent for the valid token");
-    const body = JSON.parse(calls[0].init.body);
-    assert.deepEqual(body.tokens, ["beef1111"], "invalid token excluded from the batch");
-    assert.deepEqual(pruned, [badToken], "invalid token pruned from the store");
-  } finally {
-    _resetFanoutFakesForTest();
-  }
+  );
 });
 
 test("sendApnsFanout: all-invalid store prunes everything and sends nothing", async () => {
-  _resetFanoutFakesForTest();
-  let fetchCalls = 0;
-  const pruned = [];
-  _setFanoutFakesForTest({
-    fetchImpl: async () => {
-      fetchCalls++;
-      return { ok: true, status: 200, json: async () => ({ results: [] }) };
+  await withValidationFanout(
+    { storeTokens: [{ kind: "apns", token: "80".repeat(80), registeredAt: 1 }] },
+    async ({ calls, pruned }) => {
+      await sendApnsFanout({ kind: "done" });
+      assert.equal(calls.length, 0, "no POST when nothing valid remains");
+      assert.equal(pruned.length, 1);
     },
-    loadApnsTokens: async () => [{ kind: "apns", token: "80".repeat(80), registeredAt: 1 }],
-    removeApnsToken: async (tok) => {
-      pruned.push(tok);
-      return { ok: true, count: 0 };
-    },
-    readBoxGatewayIdentity: async () => ({
-      box_id: FANOUT_BOX_ID,
-      gateway_token: FANOUT_GATEWAY_TOKEN,
-    }),
-    gatewayBase: "https://gateway.test.local",
-  });
-  try {
-    await sendApnsFanout({ kind: "done" });
-    assert.equal(fetchCalls, 0, "no POST when nothing valid remains");
-    assert.equal(pruned.length, 1);
-  } finally {
-    _resetFanoutFakesForTest();
-  }
+  );
 });
