@@ -2,19 +2,15 @@ import XCTest
 @testable import MantaUI
 
 // BET-668 — the single-writer stream merge. The chat screen has two writers
-// for turn state (optimistic local mutations vs incoming stream frames), and
-// these test the pure merge decisions so a frame can never clobber an
-// optimistic value. No HTTP/view/Keychain involved except the small store-
-// level failed-send seam (mocked transport).
+// for turn state (optimistic local mutations vs incoming stream frames). These
+// tests pin the pure merge/lifecycle decisions and the store seams (seeding on
+// open, optimistic-running protection, no stale replay on retirement) so a
+// frame can never clobber an optimistic value. Network is mocked.
 
 @MainActor
 final class ChatStreamMergeTests: XCTestCase {
 
     // MARK: - Fixtures
-
-    private func question(_ id: String) -> QuestionRequest {
-        QuestionRequest(id: id, sessionID: "ses", questions: [], tool: nil, requestId: nil)
-    }
 
     private func turnState(
         running: Bool = false,
@@ -32,126 +28,174 @@ final class ChatStreamMergeTests: XCTestCase {
         )
     }
 
-    // MARK: - Running: nil means "no opinion"
+    // MARK: - Tail identity: once per turn, reset only on the frame's turnComplete
 
-    /// A frame that carries no `running` field (e.g. a context frame) must NOT
-    /// flip an optimistic `running = true` back to false — that used to reset
-    /// `runningSince`, re-mint the tail id, and flash the running row.
-    func testFrameWithoutRunningKeepsOptimisticRunning() {
-        let state = turnState(running: true, tail: "tail")
-        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: nil, to: state)
-        XCTAssertTrue(result.state.running)
-        XCTAssertFalse(result.mintsNewTail)
-        XCTAssertEqual(result.state.streamingTailID, "tail")
-    }
-
-    /// A real `running: false` write is honoured — but on its own it must NOT
-    /// reset the tail id.
-    func testRunningFalseIsHonouredButDoesNotResetTailID() {
-        let state = turnState(running: true, tail: "tail")
-        let result = ChatStreamMerge.applying(frameRunning: false, frameTurnComplete: nil, frameQuestions: nil, to: state)
-        XCTAssertFalse(result.state.running)
-        XCTAssertEqual(result.state.streamingTailID, "tail",
-                       "a bare running==false write must never reset the tail id")
-        XCTAssertFalse(result.mintsNewTail)
-    }
-
-    // MARK: - Tail identity: once per turn, reset only on turnComplete
-
-    /// The `turnComplete` edge is the ONLY thing that resets the tail id.
+    /// The `turnComplete` EDGE carried by the frame is the only thing that
+    /// resets the tail id.
     func testTurnCompleteResetsTailID() {
-        let state = turnState(running: true, tail: "tail")
-        let result = ChatStreamMerge.applying(frameRunning: false, frameTurnComplete: true, frameQuestions: nil, to: state)
+        let state = turnState(tail: "tail")
+        let result = ChatStreamMerge.applying(frameTurnComplete: true, frameStartedRunning: false, to: state)
         XCTAssertEqual(result.state.streamingTailID, "")
     }
 
-    /// The first running false->true edge of a turn requests a fresh tail id;
-    /// a turn that already has one never mints again (no mid-turn re-mint →
-    /// no streaming row replacement / flicker).
+    /// The first running start of a turn requests a fresh tail id; a turn that
+    /// already has one never mints again (no mid-turn re-mint → no streaming row
+    /// replacement / flicker).
     func testTailMintedOncePerTurn() {
-        let idle = turnState(running: false, tail: "")
-        let first = ChatStreamMerge.applying(frameRunning: true, frameTurnComplete: nil, frameQuestions: nil, to: idle)
+        let idle = turnState(tail: "")
+        let first = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: idle)
         XCTAssertTrue(first.mintsNewTail)
 
         // The store writes the actual id; a later running frame sees it and
         // must not mint a second time.
         var running = first.state
         running.streamingTailID = "live-ses-UUID"
-        let second = ChatStreamMerge.applying(frameRunning: true, frameTurnComplete: nil, frameQuestions: nil, to: running)
+        let second = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: running)
         XCTAssertFalse(second.mintsNewTail, "a turn that already has a tail must not mint again")
     }
 
     /// A STALE `turnComplete == true` left over from a previous turn must not
-    /// suppress minting when a new turn starts running (a frame that carries
-    /// running but no completion). This is the box-started-turn case a passing
-    /// of the accumulated sticky snapshot used to break.
+    /// suppress minting when a new turn starts running.
     func testStickyTurnCompleteDoesNotSuppressMintOnRunningFrame() {
-        let state = turnState(running: false, turnComplete: true, tail: "")
-        let result = ChatStreamMerge.applying(frameRunning: true, frameTurnComplete: nil, frameQuestions: nil, to: state)
+        let state = turnState(turnComplete: true, tail: "")
+        let result = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: true, to: state)
         XCTAssertTrue(result.mintsNewTail, "a running frame must mint a tail even with a stale turnComplete")
         XCTAssertFalse(result.state.turnComplete, "a running frame starts a turn, clearing the completion flag")
     }
 
-    /// A context frame arriving AFTER a completed turn (accumulated running
-    /// false, turnComplete true) must not clear an optimistic running or
-    /// rest the tail — it carries no opinion.
-    func testContextFrameAfterCompletedTurnClobbersNeitherRunningNorTail() {
-        let state = turnState(running: true, turnComplete: false, tail: "tail")
-        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: nil, to: state)
-        XCTAssertTrue(result.state.running)
+    /// A frame that carries neither a completion edge nor a turn start (e.g. a
+    /// context/flush frame, or a retirement republish) leaves the tail alone —
+    /// it carries no opinion.
+    func testNonCarryingFrameClobbersNeitherTurnCompleteNorTail() {
+        let state = turnState(turnComplete: false, tail: "tail")
+        let result = ChatStreamMerge.applying(frameTurnComplete: nil, frameStartedRunning: false, to: state)
+        XCTAssertEqual(result.state.turnComplete, false)
         XCTAssertEqual(result.state.streamingTailID, "tail")
         XCTAssertFalse(result.mintsNewTail)
     }
 
-    // MARK: - Question tombstoning
-
-    /// An id the user answered locally is filtered out of the incoming payload
-    /// until the box catches up.
-    func testTombstonedQuestionIsFilteredAndStaysTombstonedWhilePublished() {
-        let state = turnState(tombstones: ["q1"])
-        let incoming = [question("q1"), question("q2")]
-        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: incoming, to: state)
-        XCTAssertEqual(result.state.questions.map(\.id), ["q2"])
-        XCTAssertEqual(result.state.locallyAnsweredQuestionIDs, Set(["q1"]),
-                       "a still-published id stays tombstoned so it cannot flash back")
-    }
-
-    /// Once the box stops publishing a tombstoned id, the tombstone is dropped.
-    func testTombstoneDropsWhenBoxStopsPublishingId() {
-        let state = turnState(tombstones: ["q1"])
-        let incoming = [question("q2")]
-        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: incoming, to: state)
-        XCTAssertEqual(result.state.locallyAnsweredQuestionIDs, Set())
-        XCTAssertEqual(result.state.questions.map(\.id), ["q2"])
-    }
-
-    /// A frame with no questions payload leaves the current questions alone
-    /// (the route that used to clobber optimistically-removed cards on every
-    /// non-question frame).
-    func testNoQuestionsPayloadKeepsCurrentQuestions() {
-        let state = turnState(questions: [question("q1")])
-        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: nil, to: state)
-        XCTAssertEqual(result.state.questions.map(\.id), ["q1"])
-    }
-
     // MARK: - Failed send
 
-    /// The pure rollback clears running + the tail, and leaves the
-    /// transcript-visible state (questions/tombstones) untouched.
+    /// The pure rollback clears running + the tail and leaves the question
+    /// tombstones untouched.
     func testAfterSendFailureRollsBackRunningAndPreservesState() {
-        let state = turnState(running: true, tail: "tail", tombstones: ["x"], questions: [question("q1")])
+        let state = turnState(running: true, tail: "tail", tombstones: ["x"], questions: [])
         let rolled = ChatStreamMerge.afterSendFailure(to: state)
         XCTAssertFalse(rolled.running)
         XCTAssertEqual(rolled.streamingTailID, "")
-        XCTAssertEqual(rolled.questions.map(\.id), ["q1"])
         XCTAssertEqual(rolled.locallyAnsweredQuestionIDs, Set(["x"]))
     }
 
-    /// Store-level seam: a send whose RPC throws must return false, roll the
-    /// running state back (no forever-spinner), and NOT lose the prompt — the
-    /// optimistic `.user` block stays in the transcript for the caller to
-    /// restore.
-    func testFailedSendResetsRunningAndPreservesPrompt() async {
+    // MARK: - Store seams (integration over a fake stream)
+
+    /// Block 1: opening a session that is already running must show the working
+    /// indicator. The accumulated snapshot's `running` is seeded even though the
+    /// most recent frame (a flush) carried no running field.
+    func testOpeningMidTurnSessionSeedsRunningFromSnapshot() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        // A later non-running frame must NOT erase the seeded running.
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m","partID":"p","field":"text","text":"hi"}}"#)
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        XCTAssertTrue(store.running, "opening a mid-turn session must show its working indicator")
+    }
+
+    /// Block 1: opening a session with a question already waiting must show the
+    /// card — questions are seeded from the accumulated snapshot.
+    func testOpeningSessionSeedsPendingQuestion() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.inject(#"{"kind":"stream","sub":"questions","sessionId":"ses","payload":{"questions":[{"id":"q1","sessionID":"ses","questions":[]}]}}"#)
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        XCTAssertEqual(store.questions.map(\.id), ["q1"], "a pending question must show on open")
+    }
+
+    /// The optimistic `running = true` `send()` set must NOT be clobbered by an
+    /// unrelated frame while the box hasn't yet confirmed running. Once the box
+    /// reports running, the snapshot is authoritative; a real turnComplete
+    /// stops it.
+    func testOptimisticRunningSurvivesUnrelatedFrameUntilBoxConfirms() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+
+        let ok = await store.send(text: "hello", attachments: [], model: nil)
+        XCTAssertTrue(ok)
+        XCTAssertTrue(store.running, "a send reports running optimistically")
+
+        // Unrelated context frame while the box hasn't confirmed → keep running.
+        stream.inject(#"{"kind":"stream","sub":"context","sessionId":"ses","payload":{"freshInput":0,"cacheRead":0,"cacheWrite":0,"totalInput":0,"pct":0,"segments":[]}}"#)
+        await Task.yield()
+        XCTAssertTrue(store.running, "an unrelated frame must not clobber the optimistic running")
+
+        // Box confirms running → still running.
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        XCTAssertTrue(store.running)
+
+        // Genuine completion stops it.
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await Task.yield()
+        XCTAssertFalse(store.running)
+    }
+
+    /// Block 2: a local transcript-refetch republish (retireCoveredStreamText)
+    /// must NOT replay the previous frame's fields over an optimistic send — the
+    /// freshly-minted tail and optimistic running survive it.
+    func testRetirementRepublishDoesNotReplayStaleDelta() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        // A completed turn sits at the snapshot surface: some streamed text
+        // (a chunk) then a turnComplete (running false, complete true).
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m1","partID":"p1","field":"text","text":"hi"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+        XCTAssertFalse(store.running)
+        XCTAssertEqual(store.streamingTailID, "")
+
+        // User sends the next message before the refetch lands.
+        let ok = await store.send(text: "next", attachments: [], model: nil)
+        XCTAssertTrue(ok)
+        XCTAssertTrue(store.running)
+        let mintedTail = store.streamingTailID
+        XCTAssertFalse(mintedTail.isEmpty, "send() mints the streaming tail")
+
+        // The refetch's own republish (which retires the covered chunk) must
+        // not replay the stale turnComplete over the optimistic send.
+        eventStore.retireCoveredStreamText(sessionId: "ses", covered: ["m1"])
+        await Task.yield()
+        XCTAssertTrue(store.running, "a retire republish must not clobber optimistic running")
+        XCTAssertEqual(store.streamingTailID, mintedTail,
+                       "a retire republish must not reset the freshly-minted tail")
+    }
+
+    /// A failed send removes the optimistic user bubble so the message isn't
+    /// shown twice (restored input + transcript).
+    func testFailedSendResetsRunningAndRemovesBubble() async {
         let api = MantaAPIClient(
             serverURL: URL(string: "https://127.0.0.1")!,
             tokenProvider: { nil },
@@ -159,16 +203,13 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         let store = ChatSessionStore(
             sessionId: "ses",
-            eventStore: MantaEventStore(stream: FailingSendStream(), tokenProvider: { nil }, serverProvider: { nil }),
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
             api: api
         )
         let ok = await store.send(text: "hello", attachments: [], model: nil)
         XCTAssertFalse(ok, "a failed send must be reported as failed")
         XCTAssertFalse(store.running, "a failed send must stop the running state (no forever-spinner)")
 
-        // The optimistic echo is rolled back: the box never received the
-        // message, so it must NOT stand in the transcript as if sent — it
-        // belongs back in the input the caller restores.
         let userBlocks = store.transcript.filter {
             if case .user(_, _) = $0 { return true }
             return false
@@ -176,17 +217,23 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(userBlocks.count, 0, "a failed send must not leave the message in the transcript")
     }
 
-    // MARK: - Mock transport that makes every request fail
+    // MARK: - Mock transport
 
     private static func failingSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [FailingURLProtocol.self]
         return URLSession(configuration: config)
     }
+
+    private static func succeedingSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SucceedingURLProtocol.self]
+        return URLSession(configuration: config)
+    }
 }
 
-/// URLSession protocol that fails every request with a connection error, so a
-/// real `MantaAPIClient` reliably throws (as an unreachable box would).
+/// URLSession protocol that fails every request with a connection error (an
+/// unreachable box).
 private final class FailingURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -196,10 +243,25 @@ private final class FailingURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-/// A stream control that never connects (so `MantaEventStore` never tries a
-/// real socket); sufficient for the store's `send` seam.
+/// URLSession protocol that succeeds with an empty RPC result, so `send()`
+/// reports success (as a reachable box would).
+private final class SucceedingURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let data = Data(#"{"result":{}}"#.utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+/// A stream control that never connects but can inject frames into the store,
+/// so tests can drive `sessionStates` deterministically.
 @MainActor
-private final class FailingSendStream: MantaEventStreamControl {
+private final class TestStreamControl: MantaEventStreamControl {
     var onState: ((MantaConnectionState) -> Void)?
     var onMessage: ((String) -> Void)?
     var onReconnect: (() -> Void)?
@@ -212,66 +274,41 @@ private final class FailingSendStream: MantaEventStreamControl {
     func retryNow() {}
     func forceReconnect() {}
     func close(reason: String) {}
+
+    func inject(_ text: String) { onMessage?(text) }
 }
 
-// MARK: - Per-frame delta extraction (the seam that fixes running-clobber on
-// turn 2+: the merge is fed what the frame CARRIED, not the sticky accumulator).
+// MARK: - Per-frame carried facts (which turn-state fields the frame carried)
 
 @MainActor
 final class ChatStreamDeltaTests: XCTestCase {
 
-    /// A frame aimed at a DIFFERENT session must yield all-nil ("no opinion"),
-    /// so replaying another session's frame can't clobber this one's state.
-    func testForeignSessionYieldsNoOpinion() {
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: false, sub: "running",
-            stateRunning: true, stateTurnComplete: true, stateQuestions: nil)
-        XCTAssertNil(fields.running)
-        XCTAssertNil(fields.turnComplete)
-        XCTAssertNil(fields.questions)
+    /// A frame aimed at a DIFFERENT session carries nothing for this one.
+    func testForeignSessionCarriesNothing() {
+        let c = ChatStreamDelta.carried(sessionIsTarget: false, sub: "running")
+        XCTAssertFalse(c.running)
+        XCTAssertFalse(c.turnComplete)
     }
 
-    /// A non-carrying frame (e.g. `context`) must NOT report a running value —
-    /// even though the accumulated snapshot is sticky `false` after turn 1.
-    /// This is what lets an optimistic `send()` survive an unrelated frame on
-    /// turn 2+.
-    func testContextSubCarriesNoTurnFields() {
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: true, sub: "context",
-            stateRunning: false, stateTurnComplete: true, stateQuestions: nil)
-        XCTAssertNil(fields.running)
-        XCTAssertNil(fields.turnComplete)
-        XCTAssertNil(fields.questions)
+    /// A non-carrying frame (e.g. `context`) carries no turn-state fields — even
+    /// though the accumulated snapshot is sticky after turn 1.
+    func testContextSubCarriesNothing() {
+        let c = ChatStreamDelta.carried(sessionIsTarget: true, sub: "context")
+        XCTAssertFalse(c.running)
+        XCTAssertFalse(c.turnComplete)
     }
 
-    /// A `running` frame carries the running value but not completion/questions.
+    /// A `running` frame carries a running value, not completion.
     func testRunningSubCarriesRunningOnly() {
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: true, sub: "running",
-            stateRunning: true, stateTurnComplete: nil, stateQuestions: nil)
-        XCTAssertEqual(fields.running, true)
-        XCTAssertNil(fields.turnComplete)
-        XCTAssertNil(fields.questions)
+        let c = ChatStreamDelta.carried(sessionIsTarget: true, sub: "running")
+        XCTAssertTrue(c.running)
+        XCTAssertFalse(c.turnComplete)
     }
 
     /// A `turnComplete` frame carries BOTH running and completion.
     func testTurnCompleteSubCarriesRunningAndCompletion() {
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: true, sub: "turnComplete",
-            stateRunning: false, stateTurnComplete: true, stateQuestions: nil)
-        XCTAssertEqual(fields.running, false)
-        XCTAssertEqual(fields.turnComplete, true)
-        XCTAssertNil(fields.questions)
-    }
-
-    /// A `questions` frame carries only the questions payload.
-    func testQuestionsSubCarriesQuestionsOnly() {
-        let q = QuestionRequest(id: "q1", sessionID: "ses", questions: [], tool: nil, requestId: nil)
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: true, sub: "questions",
-            stateRunning: false, stateTurnComplete: false, stateQuestions: [q])
-        XCTAssertNil(fields.running)
-        XCTAssertNil(fields.turnComplete)
-        XCTAssertEqual(fields.questions?.map(\.id), ["q1"])
+        let c = ChatStreamDelta.carried(sessionIsTarget: true, sub: "turnComplete")
+        XCTAssertTrue(c.running)
+        XCTAssertTrue(c.turnComplete)
     }
 }

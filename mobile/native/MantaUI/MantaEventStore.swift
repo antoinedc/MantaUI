@@ -351,7 +351,13 @@ final class MantaEventStore: ObservableObject {
     func retireCoveredStreamText(sessionId: String, covered: Set<String>) {
         guard let state = sessionStates[sessionId] else { return }
         let next = MantaStreamRouter.retiring(state, covered: covered)
-        if next != state { sessionStates[sessionId] = next }
+        if next != state {
+            sessionStates[sessionId] = next
+            // This is a local republish, not a new stream frame — clear the
+            // frame stamp so a consumer doesn't replay the PREVIOUS frame's
+            // fields over a newer optimistic value (BET-668 review cycle 2).
+            lastStreamFrame = nil
+        }
     }
 
     private func handleReconnect() {

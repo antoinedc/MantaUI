@@ -69,53 +69,33 @@ enum ChatStreamMerge {
         var mintsNewTail: Bool
     }
 
-    /// Apply one interpreted-stream frame's fields to the turn state.
+    /// Apply the per-frame lifecycle facts of one interpreted-stream frame to
+    /// the turn state.
     ///
-    /// - `frameRunning` / `frameTurnComplete`: nil means the frame carries no
-    ///   opinion for that field; the current value (including an optimistic
-    ///   one) is left alone.
-    /// - `frameQuestions`: nil means the frame carries no questions payload;
-    ///   the current questions are left alone.
+    /// - `frameTurnComplete`: non-nil ONLY when THIS frame carried a completion
+    ///   flag (a genuine `turnComplete` frame). This is the only thing that
+    ///   resets the streaming tail — never a bare `running == false` write and
+    ///   never a STALE accumulated completion left over from a previous turn.
+    /// - `frameStartedRunning`: true when THIS frame began a turn (a carrying
+    ///   `running` frame whose value was true) — clears any stale completion
+    ///   flag and mints a fresh tail id if none exists yet.
+    ///
+    /// `running` and `questions` are NOT touched here: they are read straight
+    /// from the accumulated snapshot in the store (the snapshot is authoritative
+    /// for both once an optimistic value is accounted for).
     static func applying(
-        frameRunning: Bool?,
         frameTurnComplete: Bool?,
-        frameQuestions: [QuestionRequest]?,
+        frameStartedRunning: Bool,
         to state: ChatStreamTurnState
     ) -> Result {
         var s = state
-
-        // `running` is written ONLY when the frame carries the field. A frame
-        // without one (e.g. a context frame) must NOT flip the value back to
-        // false — doing so used to reset `runningSince`, re-mint the tail id,
-        // and flash the running row at every such frame.
-        if let r = frameRunning {
-            s.running = r
-            // A real running frame starts a turn, so any completion flag left
-            // over from a previous turn no longer applies.
-            if r { s.turnComplete = false }
-        }
         if let t = frameTurnComplete { s.turnComplete = t }
+        if frameStartedRunning { s.turnComplete = false }
 
-        // Questions: filter incoming against the tombstone set. A tombstoned
-        // id is held back until the box actually stops publishing it; once an
-        // incoming payload no longer contains the id, the box has caught up
-        // and that tombstone is dropped.
-        if let incoming = frameQuestions {
-            let incomingIDs = Set(incoming.map(\.id))
-            s.locallyAnsweredQuestionIDs.formIntersection(incomingIDs)
-            s.questions = incoming.filter { !s.locallyAnsweredQuestionIDs.contains($0.id) }
-        }
-        // (no questions payload this frame: current questions + tombstones are
-        //  left alone — nothing to clobber.)
-
-        // Tail identity is minted at most once per turn and reset ONLY on the
-        // turnComplete EDGE carried by THIS frame (`frameTurnComplete`) — never
-        // by a bare `running == false` write, and never by a STALE accumulated
-        // turnComplete left over from a previous turn.
         var mintsNewTail = false
         if frameTurnComplete == true {
             s.streamingTailID = ""
-        } else if frameRunning == true, s.streamingTailID.isEmpty {
+        } else if frameStartedRunning, s.streamingTailID.isEmpty {
             mintsNewTail = true
         }
 
@@ -124,9 +104,8 @@ enum ChatStreamMerge {
 
     /// State after a FAILED `send()`: the optimistic running/tail is rolled
     /// back so the UI doesn't sit on a forever-spinner. The user's prompt is
-    /// NOT lost — `send()` echoed it optimistically into the transcript and
-    /// the caller restores the input text — so this only clears the fake
-    /// "in progress" flags, leaving the question tombstones untouched.
+    /// NOT lost — the caller restores the input text — so this only clears the
+    /// fake "in progress" flags, leaving the question tombstones untouched.
     static func afterSendFailure(to state: ChatStreamTurnState) -> ChatStreamTurnState {
         var s = state
         s.running = false
@@ -136,46 +115,32 @@ enum ChatStreamMerge {
     }
 }
 
-/// The per-frame turn-state fields a stream frame actually carried, derived
-/// from the frame's routing `sub` and whether it targeted this session. Used
-/// to separate the frame's DELTA from the accumulated `sessionStates` snapshot
-/// (which is sticky across turns and so cannot express "this frame carried no
-/// running field").
-struct ChatStreamFrameFields: Equatable {
-    var running: Bool?
-    var turnComplete: Bool?
-    var questions: [QuestionRequest]?
+/// Which per-frame lifecycle facts the most recently applied stream frame
+/// carried, derived from the routing `sub` and whether it targeted this
+/// session. Used to separate the frame's DELTA from the accumulated snapshot
+/// (which is sticky across turns).
+struct ChatStreamFrameCarried: Equatable {
+    /// True when this frame carried a running value (the `running` or
+    /// `turnComplete` sub).
+    var running: Bool
+    /// True when this frame carried a completion flag (the `turnComplete` sub).
+    var turnComplete: Bool
 }
 
 enum ChatStreamDelta {
-    /// Derived per-frame turn fields for the most recently applied stream
-    /// frame, given the accumulated snapshot's current values. `stateRunning`/
-    /// `stateTurnComplete`/`stateQuestions` are the snapshot values AFTER the
-    /// frame was routed, so for a carrying `sub` they equal exactly what THIS
-    /// frame delivered.
-    ///
-    /// Any non-carrying frame — or a frame aimed at a different session — yields
-    /// all-nil ("no opinion"): the merge then leaves the optimistic local values
-    /// alone instead of clobbering them with a sticky accumulated value.
-    static func turnFields(
-        sessionIsTarget: Bool,
-        sub: String?,
-        stateRunning: Bool?,
-        stateTurnComplete: Bool?,
-        stateQuestions: [QuestionRequest]?
-    ) -> ChatStreamFrameFields {
+    /// The carried facts of the most recently applied frame. A non-carrying
+    /// sub, or a frame aimed at a different session, yields neither flag —
+    /// so a republish that isn't a genuine turn-state frame (e.g. a retire or
+    /// a foreign-session frame) can't apply a stale value.
+    static func carried(sessionIsTarget: Bool, sub: String?) -> ChatStreamFrameCarried {
         guard sessionIsTarget else {
-            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: nil)
+            return ChatStreamFrameCarried(running: false, turnComplete: false)
         }
         switch sub {
         case "running", "turnComplete":
-            // Both carry a running value in the accumulated snapshot; only
-            // `turnComplete` also carries the completion flag.
-            return ChatStreamFrameFields(running: stateRunning, turnComplete: sub == "turnComplete" ? stateTurnComplete : nil, questions: nil)
-        case "questions":
-            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: stateQuestions)
+            return ChatStreamFrameCarried(running: true, turnComplete: sub == "turnComplete")
         default:
-            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: nil)
+            return ChatStreamFrameCarried(running: false, turnComplete: false)
         }
     }
 }
@@ -241,12 +206,17 @@ final class ChatSessionStore: ObservableObject {
     /// turn. The tail's TEXT grows every delta, so a content-derived id would
     /// change each time and thrash TiledView; this id doesn't. Reset when the
     /// turn ends and the tail is absorbed into the canonical transcript.
-    private var streamingTailID: String = ""
+    private(set) var streamingTailID: String = ""
     /// Question ids the user answered/rejected on-device. The incoming stream
     /// keeps publishing an answered question until the box catches up, so this
     /// tombstone set filters it out locally in the meantime (BET-668); an id
     /// leaves the set once the box stops publishing it.
     private var locallyAnsweredQuestionIDs: Set<String> = []
+    /// True between `send()` and the box's first running acknowledgment. While
+    /// set, the snapshot's accumulated `running` (still the previous turn's
+    /// `false`) must not clobber the optimistic `true` — but once the box
+    /// reports running at all, the snapshot is authoritative.
+    private var optimisticRunning = false
     private var didRunOnce = false
     private var lastRunning: Bool?
     private var lastComplete: Bool?
@@ -368,29 +338,43 @@ final class ChatSessionStore: ObservableObject {
         todos = s.todos
         subagents = s.subagents
 
-        // The turn-state fields (`running`, `turnComplete`, questions, tail
-        // identity) have TWO writers — optimistic local mutations and the
-        // stream — so they go through the pure single-writer merge.
-        //
-        // IMPORTANT: the merge must see what THIS frame actually carried, not
-        // the accumulated `sessionStates` snapshot (which is sticky across
-        // turns and would let an unrelated frame clobber an optimistic value).
-        // `lastStreamFrame` is that per-frame delta. It is only trusted when
-        // the frame targeted THIS session — the `$sessionStates` sink fires
-        // for every session's change, and replaying a stale sub from another
-        // session would be wrong.
+        // Which frame (if any) just changed this session's stream state. The
+        // `$sessionStates` sink fires on every republish, so the stamp only
+        // counts when it names THIS session; retirement nulls it so a stale
+        // frame never replays over optimistic state.
         let stamp = eventStore.lastStreamFrame
-        let fields = ChatStreamDelta.turnFields(
-            sessionIsTarget: stamp?.sessionId == sessionId,
-            sub: stamp?.sub,
-            stateRunning: s.running,
-            stateTurnComplete: s.turnComplete,
-            stateQuestions: s.questions?.questions
-        )
+        let carried = ChatStreamDelta.carried(sessionIsTarget: stamp?.sessionId == sessionId, sub: stamp?.sub)
+
+        // --- running: the accumulated snapshot is authoritative, seeded when
+        // a session is opened (a mid-turn session shows its working indicator),
+        // EXCEPT the optimistic `true` `send()` just set — which the snapshot's
+        // stale previous-turn `false` must not clobber while the box hasn't yet
+        // confirmed. Reading the snapshot (not a per-frame stamp) also makes
+        // this robust to frames that coalesce between publishes.
+        if optimisticRunning, (carried.running || s.running == true) {
+            optimisticRunning = false
+        }
+        running = optimisticRunning ? true : (s.running == true)
+
+        // --- questions: the accumulated snapshot's pending questions, filtered
+        // against the tombstone set (so an answered/rejected card is held until
+        // the box catches up) and aged only when an actual payload exists.
+        // Seeded on open — a session with a question already waiting shows its
+        // card immediately.
+        if let questionPayload = s.questions {
+            let incoming = questionPayload.questions
+            locallyAnsweredQuestionIDs.formIntersection(Set(incoming.map(\.id)))
+            questions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
+        }
+
+        // --- the turn lifecycle (`turnComplete` flag + streaming-tail identity)
+        // is per-frame: only a genuine `turnComplete` frame resets the tail, and
+        // only a genuine `running`-true frame starts a fresh turn. `running` and
+        // `questions` are NOT touched by this merge (handled above).
+        let frameStartedRunning = carried.running && (s.running == true)
         let result = ChatStreamMerge.applying(
-            frameRunning: fields.running,
-            frameTurnComplete: fields.turnComplete,
-            frameQuestions: fields.questions,
+            frameTurnComplete: carried.turnComplete ? s.turnComplete : nil,
+            frameStartedRunning: frameStartedRunning,
             to: ChatStreamTurnState(
                 running: running,
                 turnComplete: turnComplete,
@@ -399,21 +383,15 @@ final class ChatSessionStore: ObservableObject {
                 questions: questions
             )
         )
-        let merged = result.state
-        running = merged.running
-        turnComplete = merged.turnComplete
-        questions = merged.questions
-        locallyAnsweredQuestionIDs = merged.locallyAnsweredQuestionIDs
-        streamingTailID = merged.streamingTailID
-        // A fresh tail is minted exactly once per turn (first running
-        // false->true edge that finds no existing tail).
+        turnComplete = result.state.turnComplete
+        streamingTailID = result.state.streamingTailID
+        // A fresh tail id is minted exactly once per turn (when the turn begins
+        // running with no existing tail).
         if result.mintsNewTail {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
         }
-        // runningSince tracks the turn that's running for the header timer;
-        // it follows the running flag (started when running, cleared when the
-        // turn stops — e.g. on turnComplete).
-        if merged.running {
+        // runningSince tracks the turn that's running for the header timer.
+        if running {
             if runningSince == nil { runningSince = Date() }
         } else {
             runningSince = nil
@@ -676,6 +654,7 @@ final class ChatSessionStore: ObservableObject {
             rebuildBlocks()
         }
         running = true
+        optimisticRunning = true
         turnComplete = false
         if runningSince == nil {
             runningSince = Date()
@@ -695,6 +674,7 @@ final class ChatSessionStore: ObservableObject {
             // Surface the failure instead of swallowing it: stop the running
             // state and clear the optimistic tail so the spinner doesn't stay
             // on forever, and let the caller restore the lost message.
+            optimisticRunning = false
             let rolledBack = ChatStreamMerge.afterSendFailure(to: ChatStreamTurnState(
                 running: running,
                 turnComplete: turnComplete,
