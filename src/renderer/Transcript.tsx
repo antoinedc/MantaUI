@@ -249,7 +249,11 @@ export type TranscriptProps = {
   // React.memo on MessageRow isn't defeated by fresh object identities).
   turnInfo: Map<
     string,
-    { turnDurationMs: number | null; outputTokens: number | null }
+    {
+      turnDurationMs: number | null;
+      turnTokens: number | null;
+      verbSeedId: string | null;
+    }
   >;
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
   userCommandInfo: Map<string, { name: string; arguments: string }>;
@@ -435,7 +439,8 @@ export function Transcript({
                     msg={m}
                     showThinking={showThinking}
                     turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                    outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
+                    turnTokens={turnInfo.get(m.info.id)?.turnTokens ?? null}
+                    verbSeedId={turnInfo.get(m.info.id)?.verbSeedId ?? null}
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
                     // The message being written right now: last in the

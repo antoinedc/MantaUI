@@ -140,12 +140,21 @@ export const SPINNER_VERBS_PAST = [
   "Crafted",
 ];
 
-// Deterministic past-tense verb for a message — same id always picks the same
-// verb so the footer doesn't shuffle when the transcript refetches.
-export function pastVerbFor(messageId: string): string {
+// Deterministic verb for a message — same id always picks the same index so
+// neither the running indicator's present verb nor the footer's past verb
+// shuffles when the transcript refetches. One hash backs both accessors so a
+// single turn shows the SAME verb in flight ("Pondering…") and finished
+// ("Pondered"), rather than two different ones.
+function verbIndexFor(messageId: string): number {
   let h = 0;
   for (let i = 0; i < messageId.length; i++) h = (h * 31 + messageId.charCodeAt(i)) | 0;
-  return SPINNER_VERBS_PAST[Math.abs(h) % SPINNER_VERBS_PAST.length];
+  return Math.abs(h) % SPINNER_VERBS_PAST.length;
+}
+export function presentVerbFor(messageId: string): string {
+  return SPINNER_VERBS[verbIndexFor(messageId)];
+}
+export function pastVerbFor(messageId: string): string {
+  return SPINNER_VERBS_PAST[verbIndexFor(messageId)];
 }
 
 // Detect whether a model can accept file attachments. Two shapes in the wild:

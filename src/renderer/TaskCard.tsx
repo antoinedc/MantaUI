@@ -152,7 +152,8 @@ export function TaskCard({ state }: { state: ToolState }) {
                   // the turn-duration / truncation overlays designed for the
                   // top-level conversation.
                   turnDurationMs={null}
-                  outputTokens={null}
+                  turnTokens={null}
+                  verbSeedId={null}
                   truncation={null}
                   commandInfo={null}
                 />

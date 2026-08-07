@@ -2275,10 +2275,13 @@ export async function fetchTranscriptWithRetry<T>(
 // Turn boundary metadata: which assistant messages are the FINAL one of their
 // turn (i.e., immediately followed by a user message or end-of-list), the
 // cumulative duration of that turn (first assistant `created` → last assistant
-// `completed`), and the turn's total output tokens (read off the last assistant
-// message's `info.tokens.output` — the same persisted, transcript-derived source
-// the context bar uses, so it survives refresh). Intermediate assistant messages
-// within a multi-step turn get no footer — only the final one does.
+// `completed`), the whole turn's token figure (sum of `output + reasoning`
+// across every assistant step — one ASSISTANT MESSAGE PER STEP, and each
+// message's `tokens` describes only that step, so reading the last one
+// under-reports by an order of magnitude), and the seed id (the turn's FIRST
+// assistant message) that both the live verb and the footer verb are derived
+// from. Intermediate assistant messages within a multi-step turn get no footer
+// — only the final one does.
 //
 // The `running` gate: while a turn is still in progress we do NOT stamp the
 // footer on its in-progress last assistant message — it would render behind the
@@ -2290,10 +2293,13 @@ export async function fetchTranscriptWithRetry<T>(
 export function computeTurnInfo(
   messages: OpencodeMessage[] | null,
   running: boolean,
-): Map<string, { turnDurationMs: number | null; outputTokens: number | null }> {
+): Map<
+  string,
+  { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
+> {
   const out = new Map<
     string,
-    { turnDurationMs: number | null; outputTokens: number | null }
+    { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
   >();
   if (!messages) return out;
   let i = 0;
@@ -2303,8 +2309,9 @@ export function computeTurnInfo(
       let j = i + 1;
       let firstStart: number | null = null;
       let lastEnd: number | null = null;
-      let lastOutput: number | null = null;
+      let turnTokens = 0;
       let lastAssistantId: string | null = null;
+      let verbSeedId: string | null = null;
       while (j < messages.length && messages[j].info.role === "assistant") {
         const t = messages[j].info.time;
         if (firstStart == null && t?.created != null) firstStart = t.created;
@@ -2314,7 +2321,8 @@ export function computeTurnInfo(
         const tok = (
           messages[j].info as unknown as { tokens?: TokenUsage }
         ).tokens;
-        if (tok && typeof tok.output === "number") lastOutput = tok.output;
+        if (tok) turnTokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
+        if (verbSeedId == null) verbSeedId = messages[j].info.id;
         lastAssistantId = messages[j].info.id;
         j++;
       }
@@ -2334,7 +2342,8 @@ export function computeTurnInfo(
             firstStart != null && lastEnd != null && lastEnd > firstStart
               ? lastEnd - firstStart
               : null,
-          outputTokens: lastOutput,
+          turnTokens: turnTokens > 0 ? turnTokens : null,
+          verbSeedId,
         });
       }
       i = j;
@@ -2343,4 +2352,46 @@ export function computeTurnInfo(
     }
   }
   return out;
+}
+
+export type LiveTurn = { startedAt: number; tokens: number; verbSeedId: string };
+
+/**
+ * Metrics for the turn at the tail of the transcript, for the live working
+ * row. Deliberately does NOT decide whether a turn is in flight — the caller
+ * passes `running` from the event stream and only renders this when true.
+ * Returns null only when there is no trailing turn to describe.
+ */
+export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | null {
+  if (!messages) return null;
+  let lastUserIndex = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].info.role === "user") lastUserIndex = i;
+  }
+  if (lastUserIndex < 0) return null;
+  const userInfo = messages[lastUserIndex].info;
+  let startedAt: number | null = null;
+  let tokens = 0;
+  let verbSeedId: string | null = null;
+  for (
+    let j = lastUserIndex + 1;
+    j < messages.length && messages[j].info.role === "assistant";
+    j++
+  ) {
+    if (verbSeedId == null) {
+      verbSeedId = messages[j].info.id;
+      const c = messages[j].info.time?.created;
+      if (typeof c === "number") startedAt = c;
+    }
+    const tok = (
+      messages[j].info as unknown as { tokens?: TokenUsage }
+    ).tokens;
+    if (tok) tokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
+  }
+  if (startedAt == null) {
+    const c = userInfo.time?.created;
+    if (typeof c === "number") startedAt = c;
+  }
+  if (startedAt == null) return null;
+  return { startedAt, tokens, verbSeedId: verbSeedId ?? userInfo.id };
 }
