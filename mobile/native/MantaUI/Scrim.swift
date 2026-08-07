@@ -11,9 +11,15 @@ import SwiftUI
 // ONE component because these must match: the same gesture on three surfaces,
 // and hand-rolled gradients would drift the first time any of them was retuned.
 //
-// The ramp is deliberately uneven — most of the darkening happens in the third
-// nearest the edge, so content directly behind the control is well suppressed
-// while the far end of the fade stays subtle enough not to read as a band.
+//   * TOP reaches INTO the status bar, where the transcript runs under the
+//     clock and the battery. Its ramp goes solid canvas well before the
+//     display edge and holds it.
+//
+//   * BOTTOM dissolves content to solid canvas before it passes behind the
+//     floating control. It renders a fixed-height fade band ABOVE the
+//     control, then solid canvas over the control itself and the overhang
+//     below it — so by the time content reaches the glass it has fully
+//     blended into canvas rather than staying faintly visible through it.
 // ===========================================================================
 
 struct Scrim: View {
@@ -24,42 +30,69 @@ struct Scrim: View {
 
     let edge: Edge
     let tokens: Tokens
-    /// How far the fade reaches PAST its container's edge.
+    /// How far solid canvas continues BELOW the container's edge.
     ///
     /// The bottom scrim needs this because its container stops at the safe
     /// area while the transcript does not: content keeps rendering down
-    /// through the home-indicator strip, so a scrim bounded to the safe area
-    /// left that strip undimmed and the text came back to full brightness
-    /// below the composer.
+    /// through the home-indicator strip, so solid canvas that stopped at the
+    /// safe area would leave that strip showing text at full brightness below
+    /// the composer.
     ///
     /// A fixed overhang rather than `ignoresSafeArea`, which is what this
-    /// replaced: ignoring the safe area pins the gradient to the display edge,
+    /// replaced: ignoring the safe area pins the strip to the display edge,
     /// so with the keyboard up it stretched behind the keyboard and stopped
     /// sitting under the composer at all. An overhang moves WITH the
     /// container — when the keyboard is up it simply falls behind the
     /// keyboard, where there is nothing to dim anyway.
     var overhang: CGFloat = 0
 
+    /// How tall the fade above the control is. Fixed in POINTS, deliberately
+    /// NOT a fraction of the control's height: a fraction is exactly what made
+    /// the visible part of the ramp shrink to nothing as the control grew.
+    private static let fadeHeight: CGFloat = 96
+
     var body: some View {
+        switch edge {
+        case .top: topBody
+        case .bottom: bottomBody
+        }
+    }
+
+    /// Reaches into the status bar, which is the whole point of it — that
+    /// strip is where the transcript was running under the clock and the
+    /// battery.
+    private var topBody: some View {
         LinearGradient(
             stops: stops,
-            startPoint: edge == .bottom ? .top : .bottom,
-            endPoint: edge == .bottom ? .bottom : .top
+            startPoint: .bottom,
+            endPoint: .top
         )
-        .padding(edge == .bottom ? .bottom : .top, -overhang)
-        // The TOP scrim reaches into the status bar, which is the whole point
-        // of it — that strip is where the transcript was running under the
-        // clock and the battery.
-        //
-        // The BOTTOM one deliberately does NOT reach into the bottom safe area.
-        // It used to, and that is what pinned it to the screen edge: with the
-        // keyboard up the composer rides above the keyboard while the gradient
-        // still stretched to the bottom of the display, so it no longer sat
-        // under the composer at all — only the palest end of the ramp was
-        // visible. Bounded to its container, it tracks the composer wherever
-        // the keyboard puts it. The strip below is already painted canvas by
-        // the screen's own background, so nothing is left bare.
-        .ignoresSafeArea(edges: edge == .top ? .top : [])
+        .ignoresSafeArea(edges: .top)
+        // Purely decorative: it sits over a scroll view, so without this it
+        // would swallow every touch aimed at the content behind it.
+        .allowsHitTesting(false)
+    }
+
+    /// A fixed-height fade ABOVE the container, then solid canvas over the
+    /// container itself and `overhang` points below it — so content is fully
+    /// dissolved into canvas by the time it passes behind the floating
+    /// control.
+    private var bottomBody: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                stops: stops,
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: Self.fadeHeight)
+            tokens.canvas
+        }
+        // The fade hangs ABOVE the container, so content fades while still
+        // fully visible rather than behind the glass where it could not be
+        // seen.
+        .padding(.top, -Self.fadeHeight)
+        // Solid canvas continues below the container into the overhang strip.
+        .padding(.bottom, -overhang)
         // Purely decorative: it sits over a scroll view, so without this it
         // would swallow every touch aimed at the content behind it.
         .allowsHitTesting(false)
@@ -76,9 +109,9 @@ struct Scrim: View {
     /// They differ in how fast they get there. `location` runs from the far
     /// end of the fade toward the screen edge in both cases.
     ///
-    ///   * BOTTOM sits behind the composer, which is itself glass and already
-    ///     obscures what is under it. The ramp can stay gentle for most of its
-    ///     length and only go solid at the very end.
+    ///   * BOTTOM spans the fixed fade band ABOVE the composer, where the
+    ///     transcript is still fully visible, so the ramp does its real work
+    ///     across that band and ends in solid canvas where the control sits.
     ///
     ///   * TOP has to cover the STATUS BAR — the clock, the signal bars, the
     ///     battery — which occupies roughly the outer 40% of the fade and has
