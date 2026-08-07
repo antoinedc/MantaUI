@@ -204,7 +204,20 @@ final class MantaEventStore: ObservableObject {
     @Published private(set) var connectionState: MantaConnectionState = .idle
     @Published private(set) var degraded = false
     @Published private(set) var sessionStates: [String: MantaSessionStreamState] = [:]
+    /// Routing stamp of the MOST RECENT stream frame the store applied: which
+    /// session it was for and which `sub` it carried. The `$sessionStates` sink
+    /// fires on any session's change with only the ACCUMULATED snapshot, which
+    /// can't tell a consumer which fields the frame just delivered. This is the
+    /// per-frame delta the single-writer merge (BET-668) feeds off.
+    private(set) var lastStreamFrame: StreamFrameStamp?
 
+    /// Which session the most recent stream frame targeted and the `sub` it
+    /// carried. `sub == nil` for a non-routed frame (nothing turn-state-related
+    /// changed).
+    struct StreamFrameStamp: Equatable {
+        var sessionId: String
+        var sub: String?
+    }
     /// Invoked on every healthy reconnect so the app re-fetches state that may
     /// have changed while disconnected (rather than assuming the stream
     /// resumed). S4 wires this to re-fetch sessions / messages / permissions /
@@ -326,6 +339,7 @@ final class MantaEventStore: ObservableObject {
         let sid = frame.sessionId ?? ""
         let next = MantaStreamRouter.applying(frame, to: sessionStates[sid])
         sessionStates[sid] = next
+        lastStreamFrame = StreamFrameStamp(sessionId: sid, sub: frame.sub)
     }
 
     /// Retire live stream text the canonical transcript now carries. A session

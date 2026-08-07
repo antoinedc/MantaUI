@@ -81,6 +81,28 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertFalse(second.mintsNewTail, "a turn that already has a tail must not mint again")
     }
 
+    /// A STALE `turnComplete == true` left over from a previous turn must not
+    /// suppress minting when a new turn starts running (a frame that carries
+    /// running but no completion). This is the box-started-turn case a passing
+    /// of the accumulated sticky snapshot used to break.
+    func testStickyTurnCompleteDoesNotSuppressMintOnRunningFrame() {
+        let state = turnState(running: false, turnComplete: true, tail: "")
+        let result = ChatStreamMerge.applying(frameRunning: true, frameTurnComplete: nil, frameQuestions: nil, to: state)
+        XCTAssertTrue(result.mintsNewTail, "a running frame must mint a tail even with a stale turnComplete")
+        XCTAssertFalse(result.state.turnComplete, "a running frame starts a turn, clearing the completion flag")
+    }
+
+    /// A context frame arriving AFTER a completed turn (accumulated running
+    /// false, turnComplete true) must not clear an optimistic running or
+    /// rest the tail — it carries no opinion.
+    func testContextFrameAfterCompletedTurnClobbersNeitherRunningNorTail() {
+        let state = turnState(running: true, turnComplete: false, tail: "tail")
+        let result = ChatStreamMerge.applying(frameRunning: nil, frameTurnComplete: nil, frameQuestions: nil, to: state)
+        XCTAssertTrue(result.state.running)
+        XCTAssertEqual(result.state.streamingTailID, "tail")
+        XCTAssertFalse(result.mintsNewTail)
+    }
+
     // MARK: - Question tombstoning
 
     /// An id the user answered locally is filtered out of the incoming payload
@@ -144,14 +166,14 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertFalse(ok, "a failed send must be reported as failed")
         XCTAssertFalse(store.running, "a failed send must stop the running state (no forever-spinner)")
 
+        // The optimistic echo is rolled back: the box never received the
+        // message, so it must NOT stand in the transcript as if sent — it
+        // belongs back in the input the caller restores.
         let userBlocks = store.transcript.filter {
             if case .user(_, _) = $0 { return true }
             return false
         }
-        XCTAssertEqual(userBlocks.count, 1, "the optimistically echoed prompt must not be lost")
-        if case .user(let text, _) = userBlocks[0] {
-            XCTAssertEqual(text, "hello", "the prompt text must be preserved for restoration")
-        }
+        XCTAssertEqual(userBlocks.count, 0, "a failed send must not leave the message in the transcript")
     }
 
     // MARK: - Mock transport that makes every request fail
@@ -190,4 +212,66 @@ private final class FailingSendStream: MantaEventStreamControl {
     func retryNow() {}
     func forceReconnect() {}
     func close(reason: String) {}
+}
+
+// MARK: - Per-frame delta extraction (the seam that fixes running-clobber on
+// turn 2+: the merge is fed what the frame CARRIED, not the sticky accumulator).
+
+@MainActor
+final class ChatStreamDeltaTests: XCTestCase {
+
+    /// A frame aimed at a DIFFERENT session must yield all-nil ("no opinion"),
+    /// so replaying another session's frame can't clobber this one's state.
+    func testForeignSessionYieldsNoOpinion() {
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: false, sub: "running",
+            stateRunning: true, stateTurnComplete: true, stateQuestions: nil)
+        XCTAssertNil(fields.running)
+        XCTAssertNil(fields.turnComplete)
+        XCTAssertNil(fields.questions)
+    }
+
+    /// A non-carrying frame (e.g. `context`) must NOT report a running value —
+    /// even though the accumulated snapshot is sticky `false` after turn 1.
+    /// This is what lets an optimistic `send()` survive an unrelated frame on
+    /// turn 2+.
+    func testContextSubCarriesNoTurnFields() {
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: true, sub: "context",
+            stateRunning: false, stateTurnComplete: true, stateQuestions: nil)
+        XCTAssertNil(fields.running)
+        XCTAssertNil(fields.turnComplete)
+        XCTAssertNil(fields.questions)
+    }
+
+    /// A `running` frame carries the running value but not completion/questions.
+    func testRunningSubCarriesRunningOnly() {
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: true, sub: "running",
+            stateRunning: true, stateTurnComplete: nil, stateQuestions: nil)
+        XCTAssertEqual(fields.running, true)
+        XCTAssertNil(fields.turnComplete)
+        XCTAssertNil(fields.questions)
+    }
+
+    /// A `turnComplete` frame carries BOTH running and completion.
+    func testTurnCompleteSubCarriesRunningAndCompletion() {
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: true, sub: "turnComplete",
+            stateRunning: false, stateTurnComplete: true, stateQuestions: nil)
+        XCTAssertEqual(fields.running, false)
+        XCTAssertEqual(fields.turnComplete, true)
+        XCTAssertNil(fields.questions)
+    }
+
+    /// A `questions` frame carries only the questions payload.
+    func testQuestionsSubCarriesQuestionsOnly() {
+        let q = QuestionRequest(id: "q1", sessionID: "ses", questions: [], tool: nil, requestId: nil)
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: true, sub: "questions",
+            stateRunning: false, stateTurnComplete: false, stateQuestions: [q])
+        XCTAssertNil(fields.running)
+        XCTAssertNil(fields.turnComplete)
+        XCTAssertEqual(fields.questions?.map(\.id), ["q1"])
+    }
 }

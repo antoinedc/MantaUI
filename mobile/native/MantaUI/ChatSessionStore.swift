@@ -88,7 +88,12 @@ enum ChatStreamMerge {
         // without one (e.g. a context frame) must NOT flip the value back to
         // false — doing so used to reset `runningSince`, re-mint the tail id,
         // and flash the running row at every such frame.
-        if let r = frameRunning { s.running = r }
+        if let r = frameRunning {
+            s.running = r
+            // A real running frame starts a turn, so any completion flag left
+            // over from a previous turn no longer applies.
+            if r { s.turnComplete = false }
+        }
         if let t = frameTurnComplete { s.turnComplete = t }
 
         // Questions: filter incoming against the tombstone set. A tombstoned
@@ -103,12 +108,14 @@ enum ChatStreamMerge {
         // (no questions payload this frame: current questions + tombstones are
         //  left alone — nothing to clobber.)
 
-        // Tail identity: minted at most once per turn, reset ONLY on the
-        // turnComplete edge — never by a bare `running == false` write.
+        // Tail identity is minted at most once per turn and reset ONLY on the
+        // turnComplete EDGE carried by THIS frame (`frameTurnComplete`) — never
+        // by a bare `running == false` write, and never by a STALE accumulated
+        // turnComplete left over from a previous turn.
         var mintsNewTail = false
-        if s.turnComplete {
+        if frameTurnComplete == true {
             s.streamingTailID = ""
-        } else if s.running, s.streamingTailID.isEmpty {
+        } else if frameRunning == true, s.streamingTailID.isEmpty {
             mintsNewTail = true
         }
 
@@ -119,14 +126,57 @@ enum ChatStreamMerge {
     /// back so the UI doesn't sit on a forever-spinner. The user's prompt is
     /// NOT lost — `send()` echoed it optimistically into the transcript and
     /// the caller restores the input text — so this only clears the fake
-    /// "in progress" flags, leaving the transcript and question tombstones
-    /// untouched.
+    /// "in progress" flags, leaving the question tombstones untouched.
     static func afterSendFailure(to state: ChatStreamTurnState) -> ChatStreamTurnState {
         var s = state
         s.running = false
         s.turnComplete = false
         s.streamingTailID = ""
         return s
+    }
+}
+
+/// The per-frame turn-state fields a stream frame actually carried, derived
+/// from the frame's routing `sub` and whether it targeted this session. Used
+/// to separate the frame's DELTA from the accumulated `sessionStates` snapshot
+/// (which is sticky across turns and so cannot express "this frame carried no
+/// running field").
+struct ChatStreamFrameFields: Equatable {
+    var running: Bool?
+    var turnComplete: Bool?
+    var questions: [QuestionRequest]?
+}
+
+enum ChatStreamDelta {
+    /// Derived per-frame turn fields for the most recently applied stream
+    /// frame, given the accumulated snapshot's current values. `stateRunning`/
+    /// `stateTurnComplete`/`stateQuestions` are the snapshot values AFTER the
+    /// frame was routed, so for a carrying `sub` they equal exactly what THIS
+    /// frame delivered.
+    ///
+    /// Any non-carrying frame — or a frame aimed at a different session — yields
+    /// all-nil ("no opinion"): the merge then leaves the optimistic local values
+    /// alone instead of clobbering them with a sticky accumulated value.
+    static func turnFields(
+        sessionIsTarget: Bool,
+        sub: String?,
+        stateRunning: Bool?,
+        stateTurnComplete: Bool?,
+        stateQuestions: [QuestionRequest]?
+    ) -> ChatStreamFrameFields {
+        guard sessionIsTarget else {
+            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: nil)
+        }
+        switch sub {
+        case "running", "turnComplete":
+            // Both carry a running value in the accumulated snapshot; only
+            // `turnComplete` also carries the completion flag.
+            return ChatStreamFrameFields(running: stateRunning, turnComplete: sub == "turnComplete" ? stateTurnComplete : nil, questions: nil)
+        case "questions":
+            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: stateQuestions)
+        default:
+            return ChatStreamFrameFields(running: nil, turnComplete: nil, questions: nil)
+        }
     }
 }
 
@@ -321,10 +371,26 @@ final class ChatSessionStore: ObservableObject {
         // The turn-state fields (`running`, `turnComplete`, questions, tail
         // identity) have TWO writers — optimistic local mutations and the
         // stream — so they go through the pure single-writer merge.
+        //
+        // IMPORTANT: the merge must see what THIS frame actually carried, not
+        // the accumulated `sessionStates` snapshot (which is sticky across
+        // turns and would let an unrelated frame clobber an optimistic value).
+        // `lastStreamFrame` is that per-frame delta. It is only trusted when
+        // the frame targeted THIS session — the `$sessionStates` sink fires
+        // for every session's change, and replaying a stale sub from another
+        // session would be wrong.
+        let stamp = eventStore.lastStreamFrame
+        let fields = ChatStreamDelta.turnFields(
+            sessionIsTarget: stamp?.sessionId == sessionId,
+            sub: stamp?.sub,
+            stateRunning: s.running,
+            stateTurnComplete: s.turnComplete,
+            stateQuestions: s.questions?.questions
+        )
         let result = ChatStreamMerge.applying(
-            frameRunning: s.running,
-            frameTurnComplete: s.turnComplete,
-            frameQuestions: s.questions?.questions,
+            frameRunning: fields.running,
+            frameTurnComplete: fields.turnComplete,
+            frameQuestions: fields.questions,
             to: ChatStreamTurnState(
                 running: running,
                 turnComplete: turnComplete,
@@ -603,7 +669,9 @@ final class ChatSessionStore: ObservableObject {
         // the canonical refetch replaces this block), but without the echo the
         // screen sits completely unchanged after a send, which reads as "the
         // send did nothing".
+        var optimisticUserIndex: Int?
         if !text.isEmpty {
+            optimisticUserIndex = transcript.count
             transcript.append(.user(text, at: Date()))
             rebuildBlocks()
         }
@@ -637,6 +705,16 @@ final class ChatSessionStore: ObservableObject {
             running = rolledBack.running
             turnComplete = rolledBack.turnComplete
             streamingTailID = rolledBack.streamingTailID
+            // Remove THIS send's optimistic echo: the box never received the
+            // message, so it belongs back in the composer input (which the
+            // caller restores), not standing in the transcript as if sent.
+            // `fetchTranscript` can replace the whole array, so guard on the
+            // captured index still holding our echo before removing it.
+            if let idx = optimisticUserIndex, idx < transcript.count,
+               case .user(let echoed, _) = transcript[idx], echoed == text {
+                transcript.remove(at: idx)
+                rebuildBlocks()
+            }
             return false
         }
     }
