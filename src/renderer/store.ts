@@ -95,6 +95,13 @@ const SNAPSHOT_KEY = "manta:sync:snapshot";
 let lastRawProjects: Project[] = [];
 let lastRawConfig: AppConfig | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+// The boxId the snapshot is scoped to. This is the DESKTOP-LOCAL boxId (from
+// the pairing config), NOT store.boxId — in http mode the box's own config has
+// no boxId (it's a desktop-local field), so store.boxId is "" in normal paired
+// operation. Seeded by loadPersistedSnapshot(currentBoxId) at boot; the persist
+// path stamps it so the cross-box guard in loadPersistedSnapshot has a real
+// value to compare against.
+let snapshotBoxId = "";
 
 // Debounced 1s after each applySyncPayload — coalesces a burst of deltas (a
 // reconnect re-pull + a follow-up live delta) into one write rather than
@@ -103,12 +110,12 @@ function schedulePersist(): void {
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    const { syncGen, syncSeq, boxStale, boxId } = useStore.getState();
+    const { syncGen, syncSeq, boxStale } = useStore.getState();
     if (syncGen == null || syncSeq == null) return;
     const snapshot = {
       gen: syncGen,
       seq: syncSeq,
-      boxId,
+      boxId: snapshotBoxId,
       projects: lastRawProjects,
       config: lastRawConfig,
       stale: boxStale,
@@ -127,8 +134,14 @@ function schedulePersist(): void {
 // drops the key and returns null (fall back to a normal server boot). A
 // snapshot stamped for a DIFFERENT boxId is dropped too (re-pair — see above).
 // Called from main.tsx BEFORE the React root renders, only on the paired/http
-// path, passing the paired box's boxId.
+// path, passing the paired box's desktop-local boxId. On a subsequent launch
+// after a re-pair, main.tsx passes the NEW box's boxId, so any snapshot stamped
+// for the previous box is dropped by the guard below.
 export function loadPersistedSnapshot(currentBoxId?: string): void {
+  // Record the box the CURRENT boot is scoped to — used by schedulePersist to
+  // stamp the write, and by the guard below to detect a re-pair. Must be set
+  // even when there's nothing to restore, so a later persist uses the right id.
+  snapshotBoxId = currentBoxId ?? "";
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(SNAPSHOT_KEY);
@@ -167,9 +180,8 @@ export function loadPersistedSnapshot(currentBoxId?: string): void {
   if (
     typeof s.boxId === "string" &&
     s.boxId !== "" &&
-    typeof currentBoxId === "string" &&
-    currentBoxId !== "" &&
-    s.boxId !== currentBoxId
+    snapshotBoxId !== "" &&
+    s.boxId !== snapshotBoxId
   ) {
     try { localStorage.removeItem(SNAPSHOT_KEY); } catch { /* ignore */ }
     return;

@@ -1063,12 +1063,22 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
     (window as unknown as { api?: unknown }).api = prev;
   });
 
+  // Drive the REAL write path (loadPersistedSnapshot → applySyncPayload →
+  // debounced persist), so the fields the snapshot carries are exactly what
+  // schedulePersist writes — not a value planted by hand. `boxId` seeds the
+  // desktop-local spawn ref, mirroring main.tsx's loadPersistedSnapshot(config.boxId).
+  async function seedSnapshot(boxId: string, changed: { stale?: boolean; projects?: Project[] }) {
+    loadPersistedSnapshot(boxId);
+    useStore.getState().applySyncPayload({ gen: "g", seq: 10, changed });
+    await new Promise((r) => setTimeout(r, 1100)); // flush the 1s debounce
+  }
+
   it("persists and replays the stale flag (cold boot against an unreachable box)", async () => {
-    useStore.setState({ boxId: "boxA", boxStale: false });
-    useStore.getState().applySyncPayload({ gen: "g", seq: 5, changed: { stale: true } });
-    // flush the 1s debounced write
-    await new Promise((r) => setTimeout(r, 1100));
-    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as { stale: boolean };
+    await seedSnapshot("boxA", { stale: true });
+    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as {
+      stale: boolean;
+      boxId: string;
+    };
     expect(saved.stale).toBe(true);
     // a cold boot must replay boxStale instead of hardcoding "not stale" —
     // otherwise the restored cursor would make the box withhold stale and the
@@ -1078,35 +1088,25 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
     expect(useStore.getState().boxStale).toBe(true);
   });
 
-  it("loadPersistedSnapshot drops a snapshot owned by a different box (re-pair bleed guard)", () => {
-    localStorage.setItem(
-      "manta:sync:snapshot",
-      JSON.stringify({
-        gen: "g",
-        seq: 1,
-        boxId: "boxA",
-        projects: [proj({ tmuxSession: "a" })],
-        config: {},
-      }),
-    );
+  it("write path stamps the desktop-local boxId, and a different box's snapshot is dropped", async () => {
+    await seedSnapshot("boxA", { projects: [proj({ tmuxSession: "a" })] });
+    // The persisted stamp must be the desktop-local boxId passed to
+    // loadPersistedSnapshot — this would be "" if the write path read
+    // store.boxId (empty in http mode), which is the exact dead-code bug.
+    const saved = JSON.parse(localStorage.getItem("manta:sync:snapshot")!) as { boxId: string };
+    expect(saved.boxId).toBe("boxA");
+    // Re-pair to a different box: the guard must drop the old box's snapshot.
+    useStore.setState({ projects: [], syncGen: null, syncSeq: null, loaded: false });
     loadPersistedSnapshot("boxB");
     expect(localStorage.getItem("manta:sync:snapshot")).toBeNull();
     expect(useStore.getState().projects).toEqual([]);
   });
 
-  it("loadPersistedSnapshot restores a snapshot owned by the same box", () => {
-    localStorage.setItem(
-      "manta:sync:snapshot",
-      JSON.stringify({
-        gen: "g",
-        seq: 2,
-        boxId: "boxA",
-        projects: [proj({ tmuxSession: "a" })],
-        config: {},
-      }),
-    );
+  it("loadPersistedSnapshot restores a snapshot owned by the same box", async () => {
+    await seedSnapshot("boxA", { projects: [proj({ tmuxSession: "a" })] });
+    useStore.setState({ projects: [], syncGen: null, syncSeq: null, loaded: false });
     loadPersistedSnapshot("boxA");
     expect(useStore.getState().projects.map((p) => p.tmuxSession)).toEqual(["a"]);
-    expect(useStore.getState().syncSeq).toBe(2);
+    expect(useStore.getState().syncSeq).toBe(10);
   });
 });
