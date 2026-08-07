@@ -127,7 +127,7 @@ final class ComposerTests: XCTestCase {
     }
 
     func testFastToggleFastModelReportsOnAndTargetsBase() {
-        let models = [variantModel("openai", "gpt-5.6", variants: ["high"]), variantModel("openai", "gpt-5.6-fast", variants: ["high"])]
+        let models = [variantModel("openai", "gpt-5.6", variants: ["low"]), variantModel("openai", "gpt-5.6-fast", variants: ["low"])]
         let r = ChatModel.fastToggle(models: models, active: models[1], variantId: "low")
         XCTAssertTrue(r.available)
         XCTAssertTrue(r.on)
@@ -135,7 +135,7 @@ final class ComposerTests: XCTestCase {
     }
 
     func testFastToggleDisabledWhenTwinLacksSelectedEffort() {
-        let models = [variantModel("openai", "gpt-5.6", variants: ["low"]), variantModel("openai", "gpt-5.6-fast", variants: ["high"])]
+        let models = [variantModel("openai", "gpt-5.6", variants: ["high"]), variantModel("openai", "gpt-5.6-fast", variants: ["low"])]
         let r = ChatModel.fastToggle(models: models, active: models[0], variantId: "high")
         XCTAssertFalse(r.available)
         XCTAssertNil(r.target)

@@ -74,13 +74,16 @@ enum ChatModel {
             return off
         }
         let keepsVariant = variantId == nil || (counterpart.variants?.contains { $0.id == variantId } == true)
+        guard keepsVariant else {
+            return FastToggle(available: false, on: isFast, target: nil, title: "No fast mode at \(variantId ?? "") effort")
+        }
         return FastToggle(
-            available: keepsVariant,
+            available: true,
             on: isFast,
             target: (active.providerID, counterpartID),
             title: isFast
                 ? "You're in fast mode — tap to switch to the standard model"
-                : keepsVariant ? "Run this model in fast mode" : "No fast mode at \(variantId ?? "") effort"
+                : "Run this model in fast mode"
         )
     }
 
