@@ -363,6 +363,24 @@ describe("ChatPanel session resources", () => {
     expect(api.calls.uploadBuffer ?? []).toEqual([]);
     expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeNull();
   });
+
+  it("keeps staged attachments when the panel is hidden then reshown (isActive toggle must not reset the composer)", async () => {
+    // Reuse the shared attach-bridge harness (it stages an upload and returns
+    // the mounted panel) rather than duplicating the setup here.
+    const panel = await dispatchAttachBridge("ses_test");
+    expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeTruthy();
+
+    // App.tsx keeps hidden panels MOUNTED (display:none) and flips isActive.
+    // If the visibility toggle re-ran the session-reset effect, the staged
+    // attachment would be wiped here — the regression BET-676 Block 2 caught.
+    panel.rerender(<ChatPanel {...PROPS} isActive={false} />);
+    await panel.flush();
+    panel.rerender(<ChatPanel {...PROPS} isActive={true} />);
+    await panel.flush();
+
+    // The staged attachment survived the hide/reshow cycle.
+    expect(panel.container.querySelector('[title="/remote/img.png"]')).toBeTruthy();
+  });
 });
 
 // ===== Transcript rendering (via the mounted ChatPanel) =====

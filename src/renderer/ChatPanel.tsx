@@ -463,16 +463,23 @@ export function ChatPanel({
     setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
-    // Branch indicator: poll every 5s while this session is mounted AND the
-    // panel is visible. Hidden panels stop polling; the effect re-fires once
-    // when isActive flips back on.
-    refreshBranch(cwd);
+    // NOTE: the BRANCH POLL is intentionally NOT here. Chat panels stay
+    // mounted (hidden with display:none) and this reset effect must only run
+    // on a genuine session change — if isActive were a dep here, switching
+    // away and back would re-run the reset and wipe staged attachments, @agent
+    // mentions and the /help notice out of the composer. The poll lives in its
+    // own visibility-gated effect below.
+  }, [sessionId, cwd, refreshBranch]);
+
+  // Branch indicator: poll every 5s while this session is visible. Gated on
+  // isActive — hidden panels stop polling; the effect re-fires (one
+  // refreshBranch on entry) when isActive flips back on.
+  useEffect(() => {
     if (!isActive) return;
+    refreshBranch(cwd);
     const branchPoll = setInterval(() => refreshBranch(cwd), 5000);
-    return () => {
-      clearInterval(branchPoll);
-    };
-  }, [sessionId, cwd, refreshBranch, isActive]);
+    return () => clearInterval(branchPoll);
+  }, [cwd, refreshBranch, isActive]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {

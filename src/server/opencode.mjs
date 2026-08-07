@@ -520,15 +520,10 @@ export function slimTranscript(messages) {
     const kept = [];
     for (const part of parts) {
       if (SLIM_DROP_PART_TYPES.has(part?.type)) continue;
-      kept.push(slimPart(part));
+      kept.push(stripDuplicateToolOutputPart(part));
     }
     return { ...msg, parts: kept };
   });
-}
-
-/** Drop a tool part's duplicated stdout. Returns the part unchanged otherwise. */
-function slimPart(part) {
-  return stripDuplicateToolOutputPart(part);
 }
 
 /** Strip a single message's byte-identical duplicate tool output — lossless.

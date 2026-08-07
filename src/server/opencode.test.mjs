@@ -75,22 +75,64 @@ function withMockFetch(handler, fn) {
   });
 }
 
-test("createSession primes directory cache; sendPrompt then appends ?directory=", async () => {
+// Shared mock-fetch helper for the single-message splice tests: a GET to
+// /message/m1 returns `raw` as JSON and everything else 204s. Deduplicates the
+// boilerplate the two `getMessage` tests share (duplication-gate, min-tokens 70).
+function withMessageFetch(raw, body) {
+  return withMockFetch(
+    async (url) =>
+      String(url).includes("/message/m1")
+        ? new Response(JSON.stringify(raw), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        : new Response(null, { status: 204 }),
+    body,
+  );
+}
+
+// Shared mock-fetch helper for the cached-session tests: seeds a fresh
+// directory cache and serves a GET /session?directory= returning `template`,
+// recording every call so the caller can assert on it after the body runs.
+// Collapses the createSession/runCommand test setup prefix (duplication-gate).
+async function withSessionDirectoryMock(template, body) {
   _resetSessionDirectoryCache();
   const calls = [];
   await withMockFetch(
     async (url, opts) => {
       calls.push({ url: String(url), method: opts?.method ?? "GET" });
       if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_x",
-          title: "t",
-          directory: "/work/proj",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(template), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       return new Response(null, { status: 204 });
     },
+    body,
+  );
+  return { calls };
+}
+
+// Shared stream-transport capture preamble for the subscribeEvents tests:
+// arms the event stream transport to record every URL it is asked to open,
+// resets directory-cache/stream-ready state, and returns callers their
+// `openedUrls` plus a `cleanup` that tears the transport down. Collapses the
+// three tests' identical setup blocks (duplication-gate).
+function setupEventStreamCapture() {
+  const openedUrls = [];
+  _setEventStreamTransport(async (url) => {
+    openedUrls.push(String(url));
+    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
+  });
+  _resetSessionDirectoryCache();
+  _resetStreamReadyState();
+  return { openedUrls, cleanup: () => _setEventStreamTransport(null) };
+}
+
+test("createSession primes directory cache; sendPrompt then appends ?directory=", async () => {
+  const { calls } = await withSessionDirectoryMock(
+    { id: "ses_x", title: "t", directory: "/work/proj", projectID: "pid" },
     async () => {
       await createSession({ directory: "/work/proj", title: "t" });
       await sendPrompt({ sessionId: "ses_x", text: "hi" });
@@ -177,21 +219,8 @@ test("createSession leaves an already-absolute directory untouched", async () =>
 });
 
 test("runCommand carries ?directory= from cached session", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push({ url: String(url), method: opts?.method ?? "GET" });
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_q",
-          title: "t",
-          directory: "/work/repo",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(null, { status: 204 });
-    },
+  const { calls } = await withSessionDirectoryMock(
+    { id: "ses_q", title: "t", directory: "/work/repo", projectID: "pid" },
     async () => {
       await createSession({ directory: "/work/repo", title: "t" });
       await runCommand({ sessionId: "ses_q", command: "do", arguments: "" });
@@ -1188,25 +1217,14 @@ test("getMessage strips a byte-identical tool stdout duplicate (splice path)", a
       { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
     ],
   };
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/message/m1")) {
-        return new Response(JSON.stringify(raw), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const msg = await getMessage("ses_get_strip", "m1");
-      assert.deepEqual(
-        msg.parts[0].state,
-        { output: "OUT", metadata: { exit: 0 } },
-        "the duplicate metadata.output must be dropped in the single-message splice too",
-      );
-    },
-  );
+  await withMessageFetch(raw, async () => {
+    const msg = await getMessage("ses_get_strip", "m1");
+    assert.deepEqual(
+      msg.parts[0].state,
+      { output: "OUT", metadata: { exit: 0 } },
+      "the duplicate metadata.output must be dropped in the single-message splice too",
+    );
+  });
 });
 
 test("getMessage leaves a NON-identical metadata.output (live streaming) untouched", async () => {
@@ -1216,25 +1234,14 @@ test("getMessage leaves a NON-identical metadata.output (live streaming) untouch
       { type: "tool", state: { output: "final", metadata: { output: "partial", exit: 0 } } },
     ],
   };
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/message/m1")) {
-        return new Response(JSON.stringify(raw), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const msg = await getMessage("ses_get_live", "m1");
-      assert.deepEqual(
-        msg.parts[0].state.metadata.output,
-        "partial",
-        "different metadata.output must survive (running tool)",
-      );
-    },
-  );
+  await withMessageFetch(raw, async () => {
+    const msg = await getMessage("ses_get_live", "m1");
+    assert.deepEqual(
+      msg.parts[0].state.metadata.output,
+      "partial",
+      "different metadata.output must survive (running tool)",
+    );
+  });
 });
 
 test("stripDuplicateToolOutput is lossless and tolerant", () => {
@@ -1627,13 +1634,7 @@ test("subscribeEvents eagerly opens scoped streams for supplied eagerDirectories
   // open fires from the bootstrap IIFE — no prompt, no session use, just
   // startup. Assert both /work/a and /work/b scoped URLs show up in the URL
   // list, alongside the global /event URL.
-  const openedUrls = [];
-  _setEventStreamTransport(async (url) => {
-    openedUrls.push(String(url));
-    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
-  });
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
+  const { openedUrls, cleanup } = setupEventStreamCapture();
 
   const stop = subscribeEvents(() => {}, {
     sweepIntervalMs: 0,
@@ -1669,7 +1670,7 @@ test("subscribeEvents eagerly opens scoped streams for supplied eagerDirectories
     assert.ok(keys.includes("/work/b"), "/work/b eager stream key present");
   } finally {
     stop();
-    _setEventStreamTransport(null);
+    cleanup();
   }
 });
 
@@ -1679,13 +1680,7 @@ test("subscribeEvents eager open de-dupes and skips empty/null entries", async (
   // paneCurrentPath is empty). The eager loop must:
   //   - open /work/a exactly once even when listed twice,
   //   - skip "" and null entries without throwing or opening a bogus stream.
-  const openedUrls = [];
-  _setEventStreamTransport(async (url) => {
-    openedUrls.push(String(url));
-    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
-  });
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
+  const { openedUrls, cleanup } = setupEventStreamCapture();
 
   const stop = subscribeEvents(() => {}, {
     sweepIntervalMs: 0,
@@ -1704,7 +1699,7 @@ test("subscribeEvents eager open de-dupes and skips empty/null entries", async (
     );
   } finally {
     stop();
-    _setEventStreamTransport(null);
+    cleanup();
   }
 });
 
@@ -1714,13 +1709,7 @@ test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at st
   // `opts.eagerDirectories`. When the caller doesn't supply it, only the
   // global /event stream must be opened at startup — no scoped /event
   // requests, no per-catalog flood.
-  const openedUrls = [];
-  _setEventStreamTransport(async (url) => {
-    openedUrls.push(String(url));
-    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
-  });
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
+  const { openedUrls, cleanup } = setupEventStreamCapture();
 
   const stop = subscribeEvents(() => {}, { sweepIntervalMs: 0 });
   try {
@@ -1739,7 +1728,7 @@ test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at st
     assert.deepEqual(keys, [""], `only the global key should be live at startup; saw ${JSON.stringify(keys)}`);
   } finally {
     stop();
-    _setEventStreamTransport(null);
+    cleanup();
   }
 });
 

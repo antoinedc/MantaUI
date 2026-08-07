@@ -67,7 +67,14 @@ export function LoadEarlier({
   loadedAllRef: React.MutableRefObject<boolean>;
 }) {
   const [loading, setLoading] = useState(false);
-  if (loading || loadedAllRef.current || messages.length < TRANSCRIPT_TAIL_LIMIT) {
+  // NOTE: `loading` is deliberately NOT in this early return — the button must
+  // stay mounted (disabled, "Loading…") while the full-history fetch runs so
+  // the user gets feedback. Only hide once loadedAll or the tail is too short.
+  // Known false positive: a session with EXACTLY TRANSCRIPT_TAIL_LIMIT
+  // messages shows the button, and clicking just re-fetches the same tail. The
+  // issue's wording uses `>=` so this is accepted; loading the full history is
+  // still a no-op safe click.
+  if (loadedAllRef.current || messages.length < TRANSCRIPT_TAIL_LIMIT) {
     return null;
   }
   const onLoadEarlier = () => {
@@ -96,7 +103,8 @@ export function LoadEarlier({
       <button
         type="button"
         onClick={onLoadEarlier}
-        className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft"
+        disabled={loading}
+        className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft disabled:cursor-not-allowed disabled:opacity-60"
       >
         {loading ? "Loading…" : "Load earlier messages"}
       </button>

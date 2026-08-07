@@ -2352,17 +2352,21 @@ export function formatPreviewFooter(
 }
 
 /** Run one async fetch attempt with a timeout. Mirrors the rpcWithTimeout
- *  pattern (a suffering remote must not hang the caller forever). */
+ *  pattern (a suffering remote must not hang the caller forever). The timer is
+ *  cleared on settle so a fast resolve doesn't leave a stale timeout pending. */
 export function withTranscriptFetchTimeout<T>(
   fetchOnce: () => Promise<T>,
   timeoutMs: number,
 ): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     fetchOnce(),
     new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`transcript fetch timed out after ${timeoutMs}ms`)), timeoutMs);
+      timer = setTimeout(() => reject(new Error(`transcript fetch timed out after ${timeoutMs}ms`)), timeoutMs);
     }),
-  ]);
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 /** Initial mount transcript fetch: one attempt under a timeout, and on failure
