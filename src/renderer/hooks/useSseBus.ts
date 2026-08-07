@@ -83,6 +83,16 @@ import { markFirstToken, markRendered } from "../firstTokenLatency";
 const INITIAL_FETCH_TIMEOUT_MS = 15_000;
 const INITIAL_FETCH_RETRY_DELAY_MS = 2_000;
 
+// A `turnComplete` with running:false is NOT proof the turn ended: the box
+// derives it from the transcript, and at every tool-step boundary the just-
+// finished step's message is momentarily the transcript tail, so it fires
+// mid-turn and is re-armed by the next `session.status busy` 0-134ms later
+// (measured on the live stream, 2026-08-07). Waiting this long before
+// believing it collapses that flicker, while still self-healing if the hard
+// `session.status {"type":"idle"}` signal is ever dropped.
+const TURN_SETTLE_MS = 400;
+export { TURN_SETTLE_MS };
+
 
 export type SseBus = {
   running: boolean;
@@ -229,6 +239,17 @@ export function useSseBus(params: {
     phase: "running" | "done";
   } | null>(null);
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Timer arming the delayed running→false flip on a `turnComplete` whose
+  // running flag is not yet authoritative (see TURN_SETTLE_MS). Any other
+  // writer of `running` cancels it first, so a stale settle never lands on a
+  // turn it does not belong to.
+  const turnSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelTurnSettle = () => {
+    if (turnSettleRef.current) {
+      clearTimeout(turnSettleRef.current);
+      turnSettleRef.current = null;
+    }
+  };
   const [liveTodos, setLiveTodos] = useState<
     Array<{ content: string; status: string; priority: string }> | null
   >(null);
@@ -377,6 +398,7 @@ export function useSseBus(params: {
       if (!shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
         return;
       }
+      cancelTurnSettle();
       drainAbortRef.current = true;
       void window.api.opencodeAbort(sessionId)
         .catch(() => {
@@ -498,6 +520,7 @@ export function useSseBus(params: {
         const err = (props.error as { data?: { message?: string }; name?: string } | undefined);
         const raw = err?.data?.message ?? err?.name ?? "Unknown server error";
         if (isDrainAbortError(err?.name, drainAbortRef.current)) {
+          cancelTurnSettle();
           setRunning(false);
           return;
         }
@@ -513,6 +536,7 @@ export function useSseBus(params: {
         if (auth) {
           setSendError(`${auth.label} needs to be reconnected.`);
           setAuthReconnect(auth.label);
+          cancelTurnSettle();
           setRunning(false);
           return;
         }
@@ -535,6 +559,7 @@ export function useSseBus(params: {
         }
         setSendError(msg);
         setAuthReconnect(null);
+        cancelTurnSettle();
         setRunning(false);
       }
 
@@ -735,9 +760,29 @@ export function useSseBus(params: {
           if (unmatched > 0) scheduleRefetch();
           return;
         }
-        case "running":
-        case "turnComplete": {
+        case "running": {
+          // Authoritative in both directions: cancel any pending settle so a
+          // stale timer can't clobber this value, then apply it immediately.
+          cancelTurnSettle();
           setRunning((ev.payload as StreamRunningPayload).running);
+          return;
+        }
+        case "turnComplete": {
+          const { running: turnRunning } = ev.payload as StreamRunningPayload;
+          if (turnRunning === true) {
+            cancelTurnSettle();
+            setRunning(true);
+            return;
+          }
+          // running:false is not proof the turn ended — the box derives it from
+          // the transcript, so it fires at every tool-step boundary and is
+          // re-armed by the next `session.status busy`. Start (or restart) a
+          // settle timer; only the hard `running` signal or a genuine end clears
+          // it early.
+          cancelTurnSettle();
+          turnSettleRef.current = setTimeout(() => {
+            setRunning(false);
+          }, TURN_SETTLE_MS);
           return;
         }
         case "todos": {
@@ -781,6 +826,7 @@ export function useSseBus(params: {
     return () => {
       off();
       offStream();
+      cancelTurnSettle();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
     };
   }, [sessionId]);
