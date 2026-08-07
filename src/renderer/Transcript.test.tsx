@@ -213,6 +213,37 @@ describe("Transcript virtualization (react-virtuoso)", () => {
   });
 });
 
+describe("Transcript composer column pin + wrap classes (BET-687)", () => {
+  afterEach(() => {
+    // Leave the harness's window.api mock in a clean state.
+    (window as unknown as { api?: unknown }).api = undefined;
+  });
+
+  it("carries flex-1 min-h-0 on the empty-state AnimatePresence wrapper", () => {
+    // The wrapper (motion.div key="empty") is what must fill flex-1 in the
+    // empty/short session so the composer sits flush with the pane bottom.
+    const h = mount(<Transcript {...props([])} />);
+    const wrapper = Array.from(h.container.querySelectorAll<HTMLElement>("[class]")).find(
+      (el) =>
+        el.classList.contains("min-h-0") &&
+        el.classList.contains("flex") &&
+        el.textContent?.includes("Welcome"),
+    );
+    expect(wrapper).not.toBeNull();
+    expect(wrapper!.className).toContain("flex-1");
+    h.unmount();
+  });
+
+  it("carries overflow-x-hidden and max-w-full on the Virtuoso root", () => {
+    const h = mount(<Transcript {...props(HISTORY)} />);
+    const root = Array.from(h.container.querySelectorAll<HTMLElement>("[class]")).find(
+      (el) => el.classList.contains("overflow-x-hidden") && el.classList.contains("max-w-full"),
+    );
+    expect(root).not.toBeNull();
+    h.unmount();
+  });
+});
+
 describe("Transcript LoadEarlier (tail-first loading)", () => {
   afterEach(() => {
     // Leave the harness's window.api mock in a clean state.
