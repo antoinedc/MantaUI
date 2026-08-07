@@ -231,8 +231,8 @@ enum ChatTranscriptMapper {
                 // text. The box itself keys turn completion on time.completed.
                 guard msg.info.time?.completed != nil else { continue }
                 let at = ChatClock.date(epochMs: msg.info.time?.completed)
-                for part in msg.parts {
-                    process(part, at: at, pending: &pending, blocks: &blocks)
+                for (index, part) in msg.parts.enumerated() {
+                    process(part, index: index, at: at, pending: &pending, blocks: &blocks)
                 }
                 flush(&pending, into: &blocks)
             default:
@@ -253,7 +253,7 @@ enum ChatTranscriptMapper {
         pending = []
     }
 
-    private static func process(_ part: OpencodePart, at: Date?, pending: inout [StepGroupRow], blocks: inout [TranscriptBlock]) {
+    private static func process(_ part: OpencodePart, index: Int, at: Date?, pending: inout [StepGroupRow], blocks: inout [TranscriptBlock]) {
         if part.ignored == true || part.synthetic == true { return }
         switch part.type {
         case "text":
@@ -273,7 +273,7 @@ enum ChatTranscriptMapper {
                     pending.append(.subagent(agent))
                 }
             } else {
-                pending.append(.step(step(from: part, tool: tool)))
+                pending.append(.step(step(from: part, tool: tool, indexWithinMessage: index)))
             }
         default:
             // reasoning / file / etc. — no §8 block type renders it; skip.
@@ -298,7 +298,8 @@ enum ChatTranscriptMapper {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private static func step(from part: OpencodePart, tool: String) -> ToolStep {
+    private static func step(from part: OpencodePart, tool: String, indexWithinMessage: Int) -> ToolStep {
+        let id = stepIdentity(part: part, indexWithinMessage: indexWithinMessage)
         let state = ChatJSON.object(part.extra["state"])
         let statusRaw = ChatJSON.string(state?["status"])
         let status = StepStatusFromTool.status(statusRaw)
@@ -314,7 +315,22 @@ enum ChatTranscriptMapper {
             duration = ""
         }
         let output = ChatJSON.string(state?["output"])
-        return ToolStep(verb: verb, target: target, duration: duration, status: status, output: output)
+        return ToolStep(id: id, verb: verb, target: target, duration: duration, status: status, output: output)
+    }
+
+    /// Deterministic step identity derived from the wire data so a step's id
+    /// survives a canonical refetch (the turn-boundary flash fix, BET-666).
+    /// Priority: the tool part's `callID` when present → the part's own id →
+    /// `\(messageID)-step-\(indexWithinMessage)` as a last resort. No freshly
+    /// minted random id anywhere on this mapping path.
+    private static func stepIdentity(part: OpencodePart, indexWithinMessage: Int) -> String {
+        if let callID = ChatJSON.string(part.extra["callID"]), !callID.isEmpty {
+            return callID
+        }
+        if !part.id.isEmpty {
+            return part.id
+        }
+        return "\(part.messageID)-step-\(indexWithinMessage)"
     }
 
     private static func durationSeconds(state: [String: JSONValue]?, time: [String: JSONValue]?) -> Double? {
