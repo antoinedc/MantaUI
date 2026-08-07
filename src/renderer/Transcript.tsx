@@ -55,13 +55,30 @@ type TranscriptContext = {
   onRejectQuestion: (q: QuestionRequest) => void;
 };
 
+// ===== The reading inset =====
+//
+// NEVER put horizontal padding on the <Virtuoso> root. Virtuoso renders its
+// viewport as `position: absolute` sized against the scroller's PADDING box:
+// with `padding-inline: 48px` on the scroller the viewport computes to
+// `left: 48px; right: -48px; width: <clientWidth>`. The left inset survives,
+// the RIGHT inset is cancelled, every row is 2×inset too wide, and the
+// scroller's own `overflow-x: hidden` clips the overhang — which reads as
+// "text cut off at the right edge with no margin" (measured 2026-08-07:
+// scroller clientWidth 1183 vs true content width 1087, scrollWidth 1268).
+// Padding was correct on the hand-rolled block scroller this replaced; it is
+// not on a Virtuoso root. The inset therefore lives on the IN-FLOW children —
+// List, Header, Footer — where padding behaves normally, and where it also
+// gives the hover timestamp its gutter instead of letting it overflow.
+const TRANSCRIPT_INSET: React.CSSProperties = {
+  paddingInline: "var(--transcript-inset)",
+};
+
 // ===== List (spacing) =====
 //
 // Preserves the reading-column layout the hand-rolled scroller drew: the
-// messages are laid out as a flex column with `--turn-gap` between rows. The
-// horizontal inset + vertical scroll padding live on the Virtuoso root (below);
-// this List only re-introduces the inter-row turn gap that the original single
-// `MeasureColumn stacked` flex container provided.
+// messages are laid out as a flex column with `--turn-gap` between rows, plus
+// the reading inset and the vertical breathing room at the ends of the run
+// (both formerly on the Virtuoso root, where they were silently inert).
 const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function TranscriptList(
   props,
   ref,
@@ -77,6 +94,8 @@ const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function Transcript
         flexDirection: "column",
         gap: "var(--turn-gap)",
         maxWidth: "100%",
+        ...TRANSCRIPT_INSET,
+        paddingBlock: "var(--sp-6)",
       }}
     >
       {children}
@@ -122,13 +141,18 @@ export function LoadEarlierHeader({
 
 // Virtuoso Header adapter: Virtuoso invokes its Header component with the
 // TranscriptContext (the `context` prop), so bridge it to the shared
-// LoadEarlierHeader's discrete props.
+// LoadEarlierHeader's discrete props. Carries the reading inset because
+// Virtuoso renders Header OUTSIDE the List (see TRANSCRIPT_INSET); the shared
+// component stays inset-free so TaskCard can render it inside an already-
+// inset column.
 const LoadEarlier = ({ context }: { context: TranscriptContext }) => (
-  <LoadEarlierHeader
-    showLoadEarlier={context.showLoadEarlier}
-    loadingEarlier={context.loadingEarlier}
-    onLoadEarlier={context.onLoadEarlier}
-  />
+  <div style={TRANSCRIPT_INSET}>
+    <LoadEarlierHeader
+      showLoadEarlier={context.showLoadEarlier}
+      loadingEarlier={context.loadingEarlier}
+      onLoadEarlier={context.onLoadEarlier}
+    />
+  </div>
 );
 
 // The live "working" indicator (BET-677). A constant-height row at the tail of
@@ -168,7 +192,10 @@ export function WorkingIndicator({ running }: { running: boolean }) {
 // the bottom of the transcript in every state).
 function TranscriptTail({ context }: { context: TranscriptContext }) {
   return (
-    <>
+    // Inset + bottom breathing room: Virtuoso renders Footer OUTSIDE the List,
+    // so it needs its own copy of the reading inset (see TRANSCRIPT_INSET) and
+    // the trailing gap the scroller's now-removed padding used to imply.
+    <div style={{ ...TRANSCRIPT_INSET, paddingBottom: "var(--sp-6)" }}>
       <WorkingIndicator running={context.running} />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
@@ -189,7 +216,7 @@ function TranscriptTail({ context }: { context: TranscriptContext }) {
           ))}
         </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -347,6 +374,7 @@ export function Transcript({
               className="flex-1 overflow-y-auto overflow-x-hidden"
               style={{
                 padding: "var(--sp-6) 0",
+                marginBottom: "var(--sp-2)",
                 paddingInline: "var(--transcript-inset)",
               }}
             >
@@ -372,10 +400,12 @@ export function Transcript({
             <Virtuoso<OpencodeMessage, TranscriptContext>
               ref={virtuosoRef}
               className="flex-1 overflow-x-hidden max-w-full"
-              style={{
-                padding: "var(--sp-6) 0",
-                paddingInline: "var(--transcript-inset)",
-              }}
+              // NO padding here — Virtuoso's absolute viewport ignores it and
+              // the right inset is cancelled (see TRANSCRIPT_INSET). The inset
+              // and the vertical breathing room live on List/Header/Footer.
+              // `marginBottom` is safe (it is outside the scroller box) and is
+              // the gap between the transcript and the composer.
+              style={{ marginBottom: "var(--sp-2)" }}
               data={messages}
               context={virtuosoContext}
               computeItemKey={(_, m) => m.info.id}
