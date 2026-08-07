@@ -1,42 +1,29 @@
 // ===== useTranscriptState =====
 //
 // Extracted from ChatPanel.tsx (BET-64). Owns the transcript rendering
-// pipeline: message-list state, pin-to-bottom scroll behavior, delta
-// buffering/flushing, and the inactive-panel performance gate.
+// pipeline: message-list state, delta buffering/flushing, and the inactive-
+// panel performance gate.
 //
 // This is the hook that owns `messages` — the single source of truth for
 // the transcript. It exposes setMessages so the SSE bus hook can write to it.
-// The scroll/pin logic is self-contained but depends on `scrollRef` and
-// `isActive` props.
+//
+// Scrolling, pin-to-bottom and follow-output are owned by react-virtuoso
+// (BET-679) — the hook no longer carries any scroll math or scroll refs.
 //
 // Key behaviors:
 //   - Buffered text-delta flush (250ms max-age, boundary-based)
 //   - 300ms-debounced full transcript refetch
 //   - Per-message incremental splice (300ms debounce)
 //   - Inactive-panel gating (skip refetch + delta flush when hidden)
-//   - Post-commit stick-to-bottom (useLayoutEffect reads live DOM)
 //   - Session-change reset
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
 import {
   mergeBufferedDeltas,
   collectChildSessionIds,
-  wasAtBottomBeforeCommit,
-  classifyScrollForPin,
   reconcileOptimisticUser,
-  scrollBehaviorFor,
 } from "../chatUtils";
-
-/** Live reduced-motion preference. Read per call — a user can change it
- *  mid-session and `matchMedia` is cheap. Guarded for non-DOM test runs. */
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
 
 /** How many of the most recent messages the tail-first mount fetch pulls.
  *  "Load earlier" afterwards replaces the tail with the full history. The
@@ -46,10 +33,6 @@ export const TRANSCRIPT_TAIL_LIMIT = 100;
 export type TranscriptState = {
   messages: OpencodeMessage[] | null;
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
-  scrollRef: React.RefObject<HTMLDivElement>;
-  contentRef: React.RefObject<HTMLDivElement>;
-  pinnedToBottom: React.MutableRefObject<boolean>;
-  stickToBottom: () => void;
   refreshing: boolean;
   setRefreshing: React.Dispatch<React.SetStateAction<boolean>>;
   childSessionIds: React.MutableRefObject<Set<string>>;
@@ -61,8 +44,6 @@ export type TranscriptState = {
   childMessagesRef: React.MutableRefObject<Map<string, OpencodeMessage[]>>;
   isActiveRef: React.MutableRefObject<boolean>;
   refetchOwedWhileInactive: React.MutableRefObject<boolean>;
-  prevScrollHeight: React.MutableRefObject<number>;
-  questionCardRef: React.RefObject<HTMLDivElement>;
   wantQuestionScroll: React.MutableRefObject<boolean>;
   // Apply one box-flushed delta (stream.flush) into the transcript
   // (BET-551 / §17 — the box detects flush boundaries now). Returns the
@@ -104,13 +85,6 @@ export function useTranscriptState(params: {
       loadedAllRef.current ? {} : { limit: TRANSCRIPT_TAIL_LIMIT },
     [],
   );
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // The inner content node observed by the ResizeObserver below (the transcript
-  // body inside the scroll container). Separate from scrollRef because we want
-  // to react to the CONTENT growing, not the scroller resizing.
-  const contentRef = useRef<HTMLDivElement>(null);
-  const pinnedToBottom = useRef(true);
-  const prevScrollHeight = useRef(0);
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
   const refetchOwedWhileInactive = useRef(false);
@@ -140,33 +114,8 @@ export function useTranscriptState(params: {
     childMessagesRef.current = childMessages;
   }, [childMessages]);
   // childRefetchTimers are managed by the ChatPanel caller (see scheduleChildRefetch param).
-  const questionCardRef = useRef<HTMLDivElement>(null);
   const wantQuestionScroll = useRef(false);
   const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Follow new content to the bottom.
-  //
-  // Eased rather than instant when the step is SMALL (BET-649): a sentence
-  // arriving every ~120ms used to jump the viewport, which is most of what
-  // made streaming feel jerky. `scrollBehaviorFor` (pure, tested) keeps the
-  // instant write for anything large — a whole turn landing, a session switch,
-  // a re-pin after the panel was hidden — because smooth-scrolling hundreds of
-  // pixels lags behind the next commit and the view never catches up. Reduced
-  // motion always jumps.
-  //
-  // The pin DECISION is untouched: this animates how we follow, never whether
-  // we stick (that is `wasAtBottomBeforeCommit`, on its fourth design).
-  const stickToBottom = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const target = el.scrollHeight;
-    const behavior = scrollBehaviorFor(
-      target - el.scrollTop - el.clientHeight,
-      prefersReducedMotion(),
-    );
-    if (behavior === "smooth") el.scrollTo({ top: target, behavior: "smooth" });
-    else el.scrollTop = target;
-  }, []);
 
   // Apply one box-flushed delta (stream.flush) into the transcript
   // (BET-551 / §17). The box detects flush boundaries and emits the flushed
@@ -307,24 +256,8 @@ export function useTranscriptState(params: {
     });
   }, [fetchChildTranscript]);
 
-  // Scroll listener
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      const { scrollHeight, scrollTop, clientHeight } = el;
-      pinnedToBottom.current = classifyScrollForPin({ scrollHeight, scrollTop, clientHeight });
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", onScroll);
-    };
-  }, []);
-
   // Session-change reset
   useEffect(() => {
-    prevScrollHeight.current = 0;
-    pinnedToBottom.current = true;
     loadedAllRef.current = false;
     // Cancel any in-flight per-message splice from the PREVIOUS session so a
     // late timer can't refetch + write a stale message into the new session's
@@ -347,86 +280,9 @@ export function useTranscriptState(params: {
     };
   }, []);
 
-  // Follow the tail when the CONTENT grows without a `messages` commit.
-  //
-  // The post-commit layout effect below only fires when the messages array
-  // changes identity. Plenty of growth is not a commit: markdown/code blocks
-  // laying out after the commit, a card expanding or remounting, the working
-  // indicator appearing, a reflow when the window is resized. Each of those
-  // pushes the bottom away from a user who was sitting at it, and nothing put
-  // them back — which is the "new messages stop scrolling the transcript down"
-  // regression.
-  //
-  // This observes SIZE only and re-sticks only when `pinnedToBottom.current` is
-  // already true, so it can never drag a user who scrolled up back to the tail.
-  // Scrolling does not change content size, so there is no feedback loop.
-  //
-  // GOTCHA — `transcriptMounted` in the deps is load-bearing, not decoration.
-  // ChatPanel returns a "Loading session…" screen while `messages` is null, so
-  // the Transcript (and therefore `contentRef.current`) does NOT exist on the
-  // first render. `stickToBottom` is a `useCallback` with empty deps, i.e.
-  // permanently stable — so with `[stickToBottom]` alone this effect ran exactly
-  // once, against a null ref, and the observer was NEVER attached for any
-  // session. Re-running it when the transcript mounts is what makes it real.
-  const transcriptMounted = messages !== null;
-  useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    if (typeof ResizeObserver === "undefined") return; // jsdom / old runtimes
-    const ro = new ResizeObserver(() => {
-      if (!pinnedToBottom.current) return;
-      if (!isActiveRef.current) return; // a hidden panel has no live layout
-      stickToBottom();
-      const el = scrollRef.current;
-      if (el && el.scrollHeight > 0) prevScrollHeight.current = el.scrollHeight;
-    });
-    ro.observe(content);
-    return () => ro.disconnect();
-  }, [stickToBottom, transcriptMounted]);
-
-  // Post-commit stick layout effect. The stick decision MUST compare the user's
-  // pre-commit position against the PREVIOUS render's height (prevScrollHeight),
-  // not the live post-commit el.scrollHeight — by the time this layout effect
-  // runs React has already appended the new rows, so el.scrollHeight is the new
-  // (taller) height while el.scrollTop is still the user's old position.
-  // Measuring against the grown height reports a false large "distance from
-  // bottom" for a user sitting AT the tail, so it declines to stick — the v3
-  // regression PR #50 reintroduced. wasAtBottomBeforeCommit() is the single
-  // source of truth for this (tested in chatUtils.test.ts). Do NOT inline
-  // el.scrollHeight here.
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const wasPinned = wasAtBottomBeforeCommit(
-      prevScrollHeight.current,
-      el.scrollTop,
-      el.clientHeight,
-    );
-    if (wasPinned) {
-      el.scrollTop = el.scrollHeight;
-      pinnedToBottom.current = true;
-    } else {
-      pinnedToBottom.current = false;
-    }
-    // Guard: only persist scrollHeight when it's a valid positive value.
-    // Under the new HTTP-streaming cadence, commits can land mid-layout
-    // (justify-end reflow, container not yet painted) where el.scrollHeight
-    // transiently reads 0. Writing 0 into prevScrollHeight would make the
-    // next commit's wasAtBottomBeforeCommit(0, ...) return true (first-
-    // commit rule) and snap the viewport to the bottom even if the user
-    // scrolled up — the exact auto-scroll regression.
-    if (el.scrollHeight > 0) {
-      prevScrollHeight.current = el.scrollHeight;
-    }
-  }, [messages]);
-
   return {
     messages,
     setMessages,
-    scrollRef,
-    contentRef,
-    pinnedToBottom,
-    stickToBottom,
     refreshing,
     setRefreshing,
     childSessionIds,
@@ -438,8 +294,6 @@ export function useTranscriptState(params: {
     childMessagesRef,
     isActiveRef,
     refetchOwedWhileInactive,
-    prevScrollHeight,
-    questionCardRef,
     wantQuestionScroll,
     applyStreamFlush,
     scheduleRefetch,

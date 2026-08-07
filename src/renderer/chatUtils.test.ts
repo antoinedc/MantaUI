@@ -22,12 +22,6 @@ import {
   detectCommandFromText,
   MIN_COMMAND_PREFIX_LEN,
   formatAge,
-  SCROLL_REPIN_PX,
-  distFromBottom,
-  classifyScrollForPin,
-  scrollBehaviorFor,
-  SMOOTH_SCROLL_MAX_PX,
-  wasAtBottomBeforeCommit,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
   isDrainAbortError,
@@ -430,32 +424,6 @@ describe("moveMenuHighlight", () => {
 
 // ===== findFlushBoundary =====
 
-
-// ===== scrollBehaviorFor (BET-649) =====
-
-describe("scrollBehaviorFor", () => {
-  it("eases a small follow-step — the streamed-sentence case", () => {
-    expect(scrollBehaviorFor(40, false)).toBe("smooth");
-    expect(scrollBehaviorFor(SMOOTH_SCROLL_MAX_PX, false)).toBe("smooth");
-  });
-
-  it("jumps a large one so the view cannot chase the content", () => {
-    // A whole turn landing / a session switch / a re-pin after the panel was
-    // hidden. Easing hundreds of pixels means the animation is still running
-    // when the next commit arrives and the viewport never settles.
-    expect(scrollBehaviorFor(SMOOTH_SCROLL_MAX_PX + 1, false)).toBe("auto");
-    expect(scrollBehaviorFor(5000, false)).toBe("auto");
-  });
-
-  it("always jumps under reduced motion", () => {
-    expect(scrollBehaviorFor(40, true)).toBe("auto");
-  });
-
-  it("treats a non-positive delta as nothing to animate", () => {
-    expect(scrollBehaviorFor(0, false)).toBe("auto");
-    expect(scrollBehaviorFor(-120, false)).toBe("auto");
-  });
-});
 
 // ===== mergeBufferedDeltas =====
 
@@ -914,132 +882,6 @@ describe("detectCommandFromText", () => {
 // behind the dead turn. This helper drives `running` true at mount so the
 // abort button appears.
 
-
-// ===== distFromBottom =====
-
-describe("distFromBottom", () => {
-  it("returns 0 when scrolled all the way to the bottom", () => {
-    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 800, clientHeight: 200 })).toBe(0);
-  });
-
-  it("returns the gap between viewport bottom and content bottom", () => {
-    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 500, clientHeight: 200 })).toBe(300);
-  });
-
-  it("clamps negative distances (overscroll) to 0", () => {
-    // Some browsers/momentum-scroll briefly report scrollTop + clientHeight > scrollHeight.
-    expect(distFromBottom({ scrollHeight: 1000, scrollTop: 900, clientHeight: 200 })).toBe(0);
-  });
-
-  it("returns full distance for an empty/short transcript", () => {
-    expect(distFromBottom({ scrollHeight: 200, scrollTop: 0, clientHeight: 200 })).toBe(0);
-  });
-});
-
-// ===== classifyScrollForPin (single symmetric threshold) =====
-
-describe("classifyScrollForPin", () => {
-  const metricsAtDist = (dist: number) => ({
-    scrollHeight: 2000,
-    scrollTop: 2000 - 500 - dist,
-    clientHeight: 500,
-  });
-
-  it("pins when at the bottom", () => {
-    expect(classifyScrollForPin(metricsAtDist(0))).toBe(true);
-  });
-
-  it("pins at or within the threshold", () => {
-    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX))).toBe(true);
-    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX - 1))).toBe(true);
-  });
-
-  it("unpins beyond the threshold", () => {
-    expect(classifyScrollForPin(metricsAtDist(SCROLL_REPIN_PX + 1))).toBe(false);
-    expect(classifyScrollForPin(metricsAtDist(30))).toBe(false);
-    expect(classifyScrollForPin(metricsAtDist(500))).toBe(false);
-  });
-
-  it("treats overscroll as pinned (dist clamped to 0)", () => {
-    expect(
-      classifyScrollForPin({ scrollHeight: 1000, scrollTop: 900, clientHeight: 200 }),
-    ).toBe(true);
-  });
-
-  it("REGRESSION: a 30px scroll-up un-pins so the next delta does NOT snap", () => {
-    // This is the v1 bug (80px symmetric threshold) AND a v3-draft bug
-    // (asymmetric hysteresis with dead-zone "no change" return). With a
-    // single 8px threshold, any non-trivial scroll-up flips pin to false
-    // and the next delta is left alone.
-    expect(classifyScrollForPin(metricsAtDist(30))).toBe(false);
-  });
-
-  it("REGRESSION: drag-up via scrollbar handle past the threshold un-pins", () => {
-    // The v2 bug: previous onScroll handler only RE-pinned, never UN-pinned.
-    // Scrollbar-handle drag fires only `scroll` events (no wheel/touch/key),
-    // so a drag from `dist=0` to `dist=200` left `pinned == true` and the
-    // next streaming delta snapped the viewport back to the tail.
-    expect(classifyScrollForPin(metricsAtDist(200))).toBe(false);
-  });
-
-  it("respects custom threshold", () => {
-    expect(classifyScrollForPin(metricsAtDist(20), 32)).toBe(true);
-    expect(classifyScrollForPin(metricsAtDist(33), 32)).toBe(false);
-  });
-});
-
-// ===== wasAtBottomBeforeCommit (v4 — pre-commit pin derivation) =====
-
-describe("wasAtBottomBeforeCommit", () => {
-  it("returns true when previous layout had the user pinned at the bottom", () => {
-    // prevScrollHeight=1000, clientHeight=200 → bottom is scrollTop=800.
-    // scrollTop is unchanged by appending content, so a still-at-bottom
-    // reader has scrollTop=800 even after scrollHeight grows.
-    expect(wasAtBottomBeforeCommit(1000, 800, 200)).toBe(true);
-  });
-
-  it("returns true within the 8px threshold", () => {
-    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX, 200)).toBe(true);
-    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX + 1, 200)).toBe(true);
-  });
-
-  it("returns false when the user scrolled up past the threshold", () => {
-    expect(wasAtBottomBeforeCommit(1000, 800 - SCROLL_REPIN_PX - 1, 200)).toBe(false);
-    expect(wasAtBottomBeforeCommit(1000, 500, 200)).toBe(false);
-  });
-
-  it("returns true on first commit (prevScrollHeight=0) so initial render pins", () => {
-    expect(wasAtBottomBeforeCommit(0, 0, 200)).toBe(true);
-  });
-
-  it("REGRESSION (v3 streaming snap-back): if user wheeled up 50px right before a delta lands, the post-commit effect must NOT stick", () => {
-    // Sequence:
-    //   - Before user input: scrollHeight=1000, scrollTop=800 (at bottom).
-    //   - User wheels up 50px. Browser updates scrollTop=750 synchronously.
-    //   - Before the browser dispatches the scroll event, a streaming
-    //     delta lands and React commits. scrollHeight now = 1100 (delta
-    //     added 100px of content). clientHeight unchanged at 200.
-    //     scrollTop is preserved by the browser at 750.
-    //   - The post-commit layout effect reads (prevScrollHeight=1000,
-    //     scrollTop=750, clientHeight=200) → prevDist = 1000 - 750 - 200
-    //     = 50 → above threshold → DON'T stick.
-    expect(wasAtBottomBeforeCommit(1000, 750, 200)).toBe(false);
-  });
-
-  it("REGRESSION (v3 streaming snap-back): if user did NOT scroll, post-commit effect still sticks even though new scrollHeight is larger", () => {
-    // Same setup minus the wheel: scrollTop stays at 800 (the pre-commit
-    // bottom). New scrollHeight is 1100, but we evaluate against the
-    // prevScrollHeight (1000) → prevDist = 0 → stick.
-    expect(wasAtBottomBeforeCommit(1000, 800, 200)).toBe(true);
-  });
-
-  it("respects custom threshold", () => {
-    // prevScrollHeight=1000, clientHeight=200 → bottom=800. scrollTop=775
-    // → prevDist=25.
-    expect(wasAtBottomBeforeCommit(1000, 775, 200, 32)).toBe(true);
-    expect(wasAtBottomBeforeCommit(1000, 760, 200, 32)).toBe(false);
-  });
-});
 
 describe("shouldAbortForQueuedDrain", () => {
   it("aborts at a step boundary when a prompt is queued and not already draining", () => {

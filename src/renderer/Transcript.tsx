@@ -1,40 +1,32 @@
 // ===== Transcript =====
 //
 // Extracted from ChatPanel.tsx (BET-63). The scrolling message list: the
-// scroll container, the per-message `MessageRow` map, the tail-of-transcript
-// live-todos card, and the pending-question cards. Purely presentational —
-// every piece of state (messages, the derived per-message maps, running,
-// activeTodos, questions) and every callback (replyQuestion / rejectQuestion)
-// is passed in by ChatPanel.
+// virtualized scroll container, the per-message `MessageRow`, the tail-of-
+// transcript live-todos card, and the pending-question cards. Purely
+// presentational — every piece of state (messages, the derived per-message
+// maps, running, activeTodos, questions) and every callback (replyQuestion /
+// rejectQuestion) is passed in by ChatPanel.
 //
-// Two DOM refs are FORWARDED from ChatPanel rather than owned here, because
-// the container's effects read them directly:
-//   - `scrollRef` — the pin-to-bottom machinery (wasAtBottomBeforeCommit,
-//     classifyScrollForPin, the scroll listener, resizeInput) all read this
-//     element's scrollTop/scrollHeight/clientHeight. It MUST be the same node
-//     ChatPanel measures, so it's passed down, not created here.
-//   - `questionCardRef` — a notification deep-link scrolls the pending
-//     QuestionCard(s) into view; ChatPanel's deferred-scroll effect reads it.
-//   - `contentRef` — forwarded for the same reason: the transcript-state hook's
-//     ResizeObserver measures the inner content node to follow the tail when
-//     content grows without a `messages` commit (markdown laying out, a card
-//     expanding, the working indicator appearing). It MUST be the same node the
-//     hook observes, so it's created by the hook and passed down, not owned here.
+// BET-679 replaces the hand-rolled v4 scroll/pin machinery (four generations
+// of pin-to-bottom bugs, see AGENTS.md "Chat transcript pin-to-bottom") with
+// react-virtuoso (MIT). Virtuoso owns scrolling, pinning (followOutput),
+// prepending (firstItemIndex) and follow-output. The transcript-state hook no
+// longer carries any scroll refs or scroll math.
 //
-// The `TaskContext.Provider` also lives here (wrapping the scroll body) so
+// The `TaskContext.Provider` also lives here (wrapping the Virtuoso) so
 // TaskBody descendants can read subagent state without prop-drilling; the
 // provider VALUE is memoized by ChatPanel (`taskContextValue`) for keystroke
 // stability, so passing it through as a prop keeps that identity intact.
 
-import type { OpencodeMessage, QuestionRequest } from "../shared/types";
-import { useRef, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import { MotionConfig } from "framer-motion";
+import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue } from "./chatShared";
-import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { QuestionCard } from "./Cards";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import type { OpencodeMessage, QuestionRequest } from "../shared/types";
 import {
   createEntryMotionState,
   isBackgroundJobCompletionTurn,
@@ -42,84 +34,116 @@ import {
   type EntryMotionState,
 } from "./chatUtils";
 
-// ===== LoadEarlier =====
+// ===== Virtuoso context =====
 //
-// Self-contained tail→full-history expansion. Renders a slim centered button
-// above the transcript's first row once the tail-first fetch has filled the
-// panel (messages.length >= TRANSCRIPT_TAIL_LIMIT) and the full history hasn't
-// been loaded yet. On click it pulls the WHOLE transcript and splices it in
-// while preserving the user's vertical scroll position.
+// Virtuoso's Header/Footer/List components receive their data through the
+// `context` prop (passed once to <Virtuoso>). This keeps their identities
+// stable at module scope so Virtuoso doesn't remount them on every parent
+// render, while still letting them read the live tail state (todos, question
+// cards) and the load-earlier state.
+
+type TranscriptContext = {
+  showLoadEarlier: boolean;
+  loadingEarlier: boolean;
+  onLoadEarlier: () => void;
+  activeTodos: Array<Record<string, unknown>> | null;
+  onDismissTodos?: () => void;
+  questions: QuestionRequest[];
+  onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
+  onRejectQuestion: (q: QuestionRequest) => void;
+};
+
+// ===== List (spacing) =====
 //
-// Everything about the fetch + the scroll-preserving commit lives HERE, in one
-// exported component, so the future virtualization refactor can replace it with
-// a clean drop-in rather than untangle logic spread across ChatPanel.
-export function LoadEarlier({
-  sessionId,
-  messages,
-  setMessages,
-  scrollRef,
-  loadedAllRef,
-}: {
-  sessionId: string;
-  messages: OpencodeMessage[];
-  setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
-  scrollRef: React.RefObject<HTMLDivElement>;
-  loadedAllRef: React.MutableRefObject<boolean>;
-}) {
-  const [loading, setLoading] = useState(false);
-  // NOTE: `loading` is deliberately NOT in this early return — the button must
-  // stay mounted (disabled, "Loading…") while the full-history fetch runs so
-  // the user gets feedback. Only hide once loadedAll or the tail is too short.
-  // Known false positive: a session with EXACTLY TRANSCRIPT_TAIL_LIMIT
-  // messages shows the button, and clicking just re-fetches the same tail. The
-  // issue's wording uses `>=` so this is accepted; loading the full history is
-  // still a no-op safe click.
-  if (loadedAllRef.current || messages.length < TRANSCRIPT_TAIL_LIMIT) {
-    return null;
-  }
-  const onLoadEarlier = () => {
-    if (loading) return;
-    setLoading(true);
-    const scroller = scrollRef.current;
-    const oldScrollHeight = scroller?.scrollHeight ?? 0;
-    // applyFullHistory — pull the full transcript and splice it in while
-    // preserving the user's scroll position (the list grew by exactly the
-    // pre-existing history now prepended above the current viewport).
-    window.api
-      .opencodeMessages(sessionId, {})
-      .then((newMessages) => {
-        setMessages(newMessages);
-        loadedAllRef.current = true;
-        requestAnimationFrame(() => {
-          if (!scroller) return;
-          scroller.scrollTop += scroller.scrollHeight - oldScrollHeight;
-        });
-      })
-      .catch(() => { /* non-fatal — keep the tail; the button can be retried */ })
-      .finally(() => setLoading(false));
-  };
+// Preserves the reading-column layout the hand-rolled scroller drew: the
+// messages are laid out as a flex column with `--turn-gap` between rows. The
+// horizontal inset + vertical scroll padding live on the Virtuoso root (below);
+// this List only re-introduces the inter-row turn gap that the original single
+// `MeasureColumn stacked` flex container provided.
+const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function TranscriptList(
+  props,
+  ref,
+) {
+  const { style, children, ...rest } = props;
+  return (
+    <div
+      ref={ref}
+      {...rest}
+      style={{
+        ...style,
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--turn-gap)",
+      }}
+    >
+      {children}
+    </div>
+  );
+});
+
+// ===== Header: Load earlier =====
+//
+// Renders the slim centered "Load earlier messages" button once the
+// tail-first fetch has filled the panel (messages.length >=
+// TRANSCRIPT_TAIL_LIMIT) and the full history hasn't been loaded yet. On click
+// it pulls the WHOLE transcript and splices it in via `firstItemIndex`, so the
+// user's vertical position is preserved by Virtuoso (no scroll math here).
+function LoadEarlierHeader({ context }: { context: TranscriptContext }) {
+  if (!context.showLoadEarlier) return null;
   return (
     <div className="flex justify-center py-3">
       <button
         type="button"
-        onClick={onLoadEarlier}
-        disabled={loading}
+        onClick={context.onLoadEarlier}
+        disabled={context.loadingEarlier}
         className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {loading ? "Loading…" : "Load earlier messages"}
+        {context.loadingEarlier ? "Loading…" : "Load earlier messages"}
       </button>
     </div>
   );
 }
 
+// ===== Footer: transcript tail =====
+//
+// Renders everything that appeared after the message rows inside the old
+// scroller: the live todo checklist and the pending question cards. They
+// scroll with the conversation instead of sitting in a shrink-0 row above the
+// input (see the comment history in the old Transcript for the design
+// decision — anchoring them at the tail keeps them at the bottom of the
+// transcript in every state).
+function TranscriptTail({ context }: { context: TranscriptContext }) {
+  return (
+    <>
+      {context.activeTodos && context.activeTodos.length > 0 && (
+        <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
+      )}
+      {context.questions.length > 0 && (
+        <div className="space-y-2 pt-1">
+          {context.questions.map((q) => (
+            // A malformed question payload must not kill the app — each card
+            // gets its own boundary so a bad card degrades to an inline error
+            // while its siblings still render.
+            <ErrorBoundary key={q.id}>
+              <QuestionCard
+                request={q}
+                onReply={(answers) => context.onReplyQuestion(q, answers)}
+                onReject={() => context.onRejectQuestion(q)}
+              />
+            </ErrorBoundary>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export type TranscriptProps = {
   messages: OpencodeMessage[];
-  scrollRef: React.RefObject<HTMLDivElement>;
-  contentRef: React.RefObject<HTMLDivElement>;
-  questionCardRef: React.RefObject<HTMLDivElement>;
-  // Tail-first loading (see LoadEarlier). The owning ChatPanel forwards its
-  // sessionId, messages setter, scroller, and the shared loadedAll ref so
-  // "Load earlier" can pull the full history in-place.
+  virtuosoRef: React.RefObject<VirtuosoHandle>;
+  // Tail-first loading. ChatPanel forwards its sessionId, messages setter and
+  // the shared loadedAll ref so "Load earlier" can pull the full history and
+  // Virtuoso can anchor-preserve the user's scroll position via firstItemIndex.
   sessionId: string;
   setMessages: React.Dispatch<React.SetStateAction<OpencodeMessage[] | null>>;
   loadedAllRef: React.MutableRefObject<boolean>;
@@ -145,13 +169,12 @@ export type TranscriptProps = {
   userCommandInfo: Map<string, { name: string; arguments: string }>;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
+  onAtBottomChange: (atBottom: boolean) => void;
 };
 
 export function Transcript({
   messages,
-  scrollRef,
-  contentRef,
-  questionCardRef,
+  virtuosoRef,
   sessionId,
   setMessages,
   loadedAllRef,
@@ -167,6 +190,7 @@ export function Transcript({
   userCommandInfo,
   onReplyQuestion,
   onRejectQuestion,
+  onAtBottomChange,
 }: TranscriptProps) {
   // Entry motion (transcript-motion). A message that arrives while the user is
   // watching animates in; a transcript they merely LOADED does not. The whole
@@ -185,140 +209,150 @@ export function Transcript({
     isActive,
   );
 
+  // Load earlier (tail → full history) via Virtuoso's firstItemIndex. Prepending
+  // is Virtual's anchor-preservation mechanism: lowering firstItemIndex by the
+  // number of prepended rows keeps the user's scroll position without any
+  // scrollHeight/scrollTop math (the old applyFullHistory restore is deleted).
+  const [firstItemIndex, setFirstItemIndex] = useState(1_000_000);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const onLoadEarlier = () => {
+    if (loadingEarlier) return;
+    setLoadingEarlier(true);
+    window.api
+      .opencodeMessages(sessionId, {})
+      .then((newMessages: OpencodeMessage[]) => {
+        loadedAllRef.current = true;
+        const prepended = newMessages.length - messages.length;
+        // Same state-update batch (React 18 auto-batches in promise callbacks):
+        // the data and the firstItemIndex shift must land together so Virtuoso
+        // treats the new rows as pre-pended, not appended.
+        setMessages(newMessages);
+        setFirstItemIndex((f) => f - prepended);
+      })
+      .catch(() => { /* non-fatal — keep the tail; the button can be retried */ })
+      .finally(() => setLoadingEarlier(false));
+  };
+
+  const virtuosoContext: TranscriptContext = {
+    showLoadEarlier:
+      !loadedAllRef.current && messages.length >= TRANSCRIPT_TAIL_LIMIT,
+    loadingEarlier,
+    onLoadEarlier,
+    activeTodos,
+    onDismissTodos,
+    questions,
+    onReplyQuestion,
+    onRejectQuestion,
+  };
+
+  const lastId = messages.length > 0 ? messages[messages.length - 1].info.id : null;
+
+  // Anchor the initial view to the newest turn. A chat transcript opens at the
+  // tail. `initialTopMostItemIndex: "LAST"` would do this declaratively, but
+  // that prop renders zero rows under react-virtuoso's VirtuosoMockContext
+  // (jsdom) that the harness tests rely on — an imperative mount scroll to the
+  // last index is functionally equivalent and mock-compatible. `alignToBottom`
+  // additionally bottom-aligns content shorter than the viewport. Fires only on
+  // the 0→non-empty (or clear→repopulate) transition; refetches and load-earlier
+  // prepends are handled by followOutput / firstItemIndex.
+  const hasMessages = messages.length > 0;
+  useEffect(() => {
+    if (!hasMessages) return;
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMessages]);
+
   return (
     // Wrap in reducedMotion="user" so framer-motion disables every chat entry
     // animation for users who prefer reduced motion — the library-native
     // replacement for the old `prefers-reduced-motion` CSS blocks.
     <MotionConfig reducedMotion="user">
-    <div
-      ref={scrollRef}
-      className="flex-1 overflow-y-auto overflow-x-hidden"
-      // Horizontal padding moved onto the MeasureColumn (BET-637) so the
-      // transcript shares one reading-column edge with the composer and the
-      // working indicator; the container keeps only its vertical sp-6 padding.
-      //
-      // The MARGIN is not the same thing as that bottom padding and does not
-      // replace it. Padding is inside the scroller, so it only shows at the
-      // scroll extremes — mid-scroll the content is clipped flush against the
-      // container's bottom edge, which is exactly where the composer starts, so
-      // scrolling up ran a line of text right into the composer's top border.
-      // The margin sits OUTSIDE the scroller and is therefore always there. It
-      // matches the composer's own internal rhythm (the sp-2 between the input
-      // box and the model/effort row).
-      style={{ padding: "var(--sp-6) 0", marginBottom: "var(--sp-2)" }}
-    >
+    {messages.length === 0 ? (
+      // Empty state: rendered INSTEAD of the virtualized list. Full width,
+      // matching the populated flow below so both states share a left edge
+      // (BET-646).
+      <div
+        className="flex-1 overflow-y-auto overflow-x-hidden"
+        style={{
+          padding: "var(--sp-6) 0",
+          marginBottom: "var(--sp-2)",
+          paddingInline: "var(--transcript-inset)",
+        }}
+      >
+        <div className="text-text-faint">
+          <span style={{ color: "var(--accent)" }}>✻</span>{" "}
+          Welcome. Type a message below to start.
+        </div>
+      </div>
+    ) : (
+      // BET-646 (supersedes BET-413/BET-637's single-edge goal): the transcript
+      // runs the full width of the session panel by owner decision — 28px/inset
+      // from each edge, no measure cap, no centring. The vertical sp-6 padding
+      // and horizontal --transcript-inset live on the Virtuoso root (inside the
+      // scroller, so they scroll with it, exactly as the old container's own
+      // padding did).
       <TaskContext.Provider value={taskContextValue}>
         {/* Defensive boundary around the whole transcript body: a single */}
         {/* MessageRow / card that throws must not white out the app. */}
         <ErrorBoundary>
-        <div ref={contentRef} className="flex flex-col justify-end min-h-full">
-          {messages.length === 0 ? (
-            // Full width, matching the populated flow below so both states
-            // share a left edge (BET-646).
-            <MeasureColumn width="full">
-              <div className="text-text-faint">
-                <span style={{ color: "var(--accent)" }}>✻</span>{" "}
-                Welcome. Type a message below to start.
-              </div>
-            </MeasureColumn>
-          ) : (
-            // BET-646 (supersedes BET-413/BET-637's single-edge goal): the
-            // transcript runs the full width of the session panel by owner
-            // decision — 28px inset from each edge, no measure cap, no
-            // centring. The 72ch measure now caps only the composer stack and
-            // the user bubble; the left edge of the centred composer no longer
-            // meets the transcript's edge on a wide window, which is intended.
-            <MeasureColumn stacked width="full">
-              {/* Tail-first loading: once the tail has filled the panel, offer
-                  pulling the whole history. Rendered above the first row. */}
-              <LoadEarlier
-                sessionId={sessionId}
-                messages={messages}
-                setMessages={setMessages}
-                scrollRef={scrollRef}
-                loadedAllRef={loadedAllRef}
-              />
-              {messages.map((m, idx) => {
-                // BET-418 §C: a background job's completion report is injected
-                // as a fake user turn whose first line is the machine marker
-                // `[background job "<name>" <status>]`. The model still sees it,
-                // but the user must not — skip rendering the row entirely so it
-                // never appears as a right-aligned user bubble.
-                if (isBackgroundJobCompletionTurn(m)) return null;
-                const isLastInTranscript =
-                  idx === messages.length - 1 && m.info.role === "assistant";
-                // cmdInfo comes from `userCommandInfo` (memoized at panel
-                // scope on [messages, commandByMessageId, commands]).
-                // O(1) Map lookup here means MessageRow can be React.memo'd
-                // without keystrokes invalidating the prop reference.
-                const cmdInfo =
-                  m.info.role === "user"
-                    ? userCommandInfo.get(m.info.id) ?? null
-                    : null;
-                return (
-                  <MessageRow
-                    key={m.info.id}
-                    msg={m}
-                    showThinking={showThinking}
-                    turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
-                    outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
-                    truncation={finishByMessageId.get(m.info.id) ?? null}
-                    commandInfo={cmdInfo}
-                    // The message being written right now: last in the
-                    // transcript, assistant, and the turn still running.
-                    streaming={isLastInTranscript && running}
-                    entering={motion.entering.has(m.info.id)}
-                  />
-                );
-              })}
-              {/* The todo checklist — rendered INSIDE the scroll container at */}
-              {/* the tail of the transcript, so it scrolls with the rest of */}
-              {/* the chat instead of sitting in a shrink-0 row above the */}
-              {/* input (which made it feel "sticky" and ate vertical space on */}
-              {/* long checklists). */}
-              {/* */}
-              {/* ONE mount, running or idle. It used to switch owners at the */}
-              {/* end of a turn — live under this branch, then re-parented into */}
-              {/* the last assistant MessageRow via a `persistentTodos` prop */}
-              {/* once idle. Same data drawn by the same component in two */}
-              {/* places, which cost a prop threaded through MessageRow and */}
-              {/* TaskCard, moved the card by a turn-gap the instant a turn */}
-              {/* ended, and dropped it entirely whenever the last row was a */}
-              {/* USER turn (the prop was gated on the last message being an */}
-              {/* assistant). Anchoring it here keeps it at the bottom of the */}
-              {/* transcript in every state. */}
-              {activeTodos && activeTodos.length > 0 && (
-                <ActiveTodos todos={activeTodos} onDismiss={onDismissTodos} />
-              )}
-              {/* Pending question cards. Rendered INSIDE the scroll */}
-              {/* container at the tail of the transcript so they scroll */}
-              {/* with the rest of the chat instead of sitting in a shrink-0 */}
-              {/* row above the input. They still surface prominently (Claude */}
-              {/* is blocked until answered) but feel like part of the */}
-              {/* conversation — scrolling up through history doesn't keep */}
-              {/* the card glued to the bottom. Same pattern as ActiveTodos. */}
-              {questions.length > 0 && (
-                <div className="space-y-2 pt-1" ref={questionCardRef}>
-                  {questions.map((q) => (
-                    // A malformed question payload must not kill the app — each
-                    // card gets its own boundary so a bad card degrades to an
-                    // inline error while its siblings still render.
-                    <ErrorBoundary key={q.id}>
-                      <QuestionCard
-                        request={q}
-                        onReply={(answers) => onReplyQuestion(q, answers)}
-                        onReject={() => onRejectQuestion(q)}
-                      />
-                    </ErrorBoundary>
-                  ))}
-                </div>
-              )}
-            </MeasureColumn>
-          )}
-        </div>
+          <Virtuoso<OpencodeMessage, TranscriptContext>
+            ref={virtuosoRef}
+            className="flex-1 overflow-x-hidden"
+            style={{
+              padding: "var(--sp-6) 0",
+              marginBottom: "var(--sp-2)",
+              paddingInline: "var(--transcript-inset)",
+            }}
+            data={messages}
+            context={virtuosoContext}
+            computeItemKey={(_, m) => m.info.id}
+            itemContent={(_, m) => {
+              // BET-418 §C: a background job's completion report is injected
+              // as a fake user turn whose first line is the machine marker
+              // `[background job "<name>" <status>]`. The model still sees it,
+              // but the user must not — skip rendering the row entirely so it
+              // never appears as a right-aligned user bubble.
+              if (isBackgroundJobCompletionTurn(m)) return null;
+              const isLastInTranscript =
+                m.info.id === lastId && m.info.role === "assistant";
+              // cmdInfo comes from `userCommandInfo` (memoized at panel
+              // scope on [messages, commandByMessageId, commands]).
+              // O(1) Map lookup here means MessageRow can be React.memo'd
+              // without keystrokes invalidating the prop reference.
+              const cmdInfo =
+                m.info.role === "user"
+                  ? userCommandInfo.get(m.info.id) ?? null
+                  : null;
+              return (
+                <MessageRow
+                  msg={m}
+                  showThinking={showThinking}
+                  turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
+                  outputTokens={turnInfo.get(m.info.id)?.outputTokens ?? null}
+                  truncation={finishByMessageId.get(m.info.id) ?? null}
+                  commandInfo={cmdInfo}
+                  // The message being written right now: last in the
+                  // transcript, assistant, and the turn still running.
+                  streaming={isLastInTranscript && running}
+                  entering={motion.entering.has(m.info.id)}
+                />
+              );
+            }}
+            followOutput={(isAtBottom) => (isAtBottom ? "smooth" : false)}
+            atBottomStateChange={onAtBottomChange}
+            atBottomThreshold={8}
+            firstItemIndex={firstItemIndex}
+            alignToBottom
+            increaseViewportBy={{ top: 600, bottom: 200 }}
+            components={{
+              Header: LoadEarlierHeader,
+              Footer: TranscriptTail,
+              List: TranscriptList,
+            }}
+          />
         </ErrorBoundary>
       </TaskContext.Provider>
-    </div>
+    )}
     </MotionConfig>
   );
 }

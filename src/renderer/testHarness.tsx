@@ -25,6 +25,7 @@
 
 import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { VirtuosoMockContext } from "react-virtuoso";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
 import { SessionHeader } from "./SessionHeader";
@@ -230,8 +231,18 @@ export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness 
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
+  // jsdom has no real layout, so react-virtuoso would measure a 0-height
+  // viewport and render no rows. VirtuosoMockContext (per Virtuoso's official
+  // testing docs) lets the transcript render a deterministic subset of items
+  // without a real scroll container. Inert for components that render no
+  // Virtuoso.
+  const wrap = (el: React.ReactElement) => (
+    <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 60 }}>
+      {opts.strictMode ? <StrictMode>{el}</StrictMode> : el}
+    </VirtuosoMockContext.Provider>
+  );
   act(() => {
-    root.render(opts.strictMode ? <StrictMode>{el}</StrictMode> : el);
+    root.render(wrap(el));
   });
   const flush = async () => {
     await act(async () => {
@@ -246,7 +257,7 @@ export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness 
   return {
     container,
     root,
-    rerender: (next) => act(() => root.render(next)),
+    rerender: (next) => act(() => root.render(wrap(next))),
     unmount: () => {
       act(() => root.unmount());
       container.remove();
