@@ -439,7 +439,11 @@ export function buildHandlers({
       await syncState.refreshNow();
       return result;
     },
-    "tmux:select-window": (i) => tmux.selectWindow(i),
+    "tmux:select-window": async (i) => {
+      const result = await tmux.selectWindow(i);
+      await syncState.refreshNow();
+      return result;
+    },
 
     // ---- opencode: simple pass-throughs ----
 

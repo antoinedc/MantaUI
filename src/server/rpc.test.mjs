@@ -839,3 +839,16 @@ test("sync:snapshot serves from memory (no refresh) once a tick has succeeded", 
   assert.equal(calls.refreshNow, 0);
   assert.deepEqual(out.changed, []);
 });
+
+// BET-681: tmux:select-window must publish its materialized-state delta
+// immediately (mirrors the create/kill/rename handlers from BET-675). The
+// switch changes which window is `active` in the projects payload, so the
+// sync delta should fire now instead of at the next 2s poller tick.
+test("tmux:select-window triggers exactly one syncState.refreshNow", async () => {
+  const { deps, calls } = makeSnapshotDeps({ everSucceeded: true });
+  deps.tmux.selectWindow = async (i) => ({ selected: i });
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:select-window"]({ sessionName: "s", windowIndex: 2 });
+  assert.equal(calls.refreshNow, 1);
+  assert.deepEqual(out, { selected: { sessionName: "s", windowIndex: 2 } });
+});
