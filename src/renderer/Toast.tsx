@@ -20,6 +20,7 @@
 // unit-tested without mounting the component.
 
 import { useEffect, type ReactNode } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
 
 export type ToastAction = {
@@ -106,20 +107,44 @@ export type ToastStackProps = {
 /** Max simultaneous toasts (spec: three stacked). */
 export const MAX_TOASTS = 3;
 
+// How far above the bottom of the chat column the toast stack floats. This is
+// the composer cluster's approximate height, so a toast hovers JUST ABOVE the
+// composer (input box + model/effort row) instead of covering it. The stack is
+// absolutely positioned, so this is a pure overlay — it never shifts the
+// layout of the transcript or composer (BET-677).
+const TOAST_BOTTOM = 112;
+
 export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
-  if (toasts.length === 0) return null;
   // Newest on top, capped at MAX_TOASTS.
   const visible = toasts.slice(0, MAX_TOASTS);
   return (
-    // Bottom-centre stack. pb-2 + safe-area inset so it clears the composer on
-    // mobile; the stack sits above the composer (rendered before it in flow).
+    // Overlay (BET-677): no longer an in-flow row that pushes the composer
+    // down. Anchored just above the composer, horizontally centred, above the
+    // transcript's z-order. The container is pointer-events-none so it never
+    // blocks clicks on what it floats over; only each toast re-enables
+    // pointer events. The safe-area inset keeps it clear of the bottom edge on
+    // devices with a home indicator.
     <div
-      className="shrink-0 w-full flex flex-col items-center gap-2 px-4 pt-1 pb-2"
-      style={{ paddingBottom: "max(env(safe-area-inset-bottom, 0px), 8px)" }}
+      className="pointer-events-none absolute inset-x-0 z-40 flex flex-col items-center gap-2 px-4"
+      style={{
+        bottom: TOAST_BOTTOM,
+        paddingBottom: "max(env(safe-area-inset-bottom, 0px), 0px)",
+      }}
     >
-      {visible.map((t) => (
-        <Toast key={t.id} toast={t} onDismiss={onDismiss} />
-      ))}
+      <AnimatePresence initial={false}>
+        {visible.map((t) => (
+          <motion.div
+            key={t.id}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.2 }}
+            className="pointer-events-auto flex w-full justify-center"
+          >
+            <Toast toast={t} onDismiss={onDismiss} />
+          </motion.div>
+        ))}
+      </AnimatePresence>
     </div>
   );
 }

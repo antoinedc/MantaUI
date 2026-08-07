@@ -28,10 +28,10 @@
 
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
 import { useRef, useState } from "react";
-import { MotionConfig } from "framer-motion";
 import { TaskContext, type TaskContextValue } from "./chatShared";
 import { MeasureColumn } from "./MeasureColumn";
 import { ActiveTodos, MessageRow } from "./MessageRow";
+import { MantaLoader } from "./MantaLoader";
 import { QuestionCard } from "./Cards";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
@@ -112,6 +112,24 @@ export function LoadEarlier({
   );
 }
 
+// The live "working" indicator (BET-677). A constant-height row at the tail of
+// the transcript that is ALWAYS rendered and toggles `visibility` instead of
+// mounting/unmounting — so flipping `running` on send never reflows the
+// reading column (the exact reflow the deleted pre-BET-664 indicator caused).
+// The slot stays 28px whether a turn is in flight or not.
+export function WorkingIndicator({ running }: { running: boolean }) {
+  return (
+    <div
+      className="manta-working-indicator flex items-center gap-2 shrink-0"
+      style={{ height: 28, visibility: running ? "visible" : "hidden" }}
+      aria-hidden={!running}
+    >
+      <MantaLoader />
+      <span className="text-text-faint text-xs">Working…</span>
+    </div>
+  );
+}
+
 export type TranscriptProps = {
   messages: OpencodeMessage[];
   scrollRef: React.RefObject<HTMLDivElement>;
@@ -186,10 +204,6 @@ export function Transcript({
   );
 
   return (
-    // Wrap in reducedMotion="user" so framer-motion disables every chat entry
-    // animation for users who prefer reduced motion — the library-native
-    // replacement for the old `prefers-reduced-motion` CSS blocks.
-    <MotionConfig reducedMotion="user">
     <div
       ref={scrollRef}
       className="flex-1 overflow-y-auto overflow-x-hidden"
@@ -271,6 +285,12 @@ export function Transcript({
                   />
                 );
               })}
+              {/* The live working indicator (BET-677): always-rendered, */}
+              {/* constant-height row whose visibility tracks `running`. Placed */}
+              {/* at the transcript tail so it reads as part of the */}
+              {/* conversation; the reserved 28px slot means toggling running */}
+              {/* never shifts the reading column. */}
+              <WorkingIndicator running={running} />
               {/* The todo checklist — rendered INSIDE the scroll container at */}
               {/* the tail of the transcript, so it scrolls with the rest of */}
               {/* the chat instead of sitting in a shrink-0 row above the */}
@@ -319,6 +339,5 @@ export function Transcript({
         </ErrorBoundary>
       </TaskContext.Provider>
     </div>
-    </MotionConfig>
   );
 }
