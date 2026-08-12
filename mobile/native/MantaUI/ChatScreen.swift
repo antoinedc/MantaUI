@@ -96,9 +96,18 @@ private struct ChatScreenContent: View {
     /// touch auto-follow, which stays constant so new messages pin smoothly.
     @State private var showScrollToBottom = false
 
-    /// Measured height of the floating bottom bar (cards + composer), used to
-    /// size the under-composer scrim so it always covers the glass region.
+    /// Measured height of the floating bottom bar (cards + composer), fed to
+    /// the transcript's `additionalContentInset` bottom inset so the newest
+    /// message rests above the whole floating stack, not just the composer.
     @State private var bottomBarHeight: CGFloat = 0
+
+    /// Measured height of the composer's glass input box alone (plus the
+    /// composer's own bottom padding), reported by `ComposerView` via
+    /// `onGlassBoxHeightChange`. Used to size the under-composer scrim so its
+    /// fade starts at the glass box's top edge — not at the top of the whole
+    /// bottom stack (pinned cards / jump-to-bottom chip / picker anchors sit
+    /// above the glass box and must stay undimmed).
+    @State private var composerGlassHeight: CGFloat = 0
 
     /// How far the under-composer scrim reaches past the safe area, so content
     /// scrolling into the home-indicator strip stays dimmed too.
@@ -199,9 +208,25 @@ private struct ChatScreenContent: View {
         // messages genuinely pass under it while scrolling. The measured
         // `bottomBarHeight` of that floating stack feeds the transcript's
         // `additionalContentInset` bottom inset, so at rest the newest message
-        // rests readable above the composer. The bottom scrim rides as the
-        // composer's own background, so its fade (and its solid canvas) tracks
-        // the top of whatever chrome is showing with no measurement.
+        // rests readable above the whole stack.
+        //
+        // Scrim FIRST so it draws beneath the composer stack. It is sized to
+        // the composer's GLASS BOX only — reported by ComposerView via
+        // `composerGlassHeight`, not the whole floating stack — so the
+        // jump-to-bottom chip and the pinned cards above the box do not
+        // extend it. `fadeInsideContainer: true` puts the fade band AT the
+        // glass box's top edge instead of hanging above it, so the fade
+        // begins right at the composer's own top edge and dissolves content
+        // BEHIND the glass — everything above the box (transcript text,
+        // chip, cards) stays fully readable.
+        .overlay(alignment: .bottom) {
+            Color.clear
+                .frame(height: composerGlassHeight)
+                .background(alignment: .bottom) {
+                    Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang, fadeInsideContainer: true)
+                }
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .bottom) {
             GlassEffectContainer(spacing: 0) {
                 VStack(spacing: 0) {
@@ -216,7 +241,8 @@ private struct ChatScreenContent: View {
                         onScrollToBottom: {
                             scrollPosition.scrollTo(edge: .bottom, animated: true)
                             showScrollToBottom = false
-                        }
+                        },
+                        onGlassBoxHeightChange: { composerGlassHeight = $0 }
                     )
                 }
                 // Feeds the transcript's bottom content inset its height. Safe
@@ -227,9 +253,6 @@ private struct ChatScreenContent: View {
                 } action: { height in
                     bottomBarHeight = height
                 }
-            }
-            .background {
-                Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in

@@ -47,6 +47,13 @@ struct ComposerView: View {
     var showScrollToBottom: Bool = false
     /// Tapped → scroll the transcript to the newest message.
     var onScrollToBottom: (() -> Void)? = nil
+    /// Reports the height of the glass input box PLUS the composer's own
+    /// bottom padding — i.e. the distance from the glass box's top edge to
+    /// the bottom of this view. ChatScreen sizes the under-composer scrim
+    /// from this, so the fade starts exactly at the glass box's top edge,
+    /// not at the top of the whole bottom stack (chip / cards / anchors
+    /// excluded).
+    var onGlassBoxHeightChange: (CGFloat) -> Void = { _ in }
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var text = ""
@@ -200,7 +207,7 @@ struct ComposerView: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor, tint: tokens.panel.opacity(0.9)))
+        .modifier(BoxChrome(cornerRadius: cornerRadius, stroke: borderColor, tint: tokens.panel.opacity(0.35)))
         // The expand control is an OVERLAY, not a row: it must sit in the top
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
@@ -210,6 +217,11 @@ struct ComposerView: View {
                     .padding(.top, Metrics.spacing.sp2)
                     .padding(.trailing, Metrics.spacing.sp3)
             }
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.height
+        } action: { height in
+            onGlassBoxHeightChange(height + Metrics.spacing.sp2)
         }
     }
 
@@ -862,9 +874,11 @@ struct ComposerView: View {
 private struct BoxChrome: ViewModifier {
     let cornerRadius: CGFloat
     let stroke: Color
-    /// A semi-opaque fill laid UNDER the glass so the box reads less
-    /// transparent — the Liquid Glass stays, but what shows through it is
-    /// dimmed by this panel colour.
+    /// A LIGHT wash laid UNDER the glass so the box reads slightly less
+    /// transparent without smothering the material — the Liquid Glass blur
+    /// has to stay dominant. At higher opacities (this used to be 0.9) the
+    /// box read as a solid panel instead of glass, defeating the whole
+    /// point of the effect.
     let tint: Color
 
     func body(content: Content) -> some View {

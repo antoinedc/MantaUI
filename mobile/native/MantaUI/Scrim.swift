@@ -46,6 +46,14 @@ struct Scrim: View {
     /// keyboard, where there is nothing to dim anyway.
     var overhang: CGFloat = 0
 
+    /// Bottom edge only. When true, the fade band begins AT the container's
+    /// top edge and runs DOWN INTO it, instead of hanging above it — so
+    /// content passing under a glass control stays fully readable until the
+    /// control's edge and dissolves behind the glass (ChatGPT-style). The
+    /// default keeps the fade above the container, which is what the
+    /// session list's search capsule wants.
+    var fadeInsideContainer: Bool = false
+
     /// How tall the fade above the control is. Fixed in POINTS, deliberately
     /// NOT a fraction of the control's height: a fraction is exactly what made
     /// the visible part of the ramp shrink to nothing as the control grew.
@@ -89,8 +97,10 @@ struct Scrim: View {
         }
         // The fade hangs ABOVE the container, so content fades while still
         // fully visible rather than behind the glass where it could not be
-        // seen.
-        .padding(.top, -Self.fadeHeight)
+        // seen. With `fadeInsideContainer` set, the band instead occupies the
+        // top of the container itself, so content stays fully readable right
+        // up to the container's edge and dissolves behind the glass.
+        .padding(.top, fadeInsideContainer ? 0 : -Self.fadeHeight)
         // Solid canvas continues below the container into the overhang strip.
         .padding(.bottom, -overhang)
         // Purely decorative: it sits over a scroll view, so without this it
