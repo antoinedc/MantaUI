@@ -196,3 +196,20 @@ html, body, #root {
 @media (prefers-reduced-motion: reduce) {
   .manta-message-flash { animation: none; }
 }
+
+/* PaletteShell enter/exit (⌘K switcher, ⌘F search). 140ms in / 100ms out —
+   the 100ms must match CLOSE_MS in PaletteShell.tsx. */
+.manta-palette-overlay { animation: manta-palette-fade-in 140ms ease-out; }
+.manta-palette-panel { animation: manta-palette-pop-in 140ms cubic-bezier(0.16, 1, 0.3, 1); }
+.manta-palette-overlay-out { animation: manta-palette-fade-out 100ms ease-in forwards; }
+.manta-palette-panel-out { animation: manta-palette-pop-out 100ms ease-in forwards; }
+@keyframes manta-palette-fade-in { from { opacity: 0; } }
+@keyframes manta-palette-fade-out { to { opacity: 0; } }
+@keyframes manta-palette-pop-in { from { opacity: 0; transform: translateY(-8px) scale(0.985); } }
+@keyframes manta-palette-pop-out { to { opacity: 0; transform: translateY(-8px) scale(0.985); } }
+@media (prefers-reduced-motion: reduce) {
+  .manta-palette-overlay,
+  .manta-palette-panel,
+  .manta-palette-overlay-out,
+  .manta-palette-panel-out { animation: none; }
+}
