@@ -402,4 +402,58 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(Array(preserved), before,
                        "pre-existing step ids must be preserved when a new message is appended")
     }
+
+    // MARK: - Row id uniqueness (loadEarlier crash regression)
+    //
+    // `stableScrollID` is content-derived and wire content repeats: identical
+    // prose sharing a message timestamp, identical user prompts with no
+    // `time.created`. A duplicate row id traps MessagingUI's diff
+    // (`Dictionary(uniqueKeysWithValues:)`) the moment loadEarlier() widens
+    // the window over the colliding pair — the "crash when scrolling up after
+    // loading previous messages" bug. `uniqueTranscriptRows` must therefore
+    // never emit two rows with the same id, whatever the blocks contain.
+
+    func testDuplicateProseBlocksGetUniqueRowIDs() {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let blocks: [TranscriptBlock] = [
+            .prose("Done.", at: at),
+            .prose("Done.", at: at),
+            .prose("Done.", at: at),
+        ]
+        let rows = uniqueTranscriptRows(blocks)
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(Set(rows.map(\.id)).count, 3,
+                       "identical prose blocks must not share a row id")
+    }
+
+    func testDuplicateUserBlocksWithNilTimeGetUniqueRowIDs() {
+        let blocks: [TranscriptBlock] = [
+            .user("yes", at: nil),
+            .user("yes", at: nil),
+        ]
+        let rows = uniqueTranscriptRows(blocks)
+        XCTAssertEqual(Set(rows.map(\.id)).count, 2,
+                       "identical user prompts with missing timestamps must not share a row id")
+    }
+
+    func testUniqueRowIDsAreDeterministicAcrossRebuilds() {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let blocks: [TranscriptBlock] = [
+            .user("go", at: nil),
+            .prose("Done.", at: at),
+            .prose("Done.", at: at),
+        ]
+        let first = uniqueTranscriptRows(blocks).map(\.id)
+        let second = uniqueTranscriptRows(blocks).map(\.id)
+        XCTAssertEqual(first, second,
+                       "the same block order must reproduce the same row ids so the diff stays stable")
+    }
+
+    func testUniqueRowIDsKeepBareIdForFirstOccurrence() {
+        let at = Date(timeIntervalSince1970: 1_700_000_000)
+        let blocks: [TranscriptBlock] = [.prose("A", at: at), .prose("B", at: at)]
+        let rows = uniqueTranscriptRows(blocks)
+        XCTAssertEqual(rows.map(\.id), blocks.map(\.stableScrollID),
+                       "non-colliding blocks must keep their content-stable ids unchanged")
+    }
 }

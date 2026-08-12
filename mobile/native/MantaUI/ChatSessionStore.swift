@@ -483,15 +483,19 @@ final class ChatSessionStore: ObservableObject {
     /// visible duplicate, not a harmless overlap. The tail is emptied by the
     /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
+        // `uniqueTranscriptRows` (not a bare `stableScrollID` map) is
+        // load-bearing: content-derived ids can collide across a long history,
+        // and a duplicate id traps inside MessagingUI's diff the moment
+        // `loadEarlier()` widens the window over the colliding pair.
         let newRows: [TranscriptRow]
         if inProgressText.isEmpty {
             blocks = transcript
-            newRows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
+            newRows = uniqueTranscriptRows(transcript)
         } else {
             // The live tail has no completion time yet — it gets one when the
             // turn ends and the canonical refetch replaces this block.
             blocks = transcript + [.prose(inProgressText, at: nil)]
-            newRows = transcript.map { TranscriptRow(id: $0.stableScrollID, block: $0) }
+            newRows = uniqueTranscriptRows(transcript)
                 + [TranscriptRow(id: streamingTailID, block: .prose(inProgressText, at: nil))]
         }
         rows = newRows
