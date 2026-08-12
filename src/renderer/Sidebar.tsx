@@ -4,14 +4,13 @@ import {
   useEffect,
   useImperativeHandle,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs, useAgeTick } from "./clock";
-import { Modal } from "./Modal";
+import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import type { Project, TmuxWindow } from "../shared/types";
 import {
   classifyCacheAge,
@@ -24,7 +23,7 @@ import {
   windowPinId,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
-import { SessionRow, type SessionStatus } from "./SessionRow";
+import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -422,30 +421,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (paletteSel >= paletteResults.length) setPaletteSel(0);
   }, [paletteResults.length, paletteSel]);
 
-  const onPaletteKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      setPaletteOpen(false);
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setPaletteSel((s) =>
-        paletteResults.length === 0 ? 0 : (s + 1) % paletteResults.length,
-      );
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setPaletteSel((s) =>
-        paletteResults.length === 0 ? 0 : (s - 1 + paletteResults.length) % paletteResults.length,
-      );
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const target = paletteResults[paletteSel];
-      if (target) {
-        void activateWindow(target.project, target.window.index);
-        setPaletteOpen(false);
-      }
-    }
-  };
-
   // Row-indexed status lookup helper.
   const statusFor = (session: string, idx: number): WindowStatusUI | undefined =>
     status[session]?.[idx];
@@ -541,7 +516,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 ? `"${d.input.trim().slice(0, 40)}" · ${target}`
                 : target;
               return (
-                <SessionRow
+                <RailSessionRow
                   key={d.id}
                   // A draft is never running/blocking — the at-rest "default"
                   // dot keeps the row chrome identical to a resting session.
@@ -791,8 +766,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         </button>
       </div>
 
-      <CommandPalette
-          open={paletteOpen}
+      {paletteOpen && (
+        <CommandPalette
           query={paletteQuery}
           setQuery={(v) => {
             setPaletteQuery(v);
@@ -801,13 +776,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           results={paletteResults}
           sel={paletteSel}
           setSel={setPaletteSel}
-          onKeyDown={onPaletteKeyDown}
           onClose={() => setPaletteOpen(false)}
           onActivate={(proj, idx) => {
             void activateWindow(proj, idx);
-            setPaletteOpen(false);
           }}
         />
+      )}
     </aside>
   );
 });
@@ -1004,7 +978,7 @@ function WindowRow({
   return (
     <DeletableSessionRow
       row={
-        <SessionRow
+        <RailSessionRow
           status={dot.variant}
           statusTitle={dot.title}
           selected={isActive}
@@ -1091,7 +1065,7 @@ function JobChildRow({
   return (
     <DeletableSessionRow
       row={
-        <SessionRow
+        <RailSessionRow
           status={dot.variant}
           statusTitle={dot.title}
           selected={isActive}
@@ -1213,77 +1187,90 @@ function GroupHeader({
 // Esc closes, arrows move. Reuses flatSessions(projects) for ordering — no
 // second flattener. Empty query shows the full list; no match shows a plain
 // "No sessions match" row.
+// ⌘K session palette on the shared PaletteShell. Fuzzy match on session +
+// workspace name; Enter/click activates, Esc closes, arrows move (wraps).
+// Reuses flatSessions(projects) for ordering — no second flattener. Empty
+// query shows the full list; no match shows a plain "No sessions match" row.
 function CommandPalette({
-  open,
   query,
   setQuery,
   results,
   sel,
   setSel,
-  onKeyDown,
   onClose,
   onActivate,
 }: {
-  open: boolean;
   query: string;
   setQuery: (v: string) => void;
   results: Array<{ project: Project; window: TmuxWindow; score: number }>;
   sel: number;
   setSel: (n: number) => void;
-  onKeyDown: (e: React.KeyboardEvent) => void;
   onClose: () => void;
   onActivate: (project: Project, windowIndex: number) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  // The palette stays MOUNTED (so Modal can play its exit), so grab focus only
-  // when it actually opens — otherwise the always-mounted input would steal
-  // focus on every Sidebar mount.
-  useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open]);
   return (
-    <Modal open={open} size="sm" padded={false} onDismiss={onClose} label="Command palette">
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-          <Search size={14} className="text-text-faint" aria-hidden="true" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Search sessions…"
-            spellCheck={false}
-            autoComplete="off"
-            className="flex-1 bg-transparent text-meta outline-none placeholder:text-text-faint"
-          />
-          <button
-            onClick={onClose}
-            className="text-text-faint hover:text-text text-meta"
-            title="Close (Esc)"
-          >
-            Esc
-          </button>
-        </div>
-        <div className="max-h-[50vh] overflow-y-auto py-1">
-          {results.length === 0 ? (
-            <div className="px-3 py-3 text-meta text-text-faint">No sessions match</div>
-          ) : (
-            results.map((r, i) => (
-              <button
-                key={`${r.project.tmuxSession}/${r.window.index}`}
-                onMouseEnter={() => setSel(i)}
-                onClick={() => onActivate(r.project, r.window.index)}
-                className={`w-full flex items-center gap-2 px-3 py-2 text-left text-meta ${
-                  i === sel ? "bg-bg-soft text-text" : "text-text-muted hover:bg-bg-soft"
-                }`}
-              >
-                <span className="w-[10px] h-[7px] shrink-0" aria-hidden />
-                <span className="flex-1 min-w-0 truncate">{r.window.name}</span>
-                <span className="text-text-faint truncate">{r.project.tmuxSession}</span>
-              </button>
-            ))
-          )}
-        </div>
-    </Modal>
+    <PaletteShell
+      label="Command palette"
+      placeholder="Search sessions…"
+      query={query}
+      setQuery={setQuery}
+      itemCount={results.length}
+      sel={sel}
+      setSel={setSel}
+      onPick={(i) => {
+        const r = results[i];
+        if (r) onActivate(r.project, r.window.index);
+      }}
+      onClose={onClose}
+    >
+      {(pick) =>
+        results.length === 0 ? (
+          <div className="px-3 py-3 text-label text-text-faint">No sessions match</div>
+        ) : (
+          results.map((r, i) => (
+            <SessionRow
+              key={`${r.project.tmuxSession}/${r.window.index}`}
+              name={r.window.name}
+              workspace={r.project.tmuxSession}
+              selected={i === sel}
+              onEnter={() => setSel(i)}
+              onClick={() => pick(i)}
+            />
+          ))
+        )
+      }
+    </PaletteShell>
+  );
+}
+
+function SessionRow({
+  name,
+  workspace,
+  selected,
+  onEnter,
+  onClick,
+}: {
+  name: string;
+  workspace: string;
+  selected: boolean;
+  onEnter: () => void;
+  onClick: () => void;
+}) {
+  const ref = useSelectedIntoView<HTMLButtonElement>(selected);
+  return (
+    <button
+      ref={ref}
+      onMouseEnter={onEnter}
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-3 py-3 rounded-md text-left text-label border-l-2 ${
+        selected
+          ? "bg-bg-soft border-l-accent text-text"
+          : "border-l-transparent text-text-muted hover:bg-bg-soft"
+      }`}
+    >
+      <span className="flex-1 min-w-0 truncate">{name}</span>
+      <span className="text-meta text-text-faint truncate">{workspace}</span>
+    </button>
   );
 }
 
