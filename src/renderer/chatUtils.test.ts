@@ -84,9 +84,10 @@ import {
   previewOriginWord,
   decodeDataUri,
   fetchTranscriptWithRetry,
+  searchTranscript,
 } from "./chatUtils";
 
-import type { OpencodeModel } from "../shared/types";
+import type { OpencodeModel, OpencodeMessage } from "../shared/types";
 
 
 
@@ -3116,5 +3117,103 @@ describe("computeTurnInfo", () => {
   it("computeLiveTurn: null for a transcript with no user message", () => {
     const messages = [assistantMsg("a1", { created: 1000, output: 4 })];
     expect(computeLiveTurn(messages as never)).toBeNull();
+  });
+});
+
+// ===== searchTranscript =====
+
+describe("searchTranscript", () => {
+  const textPart = (
+    text: string,
+    extra: { synthetic?: boolean; ignored?: boolean } = {},
+  ) => ({ type: "text", id: "p", messageID: "m", text, ...extra } as never);
+  const toolPart = () => ({ type: "tool", id: "p", messageID: "m" } as never);
+  const msg = (id: string, role: "user" | "assistant", parts: unknown[], created?: number) =>
+    ({
+      info: { id, role, time: created != null ? { created } : undefined },
+      parts,
+    } as unknown as OpencodeMessage);
+
+  it("finds a match in a text part, preserving original casing while matching case-insensitively", () => {
+    const messages = [msg("m1", "assistant", [textPart("Please retry the request")], 100)];
+    const hits = searchTranscript(messages, "RETRY", 10);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].messageId).toBe("m1");
+    expect(hits[0].match).toBe("retry");
+    expect(hits[0].pre).toBe("Please ");
+    expect(hits[0].post).toBe(" the request");
+    expect(hits[0].role).toBe("assistant");
+  });
+
+  it("ranks newest message first", () => {
+    const messages = [
+      msg("m1", "user", [textPart("first contains alpha")], 100),
+      msg("m2", "assistant", [textPart("alpha check")], 200),
+      msg("m3", "user", [textPart("alpha again")], 300),
+    ];
+    const hits = searchTranscript(messages, "alpha", 10);
+    expect(hits.map((h) => h.messageId)).toEqual(["m3", "m2", "m1"]);
+  });
+
+  it("returns one hit per message even when two parts (or two occurrences) match", () => {
+    const messages = [
+      msg("m1", "user", [textPart("alpha and alpha again"), toolPart(), textPart("more alpha")], 100),
+    ];
+    const hits = searchTranscript(messages, "alpha", 10);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].messageId).toBe("m1");
+    expect(hits[0].match).toBe("alpha");
+    expect(hits[0].post).toBe(" and alpha again");
+  });
+
+  it("skips non-text parts and synthetic/ignored text parts", () => {
+    const messages = [
+      msg("m1", "assistant", [textPart("skip me", { synthetic: true })], 100),
+      msg("m2", "assistant", [textPart("also skip", { ignored: true })], 200),
+      msg("m3", "user", [textPart("real match here")], 300),
+    ];
+    const hits = searchTranscript(messages, "skip", 10);
+    expect(hits).toHaveLength(0);
+    const real = searchTranscript(messages, "real", 10);
+    expect(real).toHaveLength(1);
+    expect(real[0].messageId).toBe("m3");
+  });
+
+  it("truncates long prefixes with '…' and collapses whitespace runs", () => {
+    const long = "word ".repeat(30); // 150 chars, match at the very end
+    const messages = [msg("m1", "assistant", [textPart(`${long}needle here`)], 100)];
+    const hits = searchTranscript(messages, "needle", 10);
+    expect(hits[0].pre).toMatch(/^…/);
+    expect(hits[0].pre.length).toBeLessThanOrEqual(61);
+    expect(hits[0].pre).not.toContain("\n");
+    expect(hits[0].pre).not.toContain("  ");
+  });
+
+  it("collapses multiple whitespace in pre/match/post", () => {
+    const messages = [msg("m1", "assistant", [textPart("a  b\n\nc needle d")], 100)];
+    const hits = searchTranscript(messages, "needle", 10);
+    expect(hits[0].pre).toBe("a b c ");
+    expect(hits[0].match).toBe("needle");
+    expect(hits[0].post).toBe(" d");
+  });
+
+  it("respects maxHits and returns [] for empty query", () => {
+    const messages = [
+      msg("m1", "user", [textPart("needle one")], 100),
+      msg("m2", "user", [textPart("needle two")], 200),
+      msg("m3", "user", [textPart("needle three")], 300),
+    ];
+    expect(searchTranscript(messages, "needle", 2)).toHaveLength(2);
+    expect(searchTranscript(messages, "", 10)).toEqual([]);
+  });
+
+  it("passes through timeCreated, null when info.time absent", () => {
+    const messages = [
+      msg("m1", "user", [textPart("needle")], 123),
+      msg("m2", "user", [textPart("needle")]),
+    ];
+    const hits = searchTranscript(messages, "needle", 10);
+    expect(hits[0].timeCreated).toBeNull();
+    expect(hits[1].timeCreated).toBe(123);
   });
 });

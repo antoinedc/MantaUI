@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
@@ -6,6 +6,7 @@ import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
 import { Settings } from "./Settings";
+import { SearchPalette } from "./SearchPalette";
 import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
 import { Onboarding } from "./Onboarding";
 import { NewSessionScreen } from "./NewSessionScreen";
@@ -162,6 +163,21 @@ function AppInner() {
   }, [enterOnboarding, onboardingLatched]);
   const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // ⌘F conversation search palette (SearchPalette). Only reachable in chat
+  // mode with an active session (see the keydown handler).
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Activate a tmux window locally AND on the box (so the PTY follows). Shared
+  // by ⌥⌘↑↓, ⌘1..9, the voice switch-window handler, and the ⌘F cross-
+  // conversation jump.
+  const jumpToWindow = useCallback(
+    (tmuxSession: string, windowIndex: number) => {
+      setActive(tmuxSession, windowIndex);
+      window.api
+        .tmuxSelectWindow({ sessionName: tmuxSession, windowIndex })
+        .catch(() => {});
+    },
+    [setActive],
+  );
   // Section the Settings modal lands on when the `manta-open-settings` bridge
   // fires (e.g. "Manage models…" → Models). The modal re-targets to it on
   // mount and on every later request.
@@ -823,13 +839,7 @@ function AppInner() {
             : (curIdx + dir + flat.length) % flat.length;
         const target = flat[nextIdx];
         if (target && nextIdx !== curIdx) {
-          setActive(target.project.tmuxSession, target.window.index);
-          window.api
-            .tmuxSelectWindow({
-              sessionName: target.project.tmuxSession,
-              windowIndex: target.window.index,
-            })
-            .catch(() => {});
+          jumpToWindow(target.project.tmuxSession, target.window.index);
         }
         e.preventDefault();
         return;
@@ -852,6 +862,21 @@ function AppInner() {
         e.preventDefault();
         return;
       }
+      // Cmd+F = conversation search. Chat-scoped like ⌘I: terminal mode keeps
+      // xterm's own ⌘F (Terminal.tsx find), Settings keeps its ⌘F filter (it
+      // binds while open, so we bail when settingsOpen). Same key toggles closed.
+      if (
+        (e.key === "f" || e.key === "F") &&
+        !e.shiftKey &&
+        !e.altKey &&
+        !settingsOpen &&
+        activeChatSessionId != null &&
+        mode === "chat"
+      ) {
+        setSearchOpen((v) => !v);
+        e.preventDefault();
+        return;
+      }
       // Cmd+I = toggle the Artifacts panel (BET-659). Only meaningful when a
       // chat pane is active — the panel + its header toggle exist only there.
       if (
@@ -871,21 +896,14 @@ function AppInner() {
         const flat = flatSessions(projects);
         const target = flat[idx];
         if (target) {
-          setActive(target.project.tmuxSession, target.window.index);
-          // Also tell tmux to switch the window so the PTY follows.
-          window.api
-            .tmuxSelectWindow({
-              sessionName: target.project.tmuxSession,
-              windowIndex: target.window.index,
-            })
-            .catch(() => {});
+          jumpToWindow(target.project.tmuxSession, target.window.index);
           e.preventDefault();
         }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [projects, activeProjectName, activeWindowByProject, setActive, activeChatSessionId, mode]);
+  }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode]);
 
   // Voice command → app-scoped action bus. ChatPanel dispatches a
   // `manta-voice-app-action` CustomEvent for actions it doesn't own
@@ -908,19 +926,13 @@ function AppInner() {
         const flat = flatSessions(projects);
         const target = flat[detail.index - 1];
         if (!target) return;
-        setActive(target.project.tmuxSession, target.window.index);
-        window.api
-          .tmuxSelectWindow({
-            sessionName: target.project.tmuxSession,
-            windowIndex: target.window.index,
-          })
-          .catch(() => {});
+        jumpToWindow(target.project.tmuxSession, target.window.index);
       }
     };
     window.addEventListener("manta-voice-app-action", handler as EventListener);
     return () =>
       window.removeEventListener("manta-voice-app-action", handler as EventListener);
-  }, [projects, setActive]);
+  }, [projects, jumpToWindow]);
 
   // Generic "open Settings on section X" bridge, the same window-CustomEvent
   // convention as the schedules/secrets bridges. The composer-level menus
@@ -1394,6 +1406,14 @@ function AppInner() {
       )}
       {settingsOpen && (
         <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+      )}
+      {searchOpen && activeChatSessionId != null && (
+        <SearchPalette
+          sessionId={activeChatSessionId}
+          projects={projects}
+          onJumpToWindow={jumpToWindow}
+          onClose={() => setSearchOpen(false)}
+        />
       )}
       {/* Box self-update confirm: restarting opencode ends every in-flight
           agent turn, so the destructive restart needs explicit consent before
