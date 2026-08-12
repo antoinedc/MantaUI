@@ -59,6 +59,14 @@ struct Scrim: View {
     /// the visible part of the ramp shrink to nothing as the control grew.
     private static let fadeHeight: CGFloat = 96
 
+    /// Where the bottom ramp SETTLES — deliberately short of full canvas, so
+    /// content behind the control stays faintly readable through the glass
+    /// (the ChatGPT treatment) instead of dissolving to a solid block. The
+    /// fill below the fade band uses the same value so the band hands off to
+    /// it with no visible seam. The TOP scrim does not use this: the status
+    /// bar has no control of its own over it and needs true solid canvas.
+    private static let bottomFloorOpacity: Double = 0.85
+
     var body: some View {
         switch edge {
         case .top: topBody
@@ -81,10 +89,10 @@ struct Scrim: View {
         .allowsHitTesting(false)
     }
 
-    /// A fixed-height fade ABOVE the container, then solid canvas over the
-    /// container itself and `overhang` points below it — so content is fully
-    /// dissolved into canvas by the time it passes behind the floating
-    /// control.
+    /// A fixed-height fade, then a near-solid wash over the rest of the
+    /// container and `overhang` points below it — content behind the control
+    /// is heavily suppressed but stays faintly readable through the glass
+    /// (`bottomFloorOpacity`), never a solid block.
     private var bottomBody: some View {
         VStack(spacing: 0) {
             LinearGradient(
@@ -93,7 +101,7 @@ struct Scrim: View {
                 endPoint: .bottom
             )
             .frame(height: Self.fadeHeight)
-            tokens.canvas
+            tokens.canvas.opacity(Self.bottomFloorOpacity)
         }
         // The fade hangs ABOVE the container, so content fades while still
         // fully visible rather than behind the glass where it could not be
@@ -101,7 +109,7 @@ struct Scrim: View {
         // top of the container itself, so content stays fully readable right
         // up to the container's edge and dissolves behind the glass.
         .padding(.top, fadeInsideContainer ? 0 : -Self.fadeHeight)
-        // Solid canvas continues below the container into the overhang strip.
+        // The wash continues below the container into the overhang strip.
         .padding(.bottom, -overhang)
         // Purely decorative: it sits over a scroll view, so without this it
         // would swallow every touch aimed at the content behind it.
@@ -119,9 +127,10 @@ struct Scrim: View {
     /// They differ in how fast they get there. `location` runs from the far
     /// end of the fade toward the screen edge in both cases.
     ///
-    ///   * BOTTOM spans the fixed fade band ABOVE the composer, where the
-    ///     transcript is still fully visible, so the ramp does its real work
-    ///     across that band and ends in solid canvas where the control sits.
+    ///   * BOTTOM spans the fixed fade band, so the ramp does its real work
+    ///     across that band — and settles at `bottomFloorOpacity` rather than
+    ///     full canvas, so what sits behind the control keeps a ghost of the
+    ///     content showing through the glass.
     ///
     ///   * TOP has to cover the STATUS BAR — the clock, the signal bars, the
     ///     battery — which occupies roughly the outer 40% of the fade and has
@@ -135,11 +144,11 @@ struct Scrim: View {
             return [
                 .init(color: tokens.canvas.opacity(0), location: 0.0),
                 .init(color: tokens.canvas.opacity(0.10), location: 0.25),
-                .init(color: tokens.canvas.opacity(0.32), location: 0.45),
-                .init(color: tokens.canvas.opacity(0.62), location: 0.62),
-                .init(color: tokens.canvas.opacity(0.88), location: 0.80),
-                .init(color: tokens.canvas.opacity(0.98), location: 0.92),
-                .init(color: tokens.canvas.opacity(1.0), location: 1.0),
+                .init(color: tokens.canvas.opacity(0.30), location: 0.45),
+                .init(color: tokens.canvas.opacity(0.52), location: 0.62),
+                .init(color: tokens.canvas.opacity(0.70), location: 0.80),
+                .init(color: tokens.canvas.opacity(0.80), location: 0.92),
+                .init(color: tokens.canvas.opacity(Self.bottomFloorOpacity), location: 1.0),
             ]
         case .top:
             return [
