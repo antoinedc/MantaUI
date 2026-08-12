@@ -2395,3 +2395,59 @@ export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | 
   if (startedAt == null) return null;
   return { startedAt, tokens, verbSeedId: verbSeedId ?? userInfo.id };
 }
+
+// ⌘F conversation search. Pure transcript scan over text parts: newest
+// message first, case-insensitive, ONE hit per message (the first matching
+// text part) so the result list stays scannable. Snippet is split into
+// pre/match/post so the renderer can highlight without dangerouslySetInnerHTML.
+export type TranscriptHit = {
+  messageId: string;
+  role: "user" | "assistant";
+  pre: string; // up to SNIPPET_PRE_CHARS before the match, "…"-prefixed when truncated
+  match: string; // the matched text, original casing
+  post: string; // up to 200 chars after (CSS line-clamp does the final trim)
+  timeCreated: number | null;
+};
+
+// Cross-file contract for the ⌘F cross-conversation jump: SearchPalette sets
+// this global, ChatPanel consumes it once the target session's transcript has
+// rendered. Same pre-mount-bridge pattern as __mantaScrollQuestionSession.
+export type PendingMessageScroll = { sessionId: string; messageId: string };
+export type PendingScrollWin = Window & {
+  __mantaPendingMessageScroll?: PendingMessageScroll | null;
+};
+
+const SNIPPET_PRE_CHARS = 60;
+
+export function searchTranscript(
+  messages: OpencodeMessage[],
+  query: string,
+  maxHits: number,
+): TranscriptHit[] {
+  const q = query.toLowerCase();
+  if (!q) return [];
+  const clean = (s: string) => s.replace(/\s+/g, " ");
+  const hits: TranscriptHit[] = [];
+  // Newest first: walk the chronological transcript from the end.
+  for (let mi = messages.length - 1; mi >= 0 && hits.length < maxHits; mi--) {
+    const m = messages[mi];
+    for (const part of m.parts) {
+      if (part.type !== "text") continue;
+      const p = part as { text?: string; synthetic?: boolean; ignored?: boolean };
+      if (p.synthetic || p.ignored || typeof p.text !== "string") continue;
+      const idx = p.text.toLowerCase().indexOf(q);
+      if (idx < 0) continue;
+      const start = Math.max(0, idx - SNIPPET_PRE_CHARS);
+      hits.push({
+        messageId: m.info.id,
+        role: m.info.role === "user" ? "user" : "assistant",
+        pre: (start > 0 ? "…" : "") + clean(p.text.slice(start, idx)),
+        match: clean(p.text.slice(idx, idx + query.length)),
+        post: clean(p.text.slice(idx + query.length, idx + query.length + 200)),
+        timeCreated: m.info.time?.created ?? null,
+      });
+      break; // one hit per message
+    }
+  }
+  return hits;
+}

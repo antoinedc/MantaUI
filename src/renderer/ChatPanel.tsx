@@ -47,6 +47,7 @@ import {
   formatBytes,
   type EntryMotionState,
   type StaleCacheResult,
+  type PendingScrollWin,
   isApprovalCoveredByAlways,
 } from "./chatUtils";
 import {
@@ -553,33 +554,56 @@ export function ChatPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Scroll the transcript to a message row and flash it (BET-660 treatment).
+  // Returns false when the message isn't in the loaded transcript yet so
+  // callers can retry later (e.g. the ⌘F cross-conversation jump, where the
+  // window has just been activated and its transcript is still streaming in).
+  // scrollToMessage scrolls via Virtuoso's scrollToIndex; the target row may
+  // not be in the DOM until Virtuoso renders it, so we flash once it exists
+  // (a frame or two later for the smooth scroll).
+  const scrollFlashMessage = useCallback(
+    (messageId: string): boolean => {
+      scrollToMessage(messageId);
+      requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-id="${messageId}"]`,
+        );
+        el?.classList.add("manta-message-flash");
+        window.setTimeout(() => el?.classList.remove("manta-message-flash"), 1200);
+      });
+      return (messagesRef.current ?? []).some((m) => m.info.id === messageId);
+    },
+    [scrollToMessage],
+  );
+
   // Artifacts panel → jump-to-message bridge (BET-660). Scrolls the transcript
   // to the row that owns an artifact's messageId and flashes it for ~1.2s.
-  // Same window-CustomEvent + scroll pattern as manta-scroll-to-question (the
-  // existing cross-component scroll precedent), but via Virtuoso's
-  // scrollToIndex — the target row may not be in the DOM until Virtuoso
-  // renders it, so we scroll first, then flash once the row is mounted. The
-  // flash is a transient class that index.css animates out.
   useEffect(() => {
     const onScrollToMessage = (e: Event) => {
       const detail = (e as CustomEvent).detail as
         | { sessionId?: string; messageId?: string }
         | undefined;
       if (detail?.sessionId !== sessionId || !detail?.messageId) return;
-      scrollToMessage(detail.messageId);
-      // After scrollToIndex, Virtuoso renders the target row; flash it once it
-      // exists (a frame or two later for the smooth scroll).
-      requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLElement>(
-          `[data-message-id="${detail.messageId}"]`,
-        );
-        el?.classList.add("manta-message-flash");
-        window.setTimeout(() => el?.classList.remove("manta-message-flash"), 1200);
-      });
+      scrollFlashMessage(detail.messageId);
     };
     window.addEventListener("manta-scroll-to-message", onScrollToMessage);
     return () => window.removeEventListener("manta-scroll-to-message", onScrollToMessage);
-  }, [sessionId, scrollToMessage]);
+  }, [sessionId, scrollFlashMessage]);
+
+  // ⌘F cross-conversation jump: consume the pending scroll target once this
+  // session's transcript has rendered the row. Same pre-mount-bridge pattern
+  // as __mantaScrollQuestionSession above — the search palette can't dispatch
+  // an event at a panel that hasn't loaded its messages yet. Re-runs on every
+  // messages commit until the row exists, then clears the global.
+  useEffect(() => {
+    const w = window as PendingScrollWin;
+    const pending = w.__mantaPendingMessageScroll;
+    if (!pending || pending.sessionId !== sessionId || messages == null) return;
+    if (scrollFlashMessage(pending.messageId)) {
+      w.__mantaPendingMessageScroll = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, sessionId]);
 
   // Mobile keyboard-bar → /clear bridge (BET-259). The KeyboardBar's
   // `clear` key already showed the user a confirm; this listener hands the
