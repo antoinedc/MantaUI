@@ -78,14 +78,59 @@ struct MantaProse: View {
             .font(.system(size: Metrics.type.body, weight: .semibold), for: .h5)
             .font(.system(size: Metrics.type.body, weight: .semibold), for: .h6)
             .font(.system(size: Metrics.type.xs, design: .monospaced), for: .codeBlock)
+            // Tables run at the small size, not body — on a phone column a
+            // body-size table wraps every cell into a tower. Header gets the
+            // semibold weight like desktop's th.
+            .font(.system(size: Metrics.type.small, weight: .semibold), for: .tableHeader)
+            .font(.system(size: Metrics.type.small), for: .tableBody)
             .foregroundColor(tokens.tx1)
             .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
             .tint(tokens.accent, for: .link)
+            // Inline code: the library renders `code` spans as tint-colored
+            // text on tint@10% background (MarkdownView 3.0.0 exposes no
+            // inline-code FONT slot, so mono isn't reachable here). Untinted it
+            // used the loud system accent; tx2 gives the subtle grey-on-grey
+            // treatment desktop uses.
+            .tint(tokens.tx2, for: .inlineCodeBlock)
+            // Blockquote bar in the border grey (desktop: 2px var(--border)),
+            // not the default accent.
+            .tint(tokens.border, for: .blockQuote)
+            .markdownTableStyle(MantaMarkdownTableStyle(tokens: tokens))
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("assistant-prose")
+    }
+}
+
+// MARK: - Markdown table style
+//
+// Token-mapped GFM table, mirroring desktop's MarkdownBody table treatment:
+// hairline `borderSubtle` rules between cells, a `border` outline, header row
+// on `fill`, cell padding on the spacing grid (sp2 × sp1 ≈ desktop's px-3
+// py-1 scaled for the phone column). The library's default style is what made
+// tables read huge — body-size text inside 8pt cell padding inside a 12pt
+// frame inside a 20pt-radius outline.
+struct MantaMarkdownTableStyle: MarkdownTableStyle {
+    let tokens: Tokens
+
+    func makeBody(configuration: Configuration) -> some View {
+        Grid(horizontalSpacing: 0, verticalSpacing: 0) {
+            configuration.table.header
+                .markdownTableRowBackgroundStyle(AnyShapeStyle(tokens.fill))
+            ForEach(Array(configuration.table.rows.enumerated()), id: \.offset) { _, row in
+                row
+            }
+        }
+        .markdownTableCellOverlay {
+            Rectangle().strokeBorder(tokens.borderSubtle)
+        }
+        .markdownTableCellPadding(.horizontal, Metrics.spacing.sp2)
+        .markdownTableCellPadding(.vertical, Metrics.spacing.sp1)
+        .overlay {
+            Rectangle().strokeBorder(tokens.border)
+        }
     }
 }
 

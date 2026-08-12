@@ -48,6 +48,31 @@ extension TranscriptBlock {
     }
 }
 
+/// Wraps blocks in rows whose ids are GUARANTEED unique within the array.
+///
+/// `stableScrollID` is content-derived, and wire content is allowed to repeat:
+/// two identical prose parts completing at the same message timestamp, two
+/// identical user prompts with a missing `time.created`, a re-emitted tool
+/// callID — all yield the same id. MessagingUI's `ListDataSource.apply` builds
+/// `Dictionary(uniqueKeysWithValues:)` over row ids on its diff path, which
+/// TRAPS on a duplicate. The first fetch takes the no-check replace shortcut,
+/// so duplicates living in older history only enter the diff when
+/// `loadEarlier()` widens the window — i.e. the app crashed exactly when
+/// scrolling up after loading previous messages.
+///
+/// Dedup is positional: the first occurrence keeps the bare id, later ones get
+/// an occurrence suffix. Deterministic for a given block order, so a refetch of
+/// the same window reproduces the same ids and the diff stays stable.
+func uniqueTranscriptRows(_ blocks: [TranscriptBlock]) -> [TranscriptRow] {
+    var seen: [String: Int] = [:]
+    return blocks.map { block in
+        let base = block.stableScrollID
+        let occurrence = seen[base, default: 0]
+        seen[base] = occurrence + 1
+        return TranscriptRow(id: occurrence == 0 ? base : "\(base)#dup\(occurrence)", block: block)
+    }
+}
+
 extension StepGroupContent {
     /// The rows of a step group, whether plain or rolled up. Used only to
     /// derive a stable id from the rows' own stable ids.
