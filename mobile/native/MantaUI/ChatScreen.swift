@@ -214,14 +214,16 @@ private struct ChatScreenContent: View {
         // the composer's GLASS BOX only — reported by ComposerView via
         // `composerGlassHeight`, not the whole floating stack — so the
         // jump-to-bottom chip and the pinned cards above the box do not
-        // extend it: the fade begins right under the composer's own top
-        // edge, ChatGPT-style, instead of dimming readable transcript text
-        // sitting above the glass.
+        // extend it. `fadeInsideContainer: true` puts the fade band AT the
+        // glass box's top edge instead of hanging above it, so the fade
+        // begins right at the composer's own top edge and dissolves content
+        // BEHIND the glass — everything above the box (transcript text,
+        // chip, cards) stays fully readable.
         .overlay(alignment: .bottom) {
             Color.clear
                 .frame(height: composerGlassHeight)
                 .background(alignment: .bottom) {
-                    Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang)
+                    Scrim(edge: .bottom, tokens: tokens, overhang: Self.scrimOverhang, fadeInsideContainer: true)
                 }
                 .allowsHitTesting(false)
         }
