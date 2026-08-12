@@ -478,9 +478,11 @@ struct SessionListView: View {
         // capsule.
         // Sized to the capsule itself — a `.background` is exactly its
         // container — plus the overhang below, matching the chat composer:
-        // the fade starts at the control's top edge, never above it.
+        // `fadeInsideContainer` puts the fade band AT the capsule's top edge
+        // rather than hanging above it, so rows stay fully readable until
+        // the capsule and dissolve behind its glass.
         .background {
-            Scrim(edge: .bottom, tokens: tokens, overhang: Metrics.spacing.sp12)
+            Scrim(edge: .bottom, tokens: tokens, overhang: Metrics.spacing.sp12, fadeInsideContainer: true)
         }
     }
 
