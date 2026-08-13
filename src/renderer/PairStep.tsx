@@ -31,6 +31,7 @@ import {
 } from "../shared/setupLogic";
 import { detectPairClipboard } from "../shared/pairPayload";
 import { PairingCodeInput } from "./PairingCodeInput";
+import { Button } from "./Button";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
@@ -38,7 +39,6 @@ import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
 
-const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
 const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
 
@@ -377,14 +377,9 @@ function ManualPairForm({
           </code>{" "}
           on the box to get a code.
         </p>
-        <button
-          type="submit"
-          disabled={!connectEnabled}
-          className="inline-flex items-center gap-2 px-5 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
-          style={{ background: ACCENT_SOLID }}
-        >
+        <Button tone="primary" type="submit" disabled={!connectEnabled}>
           {submitting ? "Connecting…" : "Connect"}
-        </button>
+        </Button>
       </div>
     </form>
   );

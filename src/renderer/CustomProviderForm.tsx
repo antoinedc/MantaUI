@@ -27,8 +27,8 @@ import {
 } from "./chatUtils";
 import { Field } from "./Field";
 import { Checkbox } from "./Checkbox";
+import { Button } from "./Button";
 
-const ACCENT_SOLID = "var(--accent-solid)";
 const DANGER = "var(--danger)";
 
 type Phase = "editing" | "probing" | "ready";
@@ -261,27 +261,25 @@ export function CustomProviderForm({
       )}
       <div className="flex items-center gap-2">
         {phase !== "ready" ? (
-          <button
+          <Button
+            tone="primary"
             type="button"
             onClick={() => void probe()}
             disabled={busy || draftErr !== null}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
-            style={{ background: ACCENT_SOLID }}
           >
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
             {busy ? "Probing…" : "Probe endpoint"}
-          </button>
+          </Button>
         ) : (
-          <button
+          <Button
+            tone="primary"
             type="button"
             onClick={() => void save()}
             disabled={busy || checked.size === 0}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-sm text-body font-medium text-on-accent transition-opacity disabled:opacity-40"
-            style={{ background: ACCENT_SOLID }}
           >
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
             {busy ? "Saving…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
-          </button>
+          </Button>
         )}
       </div>
     </div>
