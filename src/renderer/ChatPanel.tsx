@@ -48,6 +48,8 @@ import {
   type StaleCacheResult,
   type PendingScrollWin,
   isApprovalCoveredByAlways,
+  MANTA_BUILTIN_COMMANDS,
+  MANTA_BUILTIN_NAMES,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -86,25 +88,9 @@ import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
-
-// manta-local slash commands. These are handled in the renderer (not forwarded
-// to opencode's /command endpoint) because opencode doesn't ship equivalents
-// — they're terminal-TUI conventions users expect to "just work". Each one
-// dispatches to a function on the ChatPanel.
-type BuiltinCommand = {
-  name: string;
-  description: string;
-  // Returns true if the command was handled (caller skips fallthrough).
-  // Returns false to fall through to opencode/prompt path (useful for
-  // disabled commands).
-};
-const MANTA_BUILTIN_COMMANDS: BuiltinCommand[] = [
-  { name: "clear", description: "Start a fresh chat in this window" },
-  { name: "fork", description: "Copy this session's history into a new window" },
-  { name: "compact", description: "Summarize to free context" },
-  { name: "help", description: "Show available commands" },
-];
-const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
+// manta-local slash commands live in chatUtils.ts (MANTA_BUILTIN_COMMANDS /
+// MANTA_BUILTIN_NAMES), shared with useTypeahead so execution and completion
+// never diverge.
 
 function buildHelpText(): string {
   const lines = [

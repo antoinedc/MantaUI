@@ -345,6 +345,26 @@ export function dedupeAgainstBuiltins<T extends TypeaheadCommandRow>(
   return commands.filter((c) => !builtinNames.has(c.name));
 }
 
+// ===== manta-local slash commands =====
+//
+// The single source for the renderer's local slash commands ("clear", "fork",
+// "compact", "help"). These are handled in the renderer (never forwarded to
+// opencode's /command endpoint) because opencode doesn't ship equivalents —
+// they're terminal-TUI conventions users expect to "just work". Both ChatPanel
+// (execution + /help text) and useTypeahead (typeahead completion) import this
+// ONE definition, so a builtin added here both runs and autocompletes.
+export type BuiltinCommand = {
+  name: string;
+  description: string;
+};
+export const MANTA_BUILTIN_COMMANDS: BuiltinCommand[] = [
+  { name: "clear", description: "Start a fresh chat in this window" },
+  { name: "fork", description: "Copy this session's history into a new window" },
+  { name: "compact", description: "Summarize to free context" },
+  { name: "help", description: "Show available commands" },
+];
+export const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
+
 /**
  * The four todo states the ActiveTodos card renders, normalized.
  *
