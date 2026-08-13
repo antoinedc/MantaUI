@@ -108,8 +108,8 @@ export const SCREENS = [
     id: "session",
     title: "Session view — rail, header, transcript, ask card, composer",
     // The product's main screen, and the one the marketing hero shows. The
-    // fixture's `Deploy new billing service` session is the state the mockup
-    // is drawn against: a permission card open, a tool call above it.
+    // fixture's transcript-bearing session is the state the mockup is drawn
+    // against: a permission card open, a tool call above it.
     url: "/app/index.html?demo&desktop",
     // The shell root exists from first paint, and it is also the structure
     // contract — the mockup covers rail + header + transcript + composer.
@@ -117,9 +117,6 @@ export const SCREENS = [
     // The permission card's heading proves the transcript rendered AND the
     // blocking ask is on screen — the state the design is specified for.
     final: "text=Run a shell command?",
-    actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
-    },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
     surfacesClosed: [
@@ -232,13 +229,10 @@ export const SCREENS = [
     title: "Session view — mid-stream transcript, early/mid/late phases",
     url: "/app/index.html?demo&desktop&state=stream",
     ready: '[data-screen="session"]',
-    // Same navigation as the `session` row — the default demo view opens an
-    // empty welcome session, so we click into the transcript-bearing one.
+    // Same default view as the `session` row — the demo opens straight on the
+    // transcript-bearing session.
     final: "text=Run a shell command?",
     phases: ["early", "mid", "late"],
-    actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
-    },
     viewport: DESKTOP_VIEWPORT,
     // No design exists for a mid-stream frame — `null` is the registry's
     // documented way to say so; the row still gets structure + pixels.
@@ -271,9 +265,6 @@ export const SCREENS = [
     // so scope to the visible pane's header — only the active one is shown.
     region: ".manta-session-header:visible",
     mockupRegion: ".topb",
-    actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
-    },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
     surfacesClosed: [
@@ -295,9 +286,6 @@ export const SCREENS = [
     // See session-header: only the active chat pane's composer is visible.
     region: ".manta-composer:visible",
     mockupRegion: ".composer",
-    actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
-    },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/session/mockup.html",
     surfacesClosed: [
@@ -438,7 +426,6 @@ export const SCREENS = [
     final: '[role="menu"]',
     region: ".manta-session-menu-dropdown",
     actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
       await page.getByRole("button", { name: "Session actions" }).click();
     },
     viewport: DESKTOP_VIEWPORT,
@@ -470,7 +457,6 @@ export const SCREENS = [
     final: ".manta-model-dropdown",
     region: ".manta-model-dropdown",
     actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
       await page.locator(".manta-model-picker-btn:visible").first().click();
     },
     viewport: DESKTOP_VIEWPORT,
@@ -500,7 +486,6 @@ export const SCREENS = [
     final: ".manta-effort-dropdown",
     region: ".manta-effort-dropdown",
     actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
       await page.locator(".manta-model-picker-btn:visible").first().click();
       // Model rows render as listbox options now (MenuOption, BET-644) — the
       // row that enables the effort segment is an option, not a button.
@@ -531,7 +516,6 @@ export const SCREENS = [
     final: ".manta-ctx-popover",
     region: ".manta-ctx-popover",
     actions: async (page) => {
-      await page.locator('.truncate:has-text("Deploy new billing service")').first().click();
       await page.locator(".manta-ctx-pill:visible").first().click();
     },
     viewport: DESKTOP_VIEWPORT,
@@ -594,13 +578,6 @@ export const SCREENS = [
     mockup: "docs/screens/artifacts/mockup.html",
     viewport: DESKTOP_VIEWPORT,
     actions: async (page) => {
-      // The demo only mounts the chat panel (and therefore its transcript)
-      // once the fixture's active session is selected in the rail — the same
-      // first action the `session` row uses.
-      await page
-        .locator('.truncate:has-text("Deploy new billing service")')
-        .first()
-        .click();
       await page
         .locator('[aria-label="Show artifacts"]')
         .filter({ visible: true })
@@ -633,10 +610,6 @@ export const SCREENS = [
     mockup: "docs/screens/artifacts/mockup.html",
     viewport: DESKTOP_VIEWPORT,
     actions: async (page) => {
-      // The fixture's artifact content lives on the infra session; open it
-      // (a real user opening that session), then the artifacts panel. Links is
-      // the default tab, so no further gesture.
-      await page.getByText("Deploy new billing service").first().click();
       await page
         .locator('[aria-label="Show artifacts"]')
         .filter({ visible: true })
@@ -664,7 +637,6 @@ export const SCREENS = [
     mockup: "docs/screens/artifacts/mockup.html",
     viewport: DESKTOP_VIEWPORT,
     actions: async (page) => {
-      await page.getByText("Deploy new billing service").first().click();
       await page
         .locator('[aria-label="Show artifacts"]')
         .filter({ visible: true })
@@ -693,7 +665,6 @@ export const SCREENS = [
     mockup: "docs/screens/artifacts/mockup.html",
     viewport: DESKTOP_VIEWPORT,
     actions: async (page) => {
-      await page.getByText("Deploy new billing service").first().click();
       await page
         .locator('[aria-label="Show artifacts"]')
         .filter({ visible: true })

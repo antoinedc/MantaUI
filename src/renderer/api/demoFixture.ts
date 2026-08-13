@@ -108,6 +108,28 @@ export const demoAppConfig: AppConfig = {
 // amber steady / pulsing red ? / pulsing red ! / subagent count).
 // =============================================================================
 export const demoProjects: Project[] = [
+  // Ordering is load-bearing: the store defaults the active project to
+  // projects[0], and the demo opens there. The infra session is the one that
+  // owns SES_INFRA — the transcript-bearing session — so it must be first for
+  // `?demo&desktop` to land on the real content instead of an empty Welcome.
+  {
+    tmuxSession: "infra",
+    defaultCwd: "/home/dev/projects/infra",
+    attached: true,
+    windows: [
+      // Active session — chat-mode. Holds the rendered transcript + the
+      // visible permission card + visible question card. Both blocks at once
+      // satisfies "permission card and question card are both visible without
+      // interaction" without forcing a navigation.
+      {
+        index: 0,
+        name: "Deploy new billing service",
+        active: true,
+        paneCurrentPath: "/home/dev/projects/infra/terraform/billing",
+        opencodeSessionId: SES_INFRA,
+      },
+    ],
+  },
   {
     tmuxSession: "ethernal",
     defaultCwd: "/home/dev/projects/ethernal",
@@ -163,24 +185,6 @@ export const demoProjects: Project[] = [
         active: false,
         paneCurrentPath: "/home/dev/projects/marketing-site",
         opencodeSessionId: null,
-      },
-    ],
-  },
-  {
-    tmuxSession: "infra",
-    defaultCwd: "/home/dev/projects/infra",
-    attached: true,
-    windows: [
-      // Active session — chat-mode. Holds the rendered transcript + the
-      // visible permission card + visible question card. Both blocks at once
-      // satisfies "permission card and question card are both visible without
-      // interaction" without forcing a navigation.
-      {
-        index: 0,
-        name: "Deploy new billing service",
-        active: true,
-        paneCurrentPath: "/home/dev/projects/infra/terraform/billing",
-        opencodeSessionId: SES_INFRA,
       },
     ],
   },
