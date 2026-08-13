@@ -20,12 +20,39 @@ import SwiftUI
 // `SessionModels.swift`; this store is the I/O + state wiring around them.
 // ===========================================================================
 
+/// The rename/fork RPC seam for the session-list surface, so the store's
+/// "refresh only after a successful mutation" orchestration is unit-testable
+/// without a live box. The live adapter wraps `MantaAPIClient`'s existing RPCs
+/// unchanged (no semantics change — only the swallowing call sites move here).
+@MainActor
+protocol SessionListMutationAPI {
+    func renameWindow(session: String, index: Int, newName: String) async throws
+    func forkSession(sessionId: String, sessionName: String, windowName: String) async throws
+}
+
+@MainActor
+struct ServerSessionListMutations: SessionListMutationAPI {
+    let api: MantaAPIClient
+
+    func renameWindow(session: String, index: Int, newName: String) async throws {
+        try await api.renameWindow(session: session, index: index, newName: newName)
+    }
+
+    func forkSession(sessionId: String, sessionName: String, windowName: String) async throws {
+        _ = try await api.forkSession(sessionId: sessionId, sessionName: sessionName, windowName: windowName)
+    }
+}
+
 @MainActor
 final class SessionListStore: ObservableObject {
 
     @Published private(set) var projects: [MantaProject] = []
     @Published private(set) var loading = false
     @Published private(set) var loadError: String?
+    /// A transient, user-facing failure message from a mutation (rename/fork).
+    /// Set only when the RPC rejected; the view surfaces it as a brief toast
+    /// (mirrors `ChatSessionStore.actionHint`, the BET-716 composer surface).
+    @Published var actionMessage: String?
     /// True once a fetch has come back successfully. Without it an EMPTY list
     /// is ambiguous — "this box has no sessions" and "we never managed to ask"
     /// look identical — and the view rendered the inviting "No sessions yet.
@@ -41,6 +68,7 @@ final class SessionListStore: ObservableObject {
     @Published private(set) var runningSince: [String: Date] = [:]
 
     private let api: MantaAPIClient
+    private let mutations: SessionListMutationAPI
     private let eventStore: MantaEventStore
     private var undoTimers: [String: Timer] = [:]
     private var cancellables: Set<AnyCancellable> = []
@@ -52,8 +80,9 @@ final class SessionListStore: ObservableObject {
     /// vanished and the list stayed on whatever the first one returned.
     private var refreshQueued = false
 
-    init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore) {
+    init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil) {
         self.api = api
+        self.mutations = mutations ?? ServerSessionListMutations(api: api)
         self.eventStore = eventStore
         self.loadConfig()
         self.eventStore.rawFrameHandler = { [weak self] frame in
@@ -288,6 +317,33 @@ final class SessionListStore: ObservableObject {
                     await refresh()
                 }
             }
+        }
+    }
+
+    // MARK: - Rename / Fork (transient-feedback mutations)
+
+    /// Rename a window. Refreshes only after a successful RPC; on a rejected
+    /// rename the in-memory list is left untouched (the pre-failure snapshot —
+    /// there is no optimistic rename to revert) and a transient message is
+    /// published for the view to surface.
+    func renameSession(project: String, index: Int, newName: String) async {
+        do {
+            try await mutations.renameWindow(session: project, index: index, newName: newName)
+            await refresh()
+        } catch {
+            actionMessage = "Couldn't rename — check the connection"
+        }
+    }
+
+    /// Fork a window. Refreshes only after a successful RPC; on a rejected fork
+    /// the list is left unchanged and a transient message is published. The
+    /// view never navigates on failure — navigation only ever follows success.
+    func forkSession(sessionId: String, project: String, newName: String) async {
+        do {
+            try await mutations.forkSession(sessionId: sessionId, sessionName: project, windowName: newName)
+            await refresh()
+        } catch {
+            actionMessage = "Couldn't fork — check the connection"
         }
     }
 

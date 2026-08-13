@@ -183,3 +183,101 @@ final class SessionModelsTests: XCTestCase {
             turnCompleteEdge: true, showScrollToBottom: true, isActive: true, hapticsEnabled: false))
     }
 }
+
+// MARK: - BET-746 rename/fork failure feedback
+
+@MainActor
+private final class SessionListMutationStub: SessionListMutationAPI {
+    var renameError: Error?
+    var forkError: Error?
+    var renameCalls = 0
+    var forkCalls = 0
+
+    func renameWindow(session: String, index: Int, newName: String) async throws {
+        renameCalls += 1
+        if let error = renameError { throw error }
+    }
+
+    func forkSession(sessionId: String, sessionName: String, windowName: String) async throws {
+        forkCalls += 1
+        if let error = forkError { throw error }
+    }
+}
+
+private enum SessionListMutationTestError: Error {
+    case rejected
+}
+
+@MainActor
+final class SessionListMutationTests: XCTestCase {
+
+    private func makeStore(_ stub: SessionListMutationStub) -> SessionListStore {
+        // Dead localhost port so any stray background config/refresh I/O fails
+        // fast and is swallowed; the mutation seam is what these tests drive.
+        SessionListStore(
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1:1")!),
+            eventStore: MantaEventStore(),
+            mutations: stub
+        )
+    }
+
+    private func project(_ name: String, _ window: String) -> MantaProject {
+        MantaProject(
+            tmuxSession: name,
+            defaultCwd: "/tmp",
+            windows: [MantaWindow(index: 0, name: window, active: false, paneCurrentPath: "", opencodeSessionId: nil, worktreePath: nil)],
+            attached: false,
+            mantaOwned: nil
+        )
+    }
+
+    func testRenameFailureLeavesListUnchangedAndPublishesMessage() async {
+        let stub = SessionListMutationStub()
+        stub.renameError = SessionListMutationTestError.rejected
+        let store = makeStore(stub)
+        let snapshot = [project("ethernal", "dev"), project("manta", "main")]
+        store.applyProjects(snapshot)
+
+        await store.renameSession(project: "ethernal", index: 0, newName: "renamed")
+
+        XCTAssertEqual(stub.renameCalls, 1)
+        XCTAssertEqual(store.actionMessage, "Couldn't rename — check the connection")
+        XCTAssertEqual(store.projects, snapshot)
+    }
+
+    func testForkFailureLeavesListUnchangedAndPublishesMessage() async {
+        let stub = SessionListMutationStub()
+        stub.forkError = SessionListMutationTestError.rejected
+        let store = makeStore(stub)
+        let snapshot = [project("ethernal", "dev")]
+        store.applyProjects(snapshot)
+
+        await store.forkSession(sessionId: "ses", project: "ethernal", newName: "dev fork")
+
+        XCTAssertEqual(stub.forkCalls, 1)
+        XCTAssertEqual(store.actionMessage, "Couldn't fork — check the connection")
+        XCTAssertEqual(store.projects, snapshot)
+    }
+
+    func testRenameSuccessPublishesNoFailure() async {
+        let stub = SessionListMutationStub()
+        let store = makeStore(stub)
+        store.applyProjects([project("ethernal", "dev")])
+
+        await store.renameSession(project: "ethernal", index: 0, newName: "renamed")
+
+        XCTAssertEqual(stub.renameCalls, 1)
+        XCTAssertNil(store.actionMessage)
+    }
+
+    func testForkSuccessPublishesNoFailure() async {
+        let stub = SessionListMutationStub()
+        let store = makeStore(stub)
+        store.applyProjects([project("ethernal", "dev")])
+
+        await store.forkSession(sessionId: "ses", project: "ethernal", newName: "dev fork")
+
+        XCTAssertEqual(stub.forkCalls, 1)
+        XCTAssertNil(store.actionMessage)
+    }
+}
