@@ -524,11 +524,10 @@ async function resolveSessionLabel(sessionId) {
 // reports its outcome into the parent's transcript, so a done/error push for
 // it is pure duplicate noise. Best-effort: any failure returns false, so a
 // broken store degrades to today's behaviour (notify) rather than silence.
-// `load` is injectable for tests (mirrors delegate.mjs's `{ load = loadJobs }`).
-export async function isBackgroundJobSession(sessionId, load = loadJobs) {
+async function isBackgroundJobSession(sessionId) {
   if (!sessionId) return false;
   try {
-    const jobs = await load();
+    const jobs = await loadJobs();
     return jobs.some((j) => j.childSessionID === sessionId);
   } catch {
     return false;
