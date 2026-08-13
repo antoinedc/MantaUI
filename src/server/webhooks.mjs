@@ -66,6 +66,85 @@ export function verifySignature(secret, rawBody, header) {
   return timingSafeEqual(provided, expected);
 }
 
+// Signature header NAMES, per provider. GitHub signs with `X-Hub-Signature-256`
+// using the identical `sha256=<hex>` scheme MantaUI's own `X-Manta-Signature`
+// uses (BET-797). The GitLab adapter will add a THIRD scheme (Standard
+// Webhooks: a different header, base64, and an HMAC over `id.timestamp.body`)
+// — that arrives with the adapter and lives here as another provider row in
+// the per-provider header table, not as an if/else chain in deliverWebhook.
+const SIGNATURE_HEADERS = Object.freeze({
+  manta: Object.freeze(["x-manta-signature"]),
+  github: Object.freeze(["x-hub-signature-256", "x-manta-signature"]),
+});
+
+// Our webhook record providers. `manta` is the existing inbound hook; `github`
+// is a forge hook registered by the forge rules tool. Anything else is held to
+// be false rather than coerced (a typo shouldn't silently weaken verification).
+export const HOOK_PROVIDERS = ["manta", "github"];
+
+/**
+ * Provider-aware signature resolution. Tries every header name the provider
+ * accepts, in order, and returns true on the first that verifies. A provider
+ * with the same scheme in two headers (GitHub accepts either of ours today)
+ * keeps working when a forge sends its own header. Pure — reads only the plain
+ * header map and the raw body. `unsigned` hooks skip this at the call site.
+ *
+ * @param {"manta"|"github"} provider
+ * @param {string} secret
+ * @param {unknown} rawBody
+ * @param {Record<string, string|string[]|undefined>|undefined} headers lowercased header names
+ */
+export function resolveSignature(provider, secret, rawBody, headers) {
+  const names = SIGNATURE_HEADERS[provider] ?? SIGNATURE_HEADERS.manta;
+  for (const name of names) {
+    const value = headers?.[name];
+    if (typeof value === "string" && verifySignature(secret, rawBody, value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// GitHub's event-type header (`X-GitHub-Event`). GitHub sends a header per
+// delivery; this is the raw event name. Normalised later by the adapter.
+const GITHUB_EVENT_HEADER = "x-github-event";
+// GitHub's redelivery id header (`X-GitHub-Delivery`). A delivered event keeps
+// this id if GitHub re-sends it, so it is the dedupe key.
+const GITHUB_DELIVERY_HEADER = "x-github-delivery";
+
+// Cap on the per-hook list of recent delivery ids we keep for redelivery
+// dedupe. GitHub redelivery windows are small; 200 is generous headroom.
+const MAX_SEEN_DELIVERIES = 200;
+
+/**
+ * True when an incoming GitHub event is NOT in the hook's registered `events`
+ * whitelist (true → drop). When the hook has no whitelist, nothing is filtered.
+ * Pure. Only meaningful for `github` provider hooks.
+ */
+export function isEventFiltered(hook, event) {
+  if (!Array.isArray(hook?.events) || hook.events.length === 0) return false;
+  return typeof event !== "string" || !hook.events.includes(event);
+}
+
+/**
+ * True when this GitHub delivery id has already been seen on this hook — i.e.
+ * GitHub is REDELIVERING an event we already processed. The box must not act
+ * twice. Pure; the caller persists the id after a fresh delivery.
+ */
+export function isRedelivery(hook, deliveryId) {
+  if (typeof deliveryId !== "string" || !deliveryId) return false;
+  return Array.isArray(hook?.seenDeliveryIds) && hook.seenDeliveryIds.includes(deliveryId);
+}
+
+// Append a delivery id to the dedupe list, newest last, capped.
+export function rememberDelivery(hook, deliveryId) {
+  if (typeof deliveryId !== "string" || !deliveryId) return hook;
+  const seen = Array.isArray(hook.seenDeliveryIds) ? [...hook.seenDeliveryIds] : [];
+  seen.push(deliveryId);
+  if (seen.length > MAX_SEEN_DELIVERIES) seen.splice(0, seen.length - MAX_SEEN_DELIVERIES);
+  return { ...hook, seenDeliveryIds: seen };
+}
+
 // Wrap an external payload into the delivered turn. The payload is fenced and
 // explicitly marked UNTRUSTED DATA (mirrors formatPeerMessage's provenance
 // prefix) so the model treats it as an event report, not as commands. The only
@@ -127,6 +206,7 @@ export function createRateLimiter({
 export function toMeta(hook) {
   return {
     id: hook.id,
+    provider: hook.provider ?? "manta",
     label: hook.label ?? "",
     url: hook.url ?? null,
     unsigned: !!hook.unsigned,
@@ -177,10 +257,24 @@ function genSecret() {
 // are returned ONCE so the agent can configure the external system; thereafter
 // the secret is never re-exposed (listHooks strips it).
 export async function createHook(
-  { label, instructions = "", sessionID, directory = "", unsigned = false, now = () => Date.now() },
+  {
+    label,
+    instructions = "",
+    sessionID,
+    directory = "",
+    unsigned = false,
+    provider = "manta",
+    repoKey = null,
+    now = () => Date.now(),
+  },
   { load = loadHooks, save = saveHooks, publish } = {},
 ) {
-  if (typeof sessionID !== "string" || !sessionID)
+  if (!HOOK_PROVIDERS.includes(provider))
+    return { ok: false, error: `provider must be one of ${HOOK_PROVIDERS.join(", ")}` };
+  // A MantaUI hook wakes a session, so it must name one. A forge hook routes
+  // to the forge ingest path instead (it has no session yet — the event loop
+  // engine is a later issue), so sessionID is optional for forge hooks.
+  if (provider === "manta" && (typeof sessionID !== "string" || !sessionID))
     return { ok: false, error: "sessionID is required" };
   if (typeof label !== "string" || !label.trim())
     return { ok: false, error: "label is required" };
@@ -192,20 +286,77 @@ export async function createHook(
     token,
     secret,
     unsigned: !!unsigned,
+    provider,
+    repoKey: repoKey || null,
     label: label.trim(),
     instructions: typeof instructions === "string" ? instructions.trim() : "",
-    sessionID,
+    sessionID: sessionID || null,
     directory: directory || "",
     url: deliveryUrl(token),
     createdAt: now(),
     lastDeliveredAt: null,
     deliveries: 0,
+    seenDeliveryIds: [],
   };
   const hooks = await load();
   hooks.push(hook);
   await save(hooks);
   publish?.({ kind: "webhook.updated", payload: { sessionID } });
   return { ok: true, hook, url: hook.url, secret };
+}
+
+// Mint a fresh delivery capability token for a forge hook URL. Exported so the
+// forge registration flow can build the box URL (/hook/<token>) before the
+// GitHub hook is created, then persist the SAME token on the webhook record.
+export function genDeliveryToken() {
+  return genToken();
+}
+
+// Create or refresh a forge (provider !== "manta") webhook record keyed by
+// repoKey. The token + secret are SUPPLIED here (unlike createHook, which mints
+// its own) because the GitHub hook URL and its HMAC secret are fixed up front
+// by the registration flow and MUST match the stored record. Reuses an
+// existing record for the same repo so re-save refreshes secret/events rather
+// than accumulating duplicate hooks. Returns the stored hook.
+export async function upsertForgeHook(
+  { repoKey, label, token, secret, events, now = () => Date.now() },
+  { load = loadHooks, save = saveHooks } = {},
+) {
+  const hooks = await load();
+  const idx = hooks.findIndex((h) => h.provider === "github" && h.repoKey === repoKey);
+  const existing = idx >= 0 ? hooks[idx] : null;
+  const url = deliveryUrl(token);
+  const hook = {
+    id: existing?.id ?? genId(),
+    token,
+    secret,
+    provider: "github",
+    repoKey,
+    unsigned: false,
+    label,
+    instructions: "",
+    sessionID: null,
+    directory: "",
+    url,
+    createdAt: existing?.createdAt ?? now(),
+    lastDeliveredAt: existing?.lastDeliveredAt ?? null,
+    deliveries: existing?.deliveries ?? 0,
+    seenDeliveryIds: existing?.seenDeliveryIds ?? [],
+    events,
+  };
+  if (idx >= 0) hooks[idx] = hook;
+  else hooks.push(hook);
+  await save(hooks);
+  return hook;
+}
+
+// Read the full forge hook record (INCLUDING its secret) for a repoKey, or
+// null. Used by the registration flow to reuse an existing hook's token/secret
+// when re-saving rules for the same repo. `toMeta` never returns the secret;
+// this is the box-side forge path only.
+export async function findForgeHook(repoKey, { load = loadHooks } = {}) {
+  const hooks = await load();
+  return hooks.find((h) => h.provider === "github" && h.repoKey === repoKey) ?? null;
 }
 
 export async function deleteHook(id, { load = loadHooks, save = saveHooks, publish } = {}) {
@@ -245,11 +396,12 @@ export async function listHooks(sessionID, { load = loadHooks } = {}) {
  * @param {object} deps { load, save, sendPrompt, publish, now, take, isBusy, enqueue }
  */
 export async function deliverWebhook(
-  { token, rawBody, signatureHeader },
+  { token, rawBody, signatureHeader, headers },
   {
     load = loadHooks,
     save = saveHooks,
     sendPrompt,
+    forgeIngest,
     publish,
     now = () => Date.now(),
     take = () => true,
@@ -263,12 +415,49 @@ export async function deliverWebhook(
   const idx = hooks.findIndex((h) => h.token === token);
   if (idx === -1) return { ok: false, status: 404, error: "unknown webhook" };
   const hook = hooks[idx];
+  const provider = hook.provider ?? "manta";
 
   // Rate-limit BEFORE the (cheap) HMAC so a flood can't burn CPU on crypto.
   if (!take(token)) return { ok: false, status: 429, error: "rate limited" };
 
-  if (!hook.unsigned && !verifySignature(hook.secret, rawBody, signatureHeader)) {
+  // Provider-aware signature. `headers` (raw, lowercased names) is preferred —
+  // it lets a GitHub hook verify via X-Hub-Signature-256 or X-Manta-Signature.
+  // `signatureHeader` is the legacy single-header form (MantaUI's own hooks
+  // and the pre-BET-797 call path) — verify it directly against the same HMAC.
+  let verified;
+  if (typeof signatureHeader === "string" && signatureHeader) {
+    verified = verifySignature(hook.secret, rawBody, signatureHeader);
+  } else {
+    verified = resolveSignature(provider, hook.secret, rawBody, headers);
+  }
+  if (!hook.unsigned && !verified) {
     return { ok: false, status: 401, error: "bad signature" };
+  }
+
+  // Forge hooks: dedupe GitHub redeliveries and honour the event-type
+  // whitelist BEFORE any delivery so a redelivered event cannot act twice.
+  if (provider === "github") {
+    const deliveryId = headers?.[GITHUB_DELIVERY_HEADER];
+    const eventType = headers?.[GITHUB_EVENT_HEADER];
+    if (isRedelivery(hook, deliveryId)) {
+      // A redelivery of something we already handled: acknowledge to GitHub
+      // (it expects 2xx) but do nothing — the event must not act twice.
+      return { ok: true, status: 200, deduped: true };
+    }
+    if (isEventFiltered(hook, eventType)) {
+      // The hook was registered for specific events and this is not one of
+      // them. Drop quietly (2xx), matching GitHub's "successfully handled"
+      // contract for irrelevant delivery types.
+      hooks[idx] = { ...hook, lastDeliveredAt: now(), deliveries: (hook.deliveries ?? 0) + 1 };
+      await save(hooks);
+      return { ok: true, status: 200, filtered: true };
+    }
+    if (deliveryId) {
+      // Persist the delivery id so a future redelivery is caught. Done before
+      // ingest so the "seen" set is durable even if ingest errors.
+      hooks[idx] = rememberDelivery(hook, deliveryId);
+      await save(hooks);
+    }
   }
 
   // Parse the body as JSON; fall back to the raw string if it isn't JSON (some
@@ -294,12 +483,22 @@ export async function deliverWebhook(
   // Stamp delivery metadata + persist (so the card reflects it even if the
   // sendPrompt is deferred).
   hooks[idx] = {
-    ...hook,
+    ...hooks[idx],
     lastDeliveredAt: now(),
-    deliveries: (hook.deliveries ?? 0) + 1,
+    deliveries: (hooks[idx]?.deliveries ?? 0) + 1,
   };
   await save(hooks);
   publish?.({ kind: "webhook.updated", payload: { sessionID: hook.sessionID } });
+
+  // A forge hook routes to the forge ingest path (verify, dedupe, filter, then
+  // RECORD — it does not act on events in this issue). A MantaUI hook wakes
+  // its session via the existing sendPrompt/defer path.
+  if (provider !== "manta") {
+    if (typeof forgeIngest === "function") {
+      await forgeIngest({ hook, headers, event: headers?.[GITHUB_EVENT_HEADER], payload });
+    }
+    return { ok: true, status: 200, queued: false };
+  }
 
   // Defer when busy — an external event must not abort the user's in-flight
   // turn. Otherwise send now.
@@ -347,17 +546,18 @@ export async function deliverWebhook(
  * @param {string} [deps.storePath]
  * @param {() => number} [deps.now]
  */
-export function createWebhookEngine({ sendPrompt, delivery, publish, storePath, now = () => Date.now() } = {}) {
+export function createWebhookEngine({ sendPrompt, delivery, publish, storePath, forgeIngest, now = () => Date.now() } = {}) {
   const path = storePath ?? STORE_PATH;
   const take = createRateLimiter({ now });
 
-  function deliver({ token, rawBody, signatureHeader }) {
+  function deliver({ token, rawBody, signatureHeader, headers }) {
     return deliverWebhook(
-      { token, rawBody, signatureHeader },
+      { token, rawBody, signatureHeader, headers },
       {
         load: () => loadHooks(path),
         save: (hooks) => saveHooks(hooks, path),
         sendPrompt,
+        forgeIngest,
         publish,
         now,
         take,

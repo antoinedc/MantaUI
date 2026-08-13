@@ -185,6 +185,14 @@ export type AppConfig = {
   // authored YAML files; each step runs an arbitrary shell command with the
   // user's UID, so the user MUST vet every plugin they install.
   pluginsEnabled?: boolean;
+  // ----- Forge rules (BET-797) -----
+  // Master switch for the box-side forge event loop. When true, the box can
+  // register per-repo webhooks (under ~/.manta/forge-rules/) and ingest forge
+  // deliveries. Default false (OFF) — a stale or whimsical toggle change must
+  // never quietly voice an agent. Same posture as `pluginsEnabled` and sits
+  // alongside it in Settings. With it off the subsystem is dormant: no
+  // registration, no ingest routing, no dispatch.
+  forgeRulesEnabled?: boolean;
   // BET-409: colour theme. "system" (default) follows the OS prefers-color-scheme
   // media query and re-themes live when it changes; "light"/"dark" pin the theme.
   // Resolved in src/renderer/main.tsx (data-theme on <html>) and live-managed by
