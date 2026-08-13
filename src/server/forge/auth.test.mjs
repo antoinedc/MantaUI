@@ -29,10 +29,12 @@ function loadWith(secrets) {
   return () => secrets;
 }
 
+const NO_ENV = {};
 const STORED = [{ id: "s1", key: "GITHUB_TOKEN", value: "ghp_stored", scope: "shared", sessionID: null, project: null }];
 
 test("resolveToken: CLI wins over stored", async () => {
   const r = await resolveToken("github.com", {
+    env: NO_ENV,
     shell: shellReturning("ghp_cli\n"),
     loadSecretsFn: loadWith(STORED),
   });
@@ -41,14 +43,65 @@ test("resolveToken: CLI wins over stored", async () => {
 
 test("resolveToken: stored secret used when no CLI token", async () => {
   const r = await resolveToken("github.com", {
+    env: NO_ENV,
     shell: shellReturning(""),
     loadSecretsFn: loadWith(STORED),
   });
   assert.deepEqual(r, { token: "ghp_stored", source: "stored" });
 });
 
+test("resolveToken: env var wins over CLI and stored", async () => {
+  const r = await resolveToken("github.com", {
+    env: { MANTA_GITHUB_TOKEN: "ghp_env" },
+    shell: shellReturning("ghp_cli\n"),
+    loadSecretsFn: loadWith(STORED),
+  });
+  assert.deepEqual(r, { token: "ghp_env", source: "env" });
+});
+
+test("resolveToken: legacy github.token secret still resolves", async () => {
+  const legacy = [{ id: "s1", key: "github.token", value: "ghp_legacy", scope: "shared", sessionID: null, project: null }];
+  const r = await resolveToken("github.com", {
+    env: NO_ENV,
+    shell: shellReturning(""),
+    loadSecretsFn: loadWith(legacy),
+  });
+  assert.deepEqual(r, { token: "ghp_legacy", source: "stored" });
+});
+
+test("resolveToken: canonical GITHUB_TOKEN wins over legacy github.token", async () => {
+  const both = [
+    { id: "s1", key: "github.token", value: "ghp_legacy", scope: "shared", sessionID: null, project: null },
+    { id: "s2", key: "GITHUB_TOKEN", value: "ghp_canonical", scope: "shared", sessionID: null, project: null },
+  ];
+  const r = await resolveToken("github.com", {
+    env: NO_ENV,
+    shell: shellReturning(""),
+    loadSecretsFn: loadWith(both),
+  });
+  assert.deepEqual(r, { token: "ghp_canonical", source: "stored" });
+});
+
+test("resolveToken: gitlab env var + legacy secret resolve", async () => {
+  const legacy = [{ id: "s1", key: "gitlab.token", value: "glpat_legacy", scope: "shared", sessionID: null, project: null }];
+  const r = await resolveToken("gitlab.com", {
+    env: NO_ENV,
+    shell: shellReturning(""),
+    loadSecretsFn: loadWith(legacy),
+  });
+  assert.deepEqual(r, { token: "glpat_legacy", source: "stored" });
+  invalidateToken("gitlab.com"); // drop the cached legacy resolution so the env leg is re-tried
+  const envR = await resolveToken("gitlab.com", {
+    env: { MANTA_GITLAB_TOKEN: "glpat_env" },
+    shell: shellReturning(""),
+    loadSecretsFn: loadWith([]),
+  });
+  assert.deepEqual(envR, { token: "glpat_env", source: "env" });
+});
+
 test("resolveToken: neither → null", async () => {
   const r = await resolveToken("github.com", {
+    env: NO_ENV,
     shell: shellReturning(""),
     loadSecretsFn: loadWith([]),
   });
@@ -58,6 +111,7 @@ test("resolveToken: neither → null", async () => {
 test("resolveToken: unknown/empty host → null without touching anything", async () => {
   let shellCalls = 0;
   const r = await resolveToken("", {
+    env: NO_ENV,
     shell: async () => (shellCalls++, { stdout: "x" }),
     loadSecretsFn: loadWith([]),
   });
@@ -67,6 +121,7 @@ test("resolveToken: unknown/empty host → null without touching anything", asyn
 
 test("resolveToken: CLI failure (gh missing) falls through to stored", async () => {
   const r = await resolveToken("github.com", {
+    env: NO_ENV,
     shell: async () => {
       throw new Error("gh not found");
     },
@@ -79,8 +134,8 @@ test("resolveToken: cached hit within TTL does not re-invoke the shell", async (
   const clock = makeClock();
   const seen = [];
   const shell = async () => (seen.push(1), { stdout: "ghp_cached" });
-  await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
-  await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
+  await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
+  await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
   assert.equal(seen.length, 1, "second resolve within TTL is served from cache");
 });
 
@@ -88,11 +143,11 @@ test("resolveToken: cache expires after TTL and re-reads", async () => {
   const clock = makeClock();
   let token = "ghp_v1";
   const shell = async () => ({ stdout: token });
-  const a = await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
+  const a = await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
   assert.equal(a.token, "ghp_v1");
   token = "ghp_v2"; // rotated out-of-band while the box stayed up
   clock.advance(61_000);
-  const b = await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
+  const b = await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
   assert.equal(b.token, "ghp_v2", "rotation picked up after TTL");
 });
 
@@ -100,9 +155,9 @@ test("invalidateToken clears the cache immediately", async () => {
   const clock = makeClock();
   let token = "ghp_a";
   const shell = async () => ({ stdout: token });
-  await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
+  await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
   token = "ghp_b";
   invalidateToken("github.com");
-  const r = await resolveToken("github.com", { shell, loadSecretsFn: loadWith([]), now: clock.now });
+  const r = await resolveToken("github.com", { env: NO_ENV, shell, loadSecretsFn: loadWith([]), now: clock.now });
   assert.equal(r.token, "ghp_b", "invalidate forces a re-read before TTL");
 });
