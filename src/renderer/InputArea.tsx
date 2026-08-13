@@ -33,7 +33,8 @@ import {
 import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
-import { AttachButton, AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
+import { AttachButton, AttachmentStrip, MicButton, SessionToolbar, PendingScreenshotStrip } from "./ComposerParts";
+import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
@@ -126,6 +127,9 @@ export function InputArea({
   attachments,
   onRemoveAttachment,
   onAttachFiles,
+  pendingScreenshots,
+  onAcceptScreenshots,
+  onDiscardScreenshot,
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
@@ -177,6 +181,12 @@ export function InputArea({
   // (ChatPanel's addDroppedFiles) — the button is a second door, not a second
   // upload path.
   onAttachFiles: (files: File[]) => void;
+  // Screenshots the OS detector saw, not yet attached. Rendered ABOVE the
+  // composer box (see PendingScreenshotStrip) — threaded in exactly like
+  // `attachments`, so the panel stays the single owner of what gets attached.
+  pendingScreenshots: PendingScreenshot[];
+  onAcceptScreenshots: (shots: PendingScreenshot[]) => void;
+  onDiscardScreenshot: (id: string) => void;
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
@@ -273,6 +283,14 @@ export function InputArea({
           the transcript's measure edge, per the session mockup (.comp-in). The
           reading column chrome is the MeasureColumn primitive (BET-637). */}
       <MeasureColumn>
+      {/* Pending screenshots sit above the box, inside the same measure column
+          — so the row's left edge is the model pill's, with no bespoke
+          padding. */}
+      <PendingScreenshotStrip
+        shots={pendingScreenshots}
+        onAccept={onAcceptScreenshots}
+        onDiscard={onDiscardScreenshot}
+      />
       {/* Real input shell (BET-415): a bordered card with focus-within state
           replaces the old hairline-dividers-around-a-naked-textarea. Voice
           recording is now signalled by THIS border — a fourth treatment

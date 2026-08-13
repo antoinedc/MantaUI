@@ -256,13 +256,20 @@ export type WindowStatusUI = {
   lastMessageAt?: number;
 };
 
-// Global screenshot detection toast. Single instance app-wide — the active
-// ChatPanel renders it and "Add to chat" / dismiss clear it for everyone.
-// Subscription lives in App.tsx so we only register one ipcRenderer listener
-// regardless of how many ChatPanels are mounted.
-export type ScreenshotToast = {
-  source: "clipboard" | "file";
-  path?: string;
+// A screenshot the OS-level detector saw, waiting for the user to attach or
+// discard it. App.tsx owns the single detection listener and READS THE BYTES
+// THERE, once, so this record is self-contained: nothing downstream has to go
+// back to the clipboard or the disk (the clipboard can have changed by then —
+// that was a real race in the old accept path).
+export type PendingScreenshot = {
+  id: string;
+  filename: string;
+  // The PNG bytes, read at detection time. Uploaded verbatim on accept.
+  bytes: ArrayBuffer;
+  // Object URL over `bytes`, for the strip's <img>. Created in App.tsx when
+  // the record is made, revoked by removePendingScreenshots when it is
+  // dropped — so creation and revocation are each in exactly one place.
+  previewUrl: string;
 };
 
 type State = {
@@ -403,8 +410,10 @@ type State = {
   // artifacts WITHOUT a second opencodeMessages fetch. Keyed by sessionId,
   // written by ChatPanel when its own transcript state changes.
   chatMessages: Record<string, OpencodeMessage[]>;
-  // Single global screenshot toast — see ScreenshotToast type comment.
-  screenshotToast: ScreenshotToast | null;
+  // Screenshots waiting to be attached — see PendingScreenshot. A LIST, not a
+  // slot: taking three screenshots in a row must show three, and it never
+  // expires on its own.
+  pendingScreenshots: PendingScreenshot[];
   // Single global agent-file toast: a file the remote AI pushed to its outbox.
   // Same single-instance pattern as screenshotToast — App.tsx owns the one
   // ipcRenderer listener, the active ChatPanel renders the toast, accept /
@@ -622,7 +631,10 @@ type State = {
   // BET-414: toggle a window's pin. Optimistic set + configUpdate + reconcile.
   // The id is `<tmuxSession>/<windowIndex>` (see windowPinId in chatUtils.ts).
   togglePin: (pinId: string) => Promise<void>;
-  setScreenshotToast: (t: ScreenshotToast | null) => void;
+  addPendingScreenshot: (s: PendingScreenshot) => void;
+  // Removes by id and revokes each removed record's previewUrl. Takes an
+  // ARRAY so "discard one", "accept one" and "accept all" are one code path.
+  removePendingScreenshots: (ids: string[]) => void;
   setAgentFileToast: (t: AgentFileReady | null) => void;
   setUpdatePrompt: (p: { version: string; releaseName?: string } | null) => void;
   setUpdateError: (p: { message: string; raw: string } | null) => void;
@@ -683,7 +695,7 @@ export const useStore = create<State>((set, get) => ({
   jobs: {},
   usage: [],
   chatMessages: {},
-  screenshotToast: null,
+  pendingScreenshots: [],
   agentFileToast: null,
   appToasts: [],
   systemNotice: null,
@@ -955,7 +967,21 @@ export const useStore = create<State>((set, get) => ({
     set({ pinnedWindows: Array.isArray(saved.pinnedWindows) ? saved.pinnedWindows : [] });
   },
 
-  setScreenshotToast: (t) => set({ screenshotToast: t }),
+  addPendingScreenshot: (s) =>
+    set((prev) => ({ pendingScreenshots: [...prev.pendingScreenshots, s] })),
+  removePendingScreenshots: (ids) =>
+    set((prev) => {
+      const drop = new Set(ids);
+      for (const s of prev.pendingScreenshots) {
+        // jsdom (the test environment) implements NEITHER createObjectURL nor
+        // revokeObjectURL, so an unguarded call makes every test that drops a
+        // pending screenshot throw. Guard rather than leak the URL.
+        if (drop.has(s.id) && typeof URL.revokeObjectURL === "function") {
+          URL.revokeObjectURL(s.previewUrl);
+        }
+      }
+      return { pendingScreenshots: prev.pendingScreenshots.filter((s) => !drop.has(s.id)) };
+    }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
   pushAppToast: (t) =>
     set((prev) => {
