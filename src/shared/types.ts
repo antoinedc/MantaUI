@@ -1261,6 +1261,21 @@ export type PluginRegistryRow =
 
 export type OpencodeRole = "user" | "assistant";
 
+// Token accounting surfaced by the running indicator / context bar. Lives here
+// (shared, not renderer/chatShared) because it also types the `tokens` field
+// on OpencodeMessageInfo below — previously the renderer read tokens off an
+// explicit `as unknown as { tokens?: TokenUsage }` cast because the field
+// wasn't declared; declaring it kills those casts (BET-733 / audit L10).
+// `src/renderer/chatShared.tsx` re-exports this so existing renderer imports
+// are unchanged.
+export type TokenUsage = {
+  total?: number;
+  input: number;
+  output: number;
+  reasoning: number;
+  cache: { read: number; write: number };
+};
+
 export type OpencodeMessageInfo = {
   id: string;             // msg_...
   sessionID: string;      // ses_...
@@ -1269,6 +1284,10 @@ export type OpencodeMessageInfo = {
   // assistant-only fields surfaced here for the model/cost line in the UI:
   modelID?: string;
   providerID?: string;
+  // AssistantMessage.tokens from the OpenAPI doc — carried on the wire for
+  // assistant messages; used by the context bar / turn footers. Optional
+  // because user messages (and older/streaming snapshots) don't carry it.
+  tokens?: TokenUsage;
 };
 
 // Generic part shape. Each part carries id/messageID/type plus arbitrary

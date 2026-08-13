@@ -229,6 +229,13 @@ export function ChatPanel({
   const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
+  // Unmount cleanup — clear every pending child refetch timer so a 300ms timer
+  // surviving teardown can't fire fetch + setState after the panel unmounts
+  // (same pattern as useTranscriptState's own splice-timer cleanup).
+  useEffect(() => () => {
+    for (const t of childRefetchTimers.current.values()) clearTimeout(t);
+    childRefetchTimers.current.clear();
+  }, []);
   // Forward declaration: submitRef is defined later (depends on submit), but
   // useSseBus needs it now for the drain effect.
   const submitRef = useRef<(textOverride?: string) => void>(() => {});
@@ -291,6 +298,24 @@ export function ChatPanel({
     if (idx < 0) return;
     virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior });
   }, []);
+
+  // ===== Per-session model override =====
+  // Declared before useSseBus: the auth-banner providerID below derives from
+  // it. Initialized from the per-session localStorage override, falling back
+  // to the persisted global default (the same seed useSseBus's providerID
+  // used to recompute from readSavedModel on every render).
+  const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
+    readSavedModel(sessionId) ?? configDefaultModel ?? null,
+  );
+  // Active-model providerID for the auth-error banner (BET-316). Per-session
+  // override wins over the persisted default; null if neither is set. Memoized
+  // on `modelOverride` (the in-memory selection, itself seeded from
+  // localStorage) so the localStorage read + parse runs on model change, not
+  // on every keystroke re-render.
+  const providerID = useMemo(
+    () => modelOverride?.providerID ?? configDefaultModel?.providerID ?? null,
+    [modelOverride, configDefaultModel],
+  );
 
   // ===== SSE bus state (extracted to useSseBus) =====
   const {
@@ -357,17 +382,7 @@ export function ChatPanel({
     isActiveRef,
     refetchOwedWhileInactive,
     applyStreamFlush,
-    // Active-model providerID for the auth-error banner (BET-316).
-    // Per-session override (localStorage) wins over the persisted default;
-    // null if neither is set — the banner then falls through to the
-    // raw-message path. Computed inline rather than via useMemo: the
-    // cost is one localStorage read + one object lookup per render, and
-    // keeping it inline avoids a second memo that exists only to feed one
-    // hook argument.
-    providerID:
-      readSavedModel(sessionId)?.providerID ??
-      configDefaultModel?.providerID ??
-      null,
+    providerID,
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
   });
@@ -417,9 +432,6 @@ export function ChatPanel({
   // the picker never flashes "Loading…" for a list that didn't change.
   // Selection, by contrast, IS per-session and persists via localStorage.
   const { models, defaultModel } = useModelCatalog();
-  const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    readSavedModel(sessionId) ?? configDefaultModel ?? null,
-  );
   // Pending attachments (chips above input) + agent @-mentions waiting to be
   // serialized into FilePart / AgentPart on next submit. Cleared on success.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -725,7 +737,7 @@ export function ChatPanel({
     // Snap the branch indicator to current truth on every submit.
     refreshBranch(cwd);
     // If the pinned todo list is fully terminal, hide the stale checklist.
-    if (activeTodos && allTodosTerminal(activeTodos)) {
+    if (activeTodosRef.current && allTodosTerminal(activeTodosRef.current)) {
       setTodosDismissed(true);
     }
 
@@ -770,11 +782,11 @@ export function ChatPanel({
       );
       try {
         if (cmdName === "clear") {
-          await clearSession();
+          await clearSessionRef.current();
         } else if (cmdName === "fork") {
-          await forkSession();
+          await forkSessionRef.current();
         } else if (cmdName === "compact") {
-          await compactSession();
+          await compactSessionRef.current();
         } else if (cmdName === "help") {
           setSystemNotice(buildHelpText());
         }
@@ -879,7 +891,13 @@ export function ChatPanel({
         prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
       );
     }
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions]);
+    // tmuxSession/windowIndex key the per-window prompt-history list (line
+    // 720) — if they moved to a different owning window, submit must use the
+    // NEW window's history, so they're deps. activeTodos + the session ops
+    // (clear/fork/compact) are read via their ref mirror below (declared after
+    // submit in this file — the established commandsRef pattern) so submit
+    // always sees their current value without them re-rotating this callback.
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -1134,6 +1152,17 @@ export function ChatPanel({
       setSendError(String((e as Error)?.message ?? e));
     }
   }, [tmuxSession, windowIndex, cwd, modelOverride, refresh]);
+
+  // Current-value ref mirrors for `submit` — declared AFTER submit in this file
+  // (the established commandsRef pattern), so submit reads these instead of
+  // taking the callbacks as deps (which would hit the TDZ at submit's
+  // declaration line). Kept current each render.
+  const forkSessionRef = useRef(forkSession);
+  forkSessionRef.current = forkSession;
+  const compactSessionRef = useRef(compactSession);
+  compactSessionRef.current = compactSession;
+  const clearSessionRef = useRef(clearSession);
+  clearSessionRef.current = clearSession;
 
   // Delete session — kills the tmux window + opencode session. Reaches the
   // same IPC the mobile ⋯ sheet uses.
@@ -1602,10 +1631,9 @@ export function ChatPanel({
     for (let i = messages.length - 1; i >= 0; i--) {
       const info = messages[i].info;
       if (info.role !== "assistant") continue;
-      // OpencodeMessageInfo type doesn't surface `tokens` directly — read
-      // it off the underlying record. Shape matches AssistantMessage.tokens
-      // from the OpenAPI doc.
-      const t = (info as unknown as { tokens?: TokenUsage }).tokens;
+      // `tokens` is declared on OpencodeMessageInfo (BET-733/L10) — shape
+      // matches AssistantMessage.tokens from the OpenAPI doc.
+      const t = info.tokens;
       if (!t) continue;
       const totalInput =
         (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0);
@@ -1729,6 +1757,11 @@ export function ChatPanel({
       todosDismissed,
     );
   }, [messages, liveTodos, todosDismissed]);
+  // Current-value ref mirror for `submit` (declared after submit — commandsRef
+  // pattern) so submit's todos auto-dismiss reads the latest activeTodos even
+  // though activeTodos itself can't appear in submit's dep array.
+  const activeTodosRef = useRef(activeTodos);
+  activeTodosRef.current = activeTodos;
 
   // Turn boundary metadata: which assistant messages are the FINAL one of
   // their turn (i.e., immediately followed by a user message or end-of-list),
@@ -2307,17 +2340,23 @@ export function ChatPanel({
         onHistoryUp={() => navigateHistory(-1)}
         onHistoryDown={() => navigateHistory(1)}
         onQueuePop={() => {
+          // The setMessageQueue updater must stay pure (it's double-invoked
+          // under StrictMode). Compute the popped value inside it, then run
+          // the setInput + focus side effects AFTER — otherwise setInput and
+          // the rAF fire twice per pop.
+          let last: string | undefined;
           setMessageQueue((q) => {
             if (q.length === 0) return q;
-            const last = q[q.length - 1];
-            setInput(last);
-            requestAnimationFrame(() => {
-              const el = inputRef.current;
-              if (!el) return;
-              el.focus();
-              el.setSelectionRange(last.length, last.length);
-            });
+            last = q[q.length - 1];
             return q.slice(0, -1);
+          });
+          if (last === undefined) return;
+          setInput(last);
+          requestAnimationFrame(() => {
+            const el = inputRef.current;
+            if (!el) return;
+            el.focus();
+            el.setSelectionRange(last!.length, last!.length);
           });
         }}
         onPaste={onPaste}

@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
 import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
-import type { SessionMode, TokenUsage } from "./chatShared";
+import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -2336,11 +2336,8 @@ export function computeTurnInfo(
         const t = messages[j].info.time;
         if (firstStart == null && t?.created != null) firstStart = t.created;
         if (t?.completed != null) lastEnd = t.completed;
-        // OpencodeMessageInfo doesn't surface `tokens` directly — read it
-        // off the underlying record the same way `latestTokens` does.
-        const tok = (
-          messages[j].info as unknown as { tokens?: TokenUsage }
-        ).tokens;
+        // `tokens` is declared on OpencodeMessageInfo (BET-733/L10) — no cast.
+        const tok = messages[j].info.tokens;
         if (tok) turnTokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
         if (verbSeedId == null) verbSeedId = messages[j].info.id;
         lastAssistantId = messages[j].info.id;
@@ -2403,9 +2400,7 @@ export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | 
       const c = messages[j].info.time?.created;
       if (typeof c === "number") startedAt = c;
     }
-    const tok = (
-      messages[j].info as unknown as { tokens?: TokenUsage }
-    ).tokens;
+    const tok = messages[j].info.tokens;
     if (tok) tokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
   }
   if (startedAt == null) {

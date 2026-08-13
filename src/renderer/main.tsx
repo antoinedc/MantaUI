@@ -8,7 +8,7 @@ import { App } from "./App";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
-import type { Api } from "../shared/api";
+import type { PreloadApi } from "../shared/api";
 import { initRendererLogging } from "./log";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { installHttpTransport, setWindowApi } from "./transportInstall";
@@ -41,11 +41,13 @@ import { loadPersistedSnapshot } from "./store";
 // shell that used to branch on `!preload`) is retired — a browser without a
 // preload is now only reachable through `?demo` for the visual gates and
 // marketing shots, which never run the real boot path.
-// TODO(BET-audit L10): this cast widens the ~25-method preload subset to the
-// full `Api` type; the preload shim and httpApi should eventually share one
-// typed contract rather than relying on the renderer assuming the subset
-// masks missing methods.
-const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
+// BET-733 (L10): `__mantaPreload` is typed as the HONEST `PreloadApi` subset,
+// NOT the full `Api`. Casting it to `Api` was the lie that let renderer code
+// call `window.api.<method>` (typed full-`Api`) for methods the preload does
+// not implement. Post-pairing window.api is httpApi (the full contract);
+// pre-pairing it is this subset, so any `Api` method missing here is a real
+// runtime absence that must be guarded (`window.api.X?.()`).
+const preload = (window as unknown as { __mantaPreload?: PreloadApi }).__mantaPreload;
 
 // Demo mode (BET-302): parsed once at module load so the demo branch is
 // reachable from inside boot() without re-parsing the URL.
@@ -92,7 +94,7 @@ async function bootDemo(): Promise<void> {
   );
 }
 
-async function chooseDesktopTransport(realPreload: Api): Promise<void> {
+async function chooseDesktopTransport(realPreload: PreloadApi): Promise<void> {
   // Desktop always uses httpApi (BET-82: SSH main path gone).
   // The real preload already lives at window.__mantaPreload (exposed read-only by
   // the preload's contextBridge) — we NEVER write to that name. Here we only

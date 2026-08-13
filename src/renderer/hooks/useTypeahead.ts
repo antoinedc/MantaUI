@@ -7,8 +7,9 @@
 // Self-contained: owns its own state (typeahead, commands, agents, fileResults)
 // and refs (fileSearchSeqRef, fileSearchTimer). Dependencies are injected via
 // params — it never reaches into the container's SSE / pin-to-bottom / drain
-// state. The hook is callback-driven (no effects) so it's trivially testable
-// with the render harness.
+// state. The hook is callback-driven (the only effect is an unmount cleanup
+// for the debounced file-search timer) so it's trivially testable with the
+// render harness.
 //
 // The textarea's onChange routes through `updateInput` which both updates
 // `input` state and detects active typeahead. Three triggers:
@@ -17,7 +18,7 @@
 // The popup tracks the [anchorStart, anchorEnd) slice and replaces it
 // verbatim on selection.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OpencodeAgent, OpencodeCommand } from "../../shared/types";
 import {
   filterCommands,
@@ -294,6 +295,13 @@ export function useTypeahead(params: {
     },
     [typeaheadRows.length],
   );
+
+  // Unmount cleanup — clear the debounced file-search timer so a pending
+  // 80ms timer can't fire `opencodeFindFiles` + setState after teardown
+  // (the timer was previously only cleared on keystroke, not on unmount).
+  useEffect(() => () => {
+    if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
+  }, []);
 
   const typeaheadOpen = typeahead !== null && typeaheadRows.length > 0;
   const typeaheadExactMatch =

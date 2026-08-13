@@ -225,6 +225,12 @@ export function useSseBus(params: {
   useEffect(() => {
     questionsRef.current = questions;
   }, [questions]);
+  // Ref mirror of `providerID` so the SSE handler (whose subscription effect
+  // deps are `[sessionId]`) classifies the auth-reconnect banner against the
+  // CURRENT provider, not the one captured at mount. Without this, switching
+  // provider/model mid-session leaves the banner keyed to the old provider.
+  const providerIDRef = useRef(providerID);
+  providerIDRef.current = providerID;
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
   const [compactionState, setCompactionState] = useState<{
     reason: string;
@@ -494,7 +500,7 @@ export function useSseBus(params: {
         // running in parallel for Claude specifically — this banner is
         // additive, not a replacement. For everything else the existing
         // switch/default branch handles the message and we fall through.
-        const auth = authErrorAdvice(err?.name, raw, providerID);
+        const auth = authErrorAdvice(err?.name, raw, providerIDRef.current);
         if (auth) {
           setSendError(`${auth.label} needs to be reconnected.`);
           setAuthReconnect(auth.label);

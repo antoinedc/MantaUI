@@ -565,3 +565,48 @@ export interface Api {
   // can show the user why their YAML didn't load.
   pluginsRegistry(): Promise<PluginRegistryRow[]>;
 }
+
+/**
+ * The HONEST subset of `Api` that the Electron preload runtime actually
+ * implements (`src/preload/index.ts`'s `api` object literal, exposed as
+ * `window.__mantaPreload`).
+ *
+ * This is the KEY to the "Api type lie" (BET-733 / audit L10): `main.tsx`
+ * used to cast `__mantaPreload` to the FULL `Api`, letting renderer code
+ * call `window.api.<method>` for methods the preload does NOT have — a
+ * compile-legal call that is `undefined` at runtime until httpApi is
+ * installed post-pairing (the exact class of bug behind the dead-subscription
+ * P0). Typing `__mantaPreload` as `PreloadApi` makes those missing methods a
+ * compile-visible absence: anything on `PreloadApi` is guaranteed implemented;
+ * anything on `Api` but absent from `PreloadApi` must go through a guard.
+ *
+ * Enumerated from `src/preload/index.ts`'s object literal. The preload also
+ * implements methods NOT in the `Api` contract (pairing / installer / some OS
+ * bridges such as `authUnpair`, `readClipboardText`, `readLocalFile`,
+ * `onPairLink`, `dialogShowOpenFile`, the `installer*` family) — those are
+ * reached via `window.__mantaPreload` (typed `MantaPreload` in
+ * `src/renderer/preloadAccess.ts`), never through `window.api`/`Api`, so they
+ * don't belong here.
+ *
+ * Do NOT weaken `Api` — `httpApi` must still be typecheck-enforced against the
+ * FULL contract. This type only narrows what the preload bridge claims.
+ */
+export type PreloadApi = Pick<
+  Api,
+  | "configGet"
+  | "authClaim"
+  | "clipboardWriteText"
+  | "clipboardReadImage"
+  | "onScreenshotDetected"
+  | "onDesktopNotify"
+  | "getPathForFile"
+  | "peekRemoteFile"
+  | "openExternal"
+  | "revealInFolder"
+  | "onServerUpdateAvailable"
+  | "autoUpdateDownload"
+  | "autoUpdateInstall"
+  | "onAutoUpdateAvailable"
+  | "onAutoUpdateDownloaded"
+  | "onAutoUpdateError"
+>;
