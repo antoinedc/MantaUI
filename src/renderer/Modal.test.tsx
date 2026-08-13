@@ -126,3 +126,100 @@ describe("Modal", () => {
     expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
   });
 });
+
+// ===== Escape + focus trap + restore (BET-724) =====
+describe("Modal — Escape + focus trap + restore (BET-724)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("calls onDismiss on Escape, regardless of which inner element has focus", () => {
+    let dismissed = 0;
+    h = mount(
+      <Modal label="L" onDismiss={() => dismissed++}>
+        <button>ok</button>
+      </Modal>,
+    );
+    const btn = h.container.querySelector("button")!;
+    act(() => {
+      btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(dismissed).toBe(1);
+  });
+
+  it("does nothing on Escape when onDismiss is omitted", () => {
+    h = mount(
+      <Modal label="L">
+        <button>ok</button>
+      </Modal>,
+    );
+    const btn = h.container.querySelector("button")!;
+    expect(() => {
+      act(() => {
+        btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+    }).not.toThrow();
+    expect(h.text()).toContain("ok");
+    expect(h.container.querySelector('div[role="dialog"]')).toBeTruthy();
+  });
+
+  it("focuses the first focusable element inside the panel on open", () => {
+    h = mount(
+      <Modal label="L">
+        <div>
+          <span>not focusable</span>
+          <button>first</button>
+          <button>second</button>
+        </div>
+      </Modal>,
+    );
+    const buttons = h.container.querySelectorAll("button");
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("falls back to focusing the panel itself (tabIndex=-1) when nothing inside is focusable", () => {
+    h = mount(<Modal label="L">plain text</Modal>);
+    const panel = h.container.querySelector('div[role="dialog"]') as HTMLElement;
+    expect(panel).toBeTruthy();
+    expect(document.activeElement).toBe(panel);
+    expect(panel.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("traps Tab within the panel (wraps last → first)", () => {
+    h = mount(
+      <Modal label="L">
+        <button>first</button>
+        <button>second</button>
+      </Modal>,
+    );
+    const buttons = [...h.container.querySelectorAll("button")] as HTMLButtonElement[];
+    buttons[1].focus();
+    act(() => {
+      buttons[1].dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("restores focus to the opener on unmount", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    h = mount(
+      <Modal label="L">
+        <button>inside</button>
+      </Modal>,
+    );
+    expect(document.activeElement).not.toBe(opener);
+
+    h.unmount();
+    h = null;
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+});

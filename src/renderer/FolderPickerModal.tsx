@@ -334,10 +334,9 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
                         void select();
                         return;
                       }
-                      if (e.key === "Escape") {
-                        if (suggestion) setSuggestion(null);
-                        else onCancel();
-                      }
+                      // Escape is handled by Modal (BET-724): it always
+                      // dismisses regardless of which inner element has
+                      // focus, including this input with a live suggestion.
                     }}
                     spellCheck={false}
                     autoComplete="off"

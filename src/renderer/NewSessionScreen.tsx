@@ -583,7 +583,12 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           onCancel={() => setPickerOpen(false)}
         />
 
-      <Modal open={!!fanOutWorktrees} size="md" label="Fan-out confirmed">
+      <Modal
+          open={!!fanOutWorktrees}
+          size="md"
+          label="Fan-out confirmed"
+          onDismiss={sending ? undefined : () => setFanOutWorktrees(null)}
+        >
           <div className="space-y-3">
             <div className="text-body font-semibold text-text">Fan-out confirmed</div>
             <div className="text-meta text-text-muted">

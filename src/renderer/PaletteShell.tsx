@@ -77,6 +77,10 @@ export function PaletteShell({
     <div
       className={`fixed inset-0 z-50 flex items-start justify-center pt-[16vh] bg-black/40 manta-palette-overlay ${closing ? "manta-palette-overlay-out" : ""}`}
       onClick={requestClose}
+      // BET-724: bound on the overlay (not just the input below) so Escape
+      // closes the palette regardless of which inner element has focus —
+      // previously it only fired while the search input itself was focused.
+      onKeyDown={onKeyDown}
     >
       <div
         role="dialog"
@@ -91,7 +95,6 @@ export function PaletteShell({
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
             placeholder={placeholder}
             spellCheck={false}
             autoComplete="off"
