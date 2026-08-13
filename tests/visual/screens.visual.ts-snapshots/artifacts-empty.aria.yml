@@ -1,7 +1,6 @@
 - complementary "Artifacts":
   - text: ""
   - button "Search artifacts"
-  - button "Close artifacts panel"
   - tablist "Artifact kind":
     - tab "Links 0" [selected]
     - tab "Images 0"

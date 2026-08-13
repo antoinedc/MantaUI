@@ -39,7 +39,6 @@
   - button "7%"
   - button "Show artifacts"
   - button "Session actions"
-  - text: "/Add a `\\/api\\/v1\\/orders\\/export\\.csv` endpoint to the billing service\\. It should accept the same filters as the existing `GET \\/orders` \\(status, customer_id, created_after, created_before\\) and stream the result as CSV\\. Header row first, then one row per order\\. Use the streaming response helper from `app\\/utils\\/stream\\.py` so we don't load everything into memory — the export could be [\\d,.]+[bkmBKM]+\\+ rows\\./"
   - button "Read app/routes/orders.py"
   - button "Copy"
   - button "Expand"
@@ -66,7 +65,9 @@
   - text: /\. File retention-report\.pdf · application\/pdf File migration-notes\.md · text\/markdown File cohort-grid\.png · image\/png File Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png · image\/png Three densities side by side — compact is the one that survives at 1280px:/
   - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density":
     - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density
-  - text: "/\\. Todo 2\\/5 Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - text: . Todo 2/5
+  - button "Dismiss todo list"
+  - text: "/Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
   - radio "Match the JSON shape"
   - text: Customer-friendly
   - radio "Customer-friendly"
@@ -90,3 +91,4 @@
   - button "secrets"
   - button "webhooks"
   - button "Permissions on — click to bypass"
+- complementary "Artifacts"

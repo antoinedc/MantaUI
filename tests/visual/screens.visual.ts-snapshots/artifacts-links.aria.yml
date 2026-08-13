@@ -1,7 +1,6 @@
 - complementary "Artifacts":
   - text: ""
   - button "Search artifacts"
-  - button "Close artifacts panel"
   - tablist "Artifact kind":
     - tab "Links 4" [selected]
     - tab "Images 6"
@@ -20,4 +19,4 @@
   - text: /Tue \d+ Nov/
   - button "Open artifact": datatracker.ietf.org/doc/html/rfc4180 datatracker.ietf.org/doc/html/rfc4180
   - text: here's the RFC — the quoting rules are what always breaks naive parsers
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
