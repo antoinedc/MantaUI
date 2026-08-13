@@ -1,4 +1,6 @@
+import QuickLook
 import SwiftUI
+import UIKit
 
 // ===========================================================================
 // BET-627 — overflow sheet items (scheduled tasks · secrets).
@@ -344,33 +346,47 @@ private struct SecretAddForm: View {
 }
 
 // ===========================================================================
-// BET-750 — artifacts / agent-file outbox receive card.
+// BET-822 — artifacts palette: all four sources, QuickLook preview, no download.
 //
-// The reverse of the composer's paperclip: files the AI pushes to the box's
-// `~/.manta-outbox/<sessionID>/` are listed here, scoped to this session, and
-// each row's download button pulls the bytes over `GET /api/download` and hands
-// them to the system share sheet ("Save to Files"). Receive-only — this is not
-// an upload path. Same stock-SwiftUI treatment as SchedulesCard/SecretsCard:
-// the list refetches on `.task` (and lightly while presented, so a file the AI
-// drops mid-chat appears) with an honest empty state and a `failed` flag.
+// The reverse of the composer's paperclip. Unlike the BET-750 version (which
+// read ONLY the agent's `outbox:list`), this card derives its rows from the
+// same four feeds as the desktop panel — transcript file parts, URLs in user
+// messages, published serve-pages, and the outbox — via the pure
+// `ArtifactDerivation` (ArtifactDerivation.swift, unit-tested).
+//
+// Tapping a row PREVIEWS it (QuickLook), not downloads it: iOS has no
+// user-visible Downloads folder, and duplicating a share-sheet action is a
+// misstep. Sharing is reachable only through the long-press context menu. A
+// box artifact must be staged to the temp dir first — a genuine task of
+// unknown duration, so it gets a row spinner while staging, and the preview
+// only presents when the bytes land (a failure leaves the row untouched).
+// Same stock-SwiftUI treatment as SchedulesCard/SecretsCard.
 // ===========================================================================
 
-/// List of agent-pushed files for this session (`outbox:list`), each with a
-/// system download action. Once a row's bytes are fetched it is written to the
-/// app's temp directory and that row swaps its download button for a
-/// `ShareLink`, so saving to Files goes through the platform share sheet.
+/// List of everything THIS conversation produced: files the user attached,
+/// files the agent pushed, published preview pages, and links, grouped by day
+/// behind a Files · Images · Links segmented control. Tap → QuickLook;
+/// long-press → Share / Copy path.
 struct ArtifactsCard: View {
     let sessionId: String
     let onClose: () -> Void
 
-    @State private var files: [OutboxFile] = []
+    @Environment(\.colorScheme) private var colorScheme
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    @State private var artifacts: [Artifact] = []
+    @State private var segment: ArtifactKind = .file
     @State private var loaded = false
     @State private var failed = false
-    /// Per-path temp URL where a successfully-downloaded file lives. A row
-    /// whose path is present here shows a ShareLink instead of a download tap.
-    @State private var downloaded: [String: URL] = [:]
-    /// Paths currently being fetched (row spinner).
-    @State private var downloading: Set<String> = []
+    /// Artifact ids currently having their bytes streamed to the temp dir
+    /// (row spinner while QuickLook staging runs).
+    @State private var staging: Set<String> = []
+    /// Staged local file URLs, keyed by artifact id — the rows QuickLook can
+    /// already present without another fetch.
+    @State private var stagedFiles: [String: URL] = [:]
+    @State private var quickLookURLs: [URL] = []
+    @State private var quickLookStartIndex = 0
+    @State private var showingQuickLook = false
     private let api = MantaAPIClient.live()
     /// Poll cadence while the card is presented, so a file the AI drops mid-chat
     /// appears without needing to dismiss and reopen the card.
@@ -384,13 +400,13 @@ struct ArtifactsCard: View {
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("artifacts-failed")
                 } else if loaded {
-                    if files.isEmpty {
-                        emptyState
-                    } else {
-                        List(files) { file in
-                            row(file)
+                    VStack(spacing: 0) {
+                        segmented
+                        if filtered.isEmpty {
+                            emptyState
+                        } else {
+                            list
                         }
-                        .listStyle(.insetGrouped)
                     }
                 } else {
                     ProgressView()
@@ -412,83 +428,252 @@ struct ArtifactsCard: View {
                 try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)
             }
         }
+        .fullScreenCover(isPresented: $showingQuickLook) {
+            QuickLookPreview(urls: quickLookURLs, startIndex: quickLookStartIndex)
+                .ignoresSafeArea()
+        }
+    }
+
+    private var counts: (link: Int, image: Int, file: Int) { ArtifactCounts.of(artifacts) }
+
+    private var filtered: [Artifact] {
+        artifacts.filter { $0.kind == segment }
+    }
+
+    private var segmented: some View {
+        Picker("Segment", selection: $segment) {
+            Text("Files \(counts.file)").tag(ArtifactKind.file)
+            Text("Images \(counts.image)").tag(ArtifactKind.image)
+            Text("Links \(counts.link)").tag(ArtifactKind.link)
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .accessibilityIdentifier("artifacts-segment")
+    }
+
+    private var list: some View {
+        List {
+            ForEach(ArtifactDayGrouping.grouped(filtered, now: Date()), id: \.label) { group in
+                Section(header: Text(group.label)) {
+                    ForEach(group.items) { artifact in
+                        row(artifact)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
     }
 
     private func load() async {
-        if let result = try? await api.listOutbox(sessionId: sessionId) {
-            files = result
+        do {
+            // All four feeds arrive before deriving — the merged list is the
+            // only consistent snapshot for the counts and segments.
+            async let messages = api.messages(sessionId: sessionId)
+            async let pages = api.servePageList()
+            async let outbox = api.listOutbox(sessionId: sessionId)
+            let (msgs, pgs, rows) = try await (messages, pages, outbox)
+            artifacts = ArtifactDerivation.derive(messages: msgs, pages: pgs, sessionId: sessionId, outbox: rows)
             failed = false
-        } else {
+        } catch {
             failed = true
         }
         loaded = true
     }
 
-    /// Fetch the file's bytes and stage them in the app's temp directory so the
-    /// row can offer a system Save-to-Files share. A failed download leaves the
-    /// row's download control in place — nothing is reported as saved.
-    private func download(_ file: OutboxFile) async {
-        guard !downloading.contains(file.path) else { return }
-        downloading.insert(file.path)
-        defer { downloading.remove(file.path) }
+    private func onTap(_ artifact: Artifact) {
+        // A remote link opens in the browser — QuickLook has nothing to preview.
+        // Everything else (box path or data: URI) is staged then previewed.
+        let href = artifact.href.lowercased()
+        if href.hasPrefix("http://") || href.hasPrefix("https://") {
+            if let url = URL(string: artifact.href) {
+                UIApplication.shared.open(url)
+            }
+            return
+        }
+        Task { await presentPreview(artifact) }
+    }
+
+    /// Ensure the tapped artifact is staged, then present QuickLook over every
+    /// prepared file/image row (multi-item navigation comes free). Failure
+    /// leaves the row untouched — nothing is ever reported as previewed.
+    private func presentPreview(_ artifact: Artifact) async {
+        if stagedFiles[artifact.id] == nil {
+            guard !staging.contains(artifact.id) else { return }
+            staging.insert(artifact.id)
+            defer { staging.remove(artifact.id) }
+            guard let url = await stage(artifact) else { return }
+            stagedFiles[artifact.id] = url
+        }
+        let previewables = filtered.filter { $0.kind != .link && stagedFiles[$0.id] != nil }
+        let urls = previewables.compactMap { stagedFiles[$0.id] }
+        guard !urls.isEmpty else { return }
+        quickLookURLs = urls
+        quickLookStartIndex = max(0, previewables.firstIndex { $0.id == artifact.id } ?? 0)
+        showingQuickLook = true
+    }
+
+    /// Fetch the artifact's bytes into the app's temp directory. A `data:` URI
+    /// carries its own bytes — decode, never fetch; a box path is streamed via
+    /// `/api/peek`. Returns nil on any failure (row stays untouched).
+    private func stage(_ artifact: Artifact) async -> URL? {
         do {
-            let data = try await api.downloadOutboxFile(path: file.path)
-            let url = Self.tempURL(for: file.name)
+            let data: Data
+            if artifact.href.lowercased().hasPrefix("data:") {
+                guard let decoded = Self.decodeDataURI(artifact.href) else { return nil }
+                data = decoded
+            } else {
+                data = try await api.peekFile(path: artifact.href)
+            }
+            let url = Self.tempURL(for: artifact)
             try data.write(to: url)
-            downloaded[file.path] = url
+            return url
         } catch {
-            // Failure: leave the control in place; no fabricated success.
+            return nil
         }
     }
 
-    /// A writable temp URL the share sheet can hand to the OS. Derives from the
-    /// file name and is overwritten on each (re)download of the same row.
-    private static func tempURL(for name: String) -> URL {
-        let dir = FileManager.default.temporaryDirectory
-        let safe = name.replacingOccurrences(of: "/", with: "_")
-        return dir.appendingPathComponent(safe)
+    private func contextMenu(for artifact: Artifact) -> some View {
+        Group {
+            if let url = shareURL(for: artifact) {
+                ShareLink(item: url)
+            }
+            Button {
+                UIPasteboard.general.string = artifact.href
+            } label: {
+                Label("Copy path", systemImage: "doc.on.doc")
+            }
+        }
+    }
+
+    /// The shareable URL: the staged local file for a file/image, the href for
+    /// a link. A file with no staged bytes yet has nothing shareable — sharing
+    /// a raw box path would be a lie, so the menu omits ShareLink then.
+    private func shareURL(for artifact: Artifact) -> URL? {
+        if artifact.kind != .link {
+            return stagedFiles[artifact.id]
+        }
+        return URL(string: artifact.href)
     }
 
     private var emptyState: some View {
         ContentUnavailableView(
             "No artifacts",
             systemImage: "doc",
-            description: Text("Files the AI sends during this conversation will appear here.")
+            description: Text("Files, images and links from this conversation will appear here.")
         )
         .accessibilityIdentifier("artifacts-empty")
     }
 
-    private func row(_ file: OutboxFile) -> some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(file.name)
-                    .font(.body)
+    private func row(_ artifact: Artifact) -> some View {
+        HStack(spacing: Metrics.spacing.sp3) {
+            Image(systemName: Self.glyph(artifact.kind))
+                .font(.system(size: Metrics.type.small))
+                .foregroundStyle(tokens.tx4)
+                .frame(width: Metrics.spacing.sp4)
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+                Text(artifact.label)
+                    .font(.manta(size: Metrics.type.body))
                     .lineLimit(1)
-                    .accessibilityIdentifier("artifact-name-\(file.name)")
-                Text(Self.formatSize(file.size))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+                Text(ArtifactFormat.secondaryLine(artifact, now: Date()))
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundStyle(tokens.tx3)
+                    .lineLimit(1)
             }
-            Spacer(minLength: 8)
-            if let url = downloaded[file.path] {
-                ShareLink(item: url)
-                    .accessibilityLabel("Save \(file.name)")
-            } else if downloading.contains(file.path) {
+            Spacer(minLength: Metrics.spacing.sp2)
+            if staging.contains(artifact.id) {
                 ProgressView()
-            } else {
-                Button {
-                    Task { await download(file) }
-                } label: {
-                    Image(systemName: "arrow.down.circle")
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Download \(file.name)")
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, Metrics.spacing.sp1)
+        .contentShape(Rectangle())
+        .onTapGesture { onTap(artifact) }
+        .contextMenu { contextMenu(for: artifact) }
     }
 
-    private static func formatSize(_ bytes: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    private static func glyph(_ kind: ArtifactKind) -> String {
+        switch kind {
+        case .file: return "doc"
+        case .image: return "photo"
+        case .link: return "link"
+        }
     }
+
+    /// A writable temp URL QuickLook can hand to the OS. Keyed so re-staging
+    /// the same id overwrites in place.
+    private static func tempURL(for artifact: Artifact) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+        let safe = artifact.id
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        return dir.appendingPathComponent("manta-qp-\(safe)\(Self.fileExtension(from: artifact.label))")
+    }
+
+    /// The last-dot extension of an artifact's name, so QuickLook detects the
+    /// right type; "" when the name has none or it isn't a clean extension.
+    private static func fileExtension(from label: String) -> String {
+        let name: Substring
+        if let slash = label.lastIndex(of: "/") {
+            name = label[label.index(after: slash)...]
+        } else {
+            name = Substring(label)
+        }
+        guard let dot = name.lastIndex(of: ".") else { return "" }
+        let ext = name[name.index(after: dot)...]
+        guard !ext.isEmpty, ext.count <= 8, ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return "" }
+        return "." + ext
+    }
+
+    /// Decode a `data:[mime][;base64],payload` URI. base64 when flagged,
+    /// otherwise percent-decoded UTF-8.
+    private static func decodeDataURI(_ href: String) -> Data? {
+        guard let comma = href.firstIndex(of: ",") else { return nil }
+        let metaStart = href.index(href.startIndex, offsetBy: 5) // skip "data:"
+        guard metaStart < comma else { return nil }
+        let meta = href[metaStart..<comma]
+        let payload = String(href[href.index(after: comma)...])
+        if meta.contains(";base64") {
+            return Data(base64Encoded: payload)
+        }
+        return payload.removingPercentEncoding?.data(using: .utf8)
+    }
+}
+
+/// QuickLook as a SwiftUI surface. `QLPreviewController` (not `.quickLookPreview`)
+/// gives multi-item navigation between several artifacts plus a share button
+/// inside the preview for free — a session usually has several.
+private struct QuickLookPreview: UIViewControllerRepresentable {
+    let urls: [URL]
+    let startIndex: Int
+
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.urls = urls
+        controller.reloadData()
+        // Jump to the tapped row; safe-guarded because a stale index would trap.
+        controller.currentPreviewItemIndex = min(max(0, startIndex), urls.count - 1)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(urls: urls) }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var urls: [URL]
+        init(urls: [URL]) { self.urls = urls }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { urls.count }
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            PreviewItem(url: urls[index])
+        }
+    }
+}
+
+private final class PreviewItem: NSObject, QLPreviewItem {
+    let url: URL
+    var previewItemURL: URL? { url }
+    init(url: URL) { self.url = url }
 }

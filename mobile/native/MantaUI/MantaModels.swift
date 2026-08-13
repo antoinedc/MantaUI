@@ -377,3 +377,17 @@ struct OutboxFile: Codable, Equatable, Sendable, Identifiable {
 
     var id: String { path }
 }
+
+/// A published page from the box's serve-page registry (`serve-page:list`),
+/// mirroring `ServedPageMeta` in `src/shared/types.ts`. `createdAt`/`expiresAt`
+/// are epoch milliseconds; `sessionID` is the opencode session that called
+/// `serve_page`. `url` is "" when the box has no addressable base URL
+/// (`publicBaseUrl()` returned falsy) — the artifacts card filters such rows
+/// out by their empty `href` rather than ever presenting a dead link.
+struct ServedPageMeta: Codable, Equatable, Sendable {
+    var subdomain: String
+    var url: String
+    var expiresAt: Double?
+    var createdAt: Double
+    var sessionID: String?
+}
