@@ -290,6 +290,36 @@ export type WorktreeInfo = {
   detached: boolean;
 };
 
+// BET-786: one entry in a repo-probe result. `forge` is the normalised forge
+// kind ("github" | "gitlab") from detectForge, null when there is no origin or
+// the host is unrecognised; `repoKey` is the canonical `host/owner/repo` key.
+export type RepoHit = {
+  path: string;                 // absolute path of the repo dir on the box
+  name: string;                 // basename of the repo dir
+  branch: string | null;        // current branch (null if detached / non-branch)
+  originUrl: string | null;     // `git remote get-url origin`, null if none
+  forge: string | null;         // "github" | "gitlab" | null
+  repoKey: string | null;       // `host/owner/repo` join key | null
+  lastCommitAt: number | null;  // mtime ms of .git/HEAD (approximate, for sort)
+};
+
+// BET-786: the gh CLI status probed from the box. Presence + identity only —
+// never a token.
+export type ForgeCliStatus = {
+  installed: boolean;
+  authenticated: boolean;
+  login: string | null;
+};
+
+// BET-786: the forge:probe RPC result. `partial` is true when the scan hit its
+// time-box or result cap, so the renderer knows it may be showing an
+// incomplete list.
+export type ForgeProbeResult = {
+  repos: RepoHit[];
+  cli: ForgeCliStatus;
+  partial: boolean;
+};
+
 // ----- IPC inputs -----
 
 // BET-138: the pty is a shell-in-cwd (or, for a launcher mode, an AI CLI TUI
@@ -510,6 +540,10 @@ export const IPC = {
 
   // Directory autocomplete: given a partial path, list matching subdirectories
   fsListDirs: "fs:list-dirs",
+
+  // BET-786: probe the box for git repos + read their origins + detect the gh
+  // CLI. Server-side only, cached in server memory for 60s.
+  forgeProbe: "forge:probe",
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",

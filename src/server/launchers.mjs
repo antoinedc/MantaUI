@@ -8,6 +8,16 @@ import { LAUNCHERS } from "./launcherRegistry.mjs";
 
 const pExecFile = promisify(execFile);
 
+// Run a command through a login shell (`bash -lc` or the user's $SHELL) so it
+// sees the user's interactive PATH. launchd and systemd services are handed a
+// minimal PATH and tools like `claude`, `gh`, `npm` often live under
+// ~/.local/bin or a Homebrew prefix that a bare execFile PATH lookup cannot
+// see. Reject on non-zero exit (resolves with `{ stdout, stderr }` on success).
+export function runLoginShell(cmd, { timeoutMs = 3000 } = {}) {
+  const shell = process.env.SHELL || "bash";
+  return pExecFile(shell, ["-lc", cmd], { timeout: timeoutMs });
+}
+
 // Resolve a binary on the box PATH. Returns true iff `command -v <bin>` exits
 // 0. Runs via the login shell (not a bare execFile PATH lookup) so it matches
 // the user's interactive env — `claude` is often installed under
@@ -15,8 +25,7 @@ const pExecFile = promisify(execFile);
 export async function binExists(bin) {
   if (!bin || !/^[\w.-]+$/.test(bin)) return false; // guard: no shell metachars
   try {
-    const shell = process.env.SHELL || "bash";
-    await pExecFile(shell, ["-lc", `command -v ${bin}`], { timeout: 3000 });
+    await runLoginShell(`command -v ${bin}`);
     return true;
   } catch {
     return false;

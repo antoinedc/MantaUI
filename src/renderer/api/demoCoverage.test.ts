@@ -48,6 +48,7 @@ export const DEMO_UNIMPLEMENTED = [
   "delegateList",
   "delegatePendingApprovals",
   "delegateStop",
+  "forgeProbe",
   "getPathForFile",
   "gitAddWorktree",
   "gitRemoveWorktree",

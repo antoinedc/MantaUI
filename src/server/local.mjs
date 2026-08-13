@@ -8,12 +8,14 @@
 // are no-ops documented below.
 
 import { run } from "./tmux.mjs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { statePath, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
+import { detectForge, repoKey } from "../shared/forge.mjs";
+import { runLoginShell } from "./launchers.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
 // ============================================================
@@ -403,6 +405,282 @@ export async function tmuxRestoreConfig() {
 
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ============================================================
+// Repo probe — scan the box for git repos + read origins + gh CLI (BET-786)
+// ============================================================
+//
+// First-run affordance (spec §7): ask "what repos do you already have?" without
+// the user typing a path. Pure scanning/detection logic is exported for tests;
+// the walk + git spawns stay here. Server-side only, ships no UI.
+
+// gitRemoteOrigin(cwd) → string | null
+// Returns `git -C <cwd> remote get-url origin` trimmed, or null on any failure
+// (no remote, not a repo, git missing). Never throws.
+export async function gitRemoteOrigin(cwd) {
+  try {
+    const { stdout } = await run("git", ["-C", cwd, "remote", "get-url", "origin"]);
+    const url = (stdout ?? "").trim();
+    return url || null;
+  } catch {
+    return null;
+  }
+}
+
+// Directories we never descend into during a scan (in addition to anything
+// whose name starts with `.`).
+const SKIP_DIR = new Set(["node_modules", "vendor", "target", "dist", "build"]);
+
+// shouldSkipDir(name) → boolean — helper for the scanner; pure, and the test
+// pins the skip list (dotfiles + the five heavy/build dirs).
+export function shouldSkipDir(name) {
+  if (typeof name !== "string" || name === "") return true;
+  if (name.startsWith(".")) return true;
+  return SKIP_DIR.has(name);
+}
+
+// dedupeRepoHits(hits) → RepoHit[] — drop hits whose resolved real path we've
+// already seen. `_realPath` is stamped by the scanner (node:fs realpath) so a
+// symlinked root does not report the same repo twice; falls back to `path`.
+export function dedupeRepoHits(hits) {
+  const seen = new Set();
+  const out = [];
+  for (const h of hits) {
+    const real = h._realPath ?? h.path;
+    if (seen.has(real)) continue;
+    seen.add(real);
+    out.push(h);
+  }
+  return out;
+}
+
+// sortRepoHits(hits) → RepoHit[] — recency order (most recent lastCommitAt
+// first), and hits with a repoKey sort above hits without (forge-known repos
+// lead the list). Pure copy — does not mutate the input.
+export function sortRepoHits(hits) {
+  return [...hits].sort((a, b) => {
+    const aKey = a.repoKey ? 1 : 0;
+    const bKey = b.repoKey ? 1 : 0;
+    if (aKey !== bKey) return bKey - aKey;
+    return (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0);
+  });
+}
+
+// parseGhAuthStatus(text) → string | null — best-effort extraction of the
+// login name from `gh auth status` output. Returns null for "not logged in"
+// output, multi-host text with no logged-in account, garbage, and any value
+// that looks like a token (never return a secret). Pure.
+export function parseGhAuthStatus(text) {
+  if (typeof text !== "string") return null;
+  const m = /as ([^()\n]+?)\s*\(/.exec(text);
+  if (!m) return null;
+  const login = m[1].trim();
+  if (!login) return null;
+  if (isTokenLike(login)) return null;
+  return login;
+}
+
+function isTokenLike(s) {
+  return (
+    /^gh[pousr]_/.test(s) ||
+    /^github_pat_/.test(s) ||
+    /^[0-9a-f]{40}$/.test(s) ||
+    /^[0-9a-f]{64}$/.test(s)
+  );
+}
+
+// detectForgeCli() → { installed, authenticated, login }
+// Runs `gh auth status` through a login shell (gh lives in ~/.local/bin or a
+// Homebrew prefix that a bare spawn PATH cannot see — same trap launchers.mjs
+// already learned). Reports presence and identity only; never reads or returns
+// the token itself.
+export async function detectForgeCli() {
+  let text = "";
+  try {
+    const { stdout } = await runLoginShell("gh auth status", { timeoutMs: 8000 });
+    text = stdout ?? "";
+  } catch (err) {
+    // `gh auth status` exits non-zero when not logged in but still prints the
+    // "not logged in" report; only a missing binary leaves stdout empty.
+    const stdout = err?.stdout;
+    if (typeof stdout !== "string" || stdout === "") {
+      return { installed: false, authenticated: false, login: null };
+    }
+    text = stdout;
+  }
+  const login = parseGhAuthStatus(text);
+  if (login !== null) return { installed: true, authenticated: true, login };
+  return { installed: true, authenticated: false, login: null };
+}
+
+// Default roots for a scan: $HOME plus its common code dirs. Project defaultCwds
+// (from configGet().projects) are added on top by forgeProbe — an existing
+// user's known paths are free and authoritative.
+const DEFAULT_SUBDIRS = ["projects", "code", "src", "dev", "work", "repos", "git"];
+
+export function buildRoots(projectCwds = [], home = homedir()) {
+  const roots = new Set([home]);
+  for (const sub of DEFAULT_SUBDIRS) roots.add(join(home, sub));
+  for (const cwd of projectCwds) {
+    if (!cwd || typeof cwd !== "string") continue;
+    roots.add(cwd === "~" ? home : expandTilde(cwd));
+  }
+  return [...roots];
+}
+
+// scanRepos({ roots, maxDepth, maxResults, timeoutMs }) → { repos, partial }
+// A bounded walk. maxDepth (2), maxResults (50), timeoutMs (4000) are fixed
+// server-side and NOT exposable from the renderer (spec: a renderer-supplied
+// depth is a DoS on the user's own box). On timeout / cap, returns what it has
+// so far — a partial result is correct and expected, never an error.
+export async function scanRepos({
+  roots,
+  maxDepth = 2,
+  maxResults = 50,
+  timeoutMs = 4000,
+  readdir: readdirImpl = readdir,
+  realpath: realpathImpl = realpath,
+  stat: statImpl = stat,
+  gitRun = run,
+  home = homedir(),
+} = {}) {
+  const start = Date.now();
+  const deadline = start + timeoutMs;
+  const hits = [];
+  const seenReal = new Set();
+
+  const rootList = await dedupeHitsByReal(roots ?? buildRoots([], home));
+  for (const root of rootList) {
+    if (hits.length >= maxResults) break;
+    await walkRoot(root, 0, {
+      maxDepth,
+      maxResults,
+      deadline,
+      hits,
+      seenReal,
+      readdir: readdirImpl,
+      realpath: realpathImpl,
+      stat: statImpl,
+      gitRun,
+      home,
+    });
+  }
+
+  const partial = hits.length >= maxResults || Date.now() >= deadline;
+  const repoHits = dedupeRepoHits(hits).map(({ _realPath, ...rest }) => rest);
+  return { repos: sortRepoHits(repoHits), partial };
+
+  async function dedupeHitsByReal(paths) {
+    const seen = new Set();
+    const out = [];
+    for (const p of paths) {
+      if (!p || typeof p !== "string") continue;
+      const expanded = p === "~" ? home : expandTilde(p);
+      let real;
+      try {
+        real = await realpathImpl(expanded);
+      } catch {
+        real = expanded;
+      }
+      if (seen.has(real)) continue;
+      seen.add(real);
+      out.push(expanded);
+    }
+    return out;
+  }
+}
+
+async function walkRoot(dir, depth, ctx) {
+  if (ctx.hits.length >= ctx.maxResults || Date.now() >= ctx.deadline) return;
+  let entries;
+  try {
+    entries = await ctx.readdir(dir, { withFileTypes: true });
+  } catch {
+    return; // unreadable / missing — skip quietly
+  }
+  // A directory containing a .git entry is a repo. Detect by readdir, NOT by
+  // spawning git, and do not descend into it — the outermost repo wins.
+  if (entries.some((e) => e.name === ".git")) {
+    await recordRepo(dir, ctx);
+    return;
+  }
+  if (depth >= ctx.maxDepth) return;
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (shouldSkipDir(e.name)) continue;
+    await walkRoot(join(dir, e.name), depth + 1, ctx);
+    if (ctx.hits.length >= ctx.maxResults || Date.now() >= ctx.deadline) return;
+  }
+}
+
+async function recordRepo(dir, ctx) {
+  // Dedupe by resolved real path first (a symlinked root must not double-report).
+  let real;
+  try {
+    real = await ctx.realpath(dir);
+  } catch {
+    real = dir;
+  }
+  if (ctx.seenReal.has(real)) return;
+  ctx.seenReal.add(real);
+
+  // Spawn git only for confirmed repos — two calls each.
+  let branch = null;
+  try {
+    const { stdout } = await ctx.gitRun("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+    const b = (stdout ?? "").trim();
+    if (b && b !== "HEAD") branch = b;
+  } catch { /* detached or not a branch */ }
+
+  let originUrl = null;
+  try {
+    const { stdout } = await ctx.gitRun("git", ["-C", dir, "remote", "get-url", "origin"]);
+    originUrl = (stdout ?? "").trim() || null;
+  } catch { /* no origin */ }
+
+  const forge = originUrl ? detectForge(originUrl) : null;
+  const key = forge ? repoKey(forge) : null;
+
+  // lastCommitAt: prefer the mtime of .git/HEAD (cheap, no spawn) — used only
+  // for sort order, so approximate is fine.
+  let lastCommitAt = null;
+  try {
+    const st = await ctx.stat(join(dir, ".git", "HEAD"));
+    lastCommitAt = typeof st.mtimeMs === "number" ? st.mtimeMs : null;
+  } catch { /* ignore */ }
+
+  ctx.hits.push({
+    path: dir,
+    name: basename(dir),
+    branch,
+    originUrl,
+    forge: forge ? forge.kind : null,
+    repoKey: key,
+    lastCommitAt,
+    _realPath: real,
+  });
+}
+
+// forgeProbe() → { repos: RepoHit[], cli, partial }
+// The single RPC channel behind the probe. Cached in server memory for 60s
+// (one box, keyed by nothing) — the renderer calls this on every zero-state
+// mount and a repeat filesystem walk per mount is waste.
+const FORGE_PROBE_TTL_MS = 60_000;
+let _forgeCache = null;
+
+export async function forgeProbe() {
+  const now = Date.now();
+  if (_forgeCache && now - _forgeCache.at < FORGE_PROBE_TTL_MS) {
+    return _forgeCache.result;
+  }
+  const cfg = await getConfig();
+  const projectCwds = (cfg.projects ?? []).map((p) => p.defaultCwd).filter(Boolean);
+  const { repos, partial } = await scanRepos({ roots: buildRoots(projectCwds) });
+  const cli = await detectForgeCli();
+  const result = { repos, cli, partial };
+  _forgeCache = { at: now, result };
+  return result;
 }
 
 // ============================================================

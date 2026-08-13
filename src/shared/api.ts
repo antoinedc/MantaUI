@@ -39,6 +39,7 @@ import type {
   VoiceTranscribeResult,
   WindowStatus,
   WorktreeInfo,
+  ForgeProbeResult,
   ProviderEndpoint,
   DiscoverResult,
   ProviderInput,
@@ -162,6 +163,10 @@ export interface Api {
   gitRemoveWorktree(input: { path: string; force: boolean }): Promise<{ removed: boolean; reason?: "dirty" | "other" }>;
 
   fsListDirs(partial: string): Promise<string[]>;
+
+  // BET-786: probe the box for git repos + read origins + detect the gh CLI.
+  // Server-side only; the box caches the result in memory for 60s.
+  forgeProbe(): Promise<ForgeProbeResult>;
 
   tmuxConfigStatus(): Promise<TmuxConfigStatus>;
   tmuxSetupConfig(): Promise<TmuxConfigStatus>;
