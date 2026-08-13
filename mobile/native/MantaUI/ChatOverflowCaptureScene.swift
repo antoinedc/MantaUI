@@ -31,7 +31,6 @@ struct ChatOverflowCaptureScene: View {
                     branch: "main",
                     onSchedules: {},
                     onSecrets: {},
-                    onWebhooks: {},
                     onCompact: {},
                     onClear: {},
                     onFork: {},

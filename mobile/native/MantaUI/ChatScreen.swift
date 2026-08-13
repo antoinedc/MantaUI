@@ -358,7 +358,6 @@ private struct ChatScreenContent: View {
             branch: branch,
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
-            onWebhooks: {},
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
