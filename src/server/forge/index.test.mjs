@@ -11,6 +11,7 @@ import {
   forgeStatus,
   pullRequestForCwd,
   shipPullRequest,
+  shipPreview,
   mergePullRequest,
   ForgeRateLimitedError,
 } from "./index.mjs";
@@ -306,4 +307,23 @@ test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure",
   });
   assert.equal(r.ok, false);
   assert.equal(r.kind, "sha_mismatch");
+});
+
+test("shipPreview returns head, base and a best-effort file count", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.head, "feat/forge-seam");
+  assert.equal(r.base, "main");
+  assert.equal(typeof r.fileCount, "number");
+});
+
+test("shipPreview: repo with no forge → no_forge", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    gitRemoteOrigin: async () => null,
+  });
+  assert.deepEqual(r, { ok: false, error: "no_forge" });
 });

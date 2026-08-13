@@ -358,6 +358,31 @@ async function resolveWriteContext(cwd, deps, wantBranch = true) {
 }
 
 /**
+ * Ship preview: the facts the [SH1] confirm card shows BEFORE anything is
+ * pushed — the head branch, the base branch (the PR target), and the number
+ * of changed files on the branch (best-effort, 0 when it can't be computed).
+ * Read-only; no push, no PR. This is what populates the editable confirm card;
+ * the push+create only ever runs after the human confirms it.
+ *
+ * @param {string} cwd
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true, head: string, base: string, fileCount: number } | { ok: false, error: string }>}
+ */
+export async function shipPreview(cwd, deps = {}) {
+  const ctx = await resolveWriteContext(cwd, deps);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const base = "main";
+  let fileCount = 0;
+  try {
+    const { stdout } = await run("git", ["-C", cwd, "diff", "--name-only", `origin/${base}...${ctx.head}`, "--"]);
+    fileCount = String(stdout ?? "").split("\n").filter((l) => l.length > 0).length;
+  } catch {
+    // origin/<base> may not exist locally yet — best-effort 0.
+  }
+  return { ok: true, head: ctx.head, base, fileCount };
+}
+
+/**
  * Ship: push the current branch, then open a pull request for it. The human
  * gate (issue §4) lives ABOVE this — this function is the push+create step
  * that runs only after an explicit confirm. It is the ONE code path for

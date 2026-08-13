@@ -101,6 +101,8 @@ import {
   initialRepoSelection,
   describeRepoRow,
   planHighlightRanges,
+  canMerge,
+  describeMergeFailure,
   type StatusItem,
   type RepoRow,
 } from "./chatUtils";
@@ -3777,5 +3779,81 @@ describe("failuresToAgentPrompt", () => {
 
   it("no failing checks → empty body", () => {
     expect(failuresToAgentPrompt([])).toBe("");
+  });
+});
+
+describe("canMerge", () => {
+  it("enables merge only when green + no threads + mergeable true", () => {
+    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: true })).toEqual({
+      can: true,
+      reason: null,
+    });
+  });
+
+  it("blocks when mergeable is null (still computing)", () => {
+    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: null })).toEqual({
+      can: false,
+      reason: "still computing",
+    });
+  });
+
+  it("blocks when mergeable is false", () => {
+    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: false })).toEqual({
+      can: false,
+      reason: "not mergeable",
+    });
+  });
+
+  it("blocks on red checks with a failing reason", () => {
+    expect(canMerge({ rollup: "red", unresolvedThreads: 0, mergeable: true })).toEqual({
+      can: false,
+      reason: "checks failing",
+    });
+  });
+
+  it("blocks on yellow checks as still running, never green-only", () => {
+    expect(canMerge({ rollup: "yellow", unresolvedThreads: 0, mergeable: true })).toEqual({
+      can: false,
+      reason: "checks still running",
+    });
+  });
+
+  it("blocks when there are no checks at all", () => {
+    expect(canMerge({ rollup: "none", unresolvedThreads: 0, mergeable: true })).toEqual({
+      can: false,
+      reason: "no checks",
+    });
+  });
+
+  it("blocks on unresolved review threads", () => {
+    expect(canMerge({ rollup: "green", unresolvedThreads: 1, mergeable: true })).toEqual({
+      can: false,
+      reason: "1 unresolved thread",
+    });
+    expect(canMerge({ rollup: "green", unresolvedThreads: 3, mergeable: true })).toEqual({
+      can: false,
+      reason: "3 unresolved threads",
+    });
+  });
+
+  it("blocks on EVERY blocking combination at once", () => {
+    expect(canMerge({ rollup: "red", unresolvedThreads: 2, mergeable: null })).toEqual({
+      can: false,
+      reason: "still computing",
+    });
+  });
+});
+
+describe("describeMergeFailure", () => {
+  it("surfaces the distinguished SHA-mismatch reason", () => {
+    expect(describeMergeFailure("sha_mismatch")).toMatch(/head SHA moved/i);
+  });
+  it("surfaces cannot-merge and permission distinctly", () => {
+    expect(describeMergeFailure("cannot_merge")).toMatch(/blocked/i);
+    expect(describeMergeFailure("permission")).toMatch(/No permission/i);
+  });
+  it("degrades gracefully for unknown / absent kinds", () => {
+    expect(describeMergeFailure("http_422")).toContain("http_422");
+    expect(describeMergeFailure(null)).toBe("Merge failed.");
   });
 });

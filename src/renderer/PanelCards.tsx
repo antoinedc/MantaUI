@@ -11,17 +11,21 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useState } from "react";
-import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
+import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X, GitPullRequest } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
   DelegateJob,
+  ForgePullRequestResult,
   ScheduledJob,
   SecretMeta,
   SecretScope,
   WebhookMeta,
 } from "../shared/types";
-import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
+import { Button } from "./Button";
+import { Chip } from "./Chip";
+import { Field } from "./Field";
+import { canMerge, describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
@@ -605,6 +609,196 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
           </button>
         )}
       </div>
+    </div>
+  );
+});
+
+// ===== Forge ship + merge (BET-794) =====
+
+// ShipConfirmCard — the [SH1] human gate. Always shown before anything is
+// pushed or opened; never auto-submitted. Reads top-down: a context line, an
+// editable title, an editable body, then the actions (primary "Open pull
+// request", a Draft toggle, ghost Cancel). Order matters: one submit action
+// with a modifier, not two submit actions.
+export const ShipConfirmCard = memo(function ShipConfirmCard({
+  proposal,
+  busy,
+  error,
+  onApprove,
+  onDecline,
+}: {
+  proposal: { head: string; base: string; fileCount: number };
+  busy: boolean;
+  error: string | null;
+  onApprove: (input: { title: string; body: string; draft: boolean }) => void;
+  onDecline: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [draft, setDraft] = useState(true);
+  useEffect(() => {
+    setTitle("");
+    setBody("");
+    setDraft(true);
+  }, [proposal?.head]);
+  const canSubmit = title.trim().length > 0 && !busy;
+  return (
+    <div
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
+    >
+      <div className="mb-2 flex items-center gap-2">
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center shrink-0">
+          <GitPullRequest size={15} aria-hidden="true" />
+        </span>
+        <span className="text-text-faint text-meta">
+          Open a pull request · {proposal.head}{" "}
+          <span style={{ color: "var(--accent)" }}>→</span> {proposal.base} ·{" "}
+          {proposal.fileCount} file{proposal.fileCount === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="flex flex-col gap-2">
+        <Field
+          ariaLabel="Pull request title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Pull request title"
+          mono={false}
+          disabled={busy}
+        />
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="Describe the change…"
+          spellCheck={false}
+          disabled={busy}
+          rows={3}
+          aria-label="Pull request body"
+          className="w-full bg-bg-soft border border-border-strong rounded-md text-meta text-text-muted px-4 py-3 focus:outline-none focus:border-accent resize-y"
+        />
+      </div>
+      {error && <div className="text-danger break-words mt-1">{error}</div>}
+      <div className="flex items-center gap-2 mt-2">
+        <Button tone="primary" disabled={!canSubmit} onClick={() => onApprove({ title, body, draft })}>
+          {busy ? "Opening…" : "Open pull request"}
+        </Button>
+        <Chip on={draft} onClick={() => setDraft((d) => !d)} title="Toggle draft mode">
+          Draft
+        </Chip>
+        <Button tone="ghost" onClick={onDecline} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
+      <div className="text-text-faint text-label mt-1">
+        Never auto-submitted — nothing is pushed or opened until you confirm here.
+      </div>
+    </div>
+  );
+});
+
+// ForgeCard — the session's forge surface. When the repo has a pull request it
+// shows its state + a Merge control gated by canMerge (with a visible reason),
+// and surfaces the distinguished merge-failure kind. When there is none and the
+// box is connected, it offers the Ship action that opens the ShipConfirmCard.
+export const ForgeCard = memo(function ForgeCard({
+  result,
+  loading,
+  shipOpen,
+  busy,
+  mergeError,
+  onShip,
+  onMerge,
+}: {
+  result?: ForgePullRequestResult | null;
+  loading: boolean;
+  shipOpen: boolean;
+  busy: boolean;
+  mergeError: string | null;
+  onShip: () => void;
+  onMerge: () => void;
+}) {
+  const pr = result?.pr ?? null;
+  const rollup = result?.rollup ?? "none";
+  const merge = canMerge({
+    rollup,
+    unresolvedThreads: pr?.unresolvedThreads ?? 0,
+    mergeable: pr?.mergeable ?? null,
+  });
+  const rollupColor =
+    rollup === "green" ? "var(--ok)" : rollup === "red" ? "var(--danger)" : rollup === "yellow" ? "var(--warn)" : "var(--tx3)";
+  return (
+    <div
+      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
+      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
+          <GitPullRequest size={16} aria-hidden="true" />
+        </span>
+        {loading ? (
+          <span className="text-text-faint">Checking GitHub…</span>
+        ) : pr ? (
+          <>
+            <span className="text-text truncate" title={pr.title}>
+              #{pr.number} {pr.title}
+            </span>
+            <MetaBadge title="The normalised PR state">{pr.state}</MetaBadge>
+            {/* Traffic-light for checks; null = not mergeable (reason below). */}
+            <span
+              className="inline-flex items-center gap-1 text-text-faint"
+              title={`Checks: ${rollup}`}
+            >
+              <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: rollupColor }} />
+              <span className="font-mono text-label">{result?.checks?.length ?? 0}</span>
+            </span>
+          </>
+        ) : (
+          <span className="text-text-faint">No open pull request on this branch</span>
+        )}
+      </div>
+
+      {pr ? (
+        <>
+          {/* Can I merge? Disabled with a visible reason; green rollup + no
+              threads + mergeable true are ALL required. */}
+          <div className="text-text-faint text-label mb-1">
+            {merge.can
+              ? "Ready to merge — checks green, threads resolved."
+              : `Can't merge yet — ${merge.reason}.`}
+          </div>
+          {!merge.can && pr.mergeBlockedReason && (
+            <div className="text-text-faint text-label mb-1">
+              GitHub: {pr.mergeBlockedReason}
+            </div>
+          )}
+          {mergeError && (
+            <div className="text-danger break-words mb-1">
+              {mergeError}
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Button
+              tone="primary"
+              disabled={!merge.can || busy}
+              onClick={onMerge}
+              title={merge.can ? "Merge this pull request" : merge.reason ?? "not mergeable"}
+            >
+              {busy ? "Merging…" : "Merge"}
+            </Button>
+            <span className="text-text-faint text-label">
+              {pr.headRef} → {pr.baseRef}
+            </span>
+          </div>
+        </>
+      ) : (
+        shipOpen === false && !loading && (
+          <div className="flex items-center gap-2">
+            <Button tone="ghost" onClick={onShip} title="Push the current branch and open a pull request">
+              Ship as pull request
+            </Button>
+          </div>
+        )
+      )}
     </div>
   );
 });
