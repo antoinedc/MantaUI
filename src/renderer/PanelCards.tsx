@@ -11,7 +11,7 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useState } from "react";
-import { Clock, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
+import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
@@ -69,8 +69,11 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
             return (
               <div key={j.id} className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="text-text truncate" title={j.prompt}>
-                    {j.label || j.prompt}
+                  <div className="text-text truncate flex items-center gap-1.5" title={j.prompt}>
+                    {j.kind === "notify" && (
+                      <Bell size={12} aria-hidden="true" className="shrink-0 text-text-faint" />
+                    )}
+                    <span className="truncate">{j.label || j.prompt}</span>
                   </div>
                   <div className="flex items-center gap-2 text-text-faint font-mono text-label">
                     <span className="shrink-0">

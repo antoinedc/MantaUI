@@ -232,6 +232,7 @@ const promptDelivery = createPromptDelivery({
 const { stop: stopSchedulePoller } = startSchedulePoller(
   {
     sendPrompt: (args) => promptDelivery.deliver(args),
+    fireNotify: (args) => push.fireNotify(args),
     publish: (evt) => bus.publish(evt),
   },
   { intervalMs: 30000 },

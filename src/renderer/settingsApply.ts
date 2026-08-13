@@ -67,7 +67,7 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
       pushToast({
         id: `apply-${key}-${Date.now()}`,
         message: `${entry.label} set to ${describeValue(entry, value)}`,
-        action: {
+        actions: [{
           label: "Undo",
           onClick: () => {
             void useStore.setState({ [key]: prevValue });
@@ -79,7 +79,7 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
               })
               .catch(() => {});
           },
-        },
+        }],
       });
     } catch (e) {
       useStore.setState({ [key]: prevValue });

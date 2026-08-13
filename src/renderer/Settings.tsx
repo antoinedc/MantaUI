@@ -398,11 +398,10 @@ export function Settings({
       push({
         id: `registry-${Date.now()}`,
         message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
-        action: { label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } },
+        actions: [{ label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } }],
       });
     } catch (e) {
-      useStore.setState({ skillRegistryUrls: prev });
-      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
+      useStore.setState({ skillRegistryUrls: prev });      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
     }
   };
   const onAddRegistry = () => {
@@ -448,7 +447,7 @@ export function Settings({
     if (!preload?.pluginsSetEnabled) return;
     try {
       await preload.pluginsSetEnabled(on);
-      push({ id: `plugins-${Date.now()}`, message: `Plugins ${on ? "enabled" : "disabled"} — restart Manta to apply.`, action: { label: "Undo", onClick: () => { setPluginsOn(prev); void preload.pluginsSetEnabled(prev); } } });
+      push({ id: `plugins-${Date.now()}`, message: `Plugins ${on ? "enabled" : "disabled"} — restart Manta to apply.`, actions: [{ label: "Undo", onClick: () => { setPluginsOn(prev); void preload.pluginsSetEnabled(prev); } }] });
     } catch (e) {
       setPluginsOn(prev);
       push({ id: `err-plugins-${Date.now()}`, message: errorDisclosure("Couldn't toggle plugins.", e) });
@@ -507,7 +506,7 @@ export function Settings({
       push({
         id: `reset-${Date.now()}`,
         message: "All settings reset to defaults.",
-        action: { label: "Undo", onClick: () => { void useStore.setState(prev); if (prev.theme) applyTheme(prev.theme as ThemePref); window.api.configUpdate(prev).catch(() => {}); } },
+        actions: [{ label: "Undo", onClick: () => { void useStore.setState(prev); if (prev.theme) applyTheme(prev.theme as ThemePref); window.api.configUpdate(prev).catch(() => {}); } }],
       });
     } catch (e) {
       useStore.setState(prev);

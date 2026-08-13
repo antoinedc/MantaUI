@@ -4,7 +4,9 @@ import {
   validateCron,
   cronMatches,
   minuteKey,
+  cronForInstant,
   isJobFireable,
+  createJob,
   createScheduler,
 } from "./schedule.mjs";
 
@@ -127,6 +129,125 @@ test("cronMatches returns false for malformed expr (no throw)", () => {
 test("minuteKey is stable per-minute local key", () => {
   assert.equal(minuteKey(localDate(2026, 6, 20, 15, 5)), "2026-06-20T15:05");
   assert.equal(minuteKey(localDate(2026, 1, 2, 3, 4)), "2026-01-02T03:04");
+});
+
+// ----------------------------------------------------------------------------
+// cronForInstant — a 5-field one-shot cron for a local instant
+// ----------------------------------------------------------------------------
+
+test("cronForInstant renders M H D MO * from a local date", () => {
+  assert.equal(cronForInstant(localDate(2026, 8, 18, 9, 1)), "1 9 18 8 *");
+});
+
+test("cronForInstant handles a December date (month off-by-one)", () => {
+  // JS getMonth() is 0-11; cron months are 1-12. December = getMonth() 11 → "12".
+  assert.equal(cronForInstant(localDate(2026, 12, 31, 23, 59)), "59 23 31 12 *");
+});
+
+test("cronForInstant output matches cronMatches at that instant", () => {
+  const when = localDate(2026, 8, 18, 9, 1);
+  assert.equal(cronMatches(cronForInstant(when), when), true);
+  assert.equal(cronMatches(cronForInstant(when), localDate(2026, 8, 18, 9, 2)), false);
+});
+
+// ----------------------------------------------------------------------------
+// createJob — kind field (BET-739)
+// ----------------------------------------------------------------------------
+
+test("createJob defaults kind to prompt and stores it on the job", async () => {
+  const { ok, job } = await createJob({
+    cron: "0 9 * * *",
+    prompt: "check the deploy",
+    recurring: false,
+    sessionID: "ses_x",
+  });
+  assert.equal(ok, true);
+  assert.equal(job.kind, "prompt");
+});
+
+test("createJob accepts kind notify", async () => {
+  const { ok, job } = await createJob(
+    { cron: "1 9 * * *", prompt: "reset happened", recurring: false, sessionID: "ses_x", kind: "notify" },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(ok, true);
+  assert.equal(job.kind, "notify");
+});
+
+test("createJob rejects an unknown kind", async () => {
+  const res = await createJob(
+    { cron: "1 9 * * *", prompt: "x", recurring: false, sessionID: "ses_x", kind: "bogus" },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.error, /kind/);
+});
+
+// ----------------------------------------------------------------------------
+// createScheduler.tick — kind branching (BET-739)
+// ----------------------------------------------------------------------------
+
+// Harness that records BOTH delivery paths so a test can assert which one ran.
+function branchHarness(initialJobs, fixedNow) {
+  let jobs = initialJobs.map((j) => ({ ...j }));
+  const promptSent = [];
+  const notifySent = [];
+  const deps = {
+    load: async () => jobs.map((j) => ({ ...j })),
+    save: async (next) => {
+      jobs = next.map((j) => ({ ...j }));
+    },
+    sendPrompt: async (args) => promptSent.push(args),
+    fireNotify: async (args) => notifySent.push(args),
+    now: () => fixedNow,
+    publish: () => {},
+  };
+  return {
+    deps,
+    promptSent,
+    notifySent,
+    get jobs() {
+      return jobs;
+    },
+  };
+}
+
+test("tick fires a kind:notify job via fireNotify and NOT sendPrompt", async () => {
+  const now = localDate(2026, 8, 18, 9, 1);
+  const notifyJob = { ...baseJob, id: "notify1", cron: "1 9 18 8 *", recurring: false, kind: "notify" };
+  const h = branchHarness([notifyJob], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.promptSent.length, 0);
+  assert.equal(h.notifySent.length, 1);
+  assert.deepEqual(h.notifySent[0], {
+    message: "check the deploy",
+    urgent: true,
+    sessionID: "ses_abc",
+  });
+  // one-shot removed after firing
+  assert.equal(h.jobs.length, 0);
+});
+
+test("tick fires a job with no kind as prompt (regression for legacy store jobs)", async () => {
+  const now = localDate(2026, 8, 18, 9, 1);
+  const legacy = { ...baseJob, id: "legacy1", cron: "1 9 18 8 *", recurring: false }; // no `kind`
+  const h = branchHarness([legacy], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.promptSent.length, 1);
+  assert.deepEqual(h.promptSent[0], { sessionId: "ses_abc", text: "check the deploy" });
+  assert.equal(h.notifySent.length, 0);
+});
+
+test("tick defaults a kind:prompt job to sendPrompt (explicit prompt kind)", async () => {
+  const now = localDate(2026, 8, 18, 9, 1);
+  const promptJob = { ...baseJob, id: "prompt1", cron: "1 9 18 8 *", recurring: false, kind: "prompt" };
+  const h = branchHarness([promptJob], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.promptSent.length, 1);
+  assert.equal(h.notifySent.length, 0);
 });
 
 // ----------------------------------------------------------------------------

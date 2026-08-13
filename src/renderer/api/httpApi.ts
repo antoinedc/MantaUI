@@ -966,6 +966,8 @@ export const httpApi: Api = {
   // -- scheduled prompts (manta-server owned; in-process on mobile) --
   scheduleList: (sessionId) => rpc(IPC.scheduleList, sessionId),
   scheduleDelete: (id) => rpc(IPC.scheduleDelete, id),
+  // BET-739: usage reset actions create one-shot jobs through the same channel
+  scheduleCreate: (input) => rpc(IPC.scheduleCreate, input),
 
   // -- subscription plan usage (manta-server owned; in-process on mobile) --
   usageList: () => rpc(IPC.usageList),

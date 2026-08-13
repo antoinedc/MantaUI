@@ -25,6 +25,11 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+// cronForInstant is pure (no node deps), so it lives in src/shared where the
+// RENDERER can also import it for the usage reset actions — re-exported here
+// so `src/server/schedule.test.mjs` and the server side consume it from this
+// module (single source of truth, not duplicated across the process boundary).
+export { cronForInstant } from "../shared/scheduleCron.mjs";
 
 const STORE_PATH = statePath("schedule.json");
 
@@ -184,8 +189,23 @@ function genId() {
 
 // Create + persist a job. Returns { ok, job?, error? }. Pure-ish (I/O via
 // injected load/save) so callers/tests control persistence.
+//
+// `kind` — "prompt" (default; fires sendPrompt into the session) or "notify"
+// (fires a push via fireNotify instead). The job's `prompt` field carries the
+// text in BOTH cases; there is deliberately no second text field. Defaulting
+// to "prompt" keeps every existing job and caller (the AI `schedule` tool)
+// unaffected.
 export async function createJob(
-  { cron, prompt, recurring = true, label = "", sessionID, directory = "", now = () => new Date() },
+  {
+    cron,
+    prompt,
+    recurring = true,
+    label = "",
+    sessionID,
+    directory = "",
+    kind = "prompt",
+    now = () => new Date(),
+  },
   { load = loadJobs, save = saveJobs, publish } = {},
 ) {
   const v = validateCron(cron);
@@ -194,6 +214,8 @@ export async function createJob(
     return { ok: false, error: "prompt is required" };
   if (typeof sessionID !== "string" || !sessionID)
     return { ok: false, error: "sessionID is required" };
+  if (kind !== "prompt" && kind !== "notify")
+    return { ok: false, error: `invalid kind "${kind}"` };
 
   const jobs = await load();
   const job = {
@@ -202,6 +224,7 @@ export async function createJob(
     prompt: prompt.trim(),
     recurring: !!recurring,
     label: typeof label === "string" ? label : "",
+    kind,
     sessionID,
     directory: directory || "",
     createdAt: now().getTime(),
@@ -247,6 +270,7 @@ export async function listJobs(sessionID, { load = loadJobs } = {}) {
  * @param {() => Promise<object[]>} deps.load
  * @param {(jobs: object[]) => Promise<void>} deps.save
  * @param {(args: {sessionId: string, text: string}) => Promise<any>} deps.sendPrompt
+ * @param {(args: {message: string, title?: string, urgent?: boolean, sessionID?: string}) => Promise<any>} [deps.fireNotify] — required for `kind: "notify"` jobs; injected so the tick stays testable with no push stack
  * @param {() => Date} [deps.now]
  * @param {(evt: object) => void} [deps.publish]
  * @param {(path: string) => boolean} [deps.directoryExists] — defaults to node:fs/existsSync
@@ -256,6 +280,7 @@ export function createScheduler({
   load,
   save,
   sendPrompt,
+  fireNotify,
   now = () => new Date(),
   publish,
   directoryExists = existsSync,
@@ -310,7 +335,19 @@ export function createScheduler({
         // loop or block other due jobs; lastFiredMinute is stamped regardless
         // to avoid hammering a persistently-failing send every tick.
         try {
-          await sendPrompt({ sessionId: job.sessionID, text: job.prompt });
+          if (job.kind === "notify") {
+            if (typeof fireNotify === "function") {
+              await fireNotify({
+                message: job.prompt, // the job's `prompt` carries the notify text
+                urgent: true, // draw attention on every device — that's what "remind me" means
+                sessionID: job.sessionID,
+              });
+            } else {
+              console.warn(`[schedule] fire job ${job.id}: kind "notify" but fireNotify was not injected`);
+            }
+          } else {
+            await sendPrompt({ sessionId: job.sessionID, text: job.prompt });
+          }
         } catch (e) {
           console.warn(`[schedule] fire job ${job.id} failed:`, e?.message ?? e);
         }
@@ -343,18 +380,20 @@ export function createScheduler({
  *
  * @param {object} deps
  * @param {(args: {sessionId: string, text: string}) => Promise<any>} deps.sendPrompt
+ * @param {(args: {message: string, title?: string, urgent?: boolean, sessionID?: string}) => Promise<any>} [deps.fireNotify] — for `kind: "notify"` jobs
  * @param {(evt: object) => void} [deps.publish]  - bus.publish
  * @param {object} [opts]
  * @param {number} [opts.intervalMs=30000]
  * @param {string} [opts.storePath]
  * @returns {{ stop: () => void }}
  */
-export function startSchedulePoller({ sendPrompt, publish } = {}, { intervalMs = POLL_MS, storePath } = {}) {
+export function startSchedulePoller({ sendPrompt, fireNotify, publish } = {}, { intervalMs = POLL_MS, storePath } = {}) {
   const path = storePath ?? STORE_PATH;
   const { tick } = createScheduler({
     load: () => loadJobs(path),
     save: (jobs) => saveJobs(jobs, path),
     sendPrompt,
+    fireNotify,
     publish,
   });
 

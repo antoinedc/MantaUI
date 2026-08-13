@@ -329,6 +329,17 @@ export interface Api {
   // Scheduled prompts (manta-server owned; desktop reaches it over -L 18787).
   scheduleList(sessionId?: string): Promise<ScheduledJob[]>;
   scheduleDelete(id: string): Promise<{ deleted: boolean }>;
+  // BET-739: create a one-shot job from the renderer (the usage "remind me /
+  // keep going at reset" actions). Same store/poller as the AI `schedule` tool.
+  scheduleCreate(input: {
+    cron: string;
+    prompt: string;
+    recurring?: boolean;
+    label?: string;
+    sessionID: string;
+    directory?: string;
+    kind?: "prompt" | "notify";
+  }): Promise<{ ok: boolean; job?: ScheduledJob; error?: string }>;
 
   // Subscription plan usage (manta-server owned; BET-737). Read-only —
   // snapshots are produced by the box's usage poller (src/server/usage.mjs),

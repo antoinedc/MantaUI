@@ -32,14 +32,15 @@ import { mbtn } from "./ComposerParts";
 // renderer may know a provider name beyond an icon/label lookup table").
 // Falls back to Title-Casing the snapshot's own `provider` id for any
 // adapter this table doesn't know about yet, so a 4th adapter needs no
-// renderer change.
+// renderer change. Exported so the usage escalation toasts (BET-739) reuse
+// the same single lookup instead of duplicating it.
 const PROVIDER_LABELS: Record<string, string> = {
   claude: "Claude",
   codex: "Codex",
   kimi: "Kimi",
 };
 
-function providerLabel(provider: string): string {
+export function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
