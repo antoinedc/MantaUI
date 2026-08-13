@@ -106,8 +106,9 @@ export function parseBearer(headerValue) {
 // /push/*, static assets — is gated.
 //
 // Rationale for each exemption:
-//   /auth/pair, /auth/claim — bootstrap; you can't present a token you don't
-//     have yet. Rate-limited + code-gated instead.
+//   /auth/pair, /auth/claim, /auth/check — bootstrap; you can't present a
+//     token you don't have yet. Rate-limited + code-gated instead. check is
+//     the /pair page's NON-consuming validation (it never mints or claims).
 //   /auth/revoke            — per-device "remove this box" handshake (BET-357 §2).
 //     The caller MUST present a valid token, but the standard gate collapses
 //     malformed-token and missing-token into the same 401, which loses a
@@ -130,7 +131,7 @@ export function parseBearer(headerValue) {
 // caller's token is valid, so it must run through the gate.
 export function isExemptPath(path) {
   if (typeof path !== "string") return false;
-  if (path === "/auth/pair" || path === "/auth/claim" || path === "/auth/revoke") return true;
+  if (path === "/auth/pair" || path === "/auth/claim" || path === "/auth/check" || path === "/auth/revoke") return true;
   if (path === "/pair" || path === "/pair/qr.png" || path === "/pair/logo.png") return true;
   if (path === "/hook/" || path.startsWith("/hook/")) return true;
   if (path === "/pages/" || path.startsWith("/pages/")) return true;
@@ -376,6 +377,25 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     return ok;
   }
 
+  // Non-consuming validation: does `code` match the single active, unexpired
+  // code? Same gates + constant-time compare as `consume()`, but it NEVER
+  // clears `active` — a correct answer leaves the code claimable. Used by the
+  // /pair web page (BET-699) so the page can confirm a code is good without
+  // burning it or being handed the box token. Deliberately does NOT
+  // distinguish "wrong code" from "expired" — like `verifyMatches`/`claim`, a
+  // guesser learns only "no".
+  function check(code) {
+    if (!isValidPairingCode(code)) return false;
+    if (!active) return false;
+    if (now() > active.expiresAt) {
+      active = null;
+      return false;
+    }
+    const a = Buffer.from(active.code, "utf-8");
+    const b = Buffer.from(String(code), "utf-8");
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
   // Two-factor confirm check (the "matches" affordance carried back in the
   // claim): does `verify` match the four characters minted alongside `code`?
   // Non-consumeing — a mismatch must NOT burn the one-time code (a wrong
@@ -405,7 +425,7 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     return !!active && now() <= active.expiresAt;
   }
 
-  return { issue, consume, verifyMatches, clear, hasActive };
+  return { issue, consume, verifyMatches, check, clear, hasActive };
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +594,21 @@ export function createAuthEngine({
     };
   }
 
+  // Handle POST /auth/check — NON-consuming validation for the /pair web page
+  // (BET-699). Tells the page whether a code is good so it can say "enter it
+  // in the app" WITHOUT burning the one-time code or ever exposing the box
+  // token to a throwaway browser. Mirrors claim()'s first branch: a malformed
+  // code is a 400, a wrong/expired code is an indistinguishable 403.
+  function check({ pairing_code } = {}) {
+    if (!isValidPairingCode(pairing_code)) {
+      return { ok: false, status: 400, error: "invalid pairing code" };
+    }
+    if (!pairing.check(pairing_code)) {
+      return { ok: false, status: 403, error: "invalid or expired code" };
+    }
+    return { ok: true, box_id: auth.box_id };
+  }
+
   // Handle DELETE /auth/revoke — two modes:
   //   • PER-DEVICE (device_id supplied): kill only that device's token, leaving
   //     every other device (and the primary box_token holder) working. This is
@@ -656,6 +691,7 @@ export function createAuthEngine({
     authorize,
     pair,
     claim,
+    check,
     revoke,
     listDevices,
     // exposed for /auth/status and tests

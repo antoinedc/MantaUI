@@ -202,8 +202,12 @@ before the user enters it, mint a fresh one:
 Tell the user, in this order:
 
 1. The **pair page** as the single clickable entry point — the box hosts a
-   3-step wizard that walks them through downloading the desktop app,
-   connecting it, and (optionally) installing the mobile app:
+   3-step wizard that shows them where to get the desktop app and how to
+   connect it (and, optionally, installs the mobile app). Opening it with the
+   code in the URL **checks that the code is valid** and shows install
+   instructions — it does NOT complete the linking. The user finishes by
+   entering the code in the desktop app (or the phone app), which performs the
+   actual claim:
 
    - **Linux box:** [Open this link to connect your devices](https://<box_id>.boxes.mantaui.com/pair#box=<box_id>&code=<code>)
    - **macOS box:** the installer prints the tailnet URL (or the loopback

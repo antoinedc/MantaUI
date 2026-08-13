@@ -204,7 +204,7 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
       <div class="action">
         <button class="btn btn-primary" type="button" onclick="goFinish()">Continue</button>
       </div>
-      <p class="hint">Nothing was linked yet — install Manta on this phone to finish.</p>
+      <p class="hint">Nothing was linked yet — the code stays valid. Install Manta on this phone and enter it there to finish.</p>
     </div>
   </section>
 
@@ -214,14 +214,14 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
       <div class="picon warn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       </div>
-      <h1>That code expired</h1>
-      <p class="lead">Codes last five minutes. <b>Nothing was linked and nothing changed.</b></p>
+      <h1>That code didn't work</h1>
+      <p class="lead">It may have expired or been mistyped. <b>Nothing was linked and nothing changed.</b></p>
       <div class="causecard">
         <div class="cause-row">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <div>
-            <div class="cr-t">Your desktop already has a new one</div>
-            <div class="cr-s">It refreshes on its own. Scan it again.</div>
+            <div class="cr-t">Get a fresh code</div>
+            <div class="cr-s">From the desktop app, or by running <code>manta pair</code> on the box.</div>
           </div>
         </div>
       </div>
@@ -257,7 +257,7 @@ footer{text-align:center;font-size:12px;color:var(--slate-300);padding:0 24px 28
         </div>
       </div>
       <div class="action btn-row">
-        <button class="btn btn-primary" type="button" onclick="retryClaim()">Try again</button>
+        <button class="btn btn-primary" type="button" onclick="retryCheck()">Try again</button>
         <button class="btn btn-ghost" type="button" onclick="copyDiagnostics()">Copy diagnostics</button>
       </div>
     </div>
@@ -288,7 +288,7 @@ function parseFragment(){
 
 function claimEndpointFor(origin){
   var o=(origin||"").trim();
-  return (o? o.replace(/\/+$/,"") : location.origin)+"/auth/claim";
+  return (o? o.replace(/\/+$/,"") : location.origin)+"/auth/check";
 }
 
 function resolveHost(){
@@ -339,14 +339,14 @@ function digtarget(){
   return cells[5];
 }
 
-// --- claim ---
+// --- check (non-consuming: the code stays claimable in the app) ---
 function submitCode(){
   var s=gather();
   if(!/^\d{6}$/.test(s)) return;
-  doClaim(s);
+  doCheck(s);
 }
 
-function doClaim(code){
+function doCheck(code){
   show("checking");
   var origin=$("server-url")? $("server-url").value : "";
   claimOrigin=origin;
@@ -360,28 +360,28 @@ function doClaim(code){
     return r.text();
   }).then(function(txt){
     try{ body=JSON.parse(txt); }catch(e){ body=null; }
-    presentClaimResult(res, body);
+    presentCheckResult(res, body);
   }).catch(function(){
     threw=true;
-    presentClaimResult(null, null);
+    presentCheckResult(null, null);
   });
 }
 
-function presentClaimResult(res, body){
+function presentCheckResult(res, body){
   if(res && res.ok && body && body.box_id){
     $("found-host").textContent=resolveHost();
     show("found");
     return;
   }
-  // The page only ever receives a server rejection or a network failure.
-  // §5.4 "codes don't match" needs the human to compare against what the
-  // DESKTOP shows — a box-served page cannot know that (renderer-side
-  // no-op), so an unknown rejection is shown as "expired", never with the
-  // desktop-comparator copy.
+  // Any server rejection (403 wrong/expired, 400 malformed, 429 rate-limit)
+  // lands on the same "didn't work" view — the page can never tell a typo
+  // from an expired code, and must not claim one. A network failure is the
+  // separate "unreachable" view. Nothing here consumes the code or holds a
+  // token: this is validation only, so the code stays valid in the app.
   show(res ? "expired" : "unreachable");
 }
 
-function retryClaim(){ submitCode(); }
+function retryCheck(){ submitCode(); }
 
 // --- misc ---
 function goScanAgain(){
@@ -440,7 +440,7 @@ function copyDiagnostics(){
     show("manual");
     setCells(f.code);
     $("landing-code").textContent=(f.code.slice(0,3)+" "+f.code.slice(3));
-    doClaim(f.code);
+    doCheck(f.code);
   } else {
     show("landing");
   }
