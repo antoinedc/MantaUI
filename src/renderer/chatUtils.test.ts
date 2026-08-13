@@ -3301,11 +3301,11 @@ describe("pruneVisitedSessions", () => {
 
   it("never removes the active session even if not in a live window", () => {
     const visited = new Set(["a", "b"]);
-    const live = new Set();
+    const live = new Set<string>();
     expect(pruneVisitedSessions(visited, live, "a")).toEqual(["b"]);
   });
 
   it("returns an empty array for an empty visited set", () => {
-    expect(pruneVisitedSessions(new Set(), new Set(["a"]), null)).toEqual([]);
+    expect(pruneVisitedSessions(new Set<string>(), new Set(["a"]), null)).toEqual([]);
   });
 });
