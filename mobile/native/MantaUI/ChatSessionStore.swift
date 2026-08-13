@@ -380,10 +380,17 @@ final class ChatSessionStore: ObservableObject {
         }
 
         // --- permissions: live updates ride the interpreted stream. Unlike
-        // questions there is no locally-answered tombstone filter — the box
-        // removes a replied permission via the stream frame, and the optimistic
-        // local removal in `replyPermission` covers the sub-second window.
-        if let p = s.permissions { permissions = p.permissions }
+        // questions there is no locally-answered tombstone filter — instead
+        // the accumulated snapshot is only applied on the frame that actually
+        // carries `sub: "permissions"`. Without that stamp check, this sink
+        // fires on every stream change (text delta, `running`, todos, ...)
+        // and would reapply the sticky snapshot each time, clobbering
+        // whatever `refreshPermissions()` just repaired on reconnect and
+        // briefly resurrecting an answered permission before its
+        // `permission.replied` frame lands.
+        if stamp?.sessionId == sessionId, stamp?.sub == "permissions", let p = s.permissions {
+            permissions = p.permissions
+        }
 
         // --- the turn lifecycle (`turnComplete` flag + streaming-tail RESET)
         // is per-frame: only a genuine `turnComplete` frame clears the tail.

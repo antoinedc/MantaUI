@@ -237,6 +237,38 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(store.permissions, [], "a replied/removed permission must clear on the stream frame")
     }
 
+    /// The accumulated snapshot only republishes on a genuine `permissions`
+    /// frame. A frame of any other sub (running, todos, ...) must not
+    /// reapply the sticky snapshot — otherwise it would clobber whatever
+    /// `refreshPermissions()` (seed/resync) just wrote, or resurrect a
+    /// permission that was just cleared, before the box's own frame lands.
+    func testNonPermissionsFrameDoesNotResurrectClearedPermission() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.inject(#"{"kind":"stream","sub":"permissions","sessionId":"ses","payload":{"permissions":[{"id":"perm_1","sessionID":"ses","permission":"Bash","patterns":["~/secrets.json"]}]}}"#)
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        XCTAssertEqual(store.permissions.map(\.id), ["perm_1"])
+
+        // The accumulated snapshot still carries perm_1 (no permissions frame
+        // has cleared it yet), but a reconnect just resynced the truth to
+        // empty via refreshPermissions().
+        await store.refreshPermissions()
+        XCTAssertEqual(store.permissions, [], "refreshPermissions must win immediately after resync")
+
+        // An unrelated frame (e.g. `running`) must not reapply the stale
+        // snapshot over the resync.
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        XCTAssertEqual(store.permissions, [],
+                       "a non-permissions frame must not resurrect a permission cleared by resync")
+    }
+
     /// start() twice must not double the one-time work: one transcript fetch,
     /// even when the loading branch fires twice in a row.
     func testStartTwiceCreatesOneFetch() async {
