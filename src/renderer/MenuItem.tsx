@@ -52,10 +52,15 @@ const ITEM_BASE =
   "flex w-full items-center gap-3 px-2 py-2 mb-1 last:mb-0 rounded-md text-left text-label font-medium transition-colors duration-150";
 // C1: every variant that sets a hover background also declares the matching
 // foreground so the row never renders low-contrast text on its fill.
+// `focus:bg-fill-hover` paints the SAME static roving highlight on the row
+// DOM focus owns (BET-741): the ⋯ menu's keyboard roving now moves real DOM
+// focus across the rows, so the highlight is the focused row showing the
+// `--fill-hover` pill — no component state, no aria-activedescendant.
 const VARIANT: Record<MenuItemVariant, string> = {
-  normal: "text-text-muted hover:bg-fill-hover hover:text-text",
-  danger: "text-danger hover:bg-danger-bg",
-  active: "text-accent hover:bg-fill-hover",
+  normal:
+    "text-text-muted hover:bg-fill-hover hover:text-text focus:bg-fill-hover",
+  danger: "text-danger hover:bg-danger-bg focus:bg-fill-hover",
+  active: "text-accent hover:bg-fill-hover focus:bg-fill-hover",
 };
 
 export function MenuItem({
@@ -64,8 +69,7 @@ export function MenuItem({
   children,
   trailing,
   onSelect,
-  highlighted = false,
-  id,
+  tabIndex = -1,
 }: {
   /** Which surface + foreground the row carries. normal is the default. */
   variant?: MenuItemVariant;
@@ -77,22 +81,19 @@ export function MenuItem({
   trailing?: ReactNode;
   /** Called when the row is chosen. */
   onSelect?: () => void;
-  /** The roving keyboard highlight (BET-726 Task 3.1) — the SAME static
-   *  `--fill-hover` fill MenuOption's `active` prop gives the model/effort
-   *  menus, applied unconditionally instead of only on `:hover`. */
-  highlighted?: boolean;
-  /** Option id — the aria-activedescendant target for a caller-owned roving
-   *  highlight (BET-726 review cycle 1 Question 1), same role `MenuOption`'s
-   *  `id` plays for the model/effort menus. */
-  id?: string;
+  /** Roving-tabindex slot (BET-741): menu rows are keyboard-actuated — every
+   *  `role="menuitem"` starts off-tab (-1) and the owner roves focus by
+   *  raising the focused row to 0 (and dropping the rest to -1) while the
+   *  menu is open. */
+  tabIndex?: number;
 }) {
   return (
     <button
       type="button"
-      id={id}
       role="menuitem"
+      tabIndex={tabIndex}
       onClick={onSelect}
-      className={`${ITEM_BASE} ${VARIANT[variant]}${highlighted ? " bg-fill-hover" : ""}`}
+      className={`${ITEM_BASE} ${VARIANT[variant]}`}
     >
       {icon && cloneElement(icon, { size: 14, "aria-hidden": true })}
       <span className="flex-1">{children}</span>
@@ -151,11 +152,10 @@ export function Dropdown({
 }: {
   /** Optional `manta-*` identity class for the call site (no styling). */
   hook?: string;
-  /** Optional DOM id — lets a caller-owned trigger reference this surface via
-   *  `aria-owns` when it drives a roving `aria-activedescendant` highlight
-   *  (BET-726 review cycle 1 Question 1: the trigger and this surface are
-   *  DOM siblings, not ancestor/descendant, so `aria-owns` is what makes the
-   *  activedescendant relationship well-formed). */
+  /** Optional DOM id — still used by the model/effort listbox menus (rows
+   *  reference it via `aria-activedescendant`, the correct combobox idiom).
+   *  SessionHeader's ⋯ menu no longer passes one (BET-741 moved it to real
+   *  DOM focus + roving tabIndex, which needs no descendant ids). */
   id?: string;
   /** below (top-full, SessionHeader's menu) | above (bottom-full, composer). */
   placement?: DropdownPlacement;
