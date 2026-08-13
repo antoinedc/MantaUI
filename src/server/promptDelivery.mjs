@@ -17,6 +17,15 @@
 // The queue is in-memory only; a server restart with prompts queued loses
 // them (accepted — matches the prior webhook behaviour). Draining is FIFO,
 // one prompt at a time, awaited in sequence (never batched into one message).
+//
+// The queue is BOUNDED: each session can hold at most MAX_PENDING_PER_SESSION
+// deferred prompts (BET-772, audit P3-3). An unbounded queue would grow
+// without limit while a session stays busy under a flood of deferred
+// deliveries — a memory/correctness concern, not data loss (restart already
+// drops the queue). When a session's queue is at the cap, the new delivery is
+// REJECTED and surfaced (deliver returns {rejected:true}) instead of pushing,
+// so the caller knows its prompt was not queued and can decide how to handle
+// the overflow rather than having it silently dropped on a later drain.
 
 /**
  * Build the shared prompt-delivery engine.
@@ -24,11 +33,18 @@
  * @param {object} deps
  * @param {(args:{sessionId:string, text:string})=>Promise<unknown>} deps.sendPrompt
  *        The underlying opencode prompt injector (oc.sendPrompt).
- * @returns {{deliver: (args:{sessionId:string, text:string})=>Promise<{delivered:boolean, queued:boolean}>, observeEvent:(evt:unknown)=>void, isBusy:(sessionId:string)=>boolean}}
+ * @returns {{deliver: (args:{sessionId:string, text:string})=>Promise<{delivered:boolean, queued:boolean, rejected?:boolean}>, observeEvent:(evt:unknown)=>void, isBusy:(sessionId:string)=>boolean}}
  */
 export function createPromptDelivery({ sendPrompt }) {
   const busy = new Set(); // sessionIds currently running a turn
   const pending = new Map(); // sessionId -> [text, ...] queued while busy
+
+  // Upper bound on deferred prompts per session (BET-772). Chosen well above
+  // what a realistic burst needs but small enough that a flood cannot balloon
+  // memory. The queue is drained only when the (busy) session goes idle, so an
+  // unbounded cap under a sustained flood is the exact unbounded-growth case
+  // this bound exists to prevent.
+  const MAX_PENDING_PER_SESSION = 20;
 
   async function drain(sessionId) {
     const queue = pending.get(sessionId);
@@ -81,6 +97,16 @@ export function createPromptDelivery({ sendPrompt }) {
   async function deliver({ sessionId, text }) {
     if (busy.has(sessionId)) {
       const q = pending.get(sessionId) ?? [];
+      if (q.length >= MAX_PENDING_PER_SESSION) {
+        // Queue is at the cap (BET-772). Reject + surface rather than grow
+        // the queue unboundedly: the caller learns this delivery was not
+        // queued and must be surfaced/handled, instead of assuming a drain
+        // will deliver it.
+        console.warn(
+          `[promptDelivery] deferred delivery queue for ${sessionId} is full (${MAX_PENDING_PER_SESSION}); rejecting`,
+        );
+        return { delivered: false, queued: false, rejected: true };
+      }
       q.push(text);
       pending.set(sessionId, q);
       return { delivered: false, queued: true };
