@@ -1,0 +1,51 @@
+# iOS compile gate (BET-651). Compiles the native app + BOTH test bundles for
+# any PR that touches mobile/native. build-for-testing, never `test` —
+# execution stays on the Mac plugin; this gate only proves the Swift compiles.
+# NOT in required-checks.json: the paths filter means most PRs never produce
+# this context, and requiring it would block them all (see AGENTS.md).
+name: iOS Build
+
+on:
+  pull_request:
+    paths:
+      - "mobile/native/**"
+      - ".github/workflows/ios-build.yml"
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile/native
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache SPM packages + DerivedData
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: ios-build-${{ runner.os }}-${{ hashFiles('mobile/native/project.yml') }}
+          restore-keys: |
+            ios-build-${{ runner.os }}-
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project (project.yml is the source of truth)
+        run: xcodegen generate
+
+      - name: Compile app + test bundles
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project MantaUI.xcodeproj \
+            -scheme MantaUI \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
