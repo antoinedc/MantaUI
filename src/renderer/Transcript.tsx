@@ -417,16 +417,25 @@ export function Transcript({
             transition={{ type: "tween", duration: 0.15 }}
           >
             {/* Empty state: full width, matching the populated flow below so
-                both states share a left edge (BET-646). */}
+                both states share a left edge (BET-646).
+
+                It sits at the BOTTOM of the empty transcript, right above the
+                composer — the transcript grows upward from the composer, so the
+                first line of a conversation must start where every later line
+                will be, not stranded at the top of an empty panel. `mt-auto` in
+                a flex column is what does it: unlike `justify-end` it survives
+                on a scroll container (a taller-than-viewport child stays
+                reachable) and, unlike `min-height:100%`, it needs no percentage
+                to resolve against the flex-sized parent. */}
             <div
-              className="flex-1 overflow-y-auto overflow-x-hidden"
+              className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col"
               style={{
                 padding: "var(--sp-6) 0",
                 marginBottom: "var(--sp-2)",
                 paddingInline: "var(--transcript-inset)",
               }}
             >
-              <div className="text-text-faint">
+              <div className="mt-auto text-text-faint">
                 <span style={{ color: "var(--accent)" }}>✻</span>{" "}
                 Welcome. Type a message below to start.
               </div>

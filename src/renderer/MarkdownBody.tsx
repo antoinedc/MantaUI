@@ -168,6 +168,17 @@ const MD_COMPONENTS: MarkdownComponents = {
       <table className="text-prose border-collapse">{children}</table>
     </div>
   ),
+  // A GFM table is REQUIRED to have a header row — the `|---|---|` delimiter
+  // line is what makes the block a table at all — so the common "just give me a
+  // grid of labelled rows" markdown (`|  |  |` on the first line) does not
+  // produce a header-less table. It produces a table whose header cells are
+  // blank, and remark faithfully emits a <thead> of empty <th>s. Rendered, that
+  // is a blank bordered strip sitting above the data, which reads as a
+  // rendering bug rather than as a deliberately unlabelled table. When EVERY
+  // header cell is empty, drop the <thead> entirely; a partially-filled header
+  // is a real header and is left alone.
+  thead: ({ children }) =>
+    childrenToString(children).trim() === "" ? null : <thead>{children}</thead>,
   th: ({ children }) => (
     <th
       className="px-3 py-1 text-left text-text font-medium bg-bg-soft"
