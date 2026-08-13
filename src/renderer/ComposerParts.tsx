@@ -6,7 +6,7 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
-import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip, Camera } from "lucide-react";
+import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip } from "lucide-react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import type { PendingScreenshot } from "./store";
@@ -190,10 +190,6 @@ export function PendingScreenshotStrip({
   if (shots.length === 0) return null;
   return (
     <div className="pb-2 flex flex-wrap items-center gap-2 text-meta">
-      <span className="inline-flex items-center gap-1 text-text-faint shrink-0">
-        <Camera size={13} aria-hidden="true" />
-        {shots.length} screenshot{shots.length === 1 ? "" : "s"}
-      </span>
       {shots.map((s) => (
         <span key={s.id} className="relative shrink-0">
           <button
@@ -206,7 +202,7 @@ export function PendingScreenshotStrip({
           </button>
           <button
             onClick={() => onDiscard(s.id)}
-            className="absolute top-px right-px w-4 h-4 rounded-full grid place-items-center bg-text/60 text-bg hover:bg-danger focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            className="absolute top-1 right-1 w-4 h-4 rounded-full grid place-items-center bg-text/60 text-bg hover:bg-danger focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
             title="Discard"
             aria-label={`Discard ${s.filename}`}
           >
@@ -214,14 +210,12 @@ export function PendingScreenshotStrip({
           </button>
         </span>
       ))}
-      {shots.length > 1 && (
-        <button
-          onClick={() => onAccept(shots)}
-          className="shrink-0 rounded-sm bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-        >
-          Add all {shots.length}
-        </button>
-      )}
+      <button
+        onClick={() => onAccept(shots)}
+        className="shrink-0 rounded-sm bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+      >
+        {shots.length === 1 ? "Add to chat" : `Add all ${shots.length}`}
+      </button>
     </div>
   );
 }

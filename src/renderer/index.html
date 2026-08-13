@@ -13,7 +13,7 @@
          that threshold, so they ship as `data:font/woff2;base64,…` inside
          the CSS and were refused under the `default-src 'self'` fallback.
          Still no remote origin — data: here is our own bundled bytes. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: http: https:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: http: https:;" />
     <!-- BET-559: the PWA (manifest, apple-touch-icon, install meta, home-screen
          decoration) was the web-mobile-client surface and is retired with it.
          The renderer is the desktop Electron app — none of these PWA bits apply. -->
