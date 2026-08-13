@@ -7,6 +7,7 @@ import {
   STALE_CACHE_MIN_TOKENS,
   VISIBLE_TODOS_CAP,
   allTodosTerminal,
+  applyPermissionEvent,
   applyQuestionEvent,
   buildTitlePromptInput,
   classifyCacheAge,
@@ -1119,6 +1120,66 @@ describe("applyQuestionEvent — BET-112 live-path stacking/requestId", () => {
     expect(state).toHaveLength(1);
     expect(state[0].id).toBe("toolu_2");
     expect(state[0].requestId).toBe("que_2");
+  });
+});
+
+describe("applyPermissionEvent", () => {
+  const SID = "ses_view";
+  const askedProps = {
+    id: "perm_1",
+    sessionID: SID,
+    prompt: "Allow reading ~/secrets.json?",
+  };
+
+  it("permission.asked appends the permission (whole properties object is the record)", () => {
+    const next = applyPermissionEvent([], "permission.asked", askedProps, SID);
+    expect(next).toHaveLength(1);
+    // The stored record is the raw wire payload — the same shape
+    // `opencode:permissions` returns, so iOS decodes it with PermissionRequest.
+    expect(next[0]).toEqual(askedProps);
+  });
+
+  it("permission.replied removes the answered permission", () => {
+    const prev = [askedProps];
+    expect(
+      applyPermissionEvent(prev, "permission.replied", { id: "perm_1", sessionID: SID }, SID),
+    ).toEqual([]);
+  });
+
+  it("permission.rejected removes the dismissed permission", () => {
+    const prev = [askedProps];
+    expect(
+      applyPermissionEvent(prev, "permission.rejected", { id: "perm_1", sessionID: SID }, SID),
+    ).toEqual([]);
+  });
+
+  it("permission.asked for a DIFFERENT session is ignored", () => {
+    const other = { ...askedProps, id: "perm_2", sessionID: "ses_other" };
+    expect(applyPermissionEvent([], "permission.asked", other, SID)).toEqual([]);
+  });
+
+  it("re-asking the same id dedupes (no duplicate rows)", () => {
+    const first = applyPermissionEvent([], "permission.asked", askedProps, SID);
+    const second = applyPermissionEvent(first, "permission.asked", askedProps, SID);
+    expect(second).toHaveLength(1);
+  });
+
+  it("preserves unrelated pending permissions when one is replied", () => {
+    const p2 = { ...askedProps, id: "perm_2" };
+    const prev = [askedProps, p2];
+    const next = applyPermissionEvent(prev, "permission.replied", { id: "perm_1", sessionID: SID }, SID);
+    expect(next).toEqual([p2]);
+  });
+
+  it("missing id is a no-op for asked / replied / rejected", () => {
+    expect(applyPermissionEvent([], "permission.asked", { sessionID: SID }, SID)).toEqual([]);
+    expect(applyPermissionEvent(undefined, "permission.asked", undefined, SID)).toBeUndefined();
+    expect(
+      applyPermissionEvent([askedProps], "permission.replied", { sessionID: SID }, SID),
+    ).toEqual([askedProps]);
+    expect(
+      applyPermissionEvent([askedProps], "permission.rejected", {}, SID),
+    ).toEqual([askedProps]);
   });
 });
 

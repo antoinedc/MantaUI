@@ -145,6 +145,17 @@ export function applyQuestionEvent(
   viewedSessionId: string,
 ): QuestionLike[];
 
+// The permission record is the whole `properties` object — the same wire shape
+// `opencode:permissions` returns (`{ id: "perm_…", sessionID, prompt, … }`).
+export type PermissionLike = Record<string, unknown>;
+
+export function applyPermissionEvent(
+  prev: PermissionLike[] | undefined,
+  eventType: string,
+  properties: Record<string, unknown> | undefined,
+  viewedSessionId: string,
+): PermissionLike[];
+
 export function hydrateQuestion(server: {
   id: string;
   sessionID: string;

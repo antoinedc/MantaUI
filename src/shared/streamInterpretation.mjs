@@ -611,6 +611,32 @@ export function applyQuestionEvent(prev, eventType, properties, viewedSessionId)
 }
 
 /**
+ * Fold a permission lifecycle event into the pending-permissions list.
+ * The permission twin of applyQuestionEvent, simpler because a permission has
+ * no tool/callID indirection: `properties.id` (perm_…) is both the store key
+ * and the reply key.
+ *
+ * - permission.asked    → append (dedupe on id; ignore other sessions)
+ * - permission.replied / permission.rejected → remove by id
+ */
+export function applyPermissionEvent(prev, eventType, properties, viewedSessionId) {
+  const p = properties ?? {};
+  const id = typeof p.id === "string" ? p.id : "";
+  if (eventType === "permission.replied" || eventType === "permission.rejected") {
+    if (!id) return prev;
+    return prev.filter((perm) => perm?.id !== id);
+  }
+  if (eventType === "permission.asked") {
+    if (!id) return prev;
+    const sessionID = typeof p.sessionID === "string" ? p.sessionID : "";
+    if (sessionID !== viewedSessionId) return prev;
+    const without = prev.filter((perm) => perm?.id !== id);
+    return [...without, p];
+  }
+  return prev;
+}
+
+/**
  * Normalize a server `GET /question` response row into the QuestionLike shape
  * used by applyQuestionEvent's output. The server returns
  * `{id: "que_…", sessionID, questions, tool}`; the caller keeps a separate

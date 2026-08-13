@@ -32,6 +32,7 @@ import {
   selectActiveTodos,
   selectVisibleTodos,
   applyQuestionEvent,
+  applyPermissionEvent,
   isAssistantTurnComplete,
   registerChildSessionFromCreated,
   extractSubagentInfo,
@@ -76,6 +77,7 @@ function newSessionState() {
     childSessionIds: new Set(),
     liveChildStatus: new Map(),
     questions: [],             // QuestionLike[]
+    permissions: [],           // PermissionLike[] (pending permission requests)
     lastCompleted: null,
     cachedTokens: 0,
     running: false,
@@ -333,6 +335,21 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
       case "question.rejected": {
         st.questions = applyQuestionEvent(st.questions, evt.type, evt.properties, sid);
         emit(sid, "questions", { questions: st.questions });
+        return;
+      }
+      // Permissions get the identical treatment to questions: they ride the
+      // interpreted stream as a `permissions` frame. Trust-mode note: this
+      // interpret() runs in the opencode pump BEFORE the chatAutoAllow
+      // auto-allow branch in src/server/index.mjs, so under trust mode the
+      // phone briefly receives a pending permission that the box answers
+      // milliseconds later — the `permission.replied` opencode then emits
+      // flows through this same case and clears it. That transient matches the
+      // desktop sidebar's semantics; leave it.
+      case "permission.asked":
+      case "permission.replied":
+      case "permission.rejected": {
+        st.permissions = applyPermissionEvent(st.permissions, evt.type, evt.properties, sid);
+        emit(sid, "permissions", { permissions: st.permissions });
         return;
       }
       default:

@@ -16,11 +16,11 @@ import MessagingUI
 //      (`stream:flush`), running/turnComplete, context/tokens, todos,
 //      truncation, questions, and live subagent status.
 //
-// Permissions are fetched via `opencode:permissions` and lightly polled while
-// the screen is active; questions arrive on the interpreted stream. Both are
-// answerable from the phone (S1a reply/reject RPCs). Parent and children are
-// each their own store; a child store is read-only (no permission poll) —
-// §8a v1.
+// Permissions and questions both arrive on the interpreted stream (`sub:
+// "permissions"` / `sub: "questions"`); `opencode:permissions` is only the
+// seed/resync path (the 2.5s poll is gone). Both are answerable from the phone
+// (S1a reply/reject RPCs). Parent and children are each their own store; a
+// child store is read-only (§8a v1).
 //
 // Deliberately does NOT touch the event store's single-owner `rawFrameHandler`
 // or `resyncHandler`; resync + attention are derived from the @Published stream
@@ -191,7 +191,6 @@ final class ChatSessionStore: ObservableObject {
     private let api: MantaAPIClient
     private let eventStore: MantaEventStore
     private var cancellables: Set<AnyCancellable> = []
-    private var permissionPoll: Timer?
     private var runningSince: Date?
     /// Stable id for the streaming `.prose` tail, fixed for the life of one
     /// turn. The tail's TEXT grows every delta, so a content-derived id would
@@ -213,9 +212,16 @@ final class ChatSessionStore: ObservableObject {
     /// resumable work so tests can assert the split without touching live
     /// timers or the network.
     private(set) var transcriptFetchCount = 0
-    private(set) var permissionPollStartedCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// The permissions payload most recently folded into `permissions`. The
+    /// accumulated snapshot is sticky and this sink fires on every stream change,
+    /// so applying it unconditionally would clobber whatever `refreshPermissions()`
+    /// (seed/resync) just wrote. Edge-triggering on the VALUE — rather than on the
+    /// frame stamp, a single slot that a later frame or a transcript retirement can
+    /// overwrite before this deferred sink reads it — applies every genuine
+    /// permissions frame exactly once and nothing else.
+    private var lastAppliedPermissions: StreamPermissionsPayload?
     /// How many recent messages the CURRENT window covers. Every refetch reuses
     /// it, so a turn-boundary refresh never silently collapses a window the
     /// user widened.
@@ -265,19 +271,13 @@ final class ChatSessionStore: ObservableObject {
 
     // MARK: - Lifecycle
 
-    /// Begin loading the session and (for the parent) start the light
-    /// permission poll. One-time setup is split from resumable work: the
-    /// initial transcript fetch runs once under the `didRunOnce` guard, while
-    /// the permission poll is (re)started whenever it is not already running,
-    /// so a subagent push (`stop`) then pop (`start`) keeps polling without a
-    /// re-fetch.
+    /// Begin loading the session. One-time setup is split from resumable work:
+    /// the initial transcript fetch runs once under the `didRunOnce` guard, so
+    /// a subagent push (`stop`) then pop (`start`) does not re-fetch.
     func start() {
         if !didRunOnce {
             didRunOnce = true
             load()
-        }
-        if !isReadOnly {
-            startPermissionPoll()
         }
         // Register as an observer so the event store knows a consumer is
         // attached (BET-672): a session it completes with NO observer has its
@@ -286,8 +286,6 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func stop() {
-        permissionPoll?.invalidate()
-        permissionPoll = nil
         // The session is leaving the screen: it is no longer a consumer of
         // this session's stream chunks, and its subagent stores can all go
         // (BET-672). Dropping the dictionary here is the teardown-path half of
@@ -387,6 +385,22 @@ final class ChatSessionStore: ObservableObject {
             let incoming = questionPayload.questions
             locallyAnsweredQuestionIDs.formIntersection(Set(incoming.map(\.id)))
             questions = incoming.filter { !locallyAnsweredQuestionIDs.contains($0.id) }
+        }
+
+        // --- permissions: live updates ride the interpreted stream. Unlike
+        // questions there is no locally-answered tombstone filter — instead
+        // the payload is edge-triggered against `lastAppliedPermissions`
+        // (see its doc comment for why the frame stamp alone is not a safe
+        // trigger). Applying it unconditionally would clobber whatever
+        // `refreshPermissions()` just repaired on reconnect and briefly
+        // resurrect an answered permission before its `permission.replied`
+        // frame lands; gating on the stamp instead can silently DROP a
+        // genuine permissions frame if a later frame or a transcript
+        // retirement overwrites the stamp before this deferred sink reads
+        // it. Edge-triggering on the value has neither failure mode.
+        if let p = s.permissions, p != lastAppliedPermissions {
+            lastAppliedPermissions = p
+            permissions = p.permissions
         }
 
         // --- the turn lifecycle (`turnComplete` flag + streaming-tail RESET)
@@ -623,16 +637,8 @@ final class ChatSessionStore: ObservableObject {
 
     // MARK: - Permissions (S1a answerable)
 
-    private func startPermissionPoll() {
-        guard permissionPoll == nil else { return }
-        permissionPollStartedCount += 1
-        let timer = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshPermissions() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        permissionPoll = timer
-    }
-
+    /// Seed + resync only — live updates arrive on the interpreted stream;
+    /// the 2.5s poll is gone.
     func refreshPermissions() async {
         let perms = (try? await api.permissions(sessionId: sessionId)) ?? []
         await MainActor.run { permissions = perms }
