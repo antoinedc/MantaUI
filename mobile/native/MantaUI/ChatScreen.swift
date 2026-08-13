@@ -113,6 +113,11 @@ private struct ChatScreenContent: View {
     @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
+    /// Loads `chatAutoAllow` (trust mode) from the box via `config:get` and
+    /// persists it over the store's own `config:update` path (BET-748). This is
+    /// the chat surface's window into the same settings the Settings screen
+    /// renders — no second `config:get`.
+    @StateObject private var settingsStore: MantaSettingsStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -177,6 +182,7 @@ private struct ChatScreenContent: View {
             api: api
         ))
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
+        _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -205,6 +211,7 @@ private struct ChatScreenContent: View {
                 // window/branch lookup.
                 store.start()
                 modelStore.load()
+                Task { await settingsStore.load() }
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
@@ -347,7 +354,8 @@ private struct ChatScreenContent: View {
                             scrollPosition.scrollTo(edge: .bottom, animated: true)
                             showScrollToBottom = false
                         },
-                        onGlassBoxHeightChange: { composerGlassHeight = $0 }
+                        onGlassBoxHeightChange: { composerGlassHeight = $0 },
+                        onToggleTrust: { flipTrustMode() }
                     )
                 }
                 // Feeds the transcript's bottom content inset its height. Safe
@@ -427,9 +435,33 @@ private struct ChatScreenContent: View {
             onFork: { Task { await forkSession() } },
             onOpenTerminal: { Task { await openTerminal() } },
             onDelete: { Task { await deleteSession() } },
+            settingsStore: settingsStore,
+            onToggleTrust: { _ in flipTrustMode() },
             scheduleCount: scheduleCount
         )
         .task { await refreshScheduleCount() }
+    }
+
+    // MARK: - Trust mode (BET-748 gap #14)
+
+    /// Flip the `chatAutoAllow` trust setting: flip to the opposite of its
+    /// current value, persist over the store's `config:update` path, and only
+    /// treat it as changed after the box confirms. A failed update never
+    /// fabricates a success — the visible toggle stays put (it reads the store,
+    /// which only mutates on success) and the composer `actionHint` bus says
+    /// why. Shared by the overflow toggle and the voice `toggleTrust` action.
+    private func flipTrustMode() {
+        guard let entry = SettingsSchema.entries.first(where: { $0.id == "chatAutoAllow" }) else { return }
+        let target = settingsStore.current(entry) != .bool(true)
+        Task { await setTrustMode(entry, target) }
+    }
+
+    private func setTrustMode(_ entry: SettingEntry, _ enabled: Bool) async {
+        do {
+            try await settingsStore.setBool(entry, enabled)
+        } catch {
+            await MainActor.run { store.actionHint = "Couldn't change trust mode — check the connection" }
+        }
     }
 
     /// The BET-627 overflow items that present their cards here.

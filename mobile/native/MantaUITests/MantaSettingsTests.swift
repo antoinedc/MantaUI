@@ -100,12 +100,14 @@ private final class FakeConfigStore: SettingsConfigurationStore {
     var stored: [String: JSONValue] = [:]
     var updates: [[String: JSONValue]] = []
     var failLoad = false
+    var failUpdate = false
 
     func load() async -> [String: JSONValue]? {
         failLoad ? nil : stored
     }
 
     func update(_ patch: [String: JSONValue]) async throws -> [String: JSONValue]? {
+        guard !failUpdate else { throw CancellationError() }
         updates.append(patch)
         stored.merge(patch) { _, new in new }
         return stored
@@ -205,5 +207,37 @@ final class MantaSettingsStoreTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(store.current(entry(id: "autoRenameSessions")), .bool(true))
         XCTAssertEqual(store.current(entry(id: "serverUrlMobile")), .string("https://box.example.com"))
+    }
+
+    // MARK: - Trust-mode toggle (BET-748)
+
+    func testSetBoolRoundTripsChatAutoAllowPatch() async throws {
+        await store.load()
+        let entry = entry(id: "chatAutoAllow")
+        XCTAssertEqual(store.current(entry), .bool(false))
+
+        try await store.setBool(entry, true)
+
+        // The in-memory value flips, and exactly the chatAutoAllow key is
+        // sent over the store's config:update path.
+        XCTAssertEqual(store.current(entry), .bool(true))
+        let last = try XCTUnwrap(fake.updates.last)
+        XCTAssertEqual(last["chatAutoAllow"], .bool(true))
+    }
+
+    func testSetBoolFailedUpdateThrowsAndDoesNotFlipValue() async throws {
+        await store.load()
+        let entry = entry(id: "chatAutoAllow")
+        fake.failUpdate = true
+
+        do {
+            try await store.setBool(entry, true)
+            XCTFail("Expected a thrown error for the failed config:update")
+        } catch {
+            // Expected — the update was rejected.
+        }
+
+        // No fabricated success: the persisted value must not flip.
+        XCTAssertEqual(store.current(entry), .bool(false))
     }
 }

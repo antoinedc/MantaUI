@@ -127,6 +127,29 @@ final class MantaSettingsStore: ObservableObject {
         }
     }
 
+    /// Set a config-driven boolean and persist it over `config:update` (the
+    /// store's own persistence path — the same one Settings uses), then flip
+    /// the in-memory value.
+    ///
+    /// Unlike `commit`, which flips the value optimistically and swallows the
+    /// box's answer, this AWAITS the update and only mutates the published
+    /// value after the box confirms. A failed `config:update` throws (so the
+    /// caller can revert / surface it) and leaves the stored value untouched —
+    /// never a fabricated success. This is the chat trust-mode toggle's path
+    /// (BET-748).
+    func setBool(_ entry: SettingEntry, _ value: Bool) async throws {
+        guard let configKey = entry.configKey else {
+            // Device-local entries persist locally; there is no box round-trip
+            // to fail, so flip directly.
+            values[entry.id] = .bool(value)
+            persistDeviceLocal(entry, value: .bool(value))
+            return
+        }
+        _ = try await configuration.update([configKey: .bool(value)])
+        values[entry.id] = .bool(value)
+        lastError = nil
+    }
+
     // MARK: - Reset (per-section + reset-all), both undoable
 
     func resetSection(_ sectionID: String) {

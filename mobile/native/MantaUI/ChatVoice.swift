@@ -53,7 +53,7 @@ enum ChatVoiceHint {
         case .compact: return "Compacted to free context"
         case .fork: return "Forking isn't available in this chat yet"
         case .help: return "Try “submit…”, “abort”, or “answer…”"
-        case .toggleTrust: return "Trust mode isn't available in this chat"
+        case .toggleTrust: return "Trust mode can't be toggled right now"
         case .newSession: return "New-session isn't available in this chat"
         case .openSettings: return "Settings isn't available in this chat"
         case .switchWindow: return "Switch-window isn't available in this chat"
