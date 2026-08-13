@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
+import { listSnapshots as usageListSnapshots } from "./usage.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
 import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
@@ -870,6 +871,14 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
+
+    // ---- subscription plan usage (manta-server owned; BET-737) ----
+    // Read-only: returns the current UsageSnapshot[] cache maintained by the
+    // usage poller started in src/server/index.mjs (startUsagePoller). The
+    // poller also publishes `usage.updated` on the bus whenever the snapshot
+    // set actually changes — this channel is for the initial paint / refetch.
+    // preload: ipcRenderer.invoke(IPC.usageList)  → no args
+    "usage:list": () => usageListSnapshots(),
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are

@@ -1256,6 +1256,80 @@ export async function removeProviderAuth(providerID) {
   }
 }
 
+/**
+ * Resolve where opencode itself persists provider auth — including the API
+ * keys `setProviderApiKey` above writes via `PUT /auth/{id}` — as
+ * `{"<providerID>": {"type":"api"|"oauth", "key"|"access"/"refresh", …}}`.
+ * See docs/subscription-providers.md §1.3: "Codex/Kimi/Copilot tokens live
+ * in opencode's own auth store … opencode refreshes them itself."
+ *
+ * Mirrors messageSearch.mjs's `resolveDbPath()` for the SAME opencode XDG
+ * data directory: `XDG_DATA_HOME` first when set, else `homedir()`-based —
+ * never hardcode `/home/…`. A box that sets `XDG_DATA_HOME` (review cycle 2
+ * Nit) would otherwise never find a real key here, and `detect()` would
+ * silently report false with no error, the quiet-failure mode this repo
+ * already decided against for opencode's other data-dir resolver.
+ * @returns {string}
+ */
+export function opencodeAuthPath() {
+  const base = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
+  return path.join(base, "opencode", "auth.json");
+}
+
+/**
+ * Pure: extract a provider's API key from the ALREADY-READ text of
+ * opencode's auth store. Mirrors `parseCredentials` above exactly — never
+ * throws, returns `""` (not null; this value is used directly as a header)
+ * for invalid JSON, a missing provider entry, or an entry whose `key` isn't
+ * a non-empty string (e.g. an oauth-type entry, which has `access`/`refresh`
+ * instead — see the `anthropic` shape this same file writes).
+ *
+ * Separated from the file read below so it's directly unit-testable without
+ * touching a real auth store, the same split `parseCredentials` /
+ * `readCredsSnapshot` uses.
+ *
+ * @param {string} rawFileText
+ * @param {string} providerId
+ * @returns {string}
+ */
+export function parseProviderApiKey(rawFileText, providerId) {
+  try {
+    const parsed = JSON.parse(rawFileText);
+    const entry = parsed?.[providerId];
+    return typeof entry?.key === "string" && entry.key.length > 0 ? entry.key : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Read a provider's raw API key straight off opencode's own auth store
+ * (BET-737's usage engine needs it to call a provider's usage endpoint
+ * itself — opencode exposes no usage-reporting RPC of its own). This is a
+ * READER only, never a second place to write the key: the only writer is
+ * `setProviderApiKey` above (the Kimi connect card, via `PUT /auth/{id}`).
+ *
+ * Mirrors `readCredsSnapshot` above exactly: tolerates a missing file by
+ * returning `""` — NEVER throws, so a caller can `await` this
+ * unconditionally. The parse itself is `parseProviderApiKey` above.
+ *
+ * SECURITY: this resolves a LIVE credential. It must never log, echo, or
+ * return the key anywhere but to its direct caller, and a caller must never
+ * fold it into an error message.
+ *
+ * @param {string} providerId
+ * @returns {Promise<string>}
+ */
+export async function readProviderApiKey(providerId) {
+  let raw;
+  try {
+    raw = readFileSync(opencodeAuthPath(), "utf-8");
+  } catch {
+    return "";
+  }
+  return parseProviderApiKey(raw, providerId);
+}
+
 // ---------------------------------------------------------------------------
 // VCS
 // ---------------------------------------------------------------------------

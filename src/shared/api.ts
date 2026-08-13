@@ -21,6 +21,7 @@ import type {
   Project,
   TmuxCreateResult,
   ScheduledJob,
+  UsageSnapshot,
   SecretMeta,
   SecretInput,
   ServerUpdateAvailablePayload,
@@ -328,6 +329,11 @@ export interface Api {
   // Scheduled prompts (manta-server owned; desktop reaches it over -L 18787).
   scheduleList(sessionId?: string): Promise<ScheduledJob[]>;
   scheduleDelete(id: string): Promise<{ deleted: boolean }>;
+
+  // Subscription plan usage (manta-server owned; BET-737). Read-only —
+  // snapshots are produced by the box's usage poller (src/server/usage.mjs),
+  // never written through this channel. NOT the context-window indicator.
+  usageList(): Promise<UsageSnapshot[]>;
 
   // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never

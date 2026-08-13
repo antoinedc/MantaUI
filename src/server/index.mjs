@@ -47,6 +47,7 @@ import { startUploadCleanupPoller } from "./uploads.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
+import { startUsagePoller } from "./usage.mjs";
 import {
   createCapJob,
   getJob,
@@ -235,6 +236,16 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   },
   { intervalMs: 30000 },
 );
+
+// Subscription plan usage engine (BET-737): polls each connected provider
+// adapter (claude/codex/kimi — src/server/usageAdapters/) for its rolling-5h
+// + weekly plan usage and publishes `usage.updated` on the bus whenever the
+// snapshot set actually changes. State is an in-memory cache (the poll
+// interval IS the cache TTL); the read side is the `usage:list` RPC channel
+// (src/server/rpc.mjs → usage.mjs listSnapshots()). NOT the context-window
+// indicator — see src/server/usage.mjs for that boundary.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopUsagePoller } = startUsagePoller(bus);
 
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
 // `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
