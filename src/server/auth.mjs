@@ -31,10 +31,9 @@
 // the mobile QR scanner (M3) are separate issues; they consume /auth/pair +
 // /auth/claim built here.
 
-import { unlink } from "node:fs/promises";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { createDeviceRegistry, DEVICES_STORE_PATH, DEVICE_IDLE_TTL_MS, saveDevicesRaw } from "./devices.mjs";
 
 const STORE_PATH = statePath("auth.json");
@@ -281,21 +280,13 @@ export async function saveAuth(auth, path = STORE_PATH) {
   await writeJsonAtomic(path, JSON.stringify(auth, null, 2), { mode: 0o600 });
 }
 
-// Delete the persisted auth file. Idempotent — a missing file is not an error
-// (the caller is racing for "delete a box" semantics where concurrent revokes
-// are fine, and a not-yet-created store on a fresh install is irrelevant).
-// Used by revoke() to satisfy the BET-357 §2 contract: "the old box_token no
-// longer works" is enforced by regenerating a fresh identity (see revoke),
-// but the on-disk file is rewritten by the regenerate step so the store shape
-// stays consistent across revocation.
-export async function deleteAuth(path = STORE_PATH) {
-  try {
-    await unlink(path);
-  } catch (e) {
-    if (e && e.code === "ENOENT") return;
-    throw e;
-  }
-}
+// Serializes FIRST-RUN identity minting so it is single-flight (BET-771 P3-2).
+// ensureAuth is a check-then-act: without serialization, two concurrent first
+// calls both load a missing store, mint two different identities, and the last
+// write wins — silently swapping the box's identity. Wrapping the
+// load-check-mint-save in a mutex means the second caller re-loads only after
+// the first has persisted, so both observe the SAME identity.
+const ensureAuthLock = createMutex();
 
 // Load the box identity, generating + persisting a fresh one on first run.
 // Returns { box_id, box_token, created_at }. I/O injectable for tests.
@@ -304,15 +295,17 @@ export async function ensureAuth({
   save = saveAuth,
   now = () => Date.now(),
 } = {}) {
-  const existing = await load();
-  if (existing) return existing;
-  const auth = {
-    box_id: genToken(),
-    box_token: genToken(),
-    created_at: now(),
-  };
-  await save(auth);
-  return auth;
+  return ensureAuthLock.runExclusive(async () => {
+    const existing = await load();
+    if (existing) return existing;
+    const auth = {
+      box_id: genToken(),
+      box_token: genToken(),
+      created_at: now(),
+    };
+    await save(auth);
+    return auth;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -404,14 +397,12 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
  *                 Passed through to the device registry; see devices.mjs.
  *   saveAuth    — injectable writer (default saveAuth) for the post-revoke
  *                 regenerate step
- *   deleteAuth  — injectable unlink (default deleteAuth) for the post-revoke
- *                 "wipe + regenerate" path.
  *   devices     — injectable device registry (createDeviceRegistry instance).
  *                 Tests MUST inject their own (with no-op load/save); the
  *                 DEFAULT targets ~/.manta/devices.json (0600) and is owned by
  *                 index.mjs.
  *
- * DANGER — the saveAuth/deleteAuth DEFAULTS target the real box store
+ * DANGER — the saveAuth DEFAULT targets the real box store
  * (~/.manta/auth.json). Only index.mjs, which owns that store, may rely on
  * them. Any other caller (tests above all) MUST inject its own writers: a
  * revoke() with a matching token silently rotates the identity of the machine
@@ -426,7 +417,6 @@ export function createAuthEngine({
   now = () => Date.now(),
   idleTtlMs = DEVICE_IDLE_TTL_MS,
   saveAuth: saveAuthFn = saveAuth,
-  deleteAuth: deleteAuthFn = deleteAuth,
   devices: devicesFn,
 } = {}) {
   if (!auth || !isValidToken(auth.box_id) || !isValidToken(auth.box_token)) {
@@ -614,11 +604,12 @@ export function createAuthEngine({
     // Clear any active pairing: the code minted under the old identity is
     // moot now (it would authorize the old token, which nothing holds).
     pairing.clear();
-    // Wipe the on-disk file first so a power-fail between writes can't leave
-    // a stale token behind, then write the fresh identity atomically. Best-
-    // effort on the unlink (an absent file is fine — the write below re-
-    // creates it).
-    await deleteAuthFn();
+    // Replace the on-disk store with the fresh identity in ONE atomic write.
+    // writeJsonAtomic writes a temp file then renames over `path`, so the file
+    // transitions directly from the old token to the new one — there is no
+    // delete-then-save gap in which a power-fail could leave NO store (and a
+    // reboot re-mint a whole new identity). The stale token is gone the instant
+    // the rename lands (BET-771 P3-2).
     await saveAuthFn(fresh);
     // Reset the device registry to the fresh primary token (drops every
     // per-device credential).
