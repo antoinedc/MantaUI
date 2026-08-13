@@ -346,6 +346,44 @@ final class MantaAPIClient: Sendable {
         return try await call("outbox:list", args: args, as: [OutboxFile].self) ?? []
     }
 
+    /// `serve-page:list` — the box's published serve-page registry (read-only;
+    /// `manta-server` owned, written by the `serve_page`/`stop_page` tools).
+    /// BET-822 feeds these into the artifacts card's Links tab.
+    func servePageList() async throws -> [ServedPageMeta] {
+        try await call("serve-page:list", args: [], as: [ServedPageMeta].self) ?? []
+    }
+
+    /// Fetch a file's bytes via `GET {serverURL}/api/peek?path=<box path>` with
+    /// the bearer token. The box resolves `~` and path-traversal-guards the
+    /// result to the home dir, so it serves BOTH transcript file parts (the
+    /// `pathOnly` href stripped of `file://`) and outbox rows uniformly. Used
+    /// by QuickLook staging, which needs a local file (BET-822). A non-2xx
+    /// THROWS — a missing/denied file must be a visible failure, never a silent
+    /// empty preview.
+    func peekFile(path: String) async throws -> Data {
+        var url = serverURL.appendingPathComponent("api").appendingPathComponent("peek")
+        url.append(queryItems: [URLQueryItem(name: "path", value: path)])
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = object["error"] as? String, !error.isEmpty {
+                throw MantaError.server(error)
+            }
+            throw MantaError.server("peek failed (\(http.statusCode))")
+        }
+        return data
+    }
+
     /// Download an outbox file's bytes via `GET {serverURL}/api/download?path=`
     /// with the bearer token. The box path-traversal-guards `path` to the
     /// outbox root, so a `403 "path outside outbox"` / `404` must THROW rather
