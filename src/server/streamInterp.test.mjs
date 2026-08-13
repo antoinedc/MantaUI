@@ -263,6 +263,37 @@ test("session.idle emits turnComplete true", () => {
   assert.equal(ev.payload.complete, true);
 });
 
+test("session.error emits sessionError with name+message AND turnComplete running false", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.error",
+    properties: {
+      sessionID: SID,
+      error: { name: "ProviderAuthError", data: { message: "Bad key" } },
+    },
+  });
+  const err = events.find((e) => e.sub === "sessionError");
+  assert.ok(err, "a sessionError frame was emitted");
+  assert.equal(err.payload.name, "ProviderAuthError");
+  assert.equal(err.payload.message, "Bad key");
+  const done = events.find((e) => e.sub === "turnComplete");
+  assert.ok(done, "a turnComplete frame was emitted so the spinner stops");
+  assert.equal(done.payload.complete, true);
+  assert.equal(done.payload.running, false);
+});
+
+test("session.error with a MessageAbortedError name emits NOTHING", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.error",
+    properties: {
+      sessionID: SID,
+      error: { name: "MessageAbortedError", message: "aborted" },
+    },
+  });
+  assert.equal(events.length, 0, "an abort is not a failure — no frames emitted");
+});
+
 test("session.status retry reports running true (parity with pre-S1b renderer)", () => {
   const { interp, events } = make();
   interp.interpret({

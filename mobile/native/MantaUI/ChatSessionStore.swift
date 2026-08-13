@@ -155,6 +155,7 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var context: StreamContextPayload?
     @Published private(set) var cache: StreamCachePayload?
     @Published private(set) var truncation: StreamTruncationPayload?
+    @Published private(set) var sessionError: StreamSessionErrorPayload?
     @Published private(set) var todos: StreamTodosPayload?
     @Published private(set) var questions: [QuestionRequest] = []
     @Published private(set) var permissions: [PermissionRequest] = []
@@ -355,6 +356,7 @@ final class ChatSessionStore: ObservableObject {
         context = s.context
         cache = s.cache
         truncation = s.truncation
+        sessionError = s.sessionError
         todos = s.todos
         subagents = s.subagents
 
@@ -719,6 +721,7 @@ final class ChatSessionStore: ObservableObject {
         running = true
         optimisticRunning = true
         turnComplete = false
+        sessionError = nil
         if runningSince == nil {
             runningSince = Date()
             // A send starts a turn directly (no stream running transition to

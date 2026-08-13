@@ -172,6 +172,12 @@ struct StreamTruncationPayload: Codable, Equatable, Sendable {
     var messageID: String?
 }
 
+/// `sub: "sessionError"` — a real turn failure (aborts are filtered box-side).
+struct StreamSessionErrorPayload: Codable, Equatable, Sendable {
+    var name: String?
+    var message: String
+}
+
 /// `sub: "context"` — computeContextBreakdown output (all box-computed).
 struct StreamContextSegment: Codable, Equatable, Sendable {
     var kind: String
