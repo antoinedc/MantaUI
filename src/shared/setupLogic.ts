@@ -7,14 +7,6 @@ export type SetupFields = {
   code: string;
   submitting: boolean;
   /**
-   * Optional four-character two-sided-confirm code (BET-493 §5.3, BET-514).
-   * When present, the claim is forwarded WITH `verify` so the box provisions
-   * a DISTINCT Stage-2 joiner device (never the shared primary box_token).
-   * Populated from a `&verify=` pair link or typed by hand. Absent → the
-   * legacy first-pair path. Not required to enable Connect; it is additive.
-   */
-  verify?: string;
-  /**
    * Optional Advanced server URL (BET-268). When present and non-empty, it
    * overrides the box-derived hostname — used to reach a box over its tailnet
    * (e.g. `http://100.x.y.z:8787`) or any other non-public-hostname listener.
@@ -78,27 +70,17 @@ export function canConnectSetup(input: SetupFields): boolean {
  * hostname — the box may live at a non-public listener (e.g.
  * `http://100.x.y.z:8787`) and the claim must POST there. An empty/absent
  * `serverUrl` falls through to the default `boxDirectUrl` path.
- *
- * BET-514 (two-sided confirm): when the caller supplies a `verify` code
- * (the four-char §5.3 confirm), it is forwarded verbatim on the claim so
- * the box provisions a DISTINCT Stage-2 joiner device rather than the
- * shared primary box_token. Absent → legacy first-pair path.
  */
 export function buildSetupClaimInput(input: {
   boxId: string;
   code: string;
   serverUrl?: string;
-  verify?: string;
-}): { serverUrl: string; code: string; verify?: string } {
+}): { serverUrl: string; code: string } {
   const explicit = normalizeServerUrl(input.serverUrl);
-  const claim: { serverUrl: string; code: string; verify?: string } = {
+  return {
     serverUrl: explicit ?? boxDirectUrl(input.boxId.trim()),
     code: input.code,
   };
-  if (input.verify && input.verify !== "") {
-    claim.verify = input.verify;
-  }
-  return claim;
 }
 
 /**
@@ -174,7 +156,7 @@ export function resolveConnectRoute(_serverBase: string): "direct" {
 export function prefillFromPairLink(
   raw: string | null | undefined,
   scheme: string = "manta",
-): { boxId: string; code: string; serverUrl?: string; verify?: string } | null {
+): { boxId: string; code: string; serverUrl?: string } | null {
   if (raw == null) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;

@@ -1,8 +1,6 @@
 // pairPanel.ts — pure panel-state helpers for the desktop "Add a phone"
-// pairing card (BET-493). The server mints a pairing code plus a four-character
-// verification code (§5.3 "K7 Q2"); the joiner echoes the four characters in
-// /auth/claim as the two-sided confirm (§6.3), and the panel auto-rotates the
-// code on expiry while it is open (§6.4).
+// pairing card (BET-493). The server mints a six-digit pairing code, and the
+// panel auto-rotates it on expiry while it is open (§6.4).
 //
 // Everything here is deterministic + clock-injectable so the expiry/refresh
 // edge cases are unit-tested (repo pattern: chatUtils.ts → chatUtils.test.ts)
@@ -33,18 +31,6 @@ export function msUntilRefresh(
   graceMs = 0,
 ): number {
   return Math.max(0, expiresAt - graceMs - now);
-}
-
-// Render the 4-char verification code as the two pairs a human reads: "K7Q2"
-// → "K7 Q2". Strips whitespace + folds case so arbitrary (including server-
-// normalized) input displays consistently with what the phone shows. Any
-// non-4-char input passes through unchanged (defensive — the server always
-// sends 4).
-export function formatVerifyCode(verify: string): string {
-  if (typeof verify !== "string") return "";
-  const s = verify.replace(/\s+/g, "").toUpperCase();
-  if (s.length !== 4) return s;
-  return `${s.slice(0, 2)} ${s.slice(2, 4)}`;
 }
 
 // Manual six-digit path (§5.2.9/§5.2.10): the desktop shows the six digits; a

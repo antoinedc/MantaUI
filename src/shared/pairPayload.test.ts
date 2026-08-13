@@ -32,23 +32,22 @@ describe("parsePairPayload", () => {
       ).toEqual({ boxId: BOX, code: "847291" });
     });
 
-    // BET-514: verification-code parse cases, collapsed into one loop so the
-    // repeated `manta://pair?…&verify=…` structure isn't cloned per assertion:
-    //   • present + well-formed, incl. case/whitespace normalization
-    //   • empty → treated as absent (legacy primary-token path)
-    //   • present-but-malformed → refuse the whole payload (never drop to legacy)
-    it("parses / normalizes / rejects the four-char verify (BET-514)", () => {
+    // BET-700: a stray `verify` query param (old desktop QRs / deeplinks still
+    // in the wild) is IGNORED entirely — the payload still parses, with NO
+    // verify in the result, whether the value is well-formed or malformed.
+    it("ignores a stray &verify= param entirely (well-formed and malformed, BET-700)", () => {
       const cases = [
-        ["verify=K7Q2", { boxId: BOX, code: "847291", verify: "K7Q2" }],
-        ["verify=k7%20q2", { boxId: BOX, code: "847291", verify: "K7Q2" }],
-        ["verify=", { boxId: BOX, code: "847291" }],
-        ["verify=K7", null],
-        ["verify=K7Q2Z", null],
+        "verify=K7Q2",
+        "verify=k7%20q2",
+        "verify=",
+        "verify=K7", // malformed shape
+        "verify=K7Q2Z", // malformed shape
       ] as const;
-      for (const [q, expected] of cases) {
-        expect(parsePairPayload(`manta://pair?box=${BOX}&code=847291&${q}`)).toEqual(
-          expected,
-        );
+      for (const q of cases) {
+        expect(parsePairPayload(`manta://pair?box=${BOX}&code=847291&${q}`)).toEqual({
+          boxId: BOX,
+          code: "847291",
+        });
       }
     });
 
@@ -366,46 +365,13 @@ describe("buildPairPayload", () => {
     expect(empty).not.toContain("server=");
   });
 
-  // BET-514: the four-char two-sided-confirm code round-trips through the
-  // wire so a CLI / web-paired device claims WITH it → DISTINCT Stage-2
-  // device. Appended only when present and well-formed; a malformed verify
-  // is a hard error, never a silent drop.
-  it("appends &verify=<code> when present (BET-514)", () => {
-    expect(
-      buildPairPayload({ boxId: BOX, code: "847291", verify: "K7Q2" }),
-    ).toBe(`manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2`);
-  });
-
-  it("normalizes whitespace/case before appending &verify (BET-514)", () => {
-    expect(
-      buildPairPayload({ boxId: BOX, code: "847291", verify: "k7 q2" }),
-    ).toBe(`manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2`);
-  });
-
-  it("appends both &verify and &server in a stable order (BET-514)", () => {
-    expect(
-      buildPairPayload({
-        boxId: BOX,
-        code: "847291",
-        verify: "K7Q2",
-        serverUrl: "http://100.64.1.5:8787",
-      }),
-    ).toBe(
-      `manta://pair?box=${encodeURIComponent(BOX)}&code=847291&verify=K7Q2&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
-    );
-  });
-
-  it("omits &verify when absent/empty (legacy back-compat)", () => {
+  // BET-700: the four-char verify code is retired — the builder never emits a
+  // `verify=` param (the type no longer even carries it).
+  it("emits no &verify= param (BET-700)", () => {
     expect(buildPairPayload({ boxId: BOX, code: "847291" })).not.toContain("verify=");
     expect(
-      buildPairPayload({ boxId: BOX, code: "847291", verify: "" }),
+      buildPairPayload({ boxId: BOX, code: "847291", serverUrl: "http://100.64.1.5:8787" }),
     ).not.toContain("verify=");
-  });
-
-  it("throws on a malformed verify (never silently drops it, BET-514)", () => {
-    expect(() =>
-      buildPairPayload({ boxId: BOX, code: "847291", verify: "K7Q" }),
-    ).toThrow();
   });
 
   // BET-373: per-channel emission. The builder picks up the caller's

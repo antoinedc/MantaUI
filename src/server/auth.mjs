@@ -255,31 +255,6 @@ function genPairingCode() {
   return String(randomInt(0, 1_000_000)).padStart(6, "0");
 }
 
-// Letters for the two-sided four-character verification code. Unambiguous
-// alphabet (no I/L/O that read like 1/0), uppercase. Digits likewise avoid
-// 0/1. The code is four chars grouped as two pairs — "K7 Q2" (§5.3) — stored
-// contiguously ("K7Q2"); the panel renders the space.
-const VERIFY_LETTERS = "ABCDEFGHJKMNPQRSTUVWXYZ";
-const VERIFY_DIGITS = "23456789";
-
-export function genVerifyCode() {
-  // Two pairs of [letter][digit] draw — e.g. "K7Q2" → displayed "K7 Q2".
-  let s = "";
-  for (let pair = 0; pair < 2; pair++) {
-    s += VERIFY_LETTERS[randomInt(0, VERIFY_LETTERS.length)];
-    s += VERIFY_DIGITS[randomInt(0, VERIFY_DIGITS.length)];
-  }
-  return s;
-}
-
-// Normalize a presented verification code for comparison: strip whitespace +
-// fold case so "K7 Q2", "k7 q2" and "K7Q2" all match the same minted code.
-// The human reads the pair form on both screens, so we never want a stray
-// space or case to break the two-factor confirm.
-export function normalizeVerifyCode(s) {
-  return typeof s === "string" ? s.replace(/\s+/g, "").toUpperCase() : "";
-}
-
 // ---------------------------------------------------------------------------
 // Store (atomic write + 0600 via jsonStore.mjs — single source of truth)
 // ---------------------------------------------------------------------------
@@ -353,11 +328,11 @@ export async function ensureAuth({
  * `now` injectable for deterministic tests.
  */
 export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date.now() } = {}) {
-  let active = null; // { code, verify, expiresAt }
+  let active = null; // { code, expiresAt }
 
   function issue() {
-    active = { code: genPairingCode(), verify: genVerifyCode(), expiresAt: now() + ttlMs };
-    return { code: active.code, verify: active.verify, expiresAt: active.expiresAt };
+    active = { code: genPairingCode(), expiresAt: now() + ttlMs };
+    return { code: active.code, expiresAt: active.expiresAt };
   }
 
   // Try to consume `code`. Returns true only if it matches the single active,
@@ -382,8 +357,8 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
   // clears `active` — a correct answer leaves the code claimable. Used by the
   // /pair web page (BET-699) so the page can confirm a code is good without
   // burning it or being handed the box token. Deliberately does NOT
-  // distinguish "wrong code" from "expired" — like `verifyMatches`/`claim`, a
-  // guesser learns only "no".
+  // distinguish "wrong code" from "expired" — like `claim`, a guesser learns
+  // only "no".
   function check(code) {
     if (!isValidPairingCode(code)) return false;
     if (!active) return false;
@@ -396,27 +371,6 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     return a.length === b.length && timingSafeEqual(a, b);
   }
 
-  // Two-factor confirm check (the "matches" affordance carried back in the
-  // claim): does `verify` match the four characters minted alongside `code`?
-  // Non-consumeing — a mismatch must NOT burn the one-time code (a wrong
-  // verify is a human/typo error on the deferred phone screen, not an attack),
-  // so the joiner can correct and retry within the code's window.
-  function verifyMatches(code, verify) {
-    if (!isValidPairingCode(code) || typeof verify !== "string" || verify === "") return false;
-    if (!active) return false;
-    if (now() > active.expiresAt) {
-      active = null;
-      return false;
-    }
-    const ca = Buffer.from(active.code, "utf-8");
-    const cbCode = Buffer.from(String(code), "utf-8");
-    const codeMatches = ca.length === cbCode.length && timingSafeEqual(ca, cbCode);
-    if (!codeMatches) return false;
-    const va = Buffer.from(active.verify, "utf-8");
-    const vb = Buffer.from(normalizeVerifyCode(verify), "utf-8");
-    return va.length === vb.length && timingSafeEqual(va, vb);
-  }
-
   function clear() {
     active = null;
   }
@@ -425,7 +379,7 @@ export function createPairingRegistry({ ttlMs = PAIRING_TTL_MS, now = () => Date
     return !!active && now() <= active.expiresAt;
   }
 
-  return { issue, consume, verifyMatches, check, clear, hasActive };
+  return { issue, consume, check, clear, hasActive };
 }
 
 // ---------------------------------------------------------------------------
@@ -530,44 +484,44 @@ export function createAuthEngine({
 
   // Handle GET /auth/pair — mint a one-time pairing code. Rate-limiting is
   // applied by the caller (index.mjs) via the shared limiter; here we just
-  // issue. Returns the code + the four-character verification code + box_id so
-  // the desktop can render it / a QR and the joiner can two-factor confirm (§5.3).
+  // issue. Returns the code + box_id so the caller can render it / a QR.
   function pair() {
-    const { code, verify, expiresAt } = pairing.issue();
-    return { ok: true, pairing_code: code, box_id: auth.box_id, expiresAt, verify };
+    const { code, expiresAt } = pairing.issue();
+    return { ok: true, pairing_code: code, box_id: auth.box_id, expiresAt };
   }
 
   // Handle POST /auth/claim — exchange a valid code for a device credential.
   // One-time: a correct code is consumed. Returns 400 on a missing/invalid
   // code and 403 on a wrong/expired/already-used code (so a guesser learns only
-  // "no", never partial progress).
+  // "no", never partial progress). A stray `verify` field in the body is
+  // intentionally ignored (not read), so a not-yet-updated old client that
+  // still sends it keeps working.
   //
-  // TWO PATHS, keyed by the two-factor confirm (`verify`):
-  //   • verify ABSENT  → legacy first-pair path: resume the PRIMARY (shared
-  //     box_token) device and return `box_token = auth.box_token` exactly as
-  //     before — existing paired clients keep working unchanged.
-  //   • verify PRESENT → joiner path (§6.1/§6.3): the caller echoes the four
-  //     characters the desktop panel shows (the "matches" confirmation). A
-  //     mismatch → 403 WITHOUT consuming the code (retryable). On a match the
-  //     claim PROVISIONS A DISTINCT device in the Stage-2 registry — never the
-  //     desktop's own token — so a joiner can never impersonate the desktop or
-  //     an existing device.
+  // TWO PATHS, keyed by device identity rather than a verify code:
+  //   • a claim carrying `device_id` OR `name` → joiner path: PROVISION/RESUME
+  //     a DISTINCT device ("resume" when a matching `device_id` is given,
+  //     "provision" — a freshly minted id — when only `name` is). Never the
+  //     primary, so a joiner can never impersonate the desktop or an existing
+  //     device.
+  //   • a bare claim (neither `device_id` nor `name`) → legacy first-pair path:
+  //     resume the PRIMARY (shared box_token) device and return
+  //     `box_token = auth.box_token` exactly as before — existing paired
+  //     clients keep working unchanged.
   //
   // Either way the response keeps the `{ box_token, box_id }` shape existing
   // clients already persist; `device_id` is additive.
-  function claim({ pairing_code, verify = null, device_id = null, name = null } = {}) {
+  function claim({ pairing_code, device_id = null, name = null } = {}) {
     if (!isValidPairingCode(pairing_code)) {
       return { ok: false, status: 400, error: "invalid pairing code" };
     }
-    const twoFactor = typeof verify === "string" && verify !== "";
-    if (twoFactor && !pairing.verifyMatches(pairing_code, verify)) {
-      return { ok: false, status: 403, error: "verification failed" };
-    }
+    const wantsDistinct =
+      (typeof device_id === "string" && device_id !== "") ||
+      (typeof name === "string" && name !== "");
     if (!pairing.consume(pairing_code)) {
       return { ok: false, status: 403, error: "pairing failed" };
     }
 
-    if (twoFactor) {
+    if (wantsDistinct) {
       // Joiner path — a DISTINCT device, never the primary. A device_id we're
       // given resumes that device (its own distinct token, which by definition
       // is a per-device entry, not the desktop's); absent, mint a fresh id.

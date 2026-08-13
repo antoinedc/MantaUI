@@ -29,7 +29,6 @@ import {
   normalizeServerUrl,
   prefillFromPairLink,
 } from "../shared/setupLogic";
-import { VerifyCodeInput } from "./VerifyCodeInput";
 import { PairingCodeInput } from "./PairingCodeInput";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
@@ -126,9 +125,6 @@ function ManualPairForm({
 }) {
   const [boxId, setBoxId] = useState(() => prefill?.boxId ?? "");
   const [code, setCode] = useState(() => prefill?.code ?? "");
-  // BET-514: prefill the optional two-sided-confirm code from a `&verify=`
-  // pair link so a pasted deep-link join claims as a DISTINCT Stage-2 device.
-  const [verifyCode, setVerifyCode] = useState(() => prefill?.verify ?? "");
   const [serverUrl, setServerUrl] = useState(() => prefill?.serverUrl ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,7 +159,6 @@ function ManualPairForm({
     const result = await claimBox({
       boxId: boxId.trim(),
       code,
-      verify: verifyCode,
       serverUrl: serverUrlTrimmed,
     });
     if (result.ok) {
@@ -186,7 +181,7 @@ function ManualPairForm({
 
   return (
     <form onSubmit={onFormSubmit} className="flex flex-col gap-4 mt-3">
-      <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr_0.9fr] gap-3 items-end">
+      <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr] gap-3 items-end">
         {/* Host — replaces the old Advanced → Server URL disclosure. The
             value is still named `serverUrl` and still flows through
             normalizeServerUrl / canConnectSetup, so the tailnet path
@@ -275,32 +270,6 @@ function ManualPairForm({
             value={code}
             onChange={(v) => {
               setCode(v);
-              setError(null);
-            }}
-            className="w-full rounded-sm bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
-          />
-        </div>
-
-        {/* Verify — optional four-character two-sided-confirm code (BET-514,
-            §5.3 "K7 Q2"). When the pairing code was minted WITH a verify
-            (`manta pair` / web pair page now emit one), a device that types
-            or pastes it here claims as a DISTINCT Stage-2 device instead of
-            reusing the desktop's own primary box_token. Prefilled from a
-            `&verify=` deep link. Optional — blank keeps the legacy path.
-            Field logic + normalization live in the shared VerifyCodeInput. */}
-        <div className="flex flex-col gap-2">
-          <label
-            htmlFor="pair-verify"
-            className="text-label font-medium text-text-muted"
-          >
-            Verify
-          </label>
-          <VerifyCodeInput
-            id="pair-verify"
-            disabled={submitting}
-            value={verifyCode}
-            onChange={(v) => {
-              setVerifyCode(v);
               setError(null);
             }}
             className="w-full rounded-sm bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
