@@ -2590,3 +2590,74 @@ export function selectStatusItems(
   }
   return { visible, overflow };
 }
+
+// ===== Pinned card stack arbiter (BET-783) =====
+//
+// Ten cards mount above the composer (permission ×N, retry, compaction,
+// delegate-approval, schedules|secrets|webhooks, queued, send-error) and used
+// to stack in hardcoded JSX order, so the transcript was the only flexible
+// child and a permission request (the single most urgent thing in the app)
+// could end up below several ambient cards. `arrangeCards` is the composer-
+// stack counterpart to `pickBanner` (bannerPriority.ts): where pickBanner
+// collapses boolean state to ONE top-of-window bar, this takes a LIST of
+// independent cards and splits it into two tiers with count + rollup.
+//
+// Tier rules:
+//   blocking — permission, question, delegate-approval. Always above ambient,
+//              never chronologically interleaved; at most ONE expanded, the
+//              newest; the rest collapse into an "N more requests" row.
+//   ambient  — retry, compaction, send-error, queued, resource cards. Fixed
+//              priority order (not arrival order); at most MAX_AMBIENT_EXPANDED
+//              expanded; the rest collapse into a rollup row.
+//
+// Deliberately NOT folded into pickBanner: pickBanner takes a flat boolean
+// BannerState and returns a single winner; arrangeCards takes an ordered LIST
+// of mutable cards and returns expanded + counted-rollup subsets. Different
+// shape, different callers — merging them would force both to give up what
+// makes them simple.
+
+export type CardTier = "blocking" | "ambient";
+
+export interface PinnedCard {
+  /** Stable key for the mount slot (e.g. "permission-<id>", "retry"). */
+  id: string;
+  tier: CardTier;
+  /**
+   * Within-tier ordering. Blocking: higher = newer (newest renders first).
+   * Ambient: higher = more prominent (fixed priority, independent of the
+   * input order of the cards array).
+   */
+  order: number;
+  /** Optional ambient-rollup label (e.g. "schedule"). Ignored for blocking. */
+  label?: string;
+}
+
+export interface PinnedCardStack<T extends PinnedCard = PinnedCard> {
+  /** The single blocking card to render expanded (newest), or null. */
+  blocking: T | null;
+  /** Number of additional pending blocking cards ("N more requests"). */
+  blockingMore: number;
+  /** Ambient cards rendered expanded, priority order, at most MAX_AMBIENT_EXPANDED. */
+  ambient: T[];
+  /** Remaining ambient cards collapsed into a rollup row, priority order. */
+  ambientRollup: T[];
+}
+
+/** Max ambient cards rendered expanded; the rest collapse into the rollup row. */
+export const MAX_AMBIENT_EXPANDED = 2;
+
+export function arrangeCards<T extends PinnedCard>(cards: T[]): PinnedCardStack<T> {
+  const blocking = cards
+    .filter((c) => c.tier === "blocking")
+    .sort((a, b) => b.order - a.order);
+  const ambient = cards
+    .filter((c) => c.tier === "ambient")
+    .sort((a, b) => b.order - a.order);
+  return {
+    blocking: blocking[0] ?? null,
+    blockingMore: Math.max(0, blocking.length - 1),
+    ambient: ambient.slice(0, MAX_AMBIENT_EXPANDED),
+    ambientRollup: ambient.slice(MAX_AMBIENT_EXPANDED),
+  };
+
+}

@@ -50,6 +50,7 @@ import {
   connectPhaseLabel,
   isPollExpired,
   describeSubscriptionStatus,
+  arrangeCards,
   terminalShortcut,
   authErrorAdvice,
   AUTH_PROVIDER_LABELS,
@@ -3392,5 +3393,102 @@ describe("selectStatusItems", () => {
     const r = selectStatusItems([], 400, []);
     expect(r.visible).toEqual([]);
     expect(r.overflow).toEqual([]);
+  });
+});
+
+describe("arrangeCards", () => {
+  const blocking = (id: string, order: number) => ({ id, tier: "blocking" as const, order });
+  const ambient = (id: string, order: number) => ({ id, tier: "ambient" as const, order });
+
+  it("returns an empty result for no cards", () => {
+    expect(arrangeCards([])).toEqual({
+      blocking: null,
+      blockingMore: 0,
+      ambient: [],
+      ambientRollup: [],
+    });
+  });
+
+  it("renders a single blocking card", () => {
+    const cards = [blocking("permission-a", 0)];
+    const r = arrangeCards(cards);
+    expect(r.blocking?.id).toBe("permission-a");
+    expect(r.blockingMore).toBe(0);
+  });
+
+  it("three blocking cards: one expanded plus 2 more", () => {
+    const cards = [
+      blocking("permission-a", 0),
+      blocking("permission-b", 1),
+      blocking("delegate-approval", 2),
+    ];
+    const r = arrangeCards(cards);
+    expect(r.blocking?.id).toBe("delegate-approval"); // newest (highest order)
+    expect(r.blockingMore).toBe(2);
+  });
+
+  it("blocking picks the newest regardless of input order", () => {
+    const cards = [
+      blocking("delegate-approval", 5),
+      blocking("permission-a", 0),
+      blocking("permission-b", 1),
+    ];
+    expect(arrangeCards(cards).blocking?.id).toBe("delegate-approval");
+    expect(arrangeCards(cards).blockingMore).toBe(2);
+  });
+
+  it("two ambient cards both render expanded", () => {
+    const cards = [ambient("retry", 7), ambient("compaction", 6)];
+    const r = arrangeCards(cards);
+    expect(r.ambient.map((c) => c.id)).toEqual(["retry", "compaction"]);
+    expect(r.ambientRollup).toEqual([]);
+  });
+
+  it("four ambient cards: two expanded, two rolled up", () => {
+    const cards = [
+      ambient("retry", 7),
+      ambient("compaction", 6),
+      ambient("send-error", 5),
+      ambient("queued", 4),
+    ];
+    const r = arrangeCards(cards);
+    expect(r.ambient.map((c) => c.id)).toEqual(["retry", "compaction"]);
+    expect(r.ambientRollup.map((c) => c.id)).toEqual(["send-error", "queued"]);
+  });
+
+  it("ambient priority order is independent of input order", () => {
+    const r = arrangeCards([
+      ambient("queued", 4),
+      ambient("send-error", 5),
+      ambient("retry", 7),
+      ambient("compaction", 6),
+    ]);
+    expect(r.ambient.map((c) => c.id)).toEqual(["retry", "compaction"]);
+    expect(r.ambientRollup.map((c) => c.id)).toEqual(["send-error", "queued"]);
+  });
+
+  it("blocking always orders above ambient (never interleaved)", () => {
+    const r = arrangeCards([
+      ambient("retry", 100),
+      blocking("permission-a", 0),
+      ambient("compaction", 90),
+    ]);
+    // blocking is separate from ambient entirely:
+    expect(r.blocking?.id).toBe("permission-a");
+    expect(r.ambient.map((c) => c.id)).toEqual(["retry", "compaction"]);
+  });
+
+  it("blocks with more ambient than the expanded cap roll up", () => {
+    const r = arrangeCards([
+      blocking("permission-a", 0),
+      ambient("retry", 7),
+      ambient("compaction", 6),
+      ambient("send-error", 5),
+      ambient("queued", 4),
+    ]);
+    expect(r.blocking?.id).toBe("permission-a");
+    expect(r.blockingMore).toBe(0);
+    expect(r.ambient.length).toBe(2);
+    expect(r.ambientRollup.length).toBe(2);
   });
 });
