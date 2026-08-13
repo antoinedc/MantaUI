@@ -194,6 +194,34 @@ describe("SplitChip", () => {
     expect(pr.hasAttribute("aria-expanded")).toBe(false);
   });
 
+  it("loading drops every segment's hover affordance together and marks the shell aria-busy", () => {
+    const shell = mountSplit({ loading: true, rightAccent: true });
+    expect(shell.getAttribute("aria-busy")).toBe("true");
+    const [l, r] = buttons();
+    // No segment offers a hover it can't honour, and the accent is withheld:
+    // the right segment's colour asserts a resolved value it doesn't have yet.
+    expect(l.className).not.toContain("hover:");
+    expect(r.className).not.toContain("hover:");
+    expect(r.className).not.toContain("text-accent-tx");
+    expect(l.className).toContain("cursor-default");
+    expect(r.className).toContain("cursor-default");
+
+    // Absent the prop nothing leaks — aria-busy is omitted, not "false".
+    const rest = mountSplit();
+    expect(rest.hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it("loading is presentational: it must NOT disable the segments (a failed fetch would strand the user)", () => {
+    let l = 0;
+    mountSplit({ loading: true, onLeftClick: () => l++ });
+    const [bl, br] = buttons();
+    expect(bl.disabled).toBe(false);
+    expect(br.disabled).toBe(false);
+    bl.click();
+    // The left segment still opens its (self-describing) menu while loading.
+    expect(l).toBe(1);
+  });
+
   it("does NOT assume popup semantics: aria-haspopup is absent unless popup is opted in", () => {
     mountSplit();
     const [l, r] = buttons();

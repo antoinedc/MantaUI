@@ -1,0 +1,89 @@
+// @vitest-environment jsdom
+//
+// ModelPicker loading state — the three segments (model ▸ effort ▸ ⚡ fast)
+// describe ONE subject, so they enter placeholder together while the shared
+// catalog is in flight (`models === null`, the only loading signal
+// `useModelCatalog` exposes).
+//
+// The reason this is pinned rather than left to review: the non-loading
+// fallbacks are not neutral, they are confident and WRONG before the catalog
+// lands — the model button settles on the "opencode" stub, the effort label
+// hard-codes "High", and `resolveFastToggle` reports the model as having no
+// fast twin. Those read as resolved facts about a model nobody has resolved,
+// which is exactly the state a user is most likely to act on. Each assertion
+// below is one of those three lies.
+
+import { describe, it, expect, afterEach } from "vitest";
+import { mount, type Harness } from "./testHarness";
+import { ModelPicker } from "./ModelPicker";
+import type { OpencodeModel } from "../shared/types";
+
+const MODELS: OpencodeModel[] = [
+  {
+    id: "claude-opus-4-7",
+    providerID: "anthropic",
+    name: "Claude Opus 4.7",
+    variants: [{ id: "high" }, { id: "low" }],
+  } as OpencodeModel,
+];
+
+describe("ModelPicker — loading state (models === null)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  // The server default is supplied in both cases: it is what the composer
+  // actually has in hand, and it isolates the variable under test to `models`.
+  // (With no default AND no override the loaded chip legitimately shows the
+  // "opencode" stub — a different, already-resolved state.)
+  function render(models: OpencodeModel[] | null): HTMLElement {
+    h?.unmount();
+    h = mount(
+      <ModelPicker
+        modelLabel={null}
+        models={models}
+        modelOverride={null}
+        defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        onOpen={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+    return h.container;
+  }
+
+  it("states no model, effort or fast-mode value while the catalog is in flight", () => {
+    const c = render(null);
+    const text = c.textContent ?? "";
+    // The three fabricated values, none of which may appear.
+    expect(text).not.toContain("opencode");
+    expect(text).not.toContain("High");
+    expect(text).not.toContain("Default");
+
+    // …and the toggle reports "unknown", not "off": an aria-pressed="false"
+    // here would assert the model has fast mode available and switched off.
+    const fastBtn = c.querySelector<HTMLElement>(".manta-fast-toggle-btn");
+    expect(fastBtn).toBeTruthy();
+    expect(fastBtn?.hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("marks the whole split control busy, not one segment", () => {
+    const c = render(null);
+    const shell = c.firstElementChild?.firstElementChild as HTMLElement;
+    expect(shell.getAttribute("aria-busy")).toBe("true");
+    // All three segments are present and identity-stable, so the chip does not
+    // change shape when the catalog lands — only its content.
+    expect(c.querySelector(".manta-model-picker-btn")).toBeTruthy();
+    expect(c.querySelector(".manta-effort-picker-btn")).toBeTruthy();
+    expect(c.querySelector(".manta-fast-toggle-btn")).toBeTruthy();
+  });
+
+  it("resolves to real values once the catalog lands", () => {
+    const c = render(MODELS);
+    const shell = c.firstElementChild?.firstElementChild as HTMLElement;
+    expect(shell.hasAttribute("aria-busy")).toBe(false);
+    const text = c.textContent ?? "";
+    expect(text).toContain("Claude Opus 4.7");
+  });
+});

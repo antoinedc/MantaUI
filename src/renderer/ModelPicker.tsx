@@ -22,6 +22,24 @@ import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
 import { ModelMenu } from "./ModelMenu";
 
+const LOADING_TITLE = "Loading models…";
+
+/**
+ * A placeholder bar sized to the label it stands in for, so the chip doesn't
+ * jump when the real text arrives. `bg-border` is the one neutral token with an
+ * alpha channel; `animate-pulse` is already covered by the global
+ * prefers-reduced-motion guard in index.css.
+ */
+function SkeletonBar({ width }: { width: number }) {
+  return (
+    <span
+      className="inline-block h-[9px] rounded-full bg-border animate-pulse"
+      style={{ width }}
+      aria-hidden="true"
+    />
+  );
+}
+
 export function ModelPicker({
   modelLabel,
   models,
@@ -144,25 +162,53 @@ export function ModelPicker({
     [selectableModels, activeModel, activeVariantId],
   );
 
+  // The catalog hasn't landed yet. `models === null` is the ONLY loading signal
+  // (useModelCatalog keeps no separate flag), and all three segments describe
+  // the same unresolved subject, so they go into placeholder together.
+  //
+  // This branch exists because the fallbacks below are not neutral — they are
+  // confident and WRONG while the list is in flight: the left segment settles
+  // on the "opencode" stub, `effortLabel` hard-codes "High", and
+  // `resolveFastToggle` returns unavailable, i.e. the chip claims this model has
+  // no fast twin. A user reading that gets three facts about a model nobody has
+  // resolved. Placeholder bars say "not yet" instead.
+  const loading = models === null;
+
   return (
     <div ref={rootRef} className="overflow-visible min-w-0 relative">
       <SplitChip
+        loading={loading}
         left={
-          <span className="flex items-center gap-1 truncate">
-            <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
-            <span className="truncate max-w-[140px]">{modelDisplayName}</span>
-            <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
-          </span>
+          loading ? (
+            <span className="flex items-center gap-1">
+              <Sparkles size={13} aria-hidden="true" className="shrink-0 text-text-quiet" />
+              <SkeletonBar width={76} />
+              <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-quiet" />
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 truncate">
+              <Sparkles size={13} aria-hidden="true" className="shrink-0 text-accent" />
+              <span className="truncate max-w-[140px]">{modelDisplayName}</span>
+              <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
+            </span>
+          )
         }
         right={
-          <span className="flex items-center gap-1 truncate">
-            <span className="truncate max-w-[80px]">{effortLabel}</span>
-            <ChevronDown
-              size={13}
-              aria-hidden="true"
-              className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`}
-            />
-          </span>
+          loading ? (
+            <span className="flex items-center gap-1">
+              <SkeletonBar width={30} />
+              <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-quiet" />
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 truncate">
+              <span className="truncate max-w-[80px]">{effortLabel}</span>
+              <ChevronDown
+                size={13}
+                aria-hidden="true"
+                className={`shrink-0 ${effortDisabled ? "text-text-quiet" : "text-text-faint"}`}
+              />
+            </span>
+          )
         }
         onLeftClick={() => {
           if (!modelOpen) onOpen();
@@ -182,7 +228,15 @@ export function ModelPicker({
         // hollow Zap says available-but-off; filled Zap says on. (`fast.on`
         // wins over availability so an on-but-frozen toggle still shows as on.)
         extra={
-          fast.on ? (
+          loading ? (
+            // A neutral 13px block, not a dimmed Zap/ZapOff: either glyph would
+            // state an availability we don't know yet, which is the whole point
+            // of the loading branch.
+            <span
+              className="w-[13px] h-[13px] rounded-sm bg-border animate-pulse"
+              aria-hidden="true"
+            />
+          ) : fast.on ? (
             <Zap size={13} aria-hidden="true" fill="currentColor" />
           ) : fast.available ? (
             <Zap size={13} aria-hidden="true" fill="none" />
@@ -196,7 +250,7 @@ export function ModelPicker({
           setVariantOpen(false);
           onSelect(fast.target);
         }}
-        extraTitle={fast.title}
+        extraTitle={loading ? LOADING_TITLE : fast.title}
         extraLabel="Fast mode"
         extraHook="manta-fast-toggle-btn"
         extraPressed={fast.on}
@@ -207,11 +261,13 @@ export function ModelPicker({
         rightHook="manta-effort-picker-btn"
         leftExpanded={modelOpen}
         rightExpanded={variantOpen}
-        leftTitle="Pick model for next prompt"
+        leftTitle={loading ? LOADING_TITLE : "Pick model for next prompt"}
         rightTitle={
-          effortDisabled
-            ? "This model has no effort / variant setting"
-            : "Pick effort / variant"
+          loading
+            ? LOADING_TITLE
+            : effortDisabled
+              ? "This model has no effort / variant setting"
+              : "Pick effort / variant"
         }
       />
 

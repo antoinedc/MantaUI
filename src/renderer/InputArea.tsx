@@ -17,7 +17,7 @@
 // a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Mic, Send, Shield, Square } from "lucide-react";
+import { Mic, Shield, Square } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
@@ -41,6 +41,37 @@ import { UsageDial } from "./UsageDial";
 export { TypeaheadPopup } from "./ComposerParts";
 // AttachmentStrip is no longer re-exported — it is now rendered INSIDE the
 // composer box (BET-416 §B), so Composer no longer imports it.
+
+/**
+ * The send glyph: lucide's paper plane as a SOLID shape.
+ *
+ * Not `<Send fill="currentColor"/>` — lucide's Send is two paths, the plane
+ * body plus a separate diagonal line for the fold. Filling the component fills
+ * the body but leaves that second path a stroke, so a hairline crease cuts
+ * across the solid plane. Dropping it is what "filled send" means, and the
+ * component API gives no way to render one path of two, so the body is inlined
+ * here (the same inline-SVG escape hatch CopyButton uses).
+ *
+ * The path is lucide-react v1.28.0's `send` body, verbatim; the light stroke on
+ * top of the fill is what keeps a 14px solid shape from looking eroded at its
+ * points.
+ */
+function SendFilled({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
+    </svg>
+  );
+}
 
 // Measure the caret's VISUAL row within a textarea, accounting for soft wrap.
 // Render a hidden mirror <div> that copies the textarea's box + text styling,
@@ -430,7 +461,15 @@ export function InputArea({
               : "bg-fill text-text-faint")
           }
         >
-          {running ? <Square size={12} aria-hidden="true" /> : <Send size={14} aria-hidden="true" />}
+          {/* Both glyphs are SOLID (BET icon pass): against the accent fill an
+              outline reads as a faint sketch, and the hollow square in
+              particular did not say "stop". Square keeps its stroke on top of
+              the fill so it stays optically the same size as before. */}
+          {running ? (
+            <Square size={12} fill="currentColor" aria-hidden="true" />
+          ) : (
+            <SendFilled size={14} />
+          )}
         </button>
         </div>
       </div>
