@@ -69,6 +69,7 @@ import { useModelCatalog } from "./modelCatalog";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
+import { Button } from "./Button";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardMount } from "./components/CardMount";
 import { useSessionResources } from "./hooks/useSessionResources";
@@ -1898,13 +1899,9 @@ export function ChatPanel({
           </pre>
           {transcriptLoadError && (
             <div className="mt-4 flex justify-center">
-              <button
-                type="button"
-                onClick={retryTranscriptLoad}
-                className="rounded-md border border-border px-4 py-2 text-body text-text hover:bg-bg-soft"
-              >
+              <Button type="button" tone="default" onClick={retryTranscriptLoad}>
                 Retry
-              </button>
+              </Button>
             </div>
           )}
         </div>

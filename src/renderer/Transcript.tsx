@@ -27,6 +27,7 @@ import { MantaLoader } from "./MantaLoader";
 import { CardMount } from "./components/CardMount";
 import { WORKING_TICK_MS, nowMs, useClockTick } from "./clock";
 import { QuestionCard } from "./Cards";
+import { Button } from "./Button";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage, QuestionRequest } from "../shared/types";
@@ -138,14 +139,14 @@ export function LoadEarlierHeader({
   if (!showLoadEarlier) return null;
   return (
     <div className="flex justify-center py-3">
-      <button
+      <Button
         type="button"
+        tone="default"
         onClick={onLoadEarlier}
         disabled={loadingEarlier}
-        className="rounded-full border border-border px-4 py-2 text-meta text-text-muted hover:bg-bg-soft disabled:cursor-not-allowed disabled:opacity-60"
       >
         {loadingEarlier ? "Loading…" : "Load earlier messages"}
-      </button>
+      </Button>
     </div>
   );
 }
