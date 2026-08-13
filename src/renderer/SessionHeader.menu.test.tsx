@@ -115,3 +115,44 @@ describe("SessionHeader session menu launcher entries (BET-467)", () => {
     expect(h!.text()).toContain("Fork session");
   });
 });
+
+// BET-741: the ⋯ menu adopts the standard WAI-ARIA menu-button focus pattern
+// (real DOM focus, roving tabIndex) in place of the BET-726
+// aria-activedescendant stand-in on the trigger.
+describe("SessionHeader session menu — WAI-ARIA focus (BET-741)", () => {
+  let h: Harness | null = null;
+
+  beforeEach(() => {
+    installMockApi();
+    resetStore();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("moves focus into the menu surface on open", async () => {
+    h = mount(<ChatPanel {...PROPS} onModeChange={() => {}} />);
+    await h!.flush();
+    openMenu(h!);
+
+    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement | null;
+    expect(menu).not.toBeNull();
+    expect(document.activeElement).toBe(menu);
+  });
+
+  it("returns focus to the trigger on Escape", async () => {
+    h = mount(<ChatPanel {...PROPS} onModeChange={() => {}} />);
+    await h!.flush();
+    const trigger = openMenu(h!);
+
+    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    expect(document.activeElement).toBe(menu);
+    act(() => {
+      menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(h!.container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+});

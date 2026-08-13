@@ -110,7 +110,7 @@ describe("MenuItem", () => {
     h = mount(<MenuItem>Fork session</MenuItem>);
     const el = h.container.firstElementChild as HTMLElement;
     expect(el.className).toBe(
-      `${ITEM_BASE} text-text-muted hover:bg-fill-hover hover:text-text`,
+      `${ITEM_BASE} text-text-muted hover:bg-fill-hover hover:text-text focus:bg-fill-hover`,
     );
     expect(el.className).toContain("text-label");
     expect(el.className).toContain("px-2");
@@ -188,21 +188,23 @@ describe("MenuItem", () => {
     expect(clicked).toBe(true);
   });
 
-  // BET-726 Task 3.1: the roving keyboard highlight (SessionHeader's ⋯ menu)
-  // is a static `--fill-hover` fill, independent of `variant` — the SAME
-  // static fill MenuOption's `active` prop gives the model/effort menus.
-  it("highlighted applies the static bg-fill-hover fill; unset it does not", () => {
-    h = mount(<MenuItem highlighted>row</MenuItem>);
-    let classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
-    expect(classes).toContain("bg-fill-hover");
-    h.unmount();
+  // BET-741: the roving keyboard highlight (SessionHeader's ⋯ menu) is now
+  // real DOM focus, painted by MenuItem's `:focus` fill — the SAME static
+  // `--fill-hover` MenuOption's `active` prop gives the model/effort menus,
+  // and the same fill the old `highlighted` prop applied. Every variant
+  // carries it so a roved row reads highlighted regardless of variant.
+  it("paints the focused row with the static bg-fill-hover fill on every variant", () => {
+    for (const variant of ["normal", "danger", "active"] as const) {
+      h?.unmount();
+      h = mount(<MenuItem variant={variant}>row</MenuItem>);
+      const classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
+      expect(classes, `${variant}: roving focus must show the fill`).toContain("focus:bg-fill-hover");
+    }
+    h?.unmount();
     h = mount(<MenuItem>row</MenuItem>);
-    classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
-    // The static (non-`hover:`) token is absent, but the `:hover` variant
-    // stays for a mouse user (and no trailing-whitespace artifact from the
-    // conditional either — that regressed MenuItem.test.tsx once already).
+    const classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
+    // No trailing static (non-`:hover`/`:focus`) token is applied by default.
     expect(classes).not.toContain("bg-fill-hover");
-    expect(classes).toContain("hover:bg-fill-hover");
   });
 
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
@@ -392,7 +394,14 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
 // focus after the click that opened the menu — and relies on native bubbling
 // to reach the root's onKeyDown, the same technique PaletteShell.test.tsx
 // already uses for its Escape coverage.
-describe("SessionMenu — keyboard roving highlight (BET-726 Task 3.1)", () => {
+// BET-741: the ⋯ menu's keyboard roving now uses the standard WAI-ARIA
+// menu-button pattern — real DOM focus roves across the `role="menuitem"`
+// rows with a roving tabIndex, replacing BET-726's aria-activedescendant
+// stand-in on the trigger (ARIA 1.2 doesn't allow `aria-activedescendant` on
+// a `role="button"`). The visible highlight is MenuItem's own `:focus` fill,
+// so these assert on which row actually holds focus (document.activeElement)
+// and which row is tabbable (tabIndex), not on a class.
+describe("SessionMenu — keyboard roving focus (BET-741)", () => {
   let h: Harness | null = null;
   afterEach(() => {
     h?.unmount();
@@ -414,50 +423,31 @@ describe("SessionMenu — keyboard roving highlight (BET-726 Task 3.1)", () => {
     });
   }
 
-  // BET-726 review cycle 1 Question 1: the highlight used to be visual-only
-  // — a screen reader following the arrow keys was told nothing, since DOM
-  // focus never leaves the trigger. `aria-activedescendant` on the trigger
-  // (the element that actually holds focus, matching ModelMenu's own
-  // `<input>`-carries-it idiom) plus `aria-owns` (trigger and Dropdown are
-  // DOM siblings, not ancestor/descendant) closes that gap.
-  it("wires aria-owns + aria-activedescendant on the trigger as the highlight moves", () => {
-    const trigger = openMenu();
-    const dropdown = h!.container.querySelector('[role="menu"]') as HTMLElement;
-    expect(trigger.getAttribute("aria-owns")).toBe(dropdown.id);
-    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
-    press(trigger, "ArrowDown");
-    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Chat"),
+  function rowByText(text: string): HTMLElement {
+    const el = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes(text),
     )!;
-    expect(chatRow.id).toBeTruthy();
-    expect(trigger.getAttribute("aria-activedescendant")).toBe(chatRow.id);
-    press(trigger, "ArrowDown");
-    const terminalRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Terminal"),
-    )!;
-    expect(trigger.getAttribute("aria-activedescendant")).toBe(terminalRow.id);
-  });
+    expect(el, `expected a "${text}" menu row`).toBeTruthy();
+    return el;
+  }
 
-  it("ArrowDown highlights the first row (bg-fill-hover) and Enter activates it", () => {
+  it("ArrowDown focuses the first row (tabIndex=0) and Enter activates it", () => {
     let changed: unknown = null;
     const trigger = openMenu({ onModeChange: (m) => { changed = m; } });
     press(trigger, "ArrowDown");
-    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Chat"),
-    )!;
-    expect(chatRow.className).toContain("bg-fill-hover");
+    const chatRow = rowByText("Chat");
+    expect(document.activeElement).toBe(chatRow);
+    expect(chatRow.tabIndex).toBe(0);
     press(trigger, "Enter");
     expect(changed).toBe("chat");
   });
 
-  it("ArrowUp before any ArrowDown wraps to the LAST row (End of the list)", () => {
+  it("ArrowUp before any ArrowDown wraps focus to the LAST row", () => {
     let deleted = 0;
     const trigger = openMenu({ onDelete: () => deleted++ });
     press(trigger, "ArrowUp");
-    const deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Delete session"),
-    )!;
-    expect(deleteRow.className).toContain("bg-fill-hover");
+    const deleteRow = rowByText("Delete session");
+    expect(document.activeElement).toBe(deleteRow);
     // Enter on "Delete session" opens the confirm, not onDelete directly
     // (BET-724 §D7) — same activation path a click would take.
     press(trigger, "Enter");
@@ -465,32 +455,32 @@ describe("SessionMenu — keyboard roving highlight (BET-726 Task 3.1)", () => {
     expect(h!.text()).toContain("Delete this session?");
   });
 
-  it("Home/End jump to the first/last row", () => {
+  it("Home/End rove focus to the first/last row", () => {
     const trigger = openMenu();
     press(trigger, "End");
-    let deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Delete session"),
-    )!;
-    expect(deleteRow.className).toContain("bg-fill-hover");
+    let deleteRow = rowByText("Delete session");
+    expect(document.activeElement).toBe(deleteRow);
+    expect(deleteRow.tabIndex).toBe(0);
     press(trigger, "Home");
-    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Chat"),
-    )!;
-    expect(chatRow.className).toContain("bg-fill-hover");
-    deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
-      (b) => b.textContent?.includes("Delete session"),
-    )!;
-    expect(deleteRow.className).not.toContain("bg-fill-hover");
+    const chatRow = rowByText("Chat");
+    expect(document.activeElement).toBe(chatRow);
+    expect(chatRow.tabIndex).toBe(0);
+    // The previously focused row is no longer tabbable (roving tabIndex).
+    expect(deleteRow.tabIndex).toBe(-1);
   });
 
-  it("re-opening the menu resets the highlight (no stale index carries over)", () => {
+  it("re-opening the menu resets focus: no stale row is focused or tabbable", () => {
     const trigger = openMenu();
     press(trigger, "ArrowDown");
-    // Close (click-away semantics via Escape, which useClickAway owns) then
-    // reopen — the highlight must not still be on row 0's neighbour.
+    expect(rowByText("Chat").tabIndex).toBe(0);
+    // Escape closes (and returns focus to the trigger); reopen.
     press(trigger, "Escape");
+    expect(document.activeElement).toBe(trigger);
     act(() => trigger.click());
-    const anyHighlighted = h!.container.querySelector("button[role='menuitem'].bg-fill-hover");
-    expect(anyHighlighted).toBeNull();
+    expect(
+      h!.container.querySelector("button[role='menuitem'][tabindex='0']"),
+    ).toBeNull();
+    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    expect(document.activeElement).toBe(menu);
   });
 });

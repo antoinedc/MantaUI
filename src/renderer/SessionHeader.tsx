@@ -10,7 +10,7 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
@@ -492,30 +492,54 @@ function SessionMenu({
   // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
   // sidebar's inline delete confirm — previously both fired instantly.
   const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
-  // BET-726 Task 3.1: the roving keyboard highlight, same index-state shape
-  // as ModelMenu's highlight loop (chatUtils' moveMenuHighlight) — adapted
-  // from ModelMenu's search input to this menu's root div, since there is no
-  // input here to hang the keydown on.
-  const [highlight, setHighlight] = useState(-1);
   const rootRef = useRef<HTMLDivElement>(null);
   useClickAway(rootRef, open, () => setOpen(false));
 
-  // BET-726 review cycle 1 Question 1: the highlight above was visual-only —
-  // a screen reader following the arrow keys heard nothing, because DOM
-  // focus never leaves the ⋯ trigger (this menu has no input to move focus
-  // into, unlike ModelMenu's search box). `aria-activedescendant` on the
-  // element that DOES hold focus is exactly ModelMenu's own idiom (its
-  // `<input>` carries `aria-activedescendant`, not the Dropdown surface) —
-  // applied here to the trigger instead. `useId` keeps ids collision-safe
-  // if more than one SessionHeader is ever mounted at once.
-  const menuUid = useId();
-  const dropdownDomId = `session-menu-${menuUid}`;
-  const rowDomId = (rowId: string) => `session-menu-${menuUid}-${rowId.replace(/:/g, "-")}`;
+  // WAI-ARIA menu-button pattern (BET-741): real DOM focus replaces the
+  // BET-726 active-descendant stand-in (a role="button" can't carry one).
+  // On open, focus moves into the
+  // `role="menu"` surface; the arrow keys rove across the `role="menuitem"`
+  // rows (roving tabIndex: the focused row is the only tabbable one) and the
+  // visual highlight is MenuItem's own `:focus` fill — no highlight state.
+  // `focusedIndexRef` tracks the roved row so tabIndex can rove with it.
+  const focusedIndexRef = useRef(-1);
 
-  // Reset the roving highlight each time the menu (re)opens, so a stale
-  // index from a previous open never carries over.
+  const menuRows = () =>
+    Array.from(
+      rootRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [],
+    );
+
+  // Focus the row at `idx` (wrapping handled by the caller) and rove
+  // tabIndex so only it is tabbable while the menu is open.
+  const focusRow = (idx: number) => {
+    const rows = menuRows();
+    const prev = rows[focusedIndexRef.current];
+    const next = rows[idx];
+    if (prev && prev !== next) prev.tabIndex = -1;
+    if (next) next.tabIndex = 0;
+    next?.focus();
+    focusedIndexRef.current = idx;
+  };
+
+  const focusTrigger = () =>
+    rootRef.current
+      ?.querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')
+      ?.focus();
+
+  // On open, move focus into the menu surface and reset the roving tabIndex
+  // so no stale row from a previous open is left tabbable. Focus lands on the
+  // surface, not a row; the first arrow key then drops it onto a row.
   useEffect(() => {
-    if (open) setHighlight(-1);
+    if (!open) return;
+    const menu = rootRef.current?.querySelector<HTMLElement>('[role="menu"]');
+    menu?.querySelectorAll('button[role="menuitem"]').forEach((el) => {
+      (el as HTMLButtonElement).tabIndex = -1;
+    });
+    focusedIndexRef.current = -1;
+    if (menu) {
+      menu.tabIndex = -1;
+      menu.focus();
+    }
   }, [open]);
 
   const hasMode = !!onModeChange;
@@ -528,72 +552,53 @@ function SessionMenu({
     if (onModeChange) onModeChange(m);
   };
 
-  // The flat, keyboard-navigable row order — same order the rows render in
-  // below, so `highlight`'s index lines up with the rendered row it lights.
-  const rowIds: string[] = [
-    ...(hasMode
-      ? [
-          "mode:chat",
-          "mode:terminal",
-          ...(availableLaunchers ?? []).map((l) => `mode:tui:${l.id}`),
-        ]
-      : []),
-    "fork",
-    "compact",
-    "clear",
-    "delete",
-  ];
-  const highlightedRow = highlight >= 0 ? rowIds[highlight] : undefined;
-
-  const activateRow = (id: string | undefined) => {
-    if (!id) return;
-    if (id === "fork") { setOpen(false); onFork(); return; }
-    if (id === "compact") { setOpen(false); onCompact(); return; }
-    if (id === "clear") { setOpen(false); setConfirm("clear"); return; }
-    if (id === "delete") { setOpen(false); setConfirm("delete"); return; }
-    if (id.startsWith("mode:")) { setOpen(false); switchMode(id.slice("mode:".length) as SessionMode); }
-  };
-
   const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!open) return;
+    const rows = menuRows();
+    if (rows.length === 0) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlight((h) => moveMenuHighlight(h, 1, rowIds.length));
+      focusRow(moveMenuHighlight(focusedIndexRef.current, 1, rows.length));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setHighlight((h) => moveMenuHighlight(h, -1, rowIds.length));
+      focusRow(moveMenuHighlight(focusedIndexRef.current, -1, rows.length));
     } else if (e.key === "Home") {
-      if (rowIds.length > 0) {
-        e.preventDefault();
-        setHighlight(0);
-      }
+      e.preventDefault();
+      focusRow(0);
     } else if (e.key === "End") {
-      if (rowIds.length > 0) {
-        e.preventDefault();
-        setHighlight(rowIds.length - 1);
-      }
+      e.preventDefault();
+      focusRow(rows.length - 1);
     } else if (e.key === "Enter") {
-      if (highlightedRow) {
+      // Activate the focused row the same path a click takes: rows are real
+      // `<button role="menuitem">`, so Enter natively fires the focused
+      // button's click → onSelect → closes + activates. Guard on focus
+      // actually being on a row — right after open (surface focused, nothing
+      // roved yet) Enter is ignored, matching the pre-BET-741 behaviour where
+      // Enter with no highlight did nothing.
+      const focused = rows[focusedIndexRef.current];
+      if (focused && document.activeElement === focused) {
         e.preventDefault();
-        activateRow(highlightedRow);
+        focused.click();
       }
+    } else if (e.key === "Escape") {
+      // Close and hand focus back to the trigger. useClickAway also closes on
+      // Escape (document keydown) but cannot restore focus — that's this
+      // branch's job.
+      e.preventDefault();
+      setOpen(false);
+      focusTrigger();
     }
-    // Escape already closes the menu via useClickAway's document keydown
-    // listener (bound above, gated on `open`) — nothing to add here.
   };
 
   const item = (
-    id: string,
     icon: React.ReactElement,
     label: string,
     onClick: () => void,
     danger = false,
   ) => (
     <MenuItem
-      id={rowDomId(id)}
       icon={icon}
       variant={danger ? "danger" : "normal"}
-      highlighted={highlightedRow === id}
       onSelect={() => {
         setOpen(false);
         onClick();
@@ -604,7 +609,6 @@ function SessionMenu({
   );
 
   const modeItem = (
-    id: string,
     icon: React.ReactElement,
     label: string,
     m: SessionMode,
@@ -612,10 +616,8 @@ function SessionMenu({
     const active = isActive(m);
     return (
       <MenuItem
-        id={rowDomId(id)}
         icon={icon}
         variant={active ? "active" : "normal"}
-        highlighted={highlightedRow === id}
         trailing={
           active ? (
             <span className="text-text-faint" aria-hidden="true">
@@ -642,18 +644,16 @@ function SessionMenu({
         onClick={() => setOpen((v) => !v)}
         ariaHaspopup="menu"
         ariaExpanded={open}
-        ariaOwns={open ? dropdownDomId : undefined}
-        ariaActiveDescendant={open ? (highlightedRow ? rowDomId(highlightedRow) : undefined) : undefined}
       />
       {open && (
-        <Dropdown hook="manta-session-menu-dropdown" id={dropdownDomId}>
+        <Dropdown hook="manta-session-menu-dropdown">
           {hasMode && (
             <>
               <div className={`${GROUP_LABEL} pt-1`} role="presentation">
                 Mode
               </div>
-              {modeItem("mode:chat", <MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
-              {modeItem("mode:terminal", <Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
+              {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
+              {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
               {availableLaunchers && availableLaunchers.length > 0 && (
                 <>
                   <div className={`${GROUP_LABEL} pt-3`} role="presentation">
@@ -661,7 +661,6 @@ function SessionMenu({
                   </div>
                   {availableLaunchers.map((l) =>
                     modeItem(
-                      `mode:tui:${l.id}`,
                       <Bot size={14} aria-hidden="true" />,
                       l.label,
                       `tui:${l.id}` as SessionMode,
@@ -674,26 +673,22 @@ function SessionMenu({
           )}
 
           {item(
-            "fork",
             <GitFork size={14} aria-hidden="true" />,
             "Fork session",
             onFork,
           )}
           {item(
-            "compact",
             <Minimize2 size={14} aria-hidden="true" />,
             "Compact context",
             onCompact,
           )}
           {item(
-            "clear",
             <Eraser size={14} aria-hidden="true" />,
             "Clear session",
             () => setConfirm("clear"),
           )}
           <div className="my-1 border-t border-border-subtle" role="separator" />
           {item(
-            "delete",
             <Trash2 size={14} aria-hidden="true" />,
             "Delete session",
             () => setConfirm("delete"),
