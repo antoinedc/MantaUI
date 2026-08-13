@@ -1346,7 +1346,7 @@ export function isPollExpired(
 // `terminalShortcut(ev, isMac)` is the pure matcher. Returns which terminal-
 // emulator action the keydown maps to (or null = "not ours, let it through").
 // The four actions map to the same four bodies xterm.js's custom key handler
-// already runs today (selection copy, clipboard paste, window.prompt find,
+// already runs today (selection copy, clipboard paste, in-pane find bar,
 // term.clear scrollback).
 //
 // `isMac` is passed in rather than read from `navigator` so the function is
