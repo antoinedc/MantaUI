@@ -103,16 +103,56 @@ targets:
         # addresses. Set on `base` so it holds for every configuration, which
         # is what Firebase's docs require ("for all your build types").
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
-    # MUST be the last build phase — Crashlytics cannot process the dSYMs
-    # otherwise. xcodegen emits postBuildScripts after compile/resources/link,
-    # which satisfies that. The inputFiles list is not decoration: with User
-    # Script Sandboxing on, Xcode only lets the script read files declared here.
+    # MUST be the last build phase — Crashlytics cannot process dSYMs otherwise.
+    # xcodegen emits postBuildScripts after compile/resources/link, which
+    # satisfies that.
+    #
+    # THIS CALLS `upload-symbols` DIRECTLY RATHER THAN THE `run` WRAPPER, AND
+    # THAT IS DELIBERATE. Firebase documents `Crashlytics/run`, and it was used
+    # here first — the phase executed, the build went green, and NOTHING was
+    # ever uploaded: Crashlytics reported "2 unprocessed crashes, upload 1 dSYM
+    # file" while the build log carried no upload line at all. `run` backgrounds
+    # its work, so a failure inside it neither prints nor fails the build. The
+    # identical `upload-symbols` invocation below, run by hand against the same
+    # dSYM, submitted both UUIDs immediately. Prefer the thing that is
+    # observable over the thing that is documented.
+    #
+    # THE TWO-UUID PROBLEM. Xcode 16+ sets ENABLE_DEBUG_DYLIB=YES for Debug, so
+    # the binary is SPLIT: the real code lands in <name>.debug.dylib and the
+    # main executable is a stub. The dSYM bundle then carries TWO arm64 slices
+    # with different UUIDs, and a crash references the debug.dylib's. Passing
+    # the .dSYM BUNDLE (not a single DWARF file) makes upload-symbols walk both,
+    # which is what finally produced:
+    #   Successfully submitted symbols … e0d95707… MantaUI.debug.dylib
+    #   Successfully submitted symbols … f496a5ff… MantaUI
+    # Release builds are not split and yield one slice; the same command covers
+    # both, so there is no per-configuration branch here.
+    #
+    # NON-FATAL on purpose: a symbol upload needs the network, and a flaky
+    # connection must not fail an otherwise good build. It is loud in the log
+    # instead — grep "Crashlytics" in the build log to audit it.
     postBuildScripts:
       - name: Crashlytics dSYM upload
-        script: '"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"'
+        script: |
+          UPLOAD="${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+          DSYM="${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}"
+          GSP="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/GoogleService-Info.plist"
+          if [ ! -x "$UPLOAD" ]; then
+            echo "warning: Crashlytics upload-symbols not found at $UPLOAD — crashes will not symbolicate"
+          elif [ ! -d "$DSYM" ]; then
+            echo "warning: Crashlytics found no dSYM at $DSYM (is DEBUG_INFORMATION_FORMAT dwarf-with-dsym?)"
+          elif [ ! -f "$GSP" ]; then
+            echo "warning: Crashlytics found no GoogleService-Info.plist at $GSP"
+          else
+            echo "Crashlytics: uploading $DSYM"
+            "$UPLOAD" -gsp "$GSP" -p ios "$DSYM" || echo "warning: Crashlytics symbol upload failed (non-fatal)"
+          fi
         inputFiles:
           - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}
           - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}/Contents/Resources/DWARF/${PRODUCT_NAME}
+          # The split-binary slice. Absent in Release, which is fine — Xcode
+          # treats a missing input as "out of date", so the phase still runs.
+          - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}/Contents/Resources/DWARF/${PRODUCT_NAME}.debug.dylib
           - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}/Contents/Info.plist
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/GoogleService-Info.plist
           - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)

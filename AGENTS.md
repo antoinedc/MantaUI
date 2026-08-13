@@ -2030,6 +2030,30 @@ It replaced PLCrashReporter on 2026-08-13. Do not run both.
     it is the LAST build phase; Crashlytics cannot process dSYMs otherwise. Its
     `inputFiles` list is not decoration — with User Script Sandboxing on, Xcode
     only lets the script read files declared there.
+- **The phase calls `upload-symbols` DIRECTLY, not Firebase's documented
+  `Crashlytics/run` wrapper. Do not "fix" it back.** `run` was used first and
+  silently uploaded NOTHING: the phase executed, the build was green, and the
+  console still said "2 unprocessed crashes — upload 1 dSYM file", with no
+  upload line anywhere in a 7,441-line build log. `run` backgrounds its work, so
+  a failure inside it neither prints nor fails the build. The same
+  `upload-symbols` call run by hand against the same dSYM submitted both UUIDs
+  instantly. Observable beats documented.
+- **The two-UUID trap (`ENABLE_DEBUG_DYLIB`).** Xcode 16+ sets it YES for
+  Debug, splitting the binary: real code goes to `<name>.debug.dylib`, the main
+  executable becomes a stub, and the dSYM carries TWO arm64 slices with
+  different UUIDs. A crash references the **debug.dylib's** UUID, so uploading
+  only the `${PRODUCT_NAME}` slice leaves every Debug crash unsymbolicated —
+  which is exactly the state this shipped in first. Passing the whole `.dSYM`
+  BUNDLE makes `upload-symbols` walk both slices. Release is not split and
+  yields one slice, so one command covers both and there is no per-config
+  branch. **This never affected the Codemagic TestFlight path** (it archives
+  Release); it only ever broke local Debug device installs.
+- **On-demand upload**: the `ios-crashlytics-dsym` plugin (`action: upload`)
+  uploads the last device build's dSYM from the Mac and prints the submitted
+  UUIDs. Use it when a crash arrives unsymbolicated rather than rebuilding.
+  Note its `action: diagnose` prints `ENABLE_DEBUG_DYLIB` /
+  `ENABLE_USER_SCRIPT_SANDBOXING` / the SPM checkout contents — the three
+  things that determine whether the in-build phase can work at all.
 - **`GoogleService-Info.plist` is committed on purpose** and is excluded from
   the `MantaUI` directory source entry, then re-added with an explicit
   `buildPhase: resources`. It must land in Copy Bundle Resources or
