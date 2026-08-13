@@ -255,6 +255,40 @@ test("question.asked hydrates pending questions", () => {
   assert.equal(ev2.payload.questions.length, 0);
 });
 
+test("permission.asked hydrates pending permissions; replied removes it; other-session asked ignored", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "permission.asked",
+    properties: {
+      sessionID: SID,
+      id: "perm_1",
+      prompt: "Allow reading ~/secrets.json?",
+    },
+  });
+  const ev = events.find((e) => e.sub === "permissions");
+  assert.ok(ev);
+  assert.equal(ev.payload.permissions.length, 1);
+  assert.equal(ev.payload.permissions[0].id, "perm_1");
+  // replied removes it
+  interp.interpret({
+    type: "permission.replied",
+    properties: { sessionID: SID, id: "perm_1" },
+  });
+  const ev2 = events[events.length - 1];
+  assert.equal(ev2.sub, "permissions");
+  assert.equal(ev2.payload.permissions.length, 0);
+  // an ask for a different session never leaks into this session's state
+  interp.interpret({
+    type: "permission.asked",
+    properties: { sessionID: "ses_other", id: "perm_2", prompt: "p" },
+  });
+  const frame = events[events.length - 1];
+  assert.equal(frame.sub, "permissions");
+  assert.equal(frame.sessionId, "ses_other");
+  assert.equal(frame.payload.permissions.length, 1); // its own session's frame
+  assert.equal(interp.getState(SID).permissions.length, 0); // SID untouched
+});
+
 test("session.idle emits turnComplete true", () => {
   const { interp, events } = make();
   interp.interpret({ type: "session.idle", properties: { sessionID: SID } });
