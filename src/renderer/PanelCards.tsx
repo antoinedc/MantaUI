@@ -10,7 +10,7 @@
 // All three are cards (not footer items) so they render on BOTH desktop and
 // mobile with no mobile-CSS edits.
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Clock, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
   DelegateApproval,
@@ -38,27 +38,8 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
-  // Click-outside-to-dismiss: the close (×) button sits directly above the
-  // first row's cancel button, so a mis-tap on the close used to delete a job.
-  // Dismissing by clicking anywhere outside the card removes that hazard.
-  const cardRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (cardRef.current && !cardRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    // Defer registration to the next tick so the same click that opened the
-    // card (from the toolbar button) doesn't immediately close it.
-    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("mousedown", onDown);
-    };
-  }, [onClose]);
   return (
     <div
-      ref={cardRef}
       className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
@@ -71,7 +52,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
         <button
           onClick={onClose}
           className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
-          title="Close (or click outside)"
+          title="Close"
           aria-label="Close"
         >
           <X size={16} aria-hidden="true" />
@@ -137,18 +118,7 @@ export const WebhooksCard = memo(function WebhooksCard({
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
-  const cardRef = useRef<HTMLDivElement | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (cardRef.current && !cardRef.current.contains(e.target as Node)) onClose();
-    };
-    const t = setTimeout(() => document.addEventListener("mousedown", onDown), 0);
-    return () => {
-      clearTimeout(t);
-      document.removeEventListener("mousedown", onDown);
-    };
-  }, [onClose]);
   const copyUrl = (url: string, id: string) => {
     void navigator.clipboard?.writeText(url).then(
       () => {
@@ -160,7 +130,6 @@ export const WebhooksCard = memo(function WebhooksCard({
   };
   return (
     <div
-      ref={cardRef}
       className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
       style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
     >
@@ -173,7 +142,7 @@ export const WebhooksCard = memo(function WebhooksCard({
         <button
           onClick={onClose}
           className="ml-auto px-2 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
-          title="Close (or click outside)"
+          title="Close"
           aria-label="Close"
         >
           <X size={16} aria-hidden="true" />

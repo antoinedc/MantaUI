@@ -383,6 +383,106 @@ describe("ChatPanel session resources", () => {
   });
 });
 
+// ===== Panel card toggle + mutual exclusion (BET-713) =====
+//
+// The three resource cards (schedules / secrets / webhooks) are ONE surface:
+// the toolbar button opens its card, clicking it again closes it, and opening
+// one closes whichever other was open. These drive the REAL toolbar buttons by
+// their stable aria-labels (ComposerParts).
+describe("ChatPanel panel cards one-open-at-a-time", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  async function clickToolbar(panel: Harness, label: string) {
+    const btn = Array.from(panel.container.querySelectorAll("button")).find(
+      (b) => b.getAttribute("aria-label") === label,
+    ) as HTMLButtonElement | undefined;
+    expect(btn).toBeTruthy();
+    await act(async () => {
+      btn!.click();
+    });
+    // CardMount's AnimatePresence plays a 220ms exit animation before an
+    // outgoing card leaves the DOM; let it finish so "is gone" is assertable
+    // rather than racing the transition.
+    await new Promise((r) => setTimeout(r, 300));
+    await panel.flush();
+  }
+
+  // Distinguishable, stable on-screen markers per card (their empty states).
+  const SCHEDULES = "No scheduled tasks in this session.";
+  const WEBHOOKS = "No webhooks in this session.";
+
+  it("clicking the same toolbar button twice closes the card (schedules)", async () => {
+    installMockApi({ scheduleList: () => Promise.resolve([]) });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(h.text()).not.toContain(SCHEDULES);
+    await clickToolbar(h, "schedules");
+    expect(h.text()).toContain(SCHEDULES);
+    await clickToolbar(h, "schedules");
+    expect(h.text()).not.toContain(SCHEDULES);
+  });
+
+  it("clicking the same toolbar button twice closes the card (webhooks)", async () => {
+    installMockApi({ webhookList: () => Promise.resolve([]) });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(h.text()).not.toContain(WEBHOOKS);
+    await clickToolbar(h, "webhooks");
+    expect(h.text()).toContain(WEBHOOKS);
+    await clickToolbar(h, "webhooks");
+    expect(h.text()).not.toContain(WEBHOOKS);
+  });
+
+  it("clicking the same toolbar button twice closes the card (secrets)", async () => {
+    installMockApi({ secretsList: () => Promise.resolve([]) });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    expect(h.container.querySelector("input[type=password]")).toBeNull();
+    await clickToolbar(h, "secrets");
+    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
+    await clickToolbar(h, "secrets");
+    expect(h.container.querySelector("input[type=password]")).toBeNull();
+  });
+
+  it("opening secrets closes the schedules card", async () => {
+    installMockApi({
+      scheduleList: () => Promise.resolve([]),
+      secretsList: () => Promise.resolve([]),
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await clickToolbar(h, "schedules");
+    expect(h.text()).toContain(SCHEDULES);
+    await clickToolbar(h, "secrets");
+    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
+    expect(h.text()).not.toContain(SCHEDULES);
+  });
+
+  it("opening schedules closes the webhooks card", async () => {
+    installMockApi({
+      scheduleList: () => Promise.resolve([]),
+      webhookList: () => Promise.resolve([]),
+    });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await clickToolbar(h, "webhooks");
+    expect(h.text()).toContain(WEBHOOKS);
+    await clickToolbar(h, "schedules");
+    expect(h.text()).toContain(SCHEDULES);
+    expect(h.text()).not.toContain(WEBHOOKS);
+  });
+});
+
 // ===== Transcript rendering (via the mounted ChatPanel) =====
 //
 // Verifies the extracted <Transcript> renders a fetched transcript: a user

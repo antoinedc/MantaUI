@@ -190,22 +190,19 @@ export function ChatPanel({
   // (BET-63) because none of it touches the SSE / pin-to-bottom / message core.
   const resources = useSessionResources(sessionId, isActive);
   const {
-    showSchedules,
-    setShowSchedules,
+    openPanel,
+    togglePanel,
+    closePanel,
     schedules,
     setSchedules,
     scheduleError,
     setScheduleError,
     refreshSchedules,
-    showSecrets,
-    setShowSecrets,
     secrets,
     setSecrets,
     secretError,
     setSecretError,
     refreshSecrets,
-    showWebhooks,
-    setShowWebhooks,
     webhooks,
     setWebhooks,
     webhookError,
@@ -2196,13 +2193,13 @@ export function ChatPanel({
       {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
       {/* pb-2 gives the card breathing room above the composer border so it */}
       {/* doesn't sit flush against the chat divider. Hidden for a job session. */}
-      <CardMount show={!jobOwnership && showSchedules} k="schedules">
-        {!jobOwnership && showSchedules && (
+      <CardMount show={!jobOwnership && openPanel === "schedules"} k="schedules">
+        {!jobOwnership && openPanel === "schedules" && (
           <div className="shrink-0 px-4 pt-2 pb-2">
             <ScheduledTasksCard
               jobs={schedules}
               error={scheduleError}
-              onClose={() => setShowSchedules(false)}
+              onClose={closePanel}
               onDelete={(id) => {
                 setSchedules((prev) => prev.filter((j) => j.id !== id));
                 window.api
@@ -2223,14 +2220,14 @@ export function ChatPanel({
       {/* Secrets management card. Toggled by the 🔑 toolbar button (desktop) or */}
       {/* the ⋯ sheet (mobile). The value never appears here — list is metadata */}
       {/* only. Hidden for a job session (read-only view). */}
-      <CardMount show={!jobOwnership && showSecrets} k="secrets">
-        {!jobOwnership && showSecrets && (
+      <CardMount show={!jobOwnership && openPanel === "secrets"} k="secrets">
+        {!jobOwnership && openPanel === "secrets" && (
           <div className="shrink-0 px-4 pt-2 pb-2">
             <SecretsCard
               secrets={secrets}
               error={secretError}
               sessionId={sessionId}
-              onClose={() => setShowSecrets(false)}
+              onClose={closePanel}
               onSave={(input) => {
                 return window.api
                   .secretsSet(input)
@@ -2267,13 +2264,13 @@ export function ChatPanel({
       {/* (desktop) or the ⋯ sheet (mobile). List is metadata only (no signing */}
       {/* secret); creation is the AI's job via the `webhook` opencode tool. */}
       {/* Hidden for a job session (read-only view). */}
-      <CardMount show={!jobOwnership && showWebhooks} k="webhooks">
-        {!jobOwnership && showWebhooks && (
+      <CardMount show={!jobOwnership && openPanel === "webhooks"} k="webhooks">
+        {!jobOwnership && openPanel === "webhooks" && (
           <div className="shrink-0 px-4 pt-2 pb-2">
             <WebhooksCard
               hooks={webhooks}
               error={webhookError}
-              onClose={() => setShowWebhooks(false)}
+              onClose={closePanel}
               onDelete={(id) => {
                 setWebhooks((prev) => prev.filter((h) => h.id !== id));
                 window.api
@@ -2436,9 +2433,9 @@ export function ChatPanel({
         onOpenModels={ensureModels}
         onSelectModel={selectModel}
         scheduleCount={schedules.length}
-        onSchedules={() => setShowSchedules((v) => !v)}
-        onSecrets={() => setShowSecrets((v) => !v)}
-        onWebhooks={() => setShowWebhooks((v) => !v)}
+        onSchedules={() => togglePanel("schedules")}
+        onSecrets={() => togglePanel("secrets")}
+        onWebhooks={() => togglePanel("webhooks")}
         typeaheadOpen={typeahead != null && typeaheadRows.length > 0}
         typeaheadExactMatch={(() => {
           if (!typeahead || typeaheadRows.length === 0) return false;
