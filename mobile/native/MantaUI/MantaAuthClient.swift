@@ -3,10 +3,10 @@ import Foundation
 // ===========================================================================
 // MantaAuthClient — the S2 `/auth/claim` client (BET-594).
 //
-// POSTs { pairing_code, verify?, device_id?, name? } to <server>/auth/claim
-// (src/server/index.mjs) and classifies the outcome through the pure
-// `MantaPairing.classifyClaim` (the shared claim.mjs contract). Reuses the
-// S1a `KeychainCredentialStore` on success so the token survives a relaunch.
+// POSTs { pairing_code, name? } to <server>/auth/claim (src/server/index.mjs)
+// and classifies the outcome through the pure `MantaPairing.classifyClaim`
+// (the shared claim.mjs contract). Reuses the S1a `KeychainCredentialStore`
+// on success so the token survives a relaunch.
 // ===========================================================================
 
 struct MantaAuthClient: Sendable {
@@ -16,25 +16,21 @@ struct MantaAuthClient: Sendable {
         self.session = session
     }
 
-    /// Exchange a pairing payload for a device credential. `verify` (the
-    /// two-sided four-character confirm) is forwarded when present so the box
-    /// provisions a DISTINCT Stage-2 device rather than the shared primary
-    /// token. The claim target is the payload's explicit `serverUrl`, else the
-    /// box-derived public hostname.
+    /// Exchange a pairing payload for a device credential. The claim target is
+    /// the payload's explicit `serverUrl`, else the box-derived public hostname.
     func claim(_ payload: MantaPairing.PairPayload, deviceName: String? = nil) async -> MantaPairing.ClaimOutcome {
         guard let base = MantaPairing.claimBaseURL(payload) else {
             return .invalidResponse
         }
-        return await claim(serverURL: base, code: payload.code, verify: payload.verify, deviceName: deviceName)
+        return await claim(serverURL: base, code: payload.code, deviceName: deviceName)
     }
 
-    /// Exchange a raw 6-digit code (and optional verify) for a device
-    /// credential against an explicit server URL (the manual / desktop-free
-    /// path, §5.2.10 — the caller supplies the reachable listener).
+    /// Exchange a raw 6-digit code for a device credential against an explicit
+    /// server URL (the manual / desktop-free path, §5.2.10 — the caller
+    /// supplies the reachable listener).
     func claim(
         serverURL: URL,
         code: String,
-        verify: String? = nil,
         deviceName: String? = nil
     ) async -> MantaPairing.ClaimOutcome {
         let url = serverURL.appendingPathComponent("auth").appendingPathComponent("claim")
@@ -43,9 +39,6 @@ struct MantaAuthClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         var body: [String: Any] = ["pairing_code": code]
-        if let verify, !verify.isEmpty {
-            body["verify"] = MantaPairing.normalizeVerify(verify)
-        }
         if let deviceName, !deviceName.isEmpty {
             body["name"] = deviceName
         }
