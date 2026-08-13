@@ -20,6 +20,7 @@
 		2F0CAA1B1DC211D065AC4761 /* TranscriptRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74A048582549409FE0949053 /* TranscriptRow.swift */; };
 		3354E683F0CE92566A77C7D3 /* MantaPairingModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3531B9EF3162D19FB6C30756 /* MantaPairingModels.swift */; };
 		33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1306D325FEB295B7AB874E /* MantaEventStore.swift */; };
+		359C5AA931BE4D7F69B48604 /* MantaLiveTypeaheadSlashUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36E99A4154D594C6A36FB890 /* MantaLiveTypeaheadSlashUITests.swift */; };
 		3A14CB75D91300937752389C /* MantaAppRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD646A4951E292E750890CCB /* MantaAppRoot.swift */; };
 		3CE79341ACF08E7F836522FD /* ChatStreamMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0504A23AC9360042B3D51B /* ChatStreamMergeTests.swift */; };
 		3F3FF5F6BE28352901513A14 /* MantaAppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25870866D56CCE59805BCC0E /* MantaAppDelegate.swift */; };
@@ -129,6 +130,7 @@
 		2F29E8693B4AA4191CF9C556 /* MantaAuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAuthClient.swift; sourceTree = "<group>"; };
 		3531B9EF3162D19FB6C30756 /* MantaPairingModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingModels.swift; sourceTree = "<group>"; };
 		35ECC10E3DB9A931F8EB5420 /* MantaUI.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MantaUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		36E99A4154D594C6A36FB890 /* MantaLiveTypeaheadSlashUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaLiveTypeaheadSlashUITests.swift; sourceTree = "<group>"; };
 		39978655A14BFA5D39336286 /* MantaSettingsModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsModels.swift; sourceTree = "<group>"; };
 		4098461F579869804595B0A3 /* ChatModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModelCatalog.swift; sourceTree = "<group>"; };
 		436675A65BF149932C1EADE0 /* ChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScreen.swift; sourceTree = "<group>"; };
@@ -371,6 +373,7 @@
 				570E190164DB3AB83DC14283 /* MantaChatSurfaceCaptureUITests.swift */,
 				2B7A1F140660F9AC7AF07E00 /* MantaDeepLinkUITests.swift */,
 				6E1D5B31C8FB29B23AB2A577 /* MantaLiveChatClearCaptureUITests.swift */,
+				36E99A4154D594C6A36FB890 /* MantaLiveTypeaheadSlashUITests.swift */,
 				681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */,
 				8D8A1A5388E54F31462D616F /* MantaPairFixture.swift */,
 				AD55034506C4DF218AD7300E /* MantaPairingDriverUITests.swift */,
@@ -539,6 +542,7 @@
 				1A55CBC343898856735AF0F8 /* MantaChatSurfaceCaptureUITests.swift in Sources */,
 				ED03A3C1AAFA1094A92A9ECA /* MantaDeepLinkUITests.swift in Sources */,
 				B97905DC3BE32E36E682EF0C /* MantaLiveChatClearCaptureUITests.swift in Sources */,
+				359C5AA931BE4D7F69B48604 /* MantaLiveTypeaheadSlashUITests.swift in Sources */,
 				C2C89BEF7843F4F3460A926F /* MantaOverflowCaptureUITests.swift in Sources */,
 				EDFF1716E461980191B71C85 /* MantaPairFixture.swift in Sources */,
 				D8B312D02500D61F791EF275 /* MantaPairingDriverUITests.swift in Sources */,
