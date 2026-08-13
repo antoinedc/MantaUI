@@ -269,6 +269,32 @@ final class ChatStreamMergeTests: XCTestCase {
                        "a non-permissions frame must not resurrect a permission cleared by resync")
     }
 
+    /// A permissions frame followed immediately by an unrelated frame for the
+    /// SAME session must not lose the permission. `lastStreamFrame` is a
+    /// single mutable slot read one run-loop turn later than the frame that
+    /// set it (the sink is `receive(on: .main)`), so a following frame can
+    /// overwrite that slot before the deferred sink observes it. Gating the
+    /// apply on the stamp (the cycle-1 fix) fails this case — the permissions
+    /// frame is silently dropped and the card never renders. Edge-triggering
+    /// on the payload VALUE instead is immune to this ordering.
+    func testPermissionsFrameSurvivesImmediatelyFollowingFrame() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        stream.inject(#"{"kind":"stream","sub":"permissions","sessionId":"ses","payload":{"permissions":[{"id":"perm_1","sessionID":"ses","permission":"Bash","patterns":["~/secrets.json"]}]}}"#)
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(store.permissions.map(\.id), ["perm_1"],
+                       "a permissions frame must not be lost when a following frame for the same session arrives before the deferred sink runs")
+    }
+
     /// start() twice must not double the one-time work: one transcript fetch,
     /// even when the loading branch fires twice in a row.
     func testStartTwiceCreatesOneFetch() async {

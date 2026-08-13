@@ -214,6 +214,14 @@ final class ChatSessionStore: ObservableObject {
     private(set) var transcriptFetchCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// The permissions payload most recently folded into `permissions`. The
+    /// accumulated snapshot is sticky and this sink fires on every stream change,
+    /// so applying it unconditionally would clobber whatever `refreshPermissions()`
+    /// (seed/resync) just wrote. Edge-triggering on the VALUE — rather than on the
+    /// frame stamp, a single slot that a later frame or a transcript retirement can
+    /// overwrite before this deferred sink reads it — applies every genuine
+    /// permissions frame exactly once and nothing else.
+    private var lastAppliedPermissions: StreamPermissionsPayload?
     /// How many recent messages the CURRENT window covers. Every refetch reuses
     /// it, so a turn-boundary refresh never silently collapses a window the
     /// user widened.
@@ -381,14 +389,17 @@ final class ChatSessionStore: ObservableObject {
 
         // --- permissions: live updates ride the interpreted stream. Unlike
         // questions there is no locally-answered tombstone filter — instead
-        // the accumulated snapshot is only applied on the frame that actually
-        // carries `sub: "permissions"`. Without that stamp check, this sink
-        // fires on every stream change (text delta, `running`, todos, ...)
-        // and would reapply the sticky snapshot each time, clobbering
-        // whatever `refreshPermissions()` just repaired on reconnect and
-        // briefly resurrecting an answered permission before its
-        // `permission.replied` frame lands.
-        if stamp?.sessionId == sessionId, stamp?.sub == "permissions", let p = s.permissions {
+        // the payload is edge-triggered against `lastAppliedPermissions`
+        // (see its doc comment for why the frame stamp alone is not a safe
+        // trigger). Applying it unconditionally would clobber whatever
+        // `refreshPermissions()` just repaired on reconnect and briefly
+        // resurrect an answered permission before its `permission.replied`
+        // frame lands; gating on the stamp instead can silently DROP a
+        // genuine permissions frame if a later frame or a transcript
+        // retirement overwrites the stamp before this deferred sink reads
+        // it. Edge-triggering on the value has neither failure mode.
+        if let p = s.permissions, p != lastAppliedPermissions {
+            lastAppliedPermissions = p
             permissions = p.permissions
         }
 
