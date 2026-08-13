@@ -24,6 +24,7 @@
 // whenever the controller transitions.
 
 import { describe as describeConnection, type ConnectionState } from "../shared/net/state.js";
+import { BANNER_BTN } from "./Toast";
 
 export type ReconnectingBannerProps = {
   /** Live connection state from the store. */
@@ -55,7 +56,7 @@ export function ReconnectingBanner({ state, onRetryNow }: ReconnectingBannerProp
       </span>
       <button
         onClick={onRetryNow}
-        className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
+        className={BANNER_BTN}
         title="Reset backoff and reconnect immediately"
       >
         Retry now

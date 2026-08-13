@@ -55,6 +55,7 @@ import {
 import { installHttpTransport } from "./transportInstall";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
+import { Button } from "./Button";
 import { ProcessPanel } from "./ProcessPanel";
 import { Callout } from "./Callout";
 import mantaMark from "./assets/manta-mark-128.png";
@@ -408,14 +409,10 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
         Your box is paired and a provider is connected. Start chatting with
         your AI assistant.
       </p>
-      <button
-        onClick={onOpen}
-        className="inline-flex items-center gap-2 px-6 py-3 rounded-sm text-body font-medium text-on-accent"
-        style={{ background: ACCENT_SOLID }}
-      >
+      <Button tone="primary" block onClick={onOpen}>
         Open Manta
         <ArrowRight />
-      </button>
+      </Button>
     </div>
   );
 }

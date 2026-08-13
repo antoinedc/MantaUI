@@ -1407,7 +1407,7 @@ function ConfirmDelete({
             e.stopPropagation();
             onKill();
           }}
-          className="text-meta px-2 py-px rounded-xs bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded-xs bg-transparent text-danger hover:bg-danger-bg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
           title="kill the tmux session/window on the remote"
         >
           Kill on server
@@ -1448,7 +1448,7 @@ function ConfirmWorktreeDirty({
             e.stopPropagation();
             onRemove();
           }}
-          className="text-meta px-2 py-px rounded-xs bg-danger-bg text-danger hover:bg-danger-bg"
+          className="text-meta px-2 py-px rounded-xs bg-transparent text-danger hover:bg-danger-bg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
           title="git worktree remove --force (discards uncommitted changes)"
         >
           Remove

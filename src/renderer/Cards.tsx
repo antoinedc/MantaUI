@@ -19,6 +19,7 @@ import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
 import { OutputWell } from "./OutputWell";
+import { Button } from "./Button";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
@@ -206,38 +207,31 @@ export function PermissionCard({
   //   Allow once — the FILLED accent primary, with a Check + ⏎ hint.
   //   Always allow <tool> — outlined secondary.
   //   (spacer)
-  //   Reject — ghost, pushed to the far right, gains --danger on hover.
+  //   Reject — danger text at rest, gains --danger-bg fill on hover (tone="danger").
   const actions = (
     <>
-      <button
-        onClick={() => onReply("once")}
-        className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-        style={{ backgroundColor: "var(--accent-solid)" }}
-      >
+      <Button tone="primary" onClick={() => onReply("once")}>
         <Check size={13} aria-hidden="true" />
         Allow once
         <span className="text-on-accent opacity-70" aria-hidden="true">
           ⏎
         </span>
-      </button>
+      </Button>
       {alwaysScope ? (
-        <button
+        <Button
+          tone="default"
           onClick={() => onReply("always")}
           title={`Always allow ${alwaysScope}`}
-          className="h-8 px-[14px] inline-flex items-center rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           Always allow&nbsp;
           <span className="text-text-faint">{alwaysScope}</span>
-        </button>
+        </Button>
       ) : null}
       {/* spacer pushes Reject to the far right */}
       <div className="flex-1" />
-      <button
-        onClick={() => onReply("reject")}
-        className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-      >
+      <Button tone="danger" onClick={() => onReply("reject")}>
         Reject
-      </button>
+      </Button>
     </>
   );
 
@@ -481,17 +475,12 @@ export function QuestionCard({
       actions={
         <>
           {/* Submit FIRST — the filled accent primary with a trailing ⏎ hint. */}
-          <button
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-            style={{ backgroundColor: "var(--accent-solid)" }}
-          >
+          <Button tone="primary" onClick={handleSubmit} disabled={!canSubmit}>
             Submit
             <span className="text-on-accent opacity-70" aria-hidden="true">
               ⏎
             </span>
-          </button>
+          </Button>
           {/* Multi-question progress — mono `.prog`. */}
           {isMulti && (
             <span className="text-text-faint text-meta font-mono ml-2">
@@ -500,13 +489,9 @@ export function QuestionCard({
           )}
           {/* spacer pushes Dismiss to the far right */}
           <div className="flex-1" />
-          <button
-            onClick={onReject}
-            className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-            title="Dismiss this question"
-          >
+          <Button tone="ghost" onClick={onReject} title="Dismiss this question">
             Dismiss
-          </button>
+          </Button>
         </>
       }
     />

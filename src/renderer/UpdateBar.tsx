@@ -23,6 +23,7 @@
 
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
+import { BANNER_BTN } from "./Toast";
 
 export type UpdateBarProps = {
   /** Main message text. Keep it under ~80 chars so it fits the titlebar width. */
@@ -113,7 +114,7 @@ export function UpdateBar({
             onClick={() => {
               onAction();
             }}
-            className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+            className={BANNER_BTN}
           >
             {actionLabel}
           </button>
