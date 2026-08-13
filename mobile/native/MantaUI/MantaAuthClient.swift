@@ -53,12 +53,4 @@ struct MantaAuthClient: Sendable {
             return .network
         }
     }
-
-    /// Persist a successful claim to the Keychain (S1a). Returns true on
-    /// success (or when the outcome was not a claim success).
-    func persist(onSuccess outcome: MantaPairing.ClaimOutcome, serverURL: URL) throws {
-        guard case .success(let boxToken, let boxId, _) = outcome else { return }
-        let credentials = MantaCredentials(serverUrl: serverURL.absoluteString, boxId: boxId, boxToken: boxToken)
-        try KeychainCredentialStore.shared.save(credentials)
-    }
 }
