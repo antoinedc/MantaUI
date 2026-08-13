@@ -310,7 +310,140 @@ final class ChatStreamMergeTests: XCTestCase {
                        "start() twice must not double-fetch the transcript")
     }
 
+    // MARK: - Mid-turn send queue / drain-on-idle (BET-717)
+
+    /// A send while a turn runs must NOT reach opencode (that would implicitly
+    /// abort the in-flight turn). It is accepted and queued, and no prompt is
+    /// POSTed.
+    func testSendWhileRunningQueuesWithoutPosting() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+        )
+        await Task.yield()
+
+        // A turn is in flight.
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        XCTAssertTrue(store.running)
+
+        let ok = await store.send(text: "queued", attachments: [], model: nil)
+        XCTAssertTrue(ok, "a mid-turn send is accepted (queued), not rejected")
+        XCTAssertEqual(store.queuedPrompts.count, 1, "the send must be queued")
+        XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, [],
+                       "no prompt may be POSTed while a turn runs")
+    }
+
+    /// The stream fold (`running` flips false on the turnComplete edge) drains
+    /// exactly one queued prompt: queue empties, the prompt is POSTed once, and
+    /// the drain's own send sets running optimistically.
+    func testQueuedPromptSendsOnceOnIdleEdge() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+        )
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        _ = await store.send(text: "q1", attachments: [], model: nil)
+        XCTAssertEqual(store.queuedPrompts.count, 1)
+        XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, [])
+
+        // Turn finishes → idle edge drains exactly one.
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1"] }
+
+        XCTAssertEqual(store.queuedPrompts.count, 0, "the queue must empty after the idle drain")
+        XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1"],
+                       "the queued prompt must be sent exactly once on idle")
+        XCTAssertTrue(store.running, "the drained send sets running optimistically")
+    }
+
+    /// Two queued prompts drain strictly FIFO: the first idle edge sends only
+    /// the first; the second idle edge sends the second.
+    func testTwoQueuedPromptsDrainFIFOOnePerIdleEdge() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+        )
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        _ = await store.send(text: "q1", attachments: [], model: nil)
+        _ = await store.send(text: "q2", attachments: [], model: nil)
+        XCTAssertEqual(store.queuedPrompts.count, 2)
+
+        // First idle edge → only q1.
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1"] }
+        XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1"],
+                       "the first idle edge must send only the FIRST queued prompt")
+        XCTAssertEqual(store.queuedPrompts.count, 1)
+
+        // Drain's send is running; box confirms, then that turn finishes →
+        // second drains.
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await waitUntil { RecordingPromptURLProtocol.sentTexts == ["q1", "q2"] }
+        XCTAssertEqual(RecordingPromptURLProtocol.sentTexts, ["q1", "q2"],
+                       "the second idle edge must send the second queued prompt (FIFO)")
+        XCTAssertEqual(store.queuedPrompts.count, 0)
+    }
+
+    /// Leaving the session (stop) clears the queue so a queued prompt never
+    /// fires into a session the user has left.
+    func testStopClearsQueuedPrompts() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+        )
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        _ = await store.send(text: "q1", attachments: [], model: nil)
+        XCTAssertEqual(store.queuedPrompts.count, 1)
+
+        store.stop()
+        XCTAssertEqual(store.queuedPrompts.count, 0,
+                       "leaving the session must clear the queue")
+    }
+
     // MARK: - Mock transport
+
+    /// Poll the main actor until `condition` holds (or ~2s elapses). The drain
+    /// send is fire-and-forget inside the store, so a test cannot await it
+    /// directly; `Task.sleep` (unlike `Task.yield`) lets the URLSession
+    /// delegate queue finish and resume the drain's continuation.
+    private func waitUntil(
+        _ condition: @escaping @MainActor () -> Bool,
+        timeout: TimeInterval = 2.0
+    ) async {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            if await MainActor.run(body: condition) { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    private static func recordingSession() -> URLSession {
+        RecordingPromptURLProtocol.sentTexts = []
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RecordingPromptURLProtocol.self]
+        return URLSession(configuration: config)
+    }
 
     private static func failingSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -349,6 +482,53 @@ private final class SucceedingURLProtocol: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+/// URLSession protocol that succeeds like `SucceedingURLProtocol` but records
+/// the `text` of every prompt body it serves, so a test can assert a send()
+/// actually reached the box — or, while running, that it did NOT. Only
+/// `opencode:prompt` carries a top-level `text` arg; transcript/misc RPCs
+/// don't, so the ledger never counts those.
+private final class RecordingPromptURLProtocol: URLProtocol {
+    // Test-only ledger. Writes happen from the URLSession delegate queue inside
+    // startLoading, reads from the @MainActor test; the awaits around each read
+    // make the append visible. `nonisolated(unsafe)` because these are a test
+    // seam, not real shared state.
+    nonisolated(unsafe) fileprivate(set) static var sentTexts: [String] = []
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if let body = Self.bodyData(of: request),
+           let obj = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+           let args = obj["args"] as? [Any],
+           let first = args.first as? [String: Any],
+           let text = first["text"] as? String {
+            Self.sentTexts.append(text)
+        }
+        let data = Data(#"{"result":{}}"#.utf8)
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+
+    /// URLSession moves an outgoing body from `httpBody` to `httpBodyStream`
+    /// before a URLProtocol sees the request, so read whichever carries it.
+    private static func bodyData(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
 }
 
 /// A stream control that never connects but can inject frames into the store,
