@@ -18,6 +18,7 @@ final class MantaActionRPCWireTests: XCTestCase {
         super.setUp()
         CapturingURLProtocol.cache = []
         CapturingURLProtocol.result = #"{"result": null}"#
+        CapturingURLProtocol.statusCode = 200
     }
 
     private func makeClient() -> MantaAPIClient {
@@ -260,6 +261,87 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(source?["start"] as? Int, 4)
         XCTAssertEqual(source?["end"] as? Int, 18)
     }
+
+    // MARK: - artifacts / agent-file outbox (BET-750)
+
+    /// `outbox:list` is dispatched as `fn(sessionId)` — scoped to the session —
+    /// and decodes the box's `[OutboxFile]` rows.
+    func testListOutboxSendsSessionIdAndDecodesFiles() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": [{"path": "/home/dev/.manta-outbox/ses_1/report.pdf", "name": "report.pdf", "size": 1234, "sessionID": "ses_1", "mtime": 1750000000000, "expiresAt": 1750604800000}]}"#
+        let files = try await client.listOutbox(sessionId: "ses_1")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/outbox:list")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(args?.count, 1)
+        XCTAssertEqual(args?.first as? String, "ses_1")
+        let file = try XCTUnwrap(files.first)
+        XCTAssertEqual(file.path, "/home/dev/.manta-outbox/ses_1/report.pdf")
+        XCTAssertEqual(file.name, "report.pdf")
+        XCTAssertEqual(file.size, 1234)
+        XCTAssertEqual(file.sessionID, "ses_1")
+        XCTAssertEqual(file.mtime, 1750000000000)
+        XCTAssertEqual(file.expiresAt, 1750604800000)
+    }
+
+    /// `outbox:list` with a nil sessionId sends no args — the box then lists
+    /// every artifact across sessions.
+    func testListOutboxOmitsSessionIdWhenNil() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": []}"#
+        let files = try await client.listOutbox()
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/outbox:list")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(args?.count, 0)
+        XCTAssertTrue(files.isEmpty)
+    }
+
+    /// `downloadOutboxFile` GETs `/api/download?path=<abs>` with a bearer token
+    /// and returns the file bytes on 200.
+    func testDownloadOutboxFileReturnsBytesOn200() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"PDFBYTES"#
+        let data = try await client.downloadOutboxFile(path: "/home/dev/.manta-outbox/ses_1/report.pdf")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/api/download")
+        // Assert the `path` query item carries the absolute box path, decoding
+        // the percent-encoding rather than pinning a specific escape form.
+        let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(CapturingURLProtocol.cache.last?.url), resolvingAgainstBaseURL: false))
+        let pathValue = components.queryItems?.first { $0.name == "path" }?.value
+        XCTAssertEqual(pathValue, "/home/dev/.manta-outbox/ses_1/report.pdf")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.value(forHTTPHeaderField: "Authorization"), "Bearer tok")
+        XCTAssertEqual(data, Data("PDFBYTES".utf8))
+    }
+
+    /// A `403 "path outside outbox"` must throw — never surface as empty bytes.
+    func testDownloadOutboxFileThrowsOn403() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.statusCode = 403
+        CapturingURLProtocol.result = #"{"error": "path outside outbox"}"#
+        do {
+            _ = try await client.downloadOutboxFile(path: "/etc/passwd")
+            XCTFail("expected a throw for a path outside the outbox")
+        } catch let error as MantaError {
+            guard case .server(let message) = error else {
+                return XCTFail("expected MantaError.server, got \(error)")
+            }
+            XCTAssertEqual(message, "path outside outbox")
+        }
+    }
+
+    /// A `404` for a missing file must throw rather than return empty `Data`.
+    func testDownloadOutboxFileThrowsOn404() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.statusCode = 404
+        CapturingURLProtocol.result = #"{"error": "not found"}"#
+        do {
+            _ = try await client.downloadOutboxFile(path: "/home/dev/.manta-outbox/ses_1/gone.txt")
+            XCTFail("expected a throw for a missing file")
+        } catch let error as MantaError {
+            guard case .server(let message) = error else {
+                return XCTFail("expected MantaError.server, got \(error)")
+            }
+            XCTAssertEqual(message, "not found")
+        }
+    }
 }
 
 // MARK: - Capturing URLProtocol
@@ -267,6 +349,7 @@ final class MantaActionRPCWireTests: XCTestCase {
 private final class CapturingURLProtocol: URLProtocol {
     nonisolated(unsafe) static var cache: [URLRequest] = []
     nonisolated(unsafe) static var result: String = #"{"result": null}"#
+    nonisolated(unsafe) static var statusCode: Int = 200
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -274,7 +357,7 @@ private final class CapturingURLProtocol: URLProtocol {
     override func startLoading() {
         Self.cache.append(request)
         let data = Data(Self.result.utf8)
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let response = HTTPURLResponse(url: request.url!, statusCode: Self.statusCode, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

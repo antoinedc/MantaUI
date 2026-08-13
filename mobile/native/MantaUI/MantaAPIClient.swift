@@ -338,6 +338,45 @@ final class MantaAPIClient: Sendable {
         _ = try await call("secrets:delete", args: [id], as: VoidResult.self)
     }
 
+    /// `outbox:list` — agent-pushed artifacts scoped to the session (the box's
+    /// `~/.manta-outbox/` row shape from `src/server/outbox.mjs`). Non-
+    /// destructive: entries expire via the box's TTL sweep, not on download.
+    func listOutbox(sessionId: String? = nil) async throws -> [OutboxFile] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        return try await call("outbox:list", args: args, as: [OutboxFile].self) ?? []
+    }
+
+    /// Download an outbox file's bytes via `GET {serverURL}/api/download?path=`
+    /// with the bearer token. The box path-traversal-guards `path` to the
+    /// outbox root, so a `403 "path outside outbox"` / `404` must THROW rather
+    /// than surface as a successful empty `Data` (BET-750). Non-destructive:
+    /// the source stays on the box until the TTL sweep.
+    func downloadOutboxFile(path: String) async throws -> Data {
+        var url = serverURL.appendingPathComponent("api").appendingPathComponent("download")
+        url.append(queryItems: [URLQueryItem(name: "path", value: path)])
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            // Non-2xx: the box replies `{error: "…"}` (e.g. "path outside
+            // outbox") — surface that text rather than an empty `Data`.
+            if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = object["error"] as? String, !error.isEmpty {
+                throw MantaError.server(error)
+            }
+            throw MantaError.server("download failed (\(http.statusCode))")
+        }
+        return data
+    }
+
     /// `voice:transcribe` — ship recorded audio (base64 over the JSON RPC
     /// wire, as the desktop shim does) to the box's Groq transcription.
     /// Returns the transcribed text, or nil when the clip was empty.

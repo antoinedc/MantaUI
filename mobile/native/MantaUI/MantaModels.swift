@@ -357,3 +357,23 @@ struct SecretSetResult: Decodable, Equatable, Sendable {
     var meta: SecretMeta?
     var error: String?
 }
+
+// MARK: - Artifacts / agent-file outbox (BET-750)
+
+/// A row from the box's artifact mailbox (`~/.manta-outbox/`), as served by
+/// the `outbox:list` RPC and `src/server/outbox.mjs` `statRow`. Non-destructive:
+/// files expire via the box's TTL sweep, never on download. `size` is bytes,
+/// `mtime`/`expiresAt` are epoch milliseconds (nullable — a loose root file or
+/// a file stat that failed can carry nulls). `path` is the absolute box path
+/// and doubles as the stable identity for `GET /api/download?path=<path>`
+/// (BET-750).
+struct OutboxFile: Codable, Equatable, Sendable, Identifiable {
+    var path: String
+    var name: String
+    var size: Int
+    var sessionID: String?
+    var mtime: Double?
+    var expiresAt: Double?
+
+    var id: String { path }
+}

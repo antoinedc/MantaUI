@@ -41,6 +41,7 @@ report/
 
 # Native iOS derived-data + capture scratch — build/capture output, not source.
 mobile/native/.build/
+mobile/native/build/
 mobile/native/.capture-out/
 playwright-report/
 test-results/

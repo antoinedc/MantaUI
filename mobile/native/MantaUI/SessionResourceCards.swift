@@ -342,3 +342,150 @@ private struct SecretAddForm: View {
         }
     }
 }
+
+// ===========================================================================
+// BET-750 — artifacts / agent-file outbox receive card.
+//
+// The reverse of the composer's paperclip: files the AI pushes to the box's
+// `~/.manta-outbox/<sessionID>/` are listed here, scoped to this session, and
+// each row's download button pulls the bytes over `GET /api/download` and hands
+// them to the system share sheet ("Save to Files"). Receive-only — this is not
+// an upload path. Same stock-SwiftUI treatment as SchedulesCard/SecretsCard:
+// the list refetches on `.task` (and lightly while presented, so a file the AI
+// drops mid-chat appears) with an honest empty state and a `failed` flag.
+// ===========================================================================
+
+/// List of agent-pushed files for this session (`outbox:list`), each with a
+/// system download action. Once a row's bytes are fetched it is written to the
+/// app's temp directory and that row swaps its download button for a
+/// `ShareLink`, so saving to Files goes through the platform share sheet.
+struct ArtifactsCard: View {
+    let sessionId: String
+    let onClose: () -> Void
+
+    @State private var files: [OutboxFile] = []
+    @State private var loaded = false
+    @State private var failed = false
+    /// Per-path temp URL where a successfully-downloaded file lives. A row
+    /// whose path is present here shows a ShareLink instead of a download tap.
+    @State private var downloaded: [String: URL] = [:]
+    /// Paths currently being fetched (row spinner).
+    @State private var downloading: Set<String> = []
+    private let api = MantaAPIClient.live()
+    /// Poll cadence while the card is presented, so a file the AI drops mid-chat
+    /// appears without needing to dismiss and reopen the card.
+    private static let refreshIntervalNanoseconds: UInt64 = 3_000_000_000
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if failed {
+                    Text("Couldn't load artifacts.")
+                        .foregroundStyle(.secondary)
+                } else if loaded {
+                    if files.isEmpty {
+                        emptyState
+                    } else {
+                        List(files) { file in
+                            row(file)
+                        }
+                        .listStyle(.insetGrouped)
+                    }
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle("Artifacts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onClose)
+                }
+            }
+        }
+        // Live update: refetch while presented (matches the other cards' `.task`
+        // load, extended to a light poll). Cancels when the card dismisses.
+        .task {
+            while !Task.isCancelled {
+                await load()
+                try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)
+            }
+        }
+    }
+
+    private func load() async {
+        if let result = try? await api.listOutbox(sessionId: sessionId) {
+            files = result
+            failed = false
+        } else {
+            failed = true
+        }
+        loaded = true
+    }
+
+    /// Fetch the file's bytes and stage them in the app's temp directory so the
+    /// row can offer a system Save-to-Files share. A failed download leaves the
+    /// row's download control in place — nothing is reported as saved.
+    private func download(_ file: OutboxFile) async {
+        guard !downloading.contains(file.path) else { return }
+        downloading.insert(file.path)
+        defer { downloading.remove(file.path) }
+        do {
+            let data = try await api.downloadOutboxFile(path: file.path)
+            let url = Self.tempURL(for: file.name)
+            try data.write(to: url)
+            downloaded[file.path] = url
+        } catch {
+            // Failure: leave the control in place; no fabricated success.
+        }
+    }
+
+    /// A writable temp URL the share sheet can hand to the OS. Derives from the
+    /// file name and is overwritten on each (re)download of the same row.
+    private static func tempURL(for name: String) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+        let safe = name.replacingOccurrences(of: "/", with: "_")
+        return dir.appendingPathComponent(safe)
+    }
+
+    private var emptyState: some View {
+        ContentUnavailableView(
+            "No artifacts",
+            systemImage: "doc",
+            description: Text("Files the AI sends during this conversation will appear here.")
+        )
+    }
+
+    private func row(_ file: OutboxFile) -> some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.name)
+                    .font(.body)
+                    .lineLimit(1)
+                Text(Self.formatSize(file.size))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if let url = downloaded[file.path] {
+                ShareLink(item: url)
+                    .accessibilityLabel("Save \(file.name)")
+            } else if downloading.contains(file.path) {
+                ProgressView()
+            } else {
+                Button {
+                    Task { await download(file) }
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Download \(file.name)")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private static func formatSize(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+}

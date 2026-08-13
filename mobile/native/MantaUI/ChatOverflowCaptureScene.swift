@@ -31,6 +31,7 @@ struct ChatOverflowCaptureScene: View {
                     projectName: "manta",
                     onSchedules: {},
                     onSecrets: {},
+                    onArtifacts: {},
                     onCompact: {},
                     onClear: {},
                     onFork: {},
