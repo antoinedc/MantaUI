@@ -27,6 +27,7 @@ import {
 } from "../shared/forgeRules.mjs";
 import { genDeliveryToken, upsertForgeHook, findForgeHook } from "./webhooks.mjs";
 import { ensureRepoHook } from "./forge/webhook.mjs";
+import { resolveForgeToken } from "./forge/token.mjs";
 import { publicBaseUrl } from "./gatewayRegister.mjs";
 
 const RULES_ROOT = "forge-rules";
@@ -180,7 +181,8 @@ function formatErrors(errors) {
  * @param {{repo: string, yaml: string}} input
  * @param {object} [deps]
  * @param {() => boolean} [deps.enabled]
- * @param {{host?:string, token?:string}} [deps.forge] forge identity + token for registration
+ * @param {{host?:string, token?:string}} [deps.forge] forge identity + token override for registration
+ * @param {(host: string) => string|null} [deps.resolveToken] box-side token resolver (default resolveForgeToken)
  * @param {object} [deps.io]
  * @param {typeof ensureRepoHook} [deps.ensureHook]
  * @param {() => void} [deps.reload]
@@ -190,6 +192,7 @@ export async function saveRules(
   {
     enabled = () => true,
     forge = {},
+    resolveToken = resolveForgeToken,
     io = DEFAULT_IO,
     ensureHook = ensureRepoHook,
     reload = () => {},
@@ -209,6 +212,11 @@ export async function saveRules(
 
   await io.write(p.path, yaml);
 
+  // The forge API token for the repo's host, resolved box-side (env var or the
+  // secrets vault). Never reaches the renderer/iOS. An explicit `forge.token`
+  // override wins (tests/dev).
+  const token = forge.token || resolveToken(parts.host);
+
   let webhook = { registered: false };
   try {
     const pub = publicBaseUrl();
@@ -219,10 +227,12 @@ export async function saveRules(
           "no public hostname — this box cannot receive webhooks (Tailscale-only / macOS " +
           "boxes deliberately skip public TLS; polling covers them)",
       };
-    } else if (!forge.token) {
+    } else if (!token) {
       webhook = {
         registered: false,
-        error: "no forge token configured (the auth ladder arrives with the adapter)",
+        error:
+          `no ${parts.host} token configured — set MANTA_GITHUB_TOKEN (or MANTA_GITLAB_TOKEN), ` +
+          "or store it as a shared secret named github.token (gitlab.token for GitLab)",
       };
     } else {
       const key = repoKey(parts);
@@ -234,7 +244,7 @@ export async function saveRules(
         host: parts.host,
         owner: parts.owner,
         repo: parts.repo,
-        githubToken: forge.token,
+        githubToken: token,
         deliveryToken,
         publicBase: pub,
         events: eventsForRules(parsed.rules),

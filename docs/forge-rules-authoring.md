@@ -45,6 +45,14 @@ If a use case seems to need a new event, verb, or grammar form, that is a
 MantaUI change (the adapter + ingest must understand it), not a rules change —
 raise it rather than working around the grammar.
 
+## The forge token
+
+Registering the webhook needs a GitHub API token **on the box** (it never
+reaches the desktop or phone). Set `MANTA_GITHUB_TOKEN` in the server env, or
+store it as a shared secret whose key is `github.token` (`gitlab.token` for
+GitLab) in the box secrets vault. The device-flow / `gh`-CLI legs of the token
+ladder arrive with the GitHub adapter.
+
 ## Where it lives
 
 - **Box-side storage** (`~/.manta/forge-rules/`), never a repository file. This
