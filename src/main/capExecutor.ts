@@ -107,7 +107,17 @@ export type CapCtx = {
   exec(
     cmd: string,
     args: string[],
-    opts?: { cwd?: string; quiet?: boolean; env?: NodeJS.ProcessEnv },
+    opts?: {
+      cwd?: string;
+      quiet?: boolean;
+      env?: NodeJS.ProcessEnv;
+      // Per-step abort signal (e.g. a step `timeout:`). When present the
+      // returned exec registers the SAME onAbort handler on it as on the
+      // job-level signal, so a step that exceeds its own timeout kills its
+      // whole process group. The job-level signal stays authoritative for
+      // the overall 25-min job abort.
+      signal?: AbortSignal;
+    },
   ): Promise<ExecResult>;
   signal: AbortSignal;
 };
@@ -591,7 +601,7 @@ async function handlePluginWrite(ctx: CapCtx): Promise<{ result: unknown }> {
 // Build a manifest runner closure. The returned function executes steps in
 // order, evaluating `if:` against the supplied inputs, and short-circuits
 // the first non-zero exit unless `continue_on_error: true`.
-function makeManifestHandler(manifest: PluginManifest) {
+export function makeManifestHandler(manifest: PluginManifest) {
   return async function runManifest(ctx: CapCtx): Promise<{ result: unknown }> {
     const supplied = (ctx.input ?? {}) as Record<string, unknown>;
     // Pre-validate supplied inputs before any step runs (BET-190 spec:
@@ -603,6 +613,36 @@ function makeManifestHandler(manifest: PluginManifest) {
         "supplied inputs: " +
           v.errors.map((er) => `${er.path}: ${er.message}`).join("; "),
       );
+    }
+    // git-tree integrity guard (BET-652). The executor runs ONE job at a
+    // time in-process, but a job that OUTLIVES its slot can still collide
+    // with another process that checks out / force-resets the same shared
+    // clone. Any such external writer is invisible to our serial chain, so
+    // we snapshot HEAD on every distinct step cwd BEFORE the build and
+    // re-read it AFTER — a mismatch means the tree the job reported on is
+    // not the one it built, and a pass would be a lie. Non-git cwds and
+    // plugins with zero git cwds are skipped silently (zero behavior
+    // change). A mismatch discards the result by making the job FAIL.
+    const env = buildEnv(manifest, supplied, { jobId: ctx.jobId });
+    const uniqueCwds = new Set<string>();
+    for (const step of manifest.steps) {
+      if (!step.cwd) continue;
+      const r = resolveCwd(step.cwd, env);
+      if (typeof r === "string") uniqueCwds.add(r);
+    }
+    const startShas = new Map<string, string>();
+    for (const cwd of uniqueCwds) {
+      const probe = await ctx.exec(
+        "git",
+        ["-C", cwd, "rev-parse", "HEAD"],
+        { quiet: true, env, cwd },
+      );
+      if (probe.code !== 0) continue; // not a git repo — skip silently
+      const sha = probe.stdout.trim();
+      if (sha) {
+        startShas.set(cwd, sha);
+        ctx.log(`[integrity] HEAD at start ${cwd}: ${sha}\n`);
+      }
     }
     const stepResults: Array<{ name: string; code: number; skipped: boolean }> = [];
     for (let i = 0; i < manifest.steps.length; i++) {
@@ -628,15 +668,13 @@ function makeManifestHandler(manifest: PluginManifest) {
         }
       }
       ctx.log(`--- step ${i + 1}: ${label} ---\n`);
-      // Per-step env = buildEnv + PATH patch from exec. We compute it once
-      // per step (the step's own `env:` overlay isn't applied today — the
-      // manifest-level env is the only source per spec — but the runner
-      // still works for plugins that don't override per-step).
-      // `ctx.jobId` is the cap-job id from the server (populated in
-      // runOne when constructing the ctx) — surfaces as MANTA_JOB_ID in
-      // the plugin's env so it can correlate its own output with the
-      // server's job envelope.
-      const env = buildEnv(manifest, supplied, { jobId: ctx.jobId });
+      // Per-step env = buildEnv + PATH patch from exec. `env` was computed
+      // once up top (the step's own `env:` overlay isn't applied today —
+      // the manifest-level env is the only source per spec — so it is
+      // constant across steps). `ctx.jobId` is the cap-job id from the
+      // server (populated in runOne when constructing the ctx) — surfaces
+      // as MANTA_JOB_ID in the plugin's env so it can correlate its own
+      // output with the server's job envelope.
       // Resolve cwd (optional). The user may pass `$KEY` substitution via
       // the supplied inputs — we feed the buildEnv result so any
       // MANTA_INPUT_<ID> is available as a substitution source.
@@ -667,13 +705,43 @@ function makeManifestHandler(manifest: PluginManifest) {
           cwd: cwdResolved,
           quiet: false,
           env,
+          signal: stepController?.signal,
         });
+        // A step killed by its OWN timeout (not the whole job) must fail with
+        // a clear message rather than the generic non-zero-exit one. The job
+        // signal being aborted takes precedence — that's the 25-min job
+        // timeout, reported upstream as "job timed out" (BET-652).
+        if (stepController?.signal.aborted && !controllerSignalOf(ctx).aborted) {
+          throw new Error(
+            `step ${i + 1} (${label}) timed out after ${step.timeout}`,
+          );
+        }
         if (res.code !== 0 && !step.continue_on_error) {
           throw new Error(`step ${i + 1} (${label}) exited with code ${res.code}`);
         }
         stepResults.push({ name: label, code: res.code, skipped: false });
       } finally {
         stepController?.abort();
+      }
+    }
+    // Post-build integrity probe (BET-652). Only reaches here when every
+    // step succeeded. Re-read HEAD on each cwd we snapshotted before the
+    // build; any drift means another process reset the clone under us and
+    // the result belongs to a tree we didn't build — discard it loudly.
+    for (const [cwd, shaA] of startShas) {
+      const probe = await ctx.exec(
+        "git",
+        ["-C", cwd, "rev-parse", "HEAD"],
+        { quiet: true, env, cwd },
+      );
+      if (probe.code !== 0) continue; // repo vanished mid-build — not drifted
+      const shaB = probe.stdout.trim();
+      ctx.log(`[integrity] HEAD at end ${cwd}: ${shaB}\n`);
+      if (shaB && shaA !== shaB) {
+        throw new Error(
+          `working tree moved during the job: ${cwd} was ${shaA} at start, ` +
+            `${shaB} after the build — result discarded (another process reset the clone)`,
+        );
       }
     }
     return { result: { steps: stepResults } };
@@ -831,15 +899,17 @@ export function spawnErrorMessage(
 }
 
 /**
- * Abort a spawned child. On POSIX sends SIGTERM then SIGKILL after
- * `graceMs` (today's behaviour, just extracted). On Windows Node maps
- * `child.kill()` onto `TerminateProcess` for the direct child only —
- * since every step spawns a shell, killing it leaves the compiler or
- * installer it launched running forever, exactly when the executor's
- * 25-minute job timeout fires. taskkill /T walks the whole process tree.
- * No grace period: Windows has no graceful equivalent and inventing one
- * would be a second code path. The spawn's outcome is ignored — the
- * process may already be gone, and a failure here must never reject.
+ * Abort a spawned child — and, on POSIX, the WHOLE process group it leads.
+ * Every step spawns a shell, so killing the shell alone leaves whatever it
+ * launched (`git`, `xcodegen`, `xcodebuild`) running and mutating the
+ * working tree while the serial chain has already moved to the next job —
+ * exactly when the 25-minute job timeout fires (BET-652). On POSIX the
+ * spawn is `detached: true` (its own process group) so `process.kill(-pid,
+ * …)` walks the entire tree. On Windows Node maps `child.kill()` onto
+ * `TerminateProcess` for the direct child only, so we call `taskkill /T` to
+ * walk the whole process tree — same rationale, no grace period (Windows
+ * has no graceful equivalent). The spawn's outcome is ignored either way —
+ * the process may already be gone, and a failure here must never reject.
  */
 export function killTree(
   child: ChildProcess,
@@ -857,17 +927,38 @@ export function killTree(
     }
     return;
   }
+  // POSIX: kill the process group (−pid). Fall back to the single process
+  // when the child has no pid (never spawned / already reaped).
+  const pid = child.pid;
+  if (pid === undefined) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* already dead */
+    }
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }
+    }, graceMs);
+    killTimer.unref?.();
+    return;
+  }
   try {
-    child.kill("SIGTERM");
+    process.kill(-pid, "SIGTERM");
   } catch {
-    /* already dead */
+    /* group may be gone */
   }
   const killTimer = setTimeout(() => {
     if (child.exitCode === null) {
       try {
-        child.kill("SIGKILL");
+        process.kill(-pid, "SIGKILL");
       } catch {
-        /* already dead */
+        /* group may be gone */
       }
     }
   }, graceMs);
@@ -903,11 +994,23 @@ export function makeExec(
         // + MANTA_PLUGIN/MANTA_JOB_ID, so passing it here is what makes the
         // shell see $MANTA_INPUT_* / $WORKSPACE / etc. in `run:` scripts.
         const baseEnv = opts?.env ?? process.env;
-        child = spawn(cmd, args, {
+        const spawnOpts: {
+          cwd: string | undefined;
+          env: NodeJS.ProcessEnv;
+          detached?: boolean;
+        } = {
           cwd,
           env: patchPath(baseEnv, platform),
-          signal,
-        });
+        };
+        // On POSIX, `detached: true` puts the shell in its OWN process group
+        // so killTree's `process.kill(-pid, …)` can tear down the whole tree
+        // (the shell + whatever git/xcodegen/xcodebuild it launched) instead
+        // of orphaning it (BET-652). Windows spawn options are unchanged.
+        if (platform !== "win32") spawnOpts.detached = true;
+        // NOTE: no `signal` here on purpose (BET-652). Node's built-in abort
+        // kills only the DIRECT child; the explicit onAbort → killTree path
+        // below is the sole abort mechanism and kills the whole group.
+        child = spawn(cmd, args, spawnOpts);
       } catch (e) {
         reject(new Error(spawnErrorMessage(cmd, platform, e instanceof Error ? e.message : String(e))));
         return;
@@ -920,8 +1023,13 @@ export function makeExec(
       const onAbort = () => {
         killTree(child, platform, KILL_GRACE_MS);
       };
+      const stepSignal = opts?.signal;
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
+      if (stepSignal) {
+        if (stepSignal.aborted) onAbort();
+        else stepSignal.addEventListener("abort", onAbort, { once: true });
+      }
 
       child.stdout?.setEncoding("utf-8");
       child.stderr?.setEncoding("utf-8");
@@ -939,6 +1047,7 @@ export function makeExec(
 
       child.on("close", (code) => {
         signal.removeEventListener?.("abort", onAbort);
+        stepSignal?.removeEventListener?.("abort", onAbort);
         if (stdoutTruncated) {
           stdout = `[truncated to last ${EXEC_STDOUT_CAP_BYTES} bytes]\n${stdout}`;
         }
