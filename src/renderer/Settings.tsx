@@ -249,7 +249,10 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
 // mockup's group labels. Sections with per-section custom content (general,
 // box, accounts, extensions) are rendered by renderCustom instead.
 const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds: string[] }[]>> = {
-  models: [{ title: "Requests", entryIds: ["cacheTtl"] }],
+  models: [
+    { title: "Requests", entryIds: ["cacheTtl"] },
+    { title: "Plan usage", entryIds: ["alwaysShowUsage"] },
+  ],
   sessions: [
     { title: "Naming", entryIds: ["autoRenameSessions"] },
     { title: "Git worktrees", entryIds: ["worktreePerSession", "worktreeCleanOnClose"] },
@@ -323,8 +326,9 @@ export function Settings({
       uploadCleanupHours: store.uploadCleanupHours,
       theme: store.theme,
       autoRenameSessions: store.autoRenameSessions,
+      alwaysShowUsage: store.alwaysShowUsage,
     }),
-    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.uploadCleanupHours, store.theme, store.autoRenameSessions],
+    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.uploadCleanupHours, store.theme, store.autoRenameSessions, store.alwaysShowUsage],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

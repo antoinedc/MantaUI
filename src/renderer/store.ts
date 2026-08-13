@@ -5,6 +5,7 @@ import type {
   OpencodeMessage,
   Project,
   TmuxWindow,
+  UsageSnapshot,
   WindowStatus,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
@@ -306,6 +307,10 @@ type State = {
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
   autoRenameSessions: boolean;
+  // BET-738: show the composer usage dial even when every window is under
+  // 70% (the dial's normal "quiet unless it matters" threshold). Settings-
+  // only — rides the generic configUpdate path. See AppConfig.alwaysShowUsage.
+  alwaysShowUsage: boolean;
   // Agent → laptop push trust flag. When true, files the AI drops in its
   // remote outbox are pulled to the downloads dir without confirmation.
   allowAgentPush: boolean;
@@ -391,6 +396,12 @@ type State = {
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
   jobs: Record<string, JobRow>;
+  // BET-738: subscription plan usage snapshots (one per connected provider),
+  // fed by the composer's UsageDial. Primed once with window.api.usageList()
+  // on mount and kept live by the `usage.updated` bus event — App.tsx does
+  // NOT poll this; the box's usage poller (src/server/usage.mjs) is the only
+  // timer. Empty array = no snapshots yet (or no provider connected).
+  usage: UsageSnapshot[];
   // BET-659: per-session live transcript, lifted from each ChatPanel so the
   // Artifacts panel (mounted as a sibling of <main> in App.tsx) can derive
   // artifacts WITHOUT a second opencodeMessages fetch. Keyed by sessionId,
@@ -537,6 +548,11 @@ type State = {
   // DelegateJob[] from delegateList() and reduces it to the minimal
   // {name,status,activity} map keyed by childSessionID.
   setJobs: (jobs: { childSessionID: string | null; parentSessionID?: string | null; name: string; status: string; activity: string | null }[]) => void;
+  // Replace the usage slice (BET-738) from window.api.usageList() or the
+  // `usage.updated` bus payload. Both hand over the full current array —
+  // this is a straight replace, not a merge (the poller's contract is "the
+  // current cache", not a diff).
+  setUsage: (usage: UsageSnapshot[]) => void;
   // Chat-mode running state driven by opencode SSE (session.status /
   // session.idle / session.error). The PTY-pane poller can't see chat
   // windows' state — the holder runs `sleep infinity`, not claude — so
@@ -634,6 +650,7 @@ export const useStore = create<State>((set, get) => ({
   pairLinkError: null,
   chatAutoAllow: false,
   autoRenameSessions: false,
+  alwaysShowUsage: false,
   allowAgentPush: false,
   worktreePerSession: false,
   worktreeCleanOnClose: false,
@@ -659,6 +676,7 @@ export const useStore = create<State>((set, get) => ({
   autoSubmitPrompt: null,
   status: {},
   jobs: {},
+  usage: [],
   chatMessages: {},
   screenshotToast: null,
   agentFileToast: null,
@@ -860,6 +878,7 @@ export const useStore = create<State>((set, get) => ({
       onboardingSkipped: c.onboardingSkipped ?? false,
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
+      alwaysShowUsage: c.alwaysShowUsage ?? false,
       allowAgentPush: c.allowAgentPush ?? false,
       worktreePerSession: c.worktreePerSession ?? false,
       worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,
@@ -1007,6 +1026,8 @@ export const useStore = create<State>((set, get) => ({
       }
       return { jobs: next };
     }),
+
+  setUsage: (usage) => set({ usage }),
 
   setChatRunning: (sessionId, running) =>
     set((prev) => {

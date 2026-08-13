@@ -39,6 +39,17 @@
 /**
  * @typedef {Object} UsageSnapshot
  * @property {string} provider      Adapter id: "claude" | "codex" | "kimi".
+ * @property {string[]} providerIDs opencode providerIDs this snapshot covers
+ *                                  (copied verbatim from the adapter's own
+ *                                  `providerIDs` — see UsageAdapter below).
+ *                                  BET-USAGE-B matches the renderer's active
+ *                                  model to a snapshot through THIS field, not
+ *                                  `provider` — the adapter id ("claude") and
+ *                                  opencode's providerID ("anthropic") are
+ *                                  different namespaces on purpose (adapter id
+ *                                  is this engine's registry key; providerID is
+ *                                  opencode's), so a name-equality match would
+ *                                  silently fail for every adapter.
  * @property {string} [planLabel]   "Max 20x", "Pro", "Allegretto".
  * @property {UsageWindow[]} windows
  * @property {{label:string,value:string}[]} [extras]  Credits balance, model pools.
@@ -148,6 +159,7 @@ export function createUsagePoller({
           }
           results.push({
             provider: adapter.id,
+            providerIDs: adapter.providerIDs,
             ...(raw.planLabel ? { planLabel: raw.planLabel } : {}),
             windows,
             ...(Array.isArray(raw.extras) && raw.extras.length > 0 ? { extras: raw.extras } : {}),

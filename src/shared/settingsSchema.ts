@@ -157,6 +157,16 @@ export const SETTINGS: SettingEntry[] = [
       { value: "1h", label: "1 hour" },
     ],
   },
+  {
+    id: "alwaysShowUsage",
+    section: "models",
+    label: "Always show plan usage",
+    help: "Show the usage dial even when you are well under your limits.",
+    control: "toggle",
+    configKey: "alwaysShowUsage",
+    platform: "both",
+    default: false,
+  },
 
   // ----- sessions (per-session behaviour) -----
   {

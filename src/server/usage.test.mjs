@@ -164,6 +164,10 @@ test("poller skips an adapter whose detect() is false — no snapshot, no fetch 
   assert.equal(fetchCalls, 0);
   assert.equal(poller.snapshots.length, 1);
   assert.equal(poller.snapshots[0].provider, "on");
+  // BET-USAGE-B matches the renderer's active model against `providerIDs`,
+  // not `provider` — pin that the poller copies it straight from the
+  // adapter's own registry entry.
+  assert.deepEqual(poller.snapshots[0].providerIDs, ["on"]);
 });
 
 test("poller quarantines a throwing adapter — the others' snapshots stay intact", async () => {

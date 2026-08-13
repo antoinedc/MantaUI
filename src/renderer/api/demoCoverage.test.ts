@@ -61,6 +61,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onServerUpdateAvailable",
   "onServerUpdateProgress",
   "onSyncDelta",
+  "onUsageUpdated",
   "openExternal",
   "opencodeAbort",
   "opencodeAgents",

@@ -16,6 +16,15 @@ import { IconButton } from "./IconButton";
 // @-file row visible when it moves past the popup's scroll fold.
 import { useSelectedIntoView } from "./PaletteShell";
 
+// Shared chrome for the composer's icon-row buttons (BET-620 change 6): the
+// three SessionToolbar resource buttons AND UsageDial's trigger (BET-738) —
+// exported so UsageDial imports this exact string rather than copying it,
+// which is exactly how the row would drift. 27px hit, --r-sm radius, --tx3
+// rest tone, matches the mockup's `.mbtn`.
+export const mbtn =
+  "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors " +
+  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
 // here so its live count is always visible next to the composer.
@@ -37,12 +46,6 @@ export function SessionToolbar({
   onSecrets: () => void;
   onWebhooks: () => void;
 }) {
-  // Shared chrome for the three resource buttons (BET-620 change 6). One const
-  // so they can't drift; the count badge carries its own mono type. Matches
-  // the mockup's `.mbtn` (27px hit, --r-sm radius, --tx3 rest tone).
-  const mbtn =
-    "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors " +
-    "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
   const cnum =
     "font-mono text-[11px] leading-none font-semibold text-text-muted tabular-nums";
   return (
