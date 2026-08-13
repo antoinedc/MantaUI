@@ -382,6 +382,7 @@ struct ArtifactsCard: View {
                 if failed {
                     Text("Couldn't load artifacts.")
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("artifacts-failed")
                 } else if loaded {
                     if files.isEmpty {
                         emptyState
@@ -454,6 +455,7 @@ struct ArtifactsCard: View {
             systemImage: "doc",
             description: Text("Files the AI sends during this conversation will appear here.")
         )
+        .accessibilityIdentifier("artifacts-empty")
     }
 
     private func row(_ file: OutboxFile) -> some View {
@@ -462,6 +464,7 @@ struct ArtifactsCard: View {
                 Text(file.name)
                     .font(.body)
                     .lineLimit(1)
+                    .accessibilityIdentifier("artifact-name-\(file.name)")
                 Text(Self.formatSize(file.size))
                     .font(.caption)
                     .foregroundStyle(.secondary)
