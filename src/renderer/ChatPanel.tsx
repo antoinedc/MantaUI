@@ -1875,17 +1875,35 @@ export function ChatPanel({
     secrets: { order: 2, label: "secret" },
     webhooks: { order: 1, label: "webhook" },
   };
+  // Monotonic first-seen arrival counter for blocking cards (BET-783 reviewer
+  // Block). Records each blocking ask's true interleaved arrival across
+  // permission requests AND delegate-approval, so "newest" is real arrival
+  // order — NOT derived from the live array length. Deriving delegate's order
+  // from `permissions.length` always out-ranks every newer permission, which
+  // is exactly the "urgent thing demoted" failure this issue prevents. The
+  // idempotent `map.size` assignment survives React StrictMode double-render
+  // (second pass finds the id already present) and the per-session-instance
+  // lifetime (ChatPanel is keyed by session id in App) makes it self-resetting.
+  const blockingArrival = useRef<Map<string, number>>(new Map());
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "blocking", order, render });
     const amb = (id: string, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "ambient", order: AMBIENT_CARD[id].order, label: AMBIENT_CARD[id].label, render });
-    // Blocking tier — permission requests + delegate-approval. Array index is
-    // arrival order, so the last is newest (highest order => rendered first).
+    const blockOrder = (id: string): number => {
+      const map = blockingArrival.current;
+      let order = map.get(id);
+      if (order === undefined) {
+        order = map.size;
+        map.set(id, order);
+      }
+      return order;
+    };
+    // Blocking tier — permission requests + delegate-approval, newest first.
     if (!jobOwnership) {
-      permissions.forEach((p, i) => list.push(block(
-        `permission-${p.id}`, i,
+      permissions.forEach((p) => list.push(block(
+        `permission-${p.id}`, blockOrder(`permission-${p.id}`),
         <PermissionCard
           key={p.id}
           perm={p}
@@ -1893,7 +1911,7 @@ export function ChatPanel({
         />,
       )));
       if (pendingApproval) list.push(block(
-        "delegate-approval", permissions.length,
+        "delegate-approval", blockOrder("delegate-approval"),
         <DelegateApprovalCard
           approval={pendingApproval}
           onApprove={(tools: DelegateApprovalTool[]) => {
