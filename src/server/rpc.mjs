@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
-import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
+import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
@@ -369,17 +369,6 @@ export function buildHandlers({
         mime: input?.mime ?? "audio/webm",
         apiKey: cfg.groqApiKey ?? "",
         model: cfg.voiceTranscriptionModel,
-      });
-    },
-
-    // preload: ipcRenderer.invoke(IPC.voiceClassifyCommand, { transcript, useLlmFallback? })
-    "voice:classify-command": async (input) => {
-      const cfg = await local.configGet();
-      return classifyVoiceCommand({
-        transcript: input?.transcript ?? "",
-        apiKey: cfg.groqApiKey ?? "",
-        model: cfg.voiceCommandModel,
-        useLlmFallback: input?.useLlmFallback,
       });
     },
 

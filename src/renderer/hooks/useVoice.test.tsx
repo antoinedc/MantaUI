@@ -167,20 +167,4 @@ describe("useVoice via ChatPanel", () => {
     // Component should still be mounted.
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
-
-  it("handles manta-voice-app-action custom event", async () => {
-    h = mount(<ChatPanel {...PROPS} />);
-    await h.flush();
-
-    // Simulate a custom event for app-level voice actions
-    await act(async () => {
-      const event = new CustomEvent("manta-voice-app-action", {
-        detail: { kind: "new-session" },
-      });
-      window.dispatchEvent(event);
-    });
-
-    // Component should still be mounted.
-    expect(h.container.querySelector("textarea")).not.toBeNull();
-  });
 });

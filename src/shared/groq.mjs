@@ -4,25 +4,16 @@
 // the renderer so the Groq API key never leaves the trusted process. Uses
 // only Node 22 built-ins (global fetch, FormData, Blob) — no SDK dep.
 //
-// Two operations:
+// One operation:
 //   - transcribeAudio: POST /openai/v1/audio/transcriptions (multipart, file+model)
-//   - classifyCommand: rules-first (voiceClassifier.mjs), then optionally
-//     POST /openai/v1/chat/completions with JSON response_format
 //
-// Error contract: both functions throw Error with a single-line message
-// suitable for renderer toast display. Transport errors get the bare-fetch-
-// failed unwrap treatment that opencode.ts uses elsewhere (cause.code).
-
-import {
-  classifyByRules,
-  buildClassifierPrompt,
-  coerceLlmAction,
-} from "./voiceClassifier.mjs";
+// Error contract: throws Error with a single-line message suitable for
+// renderer toast display. Transport errors get the bare-fetch-failed unwrap
+// treatment that opencode.ts uses elsewhere (cause.code).
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 
 const DEFAULT_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo";
-const DEFAULT_COMMAND_MODEL = "llama-3.1-8b-instant";
 
 /** @param {unknown} e */
 function explainFetchError(e) {
@@ -109,111 +100,4 @@ export async function transcribeAudio({ buffer, mime, apiKey, model }) {
   }
   const json = /** @type {{ text?: string }} */ (await res.json());
   return { text: typeof json.text === "string" ? json.text : "" };
-}
-
-/**
- * Classify a transcript into a VoiceAction. Tries the rules classifier
- * first (zero cost), falls back to a Groq llama call when no rule matches
- * AND `useLlmFallback !== false` AND an API key is configured. When the
- * LLM is unreachable or unset, returns `{kind:"unknown",transcript}` so
- * the renderer can surface the raw text.
- *
- * @param {object} args
- * @param {string}  args.transcript
- * @param {string}  [args.apiKey]
- * @param {string}  [args.model]
- * @param {boolean} [args.useLlmFallback=true]
- * @returns {Promise<{ action: import("./types.js").VoiceAction; source: "rules" | "llm" | "none" }>}
- */
-export async function classifyVoiceCommand({
-  transcript,
-  apiKey,
-  model,
-  useLlmFallback = true,
-}) {
-  const ruled = classifyByRules(transcript);
-  if (ruled) return { action: ruled, source: "rules" };
-
-  if (!useLlmFallback || !apiKey) {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-
-  const { system, user } = buildClassifierPrompt(String(transcript ?? ""));
-  const url = `${GROQ_BASE}/chat/completions`;
-  let res;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: model || DEFAULT_COMMAND_MODEL,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        // JSON-mode keeps the reply parseable without prompt gymnastics.
-        response_format: { type: "json_object" },
-        // Tight cap — the schema is small. Anything longer than ~80 tokens
-        // is the model going off-script; truncating saves cost.
-        max_tokens: 120,
-        temperature: 0,
-      }),
-    });
-  } catch (e) {
-    // Network failure → fall back to unknown. The user already paid the
-    // mic-press cost; degrading to a textarea-insert is friendlier than a
-    // hard error toast.
-    return {
-      action: {
-        kind: "unknown",
-        transcript: `${transcript} (classifier offline: ${explainFetchError(e)})`,
-      },
-      source: "none",
-    };
-  }
-  if (!res.ok) {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-  let json;
-  try {
-    json = await res.json();
-  } catch {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-  const content = json?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-  const coerced = coerceLlmAction(parsed);
-  if (!coerced) {
-    return {
-      action: { kind: "unknown", transcript: String(transcript ?? "") },
-      source: "none",
-    };
-  }
-  return { action: coerced, source: "llm" };
 }

@@ -33,8 +33,6 @@ import type {
   PtyEvent,
   AvailableLauncher,
   TmuxConfigStatus,
-  VoiceClassifyInput,
-  VoiceClassifyResult,
   VoiceTranscribeInput,
   VoiceTranscribeResult,
   WindowStatus,
@@ -207,10 +205,8 @@ export interface Api {
   // a rejected promise.
   authPair(): Promise<AuthPairResult>;
 
-  // Voice (Groq STT + lightweight classifier). Main owns the API key;
-  // renderer only ships audio bytes / transcripts.
+  // Voice (Groq STT). Main owns the API key; renderer only ships audio bytes.
   voiceTranscribe(input: VoiceTranscribeInput): Promise<VoiceTranscribeResult>;
-  voiceClassifyCommand(input: VoiceClassifyInput): Promise<VoiceClassifyResult>;
 
   clipboardWriteText(text: string): Promise<void>;
   clipboardReadImage(): Promise<ArrayBuffer | null>;

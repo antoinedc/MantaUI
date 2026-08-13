@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Mic, Shield, Square } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
-import type { VoiceMode, VoicePhase } from "./voice";
+import type { VoicePhase } from "./voice";
 import {
   arrowDownNavigatesHistory,
   arrowUpNavigatesHistory,
@@ -166,7 +166,6 @@ export function InputArea({
   setChatAutoAllow,
   voiceEnabled,
   voicePhase,
-  voiceMode,
   voiceRecording,
   voiceProcessing,
   startVoice,
@@ -223,10 +222,9 @@ export function InputArea({
   setChatAutoAllow: (v: boolean) => Promise<void>;
   voiceEnabled: boolean;
   voicePhase: VoicePhase;
-  voiceMode: VoiceMode;
   voiceRecording: boolean;
   voiceProcessing: boolean;
-  startVoice: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
+  startVoice: () => void;
   stopVoice: () => void;
   cancelVoice: () => void;
   // tokens / staleCache / branch / activeModel moved to SessionHeader
@@ -302,7 +300,6 @@ export function InputArea({
       {voiceEnabled && isMobileShell && (
         <MicButton
           phase={voicePhase}
-          mode={voiceMode}
           onStart={startVoice}
           onStop={stopVoice}
           onCancel={cancelVoice}
@@ -499,7 +496,6 @@ export function InputArea({
               {voiceEnabled && (
                 <MicButton
                   phase={voicePhase}
-                  mode={voiceMode}
                   onStart={startVoice}
                   onStop={stopVoice}
                   onCancel={cancelVoice}

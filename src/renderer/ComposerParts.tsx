@@ -7,10 +7,9 @@
 
 import { useRef } from "react";
 import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip } from "lucide-react";
-import type { VoiceMode, VoicePhase } from "./voice";
+import type { VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import type { PendingScreenshot } from "./store";
-import { ALT_KEY } from "./platform";
 import { IconButton } from "./IconButton";
 // BET-726 Task 1: same scrollIntoView idiom the ⌘K / ⌘F palettes and the
 // model/effort menus use (PaletteShell.tsx) — keeps the keyboard-selected
@@ -319,16 +318,8 @@ function TypeaheadRowButton({
 
 // ===== Input area =====
 
-// Press-and-hold mic button. Plain tap = dictate (transcript inserted at
-// caret). Hold + ⌥ on desktop, or a long-press (≥500ms) on touch, = command
-// mode (transcript routed through the rules classifier + Groq llama).
-//
-// **Mode source of truth lives in `useVoiceRecorder`** — see the W2 fix in
-// PR #4 review. The previous design kept a parallel `modeRef` in the
-// button which never propagated to the hook, so long-press on touch
-// transcribed as dictate. The button now passes "dictate" or "command"
-// at press time (based on the ⌥ modifier) and the HOOK schedules the
-// long-press promotion + exposes the current mode for the label.
+// Press-and-hold mic button. Dictation-only: the transcript is inserted at
+// the caret (via the hook's onResult).
 //
 // Visual states (phase):
 //   - idle       → microphone glyph in text-muted
@@ -338,22 +329,18 @@ function TypeaheadRowButton({
 //   - error      → muted-red mic; click to retry by pressing again
 export function MicButton({
   phase,
-  mode,
   onStart,
   onStop,
   onCancel,
   floating = false,
 }: {
   phase: VoicePhase;
-  mode: VoiceMode;
-  onStart: (mode: VoiceMode, opts?: { promote?: boolean }) => Promise<void>;
+  onStart: () => void;
   onStop: () => void;
   onCancel: () => void;
   // `floating` = the mobile WhatsApp-style push-to-talk FAB (bottom-right,
-  // above the composer). It is dictation-only: it starts in "dictate" with
-  // promotion DISABLED so a normal speak-length hold isn't reclassified as a
-  // voice command. The inline (non-floating) variant keeps the desktop ⌥ /
-  // long-press → command behavior.
+  // above the composer). It is dictation-only, the same as the inline
+  // button — transcription is always plain text into the composer.
   floating?: boolean;
 }) {
   const recording = phase === "recording" || phase === "requesting";
@@ -378,15 +365,7 @@ export function MicButton({
     if (busy || pressActiveRef.current) return;
     e.preventDefault();
     pressActiveRef.current = true;
-    if (floating) {
-      // PTT FAB: always plain dictation, no command promotion.
-      onStart("dictate", { promote: false });
-    } else {
-      // Desktop ⌥-modifier promotes to command IMMEDIATELY. Otherwise we
-      // start in dictate and let the hook's longPressMs timer flip us.
-      const initial: VoiceMode = e.altKey ? "command" : "dictate";
-      onStart(initial);
-    }
+    onStart();
     // Capture so onPointerUp fires even if the cursor leaves the button.
     try {
       (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
@@ -419,12 +398,10 @@ export function MicButton({
     : recording
       ? floating
         ? "release to insert"
-        : mode === "command"
-          ? "release · command"
-          : "release · dictate"
+        : "release · dictate"
       : floating
         ? "hold to talk"
-        : `hold to speak (${ALT_KEY} = command)`;
+        : "hold to speak";
 
   // Floating PTT FAB: round bubble, bottom-right (positioned by the
   // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the
@@ -456,11 +433,9 @@ export function MicButton({
     );
   }
 
-  // Active colour follows the MODE the hook owns (BET-416 §C): dictate →
-  // --danger, command → --accent. Idle is --tx3 (text-faint). The hook is the
-  // single source of truth for mode — do NOT add a second mode ref here (that
-  // was PR #4's W2 bug).
-  const activeColor = mode === "command" ? "text-accent" : "text-danger";
+  // Active colour is always the danger red while recording (BET-416 §C).
+  // Idle is --tx3 (text-faint).
+  const activeColor = "text-danger";
 
   return (
     <button

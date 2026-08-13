@@ -1205,35 +1205,6 @@ function AppInner() {
     return () => window.removeEventListener("keydown", handler);
   }, [projects, activeProjectName, activeWindowByProject, jumpToWindow, settingsOpen, activeChatSessionId, mode]);
 
-  // Voice command → app-scoped action bus. ChatPanel dispatches a
-  // `manta-voice-app-action` CustomEvent for actions it doesn't own
-  // (switch-window / new-session / open-settings). Keeping the routing
-  // here avoids drilling refs into every panel and matches how the
-  // ⌘1..9 / ⌥⌘↑↓ shortcuts already work above.
-  useEffect(() => {
-    const handler = (ev: Event) => {
-      const detail = (ev as CustomEvent<{ kind: string; index?: number }>).detail;
-      if (!detail) return;
-      if (detail.kind === "open-settings") {
-        setSettingsOpen(true);
-        return;
-      }
-      if (detail.kind === "new-session") {
-        sidebarRef.current?.openNewSessionInActive();
-        return;
-      }
-      if (detail.kind === "switch-window" && typeof detail.index === "number") {
-        const flat = flatSessions(projects);
-        const target = flat[detail.index - 1];
-        if (!target) return;
-        jumpToWindow(target.project.tmuxSession, target.window.index);
-      }
-    };
-    window.addEventListener("manta-voice-app-action", handler as EventListener);
-    return () =>
-      window.removeEventListener("manta-voice-app-action", handler as EventListener);
-  }, [projects, jumpToWindow]);
-
   // Generic "open Settings on section X" bridge, the same window-CustomEvent
   // convention as the schedules/secrets bridges. The composer-level menus
   // dispatch it; App owns the Settings modal, so it consumes it here — it

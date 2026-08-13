@@ -202,20 +202,6 @@ enum SettingsSchema {
             commitOnBlur: false,
             placeholder: "whisper-large-v3-turbo",
         ),
-        SettingEntry(
-            id: "voiceCommandModel",
-            section: "voice",
-            label: "Command classifier model",
-            help: "",
-            control: SettingControl.text,
-            configKey: "voiceCommandModel",
-            defaultString: "",
-            defaultBool: nil,
-            defaultNumber: nil,
-            options: nil,
-            commitOnBlur: false,
-            placeholder: "llama-3.1-8b-instant",
-        ),
     ]
 
     static func entries(in sectionID: String) -> [SettingEntry] {

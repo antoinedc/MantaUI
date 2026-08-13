@@ -48,7 +48,7 @@ import { ListRow } from "./ListRow";
 import { Skeleton } from "./Skeleton";
 import { StatusDot } from "./StatusDot";
 import { worktreeName } from "./folderPicker";
-import { useVoiceRecorder, type VoiceResult } from "./voice";
+import { useVoiceRecorder } from "./voice";
 import {
   describeRepoRow,
   formatAge,
@@ -56,7 +56,7 @@ import {
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
-import type { VoiceMode, VoicePhase } from "./voice";
+import type { VoicePhase } from "./voice";
 import type {
   ForgeCliStatus,
   OpencodeModel,
@@ -444,8 +444,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
   // ---- voice (simplified: just insert transcribed text) ----
   const voiceRecorder = useVoiceRecorder({
-    onResult: (r: VoiceResult) => {
-      const text = r.mode === "dictate" ? r.text : "";
+    onResult: (text) => {
       if (!text) return;
       const prev = useStore.getState().drafts.find((d) => d.id === draftId)?.input ?? "";
       const sep = prev && !prev.endsWith(" ") ? " " : "";
@@ -463,7 +462,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     onEmpty: () => {},
   });
   const voicePhase: VoicePhase = voiceRecorder.phase;
-  const voiceMode: VoiceMode = voiceRecorder.mode;
   const voiceRecording = voicePhase === "recording" || voicePhase === "requesting";
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceEnabled = !!groqApiKey && typeof MediaRecorder !== "undefined";
@@ -782,8 +780,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           {voiceEnabled ? (
             <MicButton
               phase={voicePhase}
-              mode={voiceMode}
-              onStart={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
+              onStart={() => { voiceRecorder.start(); }}
               onStop={voiceRecorder.stop}
               onCancel={voiceRecorder.cancel}
             />

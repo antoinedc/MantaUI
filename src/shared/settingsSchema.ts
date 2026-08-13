@@ -300,17 +300,6 @@ export const SETTINGS: SettingEntry[] = [
     default: "",
     placeholder: "whisper-large-v3-turbo",
   },
-  {
-    id: "voiceCommandModel",
-    section: "voice",
-    label: "Command classifier model",
-    help: "",
-    control: "text",
-    configKey: "voiceCommandModel",
-    platform: "both",
-    default: "",
-    placeholder: "llama-3.1-8b-instant",
-  },
 ];
 
 // ----- pure helpers -----
