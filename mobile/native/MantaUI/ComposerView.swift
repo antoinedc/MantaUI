@@ -57,6 +57,17 @@ struct ComposerView: View {
     /// Flip the `chatAutoAllow` trust setting (voice `toggleTrust`, BET-748).
     /// The chat screen owns the flip + revert; the composer just triggers it.
     var onToggleTrust: (() -> Void)? = nil
+    /// The session's working directory, threaded from the chat screen so the
+    /// `@`-file typeahead searches within the session (BET-749). `findFiles`
+    /// takes it directly, the same way `vcsBranch` does; nil when the session
+    /// hasn't been resolved yet.
+    var sessionDirectory: String? = nil
+    /// Performs a `/clear` (BET-749 slash palette). Optional: the chat screen
+    /// owns clearing + re-navigation; the composer just triggers it.
+    var onSlashClear: (() -> Void)? = nil
+    /// Performs a `/fork` (BET-749 slash palette). Optional: the chat screen
+    /// owns forking + navigation; the composer just triggers it.
+    var onSlashFork: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var text = ""
@@ -83,6 +94,19 @@ struct ComposerView: View {
     @State private var isTall = false
     /// The near-full-screen editing sheet, opened by the expand control.
     @State private var showExpanded = false
+    /// The active `@`-file token the cursor is inside (nil when no mention is
+    /// being composed) — BET-749 gap #10.
+    @State private var activeMention: ComposerTypeahead.MentionAnchor?
+    /// The `findFiles` matches for the active mention query, capped to bound
+    /// RPC chatter. Empty hides the typeahead.
+    @State private var fileResults: [String] = []
+    /// Mentions chosen from the `@` typeahead, pending on the draft. They
+    /// serialize onto the next send via the existing `Mention` path.
+    @State private var draftMentions: [SendPromptInput.Mention] = []
+    /// Debounced `findFiles` task (owned here so a fast typist doesn't pile up
+    /// parallel RPCs) + the sequence guard that discards stale responses.
+    @State private var fileSearchTask: Task<Void, Never>?
+    @State private var fileSearchSeq = 0
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     var body: some View {
@@ -94,6 +118,18 @@ struct ComposerView: View {
             // exactly how attaching a file came to do nothing at all.
             pickerAnchor
             expandAnchor
+            // The `@`-file typeahead and the `/` slash palette float just above
+            // the box (BET-749). At most one is active: `@` and `/` are disjoint
+            // triggers, and each is nil unless its token is genuinely being
+            // composed.
+            if let palette = slashPalette {
+                slashPaletteView(palette)
+                    .transition(.opacity)
+            }
+            if activeMention != nil, !fileResults.isEmpty {
+                mentionTypeahead
+                    .transition(.opacity)
+            }
             // The jump-to-bottom control sits right above the composer,
             // centered — not in the control row. Shown only while scrolled up.
             if showScrollToBottom {
@@ -133,6 +169,10 @@ struct ComposerView: View {
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
         }
+        .onChange(of: text) { _, newValue in
+            handleTextChange(newValue)
+        }
+        .animation(.smooth(duration: 0.18), value: typeaheadOpen)
         .onChange(of: store.actionHint) { _, hint in
             guard let hint else { return }
             surfaceHint(hint)
@@ -857,10 +897,11 @@ struct ComposerView: View {
             return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
         }
         let sentText = trimmed
+        let mentions = draftMentions.isEmpty ? nil : draftMentions
         Task { @MainActor in
             // On a failed send the store rolled its running state back; restore
             // the user's message so it is never silently lost, and surface why.
-            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model)
+            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model, mentions: mentions)
             if !ok {
                 text = sentText
                 surfaceHint("Send failed — message restored")
@@ -868,11 +909,177 @@ struct ComposerView: View {
         }
         text = ""
         attachments = []
+        draftMentions = []
         // Return to the compact form explicitly rather than waiting for the
         // emptied editor to re-measure. The measurement does arrive, but a beat
         // later — long enough for the box to sit stacked and empty after a
         // send, which reads as the composer being stuck.
         withAnimation(.smooth(duration: 0.22)) { isTall = false }
+        inputFocused = true
+    }
+
+    // MARK: - @-file typeahead + / slash palette (BET-749 gap #10)
+
+    /// True when either the `@` typeahead or the `/` palette is showing — the
+    /// single value the popup animation keys off.
+    private var typeaheadOpen: Bool {
+        (activeMention != nil && !fileResults.isEmpty) || slashPalette != nil
+    }
+
+    /// The live caret, in UTF-16 units — read from the focused text view the
+    /// same way dictation's insert-at-caret does. Falls back to end-of-text
+    /// when no text view is focused.
+    private var composerCaret: Int {
+        Self.activeTextView()?.selectedRange.location ?? (text as NSString).length
+    }
+
+    /// The active `/` palette's filtered command list, or nil when the slash
+    /// isn't being composed (no leading `/` / caret out of the word / no match).
+    private var slashPalette: [ComposerTypeahead.SlashCommand]? {
+        guard let anchor = ComposerTypeahead.detectSlash(in: text, caret: composerCaret) else { return nil }
+        let filtered = ComposerTypeahead.filterSlashCommands(
+            ComposerTypeahead.slashCommands(running: store.running),
+            query: anchor.query
+        )
+        return filtered.isEmpty ? nil : filtered
+    }
+
+    /// The `@`-file typeahead: a compact floating list of `findFiles` matches.
+    private var mentionTypeahead: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(fileResults, id: \.self) { file in
+                Button {
+                    selectFile(file)
+                } label: {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        Image(systemName: "doc")
+                            .font(.system(size: Metrics.type.xs, weight: .medium))
+                            .foregroundColor(tokens.accentTx)
+                        Text("@\(file)")
+                            .font(.manta(size: Metrics.type.small))
+                            .foregroundColor(tokens.tx1)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("mention-row")
+            }
+        }
+        .padding(.vertical, Metrics.spacing.sp1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
+                .stroke(tokens.borderSubtle, lineWidth: 1)
+        }
+        .accessibilityIdentifier("mention-typeahead")
+    }
+
+    /// The `/` command palette: one row per supported action. Selecting a row
+    /// performs the corresponding existing store/screen action.
+    private func slashPaletteView(_ commands: [ComposerTypeahead.SlashCommand]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(commands) { command in
+                Button {
+                    performSlash(command)
+                } label: {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("/\(command.id)")
+                                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                                .foregroundColor(tokens.tx1)
+                            Text(command.subtitle)
+                                .font(.manta(size: Metrics.type.twoXS))
+                                .foregroundColor(tokens.tx2)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("slash-row-\(command.id)")
+            }
+        }
+        .padding(.vertical, Metrics.spacing.sp1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
+                .stroke(tokens.borderSubtle, lineWidth: 1)
+        }
+        .accessibilityIdentifier("slash-palette")
+    }
+
+    /// Re-run the `@` detection whenever the draft changes: update the active
+    /// anchor and (debounced) fetch matches, or clear the typeahead when the
+    /// mention composition has ended.
+    private func handleTextChange(_ newText: String) {
+        let caret = Self.activeTextView()?.selectedRange.location ?? (newText as NSString).length
+        if let anchor = ComposerTypeahead.detectMention(in: newText, caret: caret) {
+            activeMention = anchor
+            searchFiles(query: anchor.query)
+        } else {
+            activeMention = nil
+            fileResults = []
+            fileSearchTask?.cancel()
+        }
+    }
+
+    /// Debounced `findFiles`, sequence-guarded so a stale response can't
+    /// clobber the latest. ~250 ms matches the desktop's fire-on-type look.
+    private func searchFiles(query: String) {
+        fileSearchTask?.cancel()
+        let seq = fileSearchSeq + 1
+        fileSearchSeq = seq
+        fileSearchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let results = (try? await api.findFiles(query: query, directory: sessionDirectory)) ?? []
+            guard fileSearchSeq == seq else { return }
+            fileResults = Array(results.prefix(10))
+        }
+    }
+
+    /// Insert a chosen file into the draft at the mention anchor and record the
+    /// `Mention` so it serializes onto the next send.
+    private func selectFile(_ file: String) {
+        guard let anchor = activeMention else { return }
+        let insertion = ComposerTypeahead.applyMention(file, to: text, anchor: anchor)
+        text = insertion.newText
+        draftMentions.append(insertion.mention)
+        activeMention = nil
+        fileResults = []
+        fileSearchTask?.cancel()
+        inputFocused = true
+    }
+
+    /// Perform a `/` palette selection: route to the corresponding existing
+    /// store/screen action, then clear the composition so the palette doesn't
+    /// reopen on the same text.
+    private func performSlash(_ command: ComposerTypeahead.SlashCommand) {
+        switch command.kind {
+        case .submit:
+            submit()
+        case .compact:
+            store.compact()
+        case .clear:
+            onSlashClear?()
+        case .fork:
+            onSlashFork?()
+        case .abort:
+            store.abort()
+        }
+        if command.kind != .submit { text = "" }
+        activeMention = nil
+        fileResults = []
+        fileSearchTask?.cancel()
         inputFocused = true
     }
 

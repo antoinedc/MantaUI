@@ -221,13 +221,13 @@ struct SendPromptInput: Sendable {
         var filename: String?
     }
 
-    struct MentionSource: Sendable {
+    struct MentionSource: Sendable, Equatable {
         var value: String
         var start: Int
         var end: Int
     }
 
-    struct Mention: Sendable {
+    struct Mention: Sendable, Equatable {
         var name: String
         var source: MentionSource
     }

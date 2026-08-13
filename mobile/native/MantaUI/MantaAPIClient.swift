@@ -222,6 +222,16 @@ final class MantaAPIClient: Sendable {
         try await call("opencode:vcs-branch", args: [directory], as: String.self)
     }
 
+    /// `opencode:find-files` — ripgrep-backed file-name search under a
+    /// directory (the desktop's `@`-file lookup channel). `directory` may be
+    /// nil when the session doesn't thread one; the box then returns a
+    /// browse-style listing. Result is a bare `[String]` of matching paths.
+    func findFiles(query: String, directory: String? = nil) async throws -> [String] {
+        var input: [String: Any] = ["query": query]
+        if let directory { input["directory"] = directory }
+        return try await call("opencode:find-files", args: [input], as: [String].self) ?? []
+    }
+
     /// `tmux:rename-window` — rename a session (the row's name).
     func renameWindow(session: String, index: Int, newName: String) async throws {
         let dict: [String: Any] = [
