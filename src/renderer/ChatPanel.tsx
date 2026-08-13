@@ -73,7 +73,7 @@ import { MeasureColumn } from "./MeasureColumn";
 import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
-import { CardMount } from "./components/CardMount";
+import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
 import { useTranscriptState } from "./hooks/useTranscriptState";
@@ -1858,6 +1858,146 @@ export function ChatPanel({
     return () => setChatMessages(sessionId, []);
   }, [sessionId, setChatMessages]);
 
+
+  // ===== Pinned card stack (BET-783) =====
+  // The cards that mount above the composer used to be ten hardcoded CardMount
+  // blocks in JSX order, so the transcript was the only flexible child and a
+  // permission request could land below three ambient cards. They are now DATA
+  // — a list the pure `arrangeCards` arbiter (via <CardStack/>) sorts into a
+  // blocking tier (always above ambient, at most one expanded) and an ambient
+  // tier (fixed priority, at most two expanded, the rest rolled up).
+  const AMBIENT_CARD: Record<string, { order: number; label: string }> = {
+    retry: { order: 7, label: "retry" },
+    compaction: { order: 6, label: "compaction" },
+    "send-error": { order: 5, label: "error" },
+    queued: { order: 4, label: "queued" },
+    schedules: { order: 3, label: "schedule" },
+    secrets: { order: 2, label: "secret" },
+    webhooks: { order: 1, label: "webhook" },
+  };
+  const cards = useMemo<PinnedCardRender[]>(() => {
+    const list: PinnedCardRender[] = [];
+    const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
+      ({ id, tier: "blocking", order, render });
+    const amb = (id: string, render: React.ReactNode): PinnedCardRender =>
+      ({ id, tier: "ambient", order: AMBIENT_CARD[id].order, label: AMBIENT_CARD[id].label, render });
+    // Blocking tier — permission requests + delegate-approval. Array index is
+    // arrival order, so the last is newest (highest order => rendered first).
+    if (!jobOwnership) {
+      permissions.forEach((p, i) => list.push(block(
+        `permission-${p.id}`, i,
+        <PermissionCard
+          key={p.id}
+          perm={p}
+          onReply={(reply) => replyPermission(p.id, reply, p.sessionID)}
+        />,
+      )));
+      if (pendingApproval) list.push(block(
+        "delegate-approval", permissions.length,
+        <DelegateApprovalCard
+          approval={pendingApproval}
+          onApprove={(tools: DelegateApprovalTool[]) => {
+            const id = pendingApproval.id;
+            setPendingApproval(null);
+            void window.api.delegateApprove(id, tools).catch(() => { /* best-effort */ });
+          }}
+          onDecline={() => {
+            const id = pendingApproval.id;
+            setPendingApproval(null);
+            void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
+          }}
+        />,
+      ));
+    }
+    // Ambient tier — fixed priority, independent of arrival order.
+    if (retryInfo) list.push(amb("retry",
+      <div className="shrink-0 px-4 pt-2"><RetryCard info={retryInfo} /></div>));
+    if (compactionState) list.push(amb("compaction",
+      <div className="shrink-0 px-4 pt-2"><CompactionCard state={compactionState} /></div>));
+    if (sendError) list.push(amb("send-error",
+      <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
+        <span className="flex-1">⚠ {sendError}</span>
+        {authReconnect && (
+          <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Reconnect ${authReconnect}`}>
+            Reconnect
+          </button>
+        )}
+        <button onClick={() => setSendError(null)} className="text-danger hover:text-danger leading-none px-1 inline-flex items-center" title="Dismiss" aria-label="Dismiss error">
+          <X size={14} aria-hidden="true" />
+        </button>
+      </div>));
+    if (running && messageQueue.length > 0) list.push(amb("queued",
+      <MeasureColumn>
+        <div className="shrink-0 pb-2 flex flex-col text-meta text-text-faint" style={{ gap: "var(--block-gap)" }}>
+          {messageQueue.map((msg, i) => (
+            <div key={i} className="flex items-baseline gap-1">
+              <Clock size={14} aria-hidden="true" className="shrink-0 self-center" />
+              <span className="italic flex-1 truncate">{msg}</span>
+              <button onClick={() => setMessageQueue((q) => q.filter((_, j) => j !== i))} className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center" title="Remove from queue" aria-label="Remove from queue">
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </MeasureColumn>));
+    if (!jobOwnership) {
+      if (openPanel === "schedules") list.push(amb("schedules",
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <ScheduledTasksCard
+            jobs={schedules}
+            error={scheduleError}
+            onClose={closePanel}
+            onDelete={(id) => {
+              setSchedules((prev) => prev.filter((j) => j.id !== id));
+              window.api.scheduleDelete(id).then(() => refreshSchedules()).catch((e: unknown) => {
+                setScheduleError(e instanceof Error ? e.message : "delete failed");
+                void refreshSchedules();
+              });
+            }}
+          />
+        </div>));
+      if (openPanel === "secrets") list.push(amb("secrets",
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <SecretsCard
+            secrets={secrets}
+            error={secretError}
+            sessionId={sessionId}
+            onClose={closePanel}
+            onSave={(input) => window.api.secretsSet(input).then((r) => {
+              if (r && r.ok === false) { setSecretError(r.error || "save failed"); return false; }
+              void refreshSecrets(); setSecretError(null); return true;
+            }).catch((e: unknown) => {
+              setSecretError(e instanceof Error ? e.message : "save failed"); return false;
+            })}
+            onDelete={(id) => {
+              setSecrets((prev) => prev.filter((s) => s.id !== id));
+              window.api.secretsDelete(id).then(() => refreshSecrets()).catch((e: unknown) => {
+                setSecretError(e instanceof Error ? e.message : "delete failed");
+                void refreshSecrets();
+              });
+            }}
+          />
+        </div>));
+      if (openPanel === "webhooks") list.push(amb("webhooks",
+        <div className="shrink-0 px-4 pt-2 pb-2">
+          <WebhooksCard
+            hooks={webhooks}
+            error={webhookError}
+            onClose={closePanel}
+            onDelete={(id) => {
+              setWebhooks((prev) => prev.filter((h) => h.id !== id));
+              window.api.webhookDelete(id).then(() => refreshWebhooks()).catch((e: unknown) => {
+                setWebhookError(e instanceof Error ? e.message : "delete failed");
+                void refreshWebhooks();
+              });
+            }}
+          />
+        </div>));
+    }
+    return list;
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission]);
+
+
   if (error || transcriptLoadError) {
     return (
       <div className="h-full w-full flex flex-col items-center justify-center gap-4 bg-bg text-text-muted p-6 font-mono">
@@ -1888,6 +2028,7 @@ export function ChatPanel({
       </div>
     );
   }
+
 
   return (
     <div
@@ -1970,239 +2111,13 @@ export function ChatPanel({
         motionStateRef={motionStateRef}
       />
 
-      {/* Pending permission cards. Shown above the running indicator/input */}
-      {/* so they're hard to miss — tool execution pauses until reply. */}
-      {/* Hidden for a job session (BET-418 §D: a job's pre-flight ruleset */}
-      {/* means it never generates asks, but gate defensively anyway). */}
-      {!jobOwnership && (
-      <CardMount show={permissions.length > 0} k="permission">
-        <div className="shrink-0 px-4 pt-2">
-          {/* BET-458: the permission card is a block in the conversation, not
-              an overlay — bound it to the same 72ch measure the transcript
-              column uses (see Transcript), so it edge-aligns with the prose
-              and the question cards instead of bleeding to the pane edge. */}
-          <div className="mx-auto w-full space-y-2" style={{ maxWidth: "72ch" }}>
-            {permissions.map((p) => (
-              <PermissionCard
-                key={p.id}
-                perm={p}
-                onReply={(reply) => replyPermission(p.id, reply, p.sessionID)}
-              />
-            ))}
-          </div>
-        </div>
-      </CardMount>
-      )}
-
-      {/* Retry status — surfaces session.status "retry" so the user can */}
-      {/* see WHY the spinner is still spinning (rate limit, transient API */}
-      {/* failure, etc) instead of assuming the AI is stalled. */}
-      <CardMount show={!!retryInfo} k="retry">
-        {retryInfo && (
-          <div className="shrink-0 px-4 pt-2">
-            <RetryCard info={retryInfo} />
-          </div>
-        )}
-      </CardMount>
-
-      {/* Transcript-loading card removed (BET-251). The warm-stale-reopen */}
-      {/* refetch is now surfaced as an ambient orange sweep on the composer's */}
-      {/* top divider — see InputArea. */}
-      {/* Cold-load (`messages === null`) is still covered by the full-screen */}
-      {/* "Connecting to session…" spinner above. */}
-      {/* `refreshing` is still threaded into the composer below. */}
-
-      {/* Live compaction progress. Streams the summary as it's produced and */}
-      {/* flips to a brief "Compacted" confirmation after .ended; clears on */}
-      {/* a timer (session.compacted refetch has already landed by then). */}
-      <CardMount show={!!compactionState} k="compaction">
-        {compactionState && (
-          <div className="shrink-0 px-4 pt-2">
-            <CompactionCard state={compactionState} />
-          </div>
-        )}
-      </CardMount>
-
-      {/* BET-418 §A: pre-flight background-job approval. Shown in the parent's */}
-      {/* panel when a `delegate` call declared tools and trust mode is OFF. */}
-      {/* Hidden for a job session (read-only view). */}
-      {!jobOwnership && (
-      <CardMount show={!!pendingApproval} k="delegate-approval">
-        {pendingApproval && (
-          <div className="shrink-0 px-4 pt-2 pb-2">
-            <DelegateApprovalCard
-              approval={pendingApproval}
-              onApprove={(tools: DelegateApprovalTool[]) => {
-                const id = pendingApproval.id;
-                setPendingApproval(null);
-                void window.api.delegateApprove(id, tools).catch(() => { /* best-effort */ });
-              }}
-              onDecline={() => {
-                const id = pendingApproval.id;
-                setPendingApproval(null);
-                void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
-              }}
-            />
-          </div>
-        )}
-      </CardMount>
-      )}
-
-      {/* Scheduled-tasks management card. Toggled by the ⏰ toolbar button */}
-      {/* (desktop) or the ⋯ sheet (mobile). Refetch-driven while open. */}
-      {/* pb-2 gives the card breathing room above the composer border so it */}
-      {/* doesn't sit flush against the chat divider. Hidden for a job session. */}
-      <CardMount show={!jobOwnership && openPanel === "schedules"} k="schedules">
-        {!jobOwnership && openPanel === "schedules" && (
-          <div className="shrink-0 px-4 pt-2 pb-2">
-            <ScheduledTasksCard
-              jobs={schedules}
-              error={scheduleError}
-              onClose={closePanel}
-              onDelete={(id) => {
-                setSchedules((prev) => prev.filter((j) => j.id !== id));
-                window.api
-                  .scheduleDelete(id)
-                  .then(() => refreshSchedules())
-                  .catch((e: unknown) => {
-                    setScheduleError(
-                      e instanceof Error ? e.message : "delete failed",
-                    );
-                    void refreshSchedules();
-                  });
-              }}
-            />
-          </div>
-        )}
-      </CardMount>
-
-      {/* Secrets management card. Toggled by the 🔑 toolbar button (desktop) or */}
-      {/* the ⋯ sheet (mobile). The value never appears here — list is metadata */}
-      {/* only. Hidden for a job session (read-only view). */}
-      <CardMount show={!jobOwnership && openPanel === "secrets"} k="secrets">
-        {!jobOwnership && openPanel === "secrets" && (
-          <div className="shrink-0 px-4 pt-2 pb-2">
-            <SecretsCard
-              secrets={secrets}
-              error={secretError}
-              sessionId={sessionId}
-              onClose={closePanel}
-              onSave={(input) => {
-                return window.api
-                  .secretsSet(input)
-                  .then((r) => {
-                    if (r && r.ok === false) {
-                      setSecretError(r.error || "save failed");
-                      return false;
-                    }
-                    void refreshSecrets();
-                    setSecretError(null);
-                    return true;
-                  })
-                  .catch((e: unknown) => {
-                    setSecretError(e instanceof Error ? e.message : "save failed");
-                    return false;
-                  });
-              }}
-              onDelete={(id) => {
-                setSecrets((prev) => prev.filter((s) => s.id !== id));
-                window.api
-                  .secretsDelete(id)
-                  .then(() => refreshSecrets())
-                  .catch((e: unknown) => {
-                    setSecretError(e instanceof Error ? e.message : "delete failed");
-                    void refreshSecrets();
-                  });
-              }}
-            />
-          </div>
-        )}
-      </CardMount>
-
-      {/* Inbound-webhook management card. Toggled by the 🪝 toolbar button */}
-      {/* (desktop) or the ⋯ sheet (mobile). List is metadata only (no signing */}
-      {/* secret); creation is the AI's job via the `webhook` opencode tool. */}
-      {/* Hidden for a job session (read-only view). */}
-      <CardMount show={!jobOwnership && openPanel === "webhooks"} k="webhooks">
-        {!jobOwnership && openPanel === "webhooks" && (
-          <div className="shrink-0 px-4 pt-2 pb-2">
-            <WebhooksCard
-              hooks={webhooks}
-              error={webhookError}
-              onClose={closePanel}
-              onDelete={(id) => {
-                setWebhooks((prev) => prev.filter((h) => h.id !== id));
-                window.api
-                  .webhookDelete(id)
-                  .then(() => refreshWebhooks())
-                  .catch((e: unknown) => {
-                    setWebhookError(e instanceof Error ? e.message : "delete failed");
-                    void refreshWebhooks();
-                  });
-              }}
-            />
-          </div>
-        )}
-      </CardMount>
-
-      <CardMount show={running && messageQueue.length > 0} k="queued">
-      {running && messageQueue.length > 0 && (
-            // Queued prompts are about to be submitted, so the notice belongs
-            // to the composer stack — default ("measure") MeasureColumn, which
-            // owns the 28px inset (BET-646, supersedes BET-642).
-            <MeasureColumn>
-              <div
-                className="shrink-0 pb-2 flex flex-col text-meta text-text-faint"
-                style={{ gap: "var(--block-gap)" }}
-              >
-              {messageQueue.map((msg, i) => (
-                <div key={i} className="flex items-baseline gap-1">
-                  <Clock size={14} aria-hidden="true" className="shrink-0 self-center" />
-                  <span className="italic flex-1 truncate">{msg}</span>
-                  <button
-                    onClick={() => setMessageQueue((q) => q.filter((_, j) => j !== i))}
-                    className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center"
-                    title="Remove from queue"
-                    aria-label="Remove from queue"
-                  >
-                    <X size={14} aria-hidden="true" />
-                  </button>
-                </div>
-              ))}
-              </div>
-            </MeasureColumn>
-          )}
-      </CardMount>
-
-      {/* Send error banner — surfaced from both client-side capability */}
-      {/* checks and server-side session.error events. Dismissable. For an */}
-      {/* auth-error (BET-316) the banner also renders a [Reconnect] button */}
-      {/* that dispatches `manta-open-subscriptions` — a no-op until the */}
-      {/* Settings → AI → Subscriptions card lands (BET-314). */}
-      <CardMount show={!!sendError} k="send-error">
-        {sendError && (
-          <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
-            <span className="flex-1">⚠ {sendError}</span>
-            {authReconnect && (
-              <button
-                onClick={openAuthReconnect}
-                className="text-danger hover:text-danger underline leading-none px-1"
-                title={`Reconnect ${authReconnect}`}
-              >
-                Reconnect
-              </button>
-            )}
-            <button
-              onClick={() => setSendError(null)}
-              className="text-danger hover:text-danger leading-none px-1 inline-flex items-center"
-              title="Dismiss"
-              aria-label="Dismiss error"
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
-          </div>
-        )}
-      </CardMount>
+      {/* Pinned card stack above the composer (BET-783): blocking always
+          above ambient, at most one blocking expanded, at most two ambient
+          expanded (rest rolled up); the whole stack is capped at 30vh with
+          internal scroll so the transcript stays the flexible child of the
+          panel. Read-only job sessions (jobOwnership) never mount these — the
+          ReadOnlyJobBar below replaces the composer instead. */}
+      <CardStack cards={cards} />
 
       {jobOwnership ? (
         <ReadOnlyJobBar

@@ -1,0 +1,126 @@
+// ===== CardStack (BET-783) =====
+//
+// Presentational home of the pinned card stack that mounts above the composer
+// (permission / retry / compaction / delegate-approval / schedules|secrets|
+// webhooks / queued / send-error). ChatPanel builds the list of visible
+// cards as DATA (`PinnedCardRender[]`) and hands it here; this component runs
+// it through the pure `arrangeCards` arbiter and renders the result:
+//
+//   - blocking tier always above ambient, at most one expanded (the newest),
+//     the rest behind an "N more requests" toggle;
+//   - ambient tier in fixed priority order, at most two expanded, the rest
+//     collapsed into a rollup row that expands in place;
+//   - the whole stack capped at 30vh with internal scroll, so the transcript
+//     stays the flexible child of the panel.
+//
+// CardMount wraps every card so mount/unmount stays layout-shift-free.
+
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { CardMount } from "./CardMount";
+import { arrangeCards, type PinnedCard } from "../chatUtils";
+
+export interface PinnedCardRender extends PinnedCard {
+  /** Self-contained card content (already includes its own padding wrapper). */
+  render: ReactNode;
+}
+
+export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
+  const arranged = useMemo(() => arrangeCards(cards), [cards]);
+  const { blocking, blockingMore, ambient, ambientRollup } = arranged;
+  const blockingList = useMemo(
+    () => cards.filter((c) => c.tier === "blocking").sort((a, b) => b.order - a.order),
+    [cards],
+  );
+  const [blockingExpanded, setBlockingExpanded] = useState(false);
+  const [ambientExpanded, setAmbientExpanded] = useState(false);
+  useEffect(() => {
+    setBlockingExpanded(false);
+    setAmbientExpanded(false);
+  }, []);
+
+  const rollupText = (() => {
+    const counts = new Map<string, number>();
+    for (const c of ambientRollup) {
+      const l = c.label ?? c.id;
+      counts.set(l, (counts.get(l) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([l, n]) => (n > 1 ? `${l} ×${n}` : l))
+      .join(" · ");
+  })();
+
+  return (
+    <div className="shrink-0 overflow-y-auto" style={{ maxHeight: "30vh" }}>
+      {/* Blocking tier — newest first, at most one expanded. */}
+      {blockingList.length > 0 && (
+        <div className="mx-auto w-full py-1" style={{ maxWidth: "72ch" }}>
+          <div className="space-y-2">
+            <CardMount show={blockingList.length > 0} k={blocking?.id ?? "blocking"}>
+              <div className="shrink-0 px-4 pt-2">{blocking?.render}</div>
+            </CardMount>
+            {blockingMore > 0 &&
+              (blockingExpanded ? (
+                <>
+                  <CardMount show k="blocking-more">
+                    <div className="shrink-0 px-4 pt-2 space-y-2">
+                      {blockingList.slice(1).map((c) => (
+                        <div key={c.id}>{c.render}</div>
+                      ))}
+                    </div>
+                  </CardMount>
+                  <button
+                    type="button"
+                    onClick={() => setBlockingExpanded(false)}
+                    className="shrink-0 px-4 text-meta text-text-faint hover:text-text leading-none"
+                  >
+                    Show fewer
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setBlockingExpanded(true)}
+                  className="shrink-0 px-4 text-meta text-text-faint hover:text-text leading-none"
+                >
+                  {blockingMore > 1 ? `${blockingMore} more requests` : "1 more request"}{" "}›
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Ambient tier — fixed priority, at most two expanded, rest rolled up. */}
+      {ambient.map((c) => (
+        <CardMount key={c.id} show k={c.id}>
+          {c.render}
+        </CardMount>
+      ))}
+      {ambientRollup.length > 0 &&
+        (ambientExpanded ? (
+          <>
+            {ambientRollup.map((c) => (
+              <CardMount key={c.id} show k={c.id}>
+                {c.render}
+              </CardMount>
+            ))}
+            <button
+              type="button"
+              onClick={() => setAmbientExpanded(false)}
+              className="shrink-0 mx-4 mb-1 px-3 py-1 text-meta text-text-faint hover:text-text leading-none"
+            >
+              Show fewer
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAmbientExpanded(true)}
+            className="shrink-0 mx-4 my-1 px-3 py-1 text-meta text-text-faint hover:text-text leading-none inline-flex items-center gap-1"
+            title="Show all"
+          >
+            ⚙ {rollupText} ›
+          </button>
+        ))}
+    </div>
+  );
+}
