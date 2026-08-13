@@ -1270,10 +1270,16 @@ main() {
     # from `curl | bash`.
     if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
       if [ "$(id -u)" = "0" ]; then
-        # Root needs no sudo. If the binary is absent, shim it so the section's
-        # `sudo <cmd>` invocations run bare — zero changes to the commands below.
+        # Root needs no sudo. Every privileged call in this section is
+        # `sudo -n <cmd>`; as root the `-n` flag is meaningless and the sudo
+        # binary may be absent entirely (minimal VPS). When it's missing,
+        # shim sudo to drop the leading `-n` and run the command bare — zero
+        # changes to the commands below.
         if ! command -v sudo >/dev/null 2>&1; then
-          sudo() { "$@"; }
+          sudo() {
+            if [ "${1:-}" = "-n" ]; then shift; fi
+            "$@"
+          }
         fi
       else
         if ! command -v sudo >/dev/null 2>&1; then
