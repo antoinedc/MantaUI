@@ -19,10 +19,21 @@ import SwiftUI
 // web dialog, which stamps the box hostname on itself (DECISIONS.md:709-715).
 // ===========================================================================
 
+/// The compact confirm gate (BET-747 task 1): a blind tap on the overflow
+/// "Compact session" row must NOT reach the store — it only arms the confirm
+/// sheet. A compact proceeds solely from the confirm-sheet's destructive action.
+/// Extracted at file scope so the gate's before/after decision is unit-testable
+/// without rendering the SwiftUI hierarchy.
+enum CompactConfirmGate {
+    /// Whether a compact action is allowed to proceed. `confirmed` is `true`
+    /// only after the user taps the confirm sheet's destructive "Compact
+    /// session" button; a plain row tap (`false`) withholds the store call.
+    static func shouldProceed(confirmed: Bool) -> Bool { confirmed }
+}
+
 struct ChatOverflowSheet: View {
     let sessionTitle: String
     let projectName: String
-    let branch: String?
 
     var onSchedules: () -> Void
     var onSecrets: () -> Void
@@ -35,12 +46,17 @@ struct ChatOverflowSheet: View {
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
 
-    /// Clear/Delete confirmations. Presented as a compact native bottom sheet
-    /// (`ConfirmActionSheet`) from within this sheet, so it layers over the
-    /// overflow sheet (sheet-on-sheet). No system primitive renders a detached
-    /// Cancel on iOS 26 — see `ConfirmActionSheet` (DECISIONS.md:709-715).
+    /// Clear/Delete/Compact confirmations. Presented as a compact native
+    /// bottom sheet (`ConfirmActionSheet`) from within this sheet, so it layers
+    /// over the overflow sheet (sheet-on-sheet). No system primitive renders a
+    /// detached Cancel on iOS 26 — see `ConfirmActionSheet` (DECISIONS.md:709-715).
+    ///
+    /// Compact is confirm-gated too (BET-747): compacting summarizes/drops the
+    /// transcript's context, so a blind tap must not destroy it without consent
+    /// — the same reason Clear and Delete confirm.
     @State private var confirmingClear = false
     @State private var confirmingDelete = false
+    @State private var confirmingCompact = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -52,7 +68,14 @@ struct ChatOverflowSheet: View {
                     row("Secrets", systemImage: "key", action: onSecrets)
                 }
                 Section {
-                    row("Compact session", systemImage: "arrow.down.right.and.arrow.up.left", action: onCompact)
+                    Button {
+                        onCompactTap()
+                    } label: {
+                        Label("Compact session", systemImage: "arrow.down.right.and.arrow.up.left")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     row("Fork session", systemImage: "arrow.triangle.branch", action: onFork)
                     row("Open terminal", systemImage: "terminal", action: onOpenTerminal)
                 }
@@ -93,27 +116,31 @@ struct ChatOverflowSheet: View {
             destructiveTitle: "Delete session",
             destructiveAction: { dismiss(); onDelete() }
         )
+        .confirmActionSheet(
+            isPresented: $confirmingCompact,
+            title: "Compact this session?",
+            message: "Summarises the conversation to free context. The transcript is condensed, not deleted.",
+            destructiveTitle: "Compact session",
+            destructiveAction: { dismiss(); onCompact() }
+        )
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
 
-    /// Session name over `project ⎇ branch` — the reference block (D4).
+    /// Session name over the project name — the reference block (D4). The git
+    /// branch lives in the chat's own branch capsule (BET-747), not here, so it
+    /// is not duplicated across the two surfaces.
     private var titleBlock: some View {
         VStack(spacing: 1) {
             Text(sessionTitle)
                 .font(.headline)
                 .lineLimit(1)
-            Text(subtitle)
+            Text(projectName)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private var subtitle: String {
-        guard let branch, !branch.isEmpty else { return projectName }
-        return "\(projectName) · ⎇ \(branch)"
     }
 
     private func row(
@@ -137,5 +164,18 @@ struct ChatOverflowSheet: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// A tap on the "Compact session" row. Conceived as a destructive control
+    /// (compacting summarizes/drops the transcript's context), it must not fire
+    /// the store on a blind tap — `CompactConfirmGate.shouldProceed(confirmed: false)`
+    /// withholds it and arms the confirm sheet instead; the store runs only from
+    /// the confirm sheet's destructive action.
+    private func onCompactTap() {
+        if CompactConfirmGate.shouldProceed(confirmed: false) {
+            onCompact()
+        } else {
+            confirmingCompact = true
+        }
     }
 }

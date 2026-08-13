@@ -36,6 +36,33 @@ func chatLoadingMode(isLoading: Bool) -> ChatLoadingMode {
     isLoading ? .skeleton : .content
 }
 
+/// Pure decision behind the branch-freshness poll (BET-747 gap #13). The chat
+/// polls the branch on the desktop's 5s cadence and refreshes on submit, so a
+/// terminal-side `git checkout` reflects within one tick. Extracted at file
+/// scope so the tick decision is unit-testable with an injected clock without
+/// rendering a SwiftUI hierarchy.
+enum BranchFreshnessPolicy {
+    /// The desktop's branch-poll cadence.
+    static let pollInterval: TimeInterval = 5
+
+    /// Whether a tick at `now` warrants a refetch, given `lastFetch`. No prior
+    /// fetch always refetches; otherwise a tick refetches once the interval has
+    /// elapsed. (A submit unconditionally refetches — see `shouldRefresh`.)
+    static func shouldRefetchAfterTick(now: Date, lastFetch: Date?) -> Bool {
+        guard let lastFetch else { return true }
+        return now.timeIntervalSince(lastFetch) >= pollInterval
+    }
+
+    /// Whether a branch refresh is warranted for the given trigger. A submit —
+    /// a turn just started running, so the next message may land on a
+    /// freshly-checked-out branch — ALWAYS refetches, even if the 5s interval
+    /// has not yet elapsed. A tick (no submit) follows `shouldRefetchAfterTick`.
+    static func shouldRefresh(didSubmit: Bool, now: Date, lastFetch: Date?) -> Bool {
+        if didSubmit { return true }
+        return shouldRefetchAfterTick(now: now, lastFetch: lastFetch)
+    }
+}
+
 /// The BET-627 overflow-sheet items that present a card of their own.
 ///
 /// Attaching is NOT one of them: the composer carries its own paperclip, so a
@@ -92,6 +119,12 @@ private struct ChatScreenContent: View {
     @EnvironmentObject private var sessionStore: SessionListStore
     @State private var showOverflow = false
     @State private var branch: String?
+    /// The session's working directory relative to the project root, shown
+    /// alongside the branch capsule (BET-747).
+    @State private var branchRelPath: String?
+    /// When the branch was last fetched, so a 5s tick only refetches once the
+    /// interval has elapsed (see `BranchFreshnessPolicy`).
+    @State private var lastBranchFetch: Date?
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
     /// Which overflow-sheet item's card is presented (BET-627).
     @State private var overflowDestination: OverflowDestination?
@@ -181,6 +214,20 @@ private struct ChatScreenContent: View {
                 store.stop()
                 MantaPushRouter.shared.visibleSessionID = nil
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
+            }
+            // 5s branch poll (desktop cadence) so a terminal-side checkout
+            // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
+            .task { await pollBranch() }
+            // A submit starts a turn optimistically (`send()` sets running), so
+            // refreshing the branch on the running edge covers "refresh on
+            // submit" — the new message is written in `cwd`'s current branch
+            // (which a terminal-side checkout just changed). Only the turn START
+            // (running true) warrants it; the settle edge does not. The
+            // submit-override decision is `BranchFreshnessPolicy.shouldRefresh`.
+            .onChange(of: store.running) { _, running in
+                if running, BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: Date(), lastFetch: nil) {
+                    Task { await refreshBranch() }
+                }
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
@@ -373,7 +420,6 @@ private struct ChatScreenContent: View {
         ChatOverflowSheet(
             sessionTitle: title,
             projectName: projectName,
-            branch: branch,
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
             onCompact: { store.compact() },
@@ -413,7 +459,9 @@ private struct ChatScreenContent: View {
 
     /// The chat screen knows its project by NAME only, but every session action
     /// (clear/fork/delete) and the branch lookup need the tmux window index and
-    /// its working directory. Resolve both once when the screen appears.
+    /// its working directory. Resolve both once when the screen appears. After
+    /// `sessionWindow` is known, the branch stays current through `refreshBranch()`
+    /// (the 5s poll `pollBranch` + a refresh on submit).
     private func resolveWindowAndBranch() async {
         let api = MantaAPIClient.live()
         guard let projects = try? await api.projects(),
@@ -421,10 +469,82 @@ private struct ChatScreenContent: View {
               let window = project.windows.first(where: { $0.opencodeSessionId == store.sessionId })
         else { return }
         let cwd = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
-        await MainActor.run { sessionWindow = (project.tmuxSession, window.index, cwd) }
-        if !cwd.isEmpty, let resolved = try? await api.vcsBranch(directory: cwd) {
-            await MainActor.run { branch = resolved }
+        await MainActor.run {
+            sessionWindow = (project.tmuxSession, window.index, cwd)
+            branchRelPath = Self.relativeWorkingPath(cwd: cwd, root: project.defaultCwd)
         }
+        await refreshBranch()
+    }
+
+    /// Re-fetch the git branch for the session's working directory. The desktop
+    /// polls every 5s AND refreshes on submit so a terminal-side `git checkout`
+    /// reflects within one tick; the chat does the same (BET-747 gap #13).
+    private func refreshBranch() async {
+        guard let cwd = sessionWindow?.cwd, !cwd.isEmpty else { return }
+        if let resolved = try? await MantaAPIClient.live().vcsBranch(directory: cwd) {
+            await MainActor.run {
+                branch = resolved
+                lastBranchFetch = Date()
+            }
+        }
+    }
+
+    /// The 5s branch poll, matching the desktop's cadence. Cancelled when the
+    /// screen disappears (the `.task` lifecycle hook owns it).
+    private func pollBranch() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(BranchFreshnessPolicy.pollInterval * 1_000_000_000))
+            if BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: Date(), lastFetch: lastBranchFetch) {
+                await refreshBranch()
+            }
+        }
+    }
+
+    /// The session's working directory relative to the project root, so the
+    /// branch capsule shows *where* the branch lives (`project/⎇ branch`), not
+    /// just the branch name. Falls back to the pane's own last path component
+    /// when the cwd isn't under the project root.
+    private static func relativeWorkingPath(cwd: String, root: String) -> String {
+        let trimmedRoot = root.hasSuffix("/") ? String(root.dropLast()) : root
+        if trimmedRoot.isEmpty || cwd == trimmedRoot { return "" }
+        if let range = cwd.range(of: trimmedRoot), range.lowerBound == cwd.startIndex {
+            var rel = String(cwd[range.upperBound...])
+            rel = rel.hasPrefix("/") ? String(rel.dropFirst()) : rel
+            return rel
+        }
+        return (cwd as NSString).lastPathComponent
+    }
+
+    /// The branch + relative path shown in the transcript header capsule, or nil
+    /// when there is no branch (non-git cwd, detached HEAD, unreachable box).
+    private var branchCapsuleInfo: (name: String, path: String?)? {
+        guard let branch, !branch.isEmpty else { return nil }
+        return (branch, branchRelPath)
+    }
+
+    /// A small non-interactive capsule: branch name + working-directory relative
+    /// path, styled from `Tokens`/`Metrics` (no hardcoded colors), matching the
+    /// ctx pill's informational treatment.
+    @ViewBuilder
+    private func branchCapsule(_ info: (name: String, path: String?)) -> some View {
+        HStack(spacing: Metrics.spacing.sp1) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: Metrics.type.xs, weight: .semibold))
+            Text("⎇ \(info.name)")
+                .font(.manta(size: Metrics.type.xs, weight: .semibold))
+            if let path = info.path, !path.isEmpty {
+                Text(path)
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx2)
+            }
+        }
+        .foregroundColor(tokens.tx2)
+        .lineLimit(1)
+        .padding(.horizontal, Metrics.spacing.sp2)
+        .padding(.vertical, Metrics.spacing.sp1)
+        .background(.ultraThinMaterial, in: Capsule())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Branch \(info.name) in \(info.path ?? "project directory")")
     }
 
     /// Clear = a fresh opencode session in the SAME window. Stay on the screen
@@ -618,9 +738,17 @@ private struct ChatScreenContent: View {
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         // Reserves the floating header's height. The header is an overlay and
-        // reserves nothing itself, so the conversation must rest below it.
+        // reserves nothing itself, so the conversation must rest below it. The
+        // live branch capsule (BET-747) sits at the top of the header area,
+        // above the reserved button space, so the branch stays visible while
+        // reading the current conversation and scrolls with the transcript.
         .headerContent(.header {
-            Color.clear.frame(height: Self.headerReservedHeight)
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                if let info = branchCapsuleInfo {
+                    branchCapsule(info)
+                }
+                Color.clear.frame(height: Self.headerReservedHeight)
+            }
         })
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.

@@ -562,6 +562,36 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(reflected?.truncated, true)
     }
 
+    // MARK: - Compact feedback (BET-747 task 1)
+
+    /// A failed `compact()` surfaces the composer `actionHint` instead of being
+    /// silent, so a blind compact never reads as success.
+    @MainActor
+    func testFailedCompactSurfacesActionHint() async {
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        store.compact()
+        await waitUntil { store.actionHint == "Compact failed — check the connection" }
+    }
+
+    /// A successful `compact()` surfaces the freed-context hint (and refreshes
+    /// state so the next context frame shows the new headroom).
+    @MainActor
+    func testSuccessfulCompactSurfacesFreedContextHint() async {
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+        store.compact()
+        await waitUntil { store.actionHint == "Compacted — context freed" }
+    }
+
     // MARK: - Mock transport
 
     /// Poll the main actor until `condition` holds (or ~2s elapses). The drain
@@ -724,5 +754,22 @@ final class ChatStreamDeltaTests: XCTestCase {
         let c = ChatStreamDelta.carried(sessionIsTarget: true, sub: "turnComplete")
         XCTAssertTrue(c.running)
         XCTAssertTrue(c.turnComplete)
+    }
+}
+
+// MARK: - Overflow compact confirm gate (BET-747 task 1)
+
+/// The overflow "Compact session" row must NOT reach the store on a blind tap:
+/// `CompactConfirmGate` withholds the action until the confirm sheet's
+/// destructive button is confirmed.
+final class CompactConfirmGateTests: XCTestCase {
+
+    /// A plain row tap (confirmed == false) yields false — a blind tap must not
+    /// call the store, but arm the confirm sheet instead.
+    func testCompactWithheldUntilConfirmation() {
+        XCTAssertFalse(CompactConfirmGate.shouldProceed(confirmed: false),
+                       "a blind tap must not compact — confirmation is required")
+        XCTAssertTrue(CompactConfirmGate.shouldProceed(confirmed: true),
+                      "a compact proceeds only after the confirm sheet's destructive action")
     }
 }

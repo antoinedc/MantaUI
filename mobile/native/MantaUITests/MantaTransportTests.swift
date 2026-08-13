@@ -253,6 +253,62 @@ final class MantaTransportTests: XCTestCase {
         try store.delete()
         XCTAssertNil(try store.load())
     }
+
+    // MARK: - Branch-freshness poll (BET-747 task 3)
+
+    /// A tick with no prior fetch always refetches.
+    func testBranchPollRefetchesWhenNeverFetched() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: now, lastFetch: nil),
+                      "the first tick with no prior fetch must refetch")
+    }
+
+    /// A tick before the 5s interval elapses does not refetch.
+    func testBranchPollSkipsEarlyTick() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        let early = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval - 1)
+        XCTAssertFalse(BranchFreshnessPolicy.shouldRefetchAfterTick(now: early, lastFetch: lastFetch))
+    }
+
+    /// A tick at/after the 5s interval refetches — the desktop's cadence, so a
+    /// terminal-side checkout reflects within one tick.
+    func testBranchPollRefetchesOnInterval() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        let at = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval)
+        let later = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval + 5)
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: at, lastFetch: lastFetch))
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: later, lastFetch: lastFetch))
+    }
+
+    /// A submit ALWAYS refetches, even immediately after a fetch (the 5s tick
+    /// interval has not yet elapsed) — the next message may land on a freshly
+    /// checked-out branch, so the submit edge can't wait for the next tick.
+    func testBranchRefetchOnSubmitOverridesInterval() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch),
+            "a submit must refetch even before the 5s interval elapses"
+        )
+    }
+
+    /// A submit with no prior fetch also refetches.
+    func testBranchRefetchOnSubmitWhenNeverFetched() {
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: Date(timeIntervalSince1970: 1_000), lastFetch: nil)
+        )
+    }
+
+    /// A plain tick (didSubmit == false) still follows the 5s interval — it is
+    /// not upgraded to an unconditional refetch by the submit path.
+    func testBranchTickRespectsIntervalEvenWhenNotSubmit() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        XCTAssertFalse(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch)
+        )
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(5), lastFetch: lastFetch)
+        )
+    }
 }
 
 private struct SendPromptResult: Decodable {}
