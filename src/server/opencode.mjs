@@ -1368,7 +1368,11 @@ export async function getVcsBranch(directory) {
     let stdout = "";
     proc.stdout.on("data", (b) => (stdout += b.toString()));
     proc.on("error", () => resolve(null));
-    proc.on("exit", () => {
+    // "close", NOT "exit" — same trap as spawnRun in tmux.mjs: `exit` fires
+    // before stdout is drained, so a live branch intermittently read back as
+    // "" and this returned null ("not a git repo"), blanking the footer's
+    // branch indicator at random.
+    proc.on("close", () => {
       const name = stdout.trim();
       resolve(name ? name : null);
     });

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSessions,
+  run,
   tmuxSpawnEnv,
   isMissingSessionError,
   isNoTmuxServerError,
@@ -820,4 +821,25 @@ test("renameSession keeps ownership under the new name", async () => {
     _resetOwnedSessionsCache();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// spawnRun must resolve on the child's "close" (all stdio drained), not its
+// "exit" (process dead, pipe possibly still holding bytes). Resolving on
+// "exit" hands the caller a truncated — often EMPTY — stdout at exit code 0,
+// which is indistinguishable from "tmux legitimately has nothing to list".
+// Under concurrent reads (the opencode event pump, the status/activity
+// pollers and push's session-label lookup all query tmux at once) that made
+// `listProjects` report an empty box roughly half the time, so a backgrounded
+// subagent never got its sidebar row ("could not resolve the owning window")
+// and push logged spurious "unresolvable-session" suppressions.
+//
+// The child here exits IMMEDIATELY while a background descendant still holds
+// the inherited stdout and writes to it 200ms later — so "exit" observes ""
+// deterministically and "close" observes the full output.
+test("run waits for stdout to close, not just for the child to exit", async () => {
+  const { stdout } = await run("/bin/sh", [
+    "-c",
+    "{ sleep 0.2; printf late-bytes; } & exit 0",
+  ]);
+  assert.equal(stdout, "late-bytes", "stdout must not be lost when the child exits early");
 });

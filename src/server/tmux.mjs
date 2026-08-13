@@ -56,7 +56,18 @@ function spawnRun(cmd, args) {
     p.stdout.on("data", (b) => (stdout += b.toString()));
     p.stderr.on("data", (b) => (stderr += b.toString()));
     p.on("error", (e) => { finish(); reject(e); });
-    p.on("exit", (code) => {
+    // "close", NOT "exit". `exit` fires the moment the child dies, BEFORE its
+    // stdout pipe has been drained, so anything still buffered is discarded and
+    // the call resolves with a TRUNCATED-or-EMPTY stdout at exit code 0 — which
+    // is indistinguishable from "tmux legitimately has nothing to list". Under
+    // concurrent reads (the event pump, the status/activity pollers and push's
+    // session-label lookup all query tmux at once) that happened ~11% of the
+    // time per spawn on the dev box, so `listProjects` returned an empty box
+    // ~50% of the time; the visible symptom was a backgrounded subagent never
+    // getting a sidebar row ("could not resolve the owning window"), plus
+    // spurious "unresolvable-session" push suppressions. `close` fires only
+    // after every stdio stream is closed, so stdout is always complete.
+    p.on("close", (code) => {
       finish();
       code === 0 ? resolve({ stdout, stderr })
                  : reject(new Error(`${cmd} exited ${code}: ${stderr.trim() || stdout.trim()}`));
