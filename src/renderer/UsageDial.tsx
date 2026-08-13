@@ -62,8 +62,7 @@ function toneRingColor(tone: UsageDialTone): string {
 }
 
 // Popover fill colour per window threshold — same three thresholds as the
-// dial, but --ok is allowed below 70 HERE: a labelled detail view, not an
-// ambient glyph (the dial's ring never uses it).
+// dial, and both return --ok below 70, so the ring and the rows agree.
 function windowFillColor(pct: number): string {
   if (pct >= 90) return cssVar("--danger");
   if (pct >= 70) return cssVar("--warn");
