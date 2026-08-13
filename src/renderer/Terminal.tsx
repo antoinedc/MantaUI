@@ -87,12 +87,24 @@ export function Terminal({ sessionKey, cwd, active, launcher, tmuxTarget }: Prop
   // hide the overlay when the cursor truly leaves the terminal area.
   const dragDepth = useRef(0);
 
+  // BET-710: in-pane find bar. SearchAddon machinery already runs in the
+  // xterm effect; this just swaps the broken modal input for an in-pane
+  // overlay driving the same addon through searchRef.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+
   // BET-409: the terminal pane stays dark in BOTH themes (no light xterm
   // theme). In light mode the pane is a fixed #0B1020 so a dark inset surface
   // reads deliberately inside a light window; in dark it uses --inset. The
   // surrounding chrome (sidebar/header/composer) follows the theme normally.
   // The hook re-themes the pane live when the app theme flips.
   const resolvedTheme = useResolvedTheme();
+
+  // Focus the find input when the bar opens.
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.focus();
+  }, [findOpen]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -299,8 +311,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
           });
           return false;
         case "find": {
-          const q = window.prompt("Find:");
-          if (q) search.findNext(q);
+          setFindOpen(true);
           return false;
         }
         case "clear":
@@ -430,6 +441,13 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
     }
   };
 
+  const closeFind = () => {
+    setFindOpen(false);
+    setFindQuery("");
+    searchRef.current?.clearDecorations();
+    termRef.current?.focus();
+  };
+
   return (
     <div
       className="relative h-full w-full"
@@ -454,6 +472,38 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
       {(dragOver || uploading) && (
         <div className="absolute inset-2 z-10 flex items-center justify-center rounded-sm border-2 border-dashed border-accent bg-bg/70 text-text text-sm pointer-events-none">
           {uploading ? "Uploading…" : "Drop to share with Claude"}
+        </div>
+      )}
+      {findOpen && (
+        <div className="absolute top-2 right-2 z-20 flex items-center gap-1 rounded-sm border border-border bg-bg px-2 py-1 shadow-md">
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            onChange={(e) => {
+              setFindQuery(e.target.value);
+              if (e.target.value) searchRef.current?.findNext(e.target.value, { incremental: true });
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && e.shiftKey) {
+                e.preventDefault();
+                if (findQuery) searchRef.current?.findPrevious(findQuery);
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                if (findQuery) searchRef.current?.findNext(findQuery);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeFind();
+              }
+            }}
+            placeholder="Find…"
+            className="w-40 bg-transparent text-sm text-text outline-none placeholder:text-text-faint"
+          />
+          <button className="px-1 text-text-muted hover:text-text" title="Previous (Shift+Enter)"
+            onClick={() => findQuery && searchRef.current?.findPrevious(findQuery)}>‹</button>
+          <button className="px-1 text-text-muted hover:text-text" title="Next (Enter)"
+            onClick={() => findQuery && searchRef.current?.findNext(findQuery)}>›</button>
+          <button className="px-1 text-text-muted hover:text-text" title="Close (Esc)"
+            onClick={closeFind}>×</button>
         </div>
       )}
     </div>
