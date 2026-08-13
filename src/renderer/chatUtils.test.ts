@@ -103,6 +103,7 @@ import {
   planHighlightRanges,
   canMerge,
   describeMergeFailure,
+  commentableLines,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -3859,6 +3860,66 @@ describe("describeMergeFailure", () => {
   it("degrades gracefully for unknown / absent kinds", () => {
     expect(describeMergeFailure("http_422")).toContain("http_422");
     expect(describeMergeFailure(null)).toBe("Merge failed.");
+
+describe("commentableLines", () => {
+  it("returns [] for an empty diff", () => {
+    expect(commentableLines("")).toEqual([]);
+    expect(commentableLines("\n\n")).toEqual([]);
+  });
+
+  it("anchors an added line on the new side", () => {
+    const diff = "@@ -10,3 +10,3 @@\n  a\n- old\n+ new\n  c\n";
+    // a=10 (context), old=11 (removed), new=11 (added), c=12 (context)
+    expect(commentableLines(diff)).toEqual([
+      { line: 10, side: "new" },
+      { line: 11, side: "old" },
+      { line: 11, side: "new" },
+      { line: 12, side: "new" },
+    ]);
+  });
+
+  it("anchors a removed line on the old side and a context line on the new side", () => {
+    const diff = "@@ -5 +5 @@\n- gone\n  kept\n";
+    expect(commentableLines(diff)).toEqual([
+      { line: 5, side: "old" },
+      { line: 5, side: "new" },
+    ]);
+  });
+
+  it("handles a file with multiple hunks, resetting line counters per hunk", () => {
+    const diff = [
+      "@@ -1,2 +1,2 @@",
+      "  a",
+      "- b",
+      "+ c",
+      "@@ -20,1 +20,1 @@",
+      "  z",
+      "+ w",
+      "",
+    ].join("\n");
+    expect(commentableLines(diff)).toEqual([
+      // first hunk: a=1 (context), b=2 (removed), c=2 (added)
+      { line: 1, side: "new" },
+      { line: 2, side: "old" },
+      { line: 2, side: "new" },
+      // second hunk: z=20 (context), w=21 (added)
+      { line: 20, side: "new" },
+      { line: 21, side: "new" },
+    ]);
+  });
+
+  it("skips hunk headers and file markers / new-file boilerplate", () => {
+    const diff = [
+      "diff --git a/x b/x",
+      "new file mode 100644",
+      "index 0000000..e69de29",
+      "--- /dev/null",
+      "+++ b/x",
+      "@@ -0,0 +1 @@",
+      "+ hi",
+      "",
+    ].join("\n");
+    expect(commentableLines(diff)).toEqual([{ line: 1, side: "new" }]);
   });
 });
 

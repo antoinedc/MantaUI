@@ -2991,4 +2991,44 @@ export function describeMergeFailure(kind: string | null | undefined): string {
     default:
       return kind ? `Merge failed (${kind}).` : "Merge failed.";
   }
+
+// ---- Forge review pane (BET-792) -------------------------------------------
+
+// The line anchor a comment may attach to, in the forge-neutral shape the spec
+// (§3.4③) normalises on. `side` is "new" (added/context lines — GitHub's RIGHT)
+// or "old" (removed lines — GitHub's LEFT); `line` is the corresponding line
+// number. The renderer maps these onto the rows UnifiedDiff draws.
+export type CommentableLine = { line: number; side: "new" | "old" };
+
+// Derive the set of commentable line anchors from a unified-diff text, walking
+// the `@@ -A,B +C,D @@` hunk headers so numbers are exact per hunk. Added and
+// context lines anchor on the NEW side (new line number); removed lines on the
+// OLD side (old line number). File markers (`--- /`+++ `) and hunk headers are
+// not commentable. An empty diff yields `[]`.
+export function commentableLines(diffText: string): CommentableLine[] {
+  const result: CommentableLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  for (const line of diffText.split("\n")) {
+    if (line.startsWith("@@")) {
+      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        oldLine = parseInt(m[1], 10);
+        newLine = parseInt(m[2], 10);
+      }
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      result.push({ line: newLine, side: "new" });
+      newLine++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      result.push({ line: oldLine, side: "old" });
+      oldLine++;
+    } else if (line.startsWith(" ")) {
+      result.push({ line: newLine, side: "new" });
+      oldLine++;
+      newLine++;
+    }
+  }
+  return result;
 }
