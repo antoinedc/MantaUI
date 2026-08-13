@@ -193,7 +193,8 @@ export function GlobalToasts({ activeChatSessionId, canAddToChat }: Props) {
     // Fixed bottom-right overlay (BET-723 §D4 — above the status bar, renders
     // over every pane). pointer-events-none so the backdrop never swallows
     // clicks under the stack; each toast re-enables pointer events (ToastStack).
-    <div className="pointer-events-none fixed bottom-24 right-4 z-40 w-96 flex flex-col items-stretch">
+    // z-[60] so toasts paint above the z-50 modal overlay (BET-735).
+    <div className="pointer-events-none fixed bottom-24 right-4 z-[60] w-96 flex flex-col items-stretch">
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

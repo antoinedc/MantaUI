@@ -8,10 +8,9 @@
 // with a toast carrying an Undo action — the "one save model: instant
 // apply + Undo" from §A.
 
-import { useState } from "react";
 import { useStore } from "./store";
 import { applyTheme, type ThemePref } from "./theme";
-import { ToastStack, type ToastItem } from "./Toast";
+import type { ToastItem } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import type { SettingEntry } from "../shared/settingsSchema";
 
@@ -38,14 +37,6 @@ function coerceSettingValue(entry: SettingEntry, value: unknown): unknown {
     return Number.isFinite(n) ? n : entry.default;
   }
   return value;
-}
-
-/** Local toast stack for a Settings surface (newest-first, capped at 3). */
-export function useSettingsToasts() {
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const push = (t: ToastItem) => setToasts((prev) => [t, ...prev].slice(0, 3));
-  const dismiss = (id: string) => setToasts((prev) => prev.filter((t) => t.id !== id));
-  return { toasts, push, dismiss };
 }
 
 /**
@@ -88,7 +79,3 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
     }
   };
 }
-
-/** Re-export so surfaces can render the stack without a second import. */
-export { ToastStack };
-export type { ToastItem };
