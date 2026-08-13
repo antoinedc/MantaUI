@@ -48,10 +48,16 @@ raise it rather than working around the grammar.
 ## The forge token
 
 Registering the webhook needs a GitHub API token **on the box** (it never
-reaches the desktop or phone). Set `MANTA_GITHUB_TOKEN` in the server env, or
-store it as a shared secret whose key is `github.token` (`gitlab.token` for
-GitLab) in the box secrets vault. The device-flow / `gh`-CLI legs of the token
-ladder arrive with the GitHub adapter.
+reaches the desktop or phone). It is resolved by the single box-side forge
+token ladder (§3.3), CLI first:
+
+1. **`gh auth token`** (run through a login shell) when the box is already a
+   GitHub dev machine — the common case.
+2. Otherwise a **shared secret named `GITHUB_TOKEN`** in the box secrets vault.
+
+If neither is present the webhook registration reports "not connected" — run
+`gh auth login`, or store the `GITHUB_TOKEN` shared secret, on the box. The
+GitLab leg of the ladder arrives with the GitLab adapter.
 
 ## Where it lives
 
