@@ -163,6 +163,7 @@ export type SubagentInfo = {
   title: string | null;
   output: string | null;
   truncated: boolean;
+  background: boolean;
   durationMs: number | null;
   model: { providerID: string; modelID: string } | null;
 };

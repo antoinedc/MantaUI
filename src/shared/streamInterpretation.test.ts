@@ -1275,6 +1275,7 @@ describe("extractSubagentInfo", () => {
       title: "Find skill loading code",
       output: "I found that skills load from…",
       truncated: false,
+      background: false,
       durationMs: 12500,
       model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
     });
@@ -1325,6 +1326,21 @@ describe("extractSubagentInfo", () => {
       state: { status: "completed", input: {}, metadata: { sessionId: "ses_x", truncated: "yes" as unknown } },
     };
     expect(extractSubagentInfo(p2)?.truncated).toBe(false);
+  });
+
+  it("background is true when stamped in metadata, false when absent", () => {
+    const bg = {
+      type: "tool",
+      tool: "task",
+      state: { status: "running", input: {}, metadata: { sessionId: "ses_x", background: true } },
+    };
+    expect(extractSubagentInfo(bg)?.background).toBe(true);
+    const plain = {
+      type: "tool",
+      tool: "task",
+      state: { status: "running", input: {}, metadata: { sessionId: "ses_x" } },
+    };
+    expect(extractSubagentInfo(plain)?.background).toBe(false);
   });
 });
 
