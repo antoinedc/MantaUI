@@ -1217,7 +1217,6 @@ export const httpApi: Api = {
     const b64 = arrayBufferToBase64(buffer);
     return rpc(IPC.voiceTranscribe, { buffer: b64, mime });
   },
-  voiceClassifyCommand: (input) => rpc(IPC.voiceClassifyCommand, input),
 
   // -- connection retry (BET-365 / BET-357 §1) --
   // The events WebSocket auto-reconnects on its own backoff; this is the

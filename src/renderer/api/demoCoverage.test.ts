@@ -124,7 +124,6 @@ export const DEMO_UNIMPLEMENTED = [
   "uploadBuffer",
   "uploadFiles",
   "usageList",
-  "voiceClassifyCommand",
   "voiceTranscribe",
   "webhookDelete",
   "webhookList",

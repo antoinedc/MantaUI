@@ -96,7 +96,6 @@ export const demoAppConfig: AppConfig = {
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
-  voiceCommandModel: "",
   shareAnalytics: false,
   pluginsEnabled: false,
 };

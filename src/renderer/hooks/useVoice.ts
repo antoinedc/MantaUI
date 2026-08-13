@@ -1,25 +1,20 @@
 // ===== useVoice =====
 //
 // Extracted from ChatPanel.tsx (BET-64). Wraps `useVoiceRecorder` from
-// `./voice.ts` and adds the voice-specific dispatch logic, keybinds, and
-// gating. Most self-contained of the four hooks — the main coupling is
-// `dispatchVoiceAction` which references callbacks from other hooks
-// (submit, abort, etc.) — these are injected as props.
+// `./voice.ts` and adds the dictation-only behaviour, keybinds, and gating.
+// The transcribed text is inserted at the caret.
 //
 // The hook owns:
 //   - The voiceRecorder instance (via useVoiceRecorder)
-//   - The dispatchVoiceAction callback (routes VoiceAction to panel callbacks)
 //   - The desktop voice keybinds (Ctrl+M / Enter / Esc)
 //   - The voiceEnabled gate (groqApiKey + MediaRecorder support)
 //
 // No Electron-only deps — only `window.api.*`, which the mobile HTTP server
 // shims.
 
-import { useCallback, useEffect, useRef } from "react";
-import type { VoiceAction } from "../../shared/types";
-import { useVoiceRecorder, fuzzyMatchModel, resolveQuestionAnswer } from "../voice";
-import type { VoicePhase, VoiceMode } from "../voice";
-import { findLast } from "../chatShared";
+import { useEffect, useRef } from "react";
+import { useVoiceRecorder } from "../voice";
+import type { VoicePhase } from "../voice";
 
 export type Voice = {
   voiceEnabled: boolean;
@@ -27,31 +22,16 @@ export type Voice = {
   voiceProcessing: boolean;
   voiceRecorder: {
     phase: VoicePhase;
-    mode: VoiceMode;
-    start: (mode: VoiceMode) => void;
+    start: () => void;
     stop: () => void;
     cancel: () => void;
   };
-  dispatchVoiceAction: (action: VoiceAction) => void;
 };
 
 export function useVoice(params: {
   input: string;
   setInput: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
-  models: import("../../shared/types").OpencodeModel[] | null;
-  permissions: import("../../shared/types").PermissionRequest[];
-  questions: import("../../shared/types").QuestionRequest[];
-  sessionId: string;
-  chatAutoAllow: boolean;
-  setChatAutoAllow: (v: boolean) => void;
-  selectModel: (m: { providerID: string; modelID: string }) => void;
-  compactSession: () => void;
-  forkSession: () => void;
-  abort: () => void;
-  replyPermission: (id: string, reply: string) => void;
-  replyQuestion: (q: import("../../shared/types").QuestionRequest, answers: string[][]) => void;
-  rejectQuestion: (q: import("../../shared/types").QuestionRequest) => void;
   submitRef: React.RefObject<() => void>;
   setSendError: (e: string | null) => void;
   setSystemNotice: (n: string | null) => void;
@@ -61,19 +41,6 @@ export function useVoice(params: {
     input,
     setInput,
     inputRef,
-    models,
-    permissions,
-    questions,
-    sessionId,
-    chatAutoAllow,
-    setChatAutoAllow,
-    selectModel,
-    compactSession,
-    forkSession,
-    abort,
-    replyPermission,
-    replyQuestion,
-    rejectQuestion,
     submitRef,
     setSendError,
     setSystemNotice,
@@ -85,143 +52,37 @@ export function useVoice(params: {
   // composer AND immediately submit, in one keystroke.
   const submitAfterTranscribeRef = useRef(false);
 
-  const dispatchVoiceAction = useCallback(
-    (action: VoiceAction) => {
-      switch (action.kind) {
-        case "append": {
-          const el = inputRef.current;
-          if (el) {
-            const start = el.selectionStart ?? input.length;
-            const end = el.selectionEnd ?? input.length;
-            const prefix = input.slice(0, start);
-            const suffix = input.slice(end);
-            const sep = prefix && !prefix.endsWith(" ") ? " " : "";
-            const tail = suffix && !suffix.startsWith(" ") ? " " : "";
-            const next = `${prefix}${sep}${action.text}${tail}${suffix}`;
-            setInput(next);
-            setTimeout(() => {
-              if (!inputRef.current) return;
-              const pos = (prefix + sep + action.text).length;
-              try {
-                inputRef.current.focus();
-                inputRef.current.setSelectionRange(pos, pos);
-              } catch { /* ignore */ }
-            }, 0);
-          } else {
-            setInput(input ? `${input} ${action.text}` : action.text);
-          }
-          return;
-        }
-        case "submit": {
-          setInput(action.text);
-          setTimeout(() => submitRef.current?.(), 0);
-          return;
-        }
-        case "clear":
-          setInput("/clear");
-          setTimeout(() => submitRef.current?.(), 0);
-          return;
-        case "compact": compactSession(); return;
-        case "fork":    forkSession();    return;
-        case "abort":   abort();          return;
-        case "help":    setSystemNotice("/help output"); return;
-        case "toggle-trust":
-          setChatAutoAllow(!chatAutoAllow);
-          return;
-        case "model": {
-          const match = fuzzyMatchModel(action.query, models ?? []);
-          if (match) selectModel({ providerID: match.providerID, modelID: match.id });
-          else setSendError(`No model matched "${action.query}".`);
-          return;
-        }
-        case "allow-once":
-        case "allow-always":
-        case "reject": {
-          const lastPerm = findLast(permissions, (p) => p.sessionID === sessionId);
-          if (lastPerm) {
-            const reply =
-              action.kind === "allow-once" ? "once"
-                : action.kind === "allow-always" ? "always"
-                  : "reject";
-            replyPermission(lastPerm.id, reply);
-            return;
-          }
-          if (action.kind === "reject") {
-            const lastQ = findLast(questions, (q) => q.sessionID === sessionId);
-            if (lastQ) {
-              rejectQuestion(lastQ);
-              return;
-            }
-          }
-          setSendError("No pending permission request to respond to.");
-          return;
-        }
-        case "answer": {
-          const pending = findLast(
-            questions,
-            (q) => q.sessionID === sessionId && q.questions.length > 0,
-          );
-          if (!pending) {
-            setSendError("No pending question to answer.");
-            return;
-          }
-          const answers: string[][] = [];
-          for (const sub of pending.questions) {
-            const label = resolveQuestionAnswer(action.choice, sub.options);
-            if (!label) {
-              setSendError(
-                `Couldn't match "${action.choice}" to an option. ` +
-                `Available: ${sub.options.map((o) => o.label).join(", ")}.`,
-              );
-              return;
-            }
-            answers.push([label]);
-          }
-          replyQuestion(pending, answers);
-          return;
-        }
-        case "switch-window":
-        case "new-session":
-        case "open-settings":
-          window.dispatchEvent(
-            new CustomEvent("manta-voice-app-action", { detail: action }),
-          );
-          return;
-        case "unknown": {
-          const text = action.transcript.trim();
-          if (text) setInput(input ? `${input} ${text}` : text);
-          return;
-        }
-      }
-    },
-    [
-      input,
-      models,
-      permissions,
-      questions,
-      sessionId,
-      chatAutoAllow,
-      setChatAutoAllow,
-      selectModel,
-      compactSession,
-      forkSession,
-      abort,
-      replyPermission,
-      replyQuestion,
-      rejectQuestion,
-    ],
-  );
+  // Insert text at the caret, mirroring the composer's append behaviour.
+  const insertAtCaret = (text: string) => {
+    const el = inputRef.current;
+    if (el) {
+      const start = el.selectionStart ?? input.length;
+      const end = el.selectionEnd ?? input.length;
+      const prefix = input.slice(0, start);
+      const suffix = input.slice(end);
+      const sep = prefix && !prefix.endsWith(" ") ? " " : "";
+      const tail = suffix && !suffix.startsWith(" ") ? " " : "";
+      const next = `${prefix}${sep}${text}${tail}${suffix}`;
+      setInput(next);
+      setTimeout(() => {
+        if (!inputRef.current) return;
+        const pos = (prefix + sep + text).length;
+        try {
+          inputRef.current.focus();
+          inputRef.current.setSelectionRange(pos, pos);
+        } catch { /* ignore */ }
+      }, 0);
+    } else {
+      setInput(input ? `${input} ${text}` : text);
+    }
+  };
 
   const voiceRecorder = useVoiceRecorder({
-    onResult: (r) => {
-      if (r.mode === "dictate") {
-        dispatchVoiceAction({ kind: "append", text: r.text });
-        if (submitAfterTranscribeRef.current) {
-          submitAfterTranscribeRef.current = false;
-          setTimeout(() => submitRef.current?.(), 0);
-        }
-      } else {
-        dispatchVoiceAction(r.classify.action);
+    onResult: (text) => {
+      insertAtCaret(text);
+      if (submitAfterTranscribeRef.current) {
+        submitAfterTranscribeRef.current = false;
+        setTimeout(() => submitRef.current?.(), 0);
       }
     },
     onError: (e) => {
@@ -268,7 +129,7 @@ export function useVoice(params: {
           submitAfterTranscribeRef.current = false;
           voiceStopRef.current();
         } else if (phase === "idle" || phase === "error") {
-          void voiceStartRef.current("dictate");
+          void voiceStartRef.current();
         }
         return;
       }
@@ -306,11 +167,9 @@ export function useVoice(params: {
     voiceProcessing,
     voiceRecorder: {
       phase: voiceRecorder.phase,
-      mode: voiceRecorder.mode,
       start: voiceRecorder.start,
       stop: voiceRecorder.stop,
       cancel: voiceRecorder.cancel,
     },
-    dispatchVoiceAction,
   };
 }

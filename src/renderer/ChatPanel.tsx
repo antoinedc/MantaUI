@@ -1464,19 +1464,6 @@ export function ChatPanel({
     input,
     setInput,
     inputRef,
-    models,
-    permissions,
-    questions,
-    sessionId,
-    chatAutoAllow,
-    setChatAutoAllow,
-    selectModel,
-    compactSession,
-    forkSession,
-    abort,
-    replyPermission: (id: string, reply: string) => replyPermission(id, reply as "once" | "always" | "reject"),
-    replyQuestion,
-    rejectQuestion,
     submitRef,
     setSendError,
     setSystemNotice,
@@ -2451,10 +2438,9 @@ export function ChatPanel({
         setChatAutoAllow={setChatAutoAllow}
         voiceEnabled={voiceEnabled}
         voicePhase={voiceRecorder.phase}
-        voiceMode={voiceRecorder.mode}
         voiceRecording={voiceRecording}
         voiceProcessing={voiceProcessing}
-        startVoice={(mode) => { voiceRecorder.start(mode); return Promise.resolve(); }}
+        startVoice={() => { voiceRecorder.start(); }}
         stopVoice={voiceRecorder.stop}
         cancelVoice={voiceRecorder.cancel}
         models={models}

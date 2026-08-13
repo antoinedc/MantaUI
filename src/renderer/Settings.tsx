@@ -248,7 +248,7 @@ const SECTION_GROUPS: Partial<Record<SettingSectionId, { title: string; entryIds
     { title: "Files you send the agent", entryIds: ["uploadCleanupHours"] },
   ],
   voice: [
-    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel", "voiceCommandModel"] },
+    { title: "Speech to text (Groq)", entryIds: ["groqApiKey", "voiceTranscriptionModel"] },
   ],
 };
 
@@ -285,7 +285,6 @@ export function Settings({
   const cacheTtl = useStore((s) => s.cacheTtl);
   const groqApiKey = useStore((s) => s.groqApiKey);
   const voiceTranscriptionModel = useStore((s) => s.voiceTranscriptionModel);
-  const voiceCommandModel = useStore((s) => s.voiceCommandModel);
   const allowAgentPush = useStore((s) => s.allowAgentPush);
   const downloadsDir = useStore((s) => s.downloadsDir);
   const worktreePerSession = useStore((s) => s.worktreePerSession);
@@ -323,7 +322,6 @@ export function Settings({
       cacheTtl,
       groqApiKey,
       voiceTranscriptionModel,
-      voiceCommandModel,
       allowAgentPush,
       downloadsDir,
       worktreePerSession,
@@ -333,7 +331,7 @@ export function Settings({
       autoRenameSessions,
       alwaysShowUsage,
     }),
-    [cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, theme, autoRenameSessions, alwaysShowUsage],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, theme, autoRenameSessions, alwaysShowUsage],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {

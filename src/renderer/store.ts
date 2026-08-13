@@ -361,11 +361,10 @@ type State = {
   launcherFlags: Record<string, Record<string, boolean>>;
   // Voice / Groq STT. `groqApiKey` is the gating signal — empty string
   // means voice features are unavailable and the mic button stays hidden.
-  // Other two fields default to "" so the main/server picks the built-in
-  // defaults (whisper-large-v3-turbo / llama-3.1-8b-instant).
+  // The transcription model defaults to "" so the main/server picks the
+  // built-in default (whisper-large-v3-turbo).
   groqApiKey: string;
   voiceTranscriptionModel: string;
-  voiceCommandModel: string;
   // Analytics opt-out (BET-217). Default true; false = this instance ships
   // nothing to Axiom (desktop renderer + server). Mobile always ships
   // regardless. Mirror of AppConfig.shareAnalytics.
@@ -690,7 +689,6 @@ export const useStore = create<State>((set, get) => ({
   launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
-  voiceCommandModel: "",
   shareAnalytics: true,
   theme: "system",
   pinnedWindows: [],
@@ -928,7 +926,6 @@ export const useStore = create<State>((set, get) => ({
       launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
-      voiceCommandModel: c.voiceCommandModel ?? "",
       shareAnalytics: c.shareAnalytics ?? true,
       pinnedWindows: Array.isArray(c.pinnedWindows) ? c.pinnedWindows : [],
       theme:
