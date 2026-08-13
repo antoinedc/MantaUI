@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
-import { Terminal as TerminalIcon } from "lucide-react";
+import { Bell, Send, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
@@ -65,6 +65,19 @@ function loadArtifactsOpen(): boolean {
   } catch {
     return false;
   }
+}
+
+// A toast body with a leading glyph. The two scheduled-at-reset confirmations
+// used a ⏰ EMOJI, which is the schedules card's glyph and the only emoji in
+// the app's chrome — everything else draws from lucide. One helper so the two
+// call sites cannot drift.
+function toastLine(Icon: LucideIcon, text: string) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Icon size={14} aria-hidden="true" className="shrink-0 text-text-faint" />
+      {text}
+    </span>
+  );
 }
 
 // PanelShell (BET-680 step 2): the always-mounted session/chat pane wrappers.
@@ -638,7 +651,7 @@ function AppInner() {
     pushAppToastStore(
       res.ok && res.job
         ? {
-            message: `⏰ “Keep going” will be sent ${formatResetClock(fireAt, true)}.`,
+            message: toastLine(Send, `“Keep going” will be sent ${formatResetClock(fireAt, true)}.`),
             actions: [
               {
                 label: "Undo",
@@ -694,7 +707,7 @@ function AppInner() {
                         if (res.ok && res.job) {
                           const jobId = res.job.id;
                           pushAppToastStore({
-                            message: `⏰ Reminder set for ${formatResetClock(fireAt, true)}.`,
+                            message: toastLine(Bell, `Reminder set for ${formatResetClock(fireAt, true)}.`),
                             actions: [
                               {
                                 label: "Undo",

@@ -71,4 +71,27 @@ describe("Toast actions", () => {
     const buttons = Array.from(h.container.querySelectorAll("button"));
     expect(buttons.length).toBe(1);
   });
+
+  it("puts the action buttons on their own row, not beside the message", () => {
+    h = mount(
+      <Toast
+        onDismiss={() => {}}
+        toast={{
+          id: "t",
+          message: "Session (5h) limit reached on Claude",
+          actions: [
+            { label: "Remind me at reset", onClick: () => {} },
+            { label: "Keep going at reset", onClick: () => {} },
+          ],
+        }}
+      />,
+    );
+    const btn = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Remind me at reset",
+    ) as HTMLButtonElement;
+    // The row that holds the actions must not also hold the message text —
+    // that shared row is what squeezed the message to one word per line.
+    expect(btn.parentElement?.textContent).not.toContain("Session (5h)");
+    expect(btn.parentElement?.textContent).toContain("Keep going at reset");
+  });
 });
