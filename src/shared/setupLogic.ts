@@ -41,18 +41,21 @@ export function normalizeServerUrl(raw: string | undefined | null): string | nul
  *
  * - Never while a request is in flight.
  * - Always requires a submittable (6-digit) code.
- * - Always requires a valid 32-hex Box ID — the box's public hostname
- *   (`https://<boxId>.boxes.mantaui.com`, see `boxDirectUrl`) is derived from
- *   it; the box is reached directly via this hostname.
- * - When the user has typed a non-empty `serverUrl` (Advanced), it must be a
- *   valid `http(s)://` URL — otherwise the inline error renders and submit is
- *   blocked. An absent/empty `serverUrl` is the default path (no override).
+ * - When the user has typed a non-empty `serverUrl` (Advanced / Host), it
+ *   must be a valid `http(s)://` URL, AND it is sufficient on its own — the
+ *   Box ID becomes OPTIONAL because the claim can run against that explicit
+ *   URL and backfill `box_id` from the claim response (BET-703). A malformed
+ *   `serverUrl` still blocks submit (the inline error renders).
+ * - When NO `serverUrl` is present (the default direct-hostname path), a
+ *   valid 32-hex Box ID is still required — the box's public hostname
+ *   (`https://<boxId>.boxes.mantaui.com`, see `boxDirectUrl`) is derived
+ *   from it and the box is reached directly via that hostname.
  */
 export function canConnectSetup(input: SetupFields): boolean {
   if (input.submitting) return false;
   if (!isSubmittableCode(input.code)) return false;
   if (input.serverUrl !== undefined && input.serverUrl.trim() !== "") {
-    if (normalizeServerUrl(input.serverUrl) === null) return false;
+    return normalizeServerUrl(input.serverUrl) !== null;
   }
   return isValidBoxToken(input.boxId.trim());
 }

@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   parsePairPayload,
   buildPairPayload,
+  buildUniversalPairLink,
+  UNIVERSAL_LINK_HOST,
   type PairPayload,
 } from "./pairPayload";
 import { CHANNELS, CHANNEL_IDS } from "./channel.mjs";
@@ -400,6 +402,58 @@ describe("buildPairPayload", () => {
         );
       });
     }
+  });
+});
+
+describe("buildUniversalPairLink", () => {
+  it("produces the universal-link https form (BET-703)", () => {
+    expect(buildUniversalPairLink({ boxId: BOX, code: "847291" })).toBe(
+      `https://${UNIVERSAL_LINK_HOST}/m?box=${encodeURIComponent(BOX)}&code=847291`,
+    );
+  });
+
+  it("URL-encodes the box value", () => {
+    expect(buildUniversalPairLink({ boxId: BOX, code: "000000" })).toContain(
+      encodeURIComponent(BOX),
+    );
+  });
+
+  it("appends &server=<url-encoded serverUrl> when present (BET-703)", () => {
+    expect(
+      buildUniversalPairLink({
+        boxId: BOX,
+        code: "847291",
+        serverUrl: "http://100.64.1.5:8787",
+      }),
+    ).toBe(
+      `https://${UNIVERSAL_LINK_HOST}/m?box=${encodeURIComponent(BOX)}&code=847291&server=${encodeURIComponent("http://100.64.1.5:8787")}`,
+    );
+  });
+
+  it("omits the server param when serverUrl is absent or empty", () => {
+    const without = buildUniversalPairLink({ boxId: BOX, code: "847291" });
+    expect(without).not.toContain("server=");
+    const empty = buildUniversalPairLink({ boxId: BOX, code: "847291", serverUrl: "" });
+    expect(empty).not.toContain("server=");
+  });
+
+  it("round-trips through parsePairPayload (universal form is a pairing payload)", () => {
+    expect(
+      parsePairPayload(buildUniversalPairLink({ boxId: BOX, code: "847291" })),
+    ).toEqual({ boxId: BOX, code: "847291" });
+    expect(
+      parsePairPayload(
+        buildUniversalPairLink({
+          boxId: BOX,
+          code: "847291",
+          serverUrl: "http://192.168.1.10:8787",
+        }),
+      ),
+    ).toEqual({
+      boxId: BOX,
+      code: "847291",
+      serverUrl: "http://192.168.1.10:8787",
+    });
   });
 });
 
