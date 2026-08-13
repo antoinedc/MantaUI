@@ -7,6 +7,7 @@
 // (App.tsx's "Update the box?", Settings.tsx's "Remove box?" / "Reset all
 // settings?") rather than inventing a new type scale.
 
+import type { ReactNode } from "react";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 
@@ -15,13 +16,15 @@ export function ConfirmModal({
   title,
   body,
   confirmLabel,
+  confirmTone = "danger",
   onConfirm,
   onCancel,
 }: {
   open: boolean;
   title: string;
-  body: string;
+  body: ReactNode;
   confirmLabel: string;
+  confirmTone?: "danger" | "primary";
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -34,7 +37,7 @@ export function ConfirmModal({
           <Button tone="default" onClick={onCancel}>
             Cancel
           </Button>
-          <Button tone="danger" onClick={onConfirm}>
+          <Button tone={confirmTone} onClick={onConfirm}>
             {confirmLabel}
           </Button>
         </div>

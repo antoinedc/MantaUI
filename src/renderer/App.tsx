@@ -25,8 +25,7 @@ import type { SyncPayload } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
-import { Modal } from "./Modal";
-import { Button } from "./Button";
+import { ConfirmModal } from "./ConfirmModal";
 import { Callout } from "./Callout";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
@@ -1721,72 +1720,45 @@ function AppInner() {
       {/* Box self-update confirm: restarting opencode ends every in-flight
           agent turn, so the destructive restart needs explicit consent before
           the update starts. */}
-      <Modal
-          open={confirmServerUpdate}
-          size="md"
-          label="Update the box?"
-          onDismiss={() => setConfirmServerUpdate(false)}
-        >
-          <div className="space-y-4">
-            <h3 className="text-title font-semibold">Update the box?</h3>
-            <div className="text-body text-text-faint">
-              This restarts opencode, which will end every agent turn currently
-              running in any session. Any unsaved work in a running turn is lost.
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button
-                tone="ghost"
-                onClick={() => setConfirmServerUpdate(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                tone="primary"
-                onClick={() => {
-                  setConfirmServerUpdate(false);
-                  void applyServerUpdate();
-                }}
-              >
-                Update &amp; restart
-              </Button>
-            </div>
-          </div>
-        </Modal>
+      <ConfirmModal
+        open={confirmServerUpdate}
+        title="Update the box?"
+        body="This restarts opencode, which will end every agent turn currently running in any session. Any unsaved work in a running turn is lost."
+        confirmLabel="Update & restart"
+        confirmTone="primary"
+        onConfirm={() => {
+          setConfirmServerUpdate(false);
+          void applyServerUpdate();
+        }}
+        onCancel={() => setConfirmServerUpdate(false)}
+      />
 
       {/* Keep going at reset — BET-739 usage escalation confirm. Rendered at
           App level (like the toasts) so it works over any pane. */}
       {keepGoing && (
-        <Modal
+        <ConfirmModal
           open
-          size="sm"
-          label="Send an automatic message at reset?"
-          onDismiss={() => setKeepGoing(null)}
-        >
-          <div className="space-y-4">
-            <h3 className="text-title font-semibold">Send an automatic message at reset?</h3>
-            <div className="text-body text-text-faint">
+          title="Send an automatic message at reset?"
+          confirmLabel="Schedule it"
+          confirmTone="primary"
+          body={
+            <>
               At {formatResetClock(keepGoing.fireAt, true)} MantaUI will send “Keep going” to this
               session on your behalf and the agent will resume unattended. You can cancel it any
               time from ⏰ scheduled tasks.
-            </div>
-            {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
-              <Callout tone="warn">
-                The reset is {describeResetDistance(keepGoing.fireAt - Date.now())} away — well past
-                your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
-                conversation will be re-sent and re-billed as fresh input, which costs significantly
-                more than a reply now.
-              </Callout>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button tone="ghost" onClick={() => setKeepGoing(null)}>
-                Cancel
-              </Button>
-              <Button tone="primary" onClick={() => void confirmKeepGoing()}>
-                Schedule it
-              </Button>
-            </div>
-          </div>
-        </Modal>
+              {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
+                <Callout tone="warn">
+                  The reset is {describeResetDistance(keepGoing.fireAt - Date.now())} away — well past
+                  your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
+                  conversation will be re-sent and re-billed as fresh input, which costs significantly
+                  more than a reply now.
+                </Callout>
+              )}
+            </>
+          }
+          onConfirm={() => void confirmKeepGoing()}
+          onCancel={() => setKeepGoing(null)}
+        />
       )}
     </div>
   );

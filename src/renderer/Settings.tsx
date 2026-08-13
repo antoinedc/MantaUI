@@ -12,7 +12,7 @@ import {
   Mic,
 } from "lucide-react";
 import { useStore } from "./store";
-import { Modal } from "./Modal";
+import { ConfirmModal } from "./ConfirmModal";
 import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
 import { Toggle } from "./Toggle";
@@ -937,28 +937,24 @@ export function Settings({
       </div>
 
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
-      <Modal open={confirmRemove} size="md" label="Remove this box?" onDismiss={() => setConfirmRemove(false)}>
-          <div className="space-y-4">
-            <h3 className="text-title font-semibold">Remove this box?</h3>
-            <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
-            <div className="flex justify-end gap-2">
-              <Button onClick={() => setConfirmRemove(false)} tone="ghost">Cancel</Button>
-              <Button onClick={removeBox} tone="danger">Remove</Button>
-            </div>
-          </div>
-        </Modal>
+      <ConfirmModal
+        open={confirmRemove}
+        title="Remove this box?"
+        body="The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts."
+        confirmLabel="Remove"
+        onConfirm={() => void removeBox()}
+        onCancel={() => setConfirmRemove(false)}
+      />
 
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
-      <Modal open={confirmReset} size="md" label="Reset all settings?" onDismiss={() => setConfirmReset(false)}>
-          <div className="space-y-4">
-            <h3 className="text-title font-semibold">Reset all settings?</h3>
-            <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
-            <div className="flex justify-end gap-2">
-              <Button onClick={() => setConfirmReset(false)} tone="ghost">Cancel</Button>
-              <Button onClick={resetAll} tone="danger">Reset</Button>
-            </div>
-          </div>
-        </Modal>
+      <ConfirmModal
+        open={confirmReset}
+        title="Reset all settings?"
+        body="Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after."
+        confirmLabel="Reset"
+        onConfirm={() => void resetAll()}
+        onCancel={() => setConfirmReset(false)}
+      />
     </div>
   );
 }
