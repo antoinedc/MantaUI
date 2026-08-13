@@ -1683,12 +1683,13 @@ export function ChatPanel({
   // burning a wakeup every 10s on idle apps with no completed turns.
   const [staleTick, setStaleTick] = useState(0);
   useEffect(() => {
+    if (!isActive) return; // BET-730: hidden panels don't need staleness ticks
     if (running) return;
     if (lastAssistantCompletion == null) return;
     if (cachedTokens < STALE_CACHE_MIN_TOKENS) return;
     const id = setInterval(() => setStaleTick((t) => t + 1), 10_000);
     return () => clearInterval(id);
-  }, [running, lastAssistantCompletion, cachedTokens]);
+  }, [running, lastAssistantCompletion, cachedTokens, isActive]);
   const staleCache = useMemo<StaleCacheResult>(
     () =>
       computeStaleCache({
