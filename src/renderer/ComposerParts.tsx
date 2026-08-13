@@ -11,6 +11,10 @@ import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
 import { IconButton } from "./IconButton";
+// BET-726 Task 1: same scrollIntoView idiom the ⌘K / ⌘F palettes and the
+// model/effort menus use (PaletteShell.tsx) — keeps the keyboard-selected
+// @-file row visible when it moves past the popup's scroll fold.
+import { useSelectedIntoView } from "./PaletteShell";
 
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
@@ -211,25 +215,52 @@ export function TypeaheadPopup({
           );
         }
         return (
-          <button
+          <TypeaheadRowButton
             key={`${row.kind}:${row.key}`}
-            onClick={() => onSelect(row)}
-            onMouseEnter={() => onHover(idx)}
-            className={
-              "w-full text-left px-2 py-1 flex items-center gap-2 " +
-              (active ? "bg-accent-bg text-text" : "text-text-muted hover:bg-bg-soft")
-            }
-          >
-            <span className="truncate flex-1">{row.primary}</span>
-            {row.secondary && (
-              <span className="text-text-faint truncate max-w-[50%] text-label">
-                {row.secondary}
-              </span>
-            )}
-          </button>
+            row={row}
+            active={active}
+            onSelect={() => onSelect(row)}
+            onHover={() => onHover(idx)}
+          />
         );
       })}
     </div>
+  );
+}
+
+// A single @-file typeahead row. Split out (rather than an inline map
+// closure) so it can call the roving-highlight hook itself — Hooks may only
+// be called from a component function, not from inside `Array.prototype.map`
+// (same shape as Sidebar's SessionRow / SearchPalette's row).
+function TypeaheadRowButton({
+  row,
+  active,
+  onSelect,
+  onHover,
+}: {
+  row: TypeaheadRow;
+  active: boolean;
+  onSelect: () => void;
+  onHover: () => void;
+}) {
+  const ref = useSelectedIntoView<HTMLButtonElement>(active);
+  return (
+    <button
+      ref={ref}
+      onClick={onSelect}
+      onMouseEnter={onHover}
+      className={
+        "w-full text-left px-2 py-1 flex items-center gap-2 " +
+        (active ? "bg-accent-bg text-text" : "text-text-muted hover:bg-bg-soft")
+      }
+    >
+      <span className="truncate flex-1">{row.primary}</span>
+      {row.secondary && (
+        <span className="text-text-faint truncate max-w-[50%] text-label">
+          {row.secondary}
+        </span>
+      )}
+    </button>
   );
 }
 

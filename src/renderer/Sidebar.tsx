@@ -329,24 +329,71 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     setFocusedKey(navKeys[next]);
   };
 
+  // Resolve the (project, window) pair backing a `pin:`/`win:`/`job:` nav key
+  // — shared by activate/rename/delete below so the three keyboard paths
+  // (BET-726 Task 2) don't each re-derive the same lookup.
+  const resolveFocusedWindow = (): { project: Project; window: TmuxWindow } | null => {
+    if (!focusedKey) return null;
+    const [kind, ...rest] = focusedKey.split(":");
+    if (kind === "pin") return resolvePin(projects, rest.join(":"));
+    if (kind === "win" || kind === "job") {
+      const session = rest[0];
+      const idx = Number(rest[1]);
+      const proj = projects.find((p) => p.tmuxSession === session);
+      const win = proj?.windows.find((w) => w.index === idx);
+      return proj && win ? { project: proj, window: win } : null;
+    }
+    return null;
+  };
+
   const activateFocused = () => {
     if (!focusedKey) return;
-    const [kind, ...rest] = focusedKey.split(":");
-    if (kind === "group") {
-      toggleCollapse(rest.join(":"));
+    if (focusedKey.startsWith("group:")) {
+      toggleCollapse(focusedKey.slice("group:".length));
       return;
     }
-    if (kind === "pin") {
-      const r = resolvePin(projects, rest.join(":"));
-      if (r) void activateWindow(r.project, r.window.index);
+    const r = resolveFocusedWindow();
+    if (r) void activateWindow(r.project, r.window.index);
+  };
+
+  // F2 → the same rename entry point the row's double-click already uses
+  // (BET-726 Task 2.1). Project groups and windows are renameable; job rows
+  // never were (JobChildRow has no onRename), so they're a no-op here too.
+  const renameFocused = () => {
+    if (!focusedKey) return;
+    if (focusedKey.startsWith("group:")) {
+      const session = focusedKey.slice("group:".length);
+      startRename({ kind: "project", old: session }, session);
       return;
     }
-    // win:<session>:<idx> | job:<session>:<idx>
-    const session = rest[0];
-    const idx = Number(rest[1]);
-    const proj = projects.find((p) => p.tmuxSession === session);
-    const win = proj?.windows.find((w) => w.index === idx);
-    if (proj && win) void activateWindow(proj, idx);
+    const r = resolveFocusedWindow();
+    if (r) {
+      startRename(
+        { kind: "window", project: r.project.tmuxSession, index: r.window.index, old: r.window.name },
+        r.window.name,
+      );
+    }
+  };
+
+  // Delete / ContextMenu → the SAME inline ConfirmDelete the right-click path
+  // already opens (BET-726 Task 2.1) — right-click's onContextMenu just calls
+  // this same setConfirmDeleteFor shape, so there is no separate "menu" to
+  // build for the ContextMenu key either.
+  const requestDeleteFocused = () => {
+    if (!focusedKey) return;
+    if (focusedKey.startsWith("group:")) {
+      setConfirmDeleteFor({ kind: "project", project: focusedKey.slice("group:".length) });
+      return;
+    }
+    const r = resolveFocusedWindow();
+    if (r) {
+      setConfirmDeleteFor({
+        kind: "session",
+        project: r.project.tmuxSession,
+        index: r.window.index,
+        name: r.window.name,
+      });
+    }
   };
 
   const onRailKeyDown = (e: React.KeyboardEvent) => {
@@ -383,9 +430,30 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         }
         break;
       }
+      // Space activates alongside Enter (SessionRow is a treeitem, not a
+      // <button>, so native Space-click doesn't happen for free).
       case "Enter":
+      case " ":
         e.preventDefault();
         activateFocused();
+        break;
+      case "F2":
+        e.preventDefault();
+        renameFocused();
+        break;
+      // Backspace alongside Delete: the Mac keyboard's only "delete" key
+      // reports as Backspace in the DOM (there's no forward-delete key on
+      // most Mac keyboards) — binding only "Delete" would leave Mac users
+      // without this path. A focused RenameInput stops propagation on its
+      // own keydown, so this never fires mid-rename.
+      case "Delete":
+      case "Backspace":
+        e.preventDefault();
+        requestDeleteFocused();
+        break;
+      case "ContextMenu":
+        e.preventDefault();
+        requestDeleteFocused();
         break;
     }
   };
@@ -534,9 +602,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                         e.stopPropagation();
                         dismissDraft(d.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
                       aria-label="Discard this new session"
-                      tabIndex={-1}
+                      title="Discard this new session"
                     >
                       <X size={13} aria-hidden="true" />
                     </button>
@@ -860,10 +928,9 @@ function PinSlot({
         e.stopPropagation();
         onToggle();
       }}
-      className="w-[18px] h-[18px] flex items-center justify-center shrink-0 text-text-faint opacity-0 group-hover:opacity-100 hover:text-[var(--accent-tx)] transition-colors"
+      className="w-[18px] h-[18px] flex items-center justify-center shrink-0 text-text-faint opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-[var(--accent-tx)] transition-colors"
       title={pinned ? "Unpin" : "Pin"}
       aria-label={pinned ? "Unpin" : "Pin"}
-      tabIndex={-1}
     >
       <Pin size={12} className={pinned ? "fill-current" : ""} aria-hidden="true" />
     </button>
@@ -1163,9 +1230,8 @@ function GroupHeader({
           e.stopPropagation();
           onNewSession();
         }}
-        className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-text leading-none"
+        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-text leading-none"
         title="New session in this project"
-        tabIndex={-1}
       >
         +
       </button>
@@ -1174,10 +1240,9 @@ function GroupHeader({
           e.stopPropagation();
           onClose();
         }}
-        className="opacity-0 group-hover:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
+        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
         title="Close project"
         aria-label="Close project"
-        tabIndex={-1}
       >
         <X size={14} aria-hidden="true" />
       </button>

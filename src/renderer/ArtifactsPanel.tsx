@@ -466,6 +466,15 @@ export function ArtifactsPanel({
   widthRef.current = width;
 
   const [tab, setTab] = useState<ArtifactKind>("link");
+  // BET-726 Task 3.2: roving-tabindex arrow nav on the tab bar — the exact
+  // pattern Settings.tsx's section rail already uses (`onRailKeyDown` there:
+  // move the active tab AND focus, on Left/Right). Refs keyed by kind so
+  // ArrowLeft/Right can call `.focus()` on the tab it moves to.
+  const tabRefs = useRef<Record<ArtifactKind, HTMLButtonElement | null>>({
+    link: null,
+    image: null,
+    file: null,
+  });
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   // The preview overlay: index into `previewable` (the current tab's
@@ -577,6 +586,16 @@ export function ArtifactsPanel({
     else void downloadArtifact(a);
   };
 
+  const onTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const idx = TABS.indexOf(tab);
+    const dir = e.key === "ArrowRight" ? 1 : -1;
+    const next = TABS[(idx + dir + TABS.length) % TABS.length];
+    setTab(next);
+    tabRefs.current[next]?.focus();
+  };
+
   // Jump the transcript to the message that owns an artifact.
   const jumpToMessage = (a: Artifact) => {
     if (!a.messageId) return;
@@ -655,7 +674,7 @@ export function ArtifactsPanel({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search links & files…"
-              className="mb-3 w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none placeholder:text-text-faint"
+              className="mb-3 w-full bg-bg border border-border px-2 py-1 text-meta rounded-xs focus:outline-none focus:border-accent placeholder:text-text-faint"
             />
           )}
 
@@ -683,12 +702,15 @@ export function ArtifactsPanel({
               return (
                 <button
                   key={k}
+                  ref={(el) => { tabRefs.current[k] = el; }}
                   type="button"
                   role="tab"
                   aria-selected={active}
                   onClick={() => setTab(k)}
+                  onKeyDown={onTabKeyDown}
                   className={
                     "relative z-10 flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
+                    "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
                     (active ? "text-text" : "text-text-faint hover:text-text")
                   }
                 >

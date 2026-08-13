@@ -64,6 +64,7 @@ export function MenuItem({
   children,
   trailing,
   onSelect,
+  highlighted = false,
 }: {
   /** Which surface + foreground the row carries. normal is the default. */
   variant?: MenuItemVariant;
@@ -75,13 +76,17 @@ export function MenuItem({
   trailing?: ReactNode;
   /** Called when the row is chosen. */
   onSelect?: () => void;
+  /** The roving keyboard highlight (BET-726 Task 3.1) — the SAME static
+   *  `--fill-hover` fill MenuOption's `active` prop gives the model/effort
+   *  menus, applied unconditionally instead of only on `:hover`. */
+  highlighted?: boolean;
 }) {
   return (
     <button
       type="button"
       role="menuitem"
       onClick={onSelect}
-      className={`${ITEM_BASE} ${VARIANT[variant]}`}
+      className={`${ITEM_BASE} ${VARIANT[variant]}${highlighted ? " bg-fill-hover" : ""}`}
     >
       {icon && cloneElement(icon, { size: 14, "aria-hidden": true })}
       <span className="flex-1">{children}</span>

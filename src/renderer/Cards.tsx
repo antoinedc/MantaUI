@@ -211,7 +211,7 @@ export function PermissionCard({
     <>
       <button
         onClick={() => onReply("once")}
-        className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium"
+        className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         style={{ backgroundColor: "var(--accent-solid)" }}
       >
         <Check size={13} aria-hidden="true" />
@@ -224,7 +224,7 @@ export function PermissionCard({
         <button
           onClick={() => onReply("always")}
           title={`Always allow ${alwaysScope}`}
-          className="h-8 px-[14px] inline-flex items-center rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta"
+          className="h-8 px-[14px] inline-flex items-center rounded-md border border-border-strong text-text hover:bg-bg-soft text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           Always allow&nbsp;
           <span className="text-text-faint">{alwaysScope}</span>
@@ -234,7 +234,7 @@ export function PermissionCard({
       <div className="flex-1" />
       <button
         onClick={() => onReply("reject")}
-        className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta"
+        className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
       >
         Reject
       </button>
@@ -484,7 +484,7 @@ export function QuestionCard({
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium disabled:opacity-40"
+            className="h-8 px-[14px] inline-flex items-center gap-2 rounded-md text-on-accent text-meta font-medium disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
             style={{ backgroundColor: "var(--accent-solid)" }}
           >
             Submit
@@ -502,7 +502,7 @@ export function QuestionCard({
           <div className="flex-1" />
           <button
             onClick={onReject}
-            className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta"
+            className="h-8 px-[14px] inline-flex items-center rounded-md text-text-faint hover:text-danger hover:bg-danger-bg text-meta focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
             title="Dismiss this question"
           >
             Dismiss

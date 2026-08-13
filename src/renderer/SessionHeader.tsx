@@ -10,11 +10,12 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
+  moveMenuHighlight,
   type ContextBreakdown,
   type StaleCacheResult,
 } from "./chatUtils";
@@ -491,10 +492,86 @@ function SessionMenu({
   // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
   // sidebar's inline delete confirm — previously both fired instantly.
   const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
+  // BET-726 Task 3.1: the roving keyboard highlight, same index-state shape
+  // as ModelMenu's highlight loop (chatUtils' moveMenuHighlight) — adapted
+  // from ModelMenu's search input to this menu's root div, since there is no
+  // input here to hang the keydown on.
+  const [highlight, setHighlight] = useState(-1);
   const rootRef = useRef<HTMLDivElement>(null);
   useClickAway(rootRef, open, () => setOpen(false));
 
+  // Reset the roving highlight each time the menu (re)opens, so a stale
+  // index from a previous open never carries over.
+  useEffect(() => {
+    if (open) setHighlight(-1);
+  }, [open]);
+
+  const hasMode = !!onModeChange;
+  const isActive = (m: SessionMode) => mode === m;
+
+  // The menu closes after any action; a mode change just re-points mode
+  // (a no-op when already in that mode, so re-clicking the current row is a
+  // harmless close).
+  const switchMode = (m: SessionMode) => {
+    if (onModeChange) onModeChange(m);
+  };
+
+  // The flat, keyboard-navigable row order — same order the rows render in
+  // below, so `highlight`'s index lines up with the rendered row it lights.
+  const rowIds: string[] = [
+    ...(hasMode
+      ? [
+          "mode:chat",
+          "mode:terminal",
+          ...(availableLaunchers ?? []).map((l) => `mode:tui:${l.id}`),
+        ]
+      : []),
+    "fork",
+    "compact",
+    "clear",
+    "delete",
+  ];
+  const highlightedRow = highlight >= 0 ? rowIds[highlight] : undefined;
+
+  const activateRow = (id: string | undefined) => {
+    if (!id) return;
+    if (id === "fork") { setOpen(false); onFork(); return; }
+    if (id === "compact") { setOpen(false); onCompact(); return; }
+    if (id === "clear") { setOpen(false); setConfirm("clear"); return; }
+    if (id === "delete") { setOpen(false); setConfirm("delete"); return; }
+    if (id.startsWith("mode:")) { setOpen(false); switchMode(id.slice("mode:".length) as SessionMode); }
+  };
+
+  const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!open) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => moveMenuHighlight(h, 1, rowIds.length));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => moveMenuHighlight(h, -1, rowIds.length));
+    } else if (e.key === "Home") {
+      if (rowIds.length > 0) {
+        e.preventDefault();
+        setHighlight(0);
+      }
+    } else if (e.key === "End") {
+      if (rowIds.length > 0) {
+        e.preventDefault();
+        setHighlight(rowIds.length - 1);
+      }
+    } else if (e.key === "Enter") {
+      if (highlightedRow) {
+        e.preventDefault();
+        activateRow(highlightedRow);
+      }
+    }
+    // Escape already closes the menu via useClickAway's document keydown
+    // listener (bound above, gated on `open`) — nothing to add here.
+  };
+
   const item = (
+    id: string,
     icon: React.ReactElement,
     label: string,
     onClick: () => void,
@@ -503,6 +580,7 @@ function SessionMenu({
     <MenuItem
       icon={icon}
       variant={danger ? "danger" : "normal"}
+      highlighted={highlightedRow === id}
       onSelect={() => {
         setOpen(false);
         onClick();
@@ -512,16 +590,8 @@ function SessionMenu({
     </MenuItem>
   );
 
-  // The menu closes after any action; a mode change just re-points mode
-  // (a no-op when already in that mode, so re-clicking the current row is a
-  // harmless close).
-  const switchMode = (m: SessionMode) => {
-    if (onModeChange) onModeChange(m);
-  };
-
-  const isActive = (m: SessionMode) => mode === m;
-
   const modeItem = (
+    id: string,
     icon: React.ReactElement,
     label: string,
     m: SessionMode,
@@ -531,6 +601,7 @@ function SessionMenu({
       <MenuItem
         icon={icon}
         variant={active ? "active" : "normal"}
+        highlighted={highlightedRow === id}
         trailing={
           active ? (
             <span className="text-text-faint" aria-hidden="true">
@@ -548,10 +619,8 @@ function SessionMenu({
     );
   };
 
-  const hasMode = !!onModeChange;
-
   return (
-    <div ref={rootRef} className="relative shrink-0">
+    <div ref={rootRef} className="relative shrink-0" onKeyDown={onMenuKeyDown}>
       <IconButton
         icon={<MoreHorizontal />}
         label="Session actions"
@@ -567,8 +636,8 @@ function SessionMenu({
               <div className={`${GROUP_LABEL} pt-1`} role="presentation">
                 Mode
               </div>
-              {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
-              {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
+              {modeItem("mode:chat", <MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
+              {modeItem("mode:terminal", <Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
               {availableLaunchers && availableLaunchers.length > 0 && (
                 <>
                   <div className={`${GROUP_LABEL} pt-3`} role="presentation">
@@ -576,6 +645,7 @@ function SessionMenu({
                   </div>
                   {availableLaunchers.map((l) =>
                     modeItem(
+                      `mode:tui:${l.id}`,
                       <Bot size={14} aria-hidden="true" />,
                       l.label,
                       `tui:${l.id}` as SessionMode,
@@ -588,22 +658,26 @@ function SessionMenu({
           )}
 
           {item(
+            "fork",
             <GitFork size={14} aria-hidden="true" />,
             "Fork session",
             onFork,
           )}
           {item(
+            "compact",
             <Minimize2 size={14} aria-hidden="true" />,
             "Compact context",
             onCompact,
           )}
           {item(
+            "clear",
             <Eraser size={14} aria-hidden="true" />,
             "Clear session",
             () => setConfirm("clear"),
           )}
           <div className="my-1 border-t border-border-subtle" role="separator" />
           {item(
+            "delete",
             <Trash2 size={14} aria-hidden="true" />,
             "Delete session",
             () => setConfirm("delete"),
