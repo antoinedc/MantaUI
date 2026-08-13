@@ -79,14 +79,14 @@ final class MantaAuthClientTests: XCTestCase {
             return (response, data)
         }
         let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456", verify: "K7Q2", deviceName: "My iPhone")
+        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456", deviceName: "My iPhone")
         guard case .success = outcome else { return XCTFail("expected success") }
 
         XCTAssertEqual(captured?.url?.path, "/auth/claim")
         XCTAssertEqual(captured?.httpMethod, "POST")
         XCTAssertEqual(captured?.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(capturedBody?["pairing_code"] as? String, "123456")
-        XCTAssertEqual(capturedBody?["verify"] as? String, "K7Q2")
+        XCTAssertNil(capturedBody?["verify"], "verify is retired — must not be sent")
         XCTAssertEqual(capturedBody?["name"] as? String, "My iPhone")
     }
 
@@ -98,7 +98,7 @@ final class MantaAuthClientTests: XCTestCase {
             return (response, data)
         }
         let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456", verify: nil)
+        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456")
         XCTAssertEqual(MantaPairing.classifyClaim(status: 200, body: ["box_token": box, "box_id": box, "device_id": "dev_1"]), outcome)
 
         try client.persist(onSuccess: outcome, serverURL: URL(string: "https://\(box).boxes.mantaui.com")!)
@@ -114,7 +114,7 @@ final class MantaAuthClientTests: XCTestCase {
             return (response, Data("{\"error\":\"no\"}".utf8))
         }
         let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "111111", verify: nil)
+        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "111111")
         XCTAssertEqual(outcome, .wrongCode)
 
         try client.persist(onSuccess: outcome, serverURL: URL(string: "https://\(box).boxes.mantaui.com")!)
@@ -126,7 +126,7 @@ final class MantaAuthClientTests: XCTestCase {
             throw URLError(.notConnectedToInternet)
         }
         let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456", verify: nil)
+        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456")
         XCTAssertEqual(outcome, .network)
     }
 }

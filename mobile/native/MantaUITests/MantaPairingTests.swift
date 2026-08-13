@@ -20,22 +20,6 @@ final class MantaPairingTests: XCTestCase {
         XCTAssertFalse(MantaPairing.isSubmittableCode(""))
     }
 
-    // MARK: - Two-sided confirm (pairPayload.ts)
-
-    func testNormalizeVerifyFoldsCaseAndStripsWhitespace() {
-        XCTAssertEqual(MantaPairing.normalizeVerify("K7 Q2"), "K7Q2")
-        XCTAssertEqual(MantaPairing.normalizeVerify("k7 q2"), "K7Q2")
-        XCTAssertEqual(MantaPairing.normalizeVerify("K7Q2"), "K7Q2")
-        XCTAssertEqual(MantaPairing.normalizeVerify("  k 7 q 2 "), "K7Q2")
-    }
-
-    func testIsValidVerify() {
-        XCTAssertTrue(MantaPairing.isValidVerify("K7Q2"))
-        XCTAssertTrue(MantaPairing.isValidVerify("k7q2"))
-        XCTAssertFalse(MantaPairing.isValidVerify("K7"))
-        XCTAssertFalse(MantaPairing.isValidVerify("K7Q22"))
-    }
-
     // MARK: - Box id + server URL (setupLogic.ts / transport.mjs)
 
     func testIsValidBoxIdRequires32Hex() {
@@ -77,19 +61,29 @@ final class MantaPairingTests: XCTestCase {
     private let box = "0123abcd0123abcd0123abcd0123abcd"
 
     func testParsesCustomSchemeBoxPayload() {
-        let raw = "manta://pair?box=\(box)&code=123456&verify=K7Q2"
+        let raw = "manta://pair?box=\(box)&code=123456"
         let payload = MantaPairing.parsePairPayload(raw)
         XCTAssertEqual(payload?.boxId, box)
         XCTAssertEqual(payload?.code, "123456")
-        XCTAssertEqual(payload?.verify, "K7Q2")
         XCTAssertNil(payload?.serverUrl)
     }
 
-    func testParsesTokenSpellingAndNoVerify() {
+    func testParsesTokenSpelling() {
         let raw = "manta://pair?box=\(box)&token=654321"
         let payload = MantaPairing.parsePairPayload(raw)
         XCTAssertEqual(payload?.code, "654321")
-        XCTAssertNil(payload?.verify)
+    }
+
+    func testVerifyQueryParamIsIgnored() {
+        // Old desktop QRs carry a `verify` param; it must be IGNORED, never
+        // refused (valid or not), so the payload still parses.
+        let valid = MantaPairing.parsePairPayload("manta://pair?box=\(box)&code=123456&verify=K7Q2")
+        XCTAssertEqual(valid?.boxId, box)
+        XCTAssertEqual(valid?.code, "123456")
+        XCTAssertNil(valid?.serverUrl)
+        let malformed = MantaPairing.parsePairPayload("manta://pair?box=\(box)&code=123456&verify=K7")
+        XCTAssertEqual(malformed?.boxId, box)
+        XCTAssertEqual(malformed?.code, "123456")
     }
 
     func testParsesDeferredDeeplinkHttpsForm() {
@@ -121,11 +115,6 @@ final class MantaPairingTests: XCTestCase {
     func testRejectsSevenDigitRawCode() {
         // 6 after clamp but 7 raw digits must be rejected (claim.mjs guard).
         let raw = "manta://pair?box=\(box)&code=1234567"
-        XCTAssertNil(MantaPairing.parsePairPayload(raw))
-    }
-
-    func testRejectsMalformedVerifyInLink() {
-        let raw = "manta://pair?box=\(box)&code=123456&verify=K7"
         XCTAssertNil(MantaPairing.parsePairPayload(raw))
     }
 
@@ -181,9 +170,9 @@ final class MantaPairingTests: XCTestCase {
     }
 
     func testClaimBaseURLLikesServerOverride() {
-        let payload = MantaPairing.PairPayload(boxId: box, code: "123456", verify: nil, serverUrl: "http://100.64.0.9:8787")
+        let payload = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: "http://100.64.0.9:8787")
         XCTAssertEqual(MantaPairing.claimBaseURL(payload)?.absoluteString, "http://100.64.0.9:8787")
-        let derived = MantaPairing.PairPayload(boxId: box, code: "123456", verify: nil, serverUrl: nil)
+        let derived = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
         XCTAssertEqual(MantaPairing.claimBaseURL(derived)?.absoluteString, "https://\(box).boxes.mantaui.com")
     }
 

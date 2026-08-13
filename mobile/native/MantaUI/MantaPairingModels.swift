@@ -6,9 +6,9 @@ import Foundation
 // This is a Swift port of the shared, tested pairing contract so the native
 // client and the desktop/web clients can never disagree about what counts as a
 // valid code or how an HTTP claim outcome maps to a user-facing result:
-//   • src/shared/claim.mjs         — code normalization + classifyClaimResult
-//   • src/shared/pairPayload.ts    — parsePairPayload / normalizeVerifyCode
-//   • src/shared/setupLogic.ts     — boxDirectUrl / normalizeServerUrl
+ //   • src/shared/claim.mjs         — code normalization + classifyClaimResult
+ //   • src/shared/pairPayload.ts    — parsePairPayload
+ //   • src/shared/setupLogic.ts     — boxDirectUrl / normalizeServerUrl
 //   • src/server/auth.mjs          — the server contract this classifies
 //
 // Pure (no HTTP, no view, no Keychain) — unit-tested in MantaPairingTests.
@@ -28,19 +28,6 @@ enum MantaPairing {
     /// True when `code` is exactly 6 digits — worth POSTing to /auth/claim.
     static func isSubmittableCode(_ code: String) -> Bool {
         code.range(of: #"^[0-9]{6}$"#, options: .regularExpression) != nil
-    }
-
-    // MARK: - Two-sided four-character confirm (pairPayload.ts / §6.2)
-    //
-    // Normalize a presented verification code for comparison: strip whitespace
-    // and fold case so "K7 Q2", "k7 q2" and "K7Q2" all resolve to "K7Q2".
-    static func normalizeVerify(_ raw: String) -> String {
-        String(raw.uppercased().filter { !$0.isWhitespace })
-    }
-
-    /// A valid four-char verification code after normalization.
-    static func isValidVerify(_ raw: String) -> Bool {
-        normalizeVerify(raw).range(of: #"^[A-Z0-9]{4}$"#, options: .regularExpression) != nil
     }
 
     // MARK: - Box ID + server URL (setupLogic.ts / transport.mjs)
@@ -94,18 +81,13 @@ enum MantaPairing {
     struct PairPayload: Equatable, Sendable {
         var boxId: String
         var code: String
-        /// Optional four-char verification code (§5.3 "K7 Q2"). When present,
-        /// the claim is forwarded WITH `verify` so the box provisions a
-        /// DISTINCT Stage-2 joiner device rather than the shared primary
-        /// box_token. Always stored in the normalized form.
-        var verify: String?
         /// Optional server URL (Tailscale path). When present the claim is
         /// made against this URL instead of the derived public hostname.
         var serverUrl: String?
 
         static func == (lhs: PairPayload, rhs: PairPayload) -> Bool {
             lhs.boxId == rhs.boxId && lhs.code == rhs.code
-                && lhs.verify == rhs.verify && lhs.serverUrl == rhs.serverUrl
+                && lhs.serverUrl == rhs.serverUrl
         }
     }
 
@@ -137,7 +119,6 @@ enum MantaPairing {
         let rawBox = q["box"] ?? ""
         let rawCode = q["code"] ?? q["token"] ?? ""
         let rawServer = q["server"] ?? ""
-        let rawVerify = q["verify"] ?? ""
 
         let boxId = rawBox.trimmingCharacters(in: .whitespaces)
         guard isValidBoxId(boxId) else { return nil }
@@ -157,14 +138,9 @@ enum MantaPairing {
             serverUrl = normalized
         }
 
-        var verify: String?
-        if !rawVerify.isEmpty {
-            let normalized = normalizeVerify(rawVerify)
-            guard isValidVerify(normalized) else { return nil }
-            verify = normalized
-        }
-
-        return PairPayload(boxId: boxId, code: code, verify: verify, serverUrl: serverUrl)
+        // A stray `verify` query param (old desktop QRs emitted one) is IGNORED
+        // — never refuse the payload because of it.
+        return PairPayload(boxId: boxId, code: code, serverUrl: serverUrl)
     }
 
     // MARK: - Claim outcome classification (claim.mjs classifyClaimResult)

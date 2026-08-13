@@ -111,9 +111,11 @@ struct MantaAppRoot: View {
             _ = MantaPairingRouter.route(url)
         }
         .onReceive(MantaPairingRouter.shared.$pendingPayload) { payload in
-            if let payload {
-                flow.receive(payload: payload)
-            }
+            guard let payload else { return }
+            flow.receive(payload: payload)
+            // The staged payload is consumed by `receive` — clear it so link
+            // handling isn't state-dependent (the same link must stage once).
+            MantaPairingRouter.shared.pendingPayload = nil
         }
     }
 }

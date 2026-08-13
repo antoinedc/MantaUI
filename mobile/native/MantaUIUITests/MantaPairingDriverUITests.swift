@@ -4,7 +4,9 @@ import XCTest
 // can be exercised from CI or from a plugin run without a human typing into
 // the Simulator. The app registers no URL scheme, so `simctl openurl` cannot
 // deliver a pair payload — the only faithful path is the one a user takes:
-// type the six digits, reveal the advanced server field, submit.
+// type the six digits, reveal the advanced server field, submit. (A Box ID is
+// the alternative address target on the manual screen; this driver uses the
+// server-URL disclosure path, which wins when both are filled.)
 //
 // Skipped unless BOTH env vars are present, so an ordinary test run (which
 // has no live box and no unexpired code) is unaffected:
