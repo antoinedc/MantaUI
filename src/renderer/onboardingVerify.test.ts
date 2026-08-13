@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   VERIFY_PROBE_TEXT,
   VERIFY_DIRECTORY,
+  VERIFY_DEFAULT_TIMEOUT_MS,
   verifyStageLabels,
   verifyOnboarding,
   hasConnectedProvider,
@@ -41,12 +42,12 @@ describe("verifyStageLabels", () => {
     expect(verifyStageLabels("Claude", "claude-sonnet-4")).toEqual([
       "Reached opencode on your box",
       "Claude credentials accepted",
-      "Getting a reply from claude-sonnet-4",
+      "Waiting for a reply — cold models can take a minute…",
     ]);
   });
 
   it("falls back to 'the model' when no model label is supplied", () => {
-    expect(verifyStageLabels("Codex")[2]).toBe("Getting a reply from the model");
+    expect(verifyStageLabels("Codex")[2]).toBe("Waiting for a reply — cold models can take a minute…");
   });
 });
 
@@ -165,6 +166,61 @@ describe("verifyOnboarding", () => {
     });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.failedStage).toBe(2);
+  });
+
+  it("succeeds on the first streamed token — an uncompleted message with text", async () => {
+    // Baseline poll returns [] (only the probe prompt, no assistant reply
+    // yet). The next poll returns a NEW assistant message that is NOT
+    // completed but HAS a text part — the first streamed token. Must be
+    // accepted as success even though nothing has completed.
+    const steps: unknown[][] = [
+      [],
+      [
+        {
+          info: { id: "a1", role: "assistant", time: { completed: null } },
+          parts: [{ type: "text", text: "Hel" }],
+        },
+      ],
+    ];
+    let calls = 0;
+    const api = makeApi({
+      opencodeMessages: (vi.fn(async (_sid: string) => {
+        const idx = Math.min(calls, steps.length - 1);
+        calls += 1;
+        return steps[idx];
+      }) as unknown) as VerifyApi["opencodeMessages"],
+    });
+    const progress: string[] = [];
+    const out = await verifyOnboarding({
+      api,
+      providerLabel: "Claude",
+      timeoutMs: 5_000,
+      pollIntervalMs: 1,
+      now: () => 0,
+      onProgress: (p) => progress.push(`${p.stage}:${p.status}`),
+    });
+    expect(out).toEqual({ ok: true });
+    expect(progress).toEqual(["0:running", "1:running", "2:running", "2:done"]);
+    expect(api.opencodeDeleteSessionRaw).toHaveBeenCalledWith("eph-1");
+  });
+
+  it("fails at stage 2 when no reply (token or completion) arrives before the 90s deadline", async () => {
+    const api = makeApi({ opencodeMessages: vi.fn(async () => []) });
+    // Inject `now` so the deadline (default 90s) elapses on the first poll
+    // — no timeout override, exercising VERIFY_DEFAULT_TIMEOUT_MS.
+    let t = 0;
+    const out = await verifyOnboarding({
+      api,
+      providerLabel: "Claude",
+      pollIntervalMs: 1,
+      now: () => (t += VERIFY_DEFAULT_TIMEOUT_MS + 1),
+    });
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.failedStage).toBe(2);
+      expect(out.message).toContain("didn't reply");
+    }
+    expect(api.opencodeDeleteSessionRaw).toHaveBeenCalledWith("eph-1");
   });
 });
 

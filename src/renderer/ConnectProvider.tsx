@@ -106,6 +106,10 @@ export function ConnectProvider({
   onCancel: () => void;
 }): JSX.Element {
   const [phase, setPhase] = useState<ConnectPhase>({ kind: "starting" });
+  // Bumped by retry() to re-run the `{action:"start"}` effect below — the
+  // effect's other deps (id, safeSetPhase) are stable, so without this the
+  // Retry button dead-ends on every failure path until the card remounts.
+  const [startEpoch, setStartEpoch] = useState(0);
   // BET-421 §A/§D: elapsed timers for the phases that render a ProcessPanel.
   // Each ticks once a second while its phase is active; reset to 0 on exit.
   const [waitingElapsed, setWaitingElapsed] = useState(0);
@@ -275,7 +279,7 @@ export function ConnectProvider({
     return () => {
       cancelled = true;
     };
-  }, [id, safeSetPhase]);
+  }, [id, safeSetPhase, startEpoch]);
 
   // BET-354: claude-status poll. Fires every 1s while `needsClaudeLogin`.
   // The server checks the credentials file mtime + probes opencode's
@@ -541,6 +545,7 @@ export function ConnectProvider({
   }, [phase.kind, onDone]);
 
   const retry = useCallback(() => {
+    setStartEpoch((e) => e + 1);
     safeSetPhase({ kind: "starting" });
   }, [safeSetPhase]);
 
@@ -907,10 +912,6 @@ const CredentialInput = memo(function CredentialInput({
     try {
       await onSubmit(value);
     } finally {
-      // Only clear on success — the parent's state machine will replace the
-      // phase and remount this component; for a 401 / bad-response path the
-      // value persists so the user can edit it instead of re-pasting.
-      if (canSubmit) setValue((v) => v);
       setSubmitting(false);
     }
   };
