@@ -442,7 +442,7 @@ test("interpret ignores events with no session id", () => {
 // ---------------------------------------------------------------------------
 
 // Build a tool `message.part.updated` payload in the shape opencode sends.
-function toolPartUpdated({ id, tool = "bash", status, title, metaOutput, output, messageID = "msg1" }) {
+function toolPartUpdated({ id, tool = "bash", status, title, metaOutput, output, callID, messageID = "msg1" }) {
   return {
     type: "message.part.updated",
     properties: {
@@ -452,6 +452,7 @@ function toolPartUpdated({ id, tool = "bash", status, title, metaOutput, output,
         id,
         type: "tool",
         tool,
+        ...(callID !== undefined ? { callID } : {}),
         state: {
           status,
           ...(title !== undefined ? { title } : {}),
@@ -471,9 +472,21 @@ test("toolStarted is emitted once when a tool part first appears", () => {
   assert.equal(started.length, 1, "re-emit for the same idx emits toolStarted exactly once");
   assert.equal(started[0].payload.sessionId, SID);
   assert.equal(started[0].payload.idx, "t1");
+  // callID falls back to the part id when opencode gave none, so the live row
+  // always shares the canonical step row's identity.
+  assert.equal(started[0].payload.callID, "t1");
   assert.equal(started[0].payload.toolName, "bash");
   assert.equal(started[0].payload.toolPresentationHint, "Run: npm test");
   assert.equal(started[0].payload.status, "running");
+});
+
+test("toolStarted carries the tool's callID when opencode provides one", () => {
+  const { interp, events } = make();
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", callID: "toolu_123" }));
+  const started = events.filter((e) => e.sub === "toolStarted");
+  assert.equal(started.length, 1);
+  assert.equal(started[0].payload.idx, "t1");
+  assert.equal(started[0].payload.callID, "toolu_123");
 });
 
 test("toolOutput carries only the delta since the last chunk, never the full output", () => {
