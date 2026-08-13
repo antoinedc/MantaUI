@@ -481,6 +481,25 @@ private struct ChatScreenContent: View {
 
                 Spacer(minLength: 0)
 
+                // Context percent pill — a centred, non-interactive capsule that
+                // appears once the box reports context stats for this session.
+                // It deliberately keeps the header at its two glass CONTROL
+                // buttons (BET-627) plus this informational element; a plain
+                // material capsule (not `.glassEffect` on a Text, which the
+                // header buttons' note warns can eat touches) is the approved
+                // non-interactive treatment.
+                if let ctx = store.context {
+                    Text("\(Int(ctx.pct.rounded()))% ctx")
+                        .font(.system(size: Metrics.type.xs, weight: .semibold))
+                        .foregroundColor(ctxColor(ctx.pct))
+                        .padding(.horizontal, Metrics.spacing.sp2)
+                        .frame(height: Metrics.type.chatHeaderBtn)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .accessibilityLabel("Context \(Int(ctx.pct.rounded())) percent used")
+                }
+
+                Spacer(minLength: 0)
+
                 // Trailing 38×38 glass button (§8) — the overflow sheet, which is
                 // where every session action lives (DECISIONS.md:667-670).
                 Button {
@@ -498,6 +517,15 @@ private struct ChatScreenContent: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
+    }
+
+    /// Same stage thresholds as the desktop ctx bar: calm → warn at 70 → hot at
+    /// 90. `tokens` has no `warning` token, so the mid stage uses `warn` (the
+    /// amber the todos card uses).
+    private func ctxColor(_ pct: Double) -> Color {
+        if pct >= 90 { return tokens.danger }
+        if pct >= 70 { return tokens.warn }
+        return tokens.tx2
     }
 
     // MARK: - Transcript (BET-481 container; anchor + landing corrected)

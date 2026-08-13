@@ -892,10 +892,4 @@ final class ChatSessionStore: ObservableObject {
     /// live elapsed against its own 1s tick rather than stream-state changes
     /// (BET-630, D1).
     var runningStart: Date? { runningSince }
-
-    /// §8 header subtitle ("running · 2m · 8%" / "idle").
-    var headerSubtitle: String {
-        let elapsed = runningSince.map { Date().timeIntervalSince($0) } ?? 0
-        return ChatHeaderSubtitle.text(running: running, elapsed: elapsed, contextPct: context?.pct)
-    }
 }
