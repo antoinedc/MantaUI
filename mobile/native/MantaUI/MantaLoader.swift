@@ -103,3 +103,6 @@ struct MantaLoader: View {
             .frame(width: diameter * Self.markRatio, height: diameter * Self.markRatio)
     }
 }
+
+// deliberate syntax error for BET-651 RED proof
+let broken =
