@@ -50,12 +50,15 @@ export function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
-// Ring colour per threshold (the dial trigger — never green, per the design
-// spec: the dial signals "pay attention", not "all good").
+// Ring colour per threshold. Identical to windowFillColor's scale on purpose:
+// the dial is a summary of the popover's rows, so a user glancing at the ring
+// and then opening the popover must not see two different colours for the same
+// number. (An earlier spec kept the ring off --ok below 70 so it read as
+// "pay attention only"; that produced a grey ring above a green bar.)
 function toneRingColor(tone: UsageDialTone): string {
   if (tone === "over" || tone === "danger") return cssVar("--danger");
   if (tone === "warn") return cssVar("--warn");
-  return cssVar("--tx4");
+  return cssVar("--ok");
 }
 
 // Popover fill colour per window threshold — same three thresholds as the

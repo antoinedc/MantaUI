@@ -267,10 +267,9 @@ export function formatClockTime(ms: number | null | undefined): string {
 }
 
 export function ctxStageColor(pct: number): string {
-  if (pct < 50) return cssVar("--ok"); // green
-  if (pct < 75) return cssVar("--warn"); // yellow
-  if (pct < 90) return cssVar("--warn"); // orange
-  return cssVar("--danger"); // red
+  if (pct < 50) return cssVar("--ok");
+  if (pct < 90) return cssVar("--warn");
+  return cssVar("--danger");
 }
 
 // ===== Theme token access from JS =====
@@ -287,7 +286,7 @@ export function ctxStageColor(pct: number): string {
 // returns only Terminal.tsx).
 const TOKEN_FALLBACK: Record<string, string> = {
   "--ok": "#22C79A",
-  "--warn": "#F0A934",
+  "--warn": "#FACC15",
   "--danger": "#F0505F",
   "--info": "#22BEE0",
   "--tx4": "#5C6578",
