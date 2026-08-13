@@ -172,6 +172,14 @@ html, body, #root {
   .manta-message-flash { animation: none; }
 }
 
+/* ⌘F jump: the matched query inside the destination message, painted via the
+   CSS Custom Highlight API so react-markdown's output is never mutated. Same
+   accent-on-accent pairing as the <mark> in the search palette's result rows. */
+::highlight(manta-search-hit) {
+  background-color: var(--accent-bg);
+  color: var(--accent-tx);
+}
+
 /* PaletteShell enter/exit (⌘K switcher, ⌘F search). 140ms in / 100ms out —
    the 100ms must match CLOSE_MS in PaletteShell.tsx. */
 .manta-palette-overlay { animation: manta-palette-fade-in 140ms ease-out; }

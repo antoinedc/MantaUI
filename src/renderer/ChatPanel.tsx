@@ -563,12 +563,12 @@ export function ChatPanel({
   // it (a frame or two later for the smooth scroll) instead of flashing on a
   // single immediate lookup.
   const scrollFlashMessage = useCallback(
-    (messageId: string): boolean => {
+    (messageId: string, query?: string): boolean => {
       scrollToMessage(messageId);
       // Cancel any pending wait from a previous jump so it can't flash against
       // a row the user has already scrolled past or a transcript they've left.
       messageFlashCancelRef.current?.();
-      messageFlashCancelRef.current = flashMessageRow(messageId);
+      messageFlashCancelRef.current = flashMessageRow(messageId, document, query);
       return (messagesRef.current ?? []).some((m) => m.info.id === messageId);
     },
     [scrollToMessage],
@@ -579,10 +579,10 @@ export function ChatPanel({
   useEffect(() => {
     const onScrollToMessage = (e: Event) => {
       const detail = (e as CustomEvent).detail as
-        | { sessionId?: string; messageId?: string }
+        | { sessionId?: string; messageId?: string; query?: string }
         | undefined;
       if (detail?.sessionId !== sessionId || !detail?.messageId) return;
-      scrollFlashMessage(detail.messageId);
+      scrollFlashMessage(detail.messageId, detail.query);
     };
     window.addEventListener("manta-scroll-to-message", onScrollToMessage);
     return () => window.removeEventListener("manta-scroll-to-message", onScrollToMessage);
@@ -597,7 +597,7 @@ export function ChatPanel({
     const w = window as PendingScrollWin;
     const pending = w.__mantaPendingMessageScroll;
     if (!pending || pending.sessionId !== sessionId || messages == null) return;
-    if (scrollFlashMessage(pending.messageId)) {
+    if (scrollFlashMessage(pending.messageId, pending.query)) {
       w.__mantaPendingMessageScroll = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
