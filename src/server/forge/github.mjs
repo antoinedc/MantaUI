@@ -325,7 +325,12 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ number: number, title: string, body: string, url: string, state: string, closed: boolean }>, stale: boolean }>}
      */
     async listIssues(repo, filter = {}) {
-      const url = `${API}${issuePath(repo)}/issues${qs({ state: filter.state ?? "open" })}`;
+      const url = `${API}${issuePath(repo)}/issues${qs({
+        state: filter.state ?? "open",
+        ...(filter.labels !== undefined
+          ? { labels: Array.isArray(filter.labels) ? filter.labels.join(",") : filter.labels }
+          : {}),
+      })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       const issues = raw

@@ -191,7 +191,7 @@ export function normalizeEvent({ event, payload } = {}) {
  *   Persist a refusal (cap reached, fork, …) — never a queue.
  * @param {string|null} [deps.self] — the box's own forge identity; events
  *   whose actor matches are ignored (self-caused).
- * @returns {{ handleEvent: (input: {hook: any, headers: any, event: string, payload: any}) => Promise<{handled: boolean, reason?: string, verb?: string}> }}
+ * @returns {{ handleEvent: (input: {hook: any, headers: any, event: string, payload: any}) => Promise<any>, dispatchEvent: (repoKey: string, event: any) => Promise<any> }}
  */
 export function createRulesEngine({
   enabled = () => false,
@@ -208,17 +208,31 @@ export function createRulesEngine({
     const repoKey = hook?.repoKey ?? null;
     if (!repoKey) return { handled: false, reason: "no repo" };
 
+    const ev = normalizeEvent({ event, payload, headers });
+    if (!ev) return { handled: false, reason: "not a rule event" };
+
+    return dispatchEvent(repoKey, ev);
+  }
+
+  /**
+   * The single dispatch path, shared by the webhook ingest (via handleEvent)
+   * and the polling fallback (poller.mjs feeds normalised forge events here).
+   * Guards (fork / self-caused) + match + verb dispatch. `event` is a
+   * normalised forge event — never a raw forge payload.
+   *
+   * @param {string} repoKey
+   * @param {object} ev a normalised forge event
+   * @returns {Promise<{handled: boolean, reason?: string, error?: string|null, verb?: string}>}
+   */
+  async function dispatchEvent(repoKey, ev) {
     const loaded = await loadRules(repoKey);
     if (!loaded?.ok) return { handled: false, reason: "no rules" };
     const parsed = parseRules(loaded.yaml ?? "");
     if (!parsed.ok || !parsed.rules) return { handled: false, reason: "invalid rules" };
 
-    const ev = normalizeEvent({ event, payload, headers });
-    if (!ev) return { handled: false, reason: "not a rule event" };
-
     // Guard: refuse fork-originated payloads.
     if (ev.fork) {
-      await recordRefusal({ repoKey, event, rule: null, reason: "fork-originated payload refused" });
+      await recordRefusal({ repoKey, event: ev, rule: null, reason: "fork-originated payload refused" });
       return { handled: false, reason: "fork" };
     }
 
@@ -241,7 +255,7 @@ export function createRulesEngine({
           // Cap reached (or another refusal) — recorded, never queued.
           await recordRefusal({
             repoKey,
-            event,
+            event: ev,
             rule,
             reason: result?.error ?? "job refused",
           });
@@ -263,7 +277,7 @@ export function createRulesEngine({
     }
   }
 
-  return { handleEvent };
+  return { handleEvent, dispatchEvent };
 }
 
 // Default loader: read a repo's rules source from the box-side registry.
