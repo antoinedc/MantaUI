@@ -2052,6 +2052,51 @@ It replaced PLCrashReporter on 2026-08-13. Do not run both.
   Note its `action: diagnose` prints `ENABLE_DEBUG_DYLIB` /
   `ENABLE_USER_SCRIPT_SANDBOXING` / the SPM checkout contents — the three
   things that determine whether the in-build phase can work at all.
+
+### Reading crashes from an agent session (Firebase MCP)
+
+Crashes are no longer uploaded to the box, so `~/.manta-uploads/crash/` is
+dead. Read them through the **`firebase` MCP server**, wired into the dev box's
+`~/.config/opencode/opencode.jsonc` and scoped `--only crashlytics` (8 tools
+instead of 25 — the rest are Firestore/Auth/deploy and cost context on every
+request).
+
+**Constants you need — none are discoverable from the tools:**
+
+| | |
+|---|---|
+| `appId` (**required on every call**) | `1:789525210372:ios:423827eb6f93a9c8b45c51` |
+| Firebase project | `manta-76416` (number `789525210372`) |
+| Bundle id | `com.antoinedc.mantaui` |
+
+Typical loop: `crashlytics_get_report` (`topIssues`) to find what is breaking →
+`crashlytics_get_issue` for one issue → `crashlytics_batch_get_events` with the
+issue's `sampleEvent` for the **symbolicated stack**, device, OS, memory, and
+`customKeys.crash_info_entry_0` (which carries the literal Swift fatal-error
+string with `file:line`). `crashlytics_update_issue` closes an issue.
+
+Four traps, each of which looks like "the data is missing":
+
+- **`topIssues` only returns OPEN issues.** A closed one comes back as "This
+  report response contains no results" — indistinguishable from a broken query.
+  `crashlytics_get_issue` returns it by id regardless of state. Check `state:`
+  before concluding anything is wrong. This wasted real time on 2026-08-13.
+- **Unprocessed crashes are invisible.** Until a matching dSYM is uploaded,
+  Crashlytics holds events and returns nothing through the API — the console
+  says "N unprocessed crashes, upload 1 dSYM file" but the API just looks
+  empty. If the API is empty and the console shows that banner, the problem is
+  symbols, not the query. Fix with the `ios-crashlytics-dsym` plugin.
+- **Processing is not instant.** Expect minutes between a dSYM upload and the
+  crash becoming queryable.
+- **Debug-build frames are attributed to `MantaUI.debug.dylib`**, not
+  `MantaUI` — that is the `ENABLE_DEBUG_DYLIB` split described above, not a
+  mis-symbolication.
+
+Auth is a read-scoped service-account key at
+`~/.config/gcloud/manta/manta-76416-sa.json` (0600). Never print it, and never
+copy it into `/tmp` (swept hourly). It requires the **Firebase Crashlytics API**
+to be enabled on the project — it is, since 2026-08-13; a `SERVICE_DISABLED`
+403 means someone turned it off.
 - **`GoogleService-Info.plist` is committed on purpose** and is excluded from
   the `MantaUI` directory source entry, then re-added with an explicit
   `buildPhase: resources`. It must land in Copy Bundle Resources or
