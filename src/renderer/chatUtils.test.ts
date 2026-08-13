@@ -3532,6 +3532,8 @@ describe("arrangeCards", () => {
     expect(r.blockingMore).toBe(0);
     expect(r.ambient.length).toBe(2);
     expect(r.ambientRollup.length).toBe(2);
+  });
+});
 
 // ===== BET-787: repo-probe zero state =====
 
