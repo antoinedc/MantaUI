@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest } from "./forge/index.mjs";
+import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest } from "./forge/index.mjs";
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
 // path resolves identically. The script lives at <repoRoot>/scripts/
@@ -308,6 +308,8 @@ export function buildHandlers({
     "forge:status": () => forgeStatus(),
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
+    "forge:diff": (input) =>
+      forgeDiffForCwd(typeof input === "object" && input !== null ? input.cwd : input),
 
     // BET-794: forge write path. Both box-side — a forge token never reaches
     // the renderer; the server resolves it. forge:ship previews/creates a PR

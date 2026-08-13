@@ -100,7 +100,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     const inFlight = inflight.get(url);
     if (inFlight) return inFlight;
 
-    const job = fetchOne(url, token, bucket, etagStore, inflight, coolingUntil, fetch, now);
+    const job = fetchOne(url, token, bucket, url, "application/vnd.github+json", (res) => res.json(), etagStore, inflight, coolingUntil, fetch, now);
     inflight.set(url, job);
     try {
       return await job;
@@ -109,8 +109,41 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     }
   }
 
+  // The diff (or any non-JSON) view of an endpoint. The diff Accept header
+  // returns the RAW unified diff as text, and the JSON and diff views of the
+  // SAME URL are cached under separate keys (`text:` prefix) so one never
+  // clobbers the other in the ETag store (the diff response is a different
+  // representation of `/pulls/{n}` than the PR object).
+  async function getText(url, { token }) {
+    const cacheKey = `text:${url}`;
+    const bucket = bucketOf(url);
+
+    if ((coolingUntil.get(bucket) ?? 0) > now()) {
+      const hit = etagStore.get(cacheKey);
+      if (hit) return { data: hit.data, stale: true };
+      throw new ForgeRateLimitedError(url);
+    }
+
+    const hit = etagStore.get(cacheKey);
+    if (hit && now() - hit.at < FRESH_TTL_MS) {
+      return { data: hit.data, stale: false };
+    }
+
+    const inFlight = inflight.get(cacheKey);
+    if (inFlight) return inFlight;
+
+    const job = fetchOne(url, token, bucket, cacheKey, "application/vnd.github.diff", (res) => res.text(), etagStore, inflight, coolingUntil, fetch, now);
+    inflight.set(cacheKey, job);
+    try {
+      return await job;
+    } finally {
+      inflight.delete(cacheKey);
+    }
+  }
+
   return {
     getJson,
+    getText,
     requestJson: (url, opts) =>
       requestJsonImpl(url, { token: opts?.token, method: opts?.method, body: opts?.body }, fetch),
   };
@@ -137,10 +170,10 @@ async function requestJsonImpl(url, { token, method = "GET", body }, fetchImpl) 
   return { data, stale: false };
 }
 
-async function fetchOne(url, token, bucket, etagStore, inflight, coolingUntil, fetch, now) {
-  const hit = etagStore.get(url);
+async function fetchOne(url, token, bucket, cacheKey, accept, parse, etagStore, inflight, coolingUntil, fetch, now) {
+  const hit = etagStore.get(cacheKey);
   const headers = {
-    accept: "application/vnd.github+json",
+    accept,
     "user-agent": "manta-forge",
     ...(token ? { authorization: `Bearer ${token}` } : {}),
     ...(hit ? { "if-none-match": hit.etag } : {}),
@@ -157,7 +190,7 @@ async function fetchOne(url, token, bucket, etagStore, inflight, coolingUntil, f
 
   if (res.status === 304) {
     // Not modified: the cache is authoritative, and a 304 costs nothing.
-    const cached = etagStore.get(url);
+    const cached = etagStore.get(cacheKey);
     return { data: cached ? cached.data : null, stale: false };
   }
 
@@ -171,9 +204,9 @@ async function fetchOne(url, token, bucket, etagStore, inflight, coolingUntil, f
     throw new Error(`github request failed (${res.status}) for ${url}`);
   }
 
-  const data = await res.json();
+  const data = await parse(res);
   const etag = res.headers.get("etag");
-  if (etag) etagStore.set(url, { etag, data, at: now() });
+  if (etag) etagStore.set(cacheKey, { etag, data, at: now() });
   return { data, stale: false };
 }
 
@@ -198,7 +231,8 @@ export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
       if (!create) throw unsupportedByForge(kind, "read path");
       const request = (url) => requestLayer.getJson(url, { token });
       const requestWrite = (url, opts) => requestLayer.requestJson(url, { token, ...opts });
-      return create(request, requestWrite);
+      const requestText = (url) => requestLayer.getText(url, { token });
+      return create(request, requestWrite, requestText);
     },
     requestLayer,
   };
@@ -541,6 +575,75 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
 // ---- Adapter interface (the seam a second adapter implements) ------------------
 
 /**
+ * forge:diff — the review pane's read. Resolve `cwd → origin → repo`, pick the
+ * open PR on the current branch (falling back to the first open PR) exactly as
+ * `pullRequestForCwd` does, then fetch its raw unified diff + normalised
+ * incoming threads + head SHA. Returns `{ diff, threads, headSha, error }` —
+ * never throws for a repo with no forge ("no_forge"), no token
+ * ("not_connected") or no open PR ("no_pr").
+ *
+ * @param {string} cwd
+ * @param {{ gitRemoteOrigin?: (cwd: string) => Promise<string|null>,
+ *          currentBranch?: (cwd: string) => Promise<string|null>,
+ *          resolveToken?: typeof authResolveToken,
+ *          getAdapter?: (kind: string, token: string) => any }} [deps]
+ */
+export async function forgeDiffForCwd(cwd, deps = {}) {
+  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
+  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  const origin = await gitRemoteOrigin(cwd);
+  const forge = origin ? detectForge(origin) : null;
+  if (!forge || forge.kind !== "github") {
+    return { diff: "", threads: [], headSha: "", error: "no_forge" };
+  }
+
+  const tok = await resolveToken(forge.host);
+  if (!tok) return { diff: "", threads: [], headSha: "", error: "not_connected" };
+
+  const adapter = getAdapterFn(forge.kind, tok.token);
+  const repo = { owner: forge.owner, repo: forge.repo };
+
+  let prArr = [];
+  let stale = false;
+  try {
+    const res = await adapter.listPullRequests(repo, { state: "open" });
+    prArr = Array.isArray(res.data) ? res.data : [];
+    stale = res.stale;
+  } catch (err) {
+    if (err instanceof ForgeRateLimitedError) {
+      return { diff: "", threads: [], headSha: "", error: null, stale: true };
+    }
+    throw err;
+  }
+  if (prArr.length === 0) return { diff: "", threads: [], headSha: "", error: "no_pr" };
+
+  const branch = await currentBranch(cwd);
+  let candidate = branch ? prArr.find((p) => p.headRef === branch) : undefined;
+  if (!candidate) candidate = prArr[0];
+
+  try {
+    const res = await adapter.getDiff(repo, candidate.number);
+    return {
+      diff: res.data.diff ?? "",
+      threads: Array.isArray(res.data.threads) ? res.data.threads : [],
+      headSha: res.data.headSha ?? "",
+      stale: stale || Boolean(res.stale),
+      error: null,
+    };
+  } catch (err) {
+    if (err instanceof ForgeRateLimitedError) {
+      return { diff: "", threads: [], headSha: "", error: null, stale: true };
+    }
+    throw err;
+  }
+}
+
+// ---- Adapter interface (the seam a second adapter implements) ------------------
+
+/**
  * The forge adapter interface, written down even though there is only one
  * implementer today (GitHub). The GitLab issue is the acceptance test for it.
  *
@@ -561,4 +664,5 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
  * @property {(repo: { owner: string, repo: string }, number: number) => Promise<{ data: any, stale: boolean }>} getPullRequest
  * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listIssues
  * @property {(repo: { owner: string, repo: string }, sha: string) => Promise<{ data: Array<any>, stale: boolean }>} getChecks
+ * @property {((repo: { owner: string, repo: string }, number: number) => Promise<{ data: { diff: string, threads: Array<any>, headSha: string }, stale: boolean }>)} [getDiff] — OPTIONAL. Presence is the capability model: an adapter without the diff/threads read simply omits it and the caller checks presence.
  */

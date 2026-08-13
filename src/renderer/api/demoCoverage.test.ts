@@ -54,6 +54,7 @@ export const DEMO_UNIMPLEMENTED = [
   "forgeShip",
   "forgeShipPreview",
   "forgeStatus",
+  "forgeDiff",
   "getPathForFile",
   "gitAddWorktree",
   "gitRemoveWorktree",
