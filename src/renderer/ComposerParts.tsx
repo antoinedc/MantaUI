@@ -10,6 +10,7 @@ import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip } from "lucide-react";
 import type { VoiceMode, VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import { ALT_KEY } from "./platform";
+import { IconButton } from "./IconButton";
 
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
@@ -36,7 +37,8 @@ export function SessionToolbar({
   // so they can't drift; the count badge carries its own mono type. Matches
   // the mockup's `.mbtn` (27px hit, --r-sm radius, --tx3 rest tone).
   const mbtn =
-    "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors";
+    "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors " +
+    "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
   const cnum =
     "font-mono text-[11px] leading-none font-semibold text-text-muted tabular-nums";
   return (
@@ -89,15 +91,11 @@ export function AttachButton({ onFiles }: { onFiles: (files: File[]) => void }) 
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <>
-      <button
-        type="button"
+      <IconButton
+        label="Attach files"
+        icon={<Paperclip />}
         onClick={() => inputRef.current?.click()}
-        title="Attach files"
-        aria-label="Attach files"
-        className="shrink-0 leading-none bg-transparent text-text-faint hover:text-text-muted transition-colors"
-      >
-        <Paperclip size={16} aria-hidden="true" />
-      </button>
+      />
       <input
         ref={inputRef}
         type="file"
@@ -398,6 +396,7 @@ export function MicButton({
       // get the pointerup even if the user drifts off.
       className={
         "select-none pt-px shrink-0 leading-none bg-transparent " +
+        "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
         (busy
           ? `${activeColor} cursor-progress`
           : recording

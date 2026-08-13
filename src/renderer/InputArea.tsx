@@ -17,7 +17,7 @@
 // a focus state instead of hairline dividers around a naked textarea.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Mic, Send, Shield } from "lucide-react";
+import { Mic, Send, Shield, Square } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import type { VoiceMode, VoicePhase } from "./voice";
 import {
@@ -392,15 +392,20 @@ export function InputArea({
         {/* Send button — sits beside the textarea in the composer box (BET-620
             change 4). Accent when there's text to send, muted fill when empty. */}
         <button
-          onClick={submit}
-          aria-label="Send message"
-          title="Send (Enter)"
+          onClick={running ? abort : submit}
+          disabled={!running && !input.trim()}
+          aria-label={running ? "Stop the running turn" : "Send message"}
+          title={running ? "Stop (Esc)" : "Send (Enter)"}
           className={
-            "w-7 h-7 rounded-sm grid place-items-center shrink-0 " +
-            (input.trim() ? "bg-accent text-on-accent" : "bg-fill text-text-faint")
+            "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
+            "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+            "disabled:cursor-default " +
+            (running || input.trim()
+              ? "bg-accent text-on-accent hover:opacity-90"
+              : "bg-fill text-text-faint")
           }
         >
-          <Send size={14} aria-hidden="true" />
+          {running ? <Square size={12} aria-hidden="true" /> : <Send size={14} aria-hidden="true" />}
         </button>
         </div>
       </div>
