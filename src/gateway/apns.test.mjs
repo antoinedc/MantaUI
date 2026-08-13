@@ -97,6 +97,43 @@ test("buildApnsPayload: no sessionId → no thread-id, still shaped right", () =
   assert.equal(out.sessionId, null);
 });
 
+test("buildApnsPayload: permission + requestId → MANTA_PERMISSION category, kind/requestId at root", () => {
+  const out = buildApnsPayload({
+    title: "default / my-chat",
+    body: "Permission needed — Claude wants to run a tool.",
+    sessionId: "ses_abc",
+    kind: "permission",
+    requestId: "per_1",
+    actions: [
+      { action: "allow-once", title: "Allow once" },
+      { action: "allow-always", title: "Always allow" },
+      { action: "deny", title: "Deny" },
+    ],
+  });
+  assert.equal(out.aps.category, "MANTA_PERMISSION");
+  assert.equal(out.aps["thread-id"], "ses_abc");
+  assert.equal(out.kind, "permission");
+  assert.equal(out.requestId, "per_1");
+});
+
+test("buildApnsPayload: no kind/requestId → byte-identical to legacy envelope (regression pin)", () => {
+  const out = buildApnsPayload({
+    title: "default / my-chat",
+    body: "Permission needed — Claude wants to run a tool.",
+    sessionId: "ses_abc",
+  });
+  assert.deepEqual(out, {
+    aps: {
+      alert: {
+        title: "default / my-chat",
+        body: "Permission needed — Claude wants to run a tool.",
+      },
+      "thread-id": "ses_abc",
+    },
+    sessionId: "ses_abc",
+  });
+});
+
 test("buildApnsRequest: host/path/headers/body shape (HTTP/2 style)", () => {
   const deviceToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const req = buildApnsRequest({

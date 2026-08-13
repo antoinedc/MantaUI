@@ -152,9 +152,22 @@ export function buildApnsPayload(payload) {
     typeof payload?.sessionId === "string" && payload.sessionId
       ? payload.sessionId
       : null;
+  const kind = typeof payload?.kind === "string" ? payload.kind : null;
+  const requestId =
+    typeof payload?.requestId === "string" && payload.requestId
+      ? payload.requestId
+      : null;
   const aps = { alert: { title, body } };
   if (sessionId) aps["thread-id"] = sessionId;
-  return { aps, sessionId };
+  // Category names an iOS-side pre-registered UNNotificationCategory. Only
+  // permission has one: its three reply actions are static. Question answers
+  // have per-ask titles, which APNs categories cannot express — questions
+  // stay tap-through on iOS.
+  if (kind === "permission" && requestId) aps.category = "MANTA_PERMISSION";
+  const envelope = { aps, sessionId };
+  if (kind) envelope.kind = kind;
+  if (requestId) envelope.requestId = requestId;
+  return envelope;
 }
 
 // ---------------------------------------------------------------------------
