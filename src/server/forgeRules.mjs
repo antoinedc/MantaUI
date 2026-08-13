@@ -27,7 +27,7 @@ import {
 } from "../shared/forgeRules.mjs";
 import { genDeliveryToken, upsertForgeHook, findForgeHook } from "./webhooks.mjs";
 import { ensureRepoHook } from "./forge/webhook.mjs";
-import { resolveForgeToken } from "./forge/token.mjs";
+import { resolveToken as authResolveToken } from "./forge/auth.mjs";
 import { publicBaseUrl } from "./gatewayRegister.mjs";
 
 const RULES_ROOT = "forge-rules";
@@ -182,7 +182,7 @@ function formatErrors(errors) {
  * @param {object} [deps]
  * @param {() => boolean} [deps.enabled]
  * @param {{host?:string, token?:string}} [deps.forge] forge identity + token override for registration
- * @param {(host: string) => string|null} [deps.resolveToken] box-side token resolver (default resolveForgeToken)
+ * @param {(host: string) => Promise<{ token?: string, source?: string } | null>} [deps.resolveToken] box-side token resolver (default authResolveToken)
  * @param {object} [deps.io]
  * @param {typeof ensureRepoHook} [deps.ensureHook]
  * @param {() => void} [deps.reload]
@@ -192,7 +192,7 @@ export async function saveRules(
   {
     enabled = () => true,
     forge = {},
-    resolveToken = resolveForgeToken,
+    resolveToken = authResolveToken,
     io = DEFAULT_IO,
     ensureHook = ensureRepoHook,
     reload = () => {},
@@ -212,10 +212,12 @@ export async function saveRules(
 
   await io.write(p.path, yaml);
 
-  // The forge API token for the repo's host, resolved box-side (env var or the
-  // secrets vault). Never reaches the renderer/iOS. An explicit `forge.token`
-  // override wins (tests/dev).
-  const token = forge.token || resolveToken(parts.host);
+  // The forge API token for the repo's host, resolved box-side via the §3.3
+  // ladder (gh auth token → shared secret named GITHUB_TOKEN in the secrets
+  // vault). Never reaches the renderer/iOS. An explicit `forge.token` override
+  // wins (tests/dev). `resolveToken` is async and yields `{ token } | null`.
+  const resolved = forge.token ? { token: forge.token } : await resolveToken(parts.host).catch(() => null);
+  const token = resolved?.token || null;
 
   let webhook = { registered: false };
   try {
@@ -231,8 +233,8 @@ export async function saveRules(
       webhook = {
         registered: false,
         error:
-          `no ${parts.host} token configured — set MANTA_GITHUB_TOKEN (or MANTA_GITLAB_TOKEN), ` +
-          "or store it as a shared secret named github.token (gitlab.token for GitLab)",
+          `no ${parts.host} token configured — run \`gh auth login\` on the box, ` +
+          "or store a shared secret named GITHUB_TOKEN",
       };
     } else {
       const key = repoKey(parts);
