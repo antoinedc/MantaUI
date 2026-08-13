@@ -52,7 +52,7 @@ export type VerifyOutcome =
   | { ok: true }
   | { ok: false; failedStage: VerifyStageIndex; message: string };
 
-export const VERIFY_DEFAULT_TIMEOUT_MS = 30_000;
+export const VERIFY_DEFAULT_TIMEOUT_MS = 90_000;
 export const VERIFY_POLL_INTERVAL_MS = 1_000;
 export const VERIFY_PROBE_TEXT = "hi";
 // The ephemeral session is created in the box's home dir — no project, no
@@ -65,12 +65,12 @@ export const VERIFY_DIRECTORY = "~";
 // test can assert the exact strings.
 export function verifyStageLabels(
   providerLabel: string,
-  modelLabel?: string,
+  _modelLabel?: string,
 ): [string, string, string] {
   return [
     "Reached opencode on your box",
     `${providerLabel} credentials accepted`,
-    `Getting a reply from ${modelLabel ?? "the model"}`,
+    "Waiting for a reply — cold models can take a minute…",
   ];
 }
 
@@ -157,7 +157,13 @@ export async function verifyOnboarding(deps: {
       if (!msgs) continue; // transient fetch failure — keep polling.
       for (const id of extractAssistantIds(msgs)) {
         if (baselineAssistantIds.has(id)) continue;
-        if (hasCompletedAssistantMessage(msgs, id)) {
+        // Succeed on the FIRST streamed token — a brand-new assistant
+        // message with any text part, even before it completes. A cold
+        // provider (first-ever call, model warm-up) can legitimately take
+        // well past 30s to produce a COMPLETED reply even when healthy, so
+        // the verification is "the model started talking", not "the model
+        // finished talking".
+        if (hasCompletedAssistantMessage(msgs, id) || hasAssistantTextStarted(msgs, id)) {
           onProgress({ stage: 2, status: "done" });
           return { ok: true };
         }
@@ -282,6 +288,29 @@ function hasCompletedAssistantMessage(
     if (mid !== id) continue;
     const completed = m.info?.time?.completed;
     return typeof completed === "number" && Number.isFinite(completed) && completed > 0;
+  }
+  return false;
+}
+
+// True when the assistant message `id` has started producing text — any
+// non-empty text part, whether or not the message has completed. Used to
+// accept the first streamed token so healthy-but-cold setups pass.
+function hasAssistantTextStarted(messages: unknown, id: string): boolean {
+  if (!Array.isArray(messages)) return false;
+  for (const m of messages) {
+    if (!isMessageLike(m)) continue;
+    const mid = m.info?.id;
+    if (mid !== id) continue;
+    const parts = m.parts;
+    if (!Array.isArray(parts)) return false;
+    for (const p of parts) {
+      if (typeof p !== "object" || p === null) continue;
+      const part = p as { type?: unknown; text?: unknown };
+      if (part.type !== "text") continue;
+      const text = part.text;
+      if (typeof text === "string" && text.trim().length > 0) return true;
+    }
+    return false;
   }
   return false;
 }
