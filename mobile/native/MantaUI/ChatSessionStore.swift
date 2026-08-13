@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import MessagingUI
 
 // ===========================================================================
 // S4 — chat session store (BET-596).
@@ -151,14 +150,14 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var inProgressText = ""
     @Published private(set) var blocks: [TranscriptBlock] = []
     /// The same transcript as `blocks`, but wrapped in `TranscriptRow` with a
-    /// STABLE id (see `TranscriptRow`). Kept so the subagent screen (and
-    /// anything else) can keep using `blocks` unchanged.
+    /// STABLE id (see `TranscriptRow`). This is the actual input the transcript
+    /// surfaces (parent chat and subagent drill-in) feed to `TiledView`.
+    /// It is intentionally NOT a `ListDataSource`: the data source is owned by
+    /// each `TiledView` so its change log and the view's replay cursor share a
+    /// lifetime. A store-owned one gets replayed from the beginning against a
+    /// final snapshot every time a new view is created, which is the
+    /// invalid-batch-updates / deque-out-of-bounds crash pair.
     @Published private(set) var rows: [TranscriptRow] = []
-    /// MessagingUI's incremental data source over `blocks`. Mutated IN PLACE
-    /// via `apply` so its `id` stays stable and TiledView coalesces each turn's
-    /// change as a prepend (loadEarlier) / append (streaming tail) / update
-    /// rather than a full reload — which is what preserves scroll position.
-    @Published private(set) var dataSource: ListDataSource<TranscriptRow> = ListDataSource()
     @Published private(set) var running = false
     @Published private(set) var turnComplete = false
     @Published private(set) var context: StreamContextPayload?
@@ -620,9 +619,6 @@ final class ChatSessionStore: ObservableObject {
                 + [TranscriptRow(id: liveTailRowID, block: .prose(inProgressText, at: nil))]
         }
         rows = newRows
-        // Mutate the data source in place (not `= ...`) so its identity — and
-        // therefore TiledView's scroll position and cell state — survives.
-        dataSource.apply(newRows)
         // Cap the subagent stores at the children the CURRENT transcript can
         // actually drill into; stores left over from a previous transcript no
         // longer show a row the user could open (BET-672).
