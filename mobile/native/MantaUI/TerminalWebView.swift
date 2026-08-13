@@ -246,7 +246,7 @@ final class TerminalContainerController: UIViewController {
 
         let config = WKWebViewConfiguration()
         let controller = WKUserContentController()
-        controller.add(self, name: "manta")
+        controller.add(WeakScriptMessageHandler(self), name: "manta")
         config.userContentController = controller
         config.allowsInlineMediaPlayback = true
         webView = WKWebView(frame: .zero, configuration: config)
@@ -509,6 +509,7 @@ final class TerminalContainerController: UIViewController {
     }
 
     deinit {
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "manta")
         NotificationCenter.default.removeObserver(self)
     }
 }
@@ -577,5 +578,18 @@ struct TerminalContainerView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: TerminalContainerController, context: Context) {
         // The controller owns its socket; nothing to push from SwiftUI here.
+    }
+}
+
+/// WKUserContentController retains its message handler STRONGLY, which would
+/// cycle controller → controller-VC → webView → controller and leak a
+/// WKWebView per terminal visit. The proxy holds the real handler weakly so
+/// the view controller can deallocate; its deinit then detaches the handler.
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    private weak var delegate: WKScriptMessageHandler?
+    init(_ delegate: WKScriptMessageHandler) { self.delegate = delegate }
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        delegate?.userContentController(userContentController, didReceive: message)
     }
 }
