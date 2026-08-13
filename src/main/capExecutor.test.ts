@@ -27,9 +27,13 @@ import {
   makeExec,
   spawnErrorMessage,
   killTree,
+  makeManifestHandler,
   type CapCtx,
 } from "./capExecutor.js";
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Shared abort signal that never fires — tests rely on the spawn exiting
 // quickly under their own /bin/sh -c command. If it doesn't, vitest's
@@ -158,12 +162,50 @@ describe("capExecutor — spawnErrorMessage (BET-327)", () => {
 // undefined (taskkill is NOT actually run, per the issue spec).
 // ---------------------------------------------------------------------------
 
-describe("capExecutor — killTree (BET-327)", () => {
-  it("sends SIGTERM on linux via child.kill", () => {
-    const kill = vi.fn();
-    const fake = { pid: 12345, kill, exitCode: null } as unknown as ChildProcess;
-    killTree(fake, "linux", 5_000);
-    expect(kill).toHaveBeenCalledWith("SIGTERM");
+describe("capExecutor — killTree (BET-327 / BET-652)", () => {
+  it("kills the process GROUP on POSIX — SIGTERM then SIGKILL after grace", () => {
+    const processKill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const childKill = vi.fn();
+    try {
+      const fake = { pid: 12345, kill: childKill, exitCode: null } as unknown as ChildProcess;
+      killTree(fake, "linux", 5_000);
+      // The shell leads its own process group (spawned detached), so the FIRST
+      // kill is the group signum −pid, not the single process.
+      expect(processKill).toHaveBeenCalledWith(-12345, "SIGTERM");
+      expect(childKill).not.toHaveBeenCalled();
+    } finally {
+      processKill.mockRestore();
+    }
+  });
+
+  it("escalates to group SIGKILL after the grace window on POSIX", () => {
+    vi.useFakeTimers();
+    const processKill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const childKill = vi.fn();
+    try {
+      const fake = { pid: 12345, kill: childKill, exitCode: null } as unknown as ChildProcess;
+      killTree(fake, "linux", 5_000);
+      expect(processKill).toHaveBeenCalledWith(-12345, "SIGTERM");
+      processKill.mockClear();
+      vi.advanceTimersByTime(5_000);
+      expect(processKill).toHaveBeenCalledWith(-12345, "SIGKILL");
+    } finally {
+      processKill.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to the single process when the child has no pid (POSIX)", () => {
+    const processKill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const childKill = vi.fn();
+    try {
+      const fake = { pid: undefined, kill: childKill, exitCode: null } as unknown as ChildProcess;
+      expect(() => killTree(fake, "linux", 5_000)).not.toThrow();
+      expect(childKill).toHaveBeenCalledWith("SIGTERM");
+      expect(processKill).not.toHaveBeenCalled();
+    } finally {
+      processKill.mockRestore();
+    }
   });
 
   it("does not throw on win32 when pid is undefined", () => {
@@ -174,5 +216,155 @@ describe("capExecutor — killTree (BET-327)", () => {
     const fake = { pid: undefined, kill: vi.fn(), exitCode: null } as unknown as ChildProcess;
     expect(() => killTree(fake, "win32", 5_000)).not.toThrow();
     expect(fake.kill).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step timeout (BET-652) — makeExec now accepts a per-step AbortSignal and
+// the runner passes the step controller's signal through, so a step's
+// `timeout:` is actually enforced instead of running to the 25-min job abort.
+// ---------------------------------------------------------------------------
+
+function makeCtx(overrides: Partial<CapCtx>): CapCtx {
+  return {
+    jobId: "abc12345",
+    input: {},
+    config: {},
+    signal: new AbortController().signal,
+    log: () => {},
+    exec: () => Promise.resolve({ code: 0, stdout: "" }),
+    ...overrides,
+  } as unknown as CapCtx;
+}
+
+describe("capExecutor — per-step timeout (BET-652)", () => {
+  it("rejects a step killed by its own timeout with a clear message, job signal unaborted", async () => {
+    vi.useFakeTimers();
+    try {
+      const handler = makeManifestHandler({
+        name: "t",
+        steps: [{ name: "hang", run: "true", timeout: "1s" }],
+      } as never);
+      const job = new AbortController();
+      // Fake exec that hangs until its own opts.signal aborts (mirrors the
+      // real makeExec's group-kill-on-step-abort) — then resolves like a
+      // killed command would (non-zero).
+      const exec = (
+        _cmd: string,
+        _args: string[],
+        opts?: { signal?: AbortSignal },
+      ) =>
+        new Promise<{ code: number; stdout: string }>((resolve) => {
+          const s = opts?.signal;
+          if (!s) return resolve({ code: 0, stdout: "" });
+          if (s.aborted) return resolve({ code: 143, stdout: "" });
+          s.addEventListener(
+            "abort",
+            () => resolve({ code: 143, stdout: "" }),
+            { once: true },
+          );
+        });
+      const ctx = makeCtx({ signal: job.signal, exec });
+      const pending = handler(ctx);
+      // Mark the rejection handled up front so advancing the fake timers
+      // (which fires the step abort → exec resolves → runManifest throws)
+      // doesn't trip Node's unhandled-rejection warning before we observe it.
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).rejects.toThrow("step 1 (hang) timed out after 1s");
+      expect(job.signal.aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// git-tree integrity guard (BET-652) — HEAD is snapshotted on every distinct
+// step cwd before the build and re-read afterward; a mismatch (an external
+// process reset the shared clone mid-job) discards the result by failing.
+// ---------------------------------------------------------------------------
+
+describe("capExecutor — git-tree integrity guard (BET-652)", () => {
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+
+  it("rejects when HEAD moved during the job, and probes exactly twice", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cap-integrity-"));
+    try {
+      let probe = 0;
+      const logs: string[] = [];
+      const exec = (_cmd: string): Promise<{ code: number; stdout: string }> => {
+        if (_cmd === "git") {
+          probe++;
+          const sha = probe === 1 ? shaA : shaB;
+          return Promise.resolve({ code: 0, stdout: `${sha}\n` });
+        }
+        return Promise.resolve({ code: 0, stdout: "" });
+      };
+      const handler = makeManifestHandler({
+        name: "t",
+        steps: [{ name: "build", run: "true", cwd: dir }],
+      } as never);
+      const ctx = makeCtx({ exec, log: (l) => logs.push(l) });
+      await expect(handler(ctx)).rejects.toThrow(
+        "working tree moved during the job",
+      );
+      expect(probe).toBe(2);
+      expect(logs.some((l) => l.includes("[integrity] HEAD at start"))).toBe(true);
+      expect(logs.some((l) => l.includes("[integrity] HEAD at end"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves when HEAD is unchanged at the end", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cap-integrity-"));
+    try {
+      let probe = 0;
+      const exec = (_cmd: string): Promise<{ code: number; stdout: string }> => {
+        if (_cmd === "git") {
+          probe++;
+          return Promise.resolve({ code: 0, stdout: `${shaA}\n` });
+        }
+        return Promise.resolve({ code: 0, stdout: "" });
+      };
+      const handler = makeManifestHandler({
+        name: "t",
+        steps: [{ name: "build", run: "true", cwd: dir }],
+      } as never);
+      const ctx = makeCtx({ exec });
+      const res = await handler(ctx);
+      expect(res.result).toEqual({ steps: [{ name: "build", code: 0, skipped: false }] });
+      expect(probe).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips non-git cwds silently (non-zero rev-parse), no integrity logs, resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cap-integrity-"));
+    try {
+      let probe = 0;
+      const logs: string[] = [];
+      const exec = (_cmd: string): Promise<{ code: number; stdout: string }> => {
+        if (_cmd === "git") {
+          probe++;
+          return Promise.resolve({ code: 128, stdout: `fatal: not a git repository\n` });
+        }
+        return Promise.resolve({ code: 0, stdout: "" });
+      };
+      const handler = makeManifestHandler({
+        name: "t",
+        steps: [{ name: "build", run: "true", cwd: dir }],
+      } as never);
+      const ctx = makeCtx({ exec, log: (l) => logs.push(l) });
+      const res = await handler(ctx);
+      expect(res.result).toEqual({ steps: [{ name: "build", code: 0, skipped: false }] });
+      expect(probe).toBe(1);
+      expect(logs.some((l) => l.includes("[integrity]"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
