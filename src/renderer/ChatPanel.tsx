@@ -1271,6 +1271,20 @@ export function ChatPanel({
   //     same byte path paste already uses. Without this fallback a drop in
   //     HTTP mode silently discarded every file.
 
+  // Patch one attachment by id with a Partial<Attachment>. The single owner of
+  // the "uploading" -> "ready" (with remotePath) / -> "error" (with errorMsg)
+  // state transition, reused by every upload path (drag-drop, paste,
+  // screenshot) so they never repeat a setAttachments closure (duplication-
+  // gate).
+  const patchAttachment = useCallback(
+    (id: string, patch: Partial<Attachment>) => {
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+      );
+    },
+    [],
+  );
+
   const addDroppedFiles = useCallback(
     async (files: FileList | File[]) => {
       if (!tmuxSession) return;
@@ -1308,17 +1322,16 @@ export function ChatPanel({
       }));
       setAttachments((prev) => [...prev, ...newChips]);
 
-      const settleChip = (id: string, rp: string | null, errorMsg?: string) => {
-        setAttachments((prev) =>
-          prev.map((a) =>
-            a.id === id
-              ? rp
-                ? { ...a, status: "ready", remotePath: rp }
-                : { ...a, status: "error", errorMsg: errorMsg ?? "Upload returned no path" }
-              : a,
-          ),
+      // Settle each chip once its upload finishes: route every completion /
+      // failure through the shared patchAttachment owner (this used to be a
+      // local settleChip that duplicated it — BET-732).
+      const settleReady = (id: string, rp: string | null) =>
+        patchAttachment(
+          id,
+          rp
+            ? { status: "ready", remotePath: rp }
+            : { status: "error", errorMsg: "Upload returned no path" },
         );
-      };
 
       // Path-based entries upload in one batch (cheaper round-trip).
       const pathPending = pending.filter((p) => p.lp);
@@ -1332,10 +1345,10 @@ export function ChatPanel({
           });
         } catch (e) {
           const msg = String((e as Error)?.message ?? e);
-          for (const p of pathPending) settleChip(p.id, null, msg);
+          for (const p of pathPending) patchAttachment(p.id, { status: "error", errorMsg: msg });
           return;
         }
-        pathPending.forEach((p, i) => settleChip(p.id, remotePaths[i] ?? null));
+        pathPending.forEach((p, i) => settleReady(p.id, remotePaths[i] ?? null));
       })();
 
       // Byte-based entries upload individually (each File's bytes → uploadBuffer).
@@ -1349,16 +1362,16 @@ export function ChatPanel({
               filename: p.file.name,
               buffer,
             });
-            settleChip(p.id, rp || null);
+            settleReady(p.id, rp || null);
           } catch (e) {
-            settleChip(p.id, null, String((e as Error)?.message ?? e));
+            patchAttachment(p.id, { status: "error", errorMsg: String((e as Error)?.message ?? e) });
           }
         }),
       );
 
       await Promise.all([pathBatch, byteBatch]);
     },
-    [tmuxSession],
+    [tmuxSession, patchAttachment],
   );
 
   // Mobile ⋯ sheet → attach-files bridge (BET-260). The hidden <input
@@ -1387,20 +1400,6 @@ export function ChatPanel({
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
-
-  // Patch one attachment by id with a Partial<Attachment>. Reused by the
-  // paste/screenshot upload paths to flip status from "uploading" -> "ready"
-  // (with remotePath) or -> "error" (with errorMsg) without repeating the
-  // setAttachments(prev => prev.map(a => a.id === id ? {...a, ...patch} : a))
-  // closure at every site (duplication-gate).
-  const patchAttachment = useCallback(
-    (id: string, patch: Partial<Attachment>) => {
-      setAttachments((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, ...patch } : a)),
-      );
-    },
-    [],
-  );
 
   // ===== Clipboard paste (screenshots) =====
   //
