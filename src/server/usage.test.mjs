@@ -353,6 +353,47 @@ test("claude adapter: used_percentage is preferred over utilization when both ar
   assert.equal(snap.windows.find((w) => w.kind === "session").pct, 93);
 });
 
+test("claude adapter: live shape (2026-08) — pools at the top level, no rate_limits wrapper, utilization already 0-100", async () => {
+  // Captured live against api.anthropic.com/api/oauth/usage (2026-08): NOT
+  // wrapped in `rate_limits`, and `utilization` is already a 0-100
+  // percentage rather than the documented 0-1 fraction.
+  const sample = {
+    five_hour: {
+      utilization: 58.0,
+      resets_at: "2026-08-13T14:20:00.464248+00:00",
+      limit_dollars: null,
+      used_dollars: null,
+      remaining_dollars: null,
+    },
+    seven_day: {
+      utilization: 64.0,
+      resets_at: "2026-08-13T22:00:00.464272+00:00",
+      limit_dollars: null,
+      used_dollars: null,
+      remaining_dollars: null,
+    },
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+  };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.windows.length, 2);
+  assert.equal(snap.windows.find((w) => w.kind === "session").pct, 58);
+  assert.equal(snap.windows.find((w) => w.kind === "weekly").pct, 64);
+  assert.equal("extras" in snap, false); // both per-model pools are null
+});
+
+test("claude adapter: still honours a rate_limits wrapper if a future build reintroduces one", async () => {
+  const sample = { rate_limits: { five_hour: { utilization: 78.0 } } };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.windows.find((w) => w.kind === "session").pct, 78);
+});
+
 test("claude adapter: no absolutes, no planLabel — never fabricated", async () => {
   const sample = { rate_limits: { five_hour: { utilization: 0.1 } } };
   const snap = await claudeAdapter.fetch({

@@ -25,12 +25,18 @@ async function defaultReadCredentials() {
   }
 }
 
-// Anthropic sometimes sends `used_percentage` (0-100) directly and sometimes
-// only `utilization` (a 0-1 fraction) — prefer `used_percentage` when both
-// are present, per the issue spec.
+// Anthropic sometimes sends `used_percentage` (0-100) directly and always
+// sends `utilization` too — prefer `used_percentage` when both are present.
+// `utilization` has been observed BOTH as a 0-1 fraction (the documented
+// shape) and, live against api.anthropic.com/api/oauth/usage as of 2026-08,
+// already as a 0-100 percentage (e.g. `"utilization":58.0`) — a fraction can
+// never exceed 1.0, so treat anything > 1 as already a percentage rather than
+// re-scaling it into the 5800% range.
 function pctOf(pool) {
   if (typeof pool?.used_percentage === "number") return pool.used_percentage;
-  if (typeof pool?.utilization === "number") return pool.utilization * 100;
+  if (typeof pool?.utilization === "number") {
+    return pool.utilization > 1 ? pool.utilization : pool.utilization * 100;
+  }
   return undefined;
 }
 
@@ -72,7 +78,12 @@ export const claudeAdapter = {
       throw err;
     }
     const data = await res.json();
-    const limits = data?.rate_limits ?? {};
+    // The issue spec (and some docs) describe the pools nested under
+    // `rate_limits`; the LIVE endpoint (verified 2026-08) returns them at the
+    // response's top level instead (`{five_hour, seven_day, ...}`, no
+    // wrapper). Prefer `rate_limits` when present so a future build that adds
+    // the wrapper back keeps working with no adapter change.
+    const limits = data?.rate_limits ?? data ?? {};
 
     const windows = [];
     const fiveHour = limits?.five_hour;
