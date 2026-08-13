@@ -443,7 +443,7 @@ export const MessageRow = memo(function MessageRow({
             <>
               {/* The finished turn keeps the mark the working row was built
                   around, held still — the arcs are what meant "in flight". */}
-              <MantaMark size={12} />{" "}
+              <MantaMark />{" "}
               {pastVerbFor(verbSeedId ?? msg.info.id)} for {formatDuration(turnDurationMs)}
               {turnTokens != null && turnTokens > 0 && (
                 <>

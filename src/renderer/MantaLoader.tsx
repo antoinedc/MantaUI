@@ -127,7 +127,7 @@ export function MantaLoader({
 // The same mark, held still, with no arcs. The arcs mean "in flight"; when a
 // turn ends the row keeps the mark and drops them, so the eye tracks ONE
 // object through the whole turn instead of two appearing and vanishing.
-export function MantaMark({ size = 14 }: { size?: number }) {
+export function MantaMark({ size = 12 }: { size?: number }) {
   return (
     <img
       src={mantaMark}

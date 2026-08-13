@@ -86,7 +86,7 @@ describe("MantaLoader", () => {
   });
 
   it("MantaMark is the same mark with no arcs — the finished-turn form", () => {
-    h = mount(<MantaMark size={12} />);
+    h = mount(<MantaMark />);
     expect(h.container.querySelectorAll("circle").length).toBe(0);
     expect(h.container.querySelector("img")?.getAttribute("width")).toBe("12");
   });
