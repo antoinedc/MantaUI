@@ -31,13 +31,26 @@ import {
 
 // The three fictional project names. Mirrors the shot list in
 // `docs/specs/website-readme-revamp.md` section 6 — every screenshot /
-// video frame renders the same brand.
-const PROJECT_NAMES = ["ethernal", "marketing", "infra"] as const;
+// video frame renders the same brand. Order IS load-bearing here: the store
+// defaults the active project to projects[0], and the demo must open on the
+// transcript-bearing infra session (BET-663). Changing the order without
+// updating this test (and the visual screens that rely on the default view)
+// silently makes the demo land on an empty session again.
+const PROJECT_NAMES = ["infra", "ethernal", "marketing"] as const;
 
 describe("demo fixture — project + session structure", () => {
   it("contains exactly the three agreed fictional project names", () => {
     const names = demoState.projects.map((p) => p.tmuxSession);
     expect(names).toEqual([...PROJECT_NAMES]);
+  });
+
+  it("defaults the active project to the transcript-bearing infra session", () => {
+    // The store's default-active rule is `activeProjectName = projects[0]`.
+    // The demo relies on infra being first so `?demo&desktop` lands on the
+    // rich transcript, not the empty "Add CSV export" welcome (BET-663).
+    const first = demoState.projects[0];
+    expect(first.tmuxSession).toBe("infra");
+    expect(first.windows.some((w) => w.active === true)).toBe(true);
   });
 
   it("has six or seven sessions total across the three projects", () => {
