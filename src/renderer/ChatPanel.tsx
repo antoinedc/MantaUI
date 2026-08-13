@@ -25,6 +25,7 @@ import type {
   QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
+import type { PendingScreenshot } from "./store";
 import {
   allTodosTerminal,
   selectActiveTodos,
@@ -82,8 +83,6 @@ import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
-import { ACCEPT_SCREENSHOT_EVENT } from "./GlobalToasts";
-import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -432,12 +431,6 @@ export function ChatPanel({
   // Whether the panel is currently being dragged over with files (for the
   // big "drop to attach" overlay).
   const [dragHover, setDragHover] = useState(false);
-  // Screenshot detection toast — global, lives in the store. App.tsx's global
-  // toast host owns the render + dismiss; this panel only runs the accept /
-  // upload flow ("Add to chat"), which needs the active session's own
-  // attachment state. Triggered by the ACCEPT_SCREENSHOT_EVENT below.
-  const screenshotToast = useStore((s) => s.screenshotToast);
-  const setScreenshotToast = useStore((s) => s.setScreenshotToast);
   // Ref mirror of the child-status map so `toggleTaskExpand` can read
   // current values synchronously without taking them as deps.
   const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
@@ -719,7 +712,6 @@ export function ChatPanel({
       return;
     }
     setSendError(null);
-    setScreenshotToast(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
     // Snap the branch indicator to current truth on every submit.
@@ -1447,78 +1439,48 @@ export function ChatPanel({
     [tmuxSession],
   );
 
-  // ===== Screenshot detection =====
-  //
-  // Subscription lives in App.tsx — single global listener writes into the
-  // store's `screenshotToast`. Only the active panel renders the toast and
-  // can accept/dismiss it; acting clears the global state for everyone.
+   // ===== Pending screenshots =====
+   //
+   // Also lives in the store (App.tsx reads the bytes + records them). Only
+   // the active panel renders + acts on them; acting clears the global
+   // records.
 
-  // Accept: upload the screenshot and create a chip.
-  const acceptScreenshot = useCallback(async () => {
-    const toast = screenshotToast;
-    setScreenshotToast(null);
-    if (!tmuxSession || !toast) return;
+   const pendingScreenshots = useStore((s) => s.pendingScreenshots);
+   const removePendingScreenshots = useStore((s) => s.removePendingScreenshots);
 
-    const mime = "image/png";
-    const filename = toast.path
-      ? toast.path.split("/").pop() ?? "screenshot.png"
-      : `screenshot-${Date.now()}.png`;
-    const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+   // Attach one or more pending screenshots. The bytes were already read at
+   // detection (App.tsx), so this is now just "make a chip, upload the bytes" —
+   // the same tail every other upload path runs. Accepting one and accepting
+   // all are the same call with a different array.
+   const acceptScreenshots = useCallback(
+     (shots: PendingScreenshot[]) => {
+       removePendingScreenshots(shots.map((s) => s.id));
+       if (!tmuxSession) return;
+       for (const shot of shots) {
+         const id = `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+         setAttachments((prev) => [
+           ...prev,
+           { id, filename: shot.filename, mime: "image/png", status: "uploading", source: "paste" } as Attachment,
+         ]);
+         void (async () => {
+           try {
+             const remotePath = await window.api.uploadBuffer({
+               projectName: tmuxSession,
+               filename: shot.filename,
+               buffer: shot.bytes,
+             });
+             if (!remotePath) throw new Error("Upload failed");
+             patchAttachment(id, { status: "ready", remotePath });
+           } catch (err) {
+             patchAttachment(id, { status: "error", errorMsg: String((err as Error)?.message ?? err) });
+           }
+         })();
+       }
+     },
+     [tmuxSession, removePendingScreenshots, patchAttachment],
+   );
 
-    setAttachments((prev) => [
-      ...prev,
-      { id, filename, mime, status: "uploading", source: "paste" } as Attachment,
-    ]);
-
-    try {
-      // Only Electron main can read the Mac clipboard or a Mac file — both
-      // must come from the preload OS bridge, never window.api (which is
-      // httpApi in HTTP mode and has no OS access; the server IS the box).
-      const preload = getMantaPreload();
-      if (!preload) throw new Error("Screenshot capture requires the desktop app");
-
-      let buf: ArrayBuffer;
-      if (toast.source === "file" && toast.path) {
-        // Desktop watcher: read the local Mac file's bytes via main.
-        buf = await preload.readLocalFile(toast.path);
-      } else {
-        // Clipboard: read bytes from main.
-        const clip = await preload.clipboardReadImage();
-        if (!clip) throw new Error("Clipboard image vanished");
-        buf = clip;
-      }
-      // Upload the bytes through the same proven path as paste/drag-drop —
-      // window.api.uploadBuffer POSTs to the server's /api/upload.
-      const remotePath = await window.api.uploadBuffer({
-        projectName: tmuxSession,
-        filename,
-        buffer: buf,
-      });
-      if (!remotePath) throw new Error("Upload failed");
-      patchAttachment(id, { status: "ready", remotePath });
-    } catch (err) {
-      const msg = String((err as Error)?.message ?? err);
-      patchAttachment(id, { status: "error", errorMsg: msg });
-    }
-  }, [screenshotToast, tmuxSession]);
-
-  // The App-level toast host (BET-723) renders the screenshot toast globally
-  // and routes its "Add to chat" action here — this panel owns the active
-  // session's attachment state, so only it can accept. Gated on isActive so a
-  // hidden panel never consumes an action aimed at the visible one (the detail
-  // sessionId match is the routing backstop).
-  useEffect(() => {
-    const onAcceptScreenshot = (e: Event) => {
-      if (!isActive) return;
-      const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
-      if (detail?.sessionId != null && detail.sessionId !== sessionId) return;
-      void acceptScreenshot();
-    };
-    window.addEventListener(ACCEPT_SCREENSHOT_EVENT, onAcceptScreenshot);
-    return () => window.removeEventListener(ACCEPT_SCREENSHOT_EVENT, onAcceptScreenshot);
-  }, [isActive, sessionId, acceptScreenshot]);
-
-  // Panel-level drag handlers. We listen on the chat container; the body of
+   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
   // already suppresses default drag/drop on the window so the renderer
   // doesn't navigate to file:// — we only handle the panel-local case.
@@ -2252,6 +2214,9 @@ export function ChatPanel({
         attachments={attachments}
         onRemoveAttachment={removeAttachment}
         onAttachFiles={(files) => void addDroppedFiles(files)}
+        pendingScreenshots={isActive ? pendingScreenshots : []}
+        onAcceptScreenshots={acceptScreenshots}
+        onDiscardScreenshot={(id) => removePendingScreenshots([id])}
         typeahead={typeahead}
         typeaheadRows={typeaheadRows}
         onTypeaheadSelect={applyTypeahead}

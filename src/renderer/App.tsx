@@ -756,14 +756,38 @@ function AppInner() {
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
-  // N toasts (one per mounted chat). Now the toast lives in the store, the
-  // active ChatPanel renders it, and accept/dismiss clear it globally.
-  // Routes through the typed preload accessor so it no-ops on mobile/web.
+  // N toasts (one per mounted chat). Now the pending list lives in the store,
+  // the active ChatPanel renders the strip, and attach/discard clear it
+  // globally. Routes through the typed preload accessor so it no-ops on
+  // mobile/web.
   useEffect(() => {
     const preload = getMantaPreload();
     if (!preload) return;
     const off = preload.onScreenshotDetected((ev) => {
-      useStore.getState().setScreenshotToast(ev);
+      // Read the bytes HERE, once. Two reasons this is not just moved code:
+      // the clipboard can hold something else by the time the user clicks, and
+      // doing it here collapses the old accept path's file-vs-clipboard branch
+      // into one place. A screenshot we cannot read produces no record at all.
+      void (async () => {
+        try {
+          const bytes =
+            ev.source === "file" && ev.path
+              ? await preload.readLocalFile(ev.path)
+              : await preload.clipboardReadImage();
+          if (!bytes) return;
+          useStore.getState().addPendingScreenshot({
+            id: `shot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+            filename: ev.path
+              ? ev.path.split("/").pop() ?? "screenshot.png"
+              : `screenshot-${Date.now()}.png`,
+            bytes,
+            previewUrl: URL.createObjectURL(new Blob([bytes], { type: "image/png" })),
+          });
+        } catch {
+          // Unreadable screenshot (file vanished, clipboard cleared) — nothing
+          // to offer, so offer nothing.
+        }
+      })();
     });
     return off;
   }, []);
@@ -1374,9 +1398,6 @@ function AppInner() {
   // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
   // new-session) keep the titlebar's drag region + breadcrumb + toggle.
   const isChatPaneActive = activeChatSessionId != null && mode === "chat";
-  // BET-723: the global toast host can route a screenshot "Add to chat" only
-  // when the foreground pane is a real chat session (not a draft over it).
-  const screenshotCanAddToChat = activeChatSessionId != null && !activeDraft && mode === "chat";
 
   return (
     // data-screen is the visual harness's handle on the app shell (see
@@ -1675,12 +1696,7 @@ function AppInner() {
       </main>
       {/* BET-723 §D4: ONE global toast host, rendered over every pane type
           (terminal / TUI / draft / chat) as a sibling of <main>. */}
-      {!showOnboarding && (
-        <GlobalToasts
-          activeChatSessionId={activeChatSessionId}
-          canAddToChat={screenshotCanAddToChat}
-        />
-      )}
+      {!showOnboarding && <GlobalToasts />}
       {/* BET-659: the Artifacts panel — a fixed-width sibling of <main>, so a
           chat pane is required for it to show (there's no panel to open in a
           terminal). The outer shell is already `flex` and <main> is

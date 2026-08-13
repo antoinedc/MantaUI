@@ -11,8 +11,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
-import { GlobalToasts } from "./GlobalToasts";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import { useStore } from "./store";
 import {
   installMockApi,
   resetStore,
@@ -762,126 +762,90 @@ describe("ChatPanel abort rejects orphaned questions", () => {
   });
 });
 
-// ===== Screenshot "Add to chat" → uploadBuffer (BET-130) =====
-//
-// Regression coverage for the HTTP-mode bug where acceptScreenshot dead-ended
-// on window.api.clipboardReadImage / window.api.uploadFiles (both server-side
-// stubs once window.api is httpApi). The fix routes bytes through
-// window.__mantaPreload (the real Electron preload, never swapped) and then
-// uploads them via window.api.uploadBuffer — the one primitive that actually
-// works in HTTP mode. These tests assert the chip reaches "ready" with a
-// remotePath, and that the preload OS bridge (not window.api) supplied bytes.
-describe("ChatPanel screenshot accept", () => {
+// The panel no longer reads any bytes itself: App.tsx reads them at detection
+// and puts them in the store. What is left to prove is that clicking a
+// thumbnail uploads THOSE bytes and clears the record, and that "Add all"
+// does it for every pending shot.
+describe("ChatPanel pending screenshots", () => {
   let h: Harness | null = null;
-
   afterEach(() => {
     h?.unmount();
     h = null;
-    (window as unknown as { __mantaPreload: unknown }).__mantaPreload = null;
   });
 
-  // Shared scaffold for the screenshot tests: mount a fresh panel (the caller
-  // has already installed the preload + window.api mock + store seed) and click
-  // the "Add to chat" toast button, which routes the buffered bytes through
-  // window.api.uploadBuffer. Returns the mounted harness for assertions; the
-  // describe-scoped `h` is also set so the shared afterEach unmounts it.
-  //
-  // Since BET-723 the toast host lives at App level (GlobalToasts), not in
-  // ChatPanel — the panel only RUNS the accept once the host's "Add to chat"
-  // action dispatches manta-accept-screenshot. So both are mounted together,
-  // with the host routing to this panel's session id.
-  async function mountScreenshotAndClickAddToChat(): Promise<Harness> {
-    h = mount(
-      <>
-        <ChatPanel {...PROPS} />
-        <GlobalToasts activeChatSessionId={PROPS.sessionId} canAddToChat />
-      </>,
-    );
-    await h.flush();
-
-    const addBtn = Array.from(h.container.querySelectorAll("button")).find(
-      (b) => b.textContent === "Add to chat",
-    ) as HTMLButtonElement;
-    expect(addBtn).toBeTruthy();
-    await act(async () => {
-      addBtn.click();
-    });
-    await h.flush();
-    return h;
+  function shot(id: string, bytes: ArrayBuffer) {
+    return { id, filename: `${id}.png`, bytes, previewUrl: `blob:${id}` };
   }
 
-  it("clipboard source: reads bytes via preload.clipboardReadImage, uploads via window.api.uploadBuffer", async () => {
-    const fakeBuf = new ArrayBuffer(4);
-    const clipboardReadImage = () => Promise.resolve(fakeBuf);
-    const readLocalFile = () => Promise.reject(new Error("should not be called"));
-    (window as unknown as {
-      __mantaPreload: { clipboardReadImage: typeof clipboardReadImage; readLocalFile: typeof readLocalFile };
-    }).__mantaPreload = { clipboardReadImage, readLocalFile };
-
-    let uploadedBuffer: ArrayBuffer | null = null;
+  it("clicking a thumbnail uploads that screenshot's bytes and clears it", async () => {
+    const bytes = new ArrayBuffer(4);
     const { api } = installMockApi({
-      uploadBuffer: (input: { buffer: ArrayBuffer }) => {
-        uploadedBuffer = input.buffer;
-        return Promise.resolve("/remote/screenshot-123.png");
-      },
+      uploadBuffer: () => Promise.resolve("/remote/shot-a.png"),
     });
-    resetStore({
-      screenshotToast: { source: "clipboard" },
-    });
+    resetStore({ pendingScreenshots: [shot("a", bytes)] });
 
-    const panel = await mountScreenshotAndClickAddToChat();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
 
-    expect(uploadedBuffer).toBe(fakeBuf);
+    const thumb = h.container.querySelector(
+      '[aria-label="Add a.png to the message"]',
+    ) as HTMLButtonElement;
+    expect(thumb).toBeTruthy();
+    await act(async () => { thumb.click(); });
+    await h.flush();
+
     expect(api.calls.uploadBuffer?.[0]?.[0]).toMatchObject({
       projectName: "proj",
-      buffer: fakeBuf,
+      filename: "a.png",
+      buffer: bytes,
     });
-    // Chip landed in the "ready" state — title attr carries the remotePath.
-    const chip = panel.container.querySelector('[title="/remote/screenshot-123.png"]');
-    expect(chip).toBeTruthy();
+    // Chip landed ready (title carries the remotePath) and the strip is empty.
+    expect(h.container.querySelector('[title="/remote/shot-a.png"]')).toBeTruthy();
+    expect(useStore.getState().pendingScreenshots).toHaveLength(0);
   });
 
-  it("file source: reads bytes via preload.readLocalFile, uploads via window.api.uploadBuffer", async () => {
-    const fakeBuf = new ArrayBuffer(8);
-    let requestedPath: string | null = null;
-    const readLocalFile = (path: string) => {
-      requestedPath = path;
-      return Promise.resolve(fakeBuf);
-    };
-    (window as unknown as {
-      __mantaPreload: { readLocalFile: typeof readLocalFile };
-    }).__mantaPreload = { readLocalFile };
-
-    let uploadedBuffer: ArrayBuffer | null = null;
-    installMockApi({
-      uploadBuffer: (input: { buffer: ArrayBuffer }) => {
-        uploadedBuffer = input.buffer;
-        return Promise.resolve("/remote/shot.png");
-      },
+  it("Add all uploads every pending screenshot", async () => {
+    const { api } = installMockApi({
+      uploadBuffer: () => Promise.resolve("/remote/x.png"),
     });
     resetStore({
-      screenshotToast: { source: "file", path: "/Users/x/Desktop/shot.png" },
+      pendingScreenshots: [
+        shot("a", new ArrayBuffer(1)),
+        shot("b", new ArrayBuffer(2)),
+      ],
     });
 
-    const panel = await mountScreenshotAndClickAddToChat();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
 
-    expect(requestedPath).toBe("/Users/x/Desktop/shot.png");
-    expect(uploadedBuffer).toBe(fakeBuf);
-    const chip = panel.container.querySelector('[title="/remote/shot.png"]');
-    expect(chip).toBeTruthy();
+    const addAll = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add all 2",
+    ) as HTMLButtonElement;
+    expect(addAll).toBeTruthy();
+    await act(async () => { addAll.click(); });
+    await h.flush();
+
+    expect(api.calls.uploadBuffer).toHaveLength(2);
+    expect(useStore.getState().pendingScreenshots).toHaveLength(0);
   });
 
-  it("no preload (mobile/web): chip goes to error state instead of silently dropping", async () => {
-    (window as unknown as { __mantaPreload: unknown }).__mantaPreload = null;
-    installMockApi();
+  it("the discard badge drops one screenshot without uploading it", async () => {
+    const { api } = installMockApi();
     resetStore({
-      screenshotToast: { source: "clipboard" },
+      pendingScreenshots: [
+        shot("a", new ArrayBuffer(1)),
+        shot("b", new ArrayBuffer(2)),
+      ],
     });
 
-    const panel = await mountScreenshotAndClickAddToChat();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
 
-    // Errored chip renders with title = errorMsg (see AttachmentStrip).
-    const chip = panel.container.querySelector('[title="Screenshot capture requires the desktop app"]');
-    expect(chip).toBeTruthy();
+    const x = h.container.querySelector('[aria-label="Discard a.png"]') as HTMLButtonElement;
+    await act(async () => { x.click(); });
+    await h.flush();
+
+    expect(api.calls.uploadBuffer).toBeUndefined();
+    expect(useStore.getState().pendingScreenshots.map((s) => s.id)).toEqual(["b"]);
   });
 });

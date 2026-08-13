@@ -198,7 +198,7 @@ export function resetStore(
       defaultModel: null,
       cacheTtl: "1h",
       groqApiKey: "",
-      screenshotToast: null,
+      pendingScreenshots: [],
       agentFileToast: null,
       ...partial,
     } as Partial<ReturnType<typeof useStore.getState>>);
