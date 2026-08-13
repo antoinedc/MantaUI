@@ -713,6 +713,12 @@ main() {
   # We use opencode's official installer; no version pinning in v1 — the
   # installer is the source of truth for "current". Re-running is a no-op
   # when the binary is already on PATH.
+  # An existing install may be off-PATH in this non-login shell (the app's
+  # ssh -tt install path) — probe the known install dirs before deciding to
+  # reinstall. Mirrors the post-install PATH fixup below.
+  for _ocdir in "$HOME/.opencode/bin" "$HOME/.local/bin"; do
+    if [ -x "$_ocdir/opencode" ]; then export PATH="$_ocdir:$PATH"; break; fi
+  done
   OPENCODE_BIN="$(command -v opencode || true)"
   if [ -n "$OPENCODE_BIN" ]; then
     ok "opencode already installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
@@ -1263,21 +1269,29 @@ main() {
     # Passwordless sudo is required because the install runs unattended
     # from `curl | bash`.
     if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
-      if ! command -v sudo >/dev/null 2>&1; then
-        warn "Caddy/gateway section skipped: \`sudo\` is not installed."
-        warn "  install sudo + grant $USER passwordless sudo, or run the
+      if [ "$(id -u)" = "0" ]; then
+        # Root needs no sudo. If the binary is absent, shim it so the section's
+        # `sudo <cmd>` invocations run bare — zero changes to the commands below.
+        if ! command -v sudo >/dev/null 2>&1; then
+          sudo() { "$@"; }
+        fi
+      else
+        if ! command -v sudo >/dev/null 2>&1; then
+          warn "Caddy/gateway section skipped: \`sudo\` is not installed."
+          warn "  install sudo + grant $USER passwordless sudo, or run the
   install with sudo available. To finish this section by hand:"
-        warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
-        warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-        warn "    echo 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
-        warn "    sudo apt update && sudo apt install caddy"
-        warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
-        PRIVILEGED_SECTION_SKIP=1
-      elif ! sudo -n true 2>/dev/null; then
-        warn "Caddy/gateway section skipped: passwordless sudo is not configured for $USER."
-        warn "  either configure \`$USER ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/ and re-run,"
-        warn "  or install Caddy by hand (commands in the previous message) and re-run the installer."
-        PRIVILEGED_SECTION_SKIP=1
+          warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
+          warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+          warn "    echo 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
+          warn "    sudo apt update && sudo apt install caddy"
+          warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
+          PRIVILEGED_SECTION_SKIP=1
+        elif ! sudo -n true 2>/dev/null; then
+          warn "Caddy/gateway section skipped: passwordless sudo is not configured for $USER."
+          warn "  either configure \`$USER ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/ and re-run,"
+          warn "  or install Caddy by hand (commands in the previous message) and re-run the installer."
+          PRIVILEGED_SECTION_SKIP=1
+        fi
       fi
     fi
   fi
