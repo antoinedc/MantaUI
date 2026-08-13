@@ -470,9 +470,7 @@ shell it rendered — `mobile/mobile.css` no longer exists. BET-578 stripped
 the inert `manta-*` hooks this guidance used to recommend as precedent
 (`manta-session-toolbar`, `manta-stale-full`/`-min`, `manta-ctx-track`,
 `manta-session-branch`); do not reintroduce `manta-*` classes as mobile CSS
-hooks (see the "Mobile CSS hook-class contract — RETIRED" section). The only
-surviving example, `manta-loading-divider`, is a live desktop class in
-`src/renderer/index.css`, not a mobile hook.
+hooks (see the "Mobile CSS hook-class contract — RETIRED" section).
 
 ## Desktop transport (HTTP-only)
 
@@ -2731,7 +2729,7 @@ gate first:
 - `manta-session-header`, `manta-ctx-pill`, `manta-ctx-popover`,
   `manta-session-menu-trigger`, `manta-session-menu-dropdown` (SessionHeader) —
   gate regions + coverage
-- `manta-composer-input-row`, `manta-loading-divider`, `manta-recording` —
+- `manta-composer-input-row`, `manta-recording` —
   live desktop CSS in `src/renderer/index.css`
 - `manta-folder-picker` (FolderPickerModal) — gate region/snapshot
 
