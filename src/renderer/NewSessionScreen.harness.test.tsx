@@ -77,26 +77,25 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     expect(h.container.childElementCount).toBeGreaterThan(0);
   });
 
-  it("empty state: worktree chip is unchecked + enabled even when config defaults it on", async () => {
-    // BET-445: on a fresh box the demo/real config defaults worktreePerSession
-    // to true, but the empty-state cwd is "~" (not a git repo) — pre-arming
-    // wantWorktree from config shipped a "checked but can't be honored" chip.
-    // The new-project (empty) state must render it unchecked and tappable so
-    // the user can choose a folder first.
+  it("new-project zero state is the repo-probe screen, not the folder-chip composer", async () => {
+    // BET-787: the new-project (zero-project) zero state is now the repo-probe
+    // screen. On a box with no repos it is the "fresh" state, not today's
+    // folder-chip composer. In particular there is no worktree chip to pre-arm
+    // (the old BET-445 concern) — the folder/composer path is reached via
+    // "Browse for a folder…" instead.
     installMockApi();
     resetStore({ projects: [], worktreePerSession: true });
 
     h = mountDraft();
     await h.flush();
 
-    // The worktree toggle is now the Checkbox primitive (BET-589); its input
-    // carries the same accessible name it always did, so select it that way.
+    // Fresh-box heading (probe succeeded, zero repos found).
+    expect(h.container.textContent).toContain("Let's get some code on this box");
+    // No worktree chip in the repo-probe zero state.
     const checkbox = h.container.querySelector(
       'input[aria-label="Create in a fresh git worktree"]',
-    ) as HTMLInputElement;
-    expect(checkbox).not.toBeNull();
-    expect(checkbox.checked).toBe(false);
-    expect(checkbox.disabled).toBe(false);
+    );
+    expect(checkbox).toBeNull();
   });
 
   it("still fetches models when window.api IS the paired httpApi", async () => {

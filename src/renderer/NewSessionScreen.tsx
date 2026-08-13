@@ -885,7 +885,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                   </div>
                 )}
 
-                <div className="space-y-0.5">
+                <div className="space-y-1">
                   {rows.map((r) =>
                     batchDone ? (
                       <ListRow
