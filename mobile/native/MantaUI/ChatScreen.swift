@@ -701,6 +701,15 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            // LIVE running-tool rows (BET-753): what the box is doing mid-turn,
+            // pinned above the composer. Each vanishes when its `toolEnded`
+            // frame lands and the canonical refetch renders it as a step row.
+            if !store.runningTools.isEmpty {
+                ForEach(Array(store.runningTools.enumerated()), id: \.element.idx) { _, tool in
+                    RunningToolRow(tool: tool, tokens: tokens)
+                        .transition(.opacity)
+                }
+            }
             if let err = store.sessionError {
                 ChatNoticeRow(text: err.message, color: tokens.danger, tokens: tokens)
             }

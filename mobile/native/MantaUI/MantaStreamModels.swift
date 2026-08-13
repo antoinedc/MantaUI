@@ -273,6 +273,46 @@ struct StreamSubagentChildPayload: Codable, Equatable, Sendable {
     var childSessionId: String
 }
 
+// MARK: - Live tool frames (server BET-745 / app BET-753)
+//
+// The server half (BET-745) publishes three temporary, additive frames so a
+// thin client can render a LIVE running-tool row with a bash tail mid-turn,
+// before the canonical turn-boundary refetch lands. The device reads exactly
+// these field names (never the raw opencode event):
+//   toolStarted { sessionId, idx, toolName, toolPresentationHint?, status }
+//   toolOutput  { sessionId, idx, text }
+//   toolEnded   { sessionId, idx, ok, truncated? }
+// `idx` is the tool PART ID — stable per tool across the whole run, identical
+// on started/output/ended — so the device keys its running-tool rows by it.
+
+/// `sub: "toolStarted"` — a live tool call began.
+struct StreamToolStartedPayload: Codable, Equatable, Sendable {
+    var sessionId: String
+    var idx: String
+    var toolName: String?
+    var toolPresentationHint: String?
+    var status: String?
+}
+
+/// `sub: "toolOutput"` — one incremental stdout chunk for a running tool. The
+/// server sends only the delta since the last chunk (never the full output),
+/// bounded by its per-tool cap.
+struct StreamToolOutputPayload: Codable, Equatable, Sendable {
+    var sessionId: String
+    var idx: String
+    var text: String
+}
+
+/// `sub: "toolEnded"` — the tool call settled. `ok` is true when the tool
+/// completed, false when it errored; `truncated` is present true only when the
+/// per-tool output cap was hit.
+struct StreamToolEndedPayload: Codable, Equatable, Sendable {
+    var sessionId: String
+    var idx: String
+    var ok: Bool
+    var truncated: Bool?
+}
+
 /// `sub: "autoRename"` — a title-summarization trigger.
 struct StreamAutoRenamePayload: Codable, Equatable, Sendable {
     var turns: Double

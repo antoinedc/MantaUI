@@ -130,6 +130,32 @@ final class MantaEventStreamModelTests: XCTestCase {
         XCTAssertFalse(p.running)
     }
 
+    // MARK: - Live tool frames (BET-753)
+
+    func testParsesToolStartedPayload() throws {
+        let f = try frame(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#)
+        let p = try XCTUnwrap(f.decodedPayload(StreamToolStartedPayload.self))
+        XCTAssertEqual(p.idx, "toolu_1")
+        XCTAssertEqual(p.toolName, "bash")
+        XCTAssertEqual(p.toolPresentationHint, "Run: npm test")
+        XCTAssertEqual(p.status, "running")
+    }
+
+    func testParsesToolOutputPayload() throws {
+        let f = try frame(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"toolu_1","text":"line1\n"}}"#)
+        let p = try XCTUnwrap(f.decodedPayload(StreamToolOutputPayload.self))
+        XCTAssertEqual(p.idx, "toolu_1")
+        XCTAssertEqual(p.text, "line1\n")
+    }
+
+    func testParsesToolEndedPayload() throws {
+        let f = try frame(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"toolu_1","ok":false,"truncated":true}}"#)
+        let p = try XCTUnwrap(f.decodedPayload(StreamToolEndedPayload.self))
+        XCTAssertEqual(p.idx, "toolu_1")
+        XCTAssertEqual(p.ok, false)
+        XCTAssertEqual(p.truncated, true)
+    }
+
     func testParsesContextPayload() throws {
         let f = try frame(#"{"kind":"stream","sub":"context","sessionId":"ses_1","payload":{"freshInput":10,"cacheRead":5,"cacheWrite":2,"totalInput":17,"pct":8,"segments":[{"kind":"fresh","pct":5},{"kind":"cacheWrite","pct":1},{"kind":"cacheRead","pct":2}]}}"#)
         let p = try XCTUnwrap(f.decodedPayload(StreamContextPayload.self))
@@ -327,6 +353,78 @@ final class MantaEventStreamRouterTests: XCTestCase {
         )
 
         XCTAssertEqual(state.subagents.count, 2)
+    }
+
+    // MARK: - Live tool frames (BET-753)
+
+    /// A `toolStarted` frame starts a running tool row, keyed by its stable
+    /// part id.
+    func testToolStartedStartsRunningTool() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.runningTools.count, 1)
+        XCTAssertEqual(state.runningTools[0].idx, "toolu_1")
+        XCTAssertEqual(state.runningTools[0].name, "bash")
+        XCTAssertEqual(state.runningTools[0].presentationHint, "Run: npm test")
+        XCTAssertEqual(state.tools["toolu_1"]?.status, "running")
+    }
+
+    /// Appended `toolOutput` deltas for the same `idx` concatenate in order; a
+    /// new `idx` starts a fresh tail. Running tools render in start order.
+    func testToolOutputAppendsByIDAndFreshIndexStartsFreshTail() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        func start(_ idx: String, _ name: String) throws -> MantaStreamFrame {
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"\#(idx)","toolName":"\#(name)","status":"running"}}"#)
+        }
+        func output(_ idx: String, _ text: String) throws -> MantaStreamFrame {
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"\#(idx)","text":"\#(text)"}}"#)
+        }
+        state = MantaStreamRouter.applying(try start("a", "bash"), to: state)
+        state = MantaStreamRouter.applying(try output("a", "chunk1"), to: state)
+        state = MantaStreamRouter.applying(try output("a", "chunk2"), to: state)
+        state = MantaStreamRouter.applying(try start("b", "read"), to: state)
+        state = MantaStreamRouter.applying(try output("b", "file.txt"), to: state)
+
+        XCTAssertEqual(state.tools["a"]?.tail, "chunk1chunk2", "deltas for the same idx concatenate in arrival order")
+        XCTAssertEqual(state.tools["b"]?.tail, "file.txt", "a new idx starts a fresh tail")
+        XCTAssertEqual(state.runningTools.map(\.idx), ["a", "b"], "running tools render in start order")
+    }
+
+    /// `toolEnded` removes the tool from the running set AND reflects its
+    /// outcome (`ok:false` / `truncated`) on the retained record.
+    func testToolEndedRemovesFromRunningAndReflectsOutcome() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","toolName":"bash","status":"running"}}"#),
+            to: state
+        )
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","ok":false,"truncated":true}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.runningTools.count, 0, "an ended tool leaves the running set")
+        XCTAssertEqual(state.tools["a"]?.ended, true, "the outcome is reflected on the record")
+        XCTAssertEqual(state.tools["a"]?.ok, false)
+        XCTAssertEqual(state.tools["a"]?.truncated, true)
+    }
+
+    /// Once the turn completes its running-tool state is dropped — the
+    /// canonical refetch now owns the tools as step rows.
+    func testTurnCompleteClearsRunningTools() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","toolName":"bash","status":"running"}}"#),
+            to: state
+        )
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#),
+            to: state
+        )
+        XCTAssertTrue(state.tools.isEmpty, "the live tool map clears on turnComplete")
+        XCTAssertEqual(state.runningTools.count, 0)
     }
 
     // MARK: - Retiring covered text (BET-655)
