@@ -83,6 +83,7 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeQuestionReply",
   "opencodeRestart",
   "opencodeRunCommand",
+  "opencodeSearchMessages",
   "opencodeSetProviders",
   "opencodeSetSubagents",
   "opencodeSyncSubagents",
