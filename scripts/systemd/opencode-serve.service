@@ -39,6 +39,15 @@ ExecStart=@@OPENCODE_BIN@@ serve --port 4096 --hostname 127.0.0.1
 # dirs (tmux). install.sh substitutes the resolved list (see
 # launchd_agent_path()).
 Environment=PATH=@@AGENT_PATH@@
+# Background subagents (BET-XXX). Unlocks `task(background: true)` — the tool
+# returns immediately and opencode injects the child's result back into the
+# parent session when it finishes — plus the
+# POST /experimental/session/:id/background detach endpoint. Without this env
+# var opencode reports `backgroundSubagents:false` from
+# /experimental/capabilities, the `background` argument hard-errors, and EVERY
+# subagent blocks its parent turn. Not a placeholder: it is unconditionally on
+# for every Manta box, so there is nothing for install.sh to substitute.
+Environment=OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
 Restart=on-failure
 RestartSec=2
 # Give opencode a moment to flush pending SSE frames on stop before SIGKILL.

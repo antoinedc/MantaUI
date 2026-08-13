@@ -971,19 +971,25 @@ main() {
   OC_UNIT="$UNIT_DIR/opencode-serve.service"
   [ -f "$OC_UNIT_SRC" ] || die "missing systemd template: $OC_UNIT_SRC"
   if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user is-active --quiet opencode-serve.service 2>/dev/null; then
-      ok "opencode-serve already active — skipping (re-run picks up unit upgrades via daemon-reload below)."
-    else
-      log "Installing opencode-serve systemd --user unit…"
-      mkdir -p "$UNIT_DIR"
-      rendered="$("$NODE" "$LIB" render-systemd-unit \
-        --template "$OC_UNIT_SRC" \
-        --placeholder OPENCODE_BIN="$OPENCODE_BIN" \
-        --placeholder AGENT_PATH="$(launchd_agent_path)")" \
-        || die "render-systemd-unit failed (see lib)"
-      printf '%s' "$rendered" > "$OC_UNIT"
-      systemctl --user daemon-reload
-      systemctl --user enable --now opencode-serve.service
+    # ALWAYS re-render, matching the manta-server branch in step 7. The old
+    # `is-active → skip` early-out meant an already-running box never picked up
+    # a unit change (self-update.sh does not render units either), so a new
+    # Environment= line would reach fresh installs only. `enable --now` does
+    # not restart an already-running unit, hence the explicit restart below —
+    # gated on MANTA_RESTART exactly like manta-server's.
+    log "Installing opencode-serve systemd --user unit…"
+    mkdir -p "$UNIT_DIR"
+    rendered="$("$NODE" "$LIB" render-systemd-unit \
+      --template "$OC_UNIT_SRC" \
+      --placeholder OPENCODE_BIN="$OPENCODE_BIN" \
+      --placeholder AGENT_PATH="$(launchd_agent_path)")" \
+      || die "render-systemd-unit failed (see lib)"
+    printf '%s' "$rendered" > "$OC_UNIT"
+    systemctl --user daemon-reload
+    systemctl --user enable --now opencode-serve.service
+    if [ "${MANTA_RESTART:-1}" = "1" ]; then
+      systemctl --user restart opencode-serve.service \
+        || warn "systemctl --user restart opencode-serve failed — run it manually"
     fi
   elif [ "$IS_MACOS" = "1" ]; then
     # macOS path (BET-277): proper LaunchAgent so opencode-serve survives
@@ -1003,7 +1009,9 @@ main() {
     else
       warn "systemctl not found. Starting opencode-serve in the background instead."
       warn "It will NOT survive reboot — set up your own supervisor for that."
-      ( nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
+      # Same background-subagent flag the systemd unit and the LaunchAgent
+      # carry — keep the three supervisors' environments identical.
+      ( OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
     fi
   fi
   # Health-wait: opencode is loopback-only on :4096. acceptAnyStatus:true is

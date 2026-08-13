@@ -4600,6 +4600,32 @@ test("install.sh: scripts/systemd/*.service carries @@AGENT_PATH@@ placeholder (
   }
 });
 
+test("install.sh: every opencode-serve supervisor enables background subagents", () => {
+  // opencode gates `task(background: true)` and the
+  // POST /experimental/session/:id/background detach endpoint behind this env
+  // var; without it /experimental/capabilities reports backgroundSubagents
+  // false and every subagent blocks its parent turn. All THREE supervisors
+  // (systemd unit, LaunchAgent, nohup fallback) must set it, or the box's
+  // behaviour would depend on which one happened to start opencode.
+  const VAR = "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS";
+  const unit = readFileSync(join(__dirname, "systemd", "opencode-serve.service"), "utf-8");
+  assert.match(unit, new RegExp(`Environment=${VAR}=true`));
+  const plist = readFileSync(join(__dirname, "launchd", "com.mantaui.opencode.plist"), "utf-8");
+  assert.match(plist, new RegExp(`<key>${VAR}</key>\\s*<string>true</string>`));
+  const installSh = readFileSync(join(__dirname, "install.sh"), "utf-8");
+  assert.match(installSh, new RegExp(`${VAR}=true nohup`));
+});
+
+test("install.sh: the opencode-serve unit is re-rendered on every run", () => {
+  // The unit used to be skipped when already active, so an already-installed
+  // box never picked up a template change (self-update.sh renders no units
+  // either). Pin the always-render shape: no is-active early-out, and an
+  // explicit restart, because `enable --now` does not restart a running unit.
+  const installSh = readFileSync(join(__dirname, "install.sh"), "utf-8");
+  assert.doesNotMatch(installSh, /is-active --quiet opencode-serve/);
+  assert.match(installSh, /systemctl --user restart opencode-serve\.service/);
+});
+
 test("install.sh: scripts/systemd/manta-server.service + scripts/launchd/com.mantaui.server.plist carry @@MANTA_CHANNEL@@ placeholder (BET-392)", () => {
   // Belt-and-braces: without the placeholder in the template, install.sh's
   // sed substitution has nothing to replace and the box's own server
