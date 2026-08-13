@@ -80,6 +80,17 @@ function allPaths(root) {
  * bash subprocess. Returns { status, stdout }.
  */
 function runReplace(pkg, dest) {
+  return sourceAndRun(`replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'`);
+}
+
+/**
+ * The one place a bash subprocess is built for these tests: define the
+ * `log`/`ok`/`warn`/`die` helpers release.sh expects its CALLER to own, source
+ * the library, then run `body`. `preamble` injects anything that must be set
+ * before sourcing (PATH, seed variables). Returns { status, stdout } with
+ * stderr folded in, so assertions can match on `die` output.
+ */
+function sourceAndRun(body, { preamble = "" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "manta-release-"));
   const script = join(dir, "run.sh");
   writeFileSync(
@@ -90,8 +101,9 @@ log()  { printf 'log: %s\\n' "$*"; }
 ok()   { printf 'ok: %s\\n' "$*"; }
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die()  { printf 'die: %s\\n' "$*" >&2; exit 1; }
+${preamble}
 source '${RELEASE_LIB}'
-replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'
+${body}
 exit $?
 `,
     { mode: 0o755 },
@@ -276,28 +288,10 @@ function runInstallDeps(dest, { npmExit = 0, replaced = 0, npmOnPath = true } = 
       { mode: 0o755 },
     );
   }
-  const script = join(dir, "run.sh");
-  writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set +e
-log()  { printf 'log: %s\\n' "$*"; }
-ok()   { printf 'ok: %s\\n' "$*"; }
-warn() { printf 'warn: %s\\n' "$*"; }
-die()  { printf 'die: %s\\n' "$*"; exit 1; }
-export PATH='${binDir}'
-REPLACED_NODE_MODULES=${replaced}
-source '${RELEASE_LIB}'
-install_prod_deps '${dest}'
-exit $?
-`,
-    { mode: 0o755 },
-  );
   try {
-    const stdout = execFileSync("bash", [script], { encoding: "utf8" });
-    return { status: 0, stdout };
-  } catch (e) {
-    return { status: e.status ?? 1, stdout: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+    return sourceAndRun(`install_prod_deps '${dest}'`, {
+      preamble: `export PATH='${binDir}'\nREPLACED_NODE_MODULES=${replaced}`,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

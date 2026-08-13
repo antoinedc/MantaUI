@@ -108,17 +108,11 @@ test("pack.mjs --arch bogus fails the parseArgs validation with the right messag
 // pack.mjs. INCLUDE is which repo paths get COPIED into the tarball;
 // OWNED_ON_BOX is which paths self-update replaces on an installed box.
 //
-// They differ by exactly two entries, and for the same underlying reason: both
-// are PRODUCED during staging rather than copied from the repo, so neither can
-// be in INCLUDE — but both must reach an installed box on update.
-//   * `runtime` — the vendored Node, produced by ensureNodeRuntime(). Without
-//     it in the owned list a runtime version bump can never reach a box.
-//   * `node_modules` — the --omit=dev tree, whose node-pty binding is repaired
-//     (spawn-helper exec bit) and then PROVEN loadable by the vendored node for
-//     this arch. Added in BET-829: the box used to rebuild it locally with
-//     `npm ci`, which needs a toolchain a clean VPS lacks and links against the
-//     system Node rather than the vendored one, producing a wrong-ABI binding
-//     and a box that will not start.
+// They differ by exactly two entries — `runtime` and `node_modules` — and for
+// the same underlying reason: both are PRODUCED during staging rather than
+// copied from the repo, so neither can be in INCLUDE, yet both must reach an
+// installed box on update. The full rationale for each lives on OWNED_ON_BOX
+// in pack.mjs and is deliberately not restated here.
 //
 // pack.mjs can't be imported (main() runs on import and hits the network), so
 // we read its SOURCE and evaluate the two array literals — the same way the
