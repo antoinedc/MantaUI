@@ -1,14 +1,81 @@
-# gitleaks config for better-ui — consumed by .github/workflows/security-gates.yml
+# gitleaks config for MantaUI — consumed by the "Secret scan (gitleaks)" step
+# in .github/workflows/ci.yml (security-gates.yml was folded into ci.yml).
 #
-# Allowlist rationale (verified 2026-07-02 over full history: 56 findings, ALL
-# the same false positive): the built Vite bundles in mobile/www/assets/ are
-# minified JS whose high-entropy identifier patterns (e.g. `i.TwoKeyMap=...`)
-# trip the generic-api-key rule. The bundles are BUILD OUTPUT tracked in git by
-# design (AGENTS.md: mobile serves a prebuilt bundle) — their SOURCE
-# (src/renderer/**) stays fully scanned, so a real key hardcoded into renderer
-# code is still caught before it ever compiles into a bundle.
+# ===========================================================================
+# THE `extend` BLOCK IS LOAD-BEARING. DO NOT DELETE IT.
+#
+# gitleaks v8 REPLACES its rule set with whatever `--config` provides. A config
+# file that declares no `[[rules]]` and does not extend the defaults therefore
+# defines ZERO rules, and the scan passes vacuously — green, instant, and
+# blind. That is precisely what this file did between its creation and
+# 2026-08-13: it carried only an allowlist, so every CI run scanned with no
+# rules at all and could not have failed for any secret in any file.
+#
+# Verified empirically with gitleaks 8.24.3 (the pinned CI version):
+#   synthetic AWS + GCP + Slack tokens in one file
+#     default rules  -> 3 findings
+#     this file, before the fix -> 0 findings
+# The repo itself was clean — a full-history scan (2086 commits) under the
+# default rules found 0 real findings — so nothing leaked through the dead
+# gate. It was luck, not the gate.
+#
+# If you add rules here, ADD to the defaults; never replace them.
+# ===========================================================================
 
-[whitelist]
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Allowlist.
+#
+# The mobile/www/assets entry is HISTORICAL: those built Vite bundles were
+# minified JS whose high-entropy identifiers tripped generic-api-key (56
+# findings, all false, audited 2026-07-02). BET-559 retired the web client and
+# the bundle is no longer produced or tracked — but the path stays allowlisted
+# because the scan covers FULL GIT HISTORY, where those commits still live.
+# Removing it would resurrect all 56 findings on the next run.
+#
+# NOTE deliberately absent: mobile/native/MantaUI/GoogleService-Info.plist is
+# NOT allowlisted. It is committed on purpose (Firebase client config must ship
+# inside the app bundle, and the build clone the iOS plugin uses is force-reset
+# to origin, so an untracked file would be wiped), and it holds an `AIza…` key
+# — but gitleaks' own rules do not flag it, confirmed against 8.24.3 with the
+# defaults enabled. A Firebase iOS API key is a client identifier, not a
+# secret: it is extractable from any IPA, and access is bounded by Firebase
+# Security Rules and App Check, not by the key's secrecy. Should a future
+# gitleaks release start flagging it, add the path here rather than weakening
+# the rule set.
+# ---------------------------------------------------------------------------
+# Every entry below was audited on 2026-08-13 against gitleaks 8.24.3 with the
+# defaults ON — 20 findings across 12 files, all false. They are listed as
+# EXPLICIT PATHS rather than a blanket rule (e.g. `.*\.test\.ts`) on purpose: a
+# pattern that exempts all test files would exempt test files that do not exist
+# yet, and agents write most of the tests here. A new file with a real secret
+# must still fail. When a finding appears in a file NOT on this list, that is
+# the gate working — read it before extending the list.
+[allowlist]
 paths = [
-  '''mobile/www/assets/.*''',
+  # --- vendored / generated bundles: minified JS whose identifier soup trips
+  # generic-api-key (`t.FourKeyMap=t.TwoKeyMap=…`). Their SOURCE is scanned.
+  '''mobile/www/assets/.*''',                              # retired web bundle, still in history
+  '''mobile/native/MantaUI/Resources/terminal/.*''',       # vendored xterm.js
+
+  # --- test fixtures: throwaway tokens and PEM *headers* with no key material
+  # (e.g. "-----BEGIN OPENSSH PRIVATE KEY-----\nblah\n-----END…").
+  '''src/main/installer/handlers\.test\.ts''',
+  '''src/main/installer/knownHosts\.test\.ts''',
+  '''src/main/installer/installer\.test\.ts''',
+  '''src/main/auth\.test\.ts''',
+  '''src/server/push\.test\.mjs''',
+  '''src/server/devices\.test\.mjs''',
+  '''src/server/gatewayRegister\.test\.mjs''',
+  '''src/gateway/apns\.test\.mjs''',
+  '''mobile-rn/src/pure/__tests__/claim\.test\.ts''',
+  '''src/renderer/api/demoFixture\.ts''',                   # demo-mode sample data
+
+  # --- codemagic.yaml matches only the LITERAL STRINGS "-----BEGIN … PRIVATE
+  # KEY-----" inside sed/printf commands that reconstruct a PEM at build time.
+  # The key material itself is a Codemagic secure env variable
+  # (CERTIFICATE_PRIVATE_KEY / ASC_API_KEY_P8_B64) and is never in this repo.
+  '''codemagic\.yaml''',
 ]
