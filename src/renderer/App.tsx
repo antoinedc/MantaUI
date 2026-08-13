@@ -161,6 +161,20 @@ function AppInner() {
   useEffect(() => {
     if (enterOnboarding && !onboardingLatched) setOnboardingLatched(true);
   }, [enterOnboarding, onboardingLatched]);
+
+  // BET-708: first-time pairing swaps window.api in place with no reload
+  // (transportInstall), so an app-level effect that guards on an httpApi-only
+  // method (onSyncDelta, onStatusEvent, onOpencodeEvent,
+  // delegateList/onDelegateUpdated, onAgentFileReady, onServerUpdateProgress)
+  // bails at mount and never re-subscribes for the whole first session.
+  // transportInstall dispatches `manta-api-installed` after every swap; bump
+  // this generation to re-run exactly those effects (added below).
+  const [apiGeneration, setApiGeneration] = useState(0);
+  useEffect(() => {
+    const bump = () => setApiGeneration((g) => g + 1);
+    window.addEventListener("manta-api-installed", bump);
+    return () => window.removeEventListener("manta-api-installed", bump);
+  }, []);
   const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
   // ⌘F conversation search palette (SearchPalette). Only reachable in chat
@@ -385,13 +399,13 @@ function AppInner() {
       useStore.getState().applySyncPayload(delta as SyncPayload);
     });
     return off;
-  }, [refresh]);
+  }, [refresh, apiGeneration]);
 
   useEffect(() => {
     if (!window.api.onStatusEvent) return;
     const off = window.api.onStatusEvent(applyStatusBatch);
     return off;
-  }, [applyStatusBatch]);
+  }, [applyStatusBatch, apiGeneration]);
 
   // Startup attention replay. opencode SSE is forward-only, so a chat window
   // already blocked on a question/permission when the app (re)connects never
@@ -475,7 +489,7 @@ function AppInner() {
       clearInterval(poll);
       if (off) off();
     };
-  }, []);
+  }, [apiGeneration]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
@@ -550,7 +564,7 @@ function AppInner() {
       useStore.getState().setAgentFileToast(ev);
     });
     return off;
-  }, []);
+  }, [apiGeneration]);
 
   // Auto-update: main checks for updates on launch and pushes
   // updateAvailable / updateDownloaded events to the renderer. We only care
@@ -618,7 +632,7 @@ function AppInner() {
       useStore.getState().setServerUpdateProgress(p);
     });
     return off;
-  }, []);
+  }, [apiGeneration]);
 
   // Version-skew guard (BET-225 stage 3 Part C). After the renderer is
   // mounted, fetch the client + server version pair ONCE (no second poll,
@@ -724,12 +738,12 @@ function AppInner() {
         ev.type === "permission.rejected"
       ) {
         const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (sid) useStore.getState().setChatAttention(sid, null);
+        if (sid)         useStore.getState().setChatAttention(sid, null);
         return;
       }
     });
     return off;
-  }, []);
+  }, [apiGeneration]);
 
   // Desktop OS notifications. manta-server's router (push.mjs) decides WHICH
   // device(s) get a notification (no duplicates) and forwards a desktop directive
