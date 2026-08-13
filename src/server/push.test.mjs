@@ -41,6 +41,28 @@ test("permission.asked → permission notification", () => {
   assert.equal(p?.tag, "perm-ses_1");
 });
 
+test("permission.asked carries requestId + the 3 static reply actions (single-select)", () => {
+  const p = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_1", id: "per_1" } },
+    NOFOCUS,
+  );
+  assert.equal(p?.requestId, "per_1");
+  assert.deepEqual(p?.actions, [
+    { action: "allow-once", title: "Allow once" },
+    { action: "allow-always", title: "Always allow" },
+    { action: "deny", title: "Deny" },
+  ]);
+});
+
+test("permission.asked without id → no requestId, no actions (unchanged legacy shape)", () => {
+  const p = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_1" } },
+    NOFOCUS,
+  );
+  assert.equal(p?.requestId, undefined);
+  assert.equal(p?.actions, undefined);
+});
+
 test("question.asked → question notification", () => {
   const p = classifyPushEvent(
     { type: "question.asked", properties: { sessionID: "ses_2" } },
