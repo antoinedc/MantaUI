@@ -48,7 +48,7 @@ import {
 // render, while still letting them read the live tail state (todos, question
 // cards, the working indicator) and the load-earlier state.
 
-type TranscriptContext = {
+export type TranscriptContext = {
   running: boolean;
   liveTurn: LiveTurn | null;
   showLoadEarlier: boolean;
@@ -190,16 +190,7 @@ export function WorkingIndicator({
   useClockTick(WORKING_TICK_MS);
   return (
     <CardMount show={running} k="working">
-      <div
-        className="manta-working-indicator flex items-center gap-2 shrink-0"
-        style={{
-          // Virtuoso renders Footer OUTSIDE List, so the List's flex `gap`
-          // never applies between the last row and this one — this margin IS
-          // that gap. It sits INSIDE CardMount so the gap collapses along with
-          // the row.
-          marginTop: "var(--block-gap)",
-        }}
-      >
+      <div className="manta-working-indicator flex items-center gap-2 shrink-0">
         <MantaLoader />
         <span className="text-text-faint text-xs">
           {liveTurn ? (
@@ -231,18 +222,40 @@ export function WorkingIndicator({
 // in a shrink-0 row above the input (see the comment history in the old
 // Transcript for the design decision — anchoring them at the tail keeps them at
 // the bottom of the transcript in every state).
-function TranscriptTail({ context }: { context: TranscriptContext }) {
+export function TranscriptTail({ context }: { context: TranscriptContext }) {
   return (
     // Inset + bottom breathing room: Virtuoso renders Footer OUTSIDE the List,
     // so it needs its own copy of the reading inset (see TRANSCRIPT_INSET) and
     // the trailing gap the scroller's now-removed padding used to imply.
-    <div style={{ ...TRANSCRIPT_INSET, paddingBottom: "var(--sp-6)" }}>
+    <div
+      style={{
+        ...TRANSCRIPT_INSET,
+        // The tail is a stacked column and owns the spacing between its own
+        // children — the working row, the todo checklist and the question
+        // cards — exactly like TranscriptList owns --turn-gap between message
+        // rows. Do NOT push this back onto a child as a margin: a child-owned
+        // gap disappears with that child (the working row unmounts when the
+        // turn ends, and its margin used to take the whole tail's spacing with
+        // it) and only ever spaces one side.
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--block-gap)",
+        // `gap` only applies BETWEEN children, so the gap to the last message
+        // row above is padding on the container. It is needed because Virtuoso
+        // renders Footer OUTSIDE List, so the List's flex gap never crosses
+        // into here. Unconditional on purpose — one code path, no "does the
+        // tail have content" branch that would have to fight CardMount's
+        // 220ms exit animation.
+        paddingTop: "var(--block-gap)",
+        paddingBottom: "var(--sp-6)",
+      }}
+    >
       <WorkingIndicator running={context.running} liveTurn={context.liveTurn} />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
       )}
       {context.questions.length > 0 && (
-        <div className="space-y-2 pt-1">
+        <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
           {context.questions.map((q) => (
             // A malformed question payload must not kill the app — each card
             // gets its own boundary so a bad card degrades to an inline error
