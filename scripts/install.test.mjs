@@ -41,6 +41,12 @@ import {
 
 const HOME = "/home/tester";
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Read a file shipped under scripts/ (a supervisor template, install.sh, …).
+// Every "the template must contain X" test wants exactly this, and repeating
+// the readFileSync(join(__dirname, …), "utf-8") triple is what tips the
+// duplication gate over its token threshold.
+const scriptFile = (...parts) => readFileSync(join(__dirname, ...parts), "utf-8");
 const INSTALL_SH = join(__dirname, "install.sh");
 
 // A canonical 32-lowercase-hex token — mirrors the test constants in
@@ -4587,20 +4593,16 @@ test("install.sh: scripts/systemd/*.service carries @@AGENT_PATH@@ placeholder (
   // token, otherwise render-systemd-unit won't substitute it. Without the
   // substitution, the supervisor-managed service inherits the bare
   // systemd default PATH and the `claude` spawn in doRefresh ENOENTs.
-  for (const f of [
-    join(__dirname, "systemd", "manta-server.service"),
-    join(__dirname, "systemd", "opencode-serve.service"),
-  ]) {
-    const text = readFileSync(f, "utf-8");
+  for (const f of ["manta-server.service", "opencode-serve.service"]) {
     assert.match(
-      text,
+      scriptFile("systemd", f),
       /Environment=PATH=@@AGENT_PATH@@/,
       `${f} must carry @@AGENT_PATH@@ for the unified PATH substitution`,
     );
   }
 });
 
-test("install.sh: every opencode-serve supervisor enables background subagents", () => {
+test("install.sh: opencode-serve gets background subagents, on every supervisor, on every run", () => {
   // opencode gates `task(background: true)` and the
   // POST /experimental/session/:id/background detach endpoint behind this env
   // var; without it /experimental/capabilities reports backgroundSubagents
@@ -4608,20 +4610,18 @@ test("install.sh: every opencode-serve supervisor enables background subagents",
   // (systemd unit, LaunchAgent, nohup fallback) must set it, or the box's
   // behaviour would depend on which one happened to start opencode.
   const VAR = "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS";
-  const unit = readFileSync(join(__dirname, "systemd", "opencode-serve.service"), "utf-8");
-  assert.match(unit, new RegExp(`Environment=${VAR}=true`));
-  const plist = readFileSync(join(__dirname, "launchd", "com.mantaui.opencode.plist"), "utf-8");
-  assert.match(plist, new RegExp(`<key>${VAR}</key>\\s*<string>true</string>`));
-  const installSh = readFileSync(join(__dirname, "install.sh"), "utf-8");
+  const installSh = scriptFile("install.sh");
+  assert.match(scriptFile("systemd", "opencode-serve.service"), new RegExp(`Environment=${VAR}=true`));
+  assert.match(
+    scriptFile("launchd", "com.mantaui.opencode.plist"),
+    new RegExp(`<key>${VAR}</key>\\s*<string>true</string>`),
+  );
   assert.match(installSh, new RegExp(`${VAR}=true nohup`));
-});
-
-test("install.sh: the opencode-serve unit is re-rendered on every run", () => {
-  // The unit used to be skipped when already active, so an already-installed
-  // box never picked up a template change (self-update.sh renders no units
-  // either). Pin the always-render shape: no is-active early-out, and an
-  // explicit restart, because `enable --now` does not restart a running unit.
-  const installSh = readFileSync(join(__dirname, "install.sh"), "utf-8");
+  // …and the unit must be re-rendered on every run, or an already-installed
+  // box would never pick the line up: the systemd branch used to skip when
+  // already active, and self-update.sh renders no units either. Pin the
+  // always-render shape — no is-active early-out, plus an explicit restart
+  // because `enable --now` does not restart a running unit.
   assert.doesNotMatch(installSh, /is-active --quiet opencode-serve/);
   assert.match(installSh, /systemctl --user restart opencode-serve\.service/);
 });
@@ -4631,17 +4631,16 @@ test("install.sh: scripts/systemd/manta-server.service + scripts/launchd/com.man
   // sed substitution has nothing to replace and the box's own server
   // process would silently fall back to resolveBoxChannel()'s "prod"
   // default on every install, regardless of MANTA_CHANNEL.
-  const serverUnit = readFileSync(join(__dirname, "systemd", "manta-server.service"), "utf-8");
-  assert.match(serverUnit, /Environment=MANTA_CHANNEL=@@MANTA_CHANNEL@@/);
-  const serverPlist = readFileSync(join(__dirname, "launchd", "com.mantaui.server.plist"), "utf-8");
-  assert.match(serverPlist, /<key>MANTA_CHANNEL<\/key>\s*<string>@@MANTA_CHANNEL@@<\/string>/);
+  assert.match(scriptFile("systemd", "manta-server.service"), /Environment=MANTA_CHANNEL=@@MANTA_CHANNEL@@/);
+  assert.match(
+    scriptFile("launchd", "com.mantaui.server.plist"),
+    /<key>MANTA_CHANNEL<\/key>\s*<string>@@MANTA_CHANNEL@@<\/string>/,
+  );
   // opencode-serve.service / com.mantaui.opencode.plist are NOT
   // pair-link-emitting processes — MANTA_CHANNEL is deliberately scoped to
   // manta-server only.
-  const opencodeUnit = readFileSync(join(__dirname, "systemd", "opencode-serve.service"), "utf-8");
-  assert.doesNotMatch(opencodeUnit, /MANTA_CHANNEL/);
-  const opencodePlist = readFileSync(join(__dirname, "launchd", "com.mantaui.opencode.plist"), "utf-8");
-  assert.doesNotMatch(opencodePlist, /MANTA_CHANNEL/);
+  assert.doesNotMatch(scriptFile("systemd", "opencode-serve.service"), /MANTA_CHANNEL/);
+  assert.doesNotMatch(scriptFile("launchd", "com.mantaui.opencode.plist"), /MANTA_CHANNEL/);
 });
 
 test("install.sh systemd render: AGENT_PATH substitution materialises ~/.local/bin in both units (BET-353)", () => {
