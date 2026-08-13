@@ -50,6 +50,7 @@ import {
   isApprovalCoveredByAlways,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
+  parseModelRef,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -2205,6 +2206,9 @@ export function ChatPanel({
       {jobOwnership ? (
         <ReadOnlyJobBar
           job={jobOwnership}
+          modelName={
+            resolveActiveModel(models, parseModelRef(jobOwnership.model), null)?.name ?? null
+          }
           parentName={(() => {
             const pid = jobOwnership.parentSessionID;
             for (const p of projects) {

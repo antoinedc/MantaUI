@@ -553,11 +553,13 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
   parentName,
   onGoToParent,
   onStop,
+  modelName,
 }: {
   job: DelegateJob;
   parentName: string | null;
   onGoToParent: () => void;
   onStop: () => void;
+  modelName: string | null;
 }) {
   const terminal = job.status !== "running";
   return (
@@ -566,7 +568,11 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
         <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
           <Bot size={14} aria-hidden="true" />
         </span>
-        <span className="text-text">Read-only — this is a background job.</span>
+        <span className="text-text">
+          {modelName
+            ? <>Read-only — this is a background job running <strong>{modelName}</strong>.</>
+            : "Read-only — this is a background job."}
+        </span>
         {parentName && (
           <span className="text-text-faint">It reports to {parentName}.</span>
         )}
