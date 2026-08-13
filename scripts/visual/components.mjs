@@ -35,7 +35,7 @@ const ic = (n) => `<svg class="ic"><use href="#i-${n}"/></svg>`;
 // Canonical examples. Markup mirrors the CSS selectors verified in the spec
 // (e.g. `.setrow .lab b`, `.sw i`, `.srow .st.run`) — not page-specific copies.
 export const COMPONENTS = [
-  { id: "btn", name: "Button", cls: "btn", app: "none — every screen inlines utilities",
+  { id: "btn", name: "Button", cls: "btn", app: "Button — src/renderer/Button.tsx (BET-616); adopted by Settings, FolderPickerModal, ModelsCard, SessionHeader",
     variants: [["default", `<button class="btn">Cancel</button>`],
                ["primary", `<button class="btn pri">Create session</button>`],
                ["ghost", `<button class="btn ghost">Skip</button>`],
@@ -47,30 +47,30 @@ export const COMPONENTS = [
                ["warn", `<span class="pill warn">stale</span>`],
                ["bad", `<span class="pill bad">failed</span>`],
                ["info", `<span class="pill info">default</span>`]] },
-  { id: "chip", name: "Chip", cls: "chip", app: "none — ModelPicker inlines its own",
+  { id: "chip", name: "Chip", cls: "chip", app: "Chip + SplitChip — src/renderer/Chip.tsx (BET-615); adopted by ModelPicker + NewSessionScreen",
     variants: [["default", `<button class="chip">${ic("branch")} feat/orders-csv</button>`],
                ["on", `<button class="chip on">${ic("terminal")} Terminal</button>`],
                ["split", `<span class="chip split"><span>Opus 4.7</span><span>high</span></span>`]] },
-  { id: "tag", name: "Tag", cls: "tag", app: "none",
+  { id: "tag", name: "Tag", cls: "tag", app: "Tag — src/renderer/Tag.tsx (BET-614); adopted by ModelMenu, ModelsCard, SessionHeader",
     variants: [["default", `<span class="tag">${ic("key")} secret</span>`]] },
-  { id: "icard", name: "Icon card", cls: "icard", app: "none",
+  { id: "icard", name: "Icon card", cls: "icard", app: "IconCard — src/renderer/IconCard.tsx (BET-614); no adopting call site yet (BET-618)",
     variants: [["default", `<div class="icard">${ic("folder")}<span>folder</span></div>`,
       ], ["second", `<div class="icard">${ic("clock")}<span>clock</span></div>`]] },
-  { id: "callout", name: "Callout", cls: "callout", app: "none",
+  { id: "callout", name: "Callout", cls: "callout", app: "Callout — src/renderer/Callout.tsx (BET-614); adopted by ConnectProvider + Onboarding",
     variants: [["default", `<div class="callout"><p>The box keeps running when the app is closed.</p></div>`],
                ["ok", `<div class="callout ok"><p>Paired. Your box is reachable.</p></div>`],
                ["warn", `<div class="callout warn"><p>Context is nearly full — consider /compact.</p></div>`],
                ["danger", `<div class="callout danger"><p>This deletes the worktree and its uncommitted changes.</p></div>`]] },
   { id: "card", name: "Card", cls: "card", app: "GroupCard — PRIVATE to Settings.tsx",
     variants: [["default", `<div class="card"><h4>Appearance</h4><p>Theme, density and font size for this device.</p></div>`]] },
-  { id: "setrow", name: "Settings row", cls: "setrow", app: "SettingField — PRIVATE to Settings.tsx",
+  { id: "setrow", name: "Settings row", cls: "setrow", app: "SettingsRow — src/renderer/SettingsRow.tsx (BET-619); no .setrow adopter yet — SettingField remains private in Settings.tsx (BET-619)",
     variants: [["with control", `<div class="setgrp"><h5>General</h5>
       <div class="setrow"><span class="lab"><b>Trust this box</b><span class="h">Auto-approve tool runs in every session.</span></span><span class="ctl"><span class="sw on"><i></i></span></span></div>
       <div class="setrow"><span class="lab"><b>Downloads folder</b></span><span class="ctl"><input class="inp" value="~/Downloads"></span></div></div>`]] },
   { id: "inp", name: "Input", cls: "inp", app: "SettingField — PRIVATE to Settings.tsx",
     variants: [["mono", `<input class="inp" value="~/projects/infra">`],
                ["sans", `<input class="inp sans" value="Deploy new billing service">`]] },
-  { id: "sw", name: "Toggle", cls: "sw", app: "none — inline in Settings",
+  { id: "sw", name: "Toggle", cls: "sw", app: "Toggle — src/renderer/Toggle.tsx (BET-614); adopted by Settings.tsx",
     variants: [["off", `<span class="sw"><i></i></span>`], ["on", `<span class="sw on"><i></i></span>`]] },
   { id: "srow", name: "Session row", cls: "srow", app: "none — inline in Sidebar.tsx",
     note: "Two things this row does not own. Its <b>inset</b> belongs to <code>.rail-scroll</code> — the selection marker (<code>.srow.on::before</code>) sits at <code>left:-8px</code> and hangs outside the row into that padding, so a primitive owning its own left inset would clip it. Its <b>metrics</b> belong to <code>[data-density]</code> — <code>--row-h/--row-px/--row-py</code> are defined there, not on <code>:root</code>, so the row collapses to an 18px unpadded line if it is rendered outside a density scope.",
@@ -91,7 +91,7 @@ export const COMPONENTS = [
       <div class="srow"><span class="st att"></span><span class="t">Refactor auth middleware</span><span class="age">12m</span></div>
       <div class="srow"><span class="st"></span><span class="t">Landing page copy</span><span class="age">2h</span></div>
       </div></div>` + `</div>`]] },
-  { id: "eyebrow", name: "Eyebrow", cls: "eyebrow", app: "none",
+  { id: "eyebrow", name: "Eyebrow", cls: "eyebrow", app: "Eyebrow — src/renderer/Eyebrow.tsx (BET-614); sole web adopter Settings.tsx (BET-618)",
     variants: [["default", `<div class="eyebrow">Section label</div>`]] },
 ];
 
