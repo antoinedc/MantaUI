@@ -12,7 +12,6 @@ keyframe animations**:
 
 - `manta-bubble-in` — the user prompt bubble "pop".
 - `manta-part-in` — tool cards sliding in.
-- `.manta-streaming > *` — per-markdown-block slide for the live streaming text.
 
 Each surface had its own bespoke motion (a different distance/easing), so a
 turn didn't assemble in one visual language, and the code was hand-maintained
@@ -31,7 +30,7 @@ rise" rather than several different effects.
 | `src/renderer/MessageBubble.tsx` | User prompt bubble — a `motion.div` using `MESSAGE_IN_ENTER`/`IDLE` based on `entering`. |
 | `src/renderer/ToolCall.tsx` | Assistant parts (tool cards **and** streaming text) — wrapped in a `motion.div`; every live part uses the same motion as the prompt. |
 | `src/renderer/Transcript.tsx` | Wraps the transcript in `MotionConfig reducedMotion="user"` so framer-motion honours `prefers-reduced-motion`. |
-| `src/renderer/index.css` | The hand-rolled keyframes were removed; only the **streaming caret** remains. |
+| `src/renderer/index.css` | The hand-rolled keyframes and the streaming caret were removed; chat entry animation is entirely framer-motion. |
 | `src/renderer/ChatPanel.tsx` | The working indicator's constant-height slot (jitter fix #2). |
 
 ## The motion (`MESSAGE_IN_ENTER`)
@@ -60,15 +59,6 @@ Regression tests assert this through a `data-motion` attribute (`"bubble"` /
 `Transcript.test.tsx`. Do not swap this for a real CSS class or a whole-list
 animation; the gate + per-message flag is what keeps loaded history still while
 live adds still animate.
-
-## Streaming caret
-
-The only remaining chat CSS is the trailing **caret** (the blinking marker on
-the currently-writing message), `.manta-streaming > *:last-child::after`. It is
-a typing indicator, not an entry animation, so it was kept. The entry animation
-is delivered by framer-motion; reduced-motion handling for it is via
-`MotionConfig`, so no `prefers-reduced-motion` CSS blocks are needed for the
-entry.
 
 ## Jitter fix #1 — the underdamped spring overshoot
 
