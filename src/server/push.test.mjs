@@ -7,7 +7,7 @@ import {
   classifyPushEvent,
   buildSessionLabel,
   shouldSuppressForDesktop,
-  shouldSuppressUnresolvedNotification,
+  shouldSuppressNotification,
   routeNotification,
   notifTier,
   fireNotify,
@@ -278,7 +278,7 @@ test("REGRESSION: a nameless 'done' (subagent/orphan, null label) is suppressed"
     { focusSessionId: null, focusVisible: false, wasBusy: true, label: null },
   );
   assert.equal(done?.kind, "done");
-  assert.equal(shouldSuppressUnresolvedNotification(done, null), true);
+  assert.equal(shouldSuppressNotification(done, null, false), true);
 });
 
 test("a named 'done' (resolvable session) is NOT suppressed", () => {
@@ -286,7 +286,7 @@ test("a named 'done' (resolvable session) is NOT suppressed", () => {
     { type: "session.idle", properties: { sessionID: "ses_real" } },
     { focusSessionId: null, focusVisible: false, wasBusy: true, label: "default / my-chat" },
   );
-  assert.equal(shouldSuppressUnresolvedNotification(done, "default / my-chat"), false);
+  assert.equal(shouldSuppressNotification(done, "default / my-chat", false), false);
 });
 
 test("unresolved 'error' (null label) is suppressed — fixes BET-107 orphan spam", () => {
@@ -297,7 +297,7 @@ test("unresolved 'error' (null label) is suppressed — fixes BET-107 orphan spa
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
   );
   assert.equal(err?.kind, "error");
-  assert.equal(shouldSuppressUnresolvedNotification(err, null), true);
+  assert.equal(shouldSuppressNotification(err, null, false), true);
 });
 
 test("resolvable 'error' (with label) is NOT suppressed", () => {
@@ -306,7 +306,7 @@ test("resolvable 'error' (with label) is NOT suppressed", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
   );
   assert.equal(err?.kind, "error");
-  assert.equal(shouldSuppressUnresolvedNotification(err, "default / my-chat"), false);
+  assert.equal(shouldSuppressNotification(err, "default / my-chat", false), false);
 });
 
 test("unresolved 'permission' (null label) is suppressed", () => {
@@ -317,7 +317,7 @@ test("unresolved 'permission' (null label) is suppressed", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
   );
   assert.equal(perm?.kind, "permission");
-  assert.equal(shouldSuppressUnresolvedNotification(perm, null), true);
+  assert.equal(shouldSuppressNotification(perm, null, false), true);
 });
 
 test("resolvable 'permission' (with label) is NOT suppressed", () => {
@@ -326,7 +326,7 @@ test("resolvable 'permission' (with label) is NOT suppressed", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
   );
   assert.equal(perm?.kind, "permission");
-  assert.equal(shouldSuppressUnresolvedNotification(perm, "default / my-chat"), false);
+  assert.equal(shouldSuppressNotification(perm, "default / my-chat", false), false);
 });
 
 test("unresolved 'question' (null label) is suppressed", () => {
@@ -337,7 +337,7 @@ test("unresolved 'question' (null label) is suppressed", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: null },
   );
   assert.equal(q?.kind, "question");
-  assert.equal(shouldSuppressUnresolvedNotification(q, null), true);
+  assert.equal(shouldSuppressNotification(q, null, false), true);
 });
 
 test("resolvable 'question' (with label) is NOT suppressed", () => {
@@ -346,16 +346,67 @@ test("resolvable 'question' (with label) is NOT suppressed", () => {
     { focusSessionId: null, focusVisible: false, wasBusy: false, label: "default / my-chat" },
   );
   assert.equal(q?.kind, "question");
-  assert.equal(shouldSuppressUnresolvedNotification(q, "default / my-chat"), false);
+  assert.equal(shouldSuppressNotification(q, "default / my-chat", false), false);
 });
 
 test("null payload → no suppression (no-op)", () => {
-  assert.equal(shouldSuppressUnresolvedNotification(null, null), false);
+  assert.equal(shouldSuppressNotification(null, null, false), false);
 });
 
 test("non-notifying kind with null label → no suppression", () => {
   // Other kinds (e.g. "notify") should not be suppressed even with null label.
-  assert.equal(shouldSuppressUnresolvedNotification({ kind: "notify" }, null), false);
+  assert.equal(shouldSuppressNotification({ kind: "notify" }, null, false), false);
+});
+
+test("background job 'done' (even with resolved label) is suppressed", () => {
+  // BET-800: a background job's own child session reports done/error into the
+  // parent's transcript, so even with a resolvable label the push is duplicate
+  // noise. Match on isBackgroundJob regardless of label.
+  const done = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_job" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: "ws / job" },
+  );
+  assert.equal(done?.kind, "done");
+  assert.equal(shouldSuppressNotification(done, "ws / job", true), true);
+});
+
+test("background job 'error' (even with resolved label) is suppressed", () => {
+  const err = classifyPushEvent(
+    { type: "session.error", properties: { sessionID: "ses_job", message: "boom" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "ws / job" },
+  );
+  assert.equal(err?.kind, "error");
+  assert.equal(shouldSuppressNotification(err, "ws / job", true), true);
+});
+
+test("background job blocked 'permission' (resolved label) is NOT suppressed", () => {
+  // A job asking permission is BLOCKED and will sit until the user acts — a
+  // blocked job must still page the user. Silence only done/error.
+  const perm = classifyPushEvent(
+    { type: "permission.asked", properties: { sessionID: "ses_job_perm", id: "per_j" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "ws / job" },
+  );
+  assert.equal(perm?.kind, "permission");
+  assert.equal(shouldSuppressNotification(perm, "ws / job", true), false);
+});
+
+test("background job blocked 'question' (resolved label) is NOT suppressed", () => {
+  const q = classifyPushEvent(
+    { type: "question.asked", properties: { sessionID: "ses_job_q" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: false, label: "ws / job" },
+  );
+  assert.equal(q?.kind, "question");
+  assert.equal(shouldSuppressNotification(q, "ws / job", true), false);
+});
+
+test("ordinary chat (resolved label, not a job) still notifies", () => {
+  // The normal chat case: named session, not a background job — done pushes fire.
+  const done = classifyPushEvent(
+    { type: "session.idle", properties: { sessionID: "ses_real" } },
+    { focusSessionId: null, focusVisible: false, wasBusy: true, label: "ws / name" },
+  );
+  assert.equal(done?.kind, "done");
+  assert.equal(shouldSuppressNotification(done, "ws / name", false), false);
 });
 
 const LBL = { ...NOFOCUS, label: "default / my-chat" };

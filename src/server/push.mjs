@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import * as tmux from "./tmux.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { loadJobs } from "./delegate.mjs";
 
 const DIR = statePath();
 const APNS_TOKENS_PATH = join(DIR, "apns-tokens.json");
@@ -455,29 +456,29 @@ export function classifyPushEvent(evt, ctx) {
 }
 
 /**
- * Pure: should a push be dropped because its session can't be resolved to a
- * tmux chat window (null label)? Such a session is a SUBAGENT child (it
- * inherited the parent's directory, runs on the same scoped /event stream, but
- * has no `@manta-session-id` of its own) or a stale orphan — there is no chat for
- * the user to land on, and the push would be a nameless notification that
- * deep-links nowhere.
+ * Pure: should a push be dropped? Either of two reasons, both meaning "the user
+ * is not watching this session and has nothing actionable to land on":
  *
- * Covers `done`, `error`, `permission`, and `question`: an orphan session has
- * no chat window for the user to act in or land on, so a push to any of these
- * kinds is useless. A `done` would be a nameless "Claude is done"; an `error`
- * would be a nameless "The turn failed"; a `permission`/`question` would
- * require user action the user can't take from a push that deep-links to a
- * sessionId the app can't find.
+ * 1. The session can't be resolved to a tmux chat window (null label). Such a
+ *    session is a SUBAGENT child (it inherited the parent's directory, runs on
+ *    the same scoped /event stream, but has no `@manta-session-id` of its own)
+ *    or a stale orphan — there is no chat for the user to land on, and the push
+ *    would be a nameless notification that deep-links nowhere. Covers `done`,
+ *    `error`, `permission`, and `question`.
+ * 2. The session is a BACKGROUND JOB's own child (isBackgroundJob). The parent
+ *    transcript already receives the job's completion report, so a `done`/`error`
+ *    push for it is pure duplicate noise — but a `permission`/`question` means
+ *    the job is BLOCKED and will sit forever until the user acts, so those stay.
  *
  * @param {{kind?: string}|null} payload  classifyPushEvent result
  * @param {string|null} label             resolved "workspace / session-name", or null
+ * @param {boolean}     isBackgroundJob   true when this session is a background job's own child
  * @returns {boolean}
  */
-export function shouldSuppressUnresolvedNotification(payload, label) {
-  if (!label) {
-    const k = payload?.kind;
-    return k === "done" || k === "error" || k === "permission" || k === "question";
-  }
+export function shouldSuppressNotification(payload, label, isBackgroundJob) {
+  const k = payload?.kind;
+  if (isBackgroundJob === true) return k === "done" || k === "error";
+  if (!label) return k === "done" || k === "error" || k === "permission" || k === "question";
   return false;
 }
 
@@ -516,6 +517,20 @@ async function resolveSessionLabel(sessionId) {
     return buildSessionLabel(projects, sessionId);
   } catch {
     return null;
+  }
+}
+
+// Is this opencode session a background job's own child session? Such a job
+// reports its outcome into the parent's transcript, so a done/error push for
+// it is pure duplicate noise. Best-effort: any failure returns false, so a
+// broken store degrades to today's behaviour (notify) rather than silence.
+async function isBackgroundJobSession(sessionId) {
+  if (!sessionId) return false;
+  try {
+    const jobs = await loadJobs();
+    return jobs.some((j) => j.childSessionID === sessionId);
+  } catch {
+    return false;
   }
 }
 
@@ -872,6 +887,7 @@ export async function firePush(evt) {
       "session.idle",
     ]);
     const label = NOTIFYING.has(type) ? await resolveSessionLabel(sid) : null;
+    const isJob = NOTIFYING.has(type) ? await isBackgroundJobSession(sid) : false;
 
     const payload = classifyPushEvent(evt, {
       focusSessionId: _focus.sessionId,
@@ -902,10 +918,12 @@ export async function firePush(evt) {
     // name the chat, the user has nothing actionable to land on. This applies
     // to done/error/permission/question — all are useless without a resolvable
     // session label.
-    if (shouldSuppressUnresolvedNotification(payload, label)) {
+    if (shouldSuppressNotification(payload, label, isJob)) {
       console.log(
-        `[push] ${payload.kind} sid=${sid} suppressed=unresolvable-session ` +
-          `(no tmux @manta-session-id → subagent/orphan)`,
+        `[push] ${payload.kind} sid=${sid} ` +
+          (isJob
+            ? `suppressed=background-job (parent gets the completion report)`
+            : `suppressed=unresolvable-session (no tmux @manta-session-id → subagent/orphan)`),
       );
       return;
     }
