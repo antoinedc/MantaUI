@@ -32,6 +32,12 @@ final class MantaAPIClient: Sendable {
         return try await call("opencode:list-sessions", args: args, as: [OpencodeSessionListItem].self) ?? []
     }
 
+    /// The session's durable progress record (BET-790/791), or nil when it
+    /// never reported / the record was cleared. Read-only `progress:get`.
+    func progressGet(sessionID: String) async throws -> MantaProgress? {
+        try await call("progress:get", args: [sessionID], as: MantaProgress.self)
+    }
+
     /// Fetch a session's transcript.
     ///
     /// `limit` asks the box for only the most recent N messages (opencode's

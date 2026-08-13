@@ -59,6 +59,26 @@ struct MantaWorktree: Codable, Equatable, Sendable {
     var detached: Bool
 }
 
+/// The durable, session-scoped "where is this turn right now" record (BET-790,
+/// mirroring src/server/progress.mjs). One record per session; `step` is
+/// monotonic and clamped server-side. The list surface reads only the model's
+/// working `label`; the rest rides along for future surfaces.
+struct MantaProgress: Codable, Equatable, Sendable {
+    var sessionID: String
+    var label: String
+    var step: Int?
+    var total: Int?
+    var state: String
+    var detail: String
+    var updatedAt: Int
+
+    /// The model-authored label only while the turn is genuinely `working` —
+    /// `blocked` yields to its card, `done`/`failed` to the turn ending.
+    var workingLabel: String? {
+        state == "working" && !label.isEmpty ? label : nil
+    }
+}
+
 /// Create-input payload for `tmux:new-session` (a new project).
 struct NewSessionInput: Sendable {
     var name: String
@@ -92,16 +112,26 @@ struct SessionRowStatus: Equatable, Sendable {
     var attention: Bool
     var subagentsRunning: Int
     var modelLabel: String?
+    /// BET-791: the model-authored progress label for a working turn (e.g.
+    /// "Running integration tests"). Absent when the turn has no record, or
+    /// when its state isn't `working`.
+    var progressLabel: String? = nil
 }
 
 enum SessionRowSubtitle {
-    /// §7.1a subtitle table — precedence: subagents, then running, then
-    /// blocked, then (nil) idle. The subagent case REPLACES the line.
+    /// §7.1a subtitle table — precedence: subagents, then the working progress
+    /// label, then running, then blocked, then (nil) idle. The subagent case
+    /// REPLACES the line. A model-authored progress label (BET-791) is more
+    /// informative than a bare "running" / "running · model", so it replaces
+    /// both when a working turn names its step.
     static func text(for s: SessionRowStatus) -> String? {
         if s.subagentsRunning > 0 {
             return "\(s.subagentsRunning) subagent" + (s.subagentsRunning == 1 ? "" : "s")
         }
         if s.running {
+            if let label = s.progressLabel, !label.isEmpty {
+                return label
+            }
             if let model = s.modelLabel, !model.isEmpty {
                 return "running · \(model)"
             }
