@@ -40,6 +40,8 @@ import type {
   WindowStatus,
   WorktreeInfo,
   ForgeProbeResult,
+  ForgeStatusResult,
+  ForgePullRequestResult,
   ProviderEndpoint,
   DiscoverResult,
   ProviderInput,
@@ -167,6 +169,12 @@ export interface Api {
   // BET-786: probe the box for git repos + read origins + detect the gh CLI.
   // Server-side only; the box caches the result in memory for 60s.
   forgeProbe(): Promise<ForgeProbeResult>;
+
+  // BET-788: forge read path (box-side only — a token never leaves the box).
+  // forgeStatus reports connected/login; forgePullRequest takes a session cwd
+  // and the server resolves cwd → origin → repo.
+  forgeStatus(): Promise<ForgeStatusResult>;
+  forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
 
   tmuxConfigStatus(): Promise<TmuxConfigStatus>;
   tmuxSetupConfig(): Promise<TmuxConfigStatus>;
