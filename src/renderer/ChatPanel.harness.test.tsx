@@ -849,5 +849,3 @@ describe("ChatPanel pending screenshots", () => {
     expect(useStore.getState().pendingScreenshots.map((s) => s.id)).toEqual(["b"]);
   });
 });
-  });
-});
