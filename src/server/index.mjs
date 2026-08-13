@@ -755,17 +755,17 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
-  // GET    /auth/pair            → {pairing_code, box_id, expiresAt, verify}
-  //                                Mint a one-time, ~5-min code + the four-
-  //                                character verification code (§5.3/§6.4). The
-  //                                desktop shows both (and encodes box_id+code
-  //                                in a QR for mobile).
-  // POST   /auth/claim {pairing_code, verify?} → {box_token, box_id, device_id}
+  // GET    /auth/pair            → {pairing_code, box_id, expiresAt}
+  //                                Mint a one-time, ~5-min code. The desktop
+  //                                shows it (and encodes box_id+code in a QR
+  //                                for mobile).
+  // POST   /auth/claim {pairing_code, device_id?, name?} → {box_token, box_id, device_id}
   //                                Exchange a valid code for a device credential.
   //                                One-time; 403 on wrong/expired/reused code.
-  //                                `verify` (BET-493): when the joiner echoes the
-  //                                four characters it provisions a DISTINCT
-  //                                Stage-2 device; absent → legacy primary token.
+  //                                A claim carrying `device_id` OR `name`
+  //                                provisions/resumes a DISTINCT device; a bare
+  //                                claim → legacy primary token. A stray
+  //                                `verify` field is ignored (unread).
   // POST   /auth/check {pairing_code} → {box_id}
   //                                NON-consuming validation for the /pair web
   //                                page; the code stays claimable (BET-699).
@@ -813,7 +813,6 @@ const handleRequest = async (req, res) => {
           pairing_code: result.pairing_code,
           box_id: result.box_id,
           expiresAt: result.expiresAt,
-          verify: result.verify,
         });
         return;
       }
@@ -828,11 +827,9 @@ const handleRequest = async (req, res) => {
         // primary box_token exactly as before (back-compat).
         const device_id = body?.device_id ?? body?.deviceId ?? null;
         const name = body?.name ?? null;
-        // Two-factor confirm (BET-493): the joiner echoes the four verification
-        // characters shown on the desktop panel. Its PRESENCE switches the
-        // claim onto the distinct-joiner-device path (see authEngine.claim).
-        const verify = body?.verify ?? body?.verify_code ?? null;
-        const result = authEngine.claim({ pairing_code, verify, device_id, name });
+        // A stray `verify` field (old clients) is intentionally not read — the
+        // claim keys on device_id/name instead (see authEngine.claim).
+        const result = authEngine.claim({ pairing_code, device_id, name });
         if (!result.ok) {
           respondJson(res, result.status ?? 400, { error: result.error });
           return;

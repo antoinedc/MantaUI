@@ -3,7 +3,6 @@ import {
   isPairCodeExpired,
   shouldRefreshPairCode,
   msUntilRefresh,
-  formatVerifyCode,
   isValidManualPairCode,
 } from "./pairPanel";
 
@@ -47,25 +46,6 @@ describe("msUntilRefresh", () => {
   });
   it("respects grace", () => {
     expect(msUntilRefresh(1000, 500, 50)).toBe(450);
-  });
-});
-
-describe("formatVerifyCode", () => {
-  it("formats a 4-char code as two pairs with a space", () => {
-    expect(formatVerifyCode("K7Q2")).toBe("K7 Q2");
-  });
-  it("strips whitespace + uppercases", () => {
-    expect(formatVerifyCode("k7 q2")).toBe("K7 Q2");
-    expect(formatVerifyCode("  k7  q2  ")).toBe("K7 Q2");
-  });
-  it("passes through non-4-char input defensively", () => {
-    expect(formatVerifyCode("A")).toBe("A");
-    expect(formatVerifyCode("ABC")).toBe("ABC");
-    expect(formatVerifyCode("")).toBe("");
-  });
-  it("handles null/undefined", () => {
-    expect(formatVerifyCode(null as unknown as string)).toBe("");
-    expect(formatVerifyCode(undefined as unknown as string)).toBe("");
   });
 });
 

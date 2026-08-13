@@ -83,7 +83,7 @@ describe("claimPairing — direct-HTTPS branch (BET-49, BET-198)", () => {
     });
   });
 
-  it("forwards the four-char verify code on the claim body when present (BET-514)", async () => {
+  it("sends exactly the claim body { pairing_code } (BET-700)", async () => {
     const { fetch, bodies } = stubFetch(
       fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
     );
@@ -93,35 +93,15 @@ describe("claimPairing — direct-HTTPS branch (BET-49, BET-198)", () => {
       {
         serverUrl: "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com",
         code: "847291",
-        verify: "K7Q2",
       },
       persist,
       fetch,
     );
 
     expect(out.ok).toBe(true);
-    // The two-sided confirm is forwarded so the box provisions a DISTINCT
-    // Stage-2 joiner device rather than the shared primary box_token.
-    expect(JSON.parse(bodies[0])).toEqual({ pairing_code: "847291", verify: "K7Q2" });
-    expect(persist).toHaveBeenCalledTimes(1);
-  });
-
-  it("omits verify from the claim body when absent (legacy path, BET-514)", async () => {
-    const { fetch, bodies } = stubFetch(
-      fakeResponse(200, { ok: true, box_token: HEX32, box_id: HEX32B }),
-    );
-    const persist = vi.fn((_patch: Partial<AppConfig>) => {});
-
-    await claimPairing(
-      {
-        serverUrl: "https://0123456789abcdef0123456789abcdef.boxes.mantaui.com",
-        code: "847291",
-      },
-      persist,
-      fetch,
-    );
-
+    // The claim carries only the six-digit code — no verify field anymore.
     expect(JSON.parse(bodies[0])).toEqual({ pairing_code: "847291" });
+    expect(persist).toHaveBeenCalledTimes(1);
   });
 
   it("trims a trailing slash off serverUrl before the claim + when persisting", async () => {

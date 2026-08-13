@@ -44,14 +44,9 @@ async function loadQrCode() {
 export function PairingQR({
   boxId,
   pairingCode,
-  verify,
 }: {
   boxId: string;
   pairingCode: string;
-  /** Optional four-char two-sided-confirm code (BET-514 §5.3). When present
-   *  the QR encodes `&verify=` so a scanning device claims WITH it → DISTINCT
-   *  Stage-2 device, never the shared primary box_token. */
-  verify?: string;
 }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,10 +56,8 @@ export function PairingQR({
     // output, and the mobile deep-link parser. Single source: pairPayload.ts.
     // BET-373: `PAIR_SCHEME` keys the QR to this channel's OS-registered URL
     // scheme so the OS routes the open back to the channel that scanned it.
-    // BET-514: forward `verify` (when present) so the QR carries the two-sided
-    // confirm and the scanning phone provisions a distinct device.
-    return buildPairPayload({ boxId, code: pairingCode, verify }, PAIR_SCHEME);
-  }, [boxId, pairingCode, verify]);
+    return buildPairPayload({ boxId, code: pairingCode }, PAIR_SCHEME);
+  }, [boxId, pairingCode]);
 
   useEffect(() => {
     let cancelled = false;

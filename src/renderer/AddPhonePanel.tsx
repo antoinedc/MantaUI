@@ -1,11 +1,7 @@
 // AddPhonePanel — the desktop "Add a phone" pairing card (BET-493).
 //
-// Shows the pairing code + a four-character verification code (§5.3 "Scan"),
-// auto-rotates the code on expiry while the panel is open (§6.4), and carries
-// the manual six-digit path (§5.2.9/§5.2.10). The joiner (phone) echoes the
-// four characters back in /auth/claim as the two-sided confirm (§6.3) — the
-// human is the comparator, so this panel never tries to know what a phone
-// shows; it only displays the characters and rotates.
+// Shows the six-digit pairing code, auto-rotates it on expiry while the panel
+// is open (§6.4), and carries the manual six-digit path (§5.2.9/§5.2.10).
 //
 // Presentational glue: the expiry/refresh logic lives in the pure, unit-tested
 // helpers in ./pairPanel.ts (repo pattern: chatUtils.ts). This component only
@@ -14,10 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { AuthPairResult } from "../shared/types";
 import { PairingQR, PairingCountdown } from "./PairingQR";
-import {
-  formatVerifyCode,
-  shouldRefreshPairCode,
-} from "./pairPanel";
+import { shouldRefreshPairCode } from "./pairPanel";
 
 // 1s tick drives the live countdown + re-evaluates expiry so the code
 // auto-rotates the moment it elapses while the panel stays open (§6.4). The
@@ -84,23 +77,12 @@ export function AddPhonePanel() {
               <PairingQR
                 boxId={pairing.boxId}
                 pairingCode={pairing.pairingCode}
-                verify={pairing.verify}
               />
             </div>
             <div className="flex-1 space-y-2">
               <div className="text-body">
                 <span className="text-text-muted">Code:</span>{" "}
                 <span className="font-mono text-text">{pairing.pairingCode}</span>
-              </div>
-              <div className="text-body">
-                <span className="text-text-muted">Verification code:</span>{" "}
-                <span className="font-mono text-lg text-text">
-                  {formatVerifyCode(pairing.verify)}
-                </span>
-              </div>
-              <div className="text-body text-text-muted">
-                Your phone will show the same four characters. Only tap Link if
-                they match.
               </div>
               <PairingCountdown expiry={new Date(pairing.expiresAt)} />
             </div>

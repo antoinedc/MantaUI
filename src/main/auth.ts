@@ -54,7 +54,6 @@ export async function claimPairing(
   fetchImpl: typeof fetch = fetch,
 ): Promise<ClaimOutcome> {
   const code = input?.code ?? "";
-  const verify = input?.verify;
   const typedServerUrl = (input?.serverUrl ?? "").trim();
   const boxId = (input?.boxId ?? "").trim();
 
@@ -73,7 +72,7 @@ export async function claimPairing(
   if (serverUrl === "") {
     return networkFailure();
   }
-  return claimPairingDirect(serverUrl, code, verify, persist, fetchImpl);
+  return claimPairingDirect(serverUrl, code, persist, fetchImpl);
 }
 
 // ---- Direct-HTTPS branch (BET-49, BET-198) ----
@@ -81,7 +80,6 @@ export async function claimPairing(
 async function claimPairingDirect(
   serverUrl: string,
   code: string,
-  verify: string | undefined,
   persist: (patch: Partial<AppConfig>) => void,
   fetchImpl: typeof fetch,
 ): Promise<ClaimOutcome> {
@@ -95,13 +93,7 @@ async function claimPairingDirect(
     res = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      // BET-514: when the caller supplied the four-char two-sided-confirm
-      // code (`verify`, §5.3), forward it alongside the code so the box
-      // provisions a DISTINCT Stage-2 joiner device (never the desktop's own
-      // primary box_token). Absent → the legacy claim body, unchanged.
-      body: JSON.stringify(
-        verify && verify !== "" ? { pairing_code: code, verify } : { pairing_code: code },
-      ),
+      body: JSON.stringify({ pairing_code: code }),
     });
   } catch {
     // fetch rejected (offline / DNS / TLS / malformed URL) — no HTTP response.

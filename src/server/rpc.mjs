@@ -977,7 +977,6 @@ export function buildHandlers({
           pairingCode: r.pairing_code,
           boxId: r.box_id,
           expiresAt: r.expiresAt,
-          verify: r.verify,
         };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
