@@ -110,28 +110,42 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
         aria-label="plan usage"
         title={title}
       >
+        {/* A 16×16 BOX holding a 13px disc. The box keeps the button's metrics
+            identical to the 16px lucide icons beside it (so the row does not
+            shift), while the disc matches what those icons actually DRAW: a
+            lucide circle is r=10 in a 24 viewBox, i.e. 20/24 of the box, which
+            is 13px at size 16. A full-bleed 16px disc read visibly heavier
+            than the Clock / Key / Webhook glyphs next to it. */}
         <span
           aria-hidden="true"
-          className="inline-block rounded-full"
-          style={{
-            width: 16,
-            height: 16,
-            background:
-              state.tone === "over"
-                ? ringColor
-                : `conic-gradient(${ringColor} 0% ${pctClamped}%, ${trackColor} ${pctClamped}% 100%)`,
-          }}
+          className="inline-flex items-center justify-center"
+          style={{ width: 16, height: 16 }}
         >
-          {/* Inner disc in the surrounding surface colour turns the pie into
-              a ring — skipped for tone "over" (>=100%), which is a solid
-              disc with no hole per the design spec. */}
-          {state.tone !== "over" && (
-            <span
-              aria-hidden="true"
-              className="block rounded-full bg-bg"
-              style={{ width: 12, height: 12, margin: 2 }}
-            />
-          )}
+          <span
+            aria-hidden="true"
+            className="block rounded-full"
+            style={{
+              width: 13,
+              height: 13,
+              background:
+                state.tone === "over"
+                  ? ringColor
+                  : `conic-gradient(${ringColor} 0% ${pctClamped}%, ${trackColor} ${pctClamped}% 100%)`,
+            }}
+          >
+            {/* Inner disc in the surrounding surface colour turns the pie into
+                a ring — skipped for tone "over" (>=100%), which is a solid
+                disc with no hole per the design spec. Ring thickness is
+                (13 - 9) / 2 = 2px, matching the neighbours' strokeWidth={2}
+                (unchanged from BET-756). */}
+            {state.tone !== "over" && (
+              <span
+                aria-hidden="true"
+                className="block rounded-full bg-bg"
+                style={{ width: 9, height: 9, margin: 2 }}
+              />
+            )}
+          </span>
         </span>
       </button>
 
