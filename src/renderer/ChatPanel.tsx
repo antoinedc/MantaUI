@@ -1911,7 +1911,7 @@ export function ChatPanel({
         />,
       )));
       if (pendingApproval) list.push(block(
-        "delegate-approval", blockOrder("delegate-approval"),
+        `delegate-${pendingApproval.id}`, blockOrder(`delegate-${pendingApproval.id}`),
         <DelegateApprovalCard
           approval={pendingApproval}
           onApprove={(tools: DelegateApprovalTool[]) => {
