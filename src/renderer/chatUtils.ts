@@ -3,6 +3,7 @@
 // Type-only import — erased at compile time, keeps this module dependency-
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
+import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
 import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
@@ -2510,4 +2511,70 @@ export function pruneVisitedSessions(
     if (!liveSessionIds.has(sid) && sid !== activeId) toRemove.push(sid);
   }
   return toRemove;
+}
+
+// ===== Session header status-item registry (BET-782) =====
+//
+// The right group of the session header is a REGISTRY of status items, each
+// carrying a stable id, a priority and a render function. Higher priority =
+// further LEFT in the right group = kept longer as the pane narrows. A pure
+// selection function decides, for a given container width + the user's hide
+// list, which items render in the bar vs the overflow dropdown. Purely
+// presentational — no DOM, no React state.
+export type StatusItem = {
+  /** Stable id — the key for the user-hide setting (AppConfig.hiddenStatusItems). */
+  id: string;
+  /** Higher = further LEFT in the right group = kept longer. */
+  priority: number;
+  /** The chip itself. */
+  render: () => ReactNode;
+};
+
+// The two container breakpoints the spec mandates (BET-782 §3). The header is
+// a CSS container query (`container: sessionheader / inline-size`); the width
+// passed in here is that container's inline size — NOT the viewport, which
+// measures the wrong thing when the sidebar / artifacts panel resize the pane.
+const STATUS_CUT_560 = 560;
+const STATUS_CUT_420 = 420;
+// The overflow cut refuses to auto-hide anything at ≥ 80 (artifacts / menu are
+// always present at every width). Priority is the ONLY "pinned" mechanism —
+// there is deliberately no separate flag.
+const STATUS_NEVER_AUTO_HIDE = 80;
+// The 560px seam hides priority < 60 (the band future forge items occupy);
+// the 420px cut additionally hides `context` (priority 60).
+const STATUS_CUT_HIDE_BELOW_560 = 60;
+
+// Whether the overflow cut sends `it` to overflow at the given container
+// width. Never hides priority ≥ 80 (artifacts / menu) via this cut — the user
+// hide list is the only thing that can remove those.
+function overflowFor(it: StatusItem, containerWidth: number): boolean {
+  if (it.priority >= STATUS_NEVER_AUTO_HIDE) return false;
+  if (containerWidth < STATUS_CUT_420) return it.priority <= STATUS_CUT_HIDE_BELOW_560;
+  if (containerWidth < STATUS_CUT_560) return it.priority < STATUS_CUT_HIDE_BELOW_560;
+  return false;
+}
+
+// Select which registry items render in the header bar vs the overflow
+// dropdown for a container width + the user's hide list. Hidden ids are never
+// present in either array (removed entirely). Sort is descending priority with
+// a stable id tiebreak.
+export function selectStatusItems(
+  items: StatusItem[],
+  containerWidth: number,
+  hiddenIds: string[],
+): { visible: StatusItem[]; overflow: StatusItem[] } {
+  const hidden = new Set(hiddenIds);
+  const considered = items
+    .filter((it) => !hidden.has(it.id))
+    .sort(
+      (a, b) =>
+        b.priority - a.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+
+  const visible: StatusItem[] = [];
+  const overflow: StatusItem[] = [];
+  for (const it of considered) {
+    (overflowFor(it, containerWidth) ? overflow : visible).push(it);
+  }
+  return { visible, overflow };
 }
