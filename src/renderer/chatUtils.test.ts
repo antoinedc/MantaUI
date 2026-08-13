@@ -3393,6 +3393,8 @@ describe("selectStatusItems", () => {
     const r = selectStatusItems([], 400, []);
     expect(r.visible).toEqual([]);
     expect(r.overflow).toEqual([]);
+  });
+});
 
 describe("arrangeCards", () => {
   const blocking = (id: string, order: number) => ({ id, tier: "blocking" as const, order });

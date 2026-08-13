@@ -24,7 +24,15 @@ export interface PinnedCardRender extends PinnedCard {
   render: ReactNode;
 }
 
-export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
+// One padding recipe for the stack's four toggle/rollup controls ("N more
+// requests", the two "Show fewer"s, and the collapsed rollup row) — same
+// control in four positions (BET-783 steering). `mx-4` keeps them clear of the
+// transcript's 72ch measure; `my-1` gives breathing room against surrounding
+// cards.
+const TOGGLE_CLS =
+  "shrink-0 mx-4 my-1 px-3 py-1 text-meta text-text-faint hover:text-text leading-none";
+
+export function CardStack({ cards, sessionId }: { cards: PinnedCardRender[]; sessionId?: string }) {
   const arranged = useMemo(() => arrangeCards(cards), [cards]);
   const { blocking, blockingMore, ambient, ambientRollup } = arranged;
   const blockingList = useMemo(
@@ -33,10 +41,12 @@ export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
   );
   const [blockingExpanded, setBlockingExpanded] = useState(false);
   const [ambientExpanded, setAmbientExpanded] = useState(false);
+  // Collapse any open rollup on session change — carrying an expanded stack
+  // across a session switch would be wrong.
   useEffect(() => {
     setBlockingExpanded(false);
     setAmbientExpanded(false);
-  }, []);
+  }, [sessionId]);
 
   const rollupText = (() => {
     const counts = new Map<string, number>();
@@ -71,7 +81,7 @@ export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
                   <button
                     type="button"
                     onClick={() => setBlockingExpanded(false)}
-                    className="shrink-0 px-4 text-meta text-text-faint hover:text-text leading-none"
+                    className={TOGGLE_CLS}
                   >
                     Show fewer
                   </button>
@@ -80,7 +90,7 @@ export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
                 <button
                   type="button"
                   onClick={() => setBlockingExpanded(true)}
-                  className="shrink-0 px-4 text-meta text-text-faint hover:text-text leading-none"
+                  className={TOGGLE_CLS}
                 >
                   {blockingMore > 1 ? `${blockingMore} more requests` : "1 more request"}{" "}›
                 </button>
@@ -106,7 +116,7 @@ export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
             <button
               type="button"
               onClick={() => setAmbientExpanded(false)}
-              className="shrink-0 mx-4 mb-1 px-3 py-1 text-meta text-text-faint hover:text-text leading-none"
+              className={TOGGLE_CLS}
             >
               Show fewer
             </button>
@@ -115,10 +125,10 @@ export function CardStack({ cards }: { cards: PinnedCardRender[] }) {
           <button
             type="button"
             onClick={() => setAmbientExpanded(true)}
-            className="shrink-0 mx-4 my-1 px-3 py-1 text-meta text-text-faint hover:text-text leading-none inline-flex items-center gap-1"
+            className={`${TOGGLE_CLS} inline-flex items-center gap-1`}
             title="Show all"
           >
-            ⚙ {rollupText} ›
+            {rollupText} ›
           </button>
         ))}
     </div>

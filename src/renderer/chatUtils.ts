@@ -2659,3 +2659,5 @@ export function arrangeCards<T extends PinnedCard>(cards: T[]): PinnedCardStack<
     ambient: ambient.slice(0, MAX_AMBIENT_EXPANDED),
     ambientRollup: ambient.slice(MAX_AMBIENT_EXPANDED),
   };
+
+}

@@ -1867,13 +1867,13 @@ export function ChatPanel({
   // blocking tier (always above ambient, at most one expanded) and an ambient
   // tier (fixed priority, at most two expanded, the rest rolled up).
   const AMBIENT_CARD: Record<string, { order: number; label: string }> = {
-    retry: { order: 7, label: "retry" },
-    compaction: { order: 6, label: "compaction" },
-    "send-error": { order: 5, label: "error" },
-    queued: { order: 4, label: "queued" },
-    schedules: { order: 3, label: "schedule" },
-    secrets: { order: 2, label: "secret" },
-    webhooks: { order: 1, label: "webhook" },
+    retry: { order: 7, label: "↻ retry" },
+    compaction: { order: 6, label: "↧ compaction" },
+    "send-error": { order: 5, label: "⚠ error" },
+    queued: { order: 4, label: "⏳ queued" },
+    schedules: { order: 3, label: "⏰ schedule" },
+    secrets: { order: 2, label: "🔑 secret" },
+    webhooks: { order: 1, label: "🪝 webhook" },
   };
   // Monotonic first-seen arrival counter for blocking cards (BET-783 reviewer
   // Block). Records each blocking ask's true interleaved arrival across
@@ -2135,7 +2135,7 @@ export function ChatPanel({
           internal scroll so the transcript stays the flexible child of the
           panel. Read-only job sessions (jobOwnership) never mount these — the
           ReadOnlyJobBar below replaces the composer instead. */}
-      <CardStack cards={cards} />
+      <CardStack cards={cards} sessionId={sessionId} />
 
       {jobOwnership ? (
         <ReadOnlyJobBar
