@@ -182,6 +182,66 @@ test("createJob rejects an unknown kind", async () => {
 });
 
 // ----------------------------------------------------------------------------
+// createJob — fireAt (BET-777: render the cron on the box)
+// ----------------------------------------------------------------------------
+
+test("createJob derives cron from fireAt on the box and stores no fireAt key", async () => {
+  // An unambiguous absolute instant (epoch ms). The renderer sends this; the
+  // box renders the cron in ITS local timezone.
+  const fireAt = Date.UTC(2026, 7, 13, 16, 0); // 2026-08-13T16:00:00Z
+  let saved = null;
+  const { ok, job } = await createJob(
+    { fireAt, prompt: "remind me", recurring: false, sessionID: "ses_x" },
+    {
+      load: async () => [],
+      save: async (jobs) => {
+        saved = jobs;
+      },
+    },
+  );
+  assert.equal(ok, true);
+  assert.equal(job.cron, cronForInstant(new Date(fireAt)));
+  assert.equal("fireAt" in job, false);
+  assert.equal("fireAt" in saved[0], false);
+});
+
+test("createJob's derived cron round-trips through cronMatches at that instant", async () => {
+  const fireAt = Date.UTC(2026, 11, 31, 23, 59); // December → month off-by-one
+  const { ok, job } = await createJob(
+    { fireAt, prompt: "reset", recurring: false, sessionID: "ses_x" },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(ok, true);
+  assert.equal(cronMatches(job.cron, new Date(fireAt)), true);
+});
+
+test("createJob rejects a non-finite fireAt and persists nothing", async () => {
+  const saved = [];
+  for (const bad of [NaN, Infinity, "123"]) {
+    const res = await createJob(
+      { fireAt: bad, prompt: "x", recurring: false, sessionID: "ses_x" },
+      {
+        load: async () => [],
+        save: async (jobs) => saved.push(jobs),
+      },
+    );
+    assert.equal(res.ok, false);
+    assert.match(res.error, /fireAt/);
+  }
+  assert.equal(saved.length, 0);
+});
+
+test("createJob's existing cron-string path still works unchanged", async () => {
+  const { ok, job } = await createJob(
+    { cron: "0 9 * * *", prompt: "check", recurring: false, sessionID: "ses_x" },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(ok, true);
+  assert.equal(job.cron, "0 9 * * *");
+  assert.equal("fireAt" in job, false);
+});
+
+// ----------------------------------------------------------------------------
 // createScheduler.tick — kind branching (BET-739)
 // ----------------------------------------------------------------------------
 

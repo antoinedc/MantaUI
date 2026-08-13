@@ -331,8 +331,11 @@ export interface Api {
   scheduleDelete(id: string): Promise<{ deleted: boolean }>;
   // BET-739: create a one-shot job from the renderer (the usage "remind me /
   // keep going at reset" actions). Same store/poller as the AI `schedule` tool.
+  // The renderer hands over the ABSOLUTE instant (`fireAt`, epoch ms) and the
+  // box renders the cron itself — so the schedule fires in the user's real
+  // time, in the box's timezone, with no timezone crossing the wire.
   scheduleCreate(input: {
-    cron: string;
+    fireAt: number;
     prompt: string;
     recurring?: boolean;
     label?: string;
