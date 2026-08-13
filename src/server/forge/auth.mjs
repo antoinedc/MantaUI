@@ -1,17 +1,27 @@
 // auth.mjs — box-side forge-credential resolution: the §3.3 ladder (BET-788).
 //
 // Priority for a resolved token:
-//   1. The forge CLI's own token — `gh auth token` for github.com, run through
+//   1. A per-host env var (`MANTA_GITHUB_TOKEN` / `MANTA_GITLAB_TOKEN`) — the
+//      dev/test override and a legitimate self-host affordance. Highest
+//      because an explicit operator override must win over ambient state.
+//   2. The forge CLI's own token — `gh auth token` for github.com, run through
 //      a login shell. gh lives under ~/.local/bin or a Homebrew prefix that a
 //      bare execFile PATH cannot see, so this reuses runLoginShell
 //      (src/server/launchers.mjs) — the same helper the repo probe's
 //      detectForgeCli() uses. This is the default and covers the overwhelmingly
 //      common case of a box that is already a dev machine.
-//   2. A stored secret — GITHUB_TOKEN in the box secrets vault
-//      (~/.manta-secrets, 0600), read via resolveSecret. Reading the value
-//      in-process is fine: the secrets-store invariant is that a value never
-//      enters an AGENT's transcript, not that it never enters the server's
-//      memory.
+//   3. A stored secret in the box secrets vault (~/.manta-secrets, 0600), read
+//      via resolveSecret. Both the BET-788 canonical key (`GITHUB_TOKEN` /
+//      `GITLAB_TOKEN`) and the BET-797 legacy key (`github.token` /
+//      `gitlab.token`) are accepted so a secret stored through either
+//      documentation path resolves. Reading the value in-process is fine: the
+//      secrets-store invariant is that a value never enters an AGENT's
+//      transcript, not that it never enters the server's memory.
+//
+// This is the ONE forge token resolver on the box. The rules
+// (forge_rules_save in forgeRules.mjs) and the adapter (forge/index.mjs)
+// both resolve through it, so a gh-authenticated or secret-stored box
+// registers webhooks and reads the forge with the same credential.
 //
 // A resolved token is cached in memory for a short TTL (so a poll loop doesn't
 // re-spawn `gh auth token` every couple of seconds) and invalidateToken()
@@ -29,18 +39,33 @@ import { resolveSecret, loadSecrets } from "../secrets.mjs";
 const TTL_MS = 60_000;
 
 // The CLI leg only exists for github.com (`gh auth token`). GitLab has its own
-// CLI but it arrives with the GitLab adapter; this issue is the GitHub read
-// path.
+// CLI but it arrives with the GitLab adapter.
 const CLI_HOST = "github.com";
 
-// Secrets-vault key per host for the stored leg. GITHUB_TOKEN is the issue's
-// canonical key for GitHub.
-const STORED_KEY_BY_HOST = Object.freeze({
-  "github.com": "GITHUB_TOKEN",
+// Per-host env var override (priority 1).
+const ENV_BY_HOST = Object.freeze({
+  "github.com": "MANTA_GITHUB_TOKEN",
+  "gitlab.com": "MANTA_GITLAB_TOKEN",
+});
+
+// Secrets-vault keys per host, checked in order. The first is the BET-788
+// canonical key; the second is the BET-797 legacy key still documented in
+// docs/forge-rules-authoring.md and accepted so an existing secret keeps
+// working.
+const STORED_KEYS_BY_HOST = Object.freeze({
+  "github.com": ["GITHUB_TOKEN", "github.token"],
+  "gitlab.com": ["GITLAB_TOKEN", "gitlab.token"],
 });
 
 // host -> { at, found, token?, source? }
 const CACHE = new Map();
+
+function envToken(host, env) {
+  const key = ENV_BY_HOST[host];
+  if (!key) return null;
+  const v = env?.[key];
+  return typeof v === "string" && v ? v : null;
+}
 
 async function cliToken(host, shell) {
   if (host !== CLI_HOST) return null;
@@ -55,11 +80,15 @@ async function cliToken(host, shell) {
 }
 
 function storedToken(host, loadSecretsFn) {
-  const key = STORED_KEY_BY_HOST[host];
-  if (!key) return null;
+  const keys = STORED_KEYS_BY_HOST[host];
+  if (!keys || keys.length === 0) return null;
   try {
-    const entry = resolveSecret(loadSecretsFn(), key, null, null);
-    return typeof entry?.value === "string" && entry.value ? entry.value : null;
+    const secrets = loadSecretsFn();
+    for (const key of keys) {
+      const entry = resolveSecret(secrets, key, null, null);
+      if (typeof entry?.value === "string" && entry.value) return entry.value;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -67,26 +96,33 @@ function storedToken(host, loadSecretsFn) {
 
 /**
  * Resolve the box-side token for a forge host per §3.3's ladder, or null when
- * neither leg yields one (callers surface "not connected").
+ * no leg yields one (callers surface "not connected").
  *
- * Priority: CLI (`gh auth token`) wins over the stored secret. A resolved
- * value is cached for TTL_MS; a miss is cached briefly too so a not-connected
- * box doesn't re-spawn the CLI on every poll. Pass `now` to control the clock
- * in tests; `invalidateToken` clears a host's entry for the rotation case.
+ * Priority: env var → CLI (`gh auth token`) → stored secret. A resolved value
+ * is cached for TTL_MS; a miss is cached briefly too so a not-connected box
+ * doesn't re-spawn the CLI on every poll. Pass `now` / `env` / `shell` /
+ * `loadSecretsFn` to control the clock and I/O in tests;
+ * `invalidateToken` clears a host's entry for the rotation case.
  *
  * @param {string} host
- * @param {{ shell?: (cmd: string) => Promise<{stdout: string}>, loadSecretsFn?: () => unknown, now?: () => number }} [opts]
- * @returns {Promise<{ token: string, source: "cli" | "stored" } | null>}
+ * @param {{ shell?: (cmd: string) => Promise<{stdout: string}>, loadSecretsFn?: () => unknown, env?: NodeJS.ProcessEnv, now?: () => number }} [opts]
+ * @returns {Promise<{ token: string, source: "env" | "cli" | "stored" } | null>}
  */
 export async function resolveToken(
   host,
-  { shell = runLoginShell, loadSecretsFn = loadSecrets, now = Date.now } = {},
+  { shell = runLoginShell, loadSecretsFn = loadSecrets, env = process.env, now = Date.now } = {},
 ) {
   if (typeof host !== "string" || !host) return null;
 
   const hit = CACHE.get(host);
   if (hit && now() - hit.at < TTL_MS) {
     return hit.found ? { token: hit.token, source: hit.source } : null;
+  }
+
+  const envTok = envToken(host, env);
+  if (envTok) {
+    CACHE.set(host, { at: now(), found: true, token: envTok, source: "env" });
+    return { token: envTok, source: "env" };
   }
 
   const cli = await cliToken(host, shell);

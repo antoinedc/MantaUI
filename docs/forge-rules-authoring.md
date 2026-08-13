@@ -48,16 +48,18 @@ raise it rather than working around the grammar.
 ## The forge token
 
 Registering the webhook needs a GitHub API token **on the box** (it never
-reaches the desktop or phone). It is resolved by the single box-side forge
-token ladder (§3.3), CLI first:
+reaches the desktop or phone). The token is resolved through the forge auth
+ladder (`src/server/forge/auth.mjs`), tried in order:
 
-1. **`gh auth token`** (run through a login shell) when the box is already a
-   GitHub dev machine — the common case.
-2. Otherwise a **shared secret named `GITHUB_TOKEN`** in the box secrets vault.
+1. The `MANTA_GITHUB_TOKEN` env var (`MANTA_GITLAB_TOKEN` for GitLab) — an
+   explicit operator override.
+2. The `gh` CLI's own credential — `gh auth token` (`gh auth login` on the
+   box). This is the default for a box that is already a dev machine.
+3. A stored secret in the box secrets vault under the key `GITHUB_TOKEN`
+   (`gitlab.token` for GitLab; the legacy `github.token` key still works).
 
-If neither is present the webhook registration reports "not connected" — run
-`gh auth login`, or store the `GITHUB_TOKEN` shared secret, on the box. The
-GitLab leg of the ladder arrives with the GitLab adapter.
+All three are box-side only; the value never reaches the desktop or phone.
+`forge_rules_save` will not register a webhook until one of these resolves.
 
 ## Where it lives
 
