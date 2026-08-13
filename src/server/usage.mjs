@@ -172,15 +172,24 @@ export function createUsagePoller({
 
       if (stopped) return;
 
+      // `fetchedAt` means "epoch ms of the successful fetch" (the frozen
+      // typedef, mirrored verbatim into shared/types.ts) — so `snapshots`
+      // is replaced on EVERY tick, unconditionally, even when the content is
+      // identical to last time. Reviewer Block (cycle 1): freezing snapshots
+      // on a content-identical tick silently repurposed fetchedAt into
+      // "when the numbers last changed", which left `usage:list` reporting
+      // an arbitrarily stale timestamp for a perfectly healthy poller — the
+      // one thing a usage dial needs to tell "fresh, unchanged" apart from
+      // "poller is dead". The dedupe rule from the issue only governs the
+      // BUS PUBLISH ("publish … only when the serialized snapshot set
+      // actually changed") — it says nothing about the cache, so gating only
+      // the publish call below satisfies both with no trade-off.
+      snapshots = results;
       const key = contentKey(results);
       if (key !== lastContentKey) {
         lastContentKey = key;
-        snapshots = results;
         publish?.({ kind: "usage.updated", payload: { snapshots: results } });
       }
-      // else: identical content (ignoring fetchedAt) to what's already
-      // published — leave `snapshots` (and its fetchedAt values) untouched
-      // and skip the publish, per spec.
     } finally {
       inFlight = false;
     }

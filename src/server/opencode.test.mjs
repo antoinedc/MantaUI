@@ -36,7 +36,11 @@ import {
   getDefaultModel,
   listModels,
   claudeCliStatus,
+  parseProviderApiKey,
+  opencodeAuthPath,
 } from "./opencode.mjs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 test("apiUrl targets local opencode port 4096", () => {
   assert.equal(apiUrl("/session"), "http://127.0.0.1:4096/session");
@@ -49,6 +53,78 @@ test("parseSseFrame extracts JSON from data: lines", () => {
 
 test("parseSseFrame returns null for comments/keepalive", () => {
   assert.equal(parseSseFrame(": keep-alive"), null);
+});
+
+// ---------------------------------------------------------------------------
+// parseProviderApiKey (BET-737) — pure parse of opencode's own auth store,
+// same split as parseCredentials/readCredsSnapshot. Never touches a real
+// file; readProviderApiKey (the IO wrapper) is intentionally NOT unit-tested
+// here, mirroring readCredsSnapshot's own convention.
+// ---------------------------------------------------------------------------
+
+test("parseProviderApiKey extracts the key from an api-type entry", () => {
+  const raw = JSON.stringify({ "kimi-for-coding": { type: "api", key: "fake-test-key" } });
+  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "fake-test-key");
+});
+
+test("parseProviderApiKey returns \"\" for a provider with no entry", () => {
+  const raw = JSON.stringify({ anthropic: { type: "oauth", access: "x", refresh: "y" } });
+  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
+});
+
+test("parseProviderApiKey returns \"\" for an oauth-type entry (no `key` field)", () => {
+  const raw = JSON.stringify({ "kimi-for-coding": { type: "oauth", access: "x", refresh: "y" } });
+  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
+});
+
+test("parseProviderApiKey returns \"\" for an empty-string key", () => {
+  const raw = JSON.stringify({ "kimi-for-coding": { type: "api", key: "" } });
+  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
+});
+
+test("parseProviderApiKey returns \"\" for invalid JSON", () => {
+  assert.equal(parseProviderApiKey("not json{", "kimi-for-coding"), "");
+});
+
+test("parseProviderApiKey returns \"\" for an empty auth store", () => {
+  assert.equal(parseProviderApiKey("{}", "kimi-for-coding"), "");
+});
+
+test("parseProviderApiKey never echoes the key into an exception (it doesn't throw at all)", () => {
+  // Malformed input that would throw if a naive implementation destructured
+  // without guarding — assert it degrades to "" instead of leaking anything.
+  assert.equal(parseProviderApiKey("null", "kimi-for-coding"), "");
+  assert.equal(parseProviderApiKey("[]", "kimi-for-coding"), "");
+  assert.equal(parseProviderApiKey('"just a string"', "kimi-for-coding"), "");
+});
+
+// opencodeAuthPath (review cycle 2 Nit): mirrors messageSearch.mjs's
+// resolveDbPath() for the SAME opencode XDG data directory — XDG_DATA_HOME
+// first when set, else homedir()-based. Save/restore the env var so this
+// test can't leak state into any other test in the process.
+test("opencodeAuthPath resolves under homedir() by default", () => {
+  const saved = process.env.XDG_DATA_HOME;
+  delete process.env.XDG_DATA_HOME;
+  try {
+    assert.equal(
+      opencodeAuthPath(),
+      join(homedir(), ".local", "share", "opencode", "auth.json"),
+    );
+  } finally {
+    if (saved === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = saved;
+  }
+});
+
+test("opencodeAuthPath honours XDG_DATA_HOME when set, like resolveDbPath does", () => {
+  const saved = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = "/tmp/xdg-test-home";
+  try {
+    assert.equal(opencodeAuthPath(), join("/tmp/xdg-test-home", "opencode", "auth.json"));
+  } finally {
+    if (saved === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = saved;
+  }
 });
 
 // ---------------------------------------------------------------------------

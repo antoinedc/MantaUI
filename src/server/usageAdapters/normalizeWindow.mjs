@@ -63,7 +63,10 @@ export function normalizeWindow(raw) {
     pct,
   };
   if (used !== undefined) window.used = used;
-  if (limit !== undefined) window.limit = limit;
+  // A `limit: 0` can still reach here when `pct` was supplied explicitly
+  // (rule 1 wins regardless of limit) — never attach it, or a popover doing
+  // `used / limit` renders "5 / 0" (reviewer Nit 1).
+  if (limit !== undefined && limit !== 0) window.limit = limit;
 
   const rawResets = raw.resetsAt;
   if (typeof rawResets === "number" && Number.isFinite(rawResets)) {

@@ -69,6 +69,22 @@ test("normalizeWindow: limit === 0 (or missing denominators) drops the window", 
   assert.equal(normalizeWindow(undefined), null);
 });
 
+// Reviewer Nit 1: pct-passthrough wins over a `limit: 0` (correct, per the
+// rule order), but `limit: 0` must never ride along onto the window — a
+// popover doing `used / limit` would render "5 / 0".
+test("normalizeWindow: an explicit pct never lets a limit:0 reach the window", () => {
+  const w = normalizeWindow({ pct: 50, limit: 0 });
+  assert.equal(w.pct, 50);
+  assert.equal("limit" in w, false);
+
+  // used:5 + limit:0, but pct also given → pct wins, used still reported,
+  // limit still dropped (used alone without a limit is a normal, already-
+  // supported shape — e.g. claude never sends absolutes at all).
+  const w2 = normalizeWindow({ pct: 50, used: 5, limit: 0 });
+  assert.equal(w2.used, 5);
+  assert.equal("limit" in w2, false);
+});
+
 test("normalizeWindow: resetsAt — epoch seconds vs epoch ms vs ISO string", () => {
   // < 1e12 → treated as epoch seconds.
   assert.equal(normalizeWindow({ pct: 10, resetsAt: 1735689600 }).resetsAt, 1735689600000);
@@ -115,6 +131,15 @@ test("ADAPTERS registers exactly the three built-in providers", () => {
     assert.equal(typeof a.fetch, "function");
     assert.equal(Array.isArray(a.providerIDs), true);
   }
+});
+
+// This repo's real opencode providerID for Kimi is "kimi-for-coding" — NOT
+// "moonshot" or "kimi" — everywhere else in the codebase (src/server/
+// subscriptionProviders.mjs, src/renderer/chatUtils.ts). Pinning the exact
+// array (not just "contains") so a stray extra id can't silently creep back
+// in and never match the active model in BET-USAGE-B's dial.
+test("kimi adapter's providerIDs is exactly [\"kimi-for-coding\"]", () => {
+  assert.deepEqual(kimiAdapter.providerIDs, ["kimi-for-coding"]);
 });
 
 // ----------------------------------------------------------------------------
@@ -255,7 +280,16 @@ test("poller: a bare 429 with no Retry-After falls back to the 15-minute default
   }
 });
 
-test("poller: identical consecutive results publish exactly once", async () => {
+// Reviewer Block (cycle 1): a content-identical tick must still refresh
+// `fetchedAt` — the frozen typedef says it means "epoch ms of the
+// successful fetch", not "epoch ms of the last tick whose content changed".
+// The dedupe rule from the issue governs the BUS PUBLISH only, so this
+// asserts BOTH halves with an advancing clock across three ticks whose
+// numbers never change: publish fires exactly once, AND
+// poller.snapshots[0].fetchedAt keeps advancing tick after tick (the poller
+// is alive and re-confirming, not frozen).
+test("poller: identical consecutive results publish exactly once, but fetchedAt still advances every tick", async () => {
+  let nowMs = 1_000_000;
   const adapter = makeAdapter("a", {
     detect: async () => true,
     fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 42 }] }),
@@ -263,12 +297,22 @@ test("poller: identical consecutive results publish exactly once", async () => {
   const published = [];
   const poller = createUsagePoller({
     adapters: [adapter],
-    now: () => 1000,
+    now: () => nowMs,
     publish: (evt) => published.push(evt),
   });
+
   await poller.tick();
+  assert.equal(poller.snapshots[0].fetchedAt, 1_000_000);
+
+  nowMs += 180_000; // a full poll interval later, same numbers
   await poller.tick();
+  assert.equal(poller.snapshots[0].fetchedAt, 1_180_000, "fetchedAt must advance on a healthy re-confirm");
+
+  nowMs += 180_000;
   await poller.tick();
+  assert.equal(poller.snapshots[0].fetchedAt, 1_360_000);
+
+  // Content never changed across all three ticks — the bus stayed quiet.
   assert.equal(published.length, 1);
   assert.equal(published[0].kind, "usage.updated");
 });

@@ -1,9 +1,16 @@
 // kimi.mjs — usage adapter for Kimi For Coding (BET-737).
 //
-// Credential: the Kimi Code API key, read from the EXISTING secrets store
-// (../secrets.mjs, shared scope, key "KIMI_CODE_API_KEY") — not a new config
-// field or a new file. Endpoint is undocumented; every field read stays
-// defensive.
+// Credential: the SAME key the user already pasted into the Kimi connect
+// card. That flow (`opencode:provider-auth` "key" action, src/server/
+// rpc.mjs) writes it into opencode's OWN auth store via `PUT /auth/{id}`
+// (src/server/opencode.mjs `setProviderApiKey`) as
+// `{"kimi-for-coding":{"type":"api","key":"…"}}`. This adapter is a READER
+// of that connection, not a second place to enter it — no config field, no
+// secrets-store entry, no new file (`readProviderApiKey`, also in
+// opencode.mjs, resolves the store path and returns "" on any read/parse
+// failure or a missing entry — never throws). If the user hasn't connected
+// Kimi, `detect()` is simply false: a silent, correct inactive state, not an
+// error.
 //
 // Absolutes ARE available here (unlike claude/codex) — `used`/`limit` are
 // populated so the popover can show "139 / 200 requests"; normalizeWindow
@@ -11,31 +18,21 @@
 // only `remaining` — normalizeWindow already handles both, so the raw fields
 // are passed straight through.
 //
-// providerIDs: this repo's own provider registry (src/server/
-// subscriptionProviders.mjs, src/renderer/chatUtils.ts AUTH_PROVIDER_LABELS)
-// uses opencode providerID "kimi-for-coding" for this provider — that's what
-// BET-USAGE-B will actually see as the active model's providerID, so it's
-// listed first. The alternate ids the original spec named ("moonshot",
-// "moonshotai", "kimi") are kept too in case a future opencode release routes
-// Kimi under one of them — harmless extras that just never match today.
+// providerIDs: `"kimi-for-coding"` is the EXACT opencode providerID this repo
+// uses for Kimi everywhere else (src/server/subscriptionProviders.mjs,
+// src/renderer/chatUtils.ts AUTH_PROVIDER_LABELS) — not "moonshot" / "kimi".
 
-import { loadSecrets, resolveSecret } from "../secrets.mjs";
+import { readProviderApiKey } from "../opencode.mjs";
 import { normalizeWindow } from "./normalizeWindow.mjs";
 import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://api.kimi.com/coding/v1/usages";
-const SECRET_KEY = "KIMI_CODE_API_KEY";
+const PROVIDER_ID = "kimi-for-coding";
 
-// Default I/O — overridable per-call so tests never touch the real secrets
-// store or the network.
+// Default I/O — overridable per-call so tests never touch opencode's real
+// auth store or the network.
 async function defaultReadKey() {
-  try {
-    const secrets = loadSecrets();
-    const entry = resolveSecret(secrets, SECRET_KEY, null, null);
-    return typeof entry?.value === "string" ? entry.value : null;
-  } catch {
-    return null;
-  }
+  return readProviderApiKey(PROVIDER_ID);
 }
 
 // `limits[]` entries carry a `window.duration` + `window.timeUnit` pair —
@@ -65,7 +62,7 @@ function windowFromDetail(detail, kind, label) {
 
 export const kimiAdapter = {
   id: "kimi",
-  providerIDs: ["kimi-for-coding", "moonshot", "moonshotai", "kimi"],
+  providerIDs: [PROVIDER_ID],
 
   async detect({ readKey = defaultReadKey } = {}) {
     const key = await readKey();
