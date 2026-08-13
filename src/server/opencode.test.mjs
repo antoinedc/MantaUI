@@ -77,6 +77,15 @@ test("parseProviderApiKey returns \"\" for an oauth-type entry (no `key` field)"
   assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
 });
 
+test("parseProviderApiKey returns \"\" for a non-api entry even when it carries a non-empty `key` (type gate)", () => {
+  // type === "api" is the discriminant — a stray `key` on an oauth/common
+  // entry must never be trusted as a Bearer credential.
+  const raw = JSON.stringify({ "kimi-for-coding": { type: "oauth", key: "should-not-leak", access: "x" } });
+  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
+  const rawCoding = JSON.stringify({ "kimi-for-coding": { key: "still-no-type" } });
+  assert.equal(parseProviderApiKey(rawCoding, "kimi-for-coding"), "");
+});
+
 test("parseProviderApiKey returns \"\" for an empty-string key", () => {
   const raw = JSON.stringify({ "kimi-for-coding": { type: "api", key: "" } });
   assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
@@ -124,6 +133,13 @@ test("readProviderApiKey returns \"\" for a provider with no entry", async () =>
 test("readProviderApiKey returns \"\" for an oauth-type entry (no `key` field)", async () => {
   assert.equal(
     await readVia(JSON.stringify({ "kimi-for-coding": { type: "oauth", access: "x", refresh: "y" } })),
+    "",
+  );
+});
+
+test("readProviderApiKey returns \"\" for a non-api entry even when it carries a non-empty `key` (type gate)", async () => {
+  assert.equal(
+    await readVia(JSON.stringify({ "kimi-for-coding": { type: "oauth", key: "should-not-leak", access: "x" } })),
     "",
   );
 });

@@ -1296,7 +1296,13 @@ export function parseProviderApiKey(rawFileText, providerId) {
   try {
     const parsed = JSON.parse(rawFileText);
     const entry = parsed?.[providerId];
-    return typeof entry?.key === "string" && entry.key.length > 0 ? entry.key : "";
+    // Discriminate on `type === "api"` before trusting any `key` value: the
+    // key is used directly as a `Bearer` header, so a non-api entry (e.g. an
+    // oauth one) must never supply it even if it happens to carry a `key`
+    // field.
+    return entry?.type === "api" && typeof entry?.key === "string" && entry.key.length > 0
+      ? entry.key
+      : "";
   } catch {
     return "";
   }
