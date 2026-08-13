@@ -214,4 +214,12 @@ jobs:
               --notes 'Unsigned internal build. Windows SmartScreen will warn on first run: **More info → Run anyway**. Per-user install, no admin rights needed. Auto-update is not wired up for Windows — grab the next release from here.'
           fi
           gh release upload "$TAG" dist/desktop/*.exe --clobber
+          # A release left as a draft is invisible to everyone but its author, so a
+          # re-run would upload the installer into a hidden release and report success.
+          # Force it published (still a prerelease — the installer is unsigned).
+          gh release edit "$TAG" --draft=false --prerelease
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "false" ]; then
+            echo "::error::$TAG is still a draft after publishing — the installer would be invisible."
+            exit 1
+          fi
           gh release view "$TAG" --json url --jq .url
