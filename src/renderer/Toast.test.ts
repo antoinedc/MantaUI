@@ -1,12 +1,30 @@
 import { describe, it, expect } from "vitest";
-import { toastTtl, TOAST_DEFAULT_TTL_MS, MAX_TOASTS, type ToastItem } from "./Toast";
+import {
+  toastTtl,
+  TOAST_DEFAULT_TTL_MS,
+  MAX_TOASTS,
+  MAX_TOAST_ACTIONS,
+  type ToastItem,
+} from "./Toast";
 
 const base: ToastItem = { id: "x", message: "hi" };
 
 describe("toastTtl", () => {
-  it("never auto-dismisses when an action is present", () => {
-    expect(toastTtl({ ...base, action: { label: "Undo", onClick: () => {} } })).toBeNull();
-    expect(toastTtl({ ...base, action: { label: "Save", onClick: () => {} }, ttl: 6000 })).toBeNull();
+  it("never auto-dismisses when any action is present", () => {
+    expect(toastTtl({ ...base, actions: [{ label: "Undo", onClick: () => {} }] })).toBeNull();
+    expect(
+      toastTtl({ ...base, actions: [{ label: "Remind me", onClick: () => {} }, { label: "Keep going", onClick: () => {} }] }),
+    ).toBeNull();
+  });
+
+  it("never auto-dismisses when an action is present even with an explicit ttl", () => {
+    expect(
+      toastTtl({ ...base, actions: [{ label: "Save", onClick: () => {} }], ttl: 6000 }),
+    ).toBeNull();
+  });
+
+  it("regards an empty actions array as no action (keeps default ttl)", () => {
+    expect(toastTtl({ ...base, actions: [] })).toBe(TOAST_DEFAULT_TTL_MS);
   });
 
   it("opts out entirely with ttl: null", () => {
@@ -23,8 +41,12 @@ describe("toastTtl", () => {
   });
 });
 
-describe("MAX_TOASTS", () => {
+describe("MAX_TOASTS / MAX_TOAST_ACTIONS", () => {
   it("is three (spec: max three stacked)", () => {
     expect(MAX_TOASTS).toBe(3);
+  });
+
+  it("caps actions at two (spec, BET-739)", () => {
+    expect(MAX_TOAST_ACTIONS).toBe(2);
   });
 });

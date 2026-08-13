@@ -8,7 +8,7 @@ import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
 import { transcribeAudio, classifyVoiceCommand } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
-import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob } from "./schedule.mjs";
+import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
@@ -871,6 +871,11 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.scheduleDelete, id)  → args[0] = id
     "schedule:delete": (id) =>
       scheduleDeleteJob(id, { publish: (evt) => bus.publish(evt) }),
+    // BET-739: the usage escalation actions ("remind / keep going at reset")
+    // create one-shot jobs from the renderer through this channel — same store,
+    // same poller, same ⏰ card. Returns { ok, job?, error? }.
+    "schedule:create": (input) =>
+      scheduleCreateJob(input || {}, { publish: (evt) => bus.publish(evt) }),
 
     // ---- subscription plan usage (manta-server owned; BET-737) ----
     // Read-only: returns the current UsageSnapshot[] cache maintained by the

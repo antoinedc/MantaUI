@@ -757,6 +757,7 @@ export const IPC = {
   // mobile is in-process (src/server/rpc.mjs → schedule.mjs).
   scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
   scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
+  scheduleCreate: "schedule:create", // (input) → { ok, job?, error? } (BET-739 usage reset actions)
 
   // ---- subscription plan usage (manta-server owned; BET-737) ----
   // Read-only: the current UsageSnapshot[] cache maintained by the usage
@@ -1055,6 +1056,9 @@ export type ScheduledJob = {
   prompt: string;
   recurring: boolean;
   label: string;
+  // BET-739: "prompt" (default; fires sendPrompt) or "notify" (fires a push).
+  // Absent on legacy jobs — treat as "prompt".
+  kind?: "prompt" | "notify";
   sessionID: string;
   directory: string;
   createdAt: number;

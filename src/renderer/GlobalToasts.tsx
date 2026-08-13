@@ -130,9 +130,9 @@ export function GlobalToasts({ activeChatSessionId, canAddToChat }: Props) {
             screenshotToast.source === "file" && screenshotToast.path
               ? `Screenshot: ${screenshotToast.path.split("/").pop()}`
               : "Screenshot in clipboard",
-          action:
+          actions:
             canAddToChat && activeChatSessionId
-              ? { label: "Add to chat", onClick: () => void acceptScreenshot() }
+              ? [{ label: "Add to chat", onClick: () => void acceptScreenshot() }]
               : undefined,
         });
       } else if (id === "agent-file" && agentFileToast) {
@@ -148,15 +148,17 @@ export function GlobalToasts({ activeChatSessionId, canAddToChat }: Props) {
               </span>
             </>
           ),
-          action: agentFileToast.autoPulled
+          actions: agentFileToast.autoPulled
             ? agentFileToast.localPath
-              ? { label: "Reveal", onClick: () => void revealAgentFile() }
+              ? [{ label: "Reveal", onClick: () => void revealAgentFile() }]
               : undefined
-            : {
-                label: agentFileSaving ? "Saving…" : "Save",
-                onClick: () => void saveAgentFile(),
-                disabled: agentFileSaving,
-              },
+            : [
+                {
+                  label: agentFileSaving ? "Saving…" : "Save",
+                  onClick: () => void saveAgentFile(),
+                  disabled: agentFileSaving,
+                },
+              ],
         });
       } else if (id === "system-notice" && systemNotice) {
         items.push({

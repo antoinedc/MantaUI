@@ -97,6 +97,7 @@ export const DEMO_UNIMPLEMENTED = [
   "ptyWrite",
   "pushRegisterApns",
   "revealInFolder",
+  "scheduleCreate",
   "scheduleDelete",
   "scheduleList",
   "secretsDelete",

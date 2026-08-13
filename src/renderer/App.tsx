@@ -27,6 +27,7 @@ import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
+import { Callout } from "./Callout";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -34,6 +35,18 @@ import { channelConfig } from "../shared/channel.mjs";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { MantaLoader } from "./MantaLoader";
 import type { AvailableLauncher } from "../shared/types";
+import {
+  buildLimitMessage,
+  buildUsageLevels,
+  buildWarnMessage,
+  describeResetDistance,
+  formatResetClock,
+  shouldFireUsageAlert,
+  shouldWarnStaleCache,
+  type UsageAlertLevel,
+} from "./usageEscalation";
+import { cronForInstant } from "../shared/scheduleCron.mjs";
+import { providerLabel } from "./UsageDial";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
 // app is, by construction, addressed to THIS channel's URL scheme
@@ -332,6 +345,18 @@ function AppInner() {
   const activeChatRef = useRef(activeChatSessionId);
   activeChatRef.current = activeChatSessionId;
 
+  // ---- Subscription usage escalation (BET-739) ----
+  // Fire-once level map (per `provider:window.kind`); see usageEscalation.ts.
+  const usageLevelsRef = useRef<Record<string, UsageAlertLevel>>({});
+  // "Keep going at reset" confirm-modal payload. null = closed.
+  const [keepGoing, setKeepGoing] = useState<{
+    providerLabel: string;
+    windowLabel: string;
+    fireAt: number;
+    sessionID: string;
+  } | null>(null);
+  const cacheTtl = useStore((s) => s.cacheTtl);
+
   useEffect(() => {
     // Bootstrap (BET-678). The first paint is INSTANT — read from the persisted
     // local snapshot restored in main.tsx (zero round trips). This effect only
@@ -519,6 +544,163 @@ function AppInner() {
       if (off) off();
     };
   }, [apiGeneration]);
+
+  // ---- Subscription usage escalation (BET-739) ----
+  // The warn (>=90%) / limit (>=100%) toasts, pushed through the existing
+  // global host via pushAppToast. Consumes the SAME `usage.updated` bus event
+  // as the store-priming effect above — this must work no matter which pane is
+  // in front, which is why it lives here at App (same BET-723 reasoning as the
+  // toast host). All transition logic is pure; the fire-once level map lives
+  // in usageLevelsRef (re-armed by writing back the new levels, so a window
+  // that resets and later crosses up again fires once more).
+  const pushAppToastStore = useStore((s) => s.pushAppToast);
+  const dismissAppToastStore = useStore((s) => s.dismissAppToast);
+
+  const fireAtFor = (resetsAt: number | undefined): number | null =>
+    resetsAt != null ? resetsAt + 60_000 : null;
+
+  // A one-shot job at `fireAt` via the existing scheduler store (window.api
+  // schedule path). Same store/poller/⏰ card as the AI `schedule` tool.
+  const scheduleAtReset = useCallback(
+    async (input: {
+      kind: "prompt" | "notify";
+      prompt: string;
+      label: string;
+      fireAt: number;
+      sessionID: string;
+    }) => {
+      try {
+        return await window.api.scheduleCreate({
+          cron: cronForInstant(new Date(input.fireAt)),
+          prompt: input.prompt,
+          recurring: false,
+          label: input.label,
+          sessionID: input.sessionID,
+          kind: input.kind,
+        });
+      } catch (err) {
+        return { ok: false as const, error: String((err as Error)?.message ?? err) };
+      }
+    },
+    [],
+  );
+
+  const confirmKeepGoing = useCallback(async () => {
+    if (!keepGoing) return;
+    const { fireAt, sessionID, providerLabel: pLabel, windowLabel } = keepGoing;
+    const res = await scheduleAtReset({
+      kind: "prompt",
+      prompt: "Keep going",
+      label: `Keep going: ${pLabel} ${windowLabel} reset`,
+      fireAt,
+      sessionID,
+    });
+    setKeepGoing(null);
+    pushAppToastStore(
+      res.ok && res.job
+        ? {
+            message: `⏰ “Keep going” will be sent ${formatResetClock(fireAt, true)}.`,
+            actions: [
+              {
+                label: "Undo",
+                onClick: () => {
+                  if (res.job?.id) void window.api.scheduleDelete(res.job.id);
+                },
+              },
+            ],
+          }
+        : {
+            tone: "error",
+            message: `Couldn't schedule “Keep going”: ${res.error ?? "unknown error"}`,
+          },
+    );
+  }, [keepGoing, scheduleAtReset, pushAppToastStore]);
+
+  useEffect(() => {
+    if (!window.api.onUsageUpdated) return;
+    const off = window.api.onUsageUpdated(({ snapshots }) => {
+      const next = Array.isArray(snapshots) ? snapshots : [];
+      const fired = shouldFireUsageAlert(usageLevelsRef.current, next);
+      for (const alert of fired) {
+        const label = providerLabel(alert.provider);
+        const windowLabel = alert.window.label;
+        const resetsAt = alert.window.resetsAt;
+        if (alert.level === "limit") {
+          const fireAt = fireAtFor(resetsAt);
+          const sessionID = activeChatRef.current;
+          const toastId = `usage-limit-${alert.key}-${Date.now()}`;
+          // Actions are hidden when the window has no resetsAt (can't compute a
+          // fireAt) OR when no chat session is active (a job needs a sessionID).
+          // The toast still shows its message either way.
+          const hasActions = fireAt != null && sessionID != null;
+          pushAppToastStore({
+            id: toastId,
+            tone: "error",
+            message: buildLimitMessage(label, windowLabel, resetsAt),
+            actions: hasActions
+              ? [
+                  {
+                    label: "Remind me at reset",
+                    onClick: () => {
+                      if (fireAt == null || !sessionID) return;
+                      dismissAppToastStore(toastId);
+                      void (async () => {
+                        const res = await scheduleAtReset({
+                          kind: "notify",
+                          prompt: `${label} ${windowLabel} has reset — you can keep working.`,
+                          label: `Reminder: ${label} ${windowLabel} reset`,
+                          fireAt,
+                          sessionID,
+                        });
+                        if (res.ok && res.job) {
+                          const jobId = res.job.id;
+                          pushAppToastStore({
+                            message: `⏰ Reminder set for ${formatResetClock(fireAt, true)}.`,
+                            actions: [
+                              {
+                                label: "Undo",
+                                onClick: () => {
+                                  if (jobId) void window.api.scheduleDelete(jobId);
+                                },
+                              },
+                            ],
+                          });
+                        } else {
+                          pushAppToastStore({
+                            tone: "error",
+                            message: `Couldn't set a reminder: ${res.error ?? "unknown error"}`,
+                          });
+                        }
+                      })();
+                    },
+                  },
+                  {
+                    label: "Keep going at reset",
+                    onClick: () => {
+                      if (fireAt == null || !sessionID) return;
+                      setKeepGoing({
+                        providerLabel: label,
+                        windowLabel,
+                        fireAt,
+                        sessionID,
+                      });
+                    },
+                  },
+                ]
+              : undefined,
+          });
+        } else {
+          pushAppToastStore({
+            message: buildWarnMessage(label, windowLabel, alert.window.pct, resetsAt),
+          });
+        }
+      }
+      // Write back the CURRENT levels so a holding level doesn't re-fire and a
+      // drop (after reset) re-arms the key for the next crossing.
+      usageLevelsRef.current = buildUsageLevels(next);
+    });
+    return off;
+  }, [apiGeneration, scheduleAtReset, pushAppToastStore, dismissAppToastStore]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
@@ -1502,6 +1684,42 @@ function AppInner() {
             </div>
           </div>
         </Modal>
+
+      {/* Keep going at reset — BET-739 usage escalation confirm. Rendered at
+          App level (like the toasts) so it works over any pane. */}
+      {keepGoing && (
+        <Modal
+          open
+          size="sm"
+          label="Send an automatic message at reset?"
+          onDismiss={() => setKeepGoing(null)}
+        >
+          <div className="space-y-4">
+            <h3 className="text-title font-semibold">Send an automatic message at reset?</h3>
+            <div className="text-body text-text-faint">
+              At {formatResetClock(keepGoing.fireAt, true)} MantaUI will send “Keep going” to this
+              session on your behalf and the agent will resume unattended. You can cancel it any
+              time from ⏰ scheduled tasks.
+            </div>
+            {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
+              <Callout tone="warn">
+                The reset is {describeResetDistance(keepGoing.fireAt - Date.now())} away — well past
+                your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
+                conversation will be re-sent and re-billed as fresh input, which costs significantly
+                more than a reply now.
+              </Callout>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button tone="ghost" onClick={() => setKeepGoing(null)}>
+                Cancel
+              </Button>
+              <Button tone="primary" onClick={() => void confirmKeepGoing()}>
+                Schedule it
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
