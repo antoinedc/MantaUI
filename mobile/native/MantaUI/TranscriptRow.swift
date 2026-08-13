@@ -103,9 +103,11 @@ struct TranscriptBlockCell: TiledCellContent {
 
     func body(context: CellContext<Void>) -> some View {
         TranscriptGutterReveal {
-            transcriptBlockView(item.block, tokens: tokens)
-                // The timestamp strip, drawn off-screen at rest (see
-                // TranscriptComponents) and brought in by the reveal gesture.
+            // The LIVE streaming tail (a `.prose` with no completion time)
+            // renders as lightweight plain text rather than a full
+            // `MarkdownView` re-parse of the accumulated turn each flush
+            // (BET-752 task 1). Completed canonical prose keeps its markdown.
+            cellContent
                 .overlay(alignment: .trailing) {
                     TimestampGutterLabel(
                         date: item.block.timestamp,
@@ -115,6 +117,15 @@ struct TranscriptBlockCell: TiledCellContent {
                     .offset(x: TranscriptGutter.gutterWidth)
                     .allowsHitTesting(false)
                 }
+        }
+    }
+
+    @ViewBuilder
+    private var cellContent: some View {
+        if case .prose(let text, nil) = item.block {
+            LiveProseTail(text: text, tokens: tokens)
+        } else {
+            transcriptBlockView(item.block, tokens: tokens)
         }
     }
 }

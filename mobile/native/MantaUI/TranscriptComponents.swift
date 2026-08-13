@@ -104,6 +104,36 @@ struct MantaProse: View {
     }
 }
 
+// MARK: - Live prose (the streaming tail, BET-752 §4.4 task 1)
+//
+// The one `.prose` row that is NOT a completed canonical block: the LIVE
+// streaming tail. Its text grows on every `stream:flush`, so rebuilding the
+// full `MarkdownView(text)` from scratch each flush re-parses the whole
+// accumulated turn — O(n²) markdown work that janks late in long answers.
+//
+// The live tail therefore renders as a lightweight plain `Text` (no markdown
+// parse) at the same metrics/padding as `MantaProse`, so the transient stream
+// stays visually continuous and the completed canonical block restores real
+// markdown the moment the turn-boundary refetch replaces it (the refetch is the
+// source of truth; this is only the live tail path, per the issue).
+struct LiveProseTail: View {
+    let text: String
+    let tokens: Tokens
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: Metrics.type.body))
+            .foregroundColor(tokens.tx1)
+            .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("live-tail")
+    }
+}
+
 // MARK: - Markdown table style
 //
 // Token-mapped GFM table, mirroring desktop's MarkdownBody table treatment:
@@ -261,6 +291,9 @@ struct StepRowView: View {
                     .accessibilityIdentifier("step-output")
             }
         }
+        // Expand/collapse is animated, matching the file's animation convention
+        // (BET-752 task 6).
+        .animation(.smooth(duration: 0.22), value: revealed)
     }
 
     private var dotColor: Color {
@@ -323,6 +356,9 @@ struct StepGroupView: View {
                         rowsView(rows)
                     }
                 }
+                // Roll-up expand is animated, matching the file's animation
+                // convention (BET-752 task 6).
+                .animation(.smooth(duration: 0.22), value: rollupExpanded)
             }
         }
         .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
@@ -696,47 +732,4 @@ struct SubagentHeader: View {
 @MainActor
 private func pointsFor(multiplier: CGFloat, size: CGFloat) -> CGFloat {
     max(0, (multiplier - 1) * size)
-}
-
-// MARK: - Shimmer
-
-/// A slow highlight sweeping across a placeholder, so a loading skeleton reads
-/// as "content is coming" rather than as empty grey boxes that might be the
-/// real, broken UI. Purely decorative: it carries no state and is skipped
-/// entirely when `active` is false.
-private struct Shimmer: ViewModifier {
-    let active: Bool
-    let tokens: Tokens
-    @State private var phase: CGFloat = -1
-
-    func body(content: Content) -> some View {
-        if !active {
-            content
-        } else {
-            content
-                .overlay {
-                    GeometryReader { geo in
-                        LinearGradient(
-                            colors: [.clear, tokens.canvas.opacity(0.65), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: geo.size.width * 0.6)
-                        .offset(x: phase * geo.size.width * 1.6)
-                    }
-                }
-                .clipped()
-                .onAppear {
-                    withAnimation(.linear(duration: 1.3).repeatForever(autoreverses: false)) {
-                        phase = 1
-                    }
-                }
-        }
-    }
-}
-
-extension View {
-    func shimmer(active: Bool, tokens: Tokens) -> some View {
-        modifier(Shimmer(active: active, tokens: tokens))
-    }
 }

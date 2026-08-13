@@ -725,11 +725,49 @@ struct ComposerView: View {
         }
     }
 
-    /// Insert text at the caret (dictate). Falls back to append if the input
-    /// isn't focused/bound yet.
+    /// Insert text at the caret (dictate). If the composer's text field is the
+    /// focused editor we insert at its live selection; otherwise fall back to
+    /// appending (no caret to speak of).
     private func insertAtCaret(_ string: String) {
-        // TextEditor owns the selection; append at end for dictation.
-        text += string
+        if let tv = Self.activeTextView(),
+           tv.selectedRange.location != NSNotFound,
+           let current = tv.text {
+            let result = Self.inserting(string, into: current, at: tv.selectedRange)
+            text = result.newText
+            tv.selectedRange = NSRange(location: result.cursorLocation, length: 0)
+            tv.delegate?.textViewDidChange?(tv)
+        } else {
+            text += string
+        }
+    }
+
+    /// Pure: the text + caret location that result from inserting `string` into
+    /// `current` at the given selection. Testable without a UITextView.
+    nonisolated static func inserting(
+        _ string: String,
+        into current: String,
+        at selected: NSRange
+    ) -> (newText: String, cursorLocation: Int) {
+        let newText = (current as NSString).replacingCharacters(in: selected, with: string)
+        return (newText, selected.location + (string as NSString).length)
+    }
+
+    /// The app's focused `UITextView` (first responder), if any — that is where
+    /// the caret lives when the SwiftUI composer is the active editor.
+    private static func activeTextView() -> UITextView? {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+            .first(where: { $0.isKeyWindow }) else { return nil }
+        return firstResponderTextView(in: window)
+    }
+
+    private static func firstResponderTextView(in view: UIView) -> UITextView? {
+        if let tv = view as? UITextView, tv.isFirstResponder { return tv }
+        for sub in view.subviews {
+            if let found = firstResponderTextView(in: sub) { return found }
+        }
+        return nil
     }
 
     private func classify(_ transcript: String) async {

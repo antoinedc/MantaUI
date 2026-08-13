@@ -72,11 +72,16 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// The live assistant prose for the turn in flight, in arrival order. Empty
     /// once every chunk has been retired by a canonical transcript that covers
     /// it — which is what stops a finished answer rendering twice.
+    ///
+    /// Chunks are joined with a PARAGRAPH break (`\n\n`) rather than a single
+    /// `\n`: separate step-narrations would otherwise render as a merged single
+    /// line in the live tail and then "pop" into separate paragraphs when the
+    /// canonical markdown refetch lands (BET-752 task 6).
     var liveText: String {
         chunks
             .filter { $0.field != "reasoning" && !$0.text.isEmpty }
             .map(\.text)
-            .joined(separator: "\n")
+            .joined(separator: "\n\n")
     }
 
     /// Append a flushed chunk, extending the part's text when it is already

@@ -57,6 +57,12 @@ struct SessionListView: View {
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
+    /// 1 s tick so a running row's count-up stays live (BET-752 task 6). The
+    /// running timer is computed from `now` in the body; without a tick nothing
+    /// re-renders it after the initial layout, so it froze at "0s" until the
+    /// next unrelated store change.
+    @State private var now = Date()
+
     var body: some View {
         NavigationStack(path: $path) {
             Group {
@@ -124,6 +130,8 @@ struct SessionListView: View {
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
+        // The running rows' count-up ticks every second (BET-752 task 6).
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now = $0 }
         // Popping the last session off the stack lands us back on the list.
         // Two jobs on that transition:
         .onChange(of: path.count) { count in
@@ -255,7 +263,7 @@ struct SessionListView: View {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
-                timer: timerText(window),
+                timer: timerText(window, now: now),
                 isActive: openRow == SessionRowKey(project: project.tmuxSession, window: window).id,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
                 tokens: tokens
@@ -304,12 +312,12 @@ struct SessionListView: View {
         .accessibilityHint("Opens the session. Swipe or long-press for actions.")
     }
 
-    private func timerText(_ window: MantaWindow) -> String? {
+    private func timerText(_ window: MantaWindow, now: Date) -> String? {
         let status = store.rowStatus(for: window)
         guard status.running, let sid = window.opencodeSessionId, let since = store.runningSince[sid] else {
             return nil
         }
-        return SessionTimerFormat.elapsed(Date().timeIntervalSince(since))
+        return SessionTimerFormat.elapsed(now.timeIntervalSince(since))
     }
 
     private func subtitle(for window: MantaWindow) -> String {
@@ -410,10 +418,16 @@ struct SessionListView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Metrics.type.listRowRadius))
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
-            .task {
+            .task(id: pending.startedAt) {
+                // The SOLE undo-window timing owner (BET-752 task 6). It sleeps
+                // the window then commits everything that has expired; a second
+                // delete during a live toast changes `newestPending.startedAt`,
+                // so `.task(id:)` restarts the countdown instead of the toast
+                // vanishing early (and no store-side timer double-times it).
                 try? await Task.sleep(nanoseconds: UInt64(PendingDelete.undoWindow * 1_000_000_000))
-                store.commitExpiredDeletes()
-                SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
+                if store.commitExpiredDeletes() {
+                    SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
+                }
             }
         }
     }

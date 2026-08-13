@@ -22,6 +22,20 @@ import MessagingUI
 // the generated tokens.
 // ===========================================================================
 
+// ===========================================================================
+// BET-752 task 3 — which region the session-loading branch renders.
+//
+// The transcript skeleton (`ChatLoadingSkeleton`) — NOT the full-screen mark
+// loader (`MantaLoader`) — is the loading state. Kept as a pure decision at
+// file scope so a unit test can pin the wiring without rendering a SwiftUI
+// hierarchy.
+// ===========================================================================
+enum ChatLoadingMode { case skeleton; case content }
+
+func chatLoadingMode(isLoading: Bool) -> ChatLoadingMode {
+    isLoading ? .skeleton : .content
+}
+
 /// The BET-627 overflow-sheet items that present a card of their own.
 ///
 /// Attaching is NOT one of them: the composer carries its own paperclip, so a
@@ -170,13 +184,13 @@ private struct ChatScreenContent: View {
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
-            // is active and haptics are enabled. `onChange` fires exactly once
-            // per false→true edge of `turnComplete`, so there is exactly one
-            // haptic per completion, none on `running` oscillations, and none
-            // when at the bottom.
-            .onChange(of: store.turnComplete) { _, completed in
+            // is active and haptics are enabled. The store coalesces multi-message
+            // turns into ONE `turnCompletionCount` per turn (BET-752 task 5), so
+            // `onChange` fires at most once per turn — no more per-message
+            // double-fires from `turnComplete` flapping on `message.updated`.
+            .onChange(of: store.turnCompletionCount) { _, _ in
                 if shouldFireTurnCompleteHaptic(
-                    turnCompleteEdge: completed,
+                    turnCompleteEdge: true,
                     showScrollToBottom: showScrollToBottom,
                     isActive: scenePhase == .active,
                     hapticsEnabled: sessionStore.hapticsEnabled
@@ -207,15 +221,19 @@ private struct ChatScreenContent: View {
     }
 
     /// While the session loads there is nothing to act on, so the screen shows
-    /// ONLY the loader — no header, no composer, no cards. Hiding the chrome
-    /// outright is both honest (a disabled control still invites a tap) and
-    /// simpler than keeping every control in a disabled state.
+    /// ONLY the transcript-shaped skeleton — no header, no composer, no cards.
+    /// Hiding the chrome outright is both honest (a disabled control still
+    /// invites a tap) and simpler than keeping every control in a disabled
+    /// state. The skeleton (`ChatLoadingSkeleton`) occupies the same scroll
+    /// region the real transcript will, so the first blocks replacing it cause
+    /// no layout shift (BET-752 task 3, reconnecting the built skeleton).
     @ViewBuilder
     private var content: some View {
-        if store.loading {
-            MantaLoader(caption: "Loading session…", tokens: tokens)
+        if chatLoadingMode(isLoading: store.loading) == .skeleton {
+            ChatLoadingSkeleton()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(tokens.canvas.ignoresSafeArea())
+                .accessibilityIdentifier("chat-loading-skeleton")
         } else {
             loadedLayout
         }
@@ -673,11 +691,10 @@ private struct ChatScreenContent: View {
 
     // MARK: - Loading skeleton (D2 / BET-631)
 
-    // The loading skeleton (`ChatLoadingSkeleton`) is no longer rendered from
-    // the chat screen — `content` already shows the full-screen loader while
-    // `store.loading`, so the in-place skeleton branch was unreachable. The
-    // skeleton is KEPT, but only as the harness scene `ChatLoadingScene`
-    // (MantaAppRoot) that the capture fixture drives.
+    // The loading skeleton (`ChatLoadingSkeleton`) is the chat screen's
+    // loading state — `content` renders it while `store.loading` (BET-752 task
+    // 3). It is ALSO the harness scene `ChatLoadingScene` (MantaAppRoot) that
+    // the capture fixture drives, so fixture and live screen share one view.
 
     // MARK: - Live cards (todos / permission / question)
 

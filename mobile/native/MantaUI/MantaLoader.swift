@@ -43,6 +43,14 @@ struct MantaLoader: View {
     @State private var outer = false
     @State private var inner = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Whether the loader animates at all. The two counter-rotating rings run
+    /// `repeatForever` regardless of the user's accessibility setting; with
+    /// "Reduce Motion" on they should render static instead (BET-752 task 4).
+    /// Pure so the guard is unit-testable without driving the view environment.
+    nonisolated static func shouldAnimate(reduceMotion: Bool) -> Bool { !reduceMotion }
+
     private var diameter: CGFloat { size.diameter }
     private var stroke: CGFloat { size.stroke }
 
@@ -85,6 +93,9 @@ struct MantaLoader: View {
             }
         }
         .onAppear {
+            // Reduce Motion on → a static loader (the arcs at rest, no
+            // repeatForever rotation). Off → the usual spin.
+            guard Self.shouldAnimate(reduceMotion: reduceMotion) else { return }
             withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { outer = true }
             withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) { inner = true }
         }

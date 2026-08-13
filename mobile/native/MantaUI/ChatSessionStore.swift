@@ -219,6 +219,19 @@ final class ChatSessionStore: ObservableObject {
     /// change each time and thrash TiledView; this id doesn't. Reset when the
     /// turn ends and the tail is absorbed into the canonical transcript.
     private(set) var streamingTailID: String = ""
+    /// The row id the streaming tail actually ships in. Unlike `streamingTailID`
+    /// (which the stream merge resets the moment a `turnComplete` frame lands),
+    /// this id SURVIVES the settle until the canonical refetch absorbs the tail
+    /// — so TiledView sees the tail row turn into the canonical prose block as
+    /// an in-place UPDATE instead of a remove+insert blink at the turn boundary
+    /// (BET-752 task 2, giving prose the stable-identity treatment BET-666 gave
+    /// step rows — BET-666, `TranscriptComponents.swift`).
+    private var liveTailRowID = ""
+    /// True while the previous rebuild shipped a live tail, so the empty branch
+    /// of `rebuildBlocks` knows a settle/absorption just replaced it (and can
+    /// carry the tail id onto the new canonical row) rather than mistaking a
+    /// fresh `send()`'s pre-stream emptiness for an absorption.
+    private var wasRenderingTail = false
     /// Question ids the user answered/rejected on-device. The incoming stream
     /// keeps publishing an answered question until the box catches up, so this
     /// tombstone set filters it out locally in the meantime (BET-668); an id
@@ -236,6 +249,18 @@ final class ChatSessionStore: ObservableObject {
     private(set) var transcriptFetchCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// Monotonic count of FULL turned completions (BET-752 task 5). Increments
+    /// at most once per turn: a multi-message turn emits a `turnComplete`
+    /// frame per `message.updated`, so the raw `turnComplete` value flaps
+    /// true repeatedly; the view used to fire a success haptic on every
+    /// false→true edge. The store now coalesces those into ONE completion per
+    /// turn, re-armed only when a genuinely new turn begins (a running start,
+    /// or a `send()`). The view fires the haptic off this counter instead.
+    @Published private(set) var turnCompletionCount = 0
+    /// True until the current turn's completion has been counted once; re-armed
+    /// when a new turn begins. Until a new turn, further `turnComplete` edges
+    /// of the same turn are ignored (deduped per turn).
+    private var completionArmed = true
     /// The permissions payload most recently folded into `permissions`. The
     /// accumulated snapshot is sticky and this sink fires on every stream change,
     /// so applying it unconditionally would clobber whatever `refreshPermissions()`
@@ -459,6 +484,7 @@ final class ChatSessionStore: ObservableObject {
         // is never replaced mid-turn.
         if running, streamingTailID.isEmpty {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
+            liveTailRowID = streamingTailID
         }
         // runningSince tracks the turn that's running for the header timer.
         if running {
@@ -507,6 +533,20 @@ final class ChatSessionStore: ObservableObject {
             if completeChanged && turnComplete { scheduleRefetch() }
         }
 
+        // --- once-per-turn completion signal (BET-752 task 5). A multi-message
+        // turn emits a `turnComplete` frame per `message.updated`, so the raw
+        // false→true edge flaps several times in one turn — and the chat screen
+        // used to fire a success haptic on EVERY edge. Coalesce to ONE
+        // completion per TURN: count a fresh completion edge only while the
+        // latch is armed, then disarm. `send()` re-arms it (a user submit IS a
+        // new turn); the latch also starts armed, so a session opened mid-turn
+        // still counts its first completion. The view fires the haptic off
+        // `turnCompletionCount` instead of the raw `turnComplete` value.
+        if completeChanged && turnComplete && completionArmed {
+            turnCompletionCount += 1
+            completionArmed = false
+        }
+
         rebuildBlocks()
     }
 
@@ -542,14 +582,35 @@ final class ChatSessionStore: ObservableObject {
         // `loadEarlier()` widens the window over the colliding pair.
         let newRows: [TranscriptRow]
         if inProgressText.isEmpty {
+            // No live tail: the whole transcript is canonical. If the turn
+            // that was streaming just settled and its refetch absorbed the
+            // tail, carry the tail's STABLE id onto the canonical prose block
+            // that replaced it — same-identity swap, so TiledView updates that
+            // row in place instead of remove+insert-blinking at the boundary
+            // (BET-752 task 2 — the prose analogue of BET-666's step rows).
+            // Guarded on `wasRenderingTail`: `send()` mints `liveTailRowID`
+            // before any text exists, and that optimistic no-tail state must
+            // not rebadge the previous turn's last prose.
+            var rows = uniqueTranscriptRows(transcript)
+            if wasRenderingTail,
+               !liveTailRowID.isEmpty,
+               let lastProse = rows.lastIndex(where: {
+                   if case .prose = $0.block { return true } else { return false }
+               }) {
+                rows[lastProse] = TranscriptRow(id: liveTailRowID, block: rows[lastProse].block)
+                liveTailRowID = ""
+            }
+            wasRenderingTail = false
             blocks = transcript
-            newRows = uniqueTranscriptRows(transcript)
+            newRows = rows
         } else {
             // The live tail has no completion time yet — it gets one when the
-            // turn ends and the canonical refetch replaces this block.
+            // turn ends and the canonical refetch replaces this block. The row
+            // keeps `liveTailRowID` across the settle so it never blinks.
+            wasRenderingTail = true
             blocks = transcript + [.prose(inProgressText, at: nil)]
             newRows = uniqueTranscriptRows(transcript)
-                + [TranscriptRow(id: streamingTailID, block: .prose(inProgressText, at: nil))]
+                + [TranscriptRow(id: liveTailRowID, block: .prose(inProgressText, at: nil))]
         }
         rows = newRows
         // Mutate the data source in place (not `= ...`) so its identity — and
@@ -770,12 +831,17 @@ final class ChatSessionStore: ObservableObject {
         running = true
         optimisticRunning = true
         turnComplete = false
+        // A user submit is a genuinely new turn: re-arm the one-per-turn
+        // completion latch so this turn's completion is counted once (BET-752
+        // task 5).
+        completionArmed = true
         sessionError = nil
         if runningSince == nil {
             runningSince = Date()
             // A send starts a turn directly (no stream running transition to
             // mint this from), so mint the streaming tail's stable id here too.
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
+            liveTailRowID = streamingTailID
         }
         do {
             try await api.sendPrompt(SendPromptInput(
