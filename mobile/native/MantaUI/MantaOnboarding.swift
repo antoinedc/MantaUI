@@ -216,10 +216,11 @@ final class MantaOnboardingFlow: ObservableObject {
         // Progress stages are informational; the volunteer device-registry name
         // is surfaced server-side so a linked device is identifiable (§6.3).
         let name = UIDevice.current.name
-        // A resolvable claim target is a precondition — without one the response
-        // could never have been a success, so surface the same failure class the
-        // unreachable code path used to.
-        guard let serverURL = claimTarget(payload) else {
+        // claimBaseURL is the same resolution MantaAuthClient.claim performs; a
+        // nil base can never produce a .success outcome, so failing here is the
+        // same classification arriving one step earlier — and it removes the
+        // need for a placeholder URL that could never be a real claim target.
+        guard let serverURL = MantaPairing.claimBaseURL(payload) else {
             phase = .failure(.serverError)
             return
         }
@@ -260,10 +261,6 @@ final class MantaOnboardingFlow: ObservableObject {
         case .serverError, .invalidResponse:
             phase = .failure(.serverError)
         }
-    }
-
-    private func claimTarget(_ payload: MantaPairing.PairPayload) -> URL? {
-        MantaPairing.claimBaseURL(payload)
     }
 
     private func requestNotificationAuthorization() async {
