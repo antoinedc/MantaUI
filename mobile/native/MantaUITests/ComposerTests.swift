@@ -189,6 +189,16 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(ChatVoice.parse(classify("switch-window", index: 2)), .switchWindow(index: 2))
     }
 
+    func testParseToggleTrustMapsToTupleHead() {
+        // Both wire spellings of the toggle-trust kind map to `.toggleTrust`,
+        // the action the composer now routes to the real `chatAutoAllow` toggle
+        // (BET-748) rather than the old "isn't available in this chat" answer.
+        XCTAssertEqual(ChatVoice.parse(classify("toggle-trust")), .toggleTrust)
+        XCTAssertEqual(ChatVoice.parse(classify("toggle_trust")), .toggleTrust)
+        // The fallback hint no longer describes trust mode as unavailable.
+        XCTAssertNotEqual(ChatVoiceHint.text(for: .toggleTrust), "Trust mode isn't available in this chat")
+    }
+
     func testParseUnknownDegrades() {
         XCTAssertEqual(ChatVoice.parse(classify("unknown", transcript: "do the thing")), .unknown(transcript: "do the thing"))
         // A nil/empty kind is treated as unknown.

@@ -43,6 +43,14 @@ struct ChatOverflowSheet: View {
     var onOpenTerminal: () -> Void
     var onDelete: () -> Void
 
+    /// Observed so the trust toggle below reflects the live `chatAutoAllow`
+    /// value (and reverts on a failed update) without the sheet holding its
+    /// own copy of the setting.
+    @ObservedObject var settingsStore: MantaSettingsStore
+    /// Flip the `chatAutoAllow` setting. Called with the requested value; the
+    /// chat screen awaits the `config:update` and reverts on failure.
+    var onToggleTrust: (Bool) -> Void
+
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
 
@@ -78,6 +86,25 @@ struct ChatOverflowSheet: View {
                     .buttonStyle(.plain)
                     row("Fork session", systemImage: "arrow.triangle.branch", action: onFork)
                     row("Open terminal", systemImage: "terminal", action: onOpenTerminal)
+                }
+                // Trust mode — the on/off autonomy switch (BET-748 gap #14). This
+                // is the ONLY trust control in chat (no permission allow-lists);
+                // it flips the `chatAutoAllow` config key over `config:update`.
+                Section {
+                    if let entry = SettingsSchema.entries.first(where: { $0.id == "chatAutoAllow" }) {
+                        Toggle(isOn: Binding(
+                            get: { settingsStore.current(entry) == .bool(true) },
+                            set: { onToggleTrust($0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Trust mode")
+                                Text("Auto-allow tool permissions")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityIdentifier("trust-mode-toggle")
+                    }
                 }
                 Section {
                     // Clear is the consequence of something the user just chose,

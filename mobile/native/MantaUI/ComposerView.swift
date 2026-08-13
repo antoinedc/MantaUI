@@ -54,6 +54,9 @@ struct ComposerView: View {
     /// not at the top of the whole bottom stack (chip / cards / anchors
     /// excluded).
     var onGlassBoxHeightChange: (CGFloat) -> Void = { _ in }
+    /// Flip the `chatAutoAllow` trust setting (voice `toggleTrust`, BET-748).
+    /// The chat screen owns the flip + revert; the composer just triggers it.
+    var onToggleTrust: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var text = ""
@@ -797,6 +800,13 @@ struct ComposerView: View {
                 return nil
             }
             return "No model found for “\(query)”"
+        case .toggleTrust:
+            // Real toggle (BET-748): the chat screen flips `chatAutoAllow` and
+            // surfaces a failure through the store's `actionHint` bus. No hint
+            // is returned here — a successful flip needs no local answer, and
+            // a failure already reaches the user through that bus.
+            onToggleTrust?()
+            return nil
         case .unknown(let transcript):
             if !transcript.isEmpty { insertAtCaret(transcript) }
             return nil

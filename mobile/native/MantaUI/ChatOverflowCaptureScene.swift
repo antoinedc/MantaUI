@@ -17,6 +17,7 @@ struct ChatOverflowCaptureScene: View {
     // Present from onAppear (NOT an initial `true`): SwiftUI does not raise a
     // sheet whose binding is already true at first render.
     @State private var showOverflow = false
+    @StateObject private var settingsStore = MantaSettingsStore()
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -34,7 +35,9 @@ struct ChatOverflowCaptureScene: View {
                     onClear: {},
                     onFork: {},
                     onOpenTerminal: {},
-                    onDelete: {}
+                    onDelete: {},
+                    settingsStore: settingsStore,
+                    onToggleTrust: { _ in }
                 )
             }
     }
