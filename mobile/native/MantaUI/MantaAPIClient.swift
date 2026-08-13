@@ -434,15 +434,6 @@ final class MantaAPIClient: Sendable {
         return ChatJSON.string(result?["text"])
     }
 
-    /// `voice:classify-command` — route a transcript through the box's rules +
-    /// (fallback) LLM classifier. Returns the structured action.
-    func voiceClassifyCommand(transcript: String, useLlmFallback: Bool? = nil) async throws -> VoiceClassifyResult? {
-        var input: [String: Any] = ["transcript": transcript]
-        if let useLlmFallback { input["useLlmFallback"] = useLlmFallback }
-        let envelope: VoiceClassifyEnvelope? = try await call("voice:classify-command", args: [input], as: VoiceClassifyEnvelope.self)
-        return envelope?.action
-    }
-
     /// `git:list-worktrees` — git worktree fan-out detection for a folder.
     func listWorktrees(_ cwd: String) async throws -> [MantaWorktree] {
         try await call("git:list-worktrees", args: [cwd], as: [MantaWorktree].self) ?? []
@@ -584,11 +575,4 @@ private struct ForkSessionResult: Decodable {
 
 private struct ClearSessionResult: Decodable {
     let newSessionId: String?
-}
-
-/// The `voice:classify-command` reply is `{ action, source }` — the action is
-/// the structured `VoiceAction`; `source` ("rules" | "llm" | "none") is
-/// diagnostic only and discarded here (the device never interprets).
-private struct VoiceClassifyEnvelope: Decodable {
-    var action: VoiceClassifyResult?
 }

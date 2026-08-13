@@ -935,41 +935,6 @@ final class ChatSessionStore: ObservableObject {
         }
     }
 
-    /// Dispatch a store-level voice action. Returns a human hint string when
-    /// the action was NOT handled here (the caller should surface it), or nil
-    /// when it was handled. Actions that insert/modify composer text
-    /// (`submit`/`append`/`unknown`) and the app-level ones (`newSession`,
-    /// `openSettings`, `switchWindow`, `fork`, `clear`, `help`,
-    /// `toggleTrust`) are NOT this store's job — the composer routes those.
-    @discardableResult
-    func dispatchVoice(_ action: VoiceAction) -> String? {
-        switch action {
-        case .allowOnce:
-            replyToLatestPermission(.once)
-            return nil
-        case .allowAlways:
-            replyToLatestPermission(.always)
-            return nil
-        case .reject:
-            if newestPermission != nil {
-                replyToLatestPermission(.reject)
-            } else if newestQuestion != nil {
-                rejectQuestion(newestQuestion!)
-            }
-            return nil
-        case .answer(let choice):
-            return answerLatestQuestion(choice: choice)
-        case .abort:
-            abort()
-            return nil
-        case .compact:
-            compact()
-            return nil
-        default:
-            return ChatVoiceHint.text(for: action)
-        }
-    }
-
     private func replyToLatestPermission(_ reply: PermissionReply) {
         guard let permission = newestPermission else { return }
         replyPermission(permission, reply: reply)

@@ -4,11 +4,10 @@ import Foundation
 // ===========================================================================
 // S5 — iOS voice capture (BET-597).
 //
-// A thin AVFoundation recorder. The recording, transcription AND command
-// classification all live on the box (Groq via `voice:transcribe` /
-// `voice:classify-command`) — the device's only job here is to capture the
-// audio and hand the bytes over, exactly as the desktop does. This file owns
-// the capture + the mic permission gate; it does NOT transcribe or classify.
+// A thin AVFoundation recorder. The recording AND transcription live on the
+// box (Groq via `voice:transcribe`) — the device's only job here is to capture
+// the audio and hand the bytes over, exactly as the desktop does. This file
+// owns the capture + the mic permission gate; it does NOT transcribe.
 //
 // The mime is `audio/mp4`: iOS records AAC-in-.m4a via AVAudioRecorder, the
 // only sane container on Apple platforms (matches the retired web client's
@@ -20,9 +19,7 @@ final class VoiceRecorder: ObservableObject {
 
     enum Phase: Equatable {
         case idle
-        case requesting       // waiting on mic permission / session start
         case recording
-        case processing       // stop requested, bytes being handed to the box
         case error(String)
     }
 
@@ -105,14 +102,6 @@ final class VoiceRecorder: ObservableObject {
         discard()
         phase = .idle
         return data
-    }
-
-    /// Cancel a capture (e.g. the user drags away before release).
-    func cancel() {
-        recorder?.stop()
-        discard()
-        deactivateSession()
-        phase = .idle
     }
 
     /// Surface a transient error phase to the UI (caller supplies the reason).

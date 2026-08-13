@@ -54,9 +54,6 @@ struct ComposerView: View {
     /// not at the top of the whole bottom stack (chip / cards / anchors
     /// excluded).
     var onGlassBoxHeightChange: (CGFloat) -> Void = { _ in }
-    /// Flip the `chatAutoAllow` trust setting (voice `toggleTrust`, BET-748).
-    /// The chat screen owns the flip + revert; the composer just triggers it.
-    var onToggleTrust: (() -> Void)? = nil
     /// The session's working directory, threaded from the chat screen so the
     /// `@`-file typeahead searches within the session (BET-749). `findFiles`
     /// takes it directly, the same way `vcsBranch` does; nil when the session
@@ -80,7 +77,6 @@ struct ComposerView: View {
     @State private var showHint = false
     @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
-    @State private var micMode: VoiceMode = .dictate
     /// High-water flag for a press whose permission prompt is still resolving —
     /// lets `micPress` re-check the finger is still down after the await.
     @State private var micPressActive = false
@@ -680,19 +676,14 @@ struct ComposerView: View {
                 .onChanged { _ in micPress() }
                 .onEnded { _ in micRelease() }
         )
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5)
-                .onEnded { _ in promoteToCommand() }
-        )
-        .accessibilityLabel("Hold to dictate, long press for command")
+        .accessibilityLabel("Hold to dictate")
         .accessibilityIdentifier("mic-button")
         .disabled(!micAvailable)
     }
 
     private var micIcon: String {
         switch recorder.phase {
-        case .recording: return micMode == .command ? "waveform.badge.mic" : "mic.fill"
-        case .processing: return "hourglass"
+        case .recording: return "mic.fill"
         case .error: return "exclamationmark.triangle"
         default: return "mic"
         }
@@ -700,21 +691,21 @@ struct ComposerView: View {
 
     private var micIconFill: Color {
         switch recorder.phase {
-        case .recording: return micMode == .command ? tokens.danger.opacity(0.2) : tokens.accentSolid
+        case .recording: return tokens.accentSolid
         default: return tokens.inset
         }
     }
 
     private var micIconColor: Color {
         switch recorder.phase {
-        case .recording: return micMode == .command ? tokens.danger : tokens.onAccent
+        case .recording: return tokens.onAccent
         case .error: return tokens.danger
         default: return tokens.tx2
         }
     }
 
     private func micPress() {
-        guard micAvailable, recorder.phase != .recording, recorder.phase != .processing else { return }
+        guard micAvailable, recorder.phase != .recording else { return }
         // onChanged fires repeatedly during the permission await — one Task only.
         guard !micPressActive else { return }
         micPressActive = true
@@ -730,42 +721,30 @@ struct ComposerView: View {
             // starting now would record with no press and wedge the phase guard
             // (desktop parity: "cancel checked AFTER getUserMedia resolves").
             guard micPressActive else { return }
-            micMode = .dictate
             recorder.start()
         }
     }
 
-    private func promoteToCommand() {
-        guard recorder.phase == .recording else { return }
-        micMode = .command
-    }
-
     private func micRelease() {
         micPressActive = false
-        guard recorder.phase != .processing else { return }
         guard let data = recorder.stop() else {
             // Too short — treat as an accidental tap, not an error (§ desktop
             // too-short guard). Quiet.
             return
         }
-        let mode = micMode
         Task {
-            await transcribe(data: data, mode: mode)
+            await transcribe(data: data)
         }
     }
 
-    private func transcribe(data: Data, mode: VoiceMode) async {
+    private func transcribe(data: Data) async {
         let result = try? await api.voiceTranscribe(data: data, mime: "audio/mp4")
         let transcript = result?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !transcript.isEmpty else {
             hintState("No speech detected")
             return
         }
-        if mode == .command {
-            await classify(transcript)
-        } else {
-            await MainActor.run { insertAtCaret(transcript) }
-        }
+        await MainActor.run { insertAtCaret(transcript) }
     }
 
     /// Insert text at the caret (dictate). If the composer's text field is the
@@ -811,55 +790,6 @@ struct ComposerView: View {
             if let found = firstResponderTextView(in: sub) { return found }
         }
         return nil
-    }
-
-    private func classify(_ transcript: String) async {
-        guard let classify = try? await api.voiceClassifyCommand(transcript: transcript) else {
-            hintState("Couldn't understand that command")
-            return
-        }
-        let action = ChatVoice.parse(classify)
-        let hint = handleVoiceAction(action)
-        if let hint { hintState(hint) }
-    }
-
-    /// Route a typed voice action. Returns a hint string when the composer was
-    /// responsible for surfacing it (text-inserting / not-handled-here), nil
-    /// when the store handled it.
-    private func handleVoiceAction(_ action: VoiceAction) -> String? {
-        switch action {
-        case .submit(let text):
-            submitVoice(text)
-            return nil
-        case .append(let text):
-            if !text.isEmpty { insertAtCaret(text) }
-            return nil
-        case .model(let query):
-            if let model = ChatModel.findByQuery(modelStore.models, query: query) {
-                modelStore.setOverride(OpencodeModelID(providerID: model.providerID, modelID: model.id))
-                return nil
-            }
-            return "No model found for “\(query)”"
-        case .toggleTrust:
-            // Real toggle (BET-748): the chat screen flips `chatAutoAllow` and
-            // surfaces a failure through the store's `actionHint` bus. No hint
-            // is returned here — a successful flip needs no local answer, and
-            // a failure already reaches the user through that bus.
-            onToggleTrust?()
-            return nil
-        case .unknown(let transcript):
-            if !transcript.isEmpty { insertAtCaret(transcript) }
-            return nil
-        default:
-            return store.dispatchVoice(action)
-        }
-    }
-
-    private func submitVoice(_ voiceText: String) {
-        let trimmed = voiceText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        insertAtCaret(trimmed)
-        submit()
     }
 
     // MARK: - Send

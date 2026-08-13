@@ -3,8 +3,8 @@ import XCTest
 
 // ===========================================================================
 // S5 — composer pure logic (BET-597). Covers ChatModel (model resolution for
-// the picker) and ChatVoice (classifier-reply mapping + attachment MIME). No
-// HTTP / view / Keychain / AVAudioRecorder involved.
+// the picker) and ChatVoice (attachment MIME). No HTTP / view / Keychain /
+// AVAudioRecorder involved.
 // ===========================================================================
 
 final class ComposerTests: XCTestCase {
@@ -171,49 +171,6 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(ChatModel.filteredGroups(g, query: "  ").first?.models.count, 2)
     }
 
-    // MARK: - ChatVoice.parse
-
-    private func classify(_ kind: String, text: String? = nil, choice: String? = nil, query: String? = nil, index: Int? = nil, transcript: String? = nil) -> VoiceClassifyResult {
-        VoiceClassifyResult(kind: kind, text: text, index: index, query: query, choice: choice, transcript: transcript, actions: nil)
-    }
-
-    func testParseStandardActions() {
-        XCTAssertEqual(ChatVoice.parse(classify("abort")), .abort)
-        XCTAssertEqual(ChatVoice.parse(classify("compact")), .compact)
-        XCTAssertEqual(ChatVoice.parse(classify("allow-once")), .allowOnce)
-        XCTAssertEqual(ChatVoice.parse(classify("reject")), .reject)
-        XCTAssertEqual(ChatVoice.parse(classify("submit", text: "look at this")), .submit(text: "look at this"))
-        XCTAssertEqual(ChatVoice.parse(classify("append", text: "remember")), .append(text: "remember"))
-        XCTAssertEqual(ChatVoice.parse(classify("answer", choice: "3")), .answer(choice: "3"))
-        XCTAssertEqual(ChatVoice.parse(classify("model", query: "haiku")), .model(query: "haiku"))
-        XCTAssertEqual(ChatVoice.parse(classify("switch-window", index: 2)), .switchWindow(index: 2))
-    }
-
-    func testParseToggleTrustMapsToTupleHead() {
-        // Both wire spellings of the toggle-trust kind map to `.toggleTrust`,
-        // the action the composer now routes to the real `chatAutoAllow` toggle
-        // (BET-748) rather than the old "isn't available in this chat" answer.
-        XCTAssertEqual(ChatVoice.parse(classify("toggle-trust")), .toggleTrust)
-        XCTAssertEqual(ChatVoice.parse(classify("toggle_trust")), .toggleTrust)
-        // The fallback hint no longer describes trust mode as unavailable.
-        XCTAssertNotEqual(ChatVoiceHint.text(for: .toggleTrust), "Trust mode isn't available in this chat")
-    }
-
-    func testParseUnknownDegrades() {
-        XCTAssertEqual(ChatVoice.parse(classify("unknown", transcript: "do the thing")), .unknown(transcript: "do the thing"))
-        // A nil/empty kind is treated as unknown.
-        XCTAssertEqual(ChatVoice.parse(classify("", transcript: "hi")), .unknown(transcript: "hi"))
-    }
-
-    // MARK: - ChatVoice.choiceToken
-
-    func testChoiceTokenCores() {
-        XCTAssertEqual(ChatVoice.choiceToken("yes"), "yes")
-        XCTAssertEqual(ChatVoice.choiceToken("NOPE"), "no")
-        XCTAssertEqual(ChatVoice.choiceToken("okay"), "yes")
-        XCTAssertNil(ChatVoice.choiceToken("the third one"))
-    }
-
     // MARK: - ChatVoice.mime
 
     func testMimeFromFilenameExtension() {
@@ -228,15 +185,5 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(ChatVoice.mime(forImageData: Data(jpeg)), "image/jpeg")
         XCTAssertEqual(ChatVoice.mime(forImageData: Data(png)), "image/png")
         XCTAssertEqual(ChatVoice.mime(forImageData: Data([0x00, 0x01, 0x02])), "image/jpeg")
-    }
-
-    // MARK: - Voice action store routing (permission/question)
-
-    @MainActor
-    func testDispatchVoiceAnswerFallsBackWhenNoQuestion() {
-        // No question pending → a hint (non-nil), and it must not crash.
-        let store = ChatSessionStore(sessionId: "ses", eventStore: MantaEventStore(), api: MantaAPIClient(serverURL: URL(string: "https://box.example")!))
-        let hint = store.dispatchVoice(.answer(choice: "yes"))
-        XCTAssertNotNil(hint)
     }
 }
