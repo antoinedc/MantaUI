@@ -295,7 +295,26 @@ export function Settings({
    *  bridge from "Manage models…"). Defaults to General. */
   initialSection?: SettingSectionId;
 }) {
-  const store = useStore();
+  // BET-730: per-field selectors, never a bare useStore() — a no-selector
+  // destructure re-renders the whole Settings tree on every store write.
+  const cacheTtl = useStore((s) => s.cacheTtl);
+  const groqApiKey = useStore((s) => s.groqApiKey);
+  const voiceTranscriptionModel = useStore((s) => s.voiceTranscriptionModel);
+  const voiceCommandModel = useStore((s) => s.voiceCommandModel);
+  const allowAgentPush = useStore((s) => s.allowAgentPush);
+  const downloadsDir = useStore((s) => s.downloadsDir);
+  const worktreePerSession = useStore((s) => s.worktreePerSession);
+  const worktreeCleanOnClose = useStore((s) => s.worktreeCleanOnClose);
+  const uploadCleanupHours = useStore((s) => s.uploadCleanupHours);
+  const autoRenameSessions = useStore((s) => s.autoRenameSessions);
+  const alwaysShowUsage = useStore((s) => s.alwaysShowUsage);
+  const theme = useStore((s) => s.theme);
+  const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
+  const launcherFlags = useStore((s) => s.launcherFlags);
+  const updatePrompt = useStore((s) => s.updatePrompt);
+  const boxToken = useStore((s) => s.boxToken);
+  const serverUrl = useStore((s) => s.serverUrl);
+  const boxId = useStore((s) => s.boxId);
   const { toasts, push, dismiss } = useSettingsToasts();
   const applySetting = useApplySetting(push);
   const dialogRef = useDialog(onClose);
@@ -316,20 +335,20 @@ export function Settings({
   // store (NO local field state → no stomping bug).
   const values: Record<string, unknown> = useMemo(
     () => ({
-      cacheTtl: store.cacheTtl,
-      groqApiKey: store.groqApiKey,
-      voiceTranscriptionModel: store.voiceTranscriptionModel,
-      voiceCommandModel: store.voiceCommandModel,
-      allowAgentPush: store.allowAgentPush,
-      downloadsDir: store.downloadsDir,
-      worktreePerSession: store.worktreePerSession,
-      worktreeCleanOnClose: store.worktreeCleanOnClose,
-      uploadCleanupHours: store.uploadCleanupHours,
-      theme: store.theme,
-      autoRenameSessions: store.autoRenameSessions,
-      alwaysShowUsage: store.alwaysShowUsage,
+      cacheTtl,
+      groqApiKey,
+      voiceTranscriptionModel,
+      voiceCommandModel,
+      allowAgentPush,
+      downloadsDir,
+      worktreePerSession,
+      worktreeCleanOnClose,
+      uploadCleanupHours,
+      theme,
+      autoRenameSessions,
+      alwaysShowUsage,
     }),
-    [store.cacheTtl, store.groqApiKey, store.voiceTranscriptionModel, store.voiceCommandModel, store.allowAgentPush, store.downloadsDir, store.worktreePerSession, store.worktreeCleanOnClose, store.uploadCleanupHours, store.theme, store.autoRenameSessions, store.alwaysShowUsage],
+    [cacheTtl, groqApiKey, voiceTranscriptionModel, voiceCommandModel, allowAgentPush, downloadsDir, worktreePerSession, worktreeCleanOnClose, uploadCleanupHours, theme, autoRenameSessions, alwaysShowUsage],
   );
 
   const commitKey = async (entry: SettingEntry, nextValue: unknown) => {
@@ -387,9 +406,9 @@ export function Settings({
   // Registry URLs (custom control — instant apply on add/remove).
   const {
     registryUrls, setRegistryUrls, newRegistryUrl, setNewRegistryUrl,
-  } = useRegistryUrls(store.skillRegistryUrls ?? []);
+  } = useRegistryUrls(skillRegistryUrls ?? []);
   const persistRegistryUrls = async (next: string[]) => {
-    const prev = store.skillRegistryUrls ?? [];
+    const prev = skillRegistryUrls ?? [];
     useStore.setState({ skillRegistryUrls: next });
     try {
       const r = await window.api.configUpdate({ skillRegistryUrls: next });
@@ -421,7 +440,7 @@ export function Settings({
 
   // Launcher flags (custom control — instant apply per flag).
   const [availableLaunchers] = useLaunchers();
-  const [launcherFlagValues, setLauncherFlagValues] = useState(store.launcherFlags ?? {});
+  const [launcherFlagValues, setLauncherFlagValues] = useState(launcherFlags ?? {});
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
     const prev = launcherFlagValues;
     const nextFlags = updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev);
@@ -597,9 +616,9 @@ export function Settings({
               {serverVersion && (<><span className="text-text-faint"> · </span>server <span className="font-medium text-text">{serverVersion}</span></>)}
               {opencodeVersion && (<><span className="text-text-faint"> · </span>opencode <span className="font-medium text-text">{opencodeVersion}</span></>)}
             </div>
-            {store.updatePrompt && (
+            {updatePrompt && (
               <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
-                <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{store.updatePrompt.releaseName || store.updatePrompt.version}</span></span>
+                <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{updatePrompt.releaseName || updatePrompt.version}</span></span>
                 <button onClick={() => { void window.api.autoUpdateInstall(); }} className={BANNER_BTN}>Restart to update</button>
               </div>
             )}
@@ -614,7 +633,7 @@ export function Settings({
       );
     }
     if (section === "box") {
-      const connected = Boolean(store.boxToken);
+      const connected = Boolean(boxToken);
       return (
         <>
           {/* Read-only status card — the URL lives here; changing it means
@@ -627,11 +646,11 @@ export function Settings({
             <dl className="space-y-1 text-meta">
               <div className="flex gap-2">
                 <dt className="text-text-faint shrink-0">Server URL</dt>
-                <dd className="text-text-muted font-mono break-all">{store.serverUrl || "—"}</dd>
+                <dd className="text-text-muted font-mono break-all">{serverUrl || "—"}</dd>
               </div>
               <div className="flex gap-2">
                 <dt className="text-text-faint shrink-0">Box ID</dt>
-                <dd className="text-text-muted font-mono break-all">{store.boxId || "—"}</dd>
+                <dd className="text-text-muted font-mono break-all">{boxId || "—"}</dd>
               </div>
               {serverVersion && (
                 <div className="flex gap-2">

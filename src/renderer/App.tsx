@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
 import { Terminal as TerminalIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
@@ -22,7 +22,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { Modal } from "./Modal";
@@ -133,30 +133,32 @@ export function App() {
 }
 
 function AppInner() {
-  const {
-    loaded,
-    projects,
-    activeProjectName,
-    activeWindowByProject,
-    setActive,
-    refresh,
-    applyStatusBatch,
-    onboardingForced,
-    finishOnboarding,
-    configSnapshot,
-    updatePrompt,
-    updateError,
-    setUpdateError,
-    boxIncompatible,
-    setBoxIncompatible,
-    serverUpdatePrompt,
-    setServerUpdatePrompt,
-    serverUpdateProgress,
-    connectionState,
-    launcherFlags,
-    createDraft,
-    boxStale,
-  } = useStore();
+  // BET-730: per-field selectors, never a bare useStore() — a no-selector
+  // destructure re-renders this whole component tree (incl. every mounted
+  // ChatPanel) on EVERY store write, e.g. each streaming transcript splice
+  // (setChatMessages ~4Hz) and the 2s status poller.
+  const loaded = useStore((s) => s.loaded);
+  const projects = useStore((s) => s.projects);
+  const activeProjectName = useStore((s) => s.activeProjectName);
+  const activeWindowByProject = useStore((s) => s.activeWindowByProject);
+  const setActive = useStore((s) => s.setActive);
+  const refresh = useStore((s) => s.refresh);
+  const applyStatusBatch = useStore((s) => s.applyStatusBatch);
+  const onboardingForced = useStore((s) => s.onboardingForced);
+  const finishOnboarding = useStore((s) => s.finishOnboarding);
+  const configSnapshot = useStore((s) => s.configSnapshot);
+  const updatePrompt = useStore((s) => s.updatePrompt);
+  const updateError = useStore((s) => s.updateError);
+  const setUpdateError = useStore((s) => s.setUpdateError);
+  const boxIncompatible = useStore((s) => s.boxIncompatible);
+  const setBoxIncompatible = useStore((s) => s.setBoxIncompatible);
+  const serverUpdatePrompt = useStore((s) => s.serverUpdatePrompt);
+  const setServerUpdatePrompt = useStore((s) => s.setServerUpdatePrompt);
+  const serverUpdateProgress = useStore((s) => s.serverUpdateProgress);
+  const connectionState = useStore((s) => s.connectionState);
+  const launcherFlags = useStore((s) => s.launcherFlags);
+  const createDraft = useStore((s) => s.createDraft);
+  const boxStale = useStore((s) => s.boxStale);
 
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
   // to "onboarding" → show the full-screen flow instead of the normal shell.
@@ -258,7 +260,46 @@ function AppInner() {
         ?.windows.find((w) => w.index === activeWindowByProject[activeProjectName])
     : null;
   const activeChatSessionId = activeWin?.opencodeSessionId ?? null;
-  if (activeChatSessionId) visitedChats.current.add(activeChatSessionId);
+
+  // BET-730: record the active chat in an effect, not during render (render-
+  // time ref mutation is a StrictMode hazard). A re-render that just touches
+  // unrelated fields must never mutate the visited set.
+  useEffect(() => {
+    if (!activeChatSessionId) return;
+    if (visitedChats.current.has(activeChatSessionId)) return;
+    visitedChats.current.add(activeChatSessionId);
+    setVisitEpoch((e) => e + 1);
+  }, [activeChatSessionId]);
+
+  // M6/BET-730: a visited chat whose session no longer exists in any project
+  // window is a zombie — unmount its panel (frees its transcript, SSE filters,
+  // intervals, and the store.chatMessages copy via the panel's unmount
+  // cleanup). Session ids that are gone but were /clear-ed or deleted must not
+  // stay mounted forever.
+  const [visitEpoch, setVisitEpoch] = useState(0);
+  useEffect(() => {
+    const live = new Set<string>();
+    for (const p of projects) for (const w of p.windows) {
+      if (w.opencodeSessionId) live.add(w.opencodeSessionId);
+    }
+    const toRemove = pruneVisitedSessions(
+      visitedChats.current,
+      live,
+      activeChatSessionId,
+    );
+    if (toRemove.length > 0) {
+      for (const sid of toRemove) visitedChats.current.delete(sid);
+      setVisitEpoch((e) => e + 1);
+    }
+  }, [projects, activeChatSessionId]);
+
+  // Render the visited-chat loop from a snapshot keyed on visitEpoch so the
+  // panel list re-runs (and the zombie panel unmounts) right after a prune.
+  const visitedChatIds = useMemo(
+    () => [...visitedChats.current],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visitEpoch],
+  );
 
   // Resolved early so it can be reused at the activeWinName display site
   // (line ~695) and anywhere else that needs the active project's metadata.
@@ -1573,7 +1614,7 @@ function AppInner() {
               {/* Chat panels (opencode chat-mode windows): one per visited */}
               {/* session id, visible only when it's the active session AND */}
               {/* the active session's current mode is "chat". */}
-              {[...visitedChats.current].map((sid) => {
+              {visitedChatIds.map((sid) => {
                 // owner is null if the window was killed remotely but manta
                 // still has the panel mounted — fork/delete buttons
                 // gracefully no-op then.

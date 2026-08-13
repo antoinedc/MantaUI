@@ -2511,3 +2511,21 @@ export function formatUpdatedAgo(fetchedAt: number, nowMs: number): string {
 export function usageStale(fetchedAt: number, nowMs: number): boolean {
   return nowMs - fetchedAt > 10 * 60_000;
 }
+
+// M6/BET-730: given the set of "visited" chat session ids (panels kept
+// mounted) and the set of session ids that still exist in some project
+// window, return the ids that should be unmounted. A visited session that no
+// longer exists anywhere is a zombie — its panel leaks its transcript, SSE
+// filters, intervals and a store.chatMessages copy. The active session is
+// never pruned even if it momentarily isn't in a project window.
+export function pruneVisitedSessions(
+  visited: Set<string>,
+  liveSessionIds: Set<string>,
+  activeId: string | null,
+): string[] {
+  const toRemove: string[] = [];
+  for (const sid of visited) {
+    if (!liveSessionIds.has(sid) && sid !== activeId) toRemove.push(sid);
+  }
+  return toRemove;
+}

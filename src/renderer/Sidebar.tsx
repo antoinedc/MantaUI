@@ -62,24 +62,25 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   { onOpenSettings, onNewProject, onNewSessionInProject },
   ref,
 ) {
-  const {
-    projects,
-    activeProjectName,
-    activeWindowByProject,
-    status,
-    jobs,
-    setActive,
-    refresh,
-    backgroundSyncing,
-    pinnedWindows,
-    recentWindows,
-    togglePin,
-    worktreeCleanOnClose,
-    drafts,
-    activeDraftId,
-    setActiveDraft,
-    dismissDraft,
-  } = useStore();
+  // BET-730: per-field selectors, never a bare useStore() — a no-selector
+  // destructure re-renders the whole sidebar tree (and the App render that
+  // hosts it) on EVERY store write, incl. each streaming transcript splice.
+  const projects = useStore((s) => s.projects);
+  const activeProjectName = useStore((s) => s.activeProjectName);
+  const activeWindowByProject = useStore((s) => s.activeWindowByProject);
+  const status = useStore((s) => s.status);
+  const jobs = useStore((s) => s.jobs);
+  const setActive = useStore((s) => s.setActive);
+  const refresh = useStore((s) => s.refresh);
+  const backgroundSyncing = useStore((s) => s.backgroundSyncing);
+  const pinnedWindows = useStore((s) => s.pinnedWindows);
+  const recentWindows = useStore((s) => s.recentWindows);
+  const togglePin = useStore((s) => s.togglePin);
+  const worktreeCleanOnClose = useStore((s) => s.worktreeCleanOnClose);
+  const drafts = useStore((s) => s.drafts);
+  const activeDraftId = useStore((s) => s.activeDraftId);
+  const setActiveDraft = useStore((s) => s.setActiveDraft);
+  const dismissDraft = useStore((s) => s.dismissDraft);
   // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
   // Settings entry, not a full-width bar.
   const updateAvailable = useStore((s) => s.updatePrompt != null);
