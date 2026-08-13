@@ -2384,10 +2384,77 @@ export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | 
 // Cross-file contract for the ⌘F cross-conversation jump: SearchPalette sets
 // this global, ChatPanel consumes it once the target session's transcript has
 // rendered. Same pre-mount-bridge pattern as __mantaScrollQuestionSession.
-export type PendingMessageScroll = { sessionId: string; messageId: string };
+// `query` is the trimmed search term; when present ChatPanel also highlights
+// the matched text in the destination row (BET-806). Absent ⇒ flash only, as
+// with the artifacts-panel jump.
+export type PendingMessageScroll = {
+  sessionId: string;
+  messageId: string;
+  query?: string;
+};
 export type PendingScrollWin = Window & {
   __mantaPendingMessageScroll?: PendingMessageScroll | null;
 };
+
+/**
+ * Plan case-insensitive highlight ranges for `query` across a row's text nodes.
+ *
+ * `lengths` is the character length of each text node, in document order. The
+ * function works on the CONCATENATION of those nodes, so a match that straddles
+ * a node boundary (e.g. bold in the middle of a sentence) still produces one
+ * range. Returns the ranges as node-index + offset pairs, which the DOM caller
+ * turns into `Range` objects.
+ *
+ * Returns [] for an empty query, a query of only whitespace, or no match.
+ * Matches do not overlap: scanning continues after the end of each match.
+ */
+export type HighlightRange = {
+  startNode: number;
+  startOffset: number;
+  endNode: number;
+  endOffset: number;
+};
+
+export function planHighlightRanges(
+  lengths: number[],
+  text: string,
+  query: string,
+): HighlightRange[] {
+  const q = query.toLowerCase();
+  if (q.length === 0 || q.trim().length === 0 || text.length === 0) return [];
+  const lower = text.toLowerCase();
+  const ranges: HighlightRange[] = [];
+  let searchFrom = 0;
+  while (true) {
+    const idx = lower.indexOf(q, searchFrom);
+    if (idx === -1) break;
+    const start = idx;
+    const end = idx + q.length;
+    ranges.push({
+      startNode: nodeForOffset(lengths, start),
+      startOffset: start - offsetAtNode(lengths, nodeForOffset(lengths, start)),
+      endNode: nodeForOffset(lengths, end),
+      endOffset: end - offsetAtNode(lengths, nodeForOffset(lengths, end)),
+    });
+    searchFrom = end;
+  }
+  return ranges;
+}
+
+function offsetAtNode(lengths: number[], node: number): number {
+  let sum = 0;
+  for (let i = 0; i < node; i++) sum += lengths[i];
+  return sum;
+}
+
+function nodeForOffset(lengths: number[], offset: number): number {
+  let sum = 0;
+  for (let i = 0; i < lengths.length; i++) {
+    sum += lengths[i];
+    if (offset < sum) return i;
+  }
+  return lengths.length > 0 ? lengths.length - 1 : 0;
+}
 
 // ===== Subscription plan usage (BET-738: composer dial + popover) =====
 //

@@ -95,6 +95,7 @@ import {
   zeroStateMode,
   initialRepoSelection,
   describeRepoRow,
+  planHighlightRanges,
   type StatusItem,
   type RepoRow,
 } from "./chatUtils";
@@ -3620,5 +3621,52 @@ describe("describeRepoRow", () => {
         repoRow({ branch: "main", originUrl: null, path: "/home/u/scratch", repoKey: null, forge: null }),
       ),
     ).toBe("⎇ main · /home/u/scratch · no remote");
+  });
+});
+
+describe("planHighlightRanges", () => {
+  it("returns one range for a single match inside one text node", () => {
+    expect(planHighlightRanges([15], "the quick brown fox", "brown")).toEqual([
+      { startNode: 0, startOffset: 10, endNode: 0, endOffset: 15 },
+    ]);
+  });
+
+  it("returns ONE range spanning two text nodes when a match straddles them", () => {
+    const lengths = [6, 6]; // "Hello " + "worldX"
+    const text = "Hello worldX";
+    expect(planHighlightRanges(lengths, text, " world")).toEqual([
+      { startNode: 0, startOffset: 5, endNode: 1, endOffset: 5 },
+    ]);
+  });
+
+  it("is case-insensitive", () => {
+    expect(planHighlightRanges([3], "foo", "Foo")).toEqual([
+      { startNode: 0, startOffset: 0, endNode: 0, endOffset: 3 },
+    ]);
+  });
+
+  it("returns one range per non-overlapping match, in document order", () => {
+    expect(planHighlightRanges([13], "cat dog cat", "cat")).toEqual([
+      { startNode: 0, startOffset: 0, endNode: 0, endOffset: 3 },
+      { startNode: 0, startOffset: 8, endNode: 0, endOffset: 11 },
+    ]);
+  });
+
+  it("resumes after each match so 'aa' in 'aaaa' yields 2 ranges, not 3", () => {
+    expect(planHighlightRanges([4], "aaaa", "aa")).toEqual([
+      { startNode: 0, startOffset: 0, endNode: 0, endOffset: 2 },
+      { startNode: 0, startOffset: 2, endNode: 0, endOffset: 4 },
+    ]);
+    expect(planHighlightRanges([4], "aaaa", "aa")).toHaveLength(2);
+  });
+
+  it("returns [] for an empty query, a whitespace-only query, or no match", () => {
+    expect(planHighlightRanges([5], "abcde", "")).toEqual([]);
+    expect(planHighlightRanges([5], "abcde", "   ")).toEqual([]);
+    expect(planHighlightRanges([5], "abcde", "zzz")).toEqual([]);
+  });
+
+  it("returns [] for an empty lengths array (a row with no text nodes)", () => {
+    expect(planHighlightRanges([], "", "cat")).toEqual([]);
   });
 });

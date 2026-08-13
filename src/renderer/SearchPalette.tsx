@@ -140,7 +140,7 @@ export function SearchPalette({
     if (row.sessionId === sessionId) {
       window.dispatchEvent(
         new CustomEvent("manta-scroll-to-message", {
-          detail: { sessionId, messageId: row.hit.messageId },
+          detail: { sessionId, messageId: row.hit.messageId, query: q },
         }),
       );
       return;
@@ -150,6 +150,7 @@ export function SearchPalette({
     (window as PendingScrollWin).__mantaPendingMessageScroll = {
       sessionId: row.sessionId,
       messageId: row.hit.messageId,
+      query: q,
     };
     onJumpToWindow(owner.tmuxSession, owner.windowIndex);
   };
