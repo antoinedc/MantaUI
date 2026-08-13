@@ -8,6 +8,7 @@ import {
   startJob,
   observeEvent,
   finishJob,
+  listJobs,
   sweepDelegateJobs,
   deleteJob,
   cleanupTerminalJob,
@@ -1144,4 +1145,58 @@ test("§A4: a job omitting bash receives the catch-all deny at the session-creat
   const after = h.jobs[0];
   assert.equal(after.status, "failed", "job fails fast — does NOT stall for the 30-min timeout");
   assert.match(after.error ?? "", /denied|bash/i, "failure reason reflects the denial");
+});
+
+// ----------------------------------------------------------------------------
+// Progress exposure (BET-790 §5): a job's list/get carries the child's live
+// progress record, from the SAME progress store delegate reads — no second
+// store/event.
+// ----------------------------------------------------------------------------
+
+test("listJobs attaches the child's progress record to the job (BET-790)", async () => {
+  const h = harness([
+    {
+      id: "job1",
+      name: "Job one",
+      parentSessionID: "parent1",
+      childSessionID: "child1",
+      status: "running",
+      activity: null,
+    },
+    {
+      id: "job2",
+      name: "Job two",
+      parentSessionID: "parent1",
+      childSessionID: "child2",
+      status: "running",
+      activity: null,
+    },
+  ]);
+  // Injected progress reader: child2 reported step 3/5; child1 never reported.
+  const readProgress = async (sid) =>
+    sid === "child2" ? { sessionID: "child2", label: "step 3 of 5", step: 3, total: 5, state: "working", detail: "", updatedAt: 1 } : null;
+
+  const scoped = await listJobs({ sessionID: "parent1" }, { load: h.deps.load, readProgress });
+  assert.equal(scoped.length, 2);
+  const job2 = scoped.find((j) => j.id === "job2");
+  assert.equal(job2.progress.label, "step 3 of 5");
+  const job1 = scoped.find((j) => j.id === "job1");
+  assert.equal(job1.progress, null);
+});
+
+test("finishJob clears the child's progress record (BET-790)", async () => {
+  const h = harness([
+    {
+      id: "job1",
+      name: "Job one",
+      parentSessionID: "parent1",
+      childSessionID: "child1",
+      status: "running",
+      activity: null,
+    },
+  ]);
+  const cleared = [];
+  h.deps.clearProgress = async (sid) => { cleared.push(sid); return { ok: true, deleted: true }; };
+  await finishJob(h.jobs[0], "done", null, h.deps, new Map());
+  assert.deepEqual(cleared, ["child1"]);
 });
