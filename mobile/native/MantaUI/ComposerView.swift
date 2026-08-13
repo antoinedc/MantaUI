@@ -760,16 +760,16 @@ struct ComposerView: View {
     // MARK: - Send
 
     private var sendButton: some View {
-        Button(action: submit) {
-            Image(systemName: "arrow.up")
+        Button(action: { store.running ? store.abort() : submit() }) {
+            Image(systemName: store.running ? "stop.fill" : "arrow.up")
                 .font(.system(size: Metrics.type.body, weight: .semibold))
-                .foregroundColor(canSend ? tokens.onAccent : tokens.tx4)
+                .foregroundColor(store.running || canSend ? tokens.onAccent : tokens.tx4)
                 .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                .background(canSend ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
+                .background(store.running || canSend ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!canSend)
-        .accessibilityLabel("Send")
+        .disabled(!store.running && !canSend)
+        .accessibilityLabel(store.running ? "Stop" : "Send")
         .accessibilityIdentifier("send-button")
     }
 
