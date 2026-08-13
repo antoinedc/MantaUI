@@ -66,4 +66,47 @@ describe("PaletteShell — Escape (BET-724)", () => {
     });
     expect(closed).toBe(1);
   });
+
+  // BET-724 review cycle 1 nit: moving the handler to the overlay meant Enter
+  // was intercepted for ANY focused element, including the "ESC" chip button
+  // — `e.preventDefault()` there suppressed the chip's own click (which calls
+  // requestClose), so Tabbing to it and pressing Enter silently ran pick(sel)
+  // instead. Enter/Arrow navigation is now scoped to the search input only.
+  it("Enter on the ESC chip does not pick a row (only the input's Enter does)", () => {
+    let picked: number | null = null;
+    h = mount(
+      <PaletteShell
+        label="Test palette"
+        placeholder="Search…"
+        query=""
+        setQuery={() => {}}
+        itemCount={1}
+        sel={0}
+        setSel={() => {}}
+        onPick={(i) => {
+          picked = i;
+        }}
+        onClose={() => {}}
+      >
+        {() => <button>row</button>}
+      </PaletteShell>,
+    );
+    const escChip = h.container.querySelector('button[title="Close (Esc)"]') as HTMLButtonElement;
+    expect(escChip).toBeTruthy();
+    escChip.focus();
+    act(() => {
+      escChip.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(picked).toBeNull();
+
+    const input = h.container.querySelector("input")!;
+    act(() => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(picked).toBe(0);
+  });
 });

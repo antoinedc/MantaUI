@@ -60,9 +60,19 @@ export function PaletteShell({
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
+      // Always closes, regardless of which inner element has focus.
       e.preventDefault();
       requestClose();
-    } else if (e.key === "ArrowDown") {
+      return;
+    }
+    // Arrow/Enter navigation only makes sense while the search input itself
+    // is focused. Bound here (not on the input) so Escape still works
+    // regardless of focus (above), but leave native button activation (e.g.
+    // Tabbing to the "ESC" chip and pressing Enter) alone otherwise — review
+    // cycle 1 nit: intercepting Enter here for a focused button suppressed
+    // its own click (requestClose) and ran pick(sel) instead.
+    if (e.target !== inputRef.current) return;
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       if (itemCount > 0) setSel((sel + 1) % itemCount);
     } else if (e.key === "ArrowUp") {
