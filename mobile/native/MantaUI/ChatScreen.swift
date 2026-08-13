@@ -333,7 +333,7 @@ private struct ChatScreenContent: View {
         .overlay(alignment: .top) {
             if store.degraded {
                 Text("Connection lost — reconnecting…")
-                    .font(.system(size: Metrics.type.xs, weight: .semibold))
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
                     .foregroundColor(tokens.danger)
                     .padding(.horizontal, Metrics.spacing.sp3)
                     .padding(.vertical, Metrics.spacing.sp1)
@@ -541,7 +541,7 @@ private struct ChatScreenContent: View {
                 // non-interactive treatment.
                 if let ctx = store.context {
                     Text("\(Int(ctx.pct.rounded()))% ctx")
-                        .font(.system(size: Metrics.type.xs, weight: .semibold))
+                        .font(.manta(size: Metrics.type.xs, weight: .semibold))
                         .foregroundColor(ctxColor(ctx.pct))
                         .padding(.horizontal, Metrics.spacing.sp2)
                         .frame(height: Metrics.type.chatHeaderBtn)
@@ -735,10 +735,10 @@ private struct ChatScreenContent: View {
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.warn)
             Text("Couldn't reach your box")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Text("Tap to retry.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -854,7 +854,7 @@ private struct TodosCard: View {
             }
             if let overflowSummary {
                 Text(overflowSummary)
-                    .font(.system(size: Metrics.type.xs))
+                    .font(.manta(size: Metrics.type.xs))
                     .foregroundColor(tokens.tx4)
             }
         }
@@ -887,7 +887,7 @@ private struct TodosCard: View {
                 .font(.system(size: Metrics.type.xs))
                 .foregroundColor(markColor(status))
             Text(item.content ?? "")
-                .font(.system(size: Metrics.type.small, weight: status == "in_progress" ? mantaFontWeight(Metrics.type.semibold) : .regular))
+                .font(.manta(size: Metrics.type.small, weight: status == "in_progress" ? mantaFontWeight(Metrics.type.semibold) : .regular))
                 .foregroundColor(textColor(status))
                 .strikethrough(status == "cancelled")
                 // A todo's text must not be silently clipped to one line.
@@ -933,10 +933,10 @@ private struct PermissionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             Text("Permission needed")
-                .font(.system(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.semibold)))
+                .font(.manta(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.semibold)))
                 .foregroundColor(tokens.tx4)
             Text(summary)
-                .font(.system(size: Metrics.type.body))
+                .font(.manta(size: Metrics.type.body))
                 .foregroundColor(tokens.tx1)
                 .lineLimit(3)
             HStack(spacing: Metrics.spacing.sp2) {
@@ -947,7 +947,7 @@ private struct PermissionCard: View {
                     onReply(.reject)
                 } label: {
                     Text("Reject")
-                        .font(.system(size: Metrics.type.small, weight: .medium))
+                        .font(.manta(size: Metrics.type.small, weight: .medium))
                         .foregroundColor(tokens.danger)
                 }
             }
@@ -974,7 +974,7 @@ private struct PermissionCard: View {
             onReply(reply)
         } label: {
             Text(label)
-                .font(.system(size: Metrics.type.small, weight: .semibold))
+                .font(.manta(size: Metrics.type.small, weight: .semibold))
                 .foregroundColor(filled ? tokens.onAccent : tokens.accentTx)
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
@@ -1005,11 +1005,11 @@ private struct QuestionCard: View {
                 VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                     if !q.header.isEmpty {
                         Text(q.header)
-                            .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                            .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                             .foregroundColor(tokens.tx1)
                     }
                     Text(q.question)
-                        .font(.system(size: Metrics.type.body))
+                        .font(.manta(size: Metrics.type.body))
                         .foregroundColor(tokens.tx1)
                     ForEach(Array(q.options.enumerated()), id: \.offset) { oi, option in
                         optionButton(questionIndex: index, optionIndex: oi, label: option.label, multi: q.multiple == true)
@@ -1022,19 +1022,19 @@ private struct QuestionCard: View {
             // only writer unreachable, so free-form questions could never be
             // answered.
             TextField("Or type your own answer…", text: $customText)
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx1)
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
                 .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             HStack {
                 Button("Reject", action: onReject)
-                    .font(.system(size: Metrics.type.small, weight: .medium))
+                    .font(.manta(size: Metrics.type.small, weight: .medium))
                     .foregroundColor(tokens.danger)
                 Spacer()
                 Button { submit() } label: {
                     Text("Send")
-                        .font(.system(size: Metrics.type.small, weight: .semibold))
+                        .font(.manta(size: Metrics.type.small, weight: .semibold))
                         .foregroundColor(canSubmit ? tokens.onAccent : tokens.tx4)
                         .padding(.horizontal, Metrics.spacing.sp3)
                         .padding(.vertical, Metrics.spacing.sp2)
@@ -1074,7 +1074,7 @@ private struct QuestionCard: View {
                     .font(.system(size: Metrics.type.xs))
                     .foregroundColor(isOn ? tokens.accent : tokens.tx4)
                 Text(label)
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx1)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
@@ -1117,7 +1117,7 @@ private struct ChatNoticeRow: View {
                 .font(.system(size: Metrics.type.xs, weight: .semibold))
                 .foregroundColor(color)
             Text(text)
-                .font(.system(size: Metrics.type.xs))
+                .font(.manta(size: Metrics.type.xs))
                 .foregroundColor(color)
                 .lineLimit(3)
             Spacer(minLength: 0)

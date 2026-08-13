@@ -237,7 +237,7 @@ struct SessionListView: View {
     @ViewBuilder
     private func groupHeader(_ name: String) -> some View {
         Text(titleCased(name))
-            .font(.system(size: Metrics.type.body, weight: .semibold))
+            .font(.manta(size: Metrics.type.body, weight: .semibold))
             .kerning(Metrics.type.headingTracking * Metrics.type.body)
             .foregroundColor(tokens.tx2)
             .padding(.top, Metrics.type.listGroupAbove)
@@ -344,10 +344,10 @@ struct SessionListView: View {
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.warn)
             Text("Delete this session?")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Text("This will stop a turn that's been running \(deleteRunningText).")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx2)
                 .multilineTextAlignment(.center)
             Button {
@@ -365,7 +365,7 @@ struct SessionListView: View {
                 }
             } label: {
                 Text("Delete Session")
-                    .font(.system(size: Metrics.type.small, weight: .semibold))
+                    .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.onAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Metrics.spacing.sp3)
@@ -375,7 +375,7 @@ struct SessionListView: View {
                 sheetRoute = nil
             } label: {
                 Text("Cancel")
-                    .font(.system(size: Metrics.type.small, weight: .medium))
+                    .font(.manta(size: Metrics.type.small, weight: .medium))
                     .foregroundColor(tokens.tx2)
                     .padding(Metrics.spacing.sp2)
             }
@@ -393,13 +393,13 @@ struct SessionListView: View {
                     .font(.system(size: Metrics.type.small))
                     .foregroundColor(tokens.tx2)
                 Text("Deleted")
-                    .font(.system(size: Metrics.type.small, weight: .medium))
+                    .font(.manta(size: Metrics.type.small, weight: .medium))
                     .foregroundColor(tokens.tx1)
                 Spacer()
                 Button("Undo") {
                     store.undoPendingDelete(pending.pinID)
                 }
-                .font(.system(size: Metrics.type.small, weight: .semibold))
+                .font(.manta(size: Metrics.type.small, weight: .semibold))
                 .foregroundColor(tokens.accentTx)
                 .padding(.horizontal, Metrics.spacing.sp2)
                 .padding(.vertical, Metrics.spacing.sp1)
@@ -439,7 +439,7 @@ struct SessionListView: View {
                         .font(.system(size: Metrics.type.xs))
                         .foregroundColor(tokens.tx4)
                     TextField("Search sessions", text: $searchText)
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx1)
                 }
                 .padding(.horizontal, Metrics.spacing.sp3)
@@ -495,10 +495,10 @@ struct SessionListView: View {
     private func renameSheet(target: MantaWindow, targetProject: String) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
             Text("Rename session")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             TextField("Name", text: $renameValue)
-                .font(.system(size: Metrics.type.body))
+                .font(.manta(size: Metrics.type.body))
                 .foregroundColor(tokens.tx1)
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
@@ -541,10 +541,10 @@ struct SessionListView: View {
     private var emptyState: some View {
         VStack(spacing: Metrics.spacing.sp2) {
             Text("No sessions yet")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx3)
             Text("Tap + to create one.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
         }
         .accessibilityIdentifier("sessions-empty")
@@ -563,16 +563,16 @@ struct SessionListView: View {
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.tx4)
             Text("Can't load your sessions")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx3)
             Text(store.loadError ?? "Couldn't reach your box")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
                 .multilineTextAlignment(.center)
             Button("Try again") {
                 Task { await store.refresh() }
             }
-            .font(.system(size: Metrics.type.small, weight: .semibold))
+            .font(.manta(size: Metrics.type.small, weight: .semibold))
             .foregroundColor(tokens.accentTx)
             .padding(.top, Metrics.spacing.sp1)
             .disabled(store.loading)
@@ -584,10 +584,10 @@ struct SessionListView: View {
     private var noMatchState: some View {
         VStack(spacing: Metrics.spacing.sp2) {
             Text("No sessions match")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx3)
             Text("Nothing named “\(searchText)”.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
         }
         .accessibilityIdentifier("sessions-no-match")
@@ -599,7 +599,7 @@ struct SessionListView: View {
             HStack {
                 Image(systemName: "wifi.exclamationmark")
                 Text(error)
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                 Spacer()
             }
             .padding(.horizontal, Metrics.spacing.sp3)
@@ -644,7 +644,7 @@ private struct SessionRowContent: View {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                 HStack(spacing: Metrics.spacing.sp1) {
                     Text(window.name)
-                        .font(.system(size: Metrics.type.rowName, weight: .medium))
+                        .font(.manta(size: Metrics.type.rowName, weight: .medium))
                         .kerning(Metrics.type.rowNameTracking * Metrics.type.rowName)
                         .foregroundColor(tokens.tx1)
                         .lineLimit(1)
@@ -656,7 +656,7 @@ private struct SessionRowContent: View {
                 }
                 if let subtitle = SessionRowSubtitle.text(for: status) {
                     Text(subtitle)
-                        .font(.system(size: Metrics.type.xs, weight: .medium))
+                        .font(.manta(size: Metrics.type.xs, weight: .medium))
                         .foregroundColor(tokens.tx4)
                         .lineLimit(1)
                 }
@@ -664,7 +664,7 @@ private struct SessionRowContent: View {
             Spacer()
             if let timer {
                 Text(timer)
-                    .font(.system(size: Metrics.type.twoXS, weight: .medium, design: .monospaced))
+                    .font(.manta(size: Metrics.type.twoXS, weight: .medium, design: .monospaced))
                     .foregroundColor(tokens.tx4)
                     .monospacedDigit()
             }
@@ -762,10 +762,10 @@ private struct SessionScreenPlaceholder: View {
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.tx4)
             Text(name)
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Text("Chat arrives in a later stage.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

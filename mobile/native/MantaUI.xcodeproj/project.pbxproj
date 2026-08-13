@@ -52,6 +52,7 @@
 		8C965541FA4ABDFB2A2A319E /* terminal in Resources */ = {isa = PBXBuildFile; fileRef = 0C1EE3F998CADE8487D2555E /* terminal */; };
 		8F61F901888B9FE16EA093B0 /* ChatSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 471BF240012879FDED5689C1 /* ChatSessionStore.swift */; };
 		9055A7DECF435A0A430D6FAB /* MantaSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABF1AB00CC95EA99A4EF537B /* MantaSettingsStore.swift */; };
+		9068396FC592D6010419D13D /* MantaDynamicType.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FCC705A51D162CE3E7E3B00 /* MantaDynamicType.swift */; };
 		94493F871005DA7F4DA19ED7 /* SessionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D06ECCB6D27DBD73D1FF3189 /* SessionListView.swift */; };
 		95970E5B12500AFD427E23D9 /* TranscriptComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */; };
 		959894A87F301CC717772BD3 /* ChatLoadingSkeleton.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */; };
@@ -111,6 +112,7 @@
 		0451BC1AF50CB3A8D80344A5 /* ChatVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatVoice.swift; sourceTree = "<group>"; };
 		0C1EE3F998CADE8487D2555E /* terminal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = terminal; path = MantaUI/Resources/terminal; sourceTree = SOURCE_ROOT; };
 		0C440016971186430E8C464B /* Scrim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scrim.swift; sourceTree = "<group>"; };
+		0FCC705A51D162CE3E7E3B00 /* MantaDynamicType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaDynamicType.swift; sourceTree = "<group>"; };
 		17673950838B843917DA660F /* MantaRunningStateCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaRunningStateCaptureUITests.swift; sourceTree = "<group>"; };
 		17D174288A1A6C72E64B9079 /* MantaAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAPIClient.swift; sourceTree = "<group>"; };
 		1E1306D325FEB295B7AB874E /* MantaEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaEventStore.swift; sourceTree = "<group>"; };
@@ -307,6 +309,7 @@
 				DD646A4951E292E750890CCB /* MantaAppRoot.swift */,
 				2F29E8693B4AA4191CF9C556 /* MantaAuthClient.swift */,
 				8879A94FE1BE824F438342AD /* MantaDeepLink.swift */,
+				0FCC705A51D162CE3E7E3B00 /* MantaDynamicType.swift */,
 				1E1306D325FEB295B7AB874E /* MantaEventStore.swift */,
 				872DDE9D9BAD041950DAC24A /* MantaLoader.swift */,
 				8C8240F1954861B4846E279D /* MantaModels.swift */,
@@ -578,6 +581,7 @@
 				3A14CB75D91300937752389C /* MantaAppRoot.swift in Sources */,
 				863035B4DE4C873A0BD9D0F5 /* MantaAuthClient.swift in Sources */,
 				F84BE156312997C53C3314AF /* MantaDeepLink.swift in Sources */,
+				9068396FC592D6010419D13D /* MantaDynamicType.swift in Sources */,
 				33DC8035C0E87F9A3A7DA7DB /* MantaEventStore.swift in Sources */,
 				74D756D48A7D2A5483170A8B /* MantaLoader.swift in Sources */,
 				01871023D47544D64443194D /* MantaModels.swift in Sources */,
@@ -685,7 +689,7 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -697,7 +701,7 @@
 				PRODUCT_NAME = MantaUI;
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -792,7 +796,7 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -804,7 +808,7 @@
 				PRODUCT_NAME = MantaUI;
 				SDKROOT = iphoneos;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};

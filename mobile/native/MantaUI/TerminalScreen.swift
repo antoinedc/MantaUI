@@ -89,13 +89,13 @@ struct TerminalScreen: View {
 
             VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
                 Text(windowName)
-                    .font(.system(size: Metrics.type.chatTitle, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.chatTitle, weight: mantaFontWeight(Metrics.type.semibold)))
                     .kerning(Metrics.type.chatTitleTracking * Metrics.type.chatTitle)
                     .foregroundColor(tokens.tx1)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(terminal.geometryText.isEmpty ? "—" : terminal.geometryText)
-                    .font(.system(size: Metrics.type.xs, weight: .medium, design: .monospaced))
+                    .font(.manta(size: Metrics.type.xs, weight: .medium, design: .monospaced))
                     .foregroundColor(tokens.tx4)
             }
 

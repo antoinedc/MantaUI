@@ -64,14 +64,14 @@ struct FolderPickerView: View {
             }
             .accessibilityLabel("Close")
             Text("Choose folder")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Spacer()
             Button {
                 selectCurrent()
             } label: {
                 Text("Select")
-                    .font(.system(size: Metrics.type.small, weight: .semibold))
+                    .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.onAccent)
                     .padding(.horizontal, Metrics.spacing.sp3)
                     .padding(.vertical, Metrics.spacing.sp1)
@@ -85,7 +85,7 @@ struct FolderPickerView: View {
     private var pathField: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             TextField("path", text: $path)
-                .font(.system(size: Metrics.type.small, design: .monospaced))
+                .font(.manta(size: Metrics.type.small, design: .monospaced))
                 .foregroundColor(tokens.tx1)
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
@@ -109,7 +109,7 @@ struct FolderPickerView: View {
                         path = crumb
                     } label: {
                         Text(FolderPath.crumbLabel(crumb))
-                            .font(.system(size: Metrics.type.twoXS, design: .monospaced))
+                            .font(.manta(size: Metrics.type.twoXS, design: .monospaced))
                             .foregroundColor(crumb == path ? tokens.tx1 : tokens.tx3)
                             .padding(.horizontal, Metrics.spacing.sp1)
                             .padding(.vertical, Metrics.spacing.spPx)
@@ -167,17 +167,17 @@ struct FolderPickerView: View {
                 VStack(spacing: Metrics.spacing.sp2) {
                     ProgressView()
                     Text("Loading…")
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx4)
                 }
             } else if let error {
                 Text(error)
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.danger)
                     .padding(Metrics.spacing.sp3)
             } else if rows.isEmpty {
                 Text("No subfolders")
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx4)
             }
         }
@@ -192,14 +192,14 @@ struct FolderPickerView: View {
                 .frame(width: 16)
             Text(name)
                 .font(monospaced
-                    ? .system(size: Metrics.type.body, design: .monospaced)
-                    : .system(size: Metrics.type.body))
+                    ? .manta(size: Metrics.type.body, design: .monospaced)
+                    : .manta(size: Metrics.type.body))
                 .foregroundColor(color)
                 .lineLimit(1)
             Spacer()
             if !trailing.isEmpty {
                 Text(trailing)
-                    .font(.system(size: Metrics.type.xs))
+                    .font(.manta(size: Metrics.type.xs))
                     .foregroundColor(tokens.accentTx)
             }
         }
@@ -250,7 +250,7 @@ struct FolderPickerView: View {
         if let fanOut {
             VStack(spacing: Metrics.spacing.sp2) {
                 Text("Detected \(fanOut.worktrees.count) git worktrees. Open a session for each?")
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx2)
                     .multilineTextAlignment(.center)
                 ScrollView {
@@ -258,11 +258,11 @@ struct FolderPickerView: View {
                         ForEach(fanOut.worktrees, id: \.path) { w in
                             HStack {
                                 Text(WorktreeInfoLogic.name(w))
-                                    .font(.system(size: Metrics.type.xs, design: .monospaced))
+                                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
                                     .foregroundColor(tokens.tx1)
                                 Spacer()
                                 Text(w.path)
-                                    .font(.system(size: Metrics.type.xs, design: .monospaced))
+                                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
                                     .foregroundColor(tokens.tx4)
                                     .lineLimit(1)
                             }
@@ -284,7 +284,7 @@ struct FolderPickerView: View {
                     self.fanOut = nil
                 } label: {
                     Text("Cancel")
-                        .font(.system(size: Metrics.type.small, weight: .medium))
+                        .font(.manta(size: Metrics.type.small, weight: .medium))
                         .foregroundColor(tokens.tx3)
                         .padding(Metrics.spacing.sp1)
                 }
@@ -299,7 +299,7 @@ struct FolderPickerView: View {
     @ViewBuilder
     private func confirmLabel(_ text: String, filled: Bool) -> some View {
         Text(text)
-            .font(.system(size: Metrics.type.small, weight: .semibold))
+            .font(.manta(size: Metrics.type.small, weight: .semibold))
             .foregroundColor(filled ? tokens.onAccent : tokens.tx2)
             .frame(maxWidth: .infinity)
             .padding(.vertical, Metrics.spacing.sp3)
