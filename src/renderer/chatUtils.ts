@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2673,5 +2673,54 @@ export function arrangeCards<T extends PinnedCard>(cards: T[]): PinnedCardStack<
     ambient: ambient.slice(0, MAX_AMBIENT_EXPANDED),
     ambientRollup: ambient.slice(MAX_AMBIENT_EXPANDED),
   };
+}
 
+// ===== BET-787: repo-probe zero state =====
+
+// A probe result row augmented with `local` — true when the repo already
+// exists on disk and can therefore be pre-checked without a clone. Clone rows,
+// added by a later forge issue, land here with `local: false` and must never be
+// pre-checked. The pre-check rule is a property of the row's data, not a
+// "default all true", so the clone rows arrive unchecked without a rewrite.
+export type RepoRow = RepoHit & { local: boolean };
+
+// The zero-state mode for the new-project screen, derived from the probe
+// lifecycle. The one rule to get exactly right: "probe succeeded but returned
+// zero repos" is `"fresh"`, never `"degraded"` — a successful scan with nothing
+// found is real information (an empty box invites a clone), a failed scan is a
+// different, worse-off state that degrades to the folder picker.
+export function zeroStateMode(input: {
+  probePending: boolean;
+  probeFailed: boolean;
+  repos: RepoHit[];
+}): "scanning" | "list" | "fresh" | "degraded" {
+  if (input.probePending) return "scanning";
+  if (input.probeFailed) return "degraded";
+  return input.repos.length > 0 ? "list" : "fresh";
+}
+
+// The pre-checked set of repos, capped at `cap`. Rows are considered
+// most-recent-first and only *local* rows can be pre-checked (anything that
+// would require a clone must land unchecked). The cap stops a box with many
+// repos from silently creating that many tmux sessions.
+export function initialRepoSelection(repos: RepoRow[], cap: number): RepoRow[] {
+  const sorted = [...repos].sort(
+    (a, b) => (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0),
+  );
+  const selected: RepoRow[] = [];
+  for (const repo of sorted) {
+    if (!repo.local) continue;
+    if (selected.length >= cap) break;
+    selected.push(repo);
+  }
+  return selected;
+}
+
+// The secondary line under a repo row. With an origin, the branch alone
+// identifies the row; without one the bare basename does not, so the path and
+// "no remote" are added so the user can tell the row apart.
+export function describeRepoRow(repo: RepoHit): string {
+  const branch = repo.branch ? `⎇ ${repo.branch}` : "no branch";
+  if (!repo.originUrl) return `${branch} · ${repo.path} · no remote`;
+  return branch;
 }

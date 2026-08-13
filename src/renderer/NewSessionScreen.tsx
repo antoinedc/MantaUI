@@ -44,12 +44,24 @@ import { Button } from "./Button";
 import { Card } from "./Card";
 import { Checkbox } from "./Checkbox";
 import { FolderPickerModal } from "./FolderPickerModal";
+import { ListRow } from "./ListRow";
+import { Skeleton } from "./Skeleton";
+import { StatusDot } from "./StatusDot";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder, type VoiceResult } from "./voice";
+import {
+  describeRepoRow,
+  formatAge,
+  initialRepoSelection,
+  zeroStateMode,
+  type RepoRow,
+} from "./chatUtils";
 import type { VoiceMode, VoicePhase } from "./voice";
 import type {
+  ForgeCliStatus,
   OpencodeModel,
   Project,
+  RepoHit,
   TmuxCreateResult,
   WorktreeInfo,
 } from "../shared/types";
@@ -104,6 +116,10 @@ export function promptWindowName(input: string): string {
 }
 
 export function NewSessionScreen({ draftId, onDone }: Props) {
+  // Per-row lifecycle for the repo-probe batch setup (BET-787 [S8]).
+  type RowPhase = "idle" | "queued" | "creating" | "ready" | "error";
+  type CreatedSession = { name: string; windowIndex: number | undefined };
+
   // The draft this composer edits. The App only ever renders this screen for a
   // draft that exists (activeDraftId always points at a live draft), so a
   // missing draft is unreachable in practice; the guard keeps TypeScript's
@@ -134,6 +150,220 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ---- repo probe (BET-787): the new-project zero state ----
+  // Probe the box for git repos + the gh CLI. The scan is purely additive: if
+  // it fails or is unavailable we degrade to exactly today's behaviour (the
+  // folder picker), never a state worse than the one the screen used to have.
+  const PROBE_PRE_CHECK_CAP = 8;
+  const [probePending, setProbePending] = useState(false);
+  const [probeFailed, setProbeFailed] = useState(false);
+  const [probeRepos, setProbeRepos] = useState<RepoHit[]>([]);
+  const [cliStatus, setCliStatus] = useState<ForgeCliStatus | null>(null);
+  const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
+  // The user chose "Browse for a folder…" (or the picker returned a worktree
+  // fan-out) → render today's full composer for that folder. This is how the
+  // Browse escape path keeps working exactly as it did before the list.
+  const [browseChosen, setBrowseChosen] = useState(false);
+  // Per-row batch progress (BET-787 [S8]): "queued" / "creating…" / "ready" /
+  // "error". Partial failure is legible and does not abort the batch.
+  const [rowPhase, setRowPhase] = useState<Record<string, RowPhase>>({});
+  const [rowError, setRowError] = useState<Record<string, string>>({});
+  const createdRef = useRef<CreatedSession[]>([]);
+  const errorPathsRef = useRef<Set<string>>(new Set());
+  // True once a batch has run and we're showing the per-row results view (with
+  // errors + retry) instead of the pre-setup list. On all-success we navigate
+  // away immediately, so this view only lingers when at least one row failed.
+  const [batchDone, setBatchDone] = useState(false);
+
+  // All probe rows are local (they already exist on disk); a later forge issue
+  // adds clone rows and those must land `local: false` via the same shape.
+  const rows = useMemo<RepoRow[]>(
+    () => probeRepos.map((r) => ({ ...r, local: true })),
+    [probeRepos],
+  );
+  const hasFailed = rows.some((r) => rowPhase[r.path] === "error");
+
+  useEffect(() => {
+    if (!isNewProject) return;
+    let cancelled = false;
+    setProbePending(true);
+    setProbeFailed(false);
+    setProbeRepos([]);
+    setCliStatus(null);
+    setBrowseChosen(false);
+    setChecked(new Set());
+    setRowPhase({});
+    setRowError({});
+    setBatchDone(false);
+    createdRef.current = [];
+    errorPathsRef.current = new Set();
+    if (typeof window.api.forgeProbe === "function") {
+      window.api
+        .forgeProbe()
+        .then((res) => {
+          if (cancelled) return;
+          setProbePending(false);
+          setProbeRepos(res?.repos ?? []);
+          setCliStatus(res?.cli ?? null);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setProbePending(false);
+          setProbeFailed(true);
+        });
+    } else {
+      // Probe not wired on this client (e.g. unpaired) — degrade gracefully.
+      setProbePending(false);
+      setProbeFailed(true);
+    }
+    return () => { cancelled = true; };
+  }, [isNewProject, draftId]);
+
+  const zeroState = zeroStateMode({
+    probePending,
+    probeFailed,
+    repos: probeRepos,
+  });
+
+  // Pre-check rule: check what already exists on disk, capped at 8, most
+  // recent first. Never check anything that would require a clone.
+  useEffect(() => {
+    if (probePending || probeFailed) {
+      setChecked(new Set());
+      return;
+    }
+    setChecked(
+      new Set(initialRepoSelection(rows, PROBE_PRE_CHECK_CAP).map((r) => r.path)),
+    );
+  }, [probePending, probeFailed, rows]);
+
+  const toggleRow = (path: string, on: boolean) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(path);
+      else next.delete(path);
+      return next;
+    });
+  };
+
+  // Numeric de-dup on top of deriveProjectName — the same scheme the fan-out
+  // submit already uses. Extracted so the new zero-state batch and the fan-out
+  // share one naming rule.
+  const uniqueSessionName = (base: string, taken: Set<string>) => {
+    if (!taken.has(base)) return base;
+    let i = 2;
+    while (taken.has(`${base}-${i}`)) i++;
+    return `${base}-${i}`;
+  };
+
+  // Land on the given created session: setActive + box-side select-window +
+  // dismiss the draft, leaving the composer empty (never auto-submit a prompt).
+  const landIn = async (entry: CreatedSession) => {
+    const proj = useStore.getState().projects.find((p) => p.tmuxSession === entry.name);
+    const win =
+      entry.windowIndex != null
+        ? proj?.windows.find((w) => w.index === entry.windowIndex)
+        : proj?.windows.find((w) => w.active) ?? proj?.windows[0];
+    const idx = win?.index ?? entry.windowIndex ?? 0;
+    try {
+      await activateWindow(entry.name, idx);
+    } catch {
+      setActive(entry.name, idx);
+    }
+    dismissDraft(draftId);
+    onDone?.();
+  };
+
+  // Create one repo's workspace, tracking per-row progress. Partial failure
+  // surfaces but never aborts the batch (submitFanOut's rule).
+  const createRow = async (
+    row: RepoRow,
+    taken: Set<string>,
+    createdOut: CreatedSession[],
+  ) => {
+    const name = uniqueSessionName(deriveProjectName(row.path), taken);
+    taken.add(name);
+    setRowPhase((p) => ({ ...p, [row.path]: "creating" }));
+    setRowError((e) => {
+      const n = { ...e };
+      delete n[row.path];
+      return n;
+    });
+    try {
+      const res = await window.api.tmuxNewSession({
+        name,
+        cwd: row.path,
+        windowName: "default",
+        chatMode: true,
+        createDir: false,
+      });
+      const norm = normalizeCreate(res);
+      applyProjects(norm.projects);
+      const entry: CreatedSession = { name, windowIndex: norm.windowIndex };
+      createdOut.push(entry);
+      errorPathsRef.current.delete(row.path);
+      setRowPhase((p) => ({ ...p, [row.path]: "ready" }));
+    } catch (e) {
+      errorPathsRef.current.add(row.path);
+      setRowPhase((p) => ({ ...p, [row.path]: "error" }));
+      setRowError((err) => ({
+        ...err,
+        [row.path]: e instanceof Error ? e.message : String(e),
+      }));
+    }
+  };
+
+  // "Set up N workspaces": create one session per checked repo, in order
+  // (most-recent-first). When every checked repo lands, navigate to the most
+  // recently touched success and dismiss. Partial failure stays on the screen
+  // with the errored row visible + retryable (done via "Done").
+  const setupWorkspaces = async () => {
+    if (sending) return;
+    const chosen = rows.filter((r) => checked.has(r.path));
+    if (chosen.length === 0) return;
+    setSending(true);
+    setBatchDone(true);
+    setError(null);
+    createdRef.current = [];
+    errorPathsRef.current = new Set();
+    setRowPhase(Object.fromEntries(chosen.map((r) => [r.path, "queued"])));
+    setRowError({});
+    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
+    for (const r of chosen) {
+      await createRow(r, taken, createdRef.current);
+    }
+    const created = createdRef.current;
+    setSending(false);
+    if (created.length > 0 && errorPathsRef.current.size === 0) {
+      // All succeeded → land in the most recently touched success.
+      await landIn(created[0]);
+    }
+  };
+
+  // Retry a single failed row (same partial-failure path). When the retry
+  // clears the last error and something was created, proceed as normal.
+  const retryRow = async (row: RepoRow) => {
+    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
+    for (const c of createdRef.current) taken.add(c.name);
+    await createRow(row, taken, createdRef.current);
+    if (errorPathsRef.current.size === 0 && createdRef.current.length > 0) {
+      await landIn(createdRef.current[0]);
+    }
+  };
+
+  // Leave the partial-failure results view: land in the most recent success,
+  // or just dismiss the draft (the App re-creates the zero-state draft) when
+  // nothing was created.
+  const finishSetup = async () => {
+    if (createdRef.current.length > 0) {
+      await landIn(createdRef.current[0]);
+    } else {
+      dismissDraft(draftId);
+      onDone?.();
+    }
+  };
+
 
   // Model state — fetched on mount (same pattern as ChatPanel).
   const [models, setModels] = useState<OpencodeModel[] | null>(null);
@@ -425,12 +655,21 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const emptyWorktree = isNewProject && !isGitRepo;
   const worktreeChipEnabled = emptyWorktree || isGitRepo;
 
+  // The repo-probe zero state is the NEW-project zero state only. The
+  // new-session-in-an-existing-project variant keeps today's composer
+  // untouched, and the "Browse for a folder…" escape from the zero state lands
+  // back on today's composer once a folder is picked (degrades to exactly
+  // today's behaviour, never a state worse than before the probe existed).
+  const showComposer = !isNewProject || browseChosen;
+
   return (
     // data-screen is the visual harness's handle on this screen (see
     // scripts/visual/screens.mjs). One stable attribute per screen root, so
     // the harness never depends on a class name or DOM position.
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
       <div className="w-full max-w-[720px] rounded-xl border border-border-subtle bg-bg-elev px-6 py-10 flex flex-col gap-2">
+        {showComposer ? (
+        <>
         <div className="text-center space-y-1 mb-4">
           <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
           <p className="text-body text-text-faint">
@@ -554,15 +793,196 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               onCancel={voiceRecorder.cancel}
             />
           ) : (
-            <IconButton
-              icon={<Mic />}
-              label="Dictate"
-              title="Dictation needs a Groq API key in Settings"
-              size="xl"
-              disabled
-            />
-          )}
+              <IconButton
+                icon={<Mic />}
+                label="Dictate"
+                title="Dictation needs a Groq API key in Settings"
+                size="xl"
+                disabled
+              />
+            )}
         </div>
+        </>
+        ) : (
+        <>
+            {zeroState === "scanning" ? (
+              <>
+                <div className="text-center space-y-1 mb-4">
+                  <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+                  <p className="text-body text-text-faint">Looking for repositories on your box…</p>
+                </div>
+                <div className="space-y-2" aria-hidden="true">
+                  <Skeleton width={38} />
+                  <Skeleton width={52} />
+                  <Skeleton width={44} />
+                </div>
+                <div className="flex items-center gap-2 mt-4">
+                  <Button tone="default" onClick={() => setPickerOpen(true)}>
+                    Browse for a folder…
+                  </Button>
+                </div>
+              </>
+            ) : zeroState === "degraded" ? (
+              <>
+                <div className="text-center space-y-1 mb-4">
+                  <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+                  <p className="text-body text-text-faint">
+                    Couldn't scan for repositories. Point Manta at a folder instead.
+                  </p>
+                </div>
+                <div className="flex justify-center mt-2">
+                  <Button tone="primary" onClick={() => setPickerOpen(true)}>
+                    Browse for a folder…
+                  </Button>
+                </div>
+              </>
+            ) : zeroState === "fresh" ? (
+              <>
+                <div className="text-center space-y-1 mb-4">
+                  <h1 className="text-display font-bold tracking-tight text-text">
+                    Let's get some code on this box
+                  </h1>
+                  <p className="text-body text-text-faint">
+                    No repositories found. Clone one from GitHub, or point Manta at a folder.
+                  </p>
+                </div>
+                <div className="flex justify-center gap-2 mt-4">
+                  <Button
+                    tone="primary"
+                    disabled
+                    title="Cloning from GitHub isn't available yet"
+                    onClick={() => {}}
+                  >
+                    Clone from GitHub…
+                  </Button>
+                  <Button tone="ghost" onClick={() => setPickerOpen(true)}>
+                    Browse for a folder…
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-center space-y-1 mb-4">
+                  <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+                  <p className="text-body text-text-faint">
+                    Found {probeRepos.length} {probeRepos.length === 1 ? "repository" : "repositories"} on your box.
+                  </p>
+                </div>
+
+                {cliStatus?.authenticated && (
+                  <div className="flex items-center justify-center gap-[7px] -mt-[6px] mb-3 text-[12px] text-text-faint">
+                    <StatusDot tone="ok" />
+                    <span>
+                      GitHub connected as{" "}
+                      <b className="text-text-muted font-semibold">@{cliStatus.login}</b>
+                    </span>
+                    <span
+                      className="text-[11.5px] text-text-faint underline decoration-dotted cursor-default"
+                      title="Not available yet"
+                    >
+                      use a different account
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-0.5">
+                  {rows.map((r) =>
+                    batchDone ? (
+                      <ListRow
+                        key={r.path}
+                        leading={
+                          <StatusDot
+                            tone={
+                              rowPhase[r.path] === "ready"
+                                ? "ok"
+                                : rowPhase[r.path] === "creating"
+                                  ? "running"
+                                  : rowPhase[r.path] === "error"
+                                    ? "error"
+                                    : "idle"
+                            }
+                          />
+                        }
+                        name={<span className="truncate">{r.name}</span>}
+                        secondary={
+                          rowPhase[r.path] === "error" ? (
+                            <span className="truncate text-danger">{rowError[r.path]}</span>
+                          ) : (
+                            <span className="truncate">
+                              {rowPhase[r.path] === "ready"
+                                ? "ready"
+                                : rowPhase[r.path] === "creating"
+                                  ? "creating…"
+                                  : "queued"}
+                            </span>
+                          )
+                        }
+                        trailing={
+                          rowPhase[r.path] === "error" ? (
+                            <Button tone="default" onClick={() => void retryRow(r)}>
+                              Retry
+                            </Button>
+                          ) : undefined
+                        }
+                      />
+                    ) : (
+                      <ListRow
+                        key={r.path}
+                        leading={
+                          <Checkbox
+                            checked={checked.has(r.path)}
+                            onChange={(v) => toggleRow(r.path, v)}
+                            ariaLabel={`Set up ${r.name}`}
+                          />
+                        }
+                        name={<span className="truncate">{r.name}</span>}
+                        secondary={<span className="truncate">{describeRepoRow(r)}</span>}
+                        trailing={
+                          <span>
+                            {r.lastCommitAt ? formatAge(Date.now() - r.lastCommitAt) : "—"}
+                          </span>
+                        }
+                        onClick={() => toggleRow(r.path, !checked.has(r.path))}
+                        title={r.originUrl ? undefined : r.path}
+                      />
+                    ),
+                  )}
+                </div>
+
+                <div className="flex items-center flex-wrap gap-2 mt-3">
+                  {batchDone && !sending && hasFailed ? (
+                    <Button tone="primary" onClick={() => void finishSetup()}>
+                      Done
+                    </Button>
+                  ) : batchDone ? (
+                    <span className="text-meta text-text-faint">Setting up workspaces…</span>
+                  ) : (
+                    <>
+                      <Button
+                        tone="primary"
+                        onClick={() => void setupWorkspaces()}
+                        disabled={checked.size === 0}
+                      >
+                        Set up {checked.size} workspace{checked.size === 1 ? "" : "s"}
+                      </Button>
+                      <Button tone="default" onClick={() => setPickerOpen(true)}>
+                        Browse for a folder…
+                      </Button>
+                      <Button
+                        tone="default"
+                        disabled
+                        title="Cloning from GitHub isn't available yet"
+                        onClick={() => {}}
+                      >
+                        Clone from GitHub…
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+        </>
+        )}
 
         {error && (
           <Card danger>
@@ -576,11 +996,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           initialPath={draft.cwd || "~"}
           onSelect={(path) => {
             updateDraft(draftId, { cwd: path });
+            if (isNewProject) setBrowseChosen(true);
             setPickerOpen(false);
           }}
           onFanOut={(baseCwd, wts) => {
             setFanOutWorktrees(wts);
             updateDraft(draftId, { cwd: baseCwd });
+            if (isNewProject) setBrowseChosen(true);
             setPickerOpen(false);
           }}
           onCancel={() => setPickerOpen(false)}
