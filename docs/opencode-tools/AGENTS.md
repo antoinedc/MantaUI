@@ -167,6 +167,25 @@ session is busy when a delivery lands, it is queued and runs when the turn
 finishes (it never interrupts your in-flight work). The user can also see and
 revoke webhooks from the manta UI (the 🪝 webhooks card).
 
+## manta progress
+
+You have a `progress_report` tool for recording durable, session-scoped
+"where are we right now" status on a long-running turn (especially a background
+job). Use it when a task takes minutes and the human watching should be able to
+see your current step — e.g. "step 3 of 5: wiring the REST handler", or
+`state:"blocked"` when you've genuinely stopped and need a human decision. It
+shows up as a live label on the job card instead of an opaque "Ruminating…".
+
+- `progress_report(label?, step?, total?, state?, detail?, sinks?)` ->
+  recorded ("Progress recorded."). Replaces the previous record — this is a
+  status, not a log.
+
+**It is ambient and anti-narration.** Report at **plan boundaries**, not per
+action; do not call more than roughly once a minute; each call replaces the
+previous state. It does **NOT** notify the user — use `notify` for that. Set
+`state:"blocked"` only when you have genuinely stopped and need a human
+decision; it does not fire a push on its own.
+
 ## manta subagent models
 
 Named subagents can run on different models — cheaper/faster for mechanical work,

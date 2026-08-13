@@ -22,6 +22,7 @@ import type {
   TmuxCreateResult,
   ScheduledJob,
   UsageSnapshot,
+  ProgressRecord,
   SecretMeta,
   SecretInput,
   ServerUpdateAvailablePayload,
@@ -348,6 +349,12 @@ export interface Api {
   // snapshots are produced by the box's usage poller (src/server/usage.mjs),
   // never written through this channel. NOT the context-window indicator.
   usageList(): Promise<UsageSnapshot[]>;
+
+  // Session progress (manta-server owned, BET-790). Reads the durable
+  // "where are we right now" record for a session, written by the AI's
+  // `progress_report` opencode tool. The renderer's job card also gets the
+  // child's progress on the delegate job object.
+  progressGet(sessionId?: string): Promise<ProgressRecord | null>;
   // BET-738: the box publishes a `usage.updated` bus event whenever the
   // poller's serialized snapshot set actually changes. Unlike
   // onDelegateUpdated's hint-only payload, this one carries the FULL current

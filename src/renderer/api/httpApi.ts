@@ -998,6 +998,9 @@ export const httpApi: Api = {
   // -- subscription plan usage (manta-server owned; in-process on mobile) --
   usageList: () => rpc(IPC.usageList),
 
+  // -- session progress (manta-server owned; BET-790) --
+  progressGet: (sessionId) => rpc(IPC.progressGet, sessionId),
+
   // -- secrets (manta-server owned; in-process on mobile) --
   secretsList: (sessionId, all) => rpc(IPC.secretsList, sessionId, all),
   secretsSet: (input) => rpc(IPC.secretsSet, input),
