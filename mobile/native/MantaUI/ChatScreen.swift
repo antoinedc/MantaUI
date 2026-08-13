@@ -207,15 +207,19 @@ private struct ChatScreenContent: View {
     }
 
     /// While the session loads there is nothing to act on, so the screen shows
-    /// ONLY the loader — no header, no composer, no cards. Hiding the chrome
-    /// outright is both honest (a disabled control still invites a tap) and
-    /// simpler than keeping every control in a disabled state.
+    /// ONLY the transcript-shaped skeleton — no header, no composer, no cards.
+    /// Hiding the chrome outright is both honest (a disabled control still
+    /// invites a tap) and simpler than keeping every control in a disabled
+    /// state. The skeleton (`ChatLoadingSkeleton`) occupies the same scroll
+    /// region the real transcript will, so the first blocks replacing it cause
+    /// no layout shift (BET-752 task 3, reconnecting the built skeleton).
     @ViewBuilder
     private var content: some View {
         if store.loading {
-            MantaLoader(caption: "Loading session…", tokens: tokens)
+            ChatLoadingSkeleton()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(tokens.canvas.ignoresSafeArea())
+                .accessibilityIdentifier("chat-loading-skeleton")
         } else {
             loadedLayout
         }
@@ -673,11 +677,10 @@ private struct ChatScreenContent: View {
 
     // MARK: - Loading skeleton (D2 / BET-631)
 
-    // The loading skeleton (`ChatLoadingSkeleton`) is no longer rendered from
-    // the chat screen — `content` already shows the full-screen loader while
-    // `store.loading`, so the in-place skeleton branch was unreachable. The
-    // skeleton is KEPT, but only as the harness scene `ChatLoadingScene`
-    // (MantaAppRoot) that the capture fixture drives.
+    // The loading skeleton (`ChatLoadingSkeleton`) is the chat screen's
+    // loading state — `content` renders it while `store.loading` (BET-752 task
+    // 3). It is ALSO the harness scene `ChatLoadingScene` (MantaAppRoot) that
+    // the capture fixture drives, so fixture and live screen share one view.
 
     // MARK: - Live cards (todos / permission / question)
 
