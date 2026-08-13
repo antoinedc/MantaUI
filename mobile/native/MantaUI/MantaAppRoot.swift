@@ -18,9 +18,18 @@ struct MantaAppRoot: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var flow: MantaOnboardingFlow
     @State private var paired: Bool
+    /// A pairing payload that arrived while already paired — pending the
+    /// "Switch box?" confirmation (BET-702).
+    @State private var switchRequest: MantaPairing.PairPayload?
 
     init() {
-        let isPaired = (try? KeychainCredentialStore.shared.load()) != nil
+        // UI-test / verification seam (BET-702): `MANTA_UI_FORCE_PAIRED` makes
+        // the app boot into the paired destination WITHOUT touching the real
+        // Keychain, so the "Switch box?" re-pair path is reachable from a
+        // UITest with no persistent credentials write.
+        let env = ProcessInfo.processInfo.environment
+        let forcedPaired = env["MANTA_UI_FORCE_PAIRED"] == "1"
+        let isPaired = forcedPaired ? true : (try? KeychainCredentialStore.shared.load()) != nil
         _paired = State(initialValue: isPaired)
         _flow = StateObject(wrappedValue: MantaOnboardingFlow(onPaired: {}))
     }
@@ -47,11 +56,7 @@ struct MantaAppRoot: View {
                 MantaOnboardingRoot(flow: flow, tokens: tokens)
                     .onAppear { flow.prepare(onboardingScene: scene) }
                     .onAppear {
-                        flow.onPaired = {
-                            paired = true
-                            store.start()
-                            MantaPushService.registerAfterPairing()
-                        }
+                        flow.onPaired = commitPairing
                     }
             } else if let scene, scene == "chat-overflow-clear" {
                 // BET-628 capture scene — raises the real ChatOverflowSheet so
@@ -81,11 +86,7 @@ struct MantaAppRoot: View {
             } else {
                 MantaOnboardingRoot(flow: flow, tokens: tokens)
                     .onAppear {
-                        flow.onPaired = {
-                            paired = true
-                            store.start()
-                            MantaPushService.registerAfterPairing()
-                        }
+                        flow.onPaired = commitPairing
                     }
             }
         }
@@ -113,10 +114,70 @@ struct MantaAppRoot: View {
         }
         .onReceive(MantaPairingRouter.shared.$pendingPayload) { payload in
             guard let payload else { return }
-            flow.receive(payload: payload)
-            // The staged payload is consumed by `receive` — clear it so link
-            // handling isn't state-dependent (the same link must stage once).
+            // The staged payload is consumed here — clear it so link handling
+            // isn't state-dependent (the same link must stage once).
             MantaPairingRouter.shared.pendingPayload = nil
+            if paired {
+                // Paired device + a pairing link = a re-pair onto a different
+                // box. Present the "Switch box?" confirmation instead of
+                // silently ignoring the link (BET-702).
+                switchRequest = payload
+            } else {
+                flow.receive(payload: payload)
+            }
         }
+        .sheet(isPresented: Binding(
+            get: { switchRequest != nil },
+            set: { if !$0 { switchRequest = nil } }
+        )) {
+            if let request = switchRequest {
+                MantaSwitchBoxSheet(
+                    tokens: tokens,
+                    currentHost: currentBoxHost,
+                    newHost: newBoxHost(for: request),
+                    onCancel: { switchRequest = nil },
+                    onSwitch: { beginSwitch(request) }
+                )
+            }
+        }
+    }
+
+    /// Shared completion for a successful pairing, fresh or re-pair. When the
+    /// flow is in "Switch box" mode, first tear down the old box's event
+    /// stream and wipe its session list so nothing from the previous box
+    /// bleeds into the new one (BET-702).
+    private var commitPairing: () -> Void {
+        {
+            if flow.isSwitching {
+                store.stop()
+                sessionStore.resetForBoxChange()
+            }
+            paired = true
+            store.start()
+            MantaPushService.registerAfterPairing()
+        }
+    }
+
+    private var currentBoxHost: String {
+        // The same verification seam feeds a synthetic current host so the
+        // Switch box sheet has a real value to compare even without credentials.
+        if let h = ProcessInfo.processInfo.environment["MANTA_UI_PAIR_HOST"], !h.isEmpty {
+            return h
+        }
+        return (try? KeychainCredentialStore.shared.load())?.serverUrl ?? ""
+    }
+
+    private func newBoxHost(for payload: MantaPairing.PairPayload) -> String {
+        MantaPairing.claimBaseURL(payload)?.absoluteString ?? ""
+    }
+
+    /// Begin the re-pair: route the new payload through the EXISTING claim
+    /// path by mounting the onboarding flow (which renders linking + the typed
+    /// failure screens). `flow.isSwitching` makes a success reset local state.
+    private func beginSwitch(_ payload: MantaPairing.PairPayload) {
+        switchRequest = nil
+        flow.isSwitching = true
+        flow.receive(payload: payload)
+        paired = false
     }
 }
