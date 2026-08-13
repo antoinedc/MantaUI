@@ -8,6 +8,7 @@ import {
   buildSessionLabel,
   shouldSuppressForDesktop,
   shouldSuppressNotification,
+  isBackgroundJobSession,
   routeNotification,
   notifTier,
   fireNotify,
@@ -407,6 +408,44 @@ test("ordinary chat (resolved label, not a job) still notifies", () => {
   );
   assert.equal(done?.kind, "done");
   assert.equal(shouldSuppressNotification(done, "ws / name", false), false);
+});
+
+test("isBackgroundJobSession matches a stored job's childSessionID in ANY status", async () => {
+  // The wire from firePush to the predicate: isBackgroundJobSession reads the
+  // delegate store and flags the job's own child session. The status==="running"
+  // filter would race — a job transitions to done in the same burst that
+  // produces its idle — so matching must hold across statuses.
+  assert.equal(
+    await isBackgroundJobSession("ses_job", async () => [{ childSessionID: "ses_job", status: "done" }]),
+    true,
+  );
+  assert.equal(
+    await isBackgroundJobSession("ses_job_running", async () => [{ childSessionID: "ses_job_running", status: "running" }]),
+    true,
+  );
+  assert.equal(
+    await isBackgroundJobSession("ses_job_failed", async () => [{ childSessionID: "ses_job_failed", status: "failed" }]),
+    true,
+  );
+});
+
+test("isBackgroundJobSession does NOT match a non-job session", async () => {
+  // A regular chat session that happens to share a sessionID with nothing in
+  // the store is not a job's child and must not be flagged.
+  assert.equal(
+    await isBackgroundJobSession("ses_regular", async () => [{ childSessionID: "ses_job", status: "running" }]),
+    false,
+  );
+});
+
+test("isBackgroundJobSession degrades to false on empty/missing/failing store", async () => {
+  // Best-effort: an empty store, a corrupt read, a missing file, or a missing
+  // sessionId all return false so the box degrades to today's notify behaviour
+  // (never silence).
+  assert.equal(await isBackgroundJobSession("ses_x", async () => []), false);
+  assert.equal(await isBackgroundJobSession("ses_x", async () => { throw new Error("corrupt"); }), false);
+  assert.equal(await isBackgroundJobSession(null, async () => [{ childSessionID: "x", status: "done" }]), false);
+  assert.equal(await isBackgroundJobSession("", async () => [{ childSessionID: "x", status: "done" }]), false);
 });
 
 const LBL = { ...NOFOCUS, label: "default / my-chat" };
