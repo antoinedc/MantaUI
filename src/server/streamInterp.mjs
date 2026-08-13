@@ -46,6 +46,12 @@ import {
 
 const TTL_DEFAULT = "1h";
 
+// Per-tool cap for the live tool-output tail (server half, BET-745). Once a
+// single tool has streamed this many characters to the device, further output
+// is dropped for that tool and a single "...truncated" marker is emitted so an
+// endless bash can't balloon the device stream or box memory.
+const MAX_TOOL_OUTPUT_CHARS = 20_000;
+
 /**
  * The latest index in `text` that is safe to cut at, or -1 if none is.
  *
@@ -74,6 +80,7 @@ function newSessionState() {
   return {
     parts: new Map(),          // partID -> { messageID, field, text } (delta buffers)
     finalParts: new Set(),     // partIDs that got a message.part.updated snapshot
+    tools: new Map(),          // toolIdx(partID) -> { idx, name, status, sent, truncated, ended }
     childSessionIds: new Set(),
     liveChildStatus: new Map(),
     questions: [],             // QuestionLike[]
@@ -85,6 +92,120 @@ function newSessionState() {
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
   };
+}
+
+// design: live tool-output frames (server half, BET-745).
+//
+// opencode re-emits `message.part.updated` for a tool part (~every 20-40ms)
+// as the tool's stdout grows, with `part.type === "tool"`. The running tool's
+// live stdout streams into `part.state.metadata.output` (NOT `state.output`,
+// which only exists at completion). The canonical transcript only refreshes
+// at refetch boundaries, so a thin client never saw the running tool until the
+// turn ended. These three TEMPORARY frames publish it on the interpreted
+// stream — additive only: every existing frame (`session.run`, `running`,
+// `todos`, `truncation`, `subagent`, …) and the turnComplete/running books are
+// untouched, and the same raw event still flows through every other branch.
+//
+// App contract (the iOS rendering half, sequenced BET, must read exactly these
+// frame + field names so the two halves cannot drift):
+//   toolStarted { sessionId, idx, toolName, toolPresentationHint?, status }
+//   toolOutput  { sessionId, idx, text }
+//   toolEnded   { sessionId, idx, ok, truncated? }
+//
+// Field types:
+//   sessionId            string   — the opencode session the tool belongs to
+//   idx                  string   — the tool PART ID; stable per tool across the
+//                                   whole run (identical on started/output/ended)
+//   toolName             string   — e.g. "bash", "read", "write", "task"
+//   toolPresentationHint string?  — opencode's human title for the part (e.g.
+//                                   "Run: npm test"); null when the box gave none
+//   status               string   — "pending" | "running" | "completed" | "error"
+//   text                 string   — a single incremental stdout chunk (the delta
+//                                   since the last chunk, never the full output)
+//   ok                   boolean  — toolEnded: true when the tool completed,
+//                                   false when it errored
+//   truncated            boolean  — present true only when the per-tool output
+//                                   cap (MAX_TOOL_OUTPUT_CHARS) was hit
+//
+// Bounding: only the delta since the last chunk is ever sent (never the full
+// output again), and the per-tool cap stops a long-running bash from
+// ballooning the device stream; past the cap a single "...truncated" marker
+// rides the last toolOutput and toolEnded carries `truncated: true`. All three
+// frames are keyed by `idx`, so a duplicate/re-emitted part for the same tool
+// is a no-op for started/ended and appends only newly-arrived bytes for output.
+function updateToolFrames(st, sid, part, emit) {
+  if (!part || part.type !== "tool") return;
+  const idx = typeof part.id === "string" && part.id.length > 0 ? part.id : null;
+  if (!idx) return;
+  const state = part.state;
+  const status = typeof state?.status === "string" ? state.status : null;
+  if (!status) return;
+
+  let tool = st.tools.get(idx);
+
+  // A tool the device hasn't been told about yet -> toolStarted.
+  if (!tool) {
+    tool = { idx, name: part.tool ?? null, status, sent: 0, truncated: false, ended: false };
+    st.tools.set(idx, tool);
+    emit(sid, "toolStarted", {
+      sessionId: sid,
+      idx,
+      toolName: tool.name,
+      toolPresentationHint: typeof state?.title === "string" ? state.title : null,
+      status,
+    });
+  }
+
+  // Live incremental stdout. The running tool streams into metadata.output;
+  // send only the bytes not already delivered, bounded by the per-tool cap.
+  if (status === "running" && typeof state?.metadata?.output === "string") {
+    tool.status = status;
+    const full = state.metadata.output;
+    if (full.length > tool.sent) {
+      if (tool.truncated) {
+        // Cap already hit: advance the cursor silently so we never re-send.
+        tool.sent = full.length;
+      } else {
+        const delta = full.slice(tool.sent);
+        const room = MAX_TOOL_OUTPUT_CHARS - tool.sent;
+        if (delta.length > room) {
+          const kept = delta.slice(0, room);
+          tool.sent += kept.length;
+          tool.truncated = true;
+          emit(sid, "toolOutput", { sessionId: sid, idx, text: kept + "… [output truncated]" });
+        } else {
+          tool.sent += delta.length;
+          emit(sid, "toolOutput", { sessionId: sid, idx, text: delta });
+        }
+      }
+    }
+  }
+
+  // Terminal statuses -> deliver any final tail, then toolEnded exactly once.
+  // At completion the authoritative full output sits in state.output, which may
+  // carry a few trailing bytes the live metadata.output hadn't flushed yet.
+  if (status === "completed" || status === "error") {
+    const finalOutput =
+      typeof state?.output === "string"
+        ? state.output
+        : typeof state?.metadata?.output === "string"
+          ? state.metadata.output
+          : null;
+    if (typeof finalOutput === "string" && finalOutput.length > tool.sent && !tool.truncated) {
+      const delta = finalOutput.slice(tool.sent);
+      tool.sent = finalOutput.length;
+      emit(sid, "toolOutput", { sessionId: sid, idx, text: delta });
+    }
+    if (!tool.ended) {
+      tool.ended = true;
+      emit(sid, "toolEnded", {
+        sessionId: sid,
+        idx,
+        ok: status === "completed",
+        ...(tool.truncated ? { truncated: true } : {}),
+      });
+    }
+  }
 }
 
 /**
@@ -203,6 +324,11 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
             ),
           });
         }
+        // Live tool-output frames for any tool part (additive; the subagent
+        // branch above still runs for task tools). A task subagent is also a
+        // tool part, so it gets a toolStarted/…/toolEnded pair too — harmless
+        // alongside the richer `subagent` frame.
+        if (part?.type === "tool") updateToolFrames(st, sid, part, emit);
         return;
       }
       case "session.created": {

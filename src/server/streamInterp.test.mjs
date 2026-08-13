@@ -427,3 +427,113 @@ test("interpret ignores events with no session id", () => {
   interp.interpret({ type: "message.part.delta", properties: { part: { id: "x" } } });
   assert.equal(events.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Live tool-output frames (server half, BET-745).
+//
+// A tool part flows through `message.part.updated` with `part.type === "tool"`.
+// The running tool's stdout is in `state.metadata.output`; the authoritative
+// final output reads from `state.output` at completion.
+// ---------------------------------------------------------------------------
+
+// Build a tool `message.part.updated` payload in the shape opencode sends.
+function toolPartUpdated({ id, tool = "bash", status, title, metaOutput, output, messageID = "msg1" }) {
+  return {
+    type: "message.part.updated",
+    properties: {
+      sessionID: SID,
+      messageID,
+      part: {
+        id,
+        type: "tool",
+        tool,
+        state: {
+          status,
+          ...(title !== undefined ? { title } : {}),
+          ...(metaOutput !== undefined ? { metadata: { output: metaOutput } } : {}),
+          ...(output !== undefined ? { output } : {}),
+        },
+      },
+    },
+  };
+}
+
+test("toolStarted is emitted once when a tool part first appears", () => {
+  const { interp, events } = make();
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", title: "Run: npm test", metaOutput: "" }));
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "" }));
+  const started = events.filter((e) => e.sub === "toolStarted");
+  assert.equal(started.length, 1, "re-emit for the same idx emits toolStarted exactly once");
+  assert.equal(started[0].payload.sessionId, SID);
+  assert.equal(started[0].payload.idx, "t1");
+  assert.equal(started[0].payload.toolName, "bash");
+  assert.equal(started[0].payload.toolPresentationHint, "Run: npm test");
+  assert.equal(started[0].payload.status, "running");
+});
+
+test("toolOutput carries only the delta since the last chunk, never the full output", () => {
+  const { interp, events } = make();
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "line1\n" }));
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "line1\nline2\n" }));
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "line1\nline2\nline3\n" }));
+  const chunks = events.filter((e) => e.sub === "toolOutput").map((e) => e.payload.text);
+  assert.deepEqual(chunks, ["line1\n", "line2\n", "line3\n"]);
+  // every chunk is keyed by the same stable tool idx
+  assert.ok(events.filter((e) => e.sub === "toolOutput").every((e) => e.payload.idx === "t1"));
+});
+
+test("re-emitting the same output does not double-append", () => {
+  const { interp, events } = make();
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "abc" }));
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "abc" }));
+  const chunks = events.filter((e) => e.sub === "toolOutput").map((e) => e.payload.text);
+  assert.deepEqual(chunks, ["abc"], "no byte is sent twice for the same tool");
+  assert.equal(events.filter((e) => e.sub === "toolStarted").length, 1);
+});
+
+test("toolEnded inverts ok on failure and flags truncation on cap", () => {
+  const { interp, events } = make();
+  // success: completed -> ok true
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "ok" }));
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "completed", output: "ok" }));
+  const ends1 = events.filter((e) => e.sub === "toolEnded" && e.payload.idx === "t1");
+  assert.equal(ends1.length, 1, "toolEnded fires exactly once");
+  assert.equal(ends1[0].payload.ok, true);
+  assert.equal(ends1[0].payload.truncated, undefined);
+
+  // failure: error -> ok false
+  interp.interpret(toolPartUpdated({ id: "t2", tool: "bash", status: "error", output: "boom" }));
+  const ends2 = events.filter((e) => e.sub === "toolEnded" && e.payload.idx === "t2");
+  assert.equal(ends2.length, 1);
+  assert.equal(ends2[0].payload.ok, false);
+
+  // cap: an over-limit bash is truncated once, then no further output
+  const { interp: i2, events: ev2 } = make();
+  const huge = "x".repeat(50_000);
+  i2.interpret(toolPartUpdated({ id: "t3", tool: "bash", status: "running", metaOutput: huge }));
+  const outs = ev2.filter((e) => e.sub === "toolOutput");
+  assert.equal(outs.length, 1);
+  assert.ok(outs[0].payload.text.endsWith("… [output truncated]"), "a truncation marker rides the last chunk");
+  i2.interpret(toolPartUpdated({ id: "t3", tool: "bash", status: "running", metaOutput: huge + "extra" }));
+  assert.equal(ev2.filter((e) => e.sub === "toolOutput").length, 1, "output is suppressed once capped");
+  i2.interpret(toolPartUpdated({ id: "t3", tool: "bash", status: "completed", output: huge + "extra" }));
+  const ends3 = ev2.filter((e) => e.sub === "toolEnded");
+  assert.equal(ends3.length, 1);
+  assert.equal(ends3[0].payload.truncated, true);
+});
+
+test("live tool frames are additive — running/truncation/sessionError still fire on their triggers", () => {
+  const { interp, events } = make();
+  // regression pins: the pre-existing frames are untouched by the new branch
+  interp.interpret({ type: "session.status", properties: { sessionID: SID, status: { type: "busy" } } });
+  assert.equal(events.filter((e) => e.sub === "running").length, 1);
+  interp.interpret({ type: "session.next.step.ended", properties: { sessionID: SID, finish: "max_tokens", lastPartIsToolUse: true } });
+  assert.equal(events.filter((e) => e.sub === "truncation").length, 1);
+  interp.interpret({ type: "session.error", properties: { sessionID: SID, error: { name: "ApiError", message: "boom" } } });
+  assert.equal(events.filter((e) => e.sub === "sessionError").length, 1);
+  assert.equal(events.filter((e) => e.sub === "turnComplete").length, 1);
+  // and a tool flow still flows through the same stream
+  interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "hi" }));
+  assert.equal(events.filter((e) => e.sub === "toolStarted").length, 1);
+  assert.equal(events.filter((e) => e.sub === "toolOutput").length, 1);
+});
