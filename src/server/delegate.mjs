@@ -28,6 +28,11 @@
 import { randomBytes } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
+import {
+  readProgressRecord as defaultReadProgress,
+  clearProgress as defaultClearProgress,
+} from "./progress.mjs";
+import { startPoller } from "./startPoller.mjs";
 import { slugify } from "../shared/worktree.mjs";
 import {
   parseGitStatus,
@@ -246,16 +251,29 @@ export function resolveOwner(projects, sessionID) {
 // List / get
 // ---------------------------------------------------------------------------
 
-export async function listJobs({ sessionID } = {}, { load = loadJobs } = {}) {
+export async function listJobs({ sessionID } = {}, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
   const jobs = await load();
-  if (sessionID === undefined) return jobs.map((j) => ({ ...j }));
-  return jobs.filter((j) => j.parentSessionID === sessionID).map((j) => ({ ...j }));
+  const scoped = sessionID === undefined ? jobs : jobs.filter((j) => j.parentSessionID === sessionID);
+  // Expose the child's live progress record on the job (BET-790 §5) so the
+  // renderer's job card can show a live label instead of "Ruminating…" for
+  // thirty minutes. Reads the SAME progress.json store — no second record or
+  // event. Null when the job has no child session yet or never reported.
+  return Promise.all(
+    scoped.map(async (j) => ({
+      ...j,
+      progress: j.childSessionID ? await readProgress(j.childSessionID) : null,
+    })),
+  );
 }
 
-export async function getJob(id, { load = loadJobs } = {}) {
+export async function getJob(id, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
   const jobs = await load();
   const job = jobs.find((j) => j.id === id);
-  return job ? { ...job } : null;
+  if (!job) return null;
+  return {
+    ...job,
+    progress: job.childSessionID ? await readProgress(job.childSessionID) : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +766,7 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
     publish,
     deliver,
     listMessages,
+    clearProgress = defaultClearProgress,
     now = () => Date.now(),
   } = deps;
 
@@ -807,6 +826,17 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
       payload: { id: updated.id, status: updated.status, activity: updated.activity },
     });
     if (sawBusy) sawBusy.delete(job.childSessionID);
+
+    // The child session is ending — clear its progress record (progress is
+    // "where are we right now"; a finished job leaves none). Reads the SAME
+    // progress.json store, no second record/event. Never fails the transition.
+    if (job.childSessionID) {
+      try {
+        await clearProgress(job.childSessionID);
+      } catch (e) {
+        console.warn(`[delegate] clearProgress failed for ${job.id}:`, e?.message ?? e);
+      }
+    }
 
     // Deliver the completion message to the parent session (deferred until idle
     // by the shared delivery engine). Swallow a failure — the job is terminal
@@ -1039,22 +1069,7 @@ export function startSweeper(deps = {}, { intervalMs = SWEEP_INTERVAL_MS } = {})
     load: () => loadJobs(deps.storePath ?? STORE_PATH),
     save: (jobs) => saveJobs(jobs, deps.storePath ?? STORE_PATH),
   };
-  let inFlight = false;
-  const tick = async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      await sweepDelegateJobs(pathBound);
-    } catch (e) {
-      console.warn("[delegate] sweep tick failed:", e?.message ?? e);
-    } finally {
-      inFlight = false;
-    }
-  };
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-  return { stop() { clearInterval(timer); } };
+  return startPoller(() => sweepDelegateJobs(pathBound), { intervalMs, label: "delegate" });
 }
 
 // ---------------------------------------------------------------------------

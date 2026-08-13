@@ -207,6 +207,7 @@ export function buildHandlers({
   opencodeVersion,
   runServerSelfUpdate,
   delegate,
+  progress,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -898,6 +899,14 @@ export function buildHandlers({
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
     // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
     "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
+
+    // ---- session progress (manta-server owned; BET-790) ----
+    // Read-only: the durable progress record for a session (written by the AI's
+    // progress_report tool → POST /api/progress). The renderer's job card also
+    // gets it on the delegate job object; this channel is the general read.
+    // preload: ipcRenderer.invoke(IPC.progressGet, sessionId) → args[0] = sessionId
+    "progress:get": (sessionID) =>
+      progress ? progress.getRecord(sessionID || undefined) : null,
 
     // ---- background job pre-flight approvals (BET-418 §A) ----
     // The renderer polls pending-approvals for the viewed parent session and

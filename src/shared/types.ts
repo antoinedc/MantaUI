@@ -765,6 +765,12 @@ export const IPC = {
   // the UsageSnapshot/UsageWindow doc comment above for that boundary.
   usageList: "usage:list", // () → UsageSnapshot[]
 
+  // ---- session progress (manta-server owned; BET-790) ----
+  // Read-only: the durable progress record for a session (written by the AI's
+  // `progress_report` opencode tool → POST /api/progress). Desktop + mobile
+  // reach it over the same /rpc surface.
+  progressGet: "progress:get", // (sessionId?) → ProgressRecord | null
+
   // ---- secrets (manta-server owned) ----
   // A secure key→value store on the box. The user adds/edits secrets in the
   // SecretsCard UI; the VALUE never leaves the box and is never returned here
@@ -1109,6 +1115,20 @@ export type UsageSnapshot = {
 // per-row summary the server computes on a 10s poll (no model call) — the
 // renderer renders it verbatim and never computes it. `worktree`/`branch` are
 // null when the parent cwd was not a git repo (the job ran in the parent cwd).
+export type ProgressState = "working" | "blocked" | "done" | "failed";
+// Durable, session-scoped "where are we right now" status (BET-790, spec §6.1).
+// One record per session, replace-never-append; `step` is monotonic. Written by
+// the AI's `progress_report` opencode tool → POST /api/progress and read by the
+// renderer via `progress:get` (or attached to a delegate job via its child).
+export type ProgressRecord = {
+  sessionID: string;
+  label: string;
+  step: number | null;
+  total: number | null;
+  state: ProgressState;
+  detail: string;
+  updatedAt: number; // epoch ms
+};
 export type DelegateJobStatus = "running" | "done" | "failed" | "stopped";
 export type DelegateJob = {
   id: string; // 8-char hex
@@ -1131,6 +1151,9 @@ export type DelegateJob = {
   result: string | null; // last assistant text (done only)
   error: string | null; // failure / stop / timeout reason
   filesChanged: number | null; // committed + uncommitted (done only)
+  // BET-790: the child session's live progress record (null when the child
+  // never reported / has no session / finished). Drives the job card's label.
+  progress?: ProgressRecord | null;
   // BET-418 §A: true once the terminal cleanup removed the tmux window +
   // worktree; false when a dirty worktree kept both (record is retained so
   // the window stays recognisable as a job). Undefined for pre-§B records.

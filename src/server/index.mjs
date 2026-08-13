@@ -60,6 +60,13 @@ import {
 import { notifyCapSession } from "./capNotifier.mjs";
 import { createDelegateEngine } from "./delegate.mjs";
 import {
+  reportProgress,
+  readProgressRecord,
+  listProgress,
+  clearProgress,
+  startProgressSweeper,
+} from "./progress.mjs";
+import {
   startCleanupPoller,
   registerPage,
   unregisterPage,
@@ -304,11 +311,22 @@ const delegateEngine = createDelegateEngine({
   // the job. See opencode.mjs:sessionExists.
   sessionExists: (sid) => oc.sessionExists(sid),
   oc,
+  // BET-790: the job card shows the child's live progress record and clears it
+  // when the job ends. Reads the same progress.json store delegate reads —
+  // no second store/event.
+  readProgress: (sid) => readProgressRecord(sid),
+  clearProgress: (sid) => clearProgress(sid),
 });
 // eslint-disable-next-line no-unused-vars
 const { stop: stopDelegateSweeper } = delegateEngine.startSweeper();
 // eslint-disable-next-line no-unused-vars
 const { stop: stopDelegateActivityPoller } = delegateEngine.startActivityPoller();
+
+// Progress-store sweeper (BET-790): prunes records not updated within 7 days.
+// Same startPoller shape as the other pollers (immediate first tick, inFlight
+// guard, timer.unref()).
+// eslint-disable-next-line no-unused-vars
+const { stop: stopProgressSweeper } = startProgressSweeper({ publish: (evt) => bus.publish(evt) });
 
 // Single-box auth gate (M1, job zero). Every request must carry the box_token
 // as `Authorization: Bearer <token>` except the pairing handshake (/auth/*) and
@@ -365,6 +383,10 @@ rpcHandlers = buildHandlers({
   serverVersion: SERVER_VERSION,
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
+  // BET-790: renderer read channel for a session's progress record (the
+  // server store from src/server/progress.mjs). The write side is the AI's
+  // progress_report tool → POST /api/progress.
+  progress: { getRecord: (sessionID) => readProgressRecord(sessionID) },
   // BET-366 reviewer return: production wiring for the
   // `server:update-apply` IPC channel. The handler in rpc.mjs calls this
   // with SELF_UPDATE_SCRIPT (resolved at module load from `import.meta.url`).
@@ -1661,6 +1683,36 @@ const handleRequest = async (req, res) => {
           sessionID: body?.sessionID,
         });
         respondJson(res, 200, { ok: true });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Progress (AI-triggered "where are we right now") ----------
+  // POST /api/progress  body {sessionID, label?, step?, total?, state?,
+  //                           detail?, sinks?} → {ok:true, record}
+  //                 (400 invalid state/step/total, or missing sessionID)
+  // Created by the remote AI's global opencode `progress_report` tool. A
+  // durable, session-scoped status record (replace, never append) plus a
+  // progress.updated bus event for the ui sink. No notification — progress is
+  // ambient and costs nothing; `notify` is what takes a human's attention.
+  // See src/server/progress.mjs. Behind the /api/* Bearer gate (no exemption).
+  if (path === "/api/progress") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await reportProgress(body || {}, {
+          publish: (evt) => bus.publish(evt),
+        });
+        if (!result.ok) {
+          respondJson(res, 400, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, { ok: true, record: result.record });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

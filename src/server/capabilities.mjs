@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { normalizeHost } from "../shared/pluginManifest.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth — see docs/mantaui-plugins.md §Constants)
@@ -436,9 +437,9 @@ function applyRetention(jobs, nowMs) {
 }
 
 /**
- * Start the capability sweeper. Clones startSchedulePoller's shape EXACTLY:
- * build the deps with path-bound load/save, run once immediately,
- * setInterval + timer.unref(), inFlight re-entrancy guard, returns {stop}.
+ * Start the capability sweeper. Uses the shared startPoller() shape (immediate
+ * first tick, inFlight re-entrancy guard, timer.unref()) with path-bound
+ * load/save deps. Returns {stop}.
  */
 export function startCapSweeper(
   { publish, notifySession } = {},
@@ -452,26 +453,5 @@ export function startCapSweeper(
     notifySession,
   };
 
-  let inFlight = false;
-  const tick = async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      await sweepCapJobs(deps);
-    } catch (e) {
-      console.warn("[cap] sweep tick failed:", e?.message ?? e);
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(() => sweepCapJobs(deps), { intervalMs, label: "cap" });
 }
