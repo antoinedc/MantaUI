@@ -20,6 +20,11 @@
 
 import type { ReactNode } from "react";
 import { Check } from "lucide-react";
+// BET-726 Task 1: keep the keyboard-highlighted row visible when arrow-keying
+// past the fold. Reuses the SAME hook the ⌘K / ⌘F palettes already use for
+// their SessionRow (PaletteShell.tsx) — do not add a second scrollIntoView
+// idiom for the model/effort menus.
+import { useSelectedIntoView } from "./PaletteShell";
 
 // `mb-1` is the same 4px the sidebar's session rows carry between each other
 // (SessionRow's ROW_BASE). Without it the rows are flush, so a highlighted row
@@ -52,8 +57,12 @@ export function MenuOption({
   /** Option id, used as the aria-activedescendant target. */
   id?: string;
 }) {
+  // `active` is the roving keyboard highlight — the same signal that should
+  // keep this row scrolled into view.
+  const ref = useSelectedIntoView<HTMLButtonElement>(active);
   return (
     <button
+      ref={ref}
       type="button"
       id={id}
       role="option"

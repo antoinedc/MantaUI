@@ -86,14 +86,14 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         <button
           onClick={toast.action.onClick}
           disabled={toast.action.disabled}
-          className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50"
+          className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         >
           {toast.action.label}
         </button>
       )}
       <button
         onClick={() => onDismiss(toast.id)}
-        className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
+        className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
         title="Dismiss"
         aria-label="Dismiss"
       >

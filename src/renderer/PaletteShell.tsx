@@ -151,7 +151,13 @@ function Kbd({ children }: { children: ReactNode }) {
 export function useSelectedIntoView<T extends HTMLElement>(selected: boolean) {
   const ref = useRef<T>(null);
   useEffect(() => {
-    if (selected) ref.current?.scrollIntoView({ block: "nearest" });
+    // Optional-call the method itself, not just the element: jsdom (the test
+    // environment) doesn't implement `scrollIntoView` at all, and BET-726
+    // widened this hook's adopters (MenuOption, the @-file typeahead) into
+    // component tests that actually render a `selected` row on mount — the
+    // first tests to exercise this path — so the gap needs to be inert here,
+    // not papered over per call site.
+    if (selected) ref.current?.scrollIntoView?.({ block: "nearest" });
   }, [selected]);
   return ref;
 }

@@ -113,14 +113,14 @@ export function UpdateBar({
             onClick={() => {
               onAction();
             }}
-            className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium"
+            className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
           >
             {actionLabel}
           </button>
           {dismissible && onDismiss && (
             <button
               onClick={() => onDismiss()}
-              className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center"
+              className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
               title="Dismiss"
               aria-label="Dismiss update"
             >

@@ -188,6 +188,23 @@ describe("MenuItem", () => {
     expect(clicked).toBe(true);
   });
 
+  // BET-726 Task 3.1: the roving keyboard highlight (SessionHeader's ⋯ menu)
+  // is a static `--fill-hover` fill, independent of `variant` — the SAME
+  // static fill MenuOption's `active` prop gives the model/effort menus.
+  it("highlighted applies the static bg-fill-hover fill; unset it does not", () => {
+    h = mount(<MenuItem highlighted>row</MenuItem>);
+    let classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
+    expect(classes).toContain("bg-fill-hover");
+    h.unmount();
+    h = mount(<MenuItem>row</MenuItem>);
+    classes = (h.container.firstElementChild as HTMLElement).className.split(/\s+/);
+    // The static (non-`hover:`) token is absent, but the `:hover` variant
+    // stays for a mouse user (and no trailing-whitespace artifact from the
+    // conditional either — that regressed MenuItem.test.tsx once already).
+    expect(classes).not.toContain("bg-fill-hover");
+    expect(classes).toContain("hover:bg-fill-hover");
+  });
+
   it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
     // If MenuItem ever grew a className prop this directive becomes unused and
     // typecheck fails — the standing-decision-3 guard lives in the types.
@@ -366,5 +383,114 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
     });
     act(() => menuItemByText("Delete session").click());
     expect(h!.text()).toContain("fix-onboarding");
+  });
+});
+
+// BET-726 Task 3.1: ArrowUp/ArrowDown/Home/End roving highlight + Enter to
+// activate, on the same session ⋯ menu. The keydown is bound on the menu's
+// root (not each row), so it's dispatched from the trigger — which keeps
+// focus after the click that opened the menu — and relies on native bubbling
+// to reach the root's onKeyDown, the same technique PaletteShell.test.tsx
+// already uses for its Escape coverage.
+describe("SessionMenu — keyboard roving highlight (BET-726 Task 3.1)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function openMenu(overrides: Parameters<typeof mountSessionHeader>[0] = {}) {
+    h = mountSessionHeader(overrides);
+    const trigger = h.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Session actions"]',
+    )!;
+    act(() => trigger.click());
+    return trigger;
+  }
+
+  function press(el: HTMLElement, key: string) {
+    act(() => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+    });
+  }
+
+  // BET-726 review cycle 1 Question 1: the highlight used to be visual-only
+  // — a screen reader following the arrow keys was told nothing, since DOM
+  // focus never leaves the trigger. `aria-activedescendant` on the trigger
+  // (the element that actually holds focus, matching ModelMenu's own
+  // `<input>`-carries-it idiom) plus `aria-owns` (trigger and Dropdown are
+  // DOM siblings, not ancestor/descendant) closes that gap.
+  it("wires aria-owns + aria-activedescendant on the trigger as the highlight moves", () => {
+    const trigger = openMenu();
+    const dropdown = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    expect(trigger.getAttribute("aria-owns")).toBe(dropdown.id);
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
+    press(trigger, "ArrowDown");
+    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Chat"),
+    )!;
+    expect(chatRow.id).toBeTruthy();
+    expect(trigger.getAttribute("aria-activedescendant")).toBe(chatRow.id);
+    press(trigger, "ArrowDown");
+    const terminalRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Terminal"),
+    )!;
+    expect(trigger.getAttribute("aria-activedescendant")).toBe(terminalRow.id);
+  });
+
+  it("ArrowDown highlights the first row (bg-fill-hover) and Enter activates it", () => {
+    let changed: unknown = null;
+    const trigger = openMenu({ onModeChange: (m) => { changed = m; } });
+    press(trigger, "ArrowDown");
+    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Chat"),
+    )!;
+    expect(chatRow.className).toContain("bg-fill-hover");
+    press(trigger, "Enter");
+    expect(changed).toBe("chat");
+  });
+
+  it("ArrowUp before any ArrowDown wraps to the LAST row (End of the list)", () => {
+    let deleted = 0;
+    const trigger = openMenu({ onDelete: () => deleted++ });
+    press(trigger, "ArrowUp");
+    const deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Delete session"),
+    )!;
+    expect(deleteRow.className).toContain("bg-fill-hover");
+    // Enter on "Delete session" opens the confirm, not onDelete directly
+    // (BET-724 §D7) — same activation path a click would take.
+    press(trigger, "Enter");
+    expect(deleted).toBe(0);
+    expect(h!.text()).toContain("Delete this session?");
+  });
+
+  it("Home/End jump to the first/last row", () => {
+    const trigger = openMenu();
+    press(trigger, "End");
+    let deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Delete session"),
+    )!;
+    expect(deleteRow.className).toContain("bg-fill-hover");
+    press(trigger, "Home");
+    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Chat"),
+    )!;
+    expect(chatRow.className).toContain("bg-fill-hover");
+    deleteRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Delete session"),
+    )!;
+    expect(deleteRow.className).not.toContain("bg-fill-hover");
+  });
+
+  it("re-opening the menu resets the highlight (no stale index carries over)", () => {
+    const trigger = openMenu();
+    press(trigger, "ArrowDown");
+    // Close (click-away semantics via Escape, which useClickAway owns) then
+    // reopen — the highlight must not still be on row 0's neighbour.
+    press(trigger, "Escape");
+    act(() => trigger.click());
+    const anyHighlighted = h!.container.querySelector("button[role='menuitem'].bg-fill-hover");
+    expect(anyHighlighted).toBeNull();
   });
 });
