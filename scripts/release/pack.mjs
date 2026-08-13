@@ -18,7 +18,7 @@
 // box does NOT run `npm ci` after extraction:
 //
 //   manta-<version>/
-//     runtime/node/                  vendored Node 20.20.2 (.tar.gz prebuilt by
+//     runtime/node/                  vendored Node 24.19.0 (.tar.gz prebuilt by
 //                                    nodejs.org — same Node binary + npm the
 //                                    box will use, so node-pty's native ABI
 //                                    matches the runtime that runs it)
@@ -63,7 +63,7 @@ const REPO_ROOT = resolve(__dirname, "..", "..");
 // Pin the vendored Node version. Bump deliberately, not from `nvm ls`. The
 // runtime is built once on the pack box and shipped as-is — the box never
 // touches a package manager.
-const NODE_VERSION = "20.20.2";
+const NODE_VERSION = "24.19.0";
 const NODE_SHA_FILE = "SHASUMS256.txt";
 const NODE_SHA_URL = `https://nodejs.org/dist/v${NODE_VERSION}/${NODE_SHA_FILE}`;
 
@@ -226,7 +226,7 @@ async function runPrebuiltDeps(stageDir) {
     stdio: "inherit",
     // PATH-prefix the vendored node bin so any npm subprocesses (e.g. node-gyp
     // for node-pty) find the matching ABI. Without this, on a pack box where
-    // /usr/bin/node is a different major than the vendored 20.20.2, the
+    // /usr/bin/node is a different major than the vendored 24.19.0, the
     // binding compiles against the system ABI and refuses to load.
     env: {
       ...process.env,
@@ -370,7 +370,7 @@ async function main() {
     die("release tarball is missing scripts/lib/release.sh — self-update.sh sources it");
   }
 
-  // 3. Vendored Node 20.20.2 — downloaded + sha256-verified + extracted under
+  // 3. Vendored Node 24.19.0 — downloaded + sha256-verified + extracted under
   //    stage/runtime/node. Tarball is cached under .cache/ so re-packs skip the
   //    network round-trip. This is the runtime the box will use.
   await ensureNodeRuntime(cacheDir, stageDir, NODE_TARBALL);
