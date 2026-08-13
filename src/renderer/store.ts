@@ -318,6 +318,10 @@ type State = {
   // hidden (never rendered in the bar or the overflow dropdown). Mirror of
   // AppConfig.hiddenStatusItems; read by SessionHeader's registry.
   hiddenStatusItems: string[];
+  // BET-789: the one-line "Connect GitHub…" offer under the session header
+  // has been permanently dismissed. Mirror of AppConfig.forgeConnectOfferDismissed;
+  // read by SessionHeader to decide whether to surface the offer.
+  forgeConnectOfferDismissed: boolean;
   // Agent → laptop push trust flag. When true, files the AI drops in its
   // remote outbox are pulled to the downloads dir without confirmation.
   allowAgentPush: boolean;
@@ -673,6 +677,7 @@ export const useStore = create<State>((set, get) => ({
   autoRenameSessions: false,
   alwaysShowUsage: false,
   hiddenStatusItems: [],
+  forgeConnectOfferDismissed: false,
   allowAgentPush: false,
   worktreePerSession: false,
   worktreeCleanOnClose: false,
@@ -910,6 +915,7 @@ export const useStore = create<State>((set, get) => ({
       autoRenameSessions: c.autoRenameSessions ?? false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
       hiddenStatusItems: Array.isArray(c.hiddenStatusItems) ? c.hiddenStatusItems : [],
+      forgeConnectOfferDismissed: c.forgeConnectOfferDismissed ?? false,
       allowAgentPush: c.allowAgentPush ?? false,
       worktreePerSession: c.worktreePerSession ?? false,
       worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,

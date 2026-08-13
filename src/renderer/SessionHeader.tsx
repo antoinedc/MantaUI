@@ -23,17 +23,25 @@ import {
   cssVar,
   moveMenuHighlight,
   selectStatusItems,
+  checksChipDescriptor,
+  countsForChecks,
+  shouldOfferForgeConnect,
+  failuresToAgentPrompt,
+  type ChecksChipTone,
   type ContextBreakdown,
   type StaleCacheResult,
   type StatusItem,
 } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
-import type { AvailableLauncher } from "../shared/types";
+import type { AvailableLauncher, CheckRollup, ForgeCheckRun, PullRequest } from "../shared/types";
 import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
 import { Tag } from "./Tag";
+import { Chip } from "./Chip";
+import { StatusDot } from "./StatusDot";
+import { Callout } from "./Callout";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { ConfirmModal } from "./ConfirmModal";
 
@@ -76,6 +84,15 @@ export function SessionHeader({
   artifactsOpen,
   onToggleArtifacts,
   hiddenStatusItems,
+  pr,
+  checks,
+  checksRollup,
+  forgeConnected,
+  forgeKind,
+  forgeConnectOfferDismissed,
+  onOpenExternal,
+  onFillComposer,
+  onDismissForgeConnect,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -116,6 +133,22 @@ export function SessionHeader({
   // bar or the overflow. Optional so the prop doesn't break callers that
   // haven't wired the setting yet.
   hiddenStatusItems?: string[];
+  // BET-789: forge read path, consumed from ChatPanel (which owns the fetch)
+  // and threaded down so this component stays presentational. `pr` + `checks`
+  // + `checksRollup` drive the PR-on-branch suffix and the checks chip;
+  // `forgeConnected` + the session origin's `forgeKind` + the permanently-
+  // dismissed flag drive the one-line connect offer. All optional with
+  // forge-absent defaults so non-forge callers (tests, mobile) stay
+  // byte-identical to today.
+  pr?: PullRequest | null;
+  checks?: ForgeCheckRun[];
+  checksRollup?: CheckRollup;
+  forgeConnected?: boolean;
+  forgeKind?: string | null;
+  forgeConnectOfferDismissed?: boolean;
+  onOpenExternal?: (url: string) => void;
+  onFillComposer?: (text: string) => void;
+  onDismissForgeConnect?: () => void;
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -133,6 +166,23 @@ export function SessionHeader({
   // BET-724 §D7: the confirm dialogs for Delete/Clear name the session — the
   // window name reads better than the full "project / window" breadcrumb.
   const sessionName = breadcrumb?.window ?? breadcrumb?.project ?? "this session";
+
+  // BET-789: the checks chip is the ONE new status item, registered only when
+  // there is a PR with checks and a non-empty rollup. No PR / no checks / forge
+  // not connected → the descriptor is null → nothing is registered (§4.3 [C2]):
+  // connecting GitHub adds no chrome by itself.
+  const checksCounts = countsForChecks(checks ?? []);
+  const checksDesc =
+    pr && checks && checks.length > 0
+      ? checksChipDescriptor(checksRollup ?? "none", checksCounts)
+      : null;
+  // The one-line connect offer — only in a forge-origin session while the
+  // forge is disconnected and the offer has not been permanently dismissed.
+  const offerConnect = shouldOfferForgeConnect({
+    connected: forgeConnected ?? false,
+    forgeKind: forgeKind ?? null,
+    dismissed: forgeConnectOfferDismissed ?? false,
+  });
 
   // ===== Status-item registry (BET-782) =====
   // The right group is a REGISTRY, not hand-ordered JSX. Each entry is a
@@ -169,6 +219,26 @@ export function SessionHeader({
   }, []);
 
   const registry: StatusItem[] = [];
+  // Checks sits FIRST in construction order so it is the leftmost item of the
+  // right group at wide widths (§4.5① [C3]: checks, context, artifacts, menu).
+  // Its priority is a function of state (§4.3): red is pinned (never auto-hidden,
+  // so it survives the narrow layout while the branch chip is displaced), green/
+  // yellow overflow first.
+  if (checksDesc) {
+    registry.push({
+      id: "checks",
+      priority: checksDesc.priority,
+      render: () => (
+        <ChecksChip
+          descriptor={checksDesc}
+          checks={checks ?? []}
+          pr={pr ?? null}
+          onOpenExternal={onOpenExternal}
+          onFillComposer={onFillComposer}
+        />
+      ),
+    });
+  }
   if (showContext) {
     registry.push({
       id: "context",
@@ -235,11 +305,12 @@ export function SessionHeader({
   );
 
   return (
-    <div
-      ref={headerRef}
-      className="manta-session-header flex items-center gap-2 h-11 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
-      style={{ WebkitAppRegion: "drag" } as CSSProperties}
-    >
+    <>
+      <div
+        ref={headerRef}
+        className="manta-session-header flex items-center gap-2 h-11 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
+        style={{ WebkitAppRegion: "drag" } as CSSProperties}
+      >
       {/* Breadcrumb — workspace / session. This names WHERE YOU ARE, and it is
             the header's primary job: one window shows many sessions across
             many workspaces, and the branch alone does not identify one. It is
@@ -254,16 +325,22 @@ export function SessionHeader({
       )}
 
       {/* Branch chip — session state, at the `sm` tag density so it reads as
-            metadata beside the breadcrumb rather than as a control. */}
-      {branch && (
-        <Tag
-          size="sm"
-          icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
-          title={`Current branch: ${branch}`}
-        >
-          <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
-        </Tag>
-      )}
+            metadata beside the breadcrumb rather than as a control. When an
+            open PR rides the branch, the chip becomes interactive and opens the
+            PR popover [C7] (the PR is an ATRIBUTE of the branch, not a peer of
+            it — no second PR chip, §4.3). No PR → byte-identical to today [C2]. */}
+      {branch &&
+        (pr ? (
+          <BranchChip branch={branch} pr={pr} onOpenExternal={onOpenExternal} />
+        ) : (
+          <Tag
+            size="sm"
+            icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+            title={`Current branch: ${branch}`}
+          >
+            <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
+          </Tag>
+        ))}
 
       {/* Right group — the registry's visible items + the overflow trigger.
             Order preserves today's wide-width visual (context, artifacts,
@@ -280,7 +357,13 @@ export function SessionHeader({
 
         {overflow.length > 0 && <StatusOverflow items={overflow} />}
       </div>
-    </div>
+      </div>
+
+      {/* BET-789 §4.5 [S10]: the one-line contextual connect offer, under the
+            header bar (never a modal / toast / Settings badge). Only in a
+            forge-origin session while disconnected and not dismissed. */}
+      {offerConnect && <ConnectOffer onDismiss={onDismissForgeConnect} />}
+    </>
   );
 }
 
@@ -832,6 +915,325 @@ function SessionMenu({
         }}
         onCancel={() => setConfirm(null)}
       />
+    </div>
+  );
+}
+
+// ===== Click-popover chip host (BET-789) =====
+//
+// Shared trigger + popover shell for the interactive header chips (branch with
+// a PR, and the checks chip). Same sibling-under-positioned-wrapper contract
+// as ContextPill — trigger and panel are SIBLINGS, never parent/child (so the
+// trigger's click can't close the panel it opens, and no button-in-button).
+// `useClickAway` handles outside-click and Escape-close; Escape additionally
+// hands focus back to the trigger chip. The panel only mounts while open, so
+// no aria-hidden dance on a closed-but-present surface. This is the "surface
+// exists only while open, closes and restores focus" requirement (§8.4 — an
+// actionable hover card would fail it, so this is click-only).
+function PopoverChip({
+  trigger,
+  panel,
+  ariaLabel,
+  triggerClassName,
+}: {
+  trigger: React.ReactNode;
+  panel: React.ReactNode;
+  ariaLabel: string;
+  triggerClassName?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  useClickAway(rootRef, open, () => setOpen(false));
+  return (
+    <div
+      ref={rootRef}
+      className="relative shrink-0"
+      style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+      onKeyDown={(e) => {
+        // useClickAway also closes on Escape (document-level); this branch is
+        // what additionally returns focus to the trigger (mirrors SessionMenu).
+        if (e.key === "Escape" && open) {
+          setOpen(false);
+          triggerRef.current?.focus();
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        className={triggerClassName}
+      >
+        {trigger}
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={ariaLabel}
+          className="manta-ctx-popover manta-menu-in absolute right-0 top-full mt-1 z-30 w-[360px] rounded-lg border border-border bg-bg-soft shadow-md"
+        >
+          {panel}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Branch + PR popover chip (BET-789 [C3] [C7]) =====
+//
+// The PR rides the branch chip — it is an attribute of the branch, not a peer
+// of it. `⎇ feat/forge-seam` becomes `⎇ feat/forge-seam · #412` and, with a PR
+// present, opens a popover carrying the PR's title, state, head→base refs,
+// reviewers, unresolved-thread count and — the payload of this feature — the
+// mergeability REASON (never "can't merge" alone, §4.3). Without a PR the
+// branch renders as the plain non-interactive Tag (byte-identical to today).
+function BranchChip({
+  branch,
+  pr,
+  onOpenExternal,
+}: {
+  branch: string;
+  pr: PullRequest;
+  onOpenExternal?: (url: string) => void;
+}) {
+  return (
+    <PopoverChip
+      ariaLabel={`Pull request #${pr.number}: ${pr.title}`}
+      triggerClassName="manta-branch-chip rounded-full p-0 border-0 bg-transparent transition-colors hover:bg-fill-hover"
+      trigger={
+        <Tag
+          size="sm"
+          icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+          title={`Current branch: ${branch} — pull request #${pr.number}`}
+        >
+          <span className="shrink-0 truncate max-w-[200px]">
+            {branch} · #{pr.number}
+          </span>
+        </Tag>
+      }
+      panel={<BranchPanel pr={pr} onOpenExternal={onOpenExternal} />}
+    />
+  );
+}
+
+// One definition-list row in the PR popover: label left in faint, value
+// right-aligned in muted; the mergeability value is the one that takes a
+// colour (that colour IS the payload, §8.4 [C7]).
+function PanelRow({
+  label,
+  value,
+  valueClass,
+}: {
+  label: string;
+  value: string;
+  valueClass?: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 py-1 text-[13px]">
+      <span className="text-text-faint">{label}</span>
+      <span
+        className={`ml-auto min-w-0 truncate font-mono text-xs font-medium text-text-muted ${
+          valueClass ?? ""
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function BranchPanel({
+  pr,
+  onOpenExternal,
+}: {
+  pr: PullRequest;
+  onOpenExternal?: (url: string) => void;
+}) {
+  // mergeBlockedReason is the payload — "checks failing", "conflicts",
+  // "review required", "draft" — displayed in danger. Only when there is no
+  // reason does it fall back to a status the forge itself reports.
+  const mergeable = pr.mergeBlockedReason
+    ? { text: pr.mergeBlockedReason, className: "text-danger" }
+    : pr.mergeable === true
+      ? { text: "mergeable", className: "text-ok" }
+      : { text: "computing…", className: "text-text-faint" };
+  return (
+    <div className="p-3">
+      <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
+        #{pr.number} {pr.title}
+      </div>
+      <div className="mb-2 text-xs text-text-faint">
+        {pr.state} · {pr.headRef} → {pr.baseRef}
+      </div>
+      <div className="flex flex-col">
+        <PanelRow
+          label="Reviewers"
+          value={pr.reviewers.length > 0 ? pr.reviewers.join(", ") : "none"}
+        />
+        <PanelRow label="Unresolved threads" value={String(pr.unresolvedThreads)} />
+        <PanelRow label="Mergeable" value={mergeable.text} valueClass={mergeable.className} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {/* "Review changes" is inert in BET-789 — a later issue wires it. */}
+        <Button tone="default">Review changes</Button>
+        {onOpenExternal && (
+          <Button tone="default" onClick={() => onOpenExternal(pr.url)}>
+            Open on GitHub ↗
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ===== Checks chip + popover (BET-789 [C3] [C4] [C6]) =====
+//
+// The checks chip is the ONE new status item (§4.3): colour AND glyph, never
+// colour alone — `✓ 7`, `✗ 2 failed`, `◐ 3 running`. Its tone + priority are
+// a function of state (see checksChipDescriptor). It opens on CLICK (never
+// hover — it carries a link + an action), and its popover lists failing checks
+// first, then a `+ N passed` collapse row.
+const CHECK_TONE_CLASS: Record<ChecksChipTone, string> = {
+  ok: "border-ok/40 bg-ok-bg text-ok",
+  warn: "border-warn/40 bg-warn-bg text-warn",
+  danger: "border-danger/40 bg-danger-bg text-danger",
+};
+
+function ChecksChip({
+  descriptor,
+  checks,
+  pr,
+  onOpenExternal,
+  onFillComposer,
+}: {
+  descriptor: { label: string; tone: ChecksChipTone; priority: number };
+  checks: ForgeCheckRun[];
+  pr: PullRequest | null;
+  onOpenExternal?: (url: string) => void;
+  onFillComposer?: (text: string) => void;
+}) {
+  return (
+    <PopoverChip
+      ariaLabel={`Checks: ${descriptor.label}`}
+      triggerClassName={`manta-checks-chip inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-full border px-2 font-mono text-[11px] font-medium leading-none ${CHECK_TONE_CLASS[descriptor.tone]}`}
+      trigger={<span>{descriptor.label}</span>}
+      panel={
+        <ChecksPanel
+          checks={checks}
+          pr={pr}
+          onOpenExternal={onOpenExternal}
+          onFillComposer={onFillComposer}
+        />
+      }
+    />
+  );
+}
+
+function CheckRow({
+  name,
+  meta,
+  tone,
+}: {
+  name: string;
+  meta: string;
+  tone: "ok" | "running" | "error" | "idle";
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-md px-2 py-2 text-[13px] text-text-muted hover:bg-fill-hover">
+      <StatusDot tone={tone} />
+      <span className="min-w-0 flex-1 truncate font-medium text-text">{name}</span>
+      {meta && (
+        <span className="shrink-0 font-mono text-[11.5px] font-medium text-text-quiet">
+          {meta}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ChecksPanel({
+  checks,
+  pr,
+  onOpenExternal,
+  onFillComposer,
+}: {
+  checks: ForgeCheckRun[];
+  pr: PullRequest | null;
+  onOpenExternal?: (url: string) => void;
+  onFillComposer?: (text: string) => void;
+}) {
+  const failed = checks.filter((c) => {
+    const done = c.conclusion;
+    return done && done !== "success" && c.status !== "in_progress" && c.status !== "queued";
+  });
+  const running = checks.filter((c) => {
+    const done = c.conclusion;
+    return !done || c.status === "in_progress" || c.status === "queued";
+  });
+  const passed = checks.filter((c) => c.conclusion === "success");
+  const prompt = failuresToAgentPrompt(checks);
+  const logUrl =
+    failed.find((c) => c.url)?.url ??
+    checks.find((c) => c.url)?.url ??
+    pr?.url;
+  return (
+    <div className="p-2">
+      <div className="max-h-[260px] overflow-y-auto">
+        {failed.map((c) => (
+          <CheckRow key={c.name} tone="error" name={c.name} meta={c.conclusion ?? "failed"} />
+        ))}
+        {running.map((c) => (
+          <CheckRow key={c.name} tone="running" name={c.name} meta="running" />
+        ))}
+        {passed.length > 0 && <CheckRow tone="idle" name={`+ ${passed.length} passed`} meta="" />}
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle px-1 pt-2">
+        {prompt && onFillComposer && (
+          <Chip on onClick={() => onFillComposer(prompt)}>
+            ↻ Send failures to the agent
+          </Chip>
+        )}
+        {logUrl && onOpenExternal && (
+          <Button tone="default" onClick={() => onOpenExternal(logUrl)}>
+            Open logs ↗
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ===== Connect offer (BET-789 §4.5 [S10]) =====
+//
+// The ENTIRE visible chrome delta for the project's existing-user acquisition
+// path: one dismissible Callout line under the header, in a forge-origin
+// session while the forge is disconnected. "Connect" is inert (a later issue
+// wires it); the × dismisses permanently, per-box, via the store + configUpdate
+// (wired by ChatPanel's onDismissForgeConnect — the offer only re-appears when
+// the config flag is cleared).
+function ConnectOffer({ onDismiss }: { onDismiss?: () => void }) {
+  return (
+    <div className="px-3 pb-2">
+      <Callout tone="info">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-[180px] flex-1">
+            Connect GitHub to see checks and pull requests for this repo.
+          </span>
+          <span className="flex items-center gap-2">
+            {/* "Connect" is inert in BET-789. */}
+            <Chip on>Connect</Chip>
+            {onDismiss && (
+              <Chip onClick={onDismiss} title="Dismiss">
+                ×
+              </Chip>
+            )}
+          </span>
+        </div>
+      </Callout>
     </div>
   );
 }

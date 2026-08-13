@@ -110,6 +110,12 @@ export type AppConfig = {
   // later issues add the toggle. Rides the generic configGet/configUpdate
   // channel like every other AppConfig field.
   hiddenStatusItems?: string[];
+  // BET-789: the one-line "Connect GitHub…" offer under the session header
+  // has been permanently dismissed. Per-box boolean; absent = never shown yet
+  // (offer appears while the forge is disconnected in a forge-origin session).
+  // Rides the generic configGet/configUpdate channel like every other
+  // AppConfig field.
+  forgeConnectOfferDismissed?: boolean;
   // Global default model for all new and cleared chat sessions. Stored as
   // { providerID, modelID } so the per-session localStorage override and
   // this setting use the same shape. When absent, opencode picks its own
