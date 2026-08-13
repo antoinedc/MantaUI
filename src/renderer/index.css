@@ -233,7 +233,7 @@ html, body, #root {
 }
 
 /* D8 — honest indeterminate UpdateBar sweep. */
-.manta-sweep { animation: manta-sweep 1.2s var(--ease-out) infinite; }
+.manta-sweep { width: 40%; animation: manta-sweep 1.2s var(--ease-out) infinite; }
 @keyframes manta-sweep { from { left: -40%; } to { left: 100%; } }
 @media (prefers-reduced-motion: reduce) {
   .manta-sweep {

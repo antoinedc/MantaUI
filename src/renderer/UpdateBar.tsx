@@ -99,7 +99,7 @@ export function UpdateBar({
               style={{ width: `${(progress.step / progress.total) * 100}%` }}
             />
           ) : (
-            <div className="absolute h-full w-2/5 rounded-full bg-accent manta-sweep" />
+            <div className="absolute h-full manta-sweep rounded-full bg-accent" />
           )}
         </div>
       ) : (
