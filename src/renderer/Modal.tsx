@@ -23,6 +23,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { useFocusTrap } from "./useFocusTrap";
+import { MOTION_BASE, MOTION_EASE, MOTION_FAST } from "./chatMotion";
 
 const SIZES = {
   sm: "w-[420px]",
@@ -30,14 +31,13 @@ const SIZES = {
   lg: "w-[560px]",
 } as const;
 
-// The modal chrome's entrance/exit ease — the same cubic-bezier as the chat
-// message entry animation (MESSAGE_IN_ENTER in chatMotion.ts) and the
-// Artifacts-panel slide, so every in-app transition reads in one motion
-// language. 0.18s for the panel scale+fade.
-const MODAL_PANEL_TRANSITION = { type: "tween", duration: 0.18, ease: [0.22, 1, 0.36, 1] } as const;
+// The modal chrome's entrance/exit ease — the shared MOTION_EASE, so every
+// in-app transition reads in one motion language. Panel uses MOTION_BASE.
+const MODAL_PANEL_TRANSITION = { type: "tween", duration: MOTION_BASE, ease: MOTION_EASE } as const;
 
-// backdrop fade is a touch faster (0.15s) than the panel (0.18s).
-const MODAL_BACKDROP_TRANSITION = { type: "tween", duration: 0.15 } as const;
+// backdrop fade is a touch faster — MOTION_FAST (the 20ms delta over the
+// old 0.15s is imperceptible; the token wins).
+const MODAL_BACKDROP_TRANSITION = { type: "tween", duration: MOTION_FAST } as const;
 
 export function Modal({
   size = "md",

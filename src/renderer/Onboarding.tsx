@@ -92,7 +92,7 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
                           background: ACCENT_SOLID,
                           color: "var(--on-accent)",
                           border: `1.5px solid ${ACCENT}`,
-                          boxShadow: `0 0 0 4px rgba(124,156,255,0.15)`,
+                          boxShadow: `0 0 0 4px var(--accent-bg)`,
                         }
                       : { background: ACCENT_SOLID, color: "var(--on-accent)", border: `1.5px solid ${ACCENT}` }
                 }
@@ -400,7 +400,7 @@ function SuccessPanel({ onOpen }: { onOpen: () => void }) {
     <div className="text-center py-5">
       <div
         className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
-        style={{ background: "rgba(34,197,94,0.1)" }}
+        style={{ background: "var(--ok-bg)" }}
       >
         <CheckIcon className="w-7 h-7 text-ok" />
       </div>

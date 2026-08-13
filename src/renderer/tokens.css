@@ -157,6 +157,16 @@
   --font-size-display: 28px;
   --font-size-confirm: 40px;
   --font-size-otp: 26px;
+
+  /* Motion scale (audit D1). Mirrors chatMotion.ts — three durations, ONE
+     easing. Every in-app transition picks a token; ad-hoc durations/curves
+     are a regression. The CSS custom properties exist so keyframe/CSS
+     consumers (dropdowns, palette, onboarding, panel swap) resolve the same
+     values the framer sites import from chatMotion.ts. */
+  --motion-fast: 120ms;   /* menus, palette, backdrops */
+  --motion-base: 200ms;   /* modals, cards, toasts */
+  --motion-slow: 300ms;   /* message entry, panel slides, onboarding */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Density scope (BET-544). Session-row metrics live on [data-density], NOT

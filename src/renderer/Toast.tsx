@@ -22,6 +22,7 @@
 import { useEffect, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X } from "lucide-react";
+import { MOTION_BASE, MOTION_EASE } from "./chatMotion";
 
 export type ToastAction = {
   label: string;
@@ -149,7 +150,7 @@ export function ToastStack({ toasts, onDismiss }: ToastStackProps) {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
             className="pointer-events-auto w-full max-w-[420px]"
           >
             <Toast toast={t} onDismiss={onDismiss} />

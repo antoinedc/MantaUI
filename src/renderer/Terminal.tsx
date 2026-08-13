@@ -473,7 +473,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
         onMouseDown={() => termRef.current?.focus()}
       />
       {(dragOver || uploading) && (
-        <div className="absolute inset-2 z-10 flex items-center justify-center rounded-sm border-2 border-dashed border-accent bg-bg/70 text-text text-sm pointer-events-none">
+        <div className="absolute inset-2 z-10 flex items-center justify-center rounded-sm border-2 border-dashed border-accent bg-bg/70 text-text text-body pointer-events-none">
           {uploading ? "Uploading…" : "Drop to share with Claude"}
         </div>
       )}
@@ -499,7 +499,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
               }
             }}
             placeholder="Find…"
-            className="w-40 bg-transparent text-sm text-text outline-none placeholder:text-text-faint"
+            className="w-40 bg-transparent text-body text-text outline-none placeholder:text-text-faint"
           />
           <button className="px-1 text-text-muted hover:text-text" title="Previous (Shift+Enter)"
             onClick={() => findQuery && searchRef.current?.findPrevious(findQuery)}>‹</button>

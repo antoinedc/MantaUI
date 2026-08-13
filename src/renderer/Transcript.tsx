@@ -24,6 +24,7 @@ import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue, presentVerbFor } from "./chatShared";
 import { ActiveTodos, MessageRow } from "./MessageRow";
 import { MantaLoader } from "./MantaLoader";
+import { MOTION_FAST } from "./chatMotion";
 import { CardMount } from "./components/CardMount";
 import { WORKING_TICK_MS, nowMs, useClockTick } from "./clock";
 import { QuestionCard } from "./Cards";
@@ -193,7 +194,7 @@ export function WorkingIndicator({
     <CardMount show={running} k="working">
       <div className="manta-working-indicator flex items-center gap-2 shrink-0">
         <MantaLoader />
-        <span className="text-text-faint text-xs">
+        <span className="text-text-faint text-meta">
           {liveTurn ? (
             <>
               {presentVerbFor(liveTurn.verbSeedId)}…
@@ -428,7 +429,7 @@ export function Transcript({
             className="flex-1 min-h-0 flex flex-col"
             initial={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ type: "tween", duration: 0.15 }}
+            transition={{ type: "tween", duration: MOTION_FAST }}
           >
             {/* Empty state: full width, matching the populated flow below so
                 both states share a left edge (BET-646).

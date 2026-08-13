@@ -87,7 +87,7 @@ html, body, #root {
   to { opacity: 1; transform: translateY(0); }
 }
 .onboarding-step-enter {
-  animation: onboardingFadeSlideIn 350ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: onboardingFadeSlideIn var(--motion-slow) var(--ease-out) forwards;
 }
 
 /* Recording indicator (BET-416 §A). Voice recording is signalled by the
@@ -158,7 +158,7 @@ html, body, #root {
    transcript, so a tab flip reads as the highlight gliding, not the content
    swapping. */
 .manta-artifacts-tab-indicator {
-  transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform var(--motion-slow) var(--ease-out);
 }
 @media (prefers-reduced-motion: reduce) {
   .manta-artifacts-tab-indicator { transition: none; }
@@ -175,7 +175,7 @@ html, body, #root {
    a 120ms fade-in keeps a fast tab-cycle from feeling like a hard blank-frame
    swap. Fades from 0.4, not 0, so quick tab-cycling never blanks the pane.
    The class is added by PanelShell in App.tsx and removed at animationend. */
-.panel-enter { animation: panelFadeIn 120ms ease-out; }
+.panel-enter { animation: panelFadeIn var(--motion-fast) ease-out; }
 @keyframes panelFadeIn {
   from { opacity: 0.4; }
   to { opacity: 1; }
@@ -200,7 +200,7 @@ html, body, #root {
 /* PaletteShell enter/exit (⌘K switcher, ⌘F search). 140ms in / 100ms out —
    the 100ms must match CLOSE_MS in PaletteShell.tsx. */
 .manta-palette-overlay { animation: manta-palette-fade-in 140ms ease-out; }
-.manta-palette-panel { animation: manta-palette-pop-in 140ms cubic-bezier(0.16, 1, 0.3, 1); }
+.manta-palette-panel { animation: manta-palette-pop-in var(--motion-fast) var(--ease-out); }
 .manta-palette-overlay-out { animation: manta-palette-fade-out 100ms ease-in forwards; }
 .manta-palette-panel-out { animation: manta-palette-pop-out 100ms ease-in forwards; }
 @keyframes manta-palette-fade-in { from { opacity: 0; } }
@@ -213,3 +213,34 @@ html, body, #root {
   .manta-palette-overlay-out,
   .manta-palette-panel-out { animation: none; }
 }
+
+/* D2 — menus/popovers enter with a 120ms rise; exit stays instant (snappy close). */
+.manta-menu-in {
+  animation: manta-menu-in var(--motion-fast) var(--ease-out);
+  transform-origin: top left;
+}
+@keyframes manta-menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-menu-in { animation: none; }
+}
+
+/* Tailwind's animate-* utilities ship no reduced-motion guard; framer is
+   covered by MotionConfig and custom keyframes carry their own guards. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse, .animate-spin, .animate-bounce { animation: none; }
+}
+
+/* D8 — honest indeterminate UpdateBar sweep. */
+.manta-sweep { animation: manta-sweep 1.2s var(--ease-out) infinite; }
+@keyframes manta-sweep { from { left: -40%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .manta-sweep {
+    animation: manta-pulse-fallback 1.6s ease-in-out infinite;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+@keyframes manta-pulse-fallback { 50% { opacity: 0.2; } }

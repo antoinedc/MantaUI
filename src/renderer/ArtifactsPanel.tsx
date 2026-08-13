@@ -16,6 +16,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
+import { MOTION_BASE, MOTION_EASE } from "./chatMotion";
 import {
   ArrowDown,
   ArrowUp,
@@ -242,7 +243,7 @@ function ExpiryPill({ state, label }: { state: "live" | "soon" | "expired"; labe
         : "bg-danger-bg text-danger";
   return (
     <span
-      className={`ml-1 inline-flex shrink-0 items-center gap-1 rounded-full px-[6px] py-[2px] text-[9.5px] font-semibold align-middle ${cls}`}
+      className={`ml-1 inline-flex shrink-0 items-center gap-1 rounded-full px-[6px] py-[2px] text-micro font-semibold align-middle ${cls}`}
     >
       {label}
     </span>
@@ -619,7 +620,7 @@ export function ArtifactsPanel({
         // mount rather than sliding in on app boot.
         initial={false}
         animate={{ width: open ? width : 0 }}
-        transition={{ type: "tween", duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+        transition={{ type: "tween", duration: MOTION_BASE, ease: MOTION_EASE }}
         aria-label="Artifacts"
       >
         {/* Inner content holds a FIXED width equal to the panel width so text
