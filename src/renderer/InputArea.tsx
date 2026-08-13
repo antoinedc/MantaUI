@@ -34,6 +34,7 @@ import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
 import { AttachButton, AttachmentStrip, MicButton, SessionToolbar } from "./ComposerParts";
+import { UsageDial } from "./UsageDial";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
 export { TypeaheadPopup } from "./ComposerParts";
@@ -139,6 +140,7 @@ export function InputArea({
   models,
   modelOverride,
   defaultModel,
+  activeProviderID,
   deactivatedMainModels,
   onOpenModels,
   onSelectModel,
@@ -191,6 +193,11 @@ export function InputArea({
   models: OpencodeModel[] | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
+  // BET-738: the active model's providerID, already resolved by ChatPanel
+  // via resolveActiveModel (the same computation `shortLabel` above uses) —
+  // passed straight through to UsageDial, which never re-resolves the model
+  // itself.
+  activeProviderID: string | null;
   deactivatedMainModels: string[];
   onOpenModels: () => void;
   onSelectModel: (m: ModelSelection | null) => void;
@@ -446,6 +453,7 @@ export function InputArea({
           )}
         </span>
         <span className="shrink-0 flex items-center gap-3 flex-wrap">
+          <UsageDial providerID={activeProviderID} />
           <SessionToolbar
             scheduleCount={scheduleCount}
             onSchedules={onSchedules}

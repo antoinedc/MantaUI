@@ -492,6 +492,34 @@ function AppInner() {
     };
   }, [apiGeneration]);
 
+  // Subscription plan usage (BET-738): prime the store's `usage` slice with
+  // ONE window.api.usageList() call on mount, then stay live via the box's
+  // `usage.updated` bus event. Deliberately NOT a poll — the box's usage
+  // poller (src/server/usage.mjs, 3-minute interval) is the only timer;
+  // adding a second one here would just be two clocks disagreeing.
+  useEffect(() => {
+    if (!window.api.usageList) return;
+    window.api
+      .usageList()
+      .then((snapshots) => {
+        useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
+      })
+      .catch(() => {
+        // Transport blip or an older box that doesn't implement the channel
+        // yet — leave the slice as-is (UsageDial's own null-snapshot path
+        // already renders nothing).
+      });
+    let off: (() => void) | null = null;
+    if (window.api.onUsageUpdated) {
+      off = window.api.onUsageUpdated(({ snapshots }) => {
+        useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
+      });
+    }
+    return () => {
+      if (off) off();
+    };
+  }, [apiGeneration]);
+
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
   // N toasts (one per mounted chat). Now the toast lives in the store, the

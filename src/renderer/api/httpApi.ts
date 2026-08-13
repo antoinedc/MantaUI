@@ -12,6 +12,7 @@ import {
   type PtyEvent,
   type ServerUpdateAvailablePayload,
   type StreamEnvelope,
+  type UsageSnapshot,
   type WindowStatus,
 } from "../../shared/types.js";
 import type { Api, SyncDelta } from "../../shared/api.js";
@@ -351,6 +352,7 @@ type Kind =
   | "serverUpdateAvailable"
   | "serverUpdateProgress"
   | "delegate.updated"
+  | "usage.updated"
   | "stream"
   | "sync";
 
@@ -368,6 +370,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   serverUpdateAvailable: new Set(),
   serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
+  "usage.updated": new Set(),
   stream: new Set(),
   sync: new Set(),
 };
@@ -1011,6 +1014,14 @@ export const httpApi: Api = {
   // bus event ({id,status,activity?}); subscribers refetch delegateList().
   onDelegateUpdated: (cb) =>
     on<{ id: string; status: string; activity?: string }>("delegate.updated", cb),
+
+  // BET-738: the box's usage poller (src/server/usage.mjs) publishes
+  // `usage.updated` on the bus whenever the serialized snapshot set actually
+  // changes. The payload IS the full current UsageSnapshot[] (unlike
+  // delegate.updated's hint-only payload) — subscribers apply it straight to
+  // the store's `usage` slice via setUsage, no refetch needed.
+  onUsageUpdated: (cb) =>
+    on<{ snapshots: UsageSnapshot[] }>("usage.updated", cb),
 
   // -- APNs native-push registration (BET-181) --
   // iOS Capacitor app registers its APNs device token via the standard 6-site

@@ -4,7 +4,7 @@
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow } from "../shared/types";
+import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode, TokenUsage } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2403,3 +2403,111 @@ export type PendingMessageScroll = { sessionId: string; messageId: string };
 export type PendingScrollWin = Window & {
   __mantaPendingMessageScroll?: PendingMessageScroll | null;
 };
+
+// ===== Subscription plan usage (BET-738: composer dial + popover) =====
+//
+// Pure selection + threshold logic for the composer's usage dial. THIS IS
+// NOT THE CONTEXT-WINDOW INDICATOR (ctxStageColor above, SessionHeader's
+// ContextPill) — per-SUBSCRIPTION plan usage, a different meter with its own
+// colour scale, never sharing code/placement with the context pill.
+
+/**
+ * Pick the UsageSnapshot that covers the active model's providerID, or null
+ * when there's no match (no data yet, that provider isn't connected, or
+ * `providerID` itself is absent). Matches on `providerIDs` — never on
+ * `provider` (the usage engine's own adapter id, e.g. "claude") or a
+ * provider display name; those are different namespaces from opencode's
+ * providerID (e.g. "anthropic") by design (see the field's doc comment in
+ * shared/types.ts).
+ */
+export function selectUsageSnapshot(
+  snapshots: UsageSnapshot[] | null | undefined,
+  providerID: string | null | undefined,
+): UsageSnapshot | null {
+  if (!snapshots || snapshots.length === 0 || !providerID) return null;
+  return snapshots.find((s) => s.providerIDs?.includes(providerID)) ?? null;
+}
+
+export type UsageDialTone = "under" | "warn" | "danger" | "over";
+
+export type UsageDialState = {
+  visible: boolean;
+  pct: number;
+  tone: UsageDialTone;
+  // The window that drives the dial's colour/visibility — the HIGHEST pct
+  // among the snapshot's windows (the one that bites first in practice,
+  // independent of whether the provider set its own `binding` flag).
+  window: UsageWindow | null;
+};
+
+function usageTone(pct: number): UsageDialTone {
+  if (pct >= 100) return "over";
+  if (pct >= 90) return "danger";
+  if (pct >= 70) return "warn";
+  return "under";
+}
+
+/**
+ * Derive the composer dial's visibility/colour/headline window from a usage
+ * snapshot. Pure — every threshold for the dial lives here, so the trigger
+ * component only maps `tone` to a CSS token.
+ *
+ * Visibility: renders only when the highest window's pct is >= 70, OR
+ * `alwaysShow` (the opt-in "Always show plan usage" setting) is on. Below
+ * that with the setting off, `visible` is false — callers render nothing;
+ * absence is the healthy signal, not a loading/error state.
+ */
+export function usageDialState(
+  snapshot: UsageSnapshot | null | undefined,
+  alwaysShow: boolean,
+): UsageDialState {
+  const windows = snapshot?.windows ?? [];
+  if (windows.length === 0) {
+    return { visible: false, pct: 0, tone: "under", window: null };
+  }
+  const binding = windows.reduce((max, w) => (w.pct > max.pct ? w : max));
+  const pct = binding.pct;
+  return {
+    visible: pct >= 70 || alwaysShow,
+    pct,
+    tone: usageTone(pct),
+    window: binding,
+  };
+}
+
+// "resets in 2h 10m" / "resets in 45m" — the popover's per-window reset
+// line. When the reset is more than 12h out, the absolute clock time is
+// appended (reuses formatClockTime, above) so a far-off reset isn't only
+// relative. Floors to the minute; returns null for a missing/past timestamp
+// so the caller omits the line rather than showing a negative duration.
+export function formatWindowReset(
+  resetsAt: number | null | undefined,
+  nowMs: number,
+): string | null {
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return null;
+  const deltaMs = resetsAt - nowMs;
+  if (deltaMs <= 0) return null;
+  const totalMin = Math.floor(deltaMs / 60_000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  const relative = h > 0 ? `resets in ${h}h ${m}m` : m > 0 ? `resets in ${m}m` : "resets in <1m";
+  if (deltaMs > 12 * 3_600_000) {
+    return `${relative} (${formatClockTime(resetsAt)})`;
+  }
+  return relative;
+}
+
+// "updated 3m ago" / "updated just now" — the popover footer's freshness
+// line. Reuses formatAge's unit ladder (now/Nm/Nh/Nd) for the same relative-
+// time vocabulary as the sidebar, above.
+export function formatUpdatedAgo(fetchedAt: number, nowMs: number): string {
+  const age = formatAge(Math.max(0, nowMs - fetchedAt));
+  return age === "now" ? "updated just now" : `updated ${age} ago`;
+}
+
+// True once a snapshot is more than 10 minutes stale — the popover footer's
+// "updated Nm ago" line turns --warn at this point. The box's poller runs
+// every 3 minutes, so 10 minutes means at least 2-3 missed ticks.
+export function usageStale(fetchedAt: number, nowMs: number): boolean {
+  return nowMs - fetchedAt > 10 * 60_000;
+}

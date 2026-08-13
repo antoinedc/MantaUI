@@ -2298,6 +2298,7 @@ export function ChatPanel({
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        activeProviderID={activeModel?.providerID ?? null}
         deactivatedMainModels={deactivatedMainModels}
         onOpenModels={ensureModels}
         onSelectModel={selectModel}

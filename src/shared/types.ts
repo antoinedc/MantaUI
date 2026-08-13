@@ -98,6 +98,11 @@ export type AppConfig = {
   // set by hand — so it's OFF by default and opt-in via Settings. See the
   // "Auto-rename" notes in AGENTS.md.
   autoRenameSessions?: boolean;
+  // BET-738: show the composer's usage dial even when every window is under
+  // the dial's normal 70% threshold. Off by default — the dial's whole point
+  // is to be absent unless it matters; this is the opt-out for someone who
+  // wants the ambient meter anyway. Settings-only, rides configUpdate.
+  alwaysShowUsage?: boolean;
   // Global default model for all new and cleared chat sessions. Stored as
   // { providerID, modelID } so the per-session localStorage override and
   // this setting use the same shape. When absent, opencode picks its own
@@ -1078,6 +1083,10 @@ export type UsageWindow = {
 };
 export type UsageSnapshot = {
   provider: string; // adapter id: "claude" | "codex" | "kimi"
+  // opencode providerIDs this snapshot covers (e.g. ["anthropic"]) — match the
+  // active model's providerID against THIS, never `provider`. The adapter id
+  // and opencode's providerID are different namespaces on purpose.
+  providerIDs: string[];
   planLabel?: string; // "Max 20x", "Pro", "Allegretto"
   windows: UsageWindow[];
   extras?: { label: string; value: string }[]; // credits balance, model pools…

@@ -334,6 +334,13 @@ export interface Api {
   // snapshots are produced by the box's usage poller (src/server/usage.mjs),
   // never written through this channel. NOT the context-window indicator.
   usageList(): Promise<UsageSnapshot[]>;
+  // BET-738: the box publishes a `usage.updated` bus event whenever the
+  // poller's serialized snapshot set actually changes. Unlike
+  // onDelegateUpdated's hint-only payload, this one carries the FULL current
+  // UsageSnapshot[] — subscribers apply it straight to the store, no
+  // refetch. No-op on the preload bridge and on demoApi (Proxy fallback
+  // returns a no-op unsubscribe).
+  onUsageUpdated(cb: (payload: { snapshots: UsageSnapshot[] }) => void): () => void;
 
   // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never

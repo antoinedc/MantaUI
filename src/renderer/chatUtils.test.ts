@@ -84,9 +84,14 @@ import {
   previewOriginWord,
   decodeDataUri,
   fetchTranscriptWithRetry,
+  selectUsageSnapshot,
+  usageDialState,
+  formatWindowReset,
+  formatUpdatedAgo,
+  usageStale,
 } from "./chatUtils";
 
-import type { OpencodeModel } from "../shared/types";
+import type { OpencodeModel, UsageSnapshot } from "../shared/types";
 
 
 
@@ -3116,6 +3121,166 @@ describe("computeTurnInfo", () => {
   it("computeLiveTurn: null for a transcript with no user message", () => {
     const messages = [assistantMsg("a1", { created: 1000, output: 4 })];
     expect(computeLiveTurn(messages as never)).toBeNull();
+  });
+});
+
+// ===== Subscription plan usage (BET-738) =====
+
+function usageSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
+  return {
+    provider: "claude",
+    providerIDs: ["anthropic"],
+    windows: [{ kind: "session", label: "Session (5h)", pct: 42 }],
+    fetchedAt: 1_000_000,
+    ...overrides,
+  };
+}
+
+describe("selectUsageSnapshot", () => {
+  it("matches the snapshot whose providerIDs contains the active providerID", () => {
+    const anthropic = usageSnapshot({ provider: "claude", providerIDs: ["anthropic"] });
+    const openai = usageSnapshot({ provider: "codex", providerIDs: ["openai"] });
+    expect(selectUsageSnapshot([anthropic, openai], "openai")).toBe(openai);
+    expect(selectUsageSnapshot([anthropic, openai], "anthropic")).toBe(anthropic);
+  });
+
+  it("returns null when no snapshot covers the providerID", () => {
+    const anthropic = usageSnapshot({ providerIDs: ["anthropic"] });
+    expect(selectUsageSnapshot([anthropic], "kimi-for-coding")).toBeNull();
+  });
+
+  it("returns null for an empty snapshot array", () => {
+    expect(selectUsageSnapshot([], "anthropic")).toBeNull();
+  });
+
+  it("returns null when providerID is null/undefined, even with snapshots present", () => {
+    const anthropic = usageSnapshot({ providerIDs: ["anthropic"] });
+    expect(selectUsageSnapshot([anthropic], null)).toBeNull();
+    expect(selectUsageSnapshot([anthropic], undefined)).toBeNull();
+    expect(selectUsageSnapshot(null, "anthropic")).toBeNull();
+  });
+});
+
+describe("usageDialState", () => {
+  it("hidden below 70 with the always-show setting off", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "s", pct: 69 }] });
+    expect(usageDialState(snap, false).visible).toBe(false);
+  });
+
+  it("visible below 70 when the always-show setting is on", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "s", pct: 10 }] });
+    const state = usageDialState(snap, true);
+    expect(state.visible).toBe(true);
+    expect(state.tone).toBe("under");
+  });
+
+  it("tone flips at exactly 70 (under → warn)", () => {
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 69 }] }), true).tone,
+    ).toBe("under");
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 70 }] }), true).tone,
+    ).toBe("warn");
+  });
+
+  it("tone flips at exactly 90 (warn → danger)", () => {
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 89 }] }), true).tone,
+    ).toBe("warn");
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 90 }] }), true).tone,
+    ).toBe("danger");
+  });
+
+  it("tone flips at exactly 100 (danger → over)", () => {
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 99 }] }), true).tone,
+    ).toBe("danger");
+    expect(
+      usageDialState(usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 100 }] }), true).tone,
+    ).toBe("over");
+  });
+
+  it("70 is visible even with the setting off (boundary is inclusive)", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "s", label: "s", pct: 70 }] });
+    expect(usageDialState(snap, false).visible).toBe(true);
+  });
+
+  it("picks the HIGHER of two windows as the binding one", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "Session (5h)", pct: 40 },
+        { kind: "weekly", label: "Weekly", pct: 85 },
+      ],
+    });
+    const state = usageDialState(snap, true);
+    expect(state.pct).toBe(85);
+    expect(state.window?.kind).toBe("weekly");
+  });
+
+  it("a snapshot with a single window works", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "s", pct: 55 }] });
+    const state = usageDialState(snap, true);
+    expect(state.pct).toBe(55);
+    expect(state.window?.kind).toBe("session");
+  });
+
+  it("a snapshot with zero windows is not visible", () => {
+    const snap = usageSnapshot({ windows: [] });
+    expect(usageDialState(snap, true)).toEqual({
+      visible: false,
+      pct: 0,
+      tone: "under",
+      window: null,
+    });
+  });
+
+  it("a null snapshot is not visible", () => {
+    expect(usageDialState(null, true).visible).toBe(false);
+    expect(usageDialState(undefined, true).visible).toBe(false);
+  });
+});
+
+describe("formatWindowReset", () => {
+  it("formats hours and minutes", () => {
+    const now = 0;
+    expect(formatWindowReset(now + 2 * 3_600_000 + 10 * 60_000, now)).toBe("resets in 2h 10m");
+  });
+
+  it("formats minutes only under an hour", () => {
+    const now = 0;
+    expect(formatWindowReset(now + 45 * 60_000, now)).toBe("resets in 45m");
+  });
+
+  it("appends the absolute clock time when more than 12h out", () => {
+    const now = 0;
+    const resetsAt = now + 13 * 3_600_000;
+    const result = formatWindowReset(resetsAt, now);
+    expect(result).toMatch(/^resets in 13h 0m \(\d{2}:\d{2}\)$/);
+  });
+
+  it("returns null for a missing or past timestamp", () => {
+    expect(formatWindowReset(null, 0)).toBeNull();
+    expect(formatWindowReset(undefined, 0)).toBeNull();
+    expect(formatWindowReset(-1, 0)).toBeNull();
+    expect(formatWindowReset(NaN, 0)).toBeNull();
+  });
+});
+
+describe("formatUpdatedAgo / usageStale", () => {
+  it("formats sub-minute elapsed as 'updated just now'", () => {
+    expect(formatUpdatedAgo(1000, 1000)).toBe("updated just now");
+    expect(formatUpdatedAgo(1000, 30_000)).toBe("updated just now");
+  });
+
+  it("formats minutes/hours/days ago using formatAge's ladder", () => {
+    expect(formatUpdatedAgo(0, 5 * 60_000)).toBe("updated 5m ago");
+    expect(formatUpdatedAgo(0, 2 * 3_600_000)).toBe("updated 2h ago");
+  });
+
+  it("usageStale flips at exactly 10 minutes", () => {
+    expect(usageStale(0, 10 * 60_000)).toBe(false);
+    expect(usageStale(0, 10 * 60_000 + 1)).toBe(true);
   });
 });
 
