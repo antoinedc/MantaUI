@@ -290,11 +290,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const nesting = useMemo(() => {
     const m = new Map<string, ReturnType<typeof computeJobNesting>>();
     for (const p of projects) {
-      const activeIdx = activeWindowByProject[p.tmuxSession];
-      m.set(p.tmuxSession, computeJobNesting(p, jobs, activeIdx));
+      m.set(p.tmuxSession, computeJobNesting(p, jobs));
     }
     return m;
-  }, [projects, jobs, activeWindowByProject]);
+  }, [projects, jobs]);
 
   // Flat nav-order keys for keyboard tree nav (roving tabindex).
   const navKeys = useMemo(() => {

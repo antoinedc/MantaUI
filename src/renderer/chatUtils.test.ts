@@ -64,7 +64,6 @@ import {
   fuzzySessionScore,
   computeJobNesting,
   shouldResyncWindowsForJobs,
-  isNestedJobChild,
   globCovers,
   isApprovalCoveredByAlways,
   shortModelName,
@@ -2208,11 +2207,9 @@ describe("shouldResyncWindowsForJobs", () => {
     const nesting = computeJobNesting(
       projects[0],
       { child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" } },
-      undefined,
     );
     expect(nesting.hidden.size).toBe(0);
     expect(nesting.children.size).toBe(0);
-    expect(nesting.orphans).toEqual([]);
     // …which is exactly the condition the predicate flags for a re-list.
     expect(
       shouldResyncWindowsForJobs(projects, {
@@ -2284,76 +2281,42 @@ describe("computeJobNesting", () => {
       { index: 1, name: "job1", opencodeSessionId: "child1" },
       { index: 2, name: "job2", opencodeSessionId: "child2" },
     ]);
-    const res = computeJobNesting(project, jobs, undefined);
+    const res = computeJobNesting(project, jobs);
     expect([...res.hidden]).toEqual([1, 2]);
     expect(res.children.get(0)).toEqual([1, 2]);
-    expect(res.orphans).toEqual([]);
   });
 
-  it("filters terminal jobs out unless the user is viewing the child", () => {
+  it("a terminal job stays nested — selection is not an input", () => {
     const project = mkProject("p", [
       { index: 0, name: "parent", opencodeSessionId: "parent" },
       { index: 3, name: "done", opencodeSessionId: "doneChild" },
     ]);
-    // Not viewing → terminal job dropped entirely.
-    let res = computeJobNesting(project, jobs, undefined);
-    expect(res.hidden.has(3)).toBe(false);
-    expect(res.children.has(0)).toBe(false);
-    // Viewing the terminal child → kept (nested under parent).
-    res = computeJobNesting(project, jobs, 3);
-    expect(res.hidden.has(3)).toBe(true);
-    expect(res.children.get(0)).toEqual([3]);
+    // Terminal job whose parent window exists is nested regardless of which
+    // window is selected — selection is no longer a parameter, so calling the
+    // function twice yields byte-identical results.
+    const a = computeJobNesting(project, jobs);
+    const b = computeJobNesting(project, jobs);
+    expect(a.hidden.has(3)).toBe(true);
+    expect(a.children.get(0)).toEqual([3]);
+    expect(b.hidden.has(3)).toBe(true);
+    expect(b.children.get(0)).toEqual([3]);
+    expect([...a.hidden]).toEqual([...b.hidden]);
+    expect([...a.children]).toEqual([...b.children]);
   });
 
-  it("renders a running job at top level when its parent window is gone", () => {
+  it("renders a job at top level when its parent window is gone", () => {
     const project = mkProject("p", [
       { index: 5, name: "orphan", opencodeSessionId: "orphanChild" },
     ]);
-    const res = computeJobNesting(project, jobs, undefined);
-    expect(res.orphans).toEqual([5]);
+    const res = computeJobNesting(project, jobs);
     expect(res.hidden.has(5)).toBe(false);
   });
 
   it("ignores jobs whose child window is not in this project", () => {
     const project = mkProject("p", [{ index: 0, name: "parent", opencodeSessionId: "parent" }]);
-    const res = computeJobNesting(project, jobs, undefined);
+    const res = computeJobNesting(project, jobs);
     expect(res.hidden.size).toBe(0);
-    expect(res.orphans).toEqual([]);
-  });
-});
-
-describe("isNestedJobChild", () => {
-  const jobs = {
-    child1: { status: "running", parentSessionID: "parent", childSessionID: "child1" },
-    doneChild: { status: "done", parentSessionID: "parent", childSessionID: "doneChild" },
-  };
-
-  it("returns true for a running job whose parent exists", () => {
-    const project = mkProject("p", [
-      { index: 0, name: "parent", opencodeSessionId: "parent" },
-      { index: 1, name: "job", opencodeSessionId: "child1" },
-    ]);
-    expect(isNestedJobChild(jobs, "child1", project, undefined)).toBe(true);
-  });
-
-  it("returns false for a running job whose parent is gone (orphan, not nested)", () => {
-    const project = mkProject("p", [{ index: 1, name: "job", opencodeSessionId: "child1" }]);
-    expect(isNestedJobChild(jobs, "child1", project, undefined)).toBe(false);
-  });
-
-  it("returns false for a terminal job that is not being viewed", () => {
-    const project = mkProject("p", [
-      { index: 0, name: "parent", opencodeSessionId: "parent" },
-      { index: 2, name: "done", opencodeSessionId: "doneChild" },
-    ]);
-    expect(isNestedJobChild(jobs, "doneChild", project, undefined)).toBe(false);
-    expect(isNestedJobChild(jobs, "doneChild", project, 2)).toBe(true);
-  });
-
-  it("returns false for non-job windows", () => {
-    const project = mkProject("p", [{ index: 0, name: "plain", opencodeSessionId: "plain" }]);
-    expect(isNestedJobChild(jobs, "plain", project, undefined)).toBe(false);
-    expect(isNestedJobChild(jobs, null, project, undefined)).toBe(false);
+    expect(res.children.size).toBe(0);
   });
 });
 
