@@ -175,6 +175,48 @@ function normalizeLegacyStatus(s) {
   };
 }
 
+// Group raw GitHub review comments (GET /pulls/{n}/comments) into forge-neutral
+// Threads. A thread is a top-level comment (no `in_reply_to_id`) plus its
+// replies, in posting order. The thread's position anchor — path/line/side plus
+// startLine for a multi-line comment — comes from the top-level comment, since
+// replies inherit it. `resolved` is read off the top comment (GitHub's REST
+// carries it; resolving a thread is a GraphQL-only write we do not model here).
+//
+//   Thread = { id, path, line, side, startLine, resolved, comments }
+//
+// `path`/`line`/`side`/`startLine` are null (never dropped) when absent, so a
+// file-level comment (no line) normalises to a well-formed thread the renderer
+// can place at the file's top rather than mangling the key.
+function normalizeReviewThreads(raw) {
+  const byTop = new Map(); // top comment id -> comments of that thread, top first
+  for (const c of Array.isArray(raw) ? raw : []) {
+    if (c?.in_reply_to_id == null) {
+      byTop.set(c.id, [c]);
+    } else {
+      const arr = byTop.get(c.in_reply_to_id);
+      if (arr) arr.push(c);
+    }
+  }
+  const threads = [];
+  for (const comments of byTop.values()) {
+    const top = comments[0] ?? {};
+    threads.push({
+      id: String(top.id),
+      path: top.path ?? null,
+      line: top.line ?? null,
+      side: top.side ?? null,
+      startLine: top.start_line ?? null,
+      resolved: Boolean(top.resolved),
+      comments: comments.map((c) => ({
+        author: c?.user?.login ?? "",
+        body: c?.body ?? "",
+        createdAt: c?.created_at ?? null,
+      })),
+    });
+  }
+  return threads;
+}
+
 /**
  * Create a GitHub adapter bound to an injected `request(url)`.
  *
@@ -188,10 +230,16 @@ function normalizeLegacyStatus(s) {
  * in the JSDoc typedef in index.mjs. Method PRESENCE is the capability model
  * — there is intentionally no separate capabilities registry to drift.
  *
+ * `request` fetches a JSON endpoint (`{ data, stale }`); `requestText` is the
+ * same serialisation layer but returns the RAW body as a string (the diff
+ * Accept header), so the two view the same URL without colliding in the ETag
+ * store. Both are injected by index.mjs.
+ *
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} request
  * @param {(url: string, opts: { method: string, body?: any }) => Promise<{ data: any, stale: boolean }>} [requestWrite]
+ * @param {(url: string) => Promise<{ data: any, stale: boolean }>} [requestText]
  */
-export function createGithubAdapter(request, requestWrite) {
+export function createGithubAdapter(request, requestWrite, requestText = request) {
   return {
     kind: "github",
 
@@ -344,6 +392,44 @@ export function createGithubAdapter(request, requestWrite) {
         throw err;
       }
       return { data, stale: false };
+    },
+
+    /**
+     * GET /repos/{o}/{r}/pulls/{n} with `Accept: application/vnd.github.diff`
+     * (raw unified diff as TEXT) + GET /repos/{o}/{r}/pulls/{n}/comments
+     * (normalised into forge-neutral Threads). headSha comes from the PR
+     * object so the renderer can key a draft comment to the SHA it reviewed.
+     *
+     * Returns `{ diff, threads, headSha }` — never a raw GitHub payload. The
+     * diff is consumed verbatim by the existing UnifiedDiff renderer; a future
+     * structured differ is deliberately NOT built.
+     *
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @returns {Promise<{ data: { diff: string, threads: Array<any>, headSha: string }, stale: boolean }>}
+     */
+    async getDiff(repo, number) {
+      const pull = `${API}${issuePath(repo)}/pulls/${number}`;
+      let stale = false;
+      let headSha = "";
+      let diff = "";
+      let threads = [];
+      const pr = await request(pull);
+      stale = stale || Boolean(pr?.stale);
+      headSha = pr?.data?.head?.sha ?? "";
+      const [diffRes, commentsRes] = await Promise.all([
+        requestText(pull).catch(() => null),
+        request(pull + "/comments").catch(() => null),
+      ]);
+      if (diffRes) {
+        stale = stale || Boolean(diffRes.stale);
+        diff = typeof diffRes.data === "string" ? diffRes.data : "";
+      }
+      if (commentsRes) {
+        stale = stale || Boolean(commentsRes.stale);
+        threads = normalizeReviewThreads(commentsRes.data);
+      }
+      return { data: { diff, threads, headSha }, stale };
     },
   };
 }

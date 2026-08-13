@@ -48,6 +48,7 @@ export const DEMO_UNIMPLEMENTED = [
   "delegateList",
   "delegatePendingApprovals",
   "delegateStop",
+  "forgeDiff",
   "forgeMerge",
   "forgeProbe",
   "forgePullRequest",

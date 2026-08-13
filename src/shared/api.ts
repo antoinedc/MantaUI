@@ -40,6 +40,7 @@ import type {
   ForgeProbeResult,
   ForgeStatusResult,
   ForgePullRequestResult,
+  ForgeDiffResult,
   ForgeShipInput,
   ForgeShipResult,
   ForgeShipPreviewInput,
@@ -179,6 +180,7 @@ export interface Api {
   // and the server resolves cwd → origin → repo.
   forgeStatus(): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
+  forgeDiff(input: { cwd: string }): Promise<ForgeDiffResult>;
 
   // BET-794: forge write path (box-side only — a token never leaves the box).
   // forgeShip pushes the current branch then opens a PR — this is called ONLY

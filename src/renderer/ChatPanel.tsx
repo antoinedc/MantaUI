@@ -790,6 +790,23 @@ export function ChatPanel({
     return () => window.removeEventListener("manta-run-clear", onRunClear);
   }, [sessionId, setInput]);
 
+  // Review pane → composer bridge (BET-792). A draft note's "Send to agent"
+  // appends the note text to the composer input WITHOUT sending — it fills the
+  // input, it does not submit. The user's next Enter sends it through the
+  // normal submit path.
+  useEffect(() => {
+    const onForgeComment = (e: Event) => {
+      const detail = (e as CustomEvent).detail as
+        | { sessionId?: string; text?: string }
+        | undefined;
+      if (detail?.sessionId !== sessionId || !detail?.text) return;
+      setInput((prev) => (prev ? `${prev}\n${detail.text!}` : detail.text!));
+      inputRef.current?.focus();
+    };
+    window.addEventListener("manta-forge-comment", onForgeComment);
+    return () => window.removeEventListener("manta-forge-comment", onForgeComment);
+  }, [sessionId, setInput]);
+
   // (manta-open-schedules / -secrets / -webhooks mobile bridges moved to
   // useSessionResources.)
 

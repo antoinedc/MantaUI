@@ -10,6 +10,7 @@ import {
   createForgeRuntime,
   forgeStatus,
   pullRequestForCwd,
+  forgeDiffForCwd,
   shipPullRequest,
   shipPreview,
   humanizeBranch,
@@ -368,4 +369,63 @@ test("shipPreview: repo with no forge → no_forge", async () => {
     gitRemoteOrigin: async () => null,
   });
   assert.deepEqual(r, { ok: false, error: "no_forge" });
+});
+
+
+// ---- forgeDiffForCwd (BET-792) ---------------------------------------------
+
+function diffAdapter({ prs = [], diff = "", threads = [], headSha = "" } = {}) {
+  return {
+    kind: "github",
+    listPullRequests: async () => ({ data: prs, stale: false }),
+    getDiff: async () => ({ data: { diff, threads, headSha }, stale: false }),
+  };
+}
+
+test("forgeDiffForCwd: no known forge → no_forge", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => null,
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () => diffAdapter(),
+  });
+  assert.deepEqual(r.error, "no_forge");
+  assert.equal(r.diff, "");
+});
+
+test("forgeDiffForCwd: forge known but no token → not_connected", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    resolveToken: async () => null,
+    getAdapter: () => diffAdapter(),
+  });
+  assert.deepEqual(r.error, "not_connected");
+});
+
+test("forgeDiffForCwd: open PR on current branch → raw diff + threads + headSha", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "git@github.com:acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () =>
+      diffAdapter({
+        prs: [OPEN_PR, { ...OPEN_PR, number: 43, headRef: "other" }],
+        diff: "@@ -1 +1 @@\n+a\n",
+        threads: [{ id: "1", path: "a", line: 1, side: "RIGHT", resolved: false, comments: [] }],
+        headSha: "abc",
+      }),
+  });
+  assert.equal(r.error, null);
+  assert.equal(r.diff, "@@ -1 +1 @@\n+a\n");
+  assert.equal(r.threads.length, 1);
+  assert.equal(r.headSha, "abc");
+});
+
+test("forgeDiffForCwd: no open PR → no_pr (not an error)", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () => diffAdapter({ prs: [] }),
+  });
+  assert.deepEqual(r.error, "no_pr");
+  assert.deepEqual(r.threads, []);
 });

@@ -264,3 +264,64 @@ test("merge maps each failure status to its distinguished typed error", async ()
     );
   }
 });
+
+// ---- getDiff / thread normalisation (BET-792) ----
+
+const DIFF_TEXT = [
+  "@@ -142,7 +142,9 @@ async function submitReview(repo, num, draft) {",
+  "   const body = { event: draft.verdict, body: draft.body };",
+  "-  for (const c of draft.comments) await post(`/pulls/${num}/comments`, c);",
+  "+  // flush the box-buffered draft as ONE review",
+  "+  body.comments = draft.comments.map(toGithubAnchor);",
+  "+  return post(`/pulls/${num}/reviews`, body);",
+  "   }",
+].join("\n");
+
+// Captured GitHub review-comment payloads covering a single-line comment, a
+// multi-line comment (start_line set), a reply, and a file-level comment.
+const REVIEW_COMMENTS = [
+  { id: 11, path: "src/forge.mjs", line: 20, side: "RIGHT", user: { login: "ada" }, body: "single-line note", created_at: "2026-08-01T10:00:00Z", in_reply_to_id: null, resolved: false },
+  { id: 12, path: "src/forge.mjs", line: 25, side: "RIGHT", start_line: 22, start_side: "RIGHT", user: { login: "grace" }, body: "a multi-line comment", created_at: "2026-08-01T10:05:00Z", in_reply_to_id: null, resolved: true },
+  { id: 13, path: "src/forge.mjs", line: 25, side: "RIGHT", user: { login: "ada" }, body: "reply to 12", created_at: "2026-08-01T10:06:00Z", in_reply_to_id: 12, resolved: false },
+  { id: 14, path: "src/forge.mjs", line: null, side: null, user: { login: "grace" }, body: "file-level note", created_at: "2026-08-01T10:07:00Z", in_reply_to_id: null, resolved: false },
+];
+
+function diffAdapter() {
+  const pull = `https://api.github.com/repos/acme/widget/pulls/42`;
+  const json = {
+    [pull]: { number: 42, title: "t", html_url: "u", state: "open", merged: false, draft: false, head: { ref: "x", sha: "abc123" }, base: { ref: "main", sha: "d" }, user: { login: "octocat" } },
+    [`${pull}/comments`]: REVIEW_COMMENTS,
+  };
+  const jsonReq = async (url) => ({ data: json[url], stale: false });
+  const textReq = async (url) => (url === pull ? { data: DIFF_TEXT, stale: false } : { data: "", stale: false });
+  return createGithubAdapter(jsonReq, undefined, textReq);
+}
+
+test("getDiff returns the raw diff text, headSha and normalised threads", async () => {
+  const { data, stale } = await diffAdapter().getDiff(REPO, 42);
+  assert.equal(data.diff, DIFF_TEXT);
+  assert.equal(data.headSha, "abc123");
+  assert.equal(stale, false);
+  assert.equal(data.threads.length, 3, "the reply to #12 groups into #12's thread");
+});
+
+test("thread normalisation yields a startLine for a multi-line comment and groups its reply", async () => {
+  const { data } = await diffAdapter().getDiff(REPO, 42);
+  const multi = data.threads.find((t) => t.id === "12");
+  assert.equal(multi.startLine, 22);
+  assert.equal(multi.line, 25);
+  assert.equal(multi.side, "RIGHT");
+  assert.equal(multi.resolved, true);
+  assert.equal(multi.comments.map((c) => c.author).join(","), "grace,ada");
+  assert.equal(multi.comments[1].body, "reply to 12");
+});
+
+test("a file-level comment (no line) normalises to a thread with a null line, and its body/path survive", async () => {
+  const { data } = await diffAdapter().getDiff(REPO, 42);
+  const file = data.threads.find((t) => t.id === "14");
+  assert.equal(file.line, null);
+  assert.equal(file.side, null);
+  assert.equal(file.startLine, null);
+  assert.equal(file.path, "src/forge.mjs");
+  assert.equal(file.comments[0].body, "file-level note");
+});

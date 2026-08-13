@@ -395,6 +395,36 @@ export type ForgePullRequestResult = {
   error: "no_forge" | "not_connected" | null;
 };
 
+// A normalised forge review thread (the review pane's "incoming thread").
+// Position anchor is forge-neutral — `path`/`line`/`side`, plus `startLine` for
+// a multi-line comment. `side` is the forge's word ("LEFT"/"RIGHT" on GitHub);
+// the renderer maps it onto the old/new line it renders. `resolved` is read
+// (never written — GitHub resolving is GraphQL-only). `comments` is the
+// top-level comment followed by its replies, in posting order.
+export type ForgeThread = {
+  id: string;
+  path: string | null;
+  line: number | null;
+  side: string | null;
+  startLine?: number | null;
+  resolved: boolean;
+  comments: { author: string; body: string; createdAt: string | null }[];
+};
+
+// forge:diff result — the review pane's read for a session cwd. `diff` is the
+// RAW unified diff text consumed verbatim by UnifiedDiff; `threads` are the
+// incoming forge threads; `headSha` is the PR head the diff was fetched at (so
+// a draft comment keys to the reviewed revision). `error` is "no_forge" for a
+// non-github repo, "not_connected" for a box with no token, "no_pr" for a repo
+// with no open PR, and null on success.
+export type ForgeDiffResult = {
+  diff: string;
+  threads: ForgeThread[];
+  headSha: string;
+  stale?: boolean;
+  error: "no_forge" | "not_connected" | "no_pr" | null;
+};
+
 // ----- Forge write path (BET-794) -----
 
 // forge:ship input — push the current branch then (only after the renderer's
@@ -676,6 +706,7 @@ export const IPC = {
   // WITHOUT ever crossing a token.
   forgeStatus: "forge:status",
   forgePullRequest: "forge:pull-request",
+  forgeDiff: "forge:diff",
 
   // BET-794: forge write path. Both box-side only — the renderer never sees a
   // forge token. forge:ship pushes the current branch then opens a PR (only

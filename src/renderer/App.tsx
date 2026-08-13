@@ -1368,6 +1368,11 @@ function AppInner() {
   // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
   // new-session) keep the titlebar's drag region + breadcrumb + toggle.
   const isChatPaneActive = activeChatSessionId != null && mode === "chat";
+  // The active chat session's working directory — the review pane resolves its
+  // linked PR from it (BET-792).
+  const activeChatCwd = activeChatSessionId
+    ? (resolveSessionOwner(projects, activeChatSessionId)?.cwd ?? null)
+    : null;
 
   return (
     // data-screen is the visual harness's handle on the app shell (see
@@ -1674,6 +1679,7 @@ function AppInner() {
       {isChatPaneActive && (
         <ArtifactsPanel
           sessionId={activeChatSessionId}
+          cwd={activeChatCwd}
           open={artifactsOpen}
         />
       )}

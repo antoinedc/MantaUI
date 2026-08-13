@@ -701,6 +701,7 @@ export const httpApi: Api = {
   // -- forge read path (BET-788) --
   forgeStatus: () => rpc(IPC.forgeStatus),
   forgePullRequest: (input) => rpc(IPC.forgePullRequest, input),
+  forgeDiff: (input) => rpc(IPC.forgeDiff, input),
 
   // -- forge write path (BET-794) --
   forgeShip: (input) => rpc(IPC.forgeShip, input),

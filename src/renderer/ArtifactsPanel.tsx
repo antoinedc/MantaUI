@@ -41,6 +41,7 @@ import {
 import { decodeDataUri, expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
+import { ReviewPane } from "./ReviewPane";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
 
 // Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
@@ -126,11 +127,17 @@ const MAX_WIDTH = 520;
 const DEFAULT_WIDTH = 340;
 const POLL_MS = 30_000;
 
-const TABS: ArtifactKind[] = ["link", "image", "file"];
-const TAB_LABEL: Record<ArtifactKind, string> = {
+// BET-792: the artifacts panel hosts the review pane as a fourth tab — the
+// same resizable, ⌘I-toggled, width-persisted side surface, sharing the layout
+// shell. The first three are artifact kinds; "review" is a mode (the PR diff +
+// comment gutter) that shares the shell but not the artifact grammar.
+type PanelTab = ArtifactKind | "review";
+const TABS: PanelTab[] = ["link", "image", "file", "review"];
+const TAB_LABEL: Record<PanelTab, string> = {
   link: "Links",
   image: "Images",
   file: "Files",
+  review: "Review",
 };
 
 // Device-local width, clamped to 280-520. Wrapped in try/catch (repo
@@ -452,9 +459,11 @@ function FileRow({
 
 export function ArtifactsPanel({
   sessionId,
+  cwd,
   open,
 }: {
   sessionId: string | null;
+  cwd: string | null;
   open: boolean;
 }) {
   // The transcript lifted by ChatPanel (reuse — never a second fetch).
@@ -466,7 +475,7 @@ export function ArtifactsPanel({
   const widthRef = useRef(width);
   widthRef.current = width;
 
-  const [tab, setTab] = useState<ArtifactKind>("link");
+  const [tab, setTab] = useState<PanelTab>("link");
   // BET-726 Task 3.2: arrow-key nav on the tab bar — the exact pattern
   // Settings.tsx's section rail already uses (`onRailKeyDown` there: move
   // the active tab state AND DOM focus, on Left/Right). Note this is NOT a
@@ -474,10 +483,11 @@ export function ArtifactsPanel({
   // `tabIndex` — every tab stays in the normal Tab order); only the active
   // tab and focus move on arrow keys. Refs keyed by kind so ArrowLeft/Right
   // can call `.focus()` on the tab it moves to.
-  const tabRefs = useRef<Record<ArtifactKind, HTMLButtonElement | null>>({
+  const tabRefs = useRef<Record<PanelTab, HTMLButtonElement | null>>({
     link: null,
     image: null,
     file: null,
+    review: null,
   });
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -697,7 +707,7 @@ export function ArtifactsPanel({
               style={{
                 // One tab's width: the content row is 100% minus the p-1 (0.5rem)
                 // horizontal padding, split across the three flush flex-1 tabs.
-                width: "calc((100% - 0.5rem) / 3)",
+                width: `calc((100% - 0.5rem) / ${TABS.length})`,
                 transform: `translateX(${TABS.indexOf(tab) * 100}%)`,
               }}
             />
@@ -719,14 +729,17 @@ export function ArtifactsPanel({
                   }
                 >
                   {TAB_LABEL[k]}
-                  <span
-                    className={
-                      "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
-                      (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
-                    }
-                  >
-                    {displayCounts[k]}
-                  </span>
+                  {/* The Review tab has no count — it is a mode, not a kind. */}
+                  {k !== "review" && (
+                    <span
+                      className={
+                        "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
+                        (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                      }
+                    >
+                      {displayCounts[k as ArtifactKind]}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -734,7 +747,11 @@ export function ArtifactsPanel({
         </div>{/* close the px-3 pt-[11px] header wrapper */}
 
         {/* Body: day-grouped, sticky headers, newest first, one renderer per
-            tab. */}
+            tab — except Review, which is a mode (the PR diff + comment gutter)
+            and owns its own scroll. */}
+        {tab === "review" ? (
+          <ReviewPane sessionId={sessionId ?? ""} cwd={cwd ?? ""} />
+        ) : (
         <div className="flex-1 overflow-y-auto min-h-0">
           {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
@@ -742,8 +759,8 @@ export function ArtifactsPanel({
                 <div className="text-label text-text-muted">No matches for “{query}”</div>
               ) : (
                 <>
-                  <div className="text-label text-text-faint">{emptyBig(tab)}</div>
-                  <div className="mt-1 text-micro text-text-faint">{emptySub(tab, counts)}</div>
+                  <div className="text-label text-text-faint">{emptyBig(tab as ArtifactKind)}</div>
+                  <div className="mt-1 text-micro text-text-faint">{emptySub(tab as ArtifactKind, counts)}</div>
                 </>
               )}
             </div>
@@ -789,6 +806,7 @@ export function ArtifactsPanel({
             ))
           )}
         </div>
+        )}
         </div>
       </motion.aside>
 

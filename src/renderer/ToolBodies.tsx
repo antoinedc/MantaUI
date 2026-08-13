@@ -6,8 +6,8 @@
 // None of them depend on the message-row rendering stack, so they import
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
-import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { resolveToolOutput, trimOutputEdges } from "./chatUtils";
+import { Fragment, memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { resolveToolOutput, trimOutputEdges, type CommentableLine } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
@@ -284,93 +284,229 @@ function CollapsibleLines({
 //
 // Line numbers come from `@@ -A,B +C,D @@` parsed per hunk; `+` and context
 // use NEW line numbers, `-` uses OLD.
-export function UnifiedDiff({ text }: { text: string }) {
+//
+// Generalised in place for the review pane (BET-792) so the SAME component
+// renders both the tool diff and the PR review diff. The extra props are all
+// optional and default to the original behaviour — the existing call sites
+// (`<UnifiedDiff text={output} />`) and their tests are untouched:
+//   - `bare` — skip the OutputWell (the review pane's diff is the panel body,
+//     not a recessed card), so added/removed backgrounds bleed edge to edge.
+//   - `showHunks` — render `@@` hunk headers as muted rows (the mockup shows
+//     them; the tool diff still hides them as noise).
+//   - `gutter` — add a fixed-width comment gutter with a `+` reveal on
+//     hover AND keyboard focus-within of the row (the row is the tab stop;
+//     the `+` is never itself in the tab order). Clicking/or Entering composes
+//     a comment at that line's anchor.
+//   - `notes` — inline blocks (incoming forge threads / your drafts) placed
+//     directly in the diff after their anchor line, or at the top when the
+//     anchor is null (a file-level comment).
+export type UnifiedDiffGutter = {
+  commentable: (a: CommentableLine) => boolean;
+  onCompose: (a: CommentableLine, el: HTMLElement) => void;
+};
+export type UnifiedDiffNote = {
+  key: string;
+  anchor: CommentableLine | null;
+  node: ReactNode;
+};
+
+export function UnifiedDiff({
+  text,
+  bare = false,
+  showHunks = false,
+  gutter,
+  notes = [],
+}: {
+  text: string;
+  /** Render without the recessed OutputWell (review pane body). Default false. */
+  bare?: boolean;
+  /** Render `@@` hunk headers as muted rows (review pane). Default false. */
+  showHunks?: boolean;
+  gutter?: UnifiedDiffGutter;
+  notes?: UnifiedDiffNote[];
+}) {
+  const children: ReactNode[] = [];
   const lines = text.split("\n");
   let oldLine = 0;
   let newLine = 0;
-  return (
-    <OutputWell variant="attached">
-      {/* `w-max min-w-full` is what makes a +/− row's colored background span
-          the WHOLE line, not just the visible viewport. The well scrolls
-          horizontally; without this the rows are block-level children sized to
-          the well's client width, so scrolling right ran past the end of the
-          green/red block and the rest of the line sat on the bare well.
-          `w-max` sizes the wrapper to the widest line so every row fills it;
-          `min-w-full` keeps short diffs flush to the well's full width. Do NOT
-          put `max-w-full` back here — it re-clamps to the viewport. */}
-      <div className="leading-snug w-max min-w-full">
-      {lines.map((line, i) => {
-        // Hunk header: parse counters silently. Skip the visible row — the
-        // header carries file/range metadata that's noise next to the actual
-        // changes. Line numbers from the parsed counters still drive the
-        // gutter, so jumps between hunks remain obvious.
-        if (line.startsWith("@@")) {
-          const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-          if (m) {
-            oldLine = parseInt(m[1], 10);
-            newLine = parseInt(m[2], 10);
-          }
-          return null;
-        }
-        // File markers / Index preamble — drop entirely. opencode emits these
-        // for every diff and they're noise next to the actual changes.
-        if (
-          line.startsWith("--- ") ||
-          line.startsWith("+++ ") ||
-          line.startsWith("Index: ") ||
-          /^=+$/.test(line)
-        ) {
-          return null;
-        }
+  // The active file path the stream is currently inside, so anchors and notes
+  // are keyed PER-FILE — a PR diff is one merged stream of many files, and
+  // `(side, line)` alone collides whenever two files share a line number. Track
+  // it from the `+++ b/` marker (falling back to `--- a/` for a file deleted to
+  // `/dev/null`).
+  let path = "";
+  let aPath = "";
 
-        // +/− /context line classification.
-        let bg = "";
-        let signCls = "text-text-faint";
-        let lnCls = "text-text-faint";
-        let sign: string | null = null;
-        let body = line;
-        let ln: number | null = null;
+  const rowKey = (a: CommentableLine) => `${a.path}\u0000${a.side}\u0000${a.line}`;
+  const notesByAnchor = new Map<string, UnifiedDiffNote[]>();
+  const topNotes: UnifiedDiffNote[] = [];
+  for (const n of notes) {
+    if (n.anchor == null) topNotes.push(n);
+    else {
+      const arr = notesByAnchor.get(rowKey(n.anchor)) ?? [];
+      arr.push(n);
+      notesByAnchor.set(rowKey(n.anchor), arr);
+    }
+  }
 
-        if (line.startsWith("+") && !line.startsWith("+++")) {
-          // Saturated green block. Text stays the same bright cream as body
-          // copy — color comes from the bg, not the text.
-          bg = "bg-[var(--diff-add)]";
-          signCls = "text-ok";
-          lnCls = "text-ok/70";
-          sign = "+";
-          body = line.slice(1);
-          ln = newLine++;
-        } else if (line.startsWith("-") && !line.startsWith("---")) {
-          bg = "bg-[var(--diff-del)]";
-          signCls = "text-danger";
-          lnCls = "text-danger/70";
-          sign = "−";
-          body = line.slice(1);
-          ln = oldLine++;
-        } else if (line.startsWith(" ")) {
-          sign = " ";
-          body = line.slice(1);
-          ln = newLine;
-          newLine++;
-          oldLine++;
-        }
+  const anchorNotes = (a: CommentableLine) => notesByAnchor.get(rowKey(a)) ?? [];
 
-        if (sign !== null) {
-          return (
-            <div key={i} className={`flex whitespace-pre ${bg}`}>
-              <span className={`select-none shrink-0 text-right pr-2 w-[30px] ${lnCls}`}>
-                {ln ?? ""}
-              </span>
-              <span className={`select-none shrink-0 w-3 ${signCls}`}>
-                {sign}
-              </span>
-              <span className="flex-1 text-text">{body || " "}</span>
-            </div>
-          );
+  for (const n of topNotes) children.push(<Fragment key={n.key}>{n.node}</Fragment>);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Hunk header.
+    if (line.startsWith("@@")) {
+      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) {
+        oldLine = parseInt(m[1], 10);
+        newLine = parseInt(m[2], 10);
+      }
+      // The tool diff treats hunks as noise and drops them; the review pane
+      // keeps them as the mockup's muted `.diffline.meta` rows.
+      if (showHunks) {
+        children.push(
+          <div
+            key={`meta-${i}`}
+            className="flex whitespace-pre text-text-quiet"
+          >
+            {/* Mirror the line-row chrome so the `@@` text sits at the same
+                offset as line bodies (the review row has no line number / sign
+                — only the gutter stays reserved). */}
+            {gutter && <span className="w-[26px] shrink-0" aria-hidden />}
+            <span className="shrink-0 select-none w-[30px]" />
+            <span className="shrink-0 w-3" />
+            <span className="flex-1">{line}</span>
+          </div>,
+        );
+      }
+      continue;
+    }
+
+    // File markers / Index preamble — drop entirely in BOTH modes (they're
+    // noise next to the changes), but use the `--- a/` / `+++ b/` pair to track
+    // which file the following hunks belong to (per-file anchoring above).
+    if (line.startsWith("--- ")) {
+      const am = /^--- a\/(.+)$/.exec(line);
+      if (am) aPath = am[1].trim();
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const bm = /^\+\+\+ b\/(.+)$/.exec(line);
+      if (bm) path = bm[1].trim();
+      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
+      continue;
+    }
+    if (line.startsWith("Index: ") || /^=+$/.test(line)) {
+      continue;
+    }
+
+    // +/− /context line classification.
+    let bg = "";
+    let signCls = "text-text-faint";
+    let lnCls = "text-text-faint";
+    let sign: string | null = null;
+    let body = line;
+    let ln: number | null = null;
+    let anchor: CommentableLine | null = null;
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      bg = "bg-[var(--diff-add)]";
+      signCls = "text-ok";
+      lnCls = "text-ok/70";
+      sign = "+";
+      body = line.slice(1);
+      ln = newLine;
+      anchor = { path, line: newLine, side: "new" };
+      newLine++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      bg = "bg-[var(--diff-del)]";
+      signCls = "text-danger";
+      lnCls = "text-danger/70";
+      sign = "−";
+      body = line.slice(1);
+      ln = oldLine;
+      anchor = { path, line: oldLine, side: "old" };
+      oldLine++;
+    } else if (line.startsWith(" ")) {
+      sign = " ";
+      body = line.slice(1);
+      ln = newLine;
+      anchor = { path, line: newLine, side: "new" };
+      newLine++;
+      oldLine++;
+    }
+
+    if (sign !== null) {
+      const commentable = anchor != null && gutter?.commentable(anchor) === true;
+      const rowClass = [
+        "flex whitespace-pre",
+        bg,
+        gutter ? "group relative" : "",
+      ].join(" ").trim();
+      const row = (
+        <div
+          key={i}
+          className={rowClass}
+          {...(gutter
+            ? {
+                tabIndex: 0,
+                role: "button",
+                "aria-label": commentable
+                  ? "Comment on this line"
+                  : "Diff line",
+                onKeyDown: commentable
+                  ? (e: React.KeyboardEvent<HTMLDivElement>) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        gutter.onCompose(anchor!, e.currentTarget);
+                      }
+                    }
+                  : undefined,
+              }
+            : {})}
+        >
+          {gutter && (
+            <span className="w-[26px] shrink-0 select-none" aria-hidden>
+              {commentable && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  aria-label="Comment on this line"
+                  title="Comment on this line"
+                  onClick={(e: React.MouseEvent<HTMLButtonElement>) =>
+                    gutter.onCompose(anchor!, e.currentTarget)
+                  }
+                  className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-xs text-text-muted opacity-0 transition-opacity hover:text-text group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
+                    <path d="M5.5 2v7M2 5.5h7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                </button>
+              )}
+            </span>
+          )}
+          <span className={`select-none shrink-0 text-right pr-2 w-[30px] ${lnCls}`}>
+            {ln ?? ""}
+          </span>
+          <span className={`select-none shrink-0 w-3 ${signCls}`}>
+            {sign}
+          </span>
+          <span className="flex-1 text-text">{body || " "}</span>
+        </div>
+      );
+      children.push(row);
+      if (anchor) {
+        for (const n of anchorNotes(anchor)) {
+          children.push(<Fragment key={n.key}>{n.node}</Fragment>);
         }
-        return null;
-      })}
-      </div>
-    </OutputWell>
+      }
+    }
+  }
+
+  const body = (
+    <div className="leading-snug w-max min-w-full">{children}</div>
   );
+  return bare ? body : <OutputWell variant="attached">{body}</OutputWell>;
 }
