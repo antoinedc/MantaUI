@@ -238,7 +238,8 @@ export async function listHooks(sessionID, { load = loadHooks } = {}) {
  *
  * Returns { ok, status } where status is the HTTP status to send the SENDER:
  *   200 delivered now · 202 queued (session busy) · 400 bad body ·
- *   401 bad/missing signature · 404 unknown token · 429 rate-limited.
+ *   401 bad/missing signature · 404 unknown token · 429 rate-limited,
+ *   or "queue full" when the defer queue rejected the delivery (BET-772).
  *
  * @param {object} req  { token, rawBody, signatureHeader }
  * @param {object} deps { load, save, sendPrompt, publish, now, take, isBusy, enqueue }
@@ -303,7 +304,14 @@ export async function deliverWebhook(
   // Defer when busy — an external event must not abort the user's in-flight
   // turn. Otherwise send now.
   if (isBusy(hook.sessionID) && typeof enqueue === "function") {
-    enqueue(hook.sessionID, text);
+    const result = await enqueue(hook.sessionID, text);
+    // The shared engine may reject a deferred delivery when the session's
+    // pending queue is at its cap (BET-772). A 202-"queued" for a prompt that
+    // was dropped would be a false success signal to the sender — surface the
+    // overflow as 429 instead (matches the existing 429 rate-limit pattern).
+    if (result?.rejected) {
+      return { ok: false, status: 429, error: "queue full" };
+    }
     return { ok: true, status: 202, queued: true };
   }
   try {
@@ -357,8 +365,10 @@ export function createWebhookEngine({ sendPrompt, delivery, publish, storePath, 
         enqueue: (sid, text) => {
           // Route the deferred webhook through the shared engine so the
           // queued prompt drains in FIFO order alongside any other sender's
-          // deferred prompt for the same session.
-          void delivery.deliver({ sessionId: sid, text });
+          // deferred prompt for the same session. Return the result so the
+          // webhook route can surface a queue-overflow rejection (BET-772)
+          // instead of reporting 202-"queued" for a dropped prompt.
+          return delivery.deliver({ sessionId: sid, text });
         },
       },
     );

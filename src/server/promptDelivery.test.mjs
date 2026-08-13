@@ -147,3 +147,63 @@ test("9. isBusy reflects the tracked state", async () => {
   engine.observeEvent({ type: "session.idle", properties: { sessionID: "s1" } });
   assert.equal(engine.isBusy("s1"), false);
 });
+
+test("10. pending queue is bounded: deliveries beyond the cap are rejected+surfaced, not queued (BET-772)", async () => {
+  const { engine, calls } = makeEngine();
+  engine.observeEvent({
+    type: "session.status",
+    properties: { sessionID: "s1", status: { type: "busy" } },
+  });
+
+  // The cap is MAX_PENDING_PER_SESSION = 20; the first 20 queue normally.
+  const queued = [];
+  for (let i = 0; i < 20; i++) {
+    const res = await engine.deliver({ sessionId: "s1", text: `q${i}` });
+    queued.push(res);
+  }
+  assert.equal(queued.length, 20);
+  assert.ok(
+    queued.every((r) => r.delivered === false && r.queued === true && !r.rejected),
+    "first 20 deferred deliveries all queued",
+  );
+  assert.equal(calls.length, 0, "nothing sent while busy");
+
+  // The 21st+ are rejected+surfaced, not pushed.
+  for (let i = 0; i < 5; i++) {
+    const res = await engine.deliver({ sessionId: "s1", text: `overflow${i}` });
+    assert.equal(res.delivered, false);
+    assert.equal(res.queued, false);
+    assert.equal(res.rejected, true, "overflow delivery surfaced as rejected");
+  }
+
+  // Idle drains exactly the queued 20; the rejected ones are NOT delivered.
+  engine.observeEvent({ type: "session.idle", properties: { sessionID: "s1" } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls.length, 20);
+  assert.deepEqual(
+    calls.map((c) => c.text),
+    Array.from({ length: 20 }, (_, i) => `q${i}`),
+  );
+});
+
+test("11. bounding is per-session: a full queue for one session does not reject another's deliveries", async () => {
+  const { engine, calls } = makeEngine();
+  engine.observeEvent({
+    type: "session.status",
+    properties: { sessionID: "s1", status: { type: "busy" } },
+  });
+  engine.observeEvent({
+    type: "session.status",
+    properties: { sessionID: "s2", status: { type: "busy" } },
+  });
+
+  for (let i = 0; i < 20; i++) {
+    await engine.deliver({ sessionId: "s1", text: `s1-${i}` });
+  }
+  // s1 is at the cap...
+  assert.equal((await engine.deliver({ sessionId: "s1", text: "s1-over" })).rejected, true);
+  // ...but s2 queues normally.
+  const s2 = await engine.deliver({ sessionId: "s2", text: "s2-first" });
+  assert.equal(s2.queued, true);
+  assert.equal(s2.rejected, undefined);
+});
