@@ -228,10 +228,6 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
     termRef.current = term;
     fitRef.current = fit;
     searchRef.current = search;
-    // Diagnostic: expose this Terminal's xterm as a window global so we can
-    // inspect modes / buffer state from DevTools while reproducing UI bugs.
-    (window as unknown as Record<string, unknown>)[`_term_${sessionKey}`] = term;
-    (window as unknown as Record<string, unknown>)._term = term;
 
     let disposeEvents: (() => void) | null = null;
     let cancelled = false;

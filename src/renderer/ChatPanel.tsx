@@ -466,7 +466,7 @@ export function ChatPanel({
     // away and back would re-run the reset and wipe staged attachments, @agent
     // mentions and the /help notice out of the composer. The poll lives in its
     // own visibility-gated effect below.
-  }, [sessionId, cwd, refreshBranch]);
+  }, [sessionId, cwd]);
 
   // Branch indicator: poll every 5s while this session is visible. Gated on
   // isActive — hidden panels stop polling; the effect re-fires (one

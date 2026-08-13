@@ -980,13 +980,7 @@ export const useStore = create<State>((set, get) => ({
       //     currently on that window, latch `attention = true`.
       //   - otherwise carry attention forward; it clears on setActive().
       const next: Record<string, Record<number, WindowStatusUI>> = {};
-      // Seed with existing entries so windows missing from this batch keep
-      // their last known state. The poller's REMOTE_CMD lists every window
-      // every tick, so missing == window was killed; we'll prune below.
-      const seen = new Set<string>();
       for (const s of batch) {
-        const key = `${s.session}:${s.windowIndex}`;
-        seen.add(key);
         const old = prev.status[s.session]?.[s.windowIndex];
         const wasRunning = old?.running === true;
         const isActiveHere =
@@ -1001,12 +995,6 @@ export const useStore = create<State>((set, get) => ({
           attention,
         };
       }
-      // Drop entries the poller no longer reports (window was killed remotely).
-      // Iterate prev to preserve any session-row that just temporarily missed
-      // a tick due to a transient error — but in practice REMOTE_CMD failing
-      // produces an empty batch (we return early in the catch), and a
-      // successful run that omits a window means the window is gone.
-      void seen;
       // Preserve the prior values for chat-mode windows — the PTY poller
       // can't see their state (the holder pane runs `sleep infinity`),
       // so a fresh `next` map would silently clobber whatever
