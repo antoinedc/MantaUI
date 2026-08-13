@@ -103,6 +103,13 @@ export type AppConfig = {
   // is to be absent unless it matters; this is the opt-out for someone who
   // wants the ambient meter anyway. Settings-only, rides configUpdate.
   alwaysShowUsage?: boolean;
+  // BET-782: ids of session-header status items the user has permanently
+  // hidden. An id in this array is never rendered, in the header bar or its
+  // overflow dropdown. Absent/empty = every registry item is shown. No
+  // Settings UI in BET-782 — the field being respected is the deliverable;
+  // later issues add the toggle. Rides the generic configGet/configUpdate
+  // channel like every other AppConfig field.
+  hiddenStatusItems?: string[];
   // Global default model for all new and cleared chat sessions. Stored as
   // { providerID, modelID } so the per-session localStorage override and
   // this setting use the same shape. When absent, opencode picks its own

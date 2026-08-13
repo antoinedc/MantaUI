@@ -163,6 +163,7 @@ export function ChatPanel({
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const configDefaultModel = useStore((s) => s.defaultModel);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
+  const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
   // User-configured Anthropic prompt cache TTL — drives the "/clear to
   // save Nk tokens" pill when the session has been idle past this TTL.
   // manta doesn't set the real cache_control.ttl on requests; this is the
@@ -1940,6 +1941,7 @@ export function ChatPanel({
         availableLaunchers={availableLaunchers}
         artifactsOpen={artifactsOpen}
         onToggleArtifacts={onToggleArtifacts}
+        hiddenStatusItems={hiddenStatusItems}
       />
 
       <Transcript

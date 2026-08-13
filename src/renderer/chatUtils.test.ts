@@ -89,6 +89,8 @@ import {
   formatUpdatedAgo,
   usageStale,
   pruneVisitedSessions,
+  selectStatusItems,
+  type StatusItem,
 } from "./chatUtils";
 
 import type { OpencodeModel, UsageSnapshot } from "../shared/types";
@@ -3284,5 +3286,111 @@ describe("pruneVisitedSessions", () => {
 
   it("returns an empty array for an empty visited set", () => {
     expect(pruneVisitedSessions(new Set<string>(), new Set(["a"]), null)).toEqual([]);
+  });
+});
+
+// ===== selectStatusItems (BET-782 status-item registry cut) =====
+
+describe("selectStatusItems", () => {
+  const s = (id: string, priority: number) => ({
+    id,
+    priority,
+    render: () => null,
+  });
+
+  // The real registry today, in construction order: context, artifacts, menu.
+  // selectStatusItems preserves that order (acceptance #1: pixel-identical at
+  // wide width); priority governs ONLY the overflow sacrifice order.
+  const registry: StatusItem[] = [
+    s("context", 60),
+    s("artifacts", 80),
+    s("menu", 100),
+  ];
+
+  it("renders everything in today's order at wide width, no overflow", () => {
+    const { visible, overflow } = selectStatusItems(registry, 900, []);
+    expect(visible.map((i) => i.id)).toEqual(["context", "artifacts", "menu"]);
+    expect(overflow).toEqual([]);
+  });
+
+  it("keeps context at 560px (between the two cuts) — 560 cut is a seam only", () => {
+    const { visible, overflow } = selectStatusItems(registry, 560, []);
+    expect(visible.map((i) => i.id)).toEqual(["context", "artifacts", "menu"]);
+    expect(overflow).toEqual([]);
+  });
+
+  it("moves context into overflow below 420px, keeping artifacts + menu", () => {
+    const { visible, overflow } = selectStatusItems(registry, 419, []);
+    expect(visible.map((i) => i.id)).toEqual(["artifacts", "menu"]);
+    expect(overflow.map((i) => i.id)).toEqual(["context"]);
+  });
+
+  it("never auto-hides priority ≥ 80 at any width", () => {
+    const { visible, overflow } = selectStatusItems(registry, 200, []);
+    expect(visible.map((i) => i.id)).toEqual(["artifacts", "menu"]);
+    expect(overflow.map((i) => i.id)).toEqual(["context"]);
+  });
+
+  it("both cuts: a <60 item is hidden at 560 only, and `context` joins at 420", () => {
+    const items = [...registry, s("checks", 40)];
+    // 900px — everything fits, today's order preserved, checks appended last.
+    let r = selectStatusItems(items, 900, []);
+    expect(r.visible.map((i) => i.id)).toEqual([
+      "context",
+      "artifacts",
+      "menu",
+      "checks",
+    ]);
+    expect(r.overflow).toEqual([]);
+    // 500px (≥420, <560): hide priority < 60 → checks, keep the rest.
+    r = selectStatusItems(items, 500, []);
+    expect(r.visible.map((i) => i.id)).toEqual(["context", "artifacts", "menu"]);
+    expect(r.overflow.map((i) => i.id)).toEqual(["checks"]);
+    // 400px: also hide context.
+    r = selectStatusItems(items, 400, []);
+    expect(r.visible.map((i) => i.id)).toEqual(["artifacts", "menu"]);
+    expect(r.overflow.map((i) => i.id)).toEqual(["context", "checks"]);
+  });
+
+  it("a hidden id is absent from both arrays (bar and overflow)", () => {
+    const { visible, overflow } = selectStatusItems(registry, 300, ["context"]);
+    expect(visible.map((i) => i.id)).toEqual(["artifacts", "menu"]);
+    expect(overflow.map((i) => i.id)).toEqual([]);
+  });
+
+  it("hidden ids can remove a ≥80 item entirely, distinct from the auto cut", () => {
+    const { visible, overflow } = selectStatusItems(registry, 900, ["artifacts"]);
+    expect(visible.map((i) => i.id)).toEqual(["context", "menu"]);
+    expect(overflow).toEqual([]);
+  });
+
+  it("keeps the registry construction order stable (no priority re-sort of the bar)", () => {
+    const items = [s("menu", 100), s("context", 60), s("artifacts", 80)];
+    const r = selectStatusItems(items, 900, []);
+    expect(r.visible.map((i) => i.id)).toEqual(["menu", "context", "artifacts"]);
+    expect(r.overflow).toEqual([]);
+  });
+
+  it("breaks equal-priority ties by stable id sort", () => {
+    // Same priority, deliberately out of id order — must come back id-sorted,
+    // regardless of the order they were pushed into the registry.
+    const tied = [s("z", 60), s("b", 60), s("a", 60)];
+    const r = selectStatusItems(tied, 900, []);
+    expect(r.visible.map((i) => i.id)).toEqual(["a", "b", "z"]);
+    expect(r.overflow).toEqual([]);
+  });
+
+  it("id-sorts tied items within the overflow too", () => {
+    // Two equal-priority (60) items both cut at 400px — id-ordered in overflow.
+    const tied = [s("z", 60), s("a", 60)];
+    const r = selectStatusItems(tied, 400, []);
+    expect(r.visible).toEqual([]);
+    expect(r.overflow.map((i) => i.id)).toEqual(["a", "z"]);
+  });
+
+  it("handles an empty registry", () => {
+    const r = selectStatusItems([], 400, []);
+    expect(r.visible).toEqual([]);
+    expect(r.overflow).toEqual([]);
   });
 });

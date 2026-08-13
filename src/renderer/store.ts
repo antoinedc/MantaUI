@@ -314,6 +314,10 @@ type State = {
   // 70% (the dial's normal "quiet unless it matters" threshold). Settings-
   // only — rides the generic configUpdate path. See AppConfig.alwaysShowUsage.
   alwaysShowUsage: boolean;
+  // BET-782: ids of session-header status items the user has permanently
+  // hidden (never rendered in the bar or the overflow dropdown). Mirror of
+  // AppConfig.hiddenStatusItems; read by SessionHeader's registry.
+  hiddenStatusItems: string[];
   // Agent → laptop push trust flag. When true, files the AI drops in its
   // remote outbox are pulled to the downloads dir without confirmation.
   allowAgentPush: boolean;
@@ -668,6 +672,7 @@ export const useStore = create<State>((set, get) => ({
   chatAutoAllow: false,
   autoRenameSessions: false,
   alwaysShowUsage: false,
+  hiddenStatusItems: [],
   allowAgentPush: false,
   worktreePerSession: false,
   worktreeCleanOnClose: false,
@@ -904,6 +909,7 @@ export const useStore = create<State>((set, get) => ({
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
+      hiddenStatusItems: Array.isArray(c.hiddenStatusItems) ? c.hiddenStatusItems : [],
       allowAgentPush: c.allowAgentPush ?? false,
       worktreePerSession: c.worktreePerSession ?? false,
       worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,

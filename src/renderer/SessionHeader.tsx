@@ -10,14 +10,23 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
   moveMenuHighlight,
+  selectStatusItems,
   type ContextBreakdown,
   type StaleCacheResult,
+  type StatusItem,
 } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
@@ -67,6 +76,7 @@ export function SessionHeader({
   availableLaunchers,
   artifactsOpen,
   onToggleArtifacts,
+  hiddenStatusItems,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -102,6 +112,11 @@ export function SessionHeader({
   // harnesses / non-desktop callers that don't own the panel omit them.
   artifactsOpen?: boolean;
   onToggleArtifacts?: () => void;
+  // BET-782: ids of registry items the user has permanently hidden (see
+  // AppConfig.hiddenStatusItems). An id in this list is never rendered, in the
+  // bar or the overflow. Optional so the prop doesn't break callers that
+  // haven't wired the setting yet.
+  hiddenStatusItems?: string[];
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -120,8 +135,97 @@ export function SessionHeader({
   // window name reads better than the full "project / window" breadcrumb.
   const sessionName = breadcrumb?.window ?? breadcrumb?.project ?? "this session";
 
+  // ===== Status-item registry (BET-782) =====
+  // The right group is a REGISTRY, not hand-ordered JSX. Each entry is a
+  // stable id + priority + render function; `selectStatusItems` (chatUtils)
+  // sorts descending by priority and decides, for the measured pane width +
+  // the user's hide list, what renders in the bar vs the `⋯ +N` overflow.
+  // `branch` and `breadcrumb` stay in the LEFT group and are NOT registered.
+  const headerRef = useRef<HTMLDivElement>(null);
+  // The cut container width, re-measured each render. Re-renders are driven by
+  // the very state that resizes the pane (sidebar / artifacts panel — BET-782
+  // §3 says the pane width is a function of those, NOT the viewport), so a
+  // plain layout-effect re-measure keeps the overflow current without a
+  // ResizeObserver or window.innerWidth listener (both forbidden). A
+  // zero/unknown width (jsdom, pre-layout) is treated as "everything fits" to
+  // preserve today's wide-width render.
+  const [paneWidth, setPaneWidth] = useState<number>(Infinity);
+  useLayoutEffect(() => {
+    const el = headerRef.current;
+    const w = el ? el.getBoundingClientRect().width : Infinity;
+    const effective = w > 0 ? w : Infinity;
+    setPaneWidth((prev) => (prev === effective ? prev : effective));
+  });
+
+  const registry: StatusItem[] = [];
+  if (showContext) {
+    registry.push({
+      id: "context",
+      priority: 60,
+      render: () => (
+        <ContextPill
+          pct={pct}
+          segments={segments}
+          fill={fill}
+          stale={stale}
+          totalInput={totalInput}
+          ctxLimit={ctxLimit}
+          freshInput={freshInput}
+          cacheRead={cacheRead}
+          cacheWrite={cacheWrite}
+          modelName={modelName}
+          staleCache={staleCache}
+          onClear={onClear}
+        />
+      ),
+    });
+  }
+  if (artifactsToggle) {
+    registry.push({
+      id: "artifacts",
+      priority: 80,
+      render: () => (
+        <IconButton
+          icon={
+            <PanelRight
+              className={artifactsToggle.isOpen ? "text-[var(--accent-tx)]" : undefined}
+            />
+          }
+          label={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
+          title={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
+          onClick={artifactsToggle.toggle}
+        />
+      ),
+    });
+  }
+  if (hasSession && !readOnly) {
+    registry.push({
+      id: "menu",
+      priority: 100,
+      render: () => (
+        <SessionMenu
+          mode={mode}
+          onModeChange={onModeChange}
+          availableLaunchers={availableLaunchers}
+          onFork={onFork}
+          onCompact={onCompact}
+          onClear={onClear}
+          onDelete={onDelete}
+          sessionName={sessionName}
+        />
+      ),
+    });
+  }
+
+  const { visible, overflow } = selectStatusItems(
+    registry,
+    paneWidth,
+    hiddenStatusItems ?? [],
+  );
+
   return (
     <div
+      ref={headerRef}
       className="manta-session-header flex items-center gap-2 h-11 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] border-b border-border shrink-0 min-w-0"
       style={{ WebkitAppRegion: "drag" } as CSSProperties}
     >
@@ -150,59 +254,58 @@ export function SessionHeader({
         </Tag>
       )}
 
-      {/* Right group — context pill, session menu. Opts out of the header's
-            drag region so the controls stay clickable. */}
+      {/* Right group — the registry's visible items + the overflow trigger.
+            Order preserves today's wide-width visual (context, artifacts,
+            menu — acceptance #1); priority drives only the overflow cut.
+            Opts out of the header's drag region so the controls stay
+            clickable. */}
       <div
         className="ml-auto flex items-center gap-2"
         style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
       >
-        {showContext && (
-          <ContextPill
-            pct={pct}
-            segments={segments}
-            fill={fill}
-            stale={stale}
-            totalInput={totalInput}
-            ctxLimit={ctxLimit}
-            freshInput={freshInput}
-            cacheRead={cacheRead}
-            cacheWrite={cacheWrite}
-            modelName={modelName}
-            staleCache={staleCache}
-            onClear={onClear}
-          />
-        )}
+        {visible.map((it) => (
+          <Fragment key={it.id}>{it.render()}</Fragment>
+        ))}
 
-        {/* Artifacts toggle (BET-659): toggles a panel, not a popup — so no
-            aria-haspopup (the visual gate scans for it) and no manta hook.
-            Tinted when open. Sits in the no-drag right group so macOS gets the
-            click. Omitted when the caller doesn't own the panel. */}
-        {artifactsToggle && (
-          <IconButton
-            icon={
-              <PanelRight
-                className={artifactsToggle.isOpen ? "text-[var(--accent-tx)]" : undefined}
-              />
-            }
-            label={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
-            title={artifactsToggle.isOpen ? "Hide artifacts" : "Show artifacts"}
-            onClick={artifactsToggle.toggle}
-          />
-        )}
-
-        {hasSession && !readOnly && (
-          <SessionMenu
-            mode={mode}
-            onModeChange={onModeChange}
-            availableLaunchers={availableLaunchers}
-            onFork={onFork}
-            onCompact={onCompact}
-            onClear={onClear}
-            onDelete={onDelete}
-            sessionName={sessionName}
-          />
-        )}
+        {overflow.length > 0 && <StatusOverflow items={overflow} />}
       </div>
+    </div>
+  );
+}
+
+// ===== Right-group overflow (BET-782) =====
+//
+// The `⋯ +N` trigger + Dropdown that holds registry items the pane is too
+// narrow to show in the bar. It is a SEPARATE control from the session `⋯`
+// menu — they are never merged. N is the hidden count, which the spec insists
+// on ("a bare ⋯ is explicitly wrong — the count is the point").
+function StatusOverflow({ items }: { items: StatusItem[] }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useClickAway(rootRef, open, () => setOpen(false));
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`${items.length} more status item${items.length === 1 ? "" : "s"}`}
+        title={`${items.length} more status item${items.length === 1 ? "" : "s"}`}
+        className="manta-status-overflow-trigger inline-flex items-center gap-1 rounded-md p-1 text-text-faint hover:bg-fill-hover hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+      >
+        <MoreHorizontal size={16} aria-hidden="true" />
+        <span className="text-micro font-semibold tabular-nums">+{items.length}</span>
+      </button>
+      {open && (
+        <Dropdown hook="manta-status-overflow-dropdown">
+          {items.map((it) => (
+            <div key={it.id} className="px-1 py-1">
+              {it.render()}
+            </div>
+          ))}
+        </Dropdown>
+      )}
     </div>
   );
 }
