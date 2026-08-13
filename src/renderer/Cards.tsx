@@ -207,7 +207,7 @@ export function PermissionCard({
   //   Allow once — the FILLED accent primary, with a Check + ⏎ hint.
   //   Always allow <tool> — outlined secondary.
   //   (spacer)
-  //   Reject — ghost, pushed to the far right, gains --danger on hover.
+  //   Reject — danger text at rest, gains --danger-bg fill on hover (tone="danger").
   const actions = (
     <>
       <Button tone="primary" onClick={() => onReply("once")}>

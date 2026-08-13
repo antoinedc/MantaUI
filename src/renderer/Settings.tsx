@@ -29,6 +29,7 @@ import { Field } from "./Field";
 import { Button } from "./Button";
 import { Eyebrow } from "./Eyebrow";
 import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
+import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import {
   useLaunchers,
@@ -595,7 +596,7 @@ export function Settings({
             {store.updatePrompt && (
               <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
                 <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{store.updatePrompt.releaseName || store.updatePrompt.version}</span></span>
-                <button onClick={() => { void window.api.autoUpdateInstall(); }} className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium">Restart to update</button>
+                <button onClick={() => { void window.api.autoUpdateInstall(); }} className={BANNER_BTN}>Restart to update</button>
               </div>
             )}
           </GroupCard>

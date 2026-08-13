@@ -612,13 +612,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               >
                 {sending ? "Creating…" : "Create"}
               </Button>
-              <button
+              <Button
+                tone="ghost"
                 onClick={() => setFanOutWorktrees(null)}
                 disabled={sending}
-                className="text-meta px-3 py-2 text-text-faint hover:text-text"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         </Modal>

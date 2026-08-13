@@ -345,9 +345,11 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
                     className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded-xs focus:outline-none font-mono"
                   />
                 </div>
-                <Button tone="default" onClick={goNavigate}>
-                  Go
-                </Button>
+                <div className="shrink-0">
+                  <Button tone="default" onClick={goNavigate}>
+                    Go
+                  </Button>
+                </div>
               </div>
 
               {/* Breadcrumbs — home icon + inter-crumb chevrons, current crumb
