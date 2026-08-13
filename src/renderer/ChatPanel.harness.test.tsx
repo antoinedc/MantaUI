@@ -829,6 +829,28 @@ describe("ChatPanel pending screenshots", () => {
     expect(useStore.getState().pendingScreenshots).toHaveLength(0);
   });
 
+  it("Add to chat attaches a single pending screenshot", async () => {
+    const { api } = installMockApi({
+      uploadBuffer: () => Promise.resolve("/remote/x.png"),
+    });
+    resetStore({
+      pendingScreenshots: [shot("a", new ArrayBuffer(1))],
+    });
+
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const addToChat = Array.from(h.container.querySelectorAll("button")).find(
+      (b) => b.textContent === "Add to chat",
+    ) as HTMLButtonElement;
+    expect(addToChat).toBeTruthy();
+    await act(async () => { addToChat.click(); });
+    await h.flush();
+
+    expect(api.calls.uploadBuffer).toHaveLength(1);
+    expect(useStore.getState().pendingScreenshots).toHaveLength(0);
+  });
+
   it("the discard badge drops one screenshot without uploading it", async () => {
     const { api } = installMockApi();
     resetStore({
