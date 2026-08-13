@@ -37,9 +37,10 @@ import {
   isBackgroundJobCompletionTurn,
   updateEntryMotion,
   formatDuration,
-  formatTokens,
   type EntryMotionState,
   type LiveTurn,
+  type ProgressRecord,
+  workingIndicatorLabel,
 } from "./chatUtils";
 
 // ===== Virtuoso context =====
@@ -53,6 +54,8 @@ import {
 export type TranscriptContext = {
   running: boolean;
   liveTurn: LiveTurn | null;
+  /** Live session-progress record (BET-790/791), if any. */
+  progress?: ProgressRecord | null;
   showLoadEarlier: boolean;
   loadingEarlier: boolean;
   onLoadEarlier: () => void;
@@ -181,36 +184,45 @@ const LoadEarlier = ({ context }: { context: TranscriptContext }) => (
 export function WorkingIndicator({
   running,
   liveTurn,
+  progress,
 }: {
   running: boolean;
   liveTurn: LiveTurn | null;
+  progress?: ProgressRecord | null;
 }) {
   // Re-render (and thus re-read the clock during render) once per second so
   // the elapsed label advances on its own. The component is only mounted
   // while running — CardMount unmounts it when idle — so no ticker runs
   // between turns.
   useClockTick(WORKING_TICK_MS);
+  const hasTurn = liveTurn != null;
+  // presentVerbFor returns the bare present tense (no ellipsis); the "…" is
+  // appended by workingIndicatorLabel, exactly as before BET-791.
+  const verb = hasTurn ? presentVerbFor(liveTurn.verbSeedId) : "Working";
+  const elapsed = hasTurn ? formatDuration(nowMs() - liveTurn.startedAt) : "";
+  const tokens = hasTurn ? liveTurn.tokens : 0;
+  // A model-authored label is content; the generic verb is chrome. When a
+  // WORKING progress record names the step, render the label as its own
+  // headline span (text-text font-medium) and the `· 3/5 · 4m 12s · 18k` run
+  // faint mono right of it — the mockup [C8] split. Only `working` ever does
+  // this: `blocked` yields to its card, `done`/`failed` to the turn ending.
+  const useModelLabel =
+    progress?.state === "working" && !!progress.label && progress.label.trim().length > 0;
+  const meta = hasTurn
+    ? workingIndicatorLabel({ progress, fallbackVerb: verb, elapsed, tokens })
+    : "Working…";
   return (
     <CardMount show={running} k="working">
       <div className="manta-working-indicator flex items-center gap-2 shrink-0">
         <MantaLoader />
-        <span className="text-text-faint text-meta">
-          {liveTurn ? (
-            <>
-              {presentVerbFor(liveTurn.verbSeedId)}…
-              {" · "}
-              {formatDuration(nowMs() - liveTurn.startedAt)}
-              {liveTurn.tokens > 0 && (
-                <>
-                  {" · "}
-                  {formatTokens(liveTurn.tokens)}
-                </>
-              )}
-            </>
-          ) : (
-            "Working…"
-          )}
-        </span>
+        {useModelLabel ? (
+          <>
+            <span className="text-text font-medium">{progress.label}</span>
+            <span className="text-text-faint text-meta">{meta}</span>
+          </>
+        ) : (
+          <span className="text-text-faint text-meta">{meta}</span>
+        )}
       </div>
     </CardMount>
   );
@@ -252,7 +264,11 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         paddingBottom: "var(--sp-6)",
       }}
     >
-      <WorkingIndicator running={context.running} liveTurn={context.liveTurn} />
+      <WorkingIndicator
+        running={context.running}
+        liveTurn={context.liveTurn}
+        progress={context.progress}
+      />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
       )}
@@ -289,6 +305,8 @@ export type TranscriptProps = {
   showThinking: boolean;
   running: boolean;
   liveTurn: LiveTurn | null;
+  /** Live session-progress record (BET-790/791), if any. */
+  progress: ProgressRecord | null;
   // Whether the user is actually viewing this panel. App.tsx keeps every
   // ChatPanel mounted and hides the inactive ones with display:none. Entry
   // motion is gated on this — a turn landing in a hidden panel is absorbed as
@@ -329,6 +347,7 @@ export function Transcript({
   showThinking,
   running,
   liveTurn,
+  progress,
   isActive,
   activeTodos,
   onDismissTodos,
@@ -385,6 +404,7 @@ export function Transcript({
   const virtuosoContext: TranscriptContext = {
     running,
     liveTurn,
+    progress,
     showLoadEarlier:
       !loadedAllRef.current && messages.length >= TRANSCRIPT_TAIL_LIMIT,
     loadingEarlier,

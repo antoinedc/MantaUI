@@ -9,21 +9,23 @@
 //
 // Chrome contract: `w-[6px] h-[6px] rounded-full shrink-0` plus a per-tone
 // background — `bg-ok` (ok), `bg-accent animate-pulse` (running), `bg-danger`
-// (error), `bg-text-quiet` (idle).
+// (error), `bg-warn` (warn), `bg-text-quiet` (idle).
 
 export function StatusDot({
   tone,
 }: {
   /** The dot's semantic state — drives the background (and pulse when running). */
-  tone: "ok" | "running" | "error" | "idle";
+  tone: "ok" | "running" | "error" | "warn" | "idle";
 }) {
   const toneCls =
     tone === "running"
       ? "bg-accent animate-pulse"
       : tone === "error"
         ? "bg-danger"
-        : tone === "ok"
-          ? "bg-ok"
-          : "bg-text-quiet";
+        : tone === "warn"
+          ? "bg-warn"
+          : tone === "ok"
+            ? "bg-ok"
+            : "bg-text-quiet";
   return <span className={`w-[6px] h-[6px] rounded-full shrink-0 ${toneCls}`} />;
 }

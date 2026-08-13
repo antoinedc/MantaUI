@@ -105,6 +105,8 @@ import {
   describeMergeFailure,
   type StatusItem,
   type RepoRow,
+  workingIndicatorLabel,
+  progressAttentionKind,
 } from "./chatUtils";
 
 import type { OpencodeModel, UsageSnapshot } from "../shared/types";
@@ -3543,6 +3545,8 @@ describe("arrangeCards", () => {
   });
 });
 
+
+
 // ===== BET-787: repo-probe zero state =====
 
 function repoRow(over: Partial<RepoRow>): RepoRow {
@@ -3855,5 +3859,88 @@ describe("describeMergeFailure", () => {
   it("degrades gracefully for unknown / absent kinds", () => {
     expect(describeMergeFailure("http_422")).toContain("http_422");
     expect(describeMergeFailure(null)).toBe("Merge failed.");
+  });
+});
+
+
+describe("workingIndicatorLabel (BET-791)", () => {
+  const base = {
+    fallbackVerb: "Ruminating",
+    elapsed: "4m 12s",
+    tokens: 18_000, // formatTokens → "18k tokens"
+  };
+
+  it("no progress record — byte-identical to today", () => {
+    expect(workingIndicatorLabel({ progress: null, ...base })).toBe(
+      "Ruminating… · 4m 12s · 18k tokens",
+    );
+  });
+
+  it("emits no token segment when tokens is 0", () => {
+    expect(
+      workingIndicatorLabel({ progress: null, fallbackVerb: "Ruminating", elapsed: "4m 12s", tokens: 0 }),
+    ).toBe("Ruminating… · 4m 12s");
+  });
+
+  it("working record with label only — no counter (indeterminate)", () => {
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: null, total: null, state: "working", detail: "", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("· 4m 12s · 18k tokens");
+  });
+
+  it("working record with label + step/total shows the counter", () => {
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: 3, total: 5, state: "working", detail: "", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("· 3/5 · 4m 12s · 18k tokens");
+  });
+
+  it("step present but total missing — NO counter (never 3/?)", () => {
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: 3, total: null, state: "working", detail: "", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("· 4m 12s · 18k tokens");
+  });
+
+  it("blocked — the indicator yields to the card (generic line)", () => {
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: 3, total: 5, state: "blocked", detail: "decide", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("Ruminating… · 4m 12s · 18k tokens");
+  });
+
+  it("done/failed — no indicator treatment either (the turn ending is visible)", () => {
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: 5, total: 5, state: "done", detail: "", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("Ruminating… · 4m 12s · 18k tokens");
+    expect(
+      workingIndicatorLabel({
+        progress: { sessionID: "s1", label: "Running integration tests", step: 5, total: 5, state: "failed", detail: "", updatedAt: 0 },
+        ...base,
+      }),
+    ).toBe("Ruminating… · 4m 12s · 18k tokens");
+  });
+});
+
+describe("progressAttentionKind (BET-791)", () => {
+  it("only blocked lights an attention kind", () => {
+    expect(progressAttentionKind("blocked")).toBe("blocked");
+    expect(progressAttentionKind("working")).toBeNull();
+    expect(progressAttentionKind("done")).toBeNull();
+    expect(progressAttentionKind("failed")).toBeNull();
+    expect(progressAttentionKind(null)).toBeNull();
+    expect(progressAttentionKind(undefined)).toBeNull();
   });
 });

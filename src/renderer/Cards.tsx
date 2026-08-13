@@ -14,12 +14,14 @@
 
 import { useState, type ReactNode } from "react";
 import { Shield, HelpCircle, Check, Send } from "lucide-react";
-import type { PermissionRequest, QuestionRequest } from "../shared/types";
+import type { PermissionRequest, ProgressRecord, QuestionRequest } from "../shared/types";
 import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
 import { OutputWell } from "./OutputWell";
 import { Button } from "./Button";
+import { StatusDot } from "./StatusDot";
+import { renderMarkdown } from "./MarkdownBody";
 
 // ===== Shared ask-card shell (BET-458) =====
 //
@@ -495,5 +497,33 @@ export function QuestionCard({
         </>
       }
     />
+  );
+}
+
+// ===== Blocked progress card (BET-791 [C9]) =====
+//
+// The ONE card a progress state earns: a model has reported — in its own
+// words — that it stopped and needs a human decision. Warn-toned, it is
+// registered in ChatPanel's card stack as a blocking-tier ask, alongside
+// permission and question and never below an ambient card. It is NOT
+// dismissible by × — it clears when the model reports a different state or
+// the turn ends. Headline is 13px/600 `--tx1` with a warn dot; the body is
+// the model's `detail` run through the transcript's markdown treatment so
+// inline `code` renders like it does in the transcript.
+export function BlockedProgressCard({ progress }: { progress: ProgressRecord }) {
+  return (
+    <Card warn>
+      <div className="flex items-center gap-2">
+        <StatusDot tone="warn" />
+        <span className="text-text font-semibold" style={{ fontSize: 13 }}>
+          Blocked — needs a decision
+        </span>
+      </div>
+      {progress.detail ? (
+        <div className="mt-2 text-text-muted" style={{ fontSize: 12.5, lineHeight: 1.55 }}>
+          {renderMarkdown(progress.detail)}
+        </div>
+      ) : null}
+    </Card>
   );
 }

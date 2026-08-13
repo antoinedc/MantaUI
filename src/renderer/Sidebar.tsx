@@ -898,13 +898,15 @@ function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; t
     return { variant: "idle", title: "Finished — click to view" };
   }
   if (status.running) {
-    return {
-      variant: "run",
-      title:
-        status.subagents > 0
-          ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
-          : "Running",
-    };
+    // BET-791: the model-authored progress label (when a working turn names
+    // its step) rides the same title tooltip the subagent count already uses
+    // for the same "say more about a running window" reason — no new slot.
+    const label = status.progressLabel?.trim() ? ` · ${status.progressLabel}` : "";
+    const subs =
+      status.subagents > 0
+        ? ` · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
+        : "";
+    return { variant: "run", title: `Running${label}${subs}` };
   }
   return { variant: "default", title: "Idle" };
 }

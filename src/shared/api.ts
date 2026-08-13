@@ -383,6 +383,12 @@ export interface Api {
   // `progress_report` opencode tool. The renderer's job card also gets the
   // child's progress on the delegate job object.
   progressGet(sessionId?: string): Promise<ProgressRecord | null>;
+  // BET-791: the box publishes a `progress.updated` hint ({sessionID}) on the
+  // /events bus whenever a session's record is written or cleared. Subscribers
+  // refetch progressGet() — the payload carries no record. No-op on the
+  // preload bridge and on demoApi (Proxy fallback returns a no-op
+  // unsubscribe).
+  onProgressUpdated(cb: (payload: { sessionID?: string }) => void): () => void;
   // BET-738: the box publishes a `usage.updated` bus event whenever the
   // poller's serialized snapshot set actually changes. Unlike
   // onDelegateUpdated's hint-only payload, this one carries the FULL current

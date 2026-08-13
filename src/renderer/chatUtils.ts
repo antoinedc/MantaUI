@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2379,6 +2379,60 @@ export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | 
   }
   if (startedAt == null) return null;
   return { startedAt, tokens, verbSeedId: verbSeedId ?? userInfo.id };
+}
+
+// ===== Session progress (BET-790/791) =====
+//
+// `ProgressRecord`/`ProgressState` are the canonical shapes from
+// src/shared/types.ts (BET-790). The renderer treats the record as opaque
+// presentation input: the server owns monotonicity (a regressing step is
+// clamped there and the renderer never re-derives one), and this module only
+// decides how a state is PRESENTED.
+
+/**
+ * The sidebar attention kind a progress state lights. Only a model reporting
+ * in its own words that it has stopped and needs a human (`blocked`) earns
+ * the same attention dot a pending question does; every other state lights
+ * nothing (working already has the running dot, done/failed are the turn
+ * ending). Reuses the existing attention mechanism rather than a parallel one.
+ */
+export function progressAttentionKind(state: ProgressState | null | undefined): "blocked" | null {
+  return state === "blocked" ? "blocked" : null;
+}
+
+/**
+ * Build the mono meta run for the working row at the transcript tail (the
+ * part after the label). With NO progress record the whole line — verb +
+ * elapsed + tokens — is one faint span, byte-identical to before BET-791.
+ *
+ * When a WORKING record exists the model's label is rendered separately (as
+ * the headline span) and this returns only the tail: `· 3/5 · 4m 12s · 18k`.
+ * The `step/total` counter is appended ONLY when both are present —
+ * indeterminate work shows no counter, never `3/?`, because a bar (or count)
+ * that stalls mid-way is worse than none for work of unknown length.
+ *
+ * Any non-`working` state falls through to the unchanged generic line:
+ * `blocked` yields to its card, `done`/`failed` to the turn ending.
+ */
+export function workingIndicatorLabel({
+  progress,
+  fallbackVerb,
+  elapsed,
+  tokens,
+}: {
+  progress: ProgressRecord | null;
+  /** The present-tense verb WITHOUT an ellipsis (e.g. "Ruminating"). */
+  fallbackVerb: string;
+  elapsed: string;
+  tokens: number;
+}): string {
+  const tok = tokens > 0 ? ` · ${formatTokens(tokens)}` : "";
+  if (!progress || progress.state !== "working") {
+    return `${fallbackVerb}… · ${elapsed}${tok}`;
+  }
+  const count =
+    progress.step != null && progress.total != null ? ` ${progress.step}/${progress.total} ·` : "";
+  return `·${count} ${elapsed}${tok}`;
 }
 
 // Cross-file contract for the ⌘F cross-conversation jump: SearchPalette sets

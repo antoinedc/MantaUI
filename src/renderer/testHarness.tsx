@@ -115,6 +115,8 @@ function defaultApiImpl(): Record<string, unknown> {
     secretsDelete: () => Promise.resolve(),
     webhookList: () => Promise.resolve([]),
     webhookDelete: () => Promise.resolve(),
+    onProgressUpdated: () => () => {},
+    progressGet: () => Promise.resolve(null),
     // Voice / files — component may probe these on mount.
     getPathForFile: () => "",
     clipboardReadImage: () => Promise.resolve(null),
