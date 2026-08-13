@@ -2991,6 +2991,7 @@ export function describeMergeFailure(kind: string | null | undefined): string {
     default:
       return kind ? `Merge failed (${kind}).` : "Merge failed.";
   }
+}
 
 // ---- Forge review pane (BET-792) -------------------------------------------
 

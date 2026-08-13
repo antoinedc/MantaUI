@@ -3860,6 +3860,8 @@ describe("describeMergeFailure", () => {
   it("degrades gracefully for unknown / absent kinds", () => {
     expect(describeMergeFailure("http_422")).toContain("http_422");
     expect(describeMergeFailure(null)).toBe("Merge failed.");
+  });
+});
 
 describe("commentableLines", () => {
   it("returns [] for an empty diff", () => {
