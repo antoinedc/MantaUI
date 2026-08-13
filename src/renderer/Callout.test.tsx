@@ -49,6 +49,17 @@ describe("Callout", () => {
     expect(calloutEl(h).textContent).toBe("Watch out");
   });
 
+  it("renders the smaller note geometry when size='note' (the review pane's inline diff note)", () => {
+    const NOTE =
+      "border-l-2 rounded-r-[var(--r-sm)] px-[11px] py-2 my-[6px] max-w-[62ch] text-meta text-text-muted border-l-accent bg-accent-bg";
+    h = mount(
+      <Callout tone="info" size="note">
+        Draft
+      </Callout>,
+    );
+    expect(calloutEl(h).className).toBe(NOTE);
+  });
+
   it("has no tone default — tone is required (compile-time)", () => {
     // If Callout ever gained a default tone this directive becomes unused and
     // typecheck fails — the C4 required-no-default guard lives in the types.

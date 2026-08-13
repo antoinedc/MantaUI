@@ -19,6 +19,7 @@ import type { ForgeThread } from "../shared/types";
 import type { CommentableLine } from "./chatUtils";
 import { Pill } from "./Pill";
 import { Chip } from "./Chip";
+import { Callout } from "./Callout";
 import { UnifiedDiff, type UnifiedDiffGutter, type UnifiedDiffNote } from "./ToolBodies";
 
 // ---- Draft comment (this issue's only forge-write-adjacent object) ---------
@@ -52,10 +53,13 @@ function diffHeader(diff: string): { label: string; plus: number; minus: number 
   return { label: label || "review", plus, minus };
 }
 
-// The inline note-inline block (a colleague's thread or your draft) that sits
-// between diff lines, styled per the spec's `.note-inline`: 2px accent left
-// border, accent-bg surface, indented past the gutter, max 62ch. The
-// attribution line (§4.5②) is emphasised; the status line is mono `--tx4`.
+// The note-inline block (a colleague's thread or your draft) that sits between
+// diff lines. This IS the `Callout` primitive at its `note` size — the spec's
+// `.note-inline` (§4.5②): a 2px accent left bar on an accent-bg surface,
+// indented under the diff's code region. It is the SAME advisory-box primitive,
+// not a second callout, so the note family cannot drift. The attribution line
+// (§4.5②) is emphasised; the status line is mono `--tx4`.
+//
 function NoteInline({
   attribution,
   body,
@@ -68,15 +72,17 @@ function NoteInline({
   status?: ReactNode;
 }) {
   return (
-    <div className="ml-[26px] my-[6px] max-w-[62ch] rounded-r-sm border-l-2 border-accent bg-accent-bg px-[11px] py-2 text-[12.5px] leading-[1.55] text-text-muted">
-      <div className="font-semibold text-text">{attribution}</div>
-      <div className="mt-px whitespace-pre-wrap break-words">{body}</div>
-      {action && (
-        <div className="mt-2 flex items-center gap-[6px]">{action}</div>
-      )}
-      {status && (
-        <div className="mt-[6px] font-mono text-[11.5px] text-text-quiet">{status}</div>
-      )}
+    <div className="ml-[68px]">
+      <Callout tone="info" size="note">
+        <div className="font-semibold text-text">{attribution}</div>
+        <div className="mt-px whitespace-pre-wrap break-words leading-[1.55]">{body}</div>
+        {action && (
+          <div className="mt-2 flex items-center gap-[6px]">{action}</div>
+        )}
+        {status && (
+          <div className="mt-[6px] font-mono text-[11.5px] text-text-quiet">{status}</div>
+        )}
+      </Callout>
     </div>
   );
 }
@@ -233,7 +239,7 @@ export function ReviewPane({
         key: "composer",
         anchor: composing,
         node: (
-          <div className="ml-[26px] my-[6px] rounded-r-sm border-l-2 border-accent bg-inset px-[11px] py-2">
+          <div className="ml-[68px] my-[6px] rounded-r-[var(--r-sm)] border-l-2 border-accent bg-bg-elev px-[11px] py-2">
             <textarea
               autoFocus
               value={draftText}
@@ -250,13 +256,13 @@ export function ReviewPane({
               }}
               placeholder="Comment on this line…"
               rows={2}
-              className="w-full resize-none rounded-xs border border-border-strong bg-bg px-2 py-1 font-mono text-[12.5px] text-text outline-none placeholder:text-text-faint focus:border-accent"
+              className="w-full resize-none rounded-xs border border-border-strong bg-bg px-2 py-1 font-mono text-meta text-text outline-none placeholder:text-text-faint focus:border-accent"
             />
             <div className="mt-2 flex items-center gap-[6px]">
               <button
                 type="button"
                 onClick={submitDraft}
-                className="rounded-sm bg-accent-solid px-2 py-1 text-[12px] font-medium text-on-accent hover:opacity-90"
+                className="rounded-xs bg-accent-solid px-2 py-1 text-meta font-medium text-on-accent hover:opacity-90"
               >
                 Add note
               </button>
@@ -266,7 +272,7 @@ export function ReviewPane({
                   setComposing(null);
                   setDraftText("");
                 }}
-                className="rounded-sm px-2 py-1 text-[12px] text-text-muted hover:bg-fill-hover hover:text-text"
+                className="rounded-xs px-2 py-1 text-meta text-text-muted hover:bg-fill-hover hover:text-text"
               >
                 Cancel
               </button>

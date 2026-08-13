@@ -187,9 +187,12 @@ const OFF_GRID_PX_ALLOWLIST: Record<string, number[]> = {
   // spec's `.sw` definition, not drift — the switch's hit-area/size resolve
   // via w-9/h-5/w-3.5 so they need no entry.
   Toggle: [2, 18],
-  // Callout's verbatim spec chrome (BET-614 stage 3): the 3px left accent
-  // bar (border-l-[3px]). The only off-grid px in CALLOUT_BASE.
-  Callout: [3],
+  // Callout's verbatim spec chrome: the 3px left accent bar (border-l-[3px])
+  // live since BET-614 stage 3; plus the review pane's `note` size (BET-792) —
+  // the 11px inline padding (px-[11px]) and 6px vertical block margin
+  // (my-[6px]) from the spec's `.note-inline` (§4.5②), which the mockup quotes
+  // verbatim. Real values, not drift.
+  Callout: [3, 6, 11],
   // Tag's verbatim spec chrome (BET-614 stage 4): the 5px icon gap
   // (gap-[5px]) and the 23px pill hit area (h-[23px]). The 11.5px label
   // (text-[11.5px]) resolves through the `\d+px` scan's decimal skip, so it
