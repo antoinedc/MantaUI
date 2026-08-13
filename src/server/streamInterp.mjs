@@ -264,6 +264,23 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         emit(sid, "turnComplete", { complete: true, running: false });
         return;
       }
+      case "session.error": {
+        // MessageAbortedError is an intentional abort (user Stop, or the
+        // desktop's queued-drain abort) — NOT a failure. Same name-check the
+        // push pump uses (src/server/push.mjs, classifyPushEvent session.error
+        // branch): the abort carries no other marker, the name is the only
+        // signal. Do NOT emit it.
+        const err = evt.properties?.error;
+        const name = typeof err?.name === "string" ? err.name : null;
+        if (name === "MessageAbortedError") return;
+        st.running = false;
+        const message =
+          typeof err?.data?.message === "string" ? err.data.message :
+          typeof err?.message === "string" ? err.message : "The turn failed.";
+        emit(sid, "sessionError", { name, message });
+        emit(sid, "turnComplete", { complete: true, running: false });
+        return;
+      }
       case "session.next.step.ended": {
         // truncation classification + context arithmetic
         const props = evt.properties ?? {};
