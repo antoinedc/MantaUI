@@ -40,6 +40,7 @@ import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
 import { Modal } from "./Modal";
+import { Button } from "./Button";
 import { Card } from "./Card";
 import { Checkbox } from "./Checkbox";
 import { FolderPickerModal } from "./FolderPickerModal";
@@ -604,13 +605,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               ))}
             </ul>
             <div className="flex gap-2">
-              <button
+              <Button
+                tone="primary"
                 onClick={() => void submitFanOut(draft.cwd, fanOutWorktrees ?? [])}
                 disabled={sending}
-                className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90 disabled:opacity-50"
               >
                 {sending ? "Creating…" : "Create"}
-              </button>
+              </Button>
               <button
                 onClick={() => setFanOutWorktrees(null)}
                 disabled={sending}

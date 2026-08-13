@@ -401,7 +401,7 @@ export function InputArea({
             "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
             "disabled:cursor-default " +
             (running || input.trim()
-              ? "bg-accent text-on-accent hover:opacity-90"
+              ? "bg-accent text-on-accent hover:brightness-110"
               : "bg-fill text-text-faint")
           }
         >
