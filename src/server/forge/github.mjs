@@ -39,6 +39,52 @@ export class GithubRequestError extends Error {
   }
 }
 
+// Typed merge failures (issue §4). The UI cannot act on a generic "merge
+// failed" — each status has a different next action, so each is its own class:
+//   405 → cannot merge (branch protection / draft / conflict)
+//   409 → the head SHA no longer matches what the user reviewed
+//   403 → no permission to merge
+// Anything else falls through to the generic GithubRequestError. The base
+// error class carries `.status` so callers can still switch on the raw code.
+export class MergeNotAllowedError extends Error {
+  constructor(url) {
+    super(`cannot merge ${url}`);
+    this.name = "MergeNotAllowedError";
+    this.status = 405;
+    this.kind = "cannot_merge";
+    this.url = url;
+  }
+}
+export class MergeShaMismatchError extends Error {
+  constructor(url) {
+    super(`head sha no longer matches for ${url}`);
+    this.name = "MergeShaMismatchError";
+    this.status = 409;
+    this.kind = "sha_mismatch";
+    this.url = url;
+  }
+}
+export class MergePermissionError extends Error {
+  constructor(url) {
+    super(`no permission to merge ${url}`);
+    this.name = "MergePermissionError";
+    this.status = 403;
+    this.kind = "permission";
+    this.url = url;
+  }
+}
+
+// Map a merge PUT's failure status to its distinguished error kind. Anything
+// not in the three known statuses stays an ordinary GithubRequestError (the
+// caller can still read `.status`). 404 is not a merge state — a vanished PR
+// is surfaced generically rather than as one of the three actionable kinds.
+function mergeFailure(status, url) {
+  if (status === 405) return new MergeNotAllowedError(url);
+  if (status === 409) return new MergeShaMismatchError(url);
+  if (status === 403) return new MergePermissionError(url);
+  return new GithubRequestError(status, url);
+}
+
 function qs(params) {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "");
   if (entries.length === 0) return "";
@@ -143,8 +189,9 @@ function normalizeLegacyStatus(s) {
  * — there is intentionally no separate capabilities registry to drift.
  *
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} request
+ * @param {(url: string, opts: { method: string, body?: any }) => Promise<{ data: any, stale: boolean }>} [requestWrite]
  */
-export function createGithubAdapter(request) {
+export function createGithubAdapter(request, requestWrite) {
   return {
     kind: "github",
 
@@ -249,6 +296,54 @@ export function createGithubAdapter(request) {
         // still cover it.
       }
       return { data: checks, stale };
+    },
+
+    /**
+     * POST /repos/{o}/{r}/pulls — create a pull request. Returns the created,
+     * normalised PR. One code path for both the human ship action and any
+     * future automated one (rule §Hygiene) — a draft-automated caller passes
+     * `draft: true` and never reaches merge.
+     * @param {{ owner: string, repo: string }} repo
+     * @param {{ title: string, head: string, base: string, body?: string, draft?: boolean }} input
+     * @returns {Promise<{ data: import("./index.mjs").PullRequestLike, stale: boolean }>}
+     */
+    async createPullRequest(repo, { title, head, base, body = "", draft = false }) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}${issuePath(repo)}/pulls`;
+      const { data } = await requestWrite(url, {
+        method: "POST",
+        body: { title, head, base, body, draft },
+      });
+      return { data: normalizePr(data), stale: false };
+    },
+
+    /**
+     * PUT /repos/{o}/{r}/pulls/{n}/merge — merge a pull request. **Always pass
+     * `sha`** (the head SHA the user approved): without it the API merges
+     * whatever landed after the reviewed diff and the failure is invisible
+     * (issue §4). A non-ok response is mapped to its distinguished error kind
+     * (405 cannot-merge / 409 sha-mismatch / 403 permission).
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {{ method?: string, sha: string }} input
+     * @returns {Promise<{ data: any, stale: boolean }>}
+     */
+    async merge(repo, number, { method = "merge", sha } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}${issuePath(repo)}/pulls/${number}/merge`;
+      let data;
+      try {
+        ({ data } = await requestWrite(url, {
+          method: "PUT",
+          body: { merge_method: method, sha },
+        }));
+      } catch (err) {
+        if (err && typeof err === "object" && typeof err.status === "number" && err.name === "GithubRequestError") {
+          throw mergeFailure(err.status, url);
+        }
+        throw err;
+      }
+      return { data, stale: false };
     },
   };
 }

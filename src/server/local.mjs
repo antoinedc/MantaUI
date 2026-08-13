@@ -8,6 +8,7 @@
 // are no-ops documented below.
 
 import { run } from "./tmux.mjs";
+import { spawn as nodeSpawn } from "node:child_process";
 import { readdir, readFile, stat, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -426,6 +427,77 @@ export async function gitRemoteOrigin(cwd) {
   } catch {
     return null;
   }
+}
+
+// gitPush — network git gets its OWN path (BET-794 §2).
+//
+// The shared `run()` helper in tmux.mjs kills at 10s, which is tuned for local
+// commands and WILL kill a real push (a genuinely large or slow push routinely
+// exceeds it). This stands alone with a 120s timeout and its own progress
+// handling. Do NOT raise the shared helper's timeout — that would silently
+// change every local git call in the server.
+//
+// `onProgress(line)` receives incremental stdout/stderr lines as they arrive
+// (best-effort; a throwing callback is swallowed) so a caller can stream push
+// progress. Errors reject with a message embedding git's stderr (same shape
+// as run()'s rejection). Arguments are an argv array — never an interpolated
+// string.
+const GIT_PUSH_TIMEOUT_MS = 120_000;
+
+export function gitPush(
+  { cwd, branch, setUpstream = false, onProgress } = {},
+  { timeoutMs = GIT_PUSH_TIMEOUT_MS, spawn = nodeSpawn } = {},
+) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-C", cwd,
+      "push",
+      ...(setUpstream ? ["-u"] : []),
+      ...(branch ? [branch] : []),
+    ];
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let p;
+    try {
+      p = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try { p.kill("SIGKILL"); } catch { /* already gone */ }
+      settled = true;
+      reject(new Error("git push timed out after 120s"));
+    }, timeoutMs);
+    timer.unref();
+    const finish = () => { if (!settled) { settled = true; clearTimeout(timer); } };
+    const emit = (chunk) => {
+      if (typeof onProgress !== "function") return;
+      try { onProgress(chunk); } catch { /* progress is best-effort */ }
+    };
+    p.stdout.on("data", (b) => {
+      const s = b.toString();
+      stdout += s;
+      emit(s);
+    });
+    p.stderr.on("data", (b) => {
+      const s = b.toString();
+      stderr += s;
+      emit(s);
+    });
+    p.on("error", (e) => { finish(); reject(e); });
+    p.on("close", (code) => {
+      finish();
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        const e = new Error(`git push exited ${code}: ${stderr.trim() || stdout.trim()}`);
+        e.status = code;
+        reject(e);
+      }
+    });
+  });
 }
 
 // Directories we never descend into during a scan (in addition to anything

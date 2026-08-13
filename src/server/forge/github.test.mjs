@@ -4,7 +4,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createGithubAdapter } from "./github.mjs";
+import {
+  createGithubAdapter,
+  GithubRequestError,
+  MergeNotAllowedError,
+  MergeShaMismatchError,
+  MergePermissionError,
+} from "./github.mjs";
 import { rollupChecks } from "../../shared/forge.mjs";
 
 const REPO = { owner: "acme", repo: "widget" };
@@ -165,4 +171,96 @@ test("listPullRequests normalises an array of PRs with draft handling", async ()
   assert.equal(prs[0].draft, false);
   assert.equal(prs[1].state, "draft");
   assert.equal(prs[1].draft, true);
+});
+
+// ---------------------------------------------------------------------------
+// Write path (BET-794): createPullRequest + merge
+// ---------------------------------------------------------------------------
+
+// A fake write transport that records every call and returns a canned body.
+function fakeWrite(map = {}, rejecter) {
+  const calls = [];
+  const write = async (url, opts) => {
+    calls.push({ url, opts });
+    if (rejecter) rejecter(url, opts);
+    if (map[url]) return { data: map[url], stale: false };
+    return { data: { ok: true }, stale: false };
+  };
+  write.calls = calls;
+  return write;
+}
+
+test("createPullRequest POSTs the payload shape including draft", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls";
+  const created = { ...PR_FIXTURE, number: 99, draft: true, head: { ref: "feature/forge", sha: "abc123" } };
+  const write = fakeWrite({ [url]: created });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+
+  const { data: pr } = await adapter.createPullRequest(REPO, {
+    title: "Forge seam",
+    head: "feature/forge",
+    base: "main",
+    body: "Adds the vocabulary layer.",
+    draft: true,
+  });
+
+  assert.equal(write.calls.length, 1);
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].opts.method, "POST");
+  assert.deepEqual(write.calls[0].opts.body, {
+    title: "Forge seam",
+    head: "feature/forge",
+    base: "main",
+    body: "Adds the vocabulary layer.",
+    draft: true,
+  });
+  // The created PR is normalised back to the shared PullRequest shape.
+  assert.equal(pr.number, 99);
+  assert.equal(pr.draft, true);
+  assert.equal(pr.state, "draft");
+});
+
+test("createPullRequest default: non-draft, empty body, draft flag false", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls";
+  const write = fakeWrite({ [url]: { ...PR_FIXTURE, number: 5, draft: true } });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+  await adapter.createPullRequest(REPO, { title: "t", head: "h", base: "main" });
+  assert.deepEqual(write.calls[0].opts.body, {
+    title: "t", head: "h", base: "main", body: "", draft: false,
+  });
+});
+
+test("merge passes the head SHA (never merges without it)", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls/42/merge";
+  const write = fakeWrite({ [url]: { merged: true, sha: "abc123" } });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+  const { data } = await adapter.merge(REPO, 42, { method: "squash", sha: "abc123" });
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].opts.method, "PUT");
+  assert.deepEqual(write.calls[0].opts.body, { merge_method: "squash", sha: "abc123" });
+  assert.equal(data.merged, true);
+});
+
+test("merge maps each failure status to its distinguished typed error", async () => {
+  const base = "https://api.github.com/repos/acme/widget/pulls/42/merge";
+  const cases = [
+    { status: 403, Expected: MergePermissionError, kind: "permission" },
+    { status: 405, Expected: MergeNotAllowedError, kind: "cannot_merge" },
+    { status: 409, Expected: MergeShaMismatchError, kind: "sha_mismatch" },
+    // An out-of-band status surfaces generically (GithubRequestError) with .status.
+    { status: 422, Expected: GithubRequestError, kind: null },
+  ];
+  for (const { status, Expected, kind } of cases) {
+    const write = async () => { throw new GithubRequestError(status, base); };
+    const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+    await assert.rejects(
+      () => adapter.merge(REPO, 42, { method: "merge", sha: "abc123" }),
+      (err) => {
+        assert.ok(err instanceof Expected, `status ${status} → ${Expected.name}, got ${err?.name}`);
+        assert.equal(err.status, status);
+        if (kind) assert.equal(err.kind, kind);
+        return true;
+      },
+    );
+  }
 });

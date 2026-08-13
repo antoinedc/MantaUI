@@ -29,9 +29,9 @@
 
 import { detectForge, rollupChecks, unsupportedByForge } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
-import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli } from "../local.mjs";
+import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
-import { createGithubAdapter } from "./github.mjs";
+import { createGithubAdapter, GithubRequestError } from "./github.mjs";
 
 // How long a fetched value is served from memory with no network request at
 // all. After this, the ETag conditional GET (If-None-Match) takes over.
@@ -107,7 +107,32 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     }
   }
 
-  return { getJson };
+  return {
+    getJson,
+    requestJson: (url, opts) =>
+      requestJsonImpl(url, { token: opts?.token, method: opts?.method, body: opts?.body }, fetch),
+  };
+}
+
+// A write request: plain fetch, NO ETag cache, NO single-flight, NO cooling —
+// writes must not be served from last-known state and must not share the
+// GET path (issue §4). Returns `{ data, stale: false }` on 2xx; any non-2xx
+// throws GithubRequestError(status, url) so the adapter can map merge-status
+// codes to their distinguished failure kinds.
+async function requestJsonImpl(url, { token, method = "GET", body }, fetchImpl) {
+  const res = await fetchImpl(url, {
+    method,
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "manta-forge",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new GithubRequestError(res.status, url);
+  const data = await res.json();
+  return { data, stale: false };
 }
 
 async function fetchOne(url, token, bucket, etagStore, inflight, coolingUntil, fetch, now) {
@@ -170,7 +195,8 @@ export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
       const create = ADAPTERS[kind];
       if (!create) throw unsupportedByForge(kind, "read path");
       const request = (url) => requestLayer.getJson(url, { token });
-      return create(request);
+      const requestWrite = (url, opts) => requestLayer.requestJson(url, { token, ...opts });
+      return create(request, requestWrite);
     },
     requestLayer,
   };
@@ -298,6 +324,104 @@ export async function pullRequestForCwd(cwd, deps = {}) {
   }
 
   return { pr, checks, rollup: rollupChecks(checks), stale: staleChecks, error: null };
+}
+
+// ---- Box-facing writes (issue BET-794) --------------------------------------
+//
+// ship + merge both live here, not in the renderer: a forge token must never
+// reach the Electron renderer or the iOS app (§Hygiene). Both resolve
+// `cwd → origin → repo → token → adapter` box-side and return well-formed
+// results / typed errors. All git/forge deps injectable for tests.
+
+// Shared context resolution for the write ops. Returns `{ forge, repo, adapter,
+// token, head }` or a `{ error }` result. `head` is the current branch (the
+// thing we push and open a PR from).
+async function resolveWriteContext(cwd, deps, wantBranch = true) {
+  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
+  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  const origin = await gitRemoteOrigin(cwd);
+  const forge = origin ? detectForge(origin) : null;
+  if (!forge || forge.kind !== "github") return { error: "no_forge" };
+  const tok = await resolveToken(forge.host);
+  if (!tok) return { error: "not_connected" };
+  const adapter = getAdapterFn(forge.kind, tok.token);
+  const repo = { owner: forge.owner, repo: forge.repo };
+  let head = null;
+  if (wantBranch) {
+    head = await currentBranch(cwd);
+    if (!head) return { error: "no_branch" };
+  }
+  return { forge, repo, adapter, head };
+}
+
+/**
+ * Ship: push the current branch, then open a pull request for it. The human
+ * gate (issue §4) lives ABOVE this — this function is the push+create step
+ * that runs only after an explicit confirm. It is the ONE code path for
+ * "open a PR", reused by the human ship action and any future automated one
+ * (a background job reaches it as a draft and never merges).
+ *
+ * Push uses gitPush (120s timeout — a real network push is killed by the
+ * shared 10s `run()`), then createPullRequest with the given config.
+ *
+ * @param {string} cwd
+ * @param {{ title: string, body?: string, base?: string, draft?: boolean }} input
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true, pr: object, url: string } | { ok: false, error: string }>}
+ */
+export async function shipPullRequest(cwd, { title, body = "", base, draft = false } = {}, deps = {}) {
+  const ctx = await resolveWriteContext(cwd, deps);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const gitPush = deps.gitPush ?? localGitPush;
+
+  try {
+    await gitPush({ cwd, branch: ctx.head, setUpstream: true });
+  } catch (e) {
+    return { ok: false, error: `push failed: ${String(e?.message ?? e)}` };
+  }
+
+  let pr;
+  try {
+    const res = await ctx.adapter.createPullRequest(ctx.repo, {
+      title,
+      body,
+      base: base ?? "main",
+      head: ctx.head,
+      draft: draft ?? false,
+    });
+    pr = res.data;
+  } catch (e) {
+    return { ok: false, error: `create pull request failed: ${String(e?.message ?? e)}` };
+  }
+
+  return { ok: true, pr, url: pr?.url ?? "" };
+}
+
+/**
+ * Merge a pull request, ALWAYS passing the head SHA the user approved (issue
+ * §4 — without the SHA the API merges whatever landed after the reviewed diff
+ * and the failure is invisible). The typed merge errors surface the
+ * distinguished reason (cannot_merge / sha_mismatch / permission) up to the
+ * caller, which decides how to present it.
+ *
+ * @param {string} cwd
+ * @param {{ number: number, method?: string, sha: string }} input
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true, data: any } | { ok: false, error: string, kind?: string }>}
+ */
+export async function mergePullRequest(cwd, { number, method = "merge", sha } = {}, deps = {}) {
+  const ctx = await resolveWriteContext(cwd, deps, false);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  try {
+    const { data } = await ctx.adapter.merge(ctx.repo, number, { method, sha });
+    return { ok: true, data };
+  } catch (e) {
+    const kind = e?.kind ?? (e?.name === "GithubRequestError" ? `http_${e.status}` : null);
+    return { ok: false, error: String(e?.message ?? e), kind };
+  }
 }
 
 // ---- Adapter interface (the seam a second adapter implements) ------------------
