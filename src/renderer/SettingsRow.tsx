@@ -10,15 +10,8 @@
 // control, or an `input`. The primitive owns the row chrome and the `gap-2`
 // inside the control slot.
 //
-// NOTE (BET-619): this stage's premise — that the private `SettingField` in
-// Settings.tsx already implements `.setrow` and only needs extracting — does
-// not hold on the current code. The actual `SettingField` is a `Field`-based
-// text/password input (entry/value/onCommit/credential), not a row with
-// name/help/children. Neither named adopter (Settings.tsx, ProvidersCard.tsx)
-// contains a genuine `.setrow` row, so this stage ships the owner-approved
-// primitive registered under the enforce net and reports the adopters (see the
-// SKIP_REASON in primitives.test.ts + the conformance record) rather than
-// force-converting an unrelated element.
+// The settings panel's schema rows (ToggleField, SegmentedField, and the
+// plugins/launcher checkbox rows in Settings.tsx) adopt this primitive.
 //
 // Accepted divergence (BET-614 stage 5): the spec's name line-height is 1.4;
 // `text-body` is 14px/1.5. We use `text-body` and do not invent an arbitrary

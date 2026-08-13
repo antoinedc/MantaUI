@@ -8,17 +8,18 @@ Last reviewed: 2026-08-03 (f3a92f6)
 
 ## Open divergences
 
-- **The settings panel does not yet use the `.setrow` row primitive.** BET-619
-  built + registered `SettingsRow` (the `.setrow` chrome) but did NOT convert
-  the settings rows to it: the stage's premise that Settings.tsx's private
+## Resolved divergences
+
+- **The settings panel did not use the `.setrow` row primitive.** BET-619 built
+  + registered `SettingsRow` (the `.setrow` chrome) but did NOT convert the
+  settings rows to it: the stage's premise that Settings.tsx's private
   `SettingField` already implements `.setrow` was false (that `SettingField`
-  is a `Field`-based text/password input, not a row with name/help/children).
-  Neither named adopter (`Settings.tsx`, `ProvidersCard.tsx`) carries a
-  genuine `.setrow` row, so the migration was reported rather than forced.
-  The settings schema rows today hand-roll their own simpler chrome
-  (`flex items-start gap-3 text-body` in `ToggleField`/`SegmentedField`) with
-  no row dividers. Awaiting an owner decision on a `.setrow` migration of the
-  settings panel.
+  is a `Field`-based text/password input, not a row with name/help/children),
+  so the migration was reported rather than forced. **Resolved by BET-623:** the
+  owner decision to adopt was made, and the settings panel's schema rows
+  (`ToggleField`, `SegmentedField`, and the plugins/launcher checkbox rows)
+  now render on `SettingsRow`. The visual change (row dividers + spec
+  label/help typography) is the expected, approved layout.
 
 ## Accepted divergences
 

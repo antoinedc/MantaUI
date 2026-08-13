@@ -29,6 +29,7 @@ import { Field } from "./Field";
 import { Button } from "./Button";
 import { Eyebrow } from "./Eyebrow";
 import { useApplySetting } from "./settingsApply";
+import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -124,27 +125,15 @@ function ToggleField({ entry, value, onApply }: {
   // different controls, both specced).
   if (entry.id === "chatAutoAllow" || entry.id === "allowAgentPush") {
     return (
-      <div className="space-y-1">
-        <div className="flex items-start gap-3 text-body">
-          <Toggle id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
-          <span>
-            {entry.label}
-            {entry.help && <span className="block text-meta text-text-faint mt-1">{entry.help}</span>}
-          </span>
-        </div>
-      </div>
+      <SettingsRow name={entry.label} help={entry.help}>
+        <Toggle id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
+      </SettingsRow>
     );
   }
   return (
-    <div className="space-y-1">
-      <div className="flex items-start gap-3 text-body">
-        <Checkbox id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
-        <span>
-          {entry.label}
-          {entry.help && <span className="block text-meta text-text-faint mt-1">{entry.help}</span>}
-        </span>
-      </div>
-    </div>
+    <SettingsRow name={entry.label} help={entry.help}>
+      <Checkbox id={id} checked={value} onChange={onApply} ariaLabel={entry.label} />
+    </SettingsRow>
   );
 }
 
@@ -157,16 +146,13 @@ function SegmentedField({ entry, value, onApply }: {
   // generic inline-flex.
   if (entry.id === "cacheTtl") {
     return (
-      <div className="space-y-1">
-        <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+      <SettingsRow name={entry.label} help={entry.help}>
         <TtlToggle ttl={value as "5m" | "1h"} setTtl={onApply} />
-        {entry.help && <div className="text-meta text-text-faint mt-2">{entry.help}</div>}
-      </div>
+      </SettingsRow>
     );
   }
   return (
-    <div className="space-y-1">
-      <label htmlFor={id} className="block text-micro font-semibold uppercase text-text-muted">{entry.label}</label>
+    <SettingsRow name={entry.label} help={entry.help}>
       <div role="group" aria-label={entry.label} className="inline-flex rounded-md border border-border overflow-hidden">
         {entry.options?.map((opt) => {
           const selected = value === opt.value;
@@ -186,8 +172,7 @@ function SegmentedField({ entry, value, onApply }: {
           );
         })}
       </div>
-      {entry.help && <span className="block text-meta text-text-faint mt-2">{entry.help}</span>}
-    </div>
+    </SettingsRow>
   );
 }
 
@@ -732,15 +717,11 @@ export function Settings({
       return (
         <>
           <GroupCard title="Plugins">
-            {pluginsToggleEntry && <div className="space-y-1">
-              <div className="flex items-start gap-3 text-body">
+            {pluginsToggleEntry && (
+              <SettingsRow name={pluginsToggleEntry.label} help={pluginsToggleEntry.help}>
                 <Checkbox id={fieldId(pluginsToggleEntry)} checked={pluginsOn} onChange={(v) => void togglePlugins(v)} ariaLabel={pluginsToggleEntry.label} />
-                <span>
-                  {pluginsToggleEntry.label}
-                  {pluginsToggleEntry.help && <span className="block text-meta text-text-faint mt-1">{pluginsToggleEntry.help}</span>}
-                </span>
-              </div>
-            </div>}
+              </SettingsRow>
+            )}
             {pluginsError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
             ) : plugins === null ? (
@@ -789,10 +770,9 @@ export function Settings({
                   <div key={l.id} className="space-y-2">
                     <div className="text-body font-medium text-text">{l.label}</div>
                     {l.flags.map((f) => (
-                      <div key={f.key} className="flex items-start gap-3 text-body">
+                      <SettingsRow key={f.key} name={f.label}>
                         <Checkbox checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(v) => setLauncherFlag(l.id, f.key, v)} ariaLabel={f.label} />
-                        <span>{f.label}</span>
-                      </div>
+                      </SettingsRow>
                     ))}
                   </div>
                 ))}
