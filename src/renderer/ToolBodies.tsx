@@ -329,8 +329,15 @@ export function UnifiedDiff({
   const lines = text.split("\n");
   let oldLine = 0;
   let newLine = 0;
+  // The active file path the stream is currently inside, so anchors and notes
+  // are keyed PER-FILE — a PR diff is one merged stream of many files, and
+  // `(side, line)` alone collides whenever two files share a line number. Track
+  // it from the `+++ b/` marker (falling back to `--- a/` for a file deleted to
+  // `/dev/null`).
+  let path = "";
+  let aPath = "";
 
-  const rowKey = (a: CommentableLine) => `${a.side}:${a.line}`;
+  const rowKey = (a: CommentableLine) => `${a.path}\u0000${a.side}\u0000${a.line}`;
   const notesByAnchor = new Map<string, UnifiedDiffNote[]>();
   const topNotes: UnifiedDiffNote[] = [];
   for (const n of notes) {
@@ -377,14 +384,21 @@ export function UnifiedDiff({
       continue;
     }
 
-    // File markers / Index preamble — drop entirely in BOTH modes. opencode
-    // emits these for every diff and they're noise next to the changes.
-    if (
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("Index: ") ||
-      /^=+$/.test(line)
-    ) {
+    // File markers / Index preamble — drop entirely in BOTH modes (they're
+    // noise next to the changes), but use the `--- a/` / `+++ b/` pair to track
+    // which file the following hunks belong to (per-file anchoring above).
+    if (line.startsWith("--- ")) {
+      const am = /^--- a\/(.+)$/.exec(line);
+      if (am) aPath = am[1].trim();
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const bm = /^\+\+\+ b\/(.+)$/.exec(line);
+      if (bm) path = bm[1].trim();
+      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
+      continue;
+    }
+    if (line.startsWith("Index: ") || /^=+$/.test(line)) {
       continue;
     }
 
@@ -404,7 +418,7 @@ export function UnifiedDiff({
       sign = "+";
       body = line.slice(1);
       ln = newLine;
-      anchor = { line: newLine, side: "new" };
+      anchor = { path, line: newLine, side: "new" };
       newLine++;
     } else if (line.startsWith("-") && !line.startsWith("---")) {
       bg = "bg-[var(--diff-del)]";
@@ -413,13 +427,13 @@ export function UnifiedDiff({
       sign = "−";
       body = line.slice(1);
       ln = oldLine;
-      anchor = { line: oldLine, side: "old" };
+      anchor = { path, line: oldLine, side: "old" };
       oldLine++;
     } else if (line.startsWith(" ")) {
       sign = " ";
       body = line.slice(1);
       ln = newLine;
-      anchor = { line: newLine, side: "new" };
+      anchor = { path, line: newLine, side: "new" };
       newLine++;
       oldLine++;
     }

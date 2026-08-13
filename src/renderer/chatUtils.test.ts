@@ -3868,26 +3868,36 @@ describe("commentableLines", () => {
   });
 
   it("anchors an added line on the new side", () => {
-    const diff = "@@ -10,3 +10,3 @@\n  a\n- old\n+ new\n  c\n";
+    const diff = [
+      "--- a/file.ts",
+      "+++ b/file.ts",
+      "@@ -10,3 +10,3 @@",
+      "  a",
+      "- old",
+      "+ new",
+      "  c",
+    ].join("\n");
     // a=10 (context), old=11 (removed), new=11 (added), c=12 (context)
     expect(commentableLines(diff)).toEqual([
-      { line: 10, side: "new" },
-      { line: 11, side: "old" },
-      { line: 11, side: "new" },
-      { line: 12, side: "new" },
+      { path: "file.ts", line: 10, side: "new" },
+      { path: "file.ts", line: 11, side: "old" },
+      { path: "file.ts", line: 11, side: "new" },
+      { path: "file.ts", line: 12, side: "new" },
     ]);
   });
 
   it("anchors a removed line on the old side and a context line on the new side", () => {
-    const diff = "@@ -5 +5 @@\n- gone\n  kept\n";
+    const diff = ["--- a/x.ts", "+++ b/x.ts", "@@ -5 +5 @@", "- gone", "  kept"].join("\n");
     expect(commentableLines(diff)).toEqual([
-      { line: 5, side: "old" },
-      { line: 5, side: "new" },
+      { path: "x.ts", line: 5, side: "old" },
+      { path: "x.ts", line: 5, side: "new" },
     ]);
   });
 
   it("handles a file with multiple hunks, resetting line counters per hunk", () => {
     const diff = [
+      "--- a/file.ts",
+      "+++ b/file.ts",
       "@@ -1,2 +1,2 @@",
       "  a",
       "- b",
@@ -3895,16 +3905,44 @@ describe("commentableLines", () => {
       "@@ -20,1 +20,1 @@",
       "  z",
       "+ w",
-      "",
     ].join("\n");
     expect(commentableLines(diff)).toEqual([
       // first hunk: a=1 (context), b=2 (removed), c=2 (added)
-      { line: 1, side: "new" },
-      { line: 2, side: "old" },
-      { line: 2, side: "new" },
+      { path: "file.ts", line: 1, side: "new" },
+      { path: "file.ts", line: 2, side: "old" },
+      { path: "file.ts", line: 2, side: "new" },
       // second hunk: z=20 (context), w=21 (added)
-      { line: 20, side: "new" },
-      { line: 21, side: "new" },
+      { path: "file.ts", line: 20, side: "new" },
+      { path: "file.ts", line: 21, side: "new" },
+    ]);
+  });
+
+  it("keys anchors per-file so two files with the same line number do not collide", () => {
+    const diff = [
+      "--- a/a.ts",
+      "+++ b/a.ts",
+      "@@ -1,1 +1,1 @@",
+      "+ a1",
+      "--- a/b.ts",
+      "+++ b/b.ts",
+      "@@ -1,1 +1,1 @@",
+      "+ b1",
+    ].join("\n");
+    expect(commentableLines(diff)).toEqual([
+      { path: "a.ts", line: 1, side: "new" },
+      { path: "b.ts", line: 1, side: "new" },
+    ]);
+  });
+
+  it("uses the +++ b/ path, falling back to --- a/ for a file deleted to /dev/null", () => {
+    const diff = [
+      "--- a/old.ts",
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "- gone",
+    ].join("\n");
+    expect(commentableLines(diff)).toEqual([
+      { path: "old.ts", line: 1, side: "old" },
     ]);
   });
 
@@ -3917,9 +3955,8 @@ describe("commentableLines", () => {
       "+++ b/x",
       "@@ -0,0 +1 @@",
       "+ hi",
-      "",
     ].join("\n");
-    expect(commentableLines(diff)).toEqual([{ line: 1, side: "new" }]);
+    expect(commentableLines(diff)).toEqual([{ path: "x", line: 1, side: "new" }]);
   });
 });
 

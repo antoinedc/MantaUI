@@ -31,11 +31,14 @@ type DraftComment = {
   sentToAgent: boolean;
 };
 
-// Map a GitHub thread anchor onto the forge-neutral `{ line, side }` the diff
-// gutters use. GitHub "RIGHT" → the new side, "LEFT" → the old side.
+// Map a GitHub thread anchor onto the forge-neutral `{ path, line, side }` the
+// diff gutters use (spec §3.4③). GitHub "RIGHT" → new side, "LEFT" → old side.
+// `path` is carried so the note anchors to the RIGHT file in the merged
+// multi-file diff stream. A file-level comment (no line) returns null → the
+// note is placed at the file top.
 function threadAnchor(t: ForgeThread): CommentableLine | null {
   if (t.line == null) return null;
-  return { line: t.line, side: t.side === "LEFT" ? "old" : "new" };
+  return { path: t.path ?? "", line: t.line, side: t.side === "LEFT" ? "old" : "new" };
 }
 
 // Derive the pane's file header from the diff text: the first touched path and

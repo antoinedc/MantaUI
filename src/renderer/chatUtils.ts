@@ -2995,21 +2995,39 @@ export function describeMergeFailure(kind: string | null | undefined): string {
 // ---- Forge review pane (BET-792) -------------------------------------------
 
 // The line anchor a comment may attach to, in the forge-neutral shape the spec
-// (§3.4③) normalises on. `side` is "new" (added/context lines — GitHub's RIGHT)
-// or "old" (removed lines — GitHub's LEFT); `line` is the corresponding line
-// number. The renderer maps these onto the rows UnifiedDiff draws.
-export type CommentableLine = { line: number; side: "new" | "old" };
+// (§3.4③) normalises on: `path` names the FILE, `side` is "new" (added/context
+// lines — GitHub's RIGHT) or "old" (removed lines — GitHub's LEFT), and `line`
+// is the corresponding line number. `path` is load-bearing — a PR diff is a
+// single merged stream of many files, so an anchor that drops it misplaces a
+// thread whenever two files share a line number. The renderer maps these onto
+// the rows UnifiedDiff draws, keyed per-file.
+export type CommentableLine = { path: string; line: number; side: "new" | "old" };
 
 // Derive the set of commentable line anchors from a unified-diff text, walking
 // the `@@ -A,B +C,D @@` hunk headers so numbers are exact per hunk. Added and
 // context lines anchor on the NEW side (new line number); removed lines on the
-// OLD side (old line number). File markers (`--- /`+++ `) and hunk headers are
-// not commentable. An empty diff yields `[]`.
+// OLD side (old line number). The active file path is tracked from the `+++ b/`
+// marker (falling back to `--- a/` when a file is deleted to `/dev/null`), so
+// every anchor is keyed to its file. File markers / hunk headers are not
+// commentable. An empty diff yields `[]`.
 export function commentableLines(diffText: string): CommentableLine[] {
   const result: CommentableLine[] = [];
   let oldLine = 0;
   let newLine = 0;
+  let path = "";
+  let aPath = "";
   for (const line of diffText.split("\n")) {
+    if (line.startsWith("--- ")) {
+      const m = /^--- a\/(.+)$/.exec(line);
+      if (m) aPath = m[1].trim();
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const m = /^\+\+\+ b\/(.+)$/.exec(line);
+      if (m) path = m[1].trim();
+      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
+      continue;
+    }
     if (line.startsWith("@@")) {
       const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       if (m) {
@@ -3019,13 +3037,13 @@ export function commentableLines(diffText: string): CommentableLine[] {
       continue;
     }
     if (line.startsWith("+") && !line.startsWith("+++")) {
-      result.push({ line: newLine, side: "new" });
+      if (path) result.push({ path, line: newLine, side: "new" });
       newLine++;
     } else if (line.startsWith("-") && !line.startsWith("---")) {
-      result.push({ line: oldLine, side: "old" });
+      if (path) result.push({ path, line: oldLine, side: "old" });
       oldLine++;
     } else if (line.startsWith(" ")) {
-      result.push({ line: newLine, side: "new" });
+      if (path) result.push({ path, line: newLine, side: "new" });
       oldLine++;
       newLine++;
     }
