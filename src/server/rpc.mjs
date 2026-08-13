@@ -29,6 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
+import { forgeStatus, pullRequestForCwd } from "./forge/index.mjs";
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
 // path resolves identically. The script lives at <repoRoot>/scripts/
@@ -297,6 +298,16 @@ export function buildHandlers({
     // depth would be a DoS on the user's own box).
     // preload: ipcRenderer.invoke(IPC.forgeProbe)  → no args
     "forge:probe": () => local.forgeProbe(),
+
+    // BET-788: forge read path. Both box-side only — the renderer stays
+    // ignorant of forge identity. forge:status reports connected/login without
+    // ever crossing a token; forge:pull-request takes a session cwd and the
+    // server resolves cwd → origin → repo.
+    // preload: ipcRenderer.invoke(IPC.forgeStatus)             → no args
+    // preload: ipcRenderer.invoke(IPC.forgePullRequest, {cwd}) → args[0] = { cwd }
+    "forge:status": () => forgeStatus(),
+    "forge:pull-request": (input) =>
+      pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
 
     // preload: ipcRenderer.invoke(IPC.clipboardWriteText, text)  → args[0] = text (string)
     "clipboard:write-text": (text) => local.clipboardWriteText(text),

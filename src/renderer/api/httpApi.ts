@@ -696,6 +696,10 @@ export const httpApi: Api = {
   // -- repo probe (BET-786) --
   forgeProbe: () => rpc(IPC.forgeProbe),
 
+  // -- forge read path (BET-788) --
+  forgeStatus: () => rpc(IPC.forgeStatus),
+  forgePullRequest: (input) => rpc(IPC.forgePullRequest, input),
+
   // -- tmux config management --
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),

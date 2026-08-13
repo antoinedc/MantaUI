@@ -328,6 +328,71 @@ export type ForgeProbeResult = {
   partial: boolean;
 };
 
+// ----- Forge read path (BET-788) -----
+
+// The normalised CI traffic-light — the same tri-state the shared
+// forge.mjs `rollupChecks` produces ("green" | "yellow" | "red" | "none").
+// Drives logic (can I merge); the raw per-check list is kept separately for
+// display.
+export type CheckRollup = "green" | "yellow" | "red" | "none";
+
+// A normalised pull-request, reconciled from a raw forge payload at the
+// adapter boundary. `mergeable` is null while the forge is still computing
+// it (caller retries — GitHub's `mergeable` is exactly that tri-state).
+// `mergeBlockedReason` is a short human string ("checks failing", "conflicts",
+// "review required", "draft") or null. `state` is the normalised four-value
+// enum: "draft" | "open" | "merged" | "closed".
+export type PullRequest = {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  state: "draft" | "open" | "merged" | "closed";
+  draft: boolean;
+  headRef: string;
+  baseRef: string;
+  headSha: string;
+  author: string;
+  reviewers: string[];
+  mergeable: true | false | null;
+  mergeBlockedReason: string | null;
+  unresolvedThreads: number;
+};
+
+// A normalised check run (GitHub `check-runs`) or legacy commit status,
+// merged into one display-friendly array by the adapter. `conclusion` absent
+// (undefined) = still running / pending; `status` is the raw GitHub
+// status field for check-runs ("queued" | "in_progress" | "completed").
+export type ForgeCheckRun = {
+  name: string;
+  status?: string;
+  conclusion?: string;
+  url?: string;
+};
+
+// forge:status result — presence + identity ONLY, never a token. `connected`
+// is true when the box can resolve a forge token (gh CLI or a stored secret);
+// `login` is the non-secret gh login when available; `kind` is the forge the
+// resolved token authenticates to ("github" — the only adapter today).
+export type ForgeStatusResult =
+  | { connected: true; login: string | null; kind: "github" }
+  | { connected: false };
+
+// forge:pull-request result — the normalised PR + its CI for a session cwd.
+// `pr` is null (not an error) when the repo has no open PR. `rollup` is the
+// traffic-light over `checks`. `stale` is true when any part was served from
+// last-known state because the forge was unreachable / rate-limited while the
+// box honours its cooling period. `error` distinguishes a repo that isn't a
+// known forge ("no_forge") from one the box isn't authenticated to
+// ("not_connected") from a plain "no PR" (`error: null`, `pr: null`).
+export type ForgePullRequestResult = {
+  pr: PullRequest | null;
+  checks: ForgeCheckRun[];
+  rollup: CheckRollup;
+  stale: boolean;
+  error: "no_forge" | "not_connected" | null;
+};
+
 // ----- IPC inputs -----
 
 // BET-138: the pty is a shell-in-cwd (or, for a launcher mode, an AI CLI TUI
@@ -552,6 +617,13 @@ export const IPC = {
   // BET-786: probe the box for git repos + read their origins + detect the gh
   // CLI. Server-side only, cached in server memory for 60s.
   forgeProbe: "forge:probe",
+
+  // BET-788: forge read path. Both server-side only — the renderer stays
+  // ignorant of forge identity; forge:pull-request takes a session cwd and the
+  // server resolves cwd → origin → repo. forge:status reports connected/login
+  // WITHOUT ever crossing a token.
+  forgeStatus: "forge:status",
+  forgePullRequest: "forge:pull-request",
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",
