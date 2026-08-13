@@ -92,21 +92,34 @@ export function Toast({ toast, onDismiss }: ToastProps) {
   return (
     <div
       role="status"
-      className={`w-full max-w-[420px] rounded-lg border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md ${
+      className={`w-full max-w-[420px] rounded-lg border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-start gap-2 shadow-md ${
         toast.tone === "error" ? "border-l-2 border-l-danger" : ""
       }`}
     >
-      <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{toast.message}</span>
-      {(toast.actions ?? []).slice(0, MAX_TOAST_ACTIONS).map((action) => (
-        <button
-          key={action.label}
-          onClick={action.onClick}
-          disabled={action.disabled}
-          className={BANNER_BTN}
-        >
-          {action.label}
-        </button>
-      ))}
+      {/* Message and actions stack VERTICALLY, always — one layout, no
+          conditional branch on how many actions there are. The old single-row
+          layout put `shrink-0` buttons next to a `flex-1 min-w-0` message, so
+          two actions squeezed the text to a few characters per line. The close
+          button stays on the right of the whole block, which is why the root is
+          now `items-start` (it aligns with the message's FIRST line rather than
+          the vertical middle of a two-row block). */}
+      <div className="flex-1 min-w-0 flex flex-col gap-2">
+        <span className="whitespace-pre-wrap break-words">{toast.message}</span>
+        {(toast.actions ?? []).length > 0 && (
+          <div className="flex items-center gap-2">
+            {(toast.actions ?? []).slice(0, MAX_TOAST_ACTIONS).map((action) => (
+              <button
+                key={action.label}
+                onClick={action.onClick}
+                disabled={action.disabled}
+                className={BANNER_BTN}
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <button
         onClick={() => onDismiss(toast.id)}
         className="shrink-0 text-text-faint hover:text-text leading-none inline-flex items-center focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
