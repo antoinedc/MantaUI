@@ -51,6 +51,7 @@ struct MantaSessionStreamState: Equatable, Sendable {
     var sessionError: StreamSessionErrorPayload?
     var todos: StreamTodosPayload?
     var questions: StreamQuestionsPayload?
+    var permissions: StreamPermissionsPayload?
     var subagents: [StreamSubagentPayload] = []
 
     init(sessionId: String) {
@@ -138,6 +139,8 @@ enum MantaStreamRouter {
             s.todos = try? frame.decodedPayload(StreamTodosPayload.self)
         case "questions":
             s.questions = try? frame.decodedPayload(StreamQuestionsPayload.self)
+        case "permissions":
+            s.permissions = try? frame.decodedPayload(StreamPermissionsPayload.self)
         case "subagent":
             if let p = try? frame.decodedPayload(StreamSubagentPayload.self) {
                 // Upsert keyed by the subagent's child-session id (BET-672): a

@@ -241,6 +241,13 @@ struct StreamQuestionsPayload: Codable, Equatable, Sendable {
     var questions: [QuestionRequest]
 }
 
+/// `sub: "permissions"` — the pending permission requests for the session.
+/// Same wire shape as the `opencode:permissions` RPC, so the existing
+/// PermissionRequest Codable decodes both.
+struct StreamPermissionsPayload: Codable, Equatable, Sendable {
+    var permissions: [PermissionRequest]
+}
+
 /// `sub: "subagent"` — extractSubagentInfo + runningCount.
 struct StreamSubagentPayload: Codable, Equatable, Sendable {
     var childSessionId: String
