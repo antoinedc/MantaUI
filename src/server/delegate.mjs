@@ -27,7 +27,7 @@
 
 import { randomBytes } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { slugify } from "../shared/worktree.mjs";
 import {
   parseGitStatus,
@@ -42,9 +42,24 @@ import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 
 const STORE_PATH = statePath("delegate-jobs.json");
 
+// Single-writer serialization for the jobs store (BET-770 P2-1/2-2/2-3). Every
+// read-modify-write mutation of the jobs array runs inside `jobsLock`, shared by
+// ALL writers: startJob (+ the MAX_RUNNING_JOBS check), adoptSubagentJob,
+// finishJob, stopJob, deleteJob, the activity poller, and the sweeper. Without
+// this, a stale activity-poller write could resurrect a terminal job to
+// `running`, a just-completed job could be flipped to "timed out", and two
+// near-simultaneous `delegate` POSTs could both pass the cap check. Each
+// mutation re-reads the store inside the lock, so a writer that lost a race
+// observes the winner's state instead of overwriting it.
+const jobsLock = createMutex();
+
 // Max concurrently `running` jobs, counted box-wide. There is no `queued`
 // state — a job either starts immediately or is refused by the cap.
 export const MAX_RUNNING_JOBS = 5;
+// Cap-refusal copy, spelled exactly for the UI/REST consumer and pinned by
+// delegate.test.mjs.
+export const CAP_ERROR =
+  "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.";
 // `running` jobs older than this → `failed "timed out after 30 minutes"`.
 const RUNNING_TIMEOUT_MS = 30 * 60_000;
 // Terminal jobs are retained this long, OR until 50 records, whichever bites
@@ -365,12 +380,7 @@ async function registerJob(
  *        newWindow/gitAddWorktree/gitRun/oc listMessages/now)
  */
 export async function startJob(input, deps = {}) {
-  const {
-    load = loadJobs,
-    deliver,
-    gitAddWorktree,
-    gitRun,
-  } = deps;
+  const { deliver } = deps;
 
   const prompt = String(input?.prompt ?? "");
   const parentSessionID = input?.parentSessionID;
@@ -379,87 +389,96 @@ export async function startJob(input, deps = {}) {
   if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
   if (!parentDirectory) return { ok: false, error: "parentDirectory is required" };
 
-  // 1. Refuse if nesting.
-  {
-    const jobs = await load();
-    const nesting = jobs.find(
-      (j) => j.childSessionID === parentSessionID && j.status === "running",
-    );
-    if (nesting) {
-      return { ok: false, error: "a background job cannot start another background job" };
-    }
-  }
+  // The whole creation — nesting + cap checks, worktree, window, record append —
+  // runs inside the jobs-store lock so a concurrent `delegate` POST cannot pass
+  // the (read-then-act) MAX_RUNNING_JOBS check at the same moment as another
+  // and start >5 running jobs, and so the record append cannot interleave with
+  // another writer's read-modify-write. The prompt is delivered AFTER the lock
+  // releases.
+  const reg = await jobsLock.runExclusive(async () => {
+    const { load = loadJobs, gitAddWorktree, gitRun } = deps;
 
-  // 2. Refuse if at cap.
-  {
-    const jobs = await load();
-    const running = jobs.filter((j) => j.status === "running").length;
-    if (running >= MAX_RUNNING_JOBS) {
-      return {
-        ok: false,
-        error:
-          "too many background jobs running (5). Do not retry — either wait for one to finish, or do this work yourself.",
-      };
-    }
-  }
-
-  // 3. Derive the name.
-  const name = deriveName(prompt);
-
-  // 4. Create the worktree. On throw, catch and continue with
-  //    worktree = branch = baseSha = null and cwd = parentDirectory.
-  let worktree = null;
-  let branch = null;
-  let baseSha = null;
-  let cwd = parentDirectory;
-  try {
-    const wt = await gitAddWorktree({ cwd: parentDirectory, name });
-    worktree = wt.path;
-    branch = wt.branch;
-    cwd = wt.path;
-  } catch {
-    worktree = null;
-    branch = null;
-    baseSha = null;
-    cwd = parentDirectory;
-  }
-
-  // 5. Record baseSha — git -C <worktree> rev-parse HEAD, trimmed. Skip when
-  //    there is no worktree.
-  if (worktree) {
-    try {
-      const { stdout } = await gitRun(["-C", worktree, "rev-parse", "HEAD"]);
-      baseSha = String(stdout ?? "").trim() || null;
-    } catch {
-      baseSha = null;
-    }
-  }
-
-  // 6+7. Register the window + record + publish.
-  const reg = await registerJob(
+    // 1. Refuse if nesting.
     {
-      parentSessionID,
-      parentDirectory,
-      name,
-      prompt,
-      model: input?.model,
-      cwd,
-      worktree,
-      branch,
-      baseSha,
-      existingSessionId: undefined,
-      origin: "delegate",
-      permission: input?.permission,
-    },
-    deps,
-  );
+      const jobs = await load();
+      const nesting = jobs.find(
+        (j) => j.childSessionID === parentSessionID && j.status === "running",
+      );
+      if (nesting) {
+        return { ok: false, error: "a background job cannot start another background job" };
+      }
+    }
+
+    // 2. Refuse if at cap. Checked here, inside the lock and BEFORE any
+    //    worktree/window is created, so a burst of concurrent POSTs cannot
+    //    exceed MAX_RUNNING_JOBS without leaking created worktrees.
+    {
+      const jobs = await load();
+      const running = jobs.filter((j) => j.status === "running").length;
+      if (running >= MAX_RUNNING_JOBS) {
+        return { ok: false, error: CAP_ERROR };
+      }
+    }
+
+    // 3. Derive the name.
+    const name = deriveName(prompt);
+
+    // 4. Create the worktree. On throw, catch and continue with
+    //    worktree = branch = baseSha = null and cwd = parentDirectory.
+    let worktree = null;
+    let branch = null;
+    let baseSha = null;
+    let cwd = parentDirectory;
+    try {
+      const wt = await gitAddWorktree({ cwd: parentDirectory, name });
+      worktree = wt.path;
+      branch = wt.branch;
+      cwd = wt.path;
+    } catch {
+      worktree = null;
+      branch = null;
+      baseSha = null;
+      cwd = parentDirectory;
+    }
+
+    // 5. Record baseSha — git -C <worktree> rev-parse HEAD, trimmed. Skip when
+    //    there is no worktree.
+    if (worktree) {
+      try {
+        const { stdout } = await gitRun(["-C", worktree, "rev-parse", "HEAD"]);
+        baseSha = String(stdout ?? "").trim() || null;
+      } catch {
+        baseSha = null;
+      }
+    }
+
+    // 6+7. Register the window + record + publish.
+    return registerJob(
+      {
+        parentSessionID,
+        parentDirectory,
+        name,
+        prompt,
+        model: input?.model,
+        cwd,
+        worktree,
+        branch,
+        baseSha,
+        existingSessionId: undefined,
+        origin: "delegate",
+        permission: input?.permission,
+      },
+      deps,
+    );
+  });
+
   if (!reg.ok) return reg;
 
   // 8. Send the opening prompt via the shared delivery module's deliver.
   try {
     await deliver({
       sessionId: reg.job.childSessionID,
-      text: buildJobPrompt({ prompt, worktree, branch }),
+      text: buildJobPrompt({ prompt, worktree: reg.job.worktree, branch: reg.job.branch }),
     });
   } catch (e) {
     // deliver never rejects in production, but guard anyway — the job is
@@ -496,36 +515,41 @@ export async function adoptSubagentJob(
     return { ok: false, error: "parentSessionID, parentDirectory and childSessionID are required" };
   }
 
-  // Idempotent — the detecting event fires repeatedly as the tool part updates.
-  {
-    const jobs = await load();
-    const exists = jobs.find((j) => j.childSessionID === childSessionID);
-    if (exists) {
-      return { ok: true, alreadyAdopted: true };
-    }
-  }
-
-  // We deliberately do NOT enforce MAX_RUNNING_JOBS and do NOT enforce the
-  // no-nesting rule: opencode has already started this subagent, so refusing
-  // to record it would only make it invisible — the exact bug this fixes.
-  // We also do NOT create a worktree (the session is adopted, not created)
-  // and do NOT call deliver() — opencode already sent the child its prompt.
-  return registerJob(
+  // Under the jobs-store lock: the idempotency read + the record append happen
+  // as one atomic unit, so a repeated adoption event cannot interleave with
+  // another writer.
+  return jobsLock.runExclusive(async () => {
+    // Idempotent — the detecting event fires repeatedly as the tool part updates.
     {
-      parentSessionID,
-      parentDirectory,
-      name,
-      prompt,
-      model,
-      cwd: parentDirectory,
-      worktree: null,
-      branch: null,
-      baseSha: null,
-      existingSessionId: childSessionID,
-      origin: "subagent",
-    },
-    deps,
-  );
+      const jobs = await load();
+      const exists = jobs.find((j) => j.childSessionID === childSessionID);
+      if (exists) {
+        return { ok: true, alreadyAdopted: true };
+      }
+    }
+
+    // We deliberately do NOT enforce MAX_RUNNING_JOBS and do NOT enforce the
+    // no-nesting rule: opencode has already started this subagent, so refusing
+    // to record it would only make it invisible — the exact bug this fixes.
+    // We also do NOT create a worktree (the session is adopted, not created)
+    // and do NOT call deliver() — opencode already sent the child its prompt.
+    return registerJob(
+      {
+        parentSessionID,
+        parentDirectory,
+        name,
+        prompt,
+        model,
+        cwd: parentDirectory,
+        worktree: null,
+        branch: null,
+        baseSha: null,
+        existingSessionId: childSessionID,
+        origin: "subagent",
+      },
+      deps,
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -722,125 +746,148 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
     now = () => Date.now(),
   } = deps;
 
-  // Idempotent: if the job is already terminal, do nothing.
-  if (job.status === "done" || job.status === "failed" || job.status === "stopped") {
-    return { ok: true, alreadyTerminal: true };
-  }
+  return jobsLock.runExclusive(async () => {
+    // Re-read the job under the lock: the `job` passed in may be a stale
+    // snapshot (e.g. a sweeper candidate read before another writer completed,
+    // stopped or pruned it). If the live record is already terminal — or was
+    // pruned — do nothing. This is what stops a completing job being flipped
+    // to "timed out" (and a false timeout being notified) or a truly timed-out
+    // job being resurrected to "done" by a stale writer.
+    {
+      const jobs = await load();
+      const idx = jobs.findIndex((j) => j.id === job.id);
+      if (idx === -1) return { ok: true, alreadyTerminal: true };
+      job = jobs[idx];
+    }
 
-  let result = "";
-  let filesChanged = null;
-  if (status === "done") {
+    // Idempotent: if the job is already terminal, do nothing.
+    if (job.status === "done" || job.status === "failed" || job.status === "stopped") {
+      return { ok: true, alreadyTerminal: true };
+    }
+
+    let result = "";
+    let filesChanged = null;
+    if (status === "done") {
+      try {
+        const messages = listMessages ? await listMessages(job.childSessionID) : [];
+        result = await lastAssistantText(messages);
+      } catch (e) {
+        console.warn("[delegate] listMessages failed:", e?.message ?? e);
+        result = "";
+      }
+      filesChanged = await countFilesChanged(job, deps);
+    }
+
+    const finishedAt = now();
+    const updated = {
+      ...job,
+      status,
+      error: status === "done" ? null : (error ?? null),
+      result: status === "done" ? result : null,
+      filesChanged,
+      finishedAt,
+    };
+
+    // Persist.
+    {
+      const jobs = await load();
+      const idx = jobs.findIndex((j) => j.id === job.id);
+      if (idx !== -1) {
+        jobs[idx] = updated;
+        await save(jobs);
+      }
+    }
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: updated.id, status: updated.status, activity: updated.activity },
+    });
+    if (sawBusy) sawBusy.delete(job.childSessionID);
+
+    // Deliver the completion message to the parent session (deferred until idle
+    // by the shared delivery engine). Swallow a failure — the job is terminal
+    // regardless.
+    //
+    // BET-721: skip the deliver for adopted subagents — opencode ALREADY injects
+    // the <task ...> result into the parent when the child finishes, so
+    // delivering ours too would report the same job twice. A missing `origin`
+    // (records written before this change) means `delegate` and still delivers.
+    if (deliver && job.parentSessionID && job.origin !== "subagent") {
+      try {
+        await deliver({
+          sessionId: job.parentSessionID,
+          text: buildCompletionText(updated),
+        });
+      } catch (e) {
+        console.warn(`[delegate] completion delivery failed for ${job.id}:`, e?.message ?? e);
+      }
+    }
+
+    // BET-418 §B: remove the tmux window + worktree now that the job is
+    // terminal. A dirty worktree keeps both (cleanupTerminalJob returns
+    // cleanedUp:false); persist that flag so the retention sweep does NOT prune
+    // the record (the window must stay recognisable as a job, not leak as an
+    // ordinary session). A clean cleanup sets cleanedUp:true so retention may
+    // prune the record normally once it ages out.
+    let cleanedUp = false;
     try {
-      const messages = listMessages ? await listMessages(job.childSessionID) : [];
-      result = await lastAssistantText(messages);
+      const res = await cleanupTerminalJob(updated, deps);
+      cleanedUp = !!res.cleanedUp;
     } catch (e) {
-      console.warn("[delegate] listMessages failed:", e?.message ?? e);
-      result = "";
+      console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
     }
-    filesChanged = await countFilesChanged(job, deps);
-  }
-
-  const finishedAt = now();
-  const updated = {
-    ...job,
-    status,
-    error: status === "done" ? null : (error ?? null),
-    result: status === "done" ? result : null,
-    filesChanged,
-    finishedAt,
-  };
-
-  // Persist.
-  {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === job.id);
-    if (idx !== -1) {
-      jobs[idx] = updated;
-      await save(jobs);
+    {
+      const jobs = await load();
+      const idx = jobs.findIndex((j) => j.id === job.id);
+      if (idx !== -1) {
+        jobs[idx] = { ...jobs[idx], cleanedUp };
+        await save(jobs);
+      }
     }
-  }
-  publish?.({
-    kind: "delegate.updated",
-    payload: { id: updated.id, status: updated.status, activity: updated.activity },
+    return { ok: true };
   });
-  if (sawBusy) sawBusy.delete(job.childSessionID);
-
-  // Deliver the completion message to the parent session (deferred until idle
-  // by the shared delivery engine). Swallow a failure — the job is terminal
-  // regardless.
-  //
-  // BET-721: skip the deliver for adopted subagents — opencode ALREADY injects
-  // the <task ...> result into the parent when the child finishes, so
-  // delivering ours too would report the same job twice. A missing `origin`
-  // (records written before this change) means `delegate` and still delivers.
-  if (deliver && job.parentSessionID && job.origin !== "subagent") {
-    try {
-      await deliver({
-        sessionId: job.parentSessionID,
-        text: buildCompletionText(updated),
-      });
-    } catch (e) {
-      console.warn(`[delegate] completion delivery failed for ${job.id}:`, e?.message ?? e);
-    }
-  }
-
-  // BET-418 §B: remove the tmux window + worktree now that the job is
-  // terminal. A dirty worktree keeps both (cleanupTerminalJob returns
-  // cleanedUp:false); persist that flag so the retention sweep does NOT prune
-  // the record (the window must stay recognisable as a job, not leak as an
-  // ordinary session). A clean cleanup sets cleanedUp:true so retention may
-  // prune the record normally once it ages out.
-  let cleanedUp = false;
-  try {
-    const res = await cleanupTerminalJob(updated, deps);
-    cleanedUp = !!res.cleanedUp;
-  } catch (e) {
-    console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
-  }
-  {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === job.id);
-    if (idx !== -1) {
-      jobs[idx] = { ...jobs[idx], cleanedUp };
-      await save(jobs);
-    }
-  }
-  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
 // Activity summaries — a 10s poller updates `activity` for running jobs only.
 // Reuses summarizeTranscript(messages) then describeChatActivity(summary),
 // both from peers.mjs. No model call. No Groq. No new config.
+//
+// `tickActivity` is exported for unit tests; the poller wrapper
+// (startActivityPoller) retains the inFlight re-entrancy guard + timer.unref.
 // ---------------------------------------------------------------------------
 
-async function tickActivity(deps) {
+export async function tickActivity(deps) {
   const { load = loadJobs, save = saveJobs, publish, listMessages, now = () => Date.now() } = deps;
-  const jobs = await load();
-  let changed = false;
-  await Promise.all(
-    jobs.map(async (job) => {
-      if (job.status !== "running") return;
-      let activity = null;
-      try {
-        const messages = listMessages ? await listMessages(job.childSessionID) : [];
-        activity = describeChatActivity(summarizeTranscript(messages));
-      } catch (e) {
-        console.warn(`[delegate] activity poll failed for ${job.id}:`, e?.message ?? e);
-        return;
-      }
-      if (activity !== job.activity) {
-        job.activity = activity;
-        changed = true;
-        publish?.({
-          kind: "delegate.updated",
-          payload: { id: job.id, status: job.status, activity },
-        });
-      }
-    }),
-  );
-  if (changed) await save(jobs);
-  void now;
+  // Under the jobs-store lock: the read-compare-write of `activity` is atomic,
+  // so a stale poller write can never overwrite a terminal transition a
+  // concurrent writer just persisted, or resurrect a completed job to running.
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    let changed = false;
+    await Promise.all(
+      jobs.map(async (job) => {
+        if (job.status !== "running") return;
+        let activity = null;
+        try {
+          const messages = listMessages ? await listMessages(job.childSessionID) : [];
+          activity = describeChatActivity(summarizeTranscript(messages));
+        } catch (e) {
+          console.warn(`[delegate] activity poll failed for ${job.id}:`, e?.message ?? e);
+          return;
+        }
+        if (activity !== job.activity) {
+          job.activity = activity;
+          changed = true;
+          publish?.({
+            kind: "delegate.updated",
+            payload: { id: job.id, status: job.status, activity },
+          });
+        }
+      }),
+    );
+    if (changed) await save(jobs);
+    void now;
+  });
 }
 
 export function startActivityPoller(deps = {}, { intervalMs = ACTIVITY_INTERVAL_MS } = {}) {
@@ -914,8 +961,7 @@ export async function sweepDelegateJobs(deps = {}) {
     }
 
     if (transitioned.length === 0 && orphaned.length === 0) {
-      const retained = applyRetention(jobs, nowMs);
-      if (retained.length !== jobs.length) await save(retained);
+      await persistRetention({ load, save }, nowMs);
       return;
     }
 
@@ -932,11 +978,22 @@ export async function sweepDelegateJobs(deps = {}) {
     for (const job of transitioned) {
       await finishJob(job, "failed", "timed out after 30 minutes", deps, new Map());
     }
-    const retained = applyRetention(await load(), nowMs);
-    await save(retained);
+    await persistRetention({ load, save }, nowMs);
   } catch (e) {
     console.warn("[delegate] sweep failed:", e?.message ?? e);
   }
+}
+
+// Retention prune under the jobs-store lock: re-read the store fresh so the
+// prune cannot clobber a write a concurrent writer persisted while this sweep
+// was inspecting a stale snapshot.
+async function persistRetention({ load, save }, nowMs) {
+  await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    if (jobs.length === 0) return;
+    const retained = applyRetention(jobs, nowMs);
+    if (retained.length !== jobs.length) await save(retained);
+  });
 }
 
 function applyRetention(jobs, nowMs) {
@@ -1013,63 +1070,67 @@ export async function stopJob(id, deps = {}) {
     listMessages,
     now = () => Date.now(),
   } = deps;
-  const jobs = await load();
-  const idx = jobs.findIndex((j) => j.id === id);
-  if (idx === -1) return { ok: false, error: "not found" };
-  const job = jobs[idx];
-  if (job.status !== "running") {
-    return { ok: false, error: "job not running", status: job.status };
-  }
-  if (abortSession && job.childSessionID) {
-    try {
-      await abortSession(job.childSessionID);
-    } catch (e) {
-      console.warn(`[delegate] abortSession failed for ${id}:`, e?.message ?? e);
+  // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
+  // atomic, so a stop cannot race another writer into a half-state.
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "running") {
+      return { ok: false, error: "job not running", status: job.status };
     }
-  }
-  const finishedAt = now();
-  const updated = {
-    ...job,
-    status: "stopped",
-    error: "stopped by user",
-    finishedAt,
-  };
-  jobs[idx] = updated;
-  await save(jobs);
-  publish?.({
-    kind: "delegate.updated",
-    payload: { id: updated.id, status: updated.status, activity: updated.activity },
+    if (abortSession && job.childSessionID) {
+      try {
+        await abortSession(job.childSessionID);
+      } catch (e) {
+        console.warn(`[delegate] abortSession failed for ${id}:`, e?.message ?? e);
+      }
+    }
+    const finishedAt = now();
+    const updated = {
+      ...job,
+      status: "stopped",
+      error: "stopped by user",
+      finishedAt,
+    };
+    jobs[idx] = updated;
+    await save(jobs);
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: updated.id, status: updated.status, activity: updated.activity },
+    });
+    if (deliver && job.parentSessionID) {
+      try {
+        await deliver({
+          sessionId: job.parentSessionID,
+          text: buildCompletionText(updated),
+        });
+      } catch (e) {
+        console.warn(`[delegate] stop completion delivery failed for ${id}:`, e?.message ?? e);
+      }
+    }
+    // BET-418 §B: a stopped job is terminal → remove the window + worktree (a
+    // dirty worktree keeps both). Persist cleanedUp so retention treats it
+    // correctly.
+    let cleanedUp = false;
+    try {
+      const res = await cleanupTerminalJob(updated, deps);
+      cleanedUp = !!res.cleanedUp;
+    } catch (e) {
+      console.warn(`[delegate] stop cleanup failed for ${id}:`, e?.message ?? e);
+    }
+    {
+      const jobs2 = await load();
+      const idx2 = jobs2.findIndex((j) => j.id === id);
+      if (idx2 !== -1) {
+        jobs2[idx2] = { ...jobs2[idx2], cleanedUp };
+        await save(jobs2);
+      }
+    }
+    void listMessages;
+    return { ok: true };
   });
-  if (deliver && job.parentSessionID) {
-    try {
-      await deliver({
-        sessionId: job.parentSessionID,
-        text: buildCompletionText(updated),
-      });
-    } catch (e) {
-      console.warn(`[delegate] stop completion delivery failed for ${id}:`, e?.message ?? e);
-    }
-  }
-  // BET-418 §B: a stopped job is terminal → remove the window + worktree (a
-  // dirty worktree keeps both). Persist cleanedUp so retention treats it
-  // correctly.
-  let cleanedUp = false;
-  try {
-    const res = await cleanupTerminalJob(updated, deps);
-    cleanedUp = !!res.cleanedUp;
-  } catch (e) {
-    console.warn(`[delegate] stop cleanup failed for ${id}:`, e?.message ?? e);
-  }
-  {
-    const jobs2 = await load();
-    const idx2 = jobs2.findIndex((j) => j.id === id);
-    if (idx2 !== -1) {
-      jobs2[idx2] = { ...jobs2[idx2], cleanedUp };
-      await save(jobs2);
-    }
-  }
-  void listMessages;
-  return { ok: true };
 }
 
 /**
@@ -1087,40 +1148,44 @@ export async function deleteJob(id, deps = {}) {
     killWindow,
     gitRemoveWorktree,
   } = deps;
-  const jobs = await load();
-  const idx = jobs.findIndex((j) => j.id === id);
-  if (idx === -1) return { ok: false, error: "not found" };
-  const job = jobs[idx];
+  // Under the jobs-store lock: the load → remove-record save is atomic.
+  const result = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
 
-  // 1. Remove the tmux window (best-effort).
-  if (killWindow && job.tmuxSession != null && job.windowIndex != null) {
-    try {
-      await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
-    } catch (e) {
-      console.warn(`[delegate] killWindow failed for ${id}:`, e?.message ?? e);
-    }
-  }
-
-  // 2. Remove the worktree (force: false, NEVER force: true).
-  if (gitRemoveWorktree && job.worktree) {
-    try {
-      const res = await gitRemoveWorktree({ path: job.worktree, force: false });
-      if (res && res.removed === false && res.reason === "dirty") {
-        // Keep the worktree AND keep the job record; report `dirty`.
-        return { ok: false, error: "dirty", reason: "dirty" };
+    // 1. Remove the tmux window (best-effort).
+    if (killWindow && job.tmuxSession != null && job.windowIndex != null) {
+      try {
+        await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
+      } catch (e) {
+        console.warn(`[delegate] killWindow failed for ${id}:`, e?.message ?? e);
       }
-    } catch (e) {
-      console.warn(`[delegate] gitRemoveWorktree failed for ${id}:`, e?.message ?? e);
-      // A failed remove leaves the worktree on disk; still drop the record so
-      // the UI isn't stuck, but surface the error.
     }
-  }
 
-  // 3. Remove the record.
-  const next = jobs.filter((j) => j.id !== id);
-  await save(next);
-  publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
-  return { ok: true };
+    // 2. Remove the worktree (force: false, NEVER force: true).
+    if (gitRemoveWorktree && job.worktree) {
+      try {
+        const res = await gitRemoveWorktree({ path: job.worktree, force: false });
+        if (res && res.removed === false && res.reason === "dirty") {
+          // Keep the worktree AND keep the job record; report `dirty`.
+          return { ok: false, error: "dirty", reason: "dirty" };
+        }
+      } catch (e) {
+        console.warn(`[delegate] gitRemoveWorktree failed for ${id}:`, e?.message ?? e);
+        // A failed remove leaves the worktree on disk; still drop the record so
+        // the UI isn't stuck, but surface the error.
+      }
+    }
+
+    // 3. Remove the record.
+    const next = jobs.filter((j) => j.id !== id);
+    await save(next);
+    publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
+    return { ok: true };
+  });
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -21,13 +21,23 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { normalizeHost } from "../shared/pluginManifest.mjs";
-import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (single source of truth — see docs/mantaui-plugins.md §Constants)
 // ---------------------------------------------------------------------------
 
 const STORE_PATH = statePath("cap-jobs.json");
+
+// Single-writer serialization for the cap-jobs store (BET-770 P2-1/2-2/2-3).
+// Every read-modify-write mutation of the jobs array runs inside `jobsLock`,
+// shared by ALL writers: createCapJob, startJob, appendLog, completeJob and
+// the sweeper. Without it, completeJob (whose async gap is markTerminal
+// awaiting the session notify) could race sweepCapJobs and flip a completed
+// job to "timed out" (and notify) or a truly timed-out job to done. Each
+// mutation re-reads the store inside the lock, so a writer that lost a race
+// observes the winner's state instead of overwriting it.
+const jobsLock = createMutex();
 
 // Ring-buffer cap on a job's stored log. A runaway xcodebuild cannot fill the
 // disk or blow the AI's context — chunks are dropped oldest-first.
@@ -98,24 +108,27 @@ export async function createCapJob(
   // (`host: "mac"` written before this rename) are normalized on read in
   // listJobs so we don't need a schema migration.
   const normalizedHost = normalizeHost(host);
-  const jobs = await load();
-  const job = {
-    id: genId(),
-    capability,
-    input: input ?? {},
-    host: normalizedHost,
-    sessionID,
-    directory: typeof directory === "string" ? directory : "",
-    status: "queued",
-    createdAt: now(),
-    startedAt: null,
-    finishedAt: null,
-    log: [],
-    result: null,
-    error: null,
-  };
-  jobs.push(job);
-  await save(jobs);
+  const job = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const rec = {
+      id: genId(),
+      capability,
+      input: input ?? {},
+      host: normalizedHost,
+      sessionID,
+      directory: typeof directory === "string" ? directory : "",
+      status: "queued",
+      createdAt: now(),
+      startedAt: null,
+      finishedAt: null,
+      log: [],
+      result: null,
+      error: null,
+    };
+    jobs.push(rec);
+    await save(jobs);
+    return rec;
+  });
   publish?.({ kind: "capJob", payload: { id: job.id, capability, input: job.input, host: normalizedHost } });
   return { ok: true, job };
 }
@@ -178,21 +191,23 @@ export async function listJobs(
  * a timed-out job cannot be resurrected by a late log POST.
  */
 export async function appendLog(id, chunk, { load = loadJobs, save = saveJobs } = {}) {
-  const jobs = await load();
-  const idx = jobs.findIndex((j) => j.id === id);
-  if (idx === -1) return { ok: false, error: "not found" };
-  const job = jobs[idx];
-  if (job.status !== "running") {
-    return { ok: false, error: "job not running", status: job.status };
-  }
-  const text = String(chunk ?? "");
-  if (!text) return { ok: true }; // empty chunk is a no-op
-  job.log = [...(job.log ?? []), text];
-  while (job.log.length > 1 && job.log.join("").length > LOG_CAP_BYTES) {
-    job.log.shift();
-  }
-  await save(jobs);
-  return { ok: true };
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "running") {
+      return { ok: false, error: "job not running", status: job.status };
+    }
+    const text = String(chunk ?? "");
+    if (!text) return { ok: true }; // empty chunk is a no-op
+    job.log = [...(job.log ?? []), text];
+    while (job.log.length > 1 && job.log.join("").length > LOG_CAP_BYTES) {
+      job.log.shift();
+    }
+    await save(jobs);
+    return { ok: true };
+  });
 }
 
 /**
@@ -205,18 +220,20 @@ export async function startJob(
   id,
   { load = loadJobs, save = saveJobs, now = () => Date.now() } = {},
 ) {
-  const jobs = await load();
-  const idx = jobs.findIndex((j) => j.id === id);
-  if (idx === -1) return { ok: false, error: "not found" };
-  const job = jobs[idx];
-  if (job.status !== "queued") {
-    return { ok: false, error: "not queued", status: job.status };
-  }
-  job.status = "running";
-  job.startedAt = now();
-  jobs[idx] = job;
-  await save(jobs);
-  return { ok: true };
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "queued") {
+      return { ok: false, error: "not queued", status: job.status };
+    }
+    job.status = "running";
+    job.startedAt = now();
+    jobs[idx] = job;
+    await save(jobs);
+    return { ok: true };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -268,26 +285,33 @@ export async function completeJob(
   if (status !== "done" && status !== "failed") {
     return { ok: false, error: "status must be \"done\" or \"failed\"" };
   }
-  const jobs = await load();
-  const idx = jobs.findIndex((j) => j.id === id);
-  if (idx === -1) return { ok: false, error: "not found" };
-  const job = jobs[idx];
-  if (job.status === "done" || job.status === "failed") {
-    return { ok: true, alreadyTerminal: true };
-  }
-  // Allow completeJob only from `running` or `queued` — guards against a typo
-  // status string making its way in by a non-executor caller.
-  if (job.status !== "running" && job.status !== "queued") {
-    return { ok: false, error: "cannot complete from status", status: job.status };
-  }
-  jobs[idx] = job;
-  await markTerminal(
-    job,
-    { status, result, error, nowMs: now() },
-    { publish, notifySession },
-  );
-  await save(jobs);
-  return { ok: true };
+  // Under the cap-jobs lock: the load → markTerminal → save is atomic, so an
+  // executor "done" POST cannot race the 60s timeout sweep and flip a
+  // completed job to "timed out" (or a timed-out job to done). markTerminal
+  // may await notifySession — that await stays INSIDE the lock so the whole
+  // transition is one unit.
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status === "done" || job.status === "failed") {
+      return { ok: true, alreadyTerminal: true };
+    }
+    // Allow completeJob only from `running` or `queued` — guards against a typo
+    // status string making its way in by a non-executor caller.
+    if (job.status !== "running" && job.status !== "queued") {
+      return { ok: false, error: "cannot complete from status", status: job.status };
+    }
+    jobs[idx] = job;
+    await markTerminal(
+      job,
+      { status, result, error, nowMs: now() },
+      { publish, notifySession },
+    );
+    await save(jobs);
+    return { ok: true };
+  });
 }
 
 /**
@@ -322,61 +346,67 @@ export async function sweepCapJobs({
   notifySession,
   now = () => Date.now(),
 } = {}) {
+  // Under the cap-jobs lock: one atomic read → transition → retention → save
+  // pass, so a transition (which awaits the session notify inside markTerminal)
+  // cannot interleave with an executor's completeJob and flip a completing job
+  // to "timed out" or a timed-out job to done.
   try {
-    const jobs = await load();
-    if (jobs.length === 0) return;
-    const nowMs = now();
-    const transitioned = [];
+    await jobsLock.runExclusive(async () => {
+      const jobs = await load();
+      if (jobs.length === 0) return;
+      const nowMs = now();
+      const transitioned = [];
 
-    for (const job of jobs) {
-      if (
-        job.status === "running" &&
-        job.startedAt != null &&
-        nowMs - job.startedAt > RUNNING_TIMEOUT_MS
-      ) {
-        job._pendingTerminal = {
-          status: "failed",
-          error: "timed out after 30 minutes (desktop executor lost?)",
-        };
-        transitioned.push(job);
-      } else if (
-        job.status === "queued" &&
-        nowMs - job.createdAt > QUEUED_EXPIRY_MS
-      ) {
-        job._pendingTerminal = {
-          status: "failed",
-          error:
-            "expired: no executor picked this job up within 24h " +
-            "(is the desktop app running with the capability executor enabled?)",
-        };
-        transitioned.push(job);
+      for (const job of jobs) {
+        if (
+          job.status === "running" &&
+          job.startedAt != null &&
+          nowMs - job.startedAt > RUNNING_TIMEOUT_MS
+        ) {
+          job._pendingTerminal = {
+            status: "failed",
+            error: "timed out after 30 minutes (desktop executor lost?)",
+          };
+          transitioned.push(job);
+        } else if (
+          job.status === "queued" &&
+          nowMs - job.createdAt > QUEUED_EXPIRY_MS
+        ) {
+          job._pendingTerminal = {
+            status: "failed",
+            error:
+              "expired: no executor picked this job up within 24h " +
+              "(is the desktop app running with the capability executor enabled?)",
+          };
+          transitioned.push(job);
+        }
       }
-    }
 
-    if (transitioned.length === 0) {
-      // No timeouts/expiries — check retention only, and skip the save when
-      // nothing was pruned.
+      if (transitioned.length === 0) {
+        // No timeouts/expiries — check retention only, and skip the save when
+        // nothing was pruned.
+        const retained = applyRetention(jobs, nowMs);
+        if (retained.length !== jobs.length) {
+          await save(retained);
+        }
+        return;
+      }
+
+      // Apply transitions via the shared markTerminal helper so the notify +
+      // publish + finishedAt-stamp logic stays in one place. markTerminal does
+      // NOT save — we save once below (sweep = one pass, one save).
+      for (const job of transitioned) {
+        const t = job._pendingTerminal;
+        delete job._pendingTerminal;
+        await markTerminal(
+          job,
+          { status: t.status, error: t.error, result: null, nowMs },
+          { publish, notifySession },
+        );
+      }
       const retained = applyRetention(jobs, nowMs);
-      if (retained.length !== jobs.length) {
-        await save(retained);
-      }
-      return;
-    }
-
-    // Apply transitions via the shared markTerminal helper so the notify +
-    // publish + finishedAt-stamp logic stays in one place. markTerminal does
-    // NOT save — we save once below (sweep = one pass, one save).
-    for (const job of transitioned) {
-      const t = job._pendingTerminal;
-      delete job._pendingTerminal;
-      await markTerminal(
-        job,
-        { status: t.status, error: t.error, result: null, nowMs },
-        { publish, notifySession },
-      );
-    }
-    const retained = applyRetention(jobs, nowMs);
-    await save(retained);
+      await save(retained);
+    });
   } catch (e) {
     console.warn("[cap] sweep failed:", e?.message ?? e);
   }
