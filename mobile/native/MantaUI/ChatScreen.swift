@@ -170,13 +170,13 @@ private struct ChatScreenContent: View {
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
-            // is active and haptics are enabled. `onChange` fires exactly once
-            // per false→true edge of `turnComplete`, so there is exactly one
-            // haptic per completion, none on `running` oscillations, and none
-            // when at the bottom.
-            .onChange(of: store.turnComplete) { _, completed in
+            // is active and haptics are enabled. The store coalesces multi-message
+            // turns into ONE `turnCompletionCount` per turn (BET-752 task 5), so
+            // `onChange` fires at most once per turn — no more per-message
+            // double-fires from `turnComplete` flapping on `message.updated`.
+            .onChange(of: store.turnCompletionCount) { _, _ in
                 if shouldFireTurnCompleteHaptic(
-                    turnCompleteEdge: completed,
+                    turnCompleteEdge: true,
                     showScrollToBottom: showScrollToBottom,
                     isActive: scenePhase == .active,
                     hapticsEnabled: sessionStore.hapticsEnabled

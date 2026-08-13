@@ -249,6 +249,18 @@ final class ChatSessionStore: ObservableObject {
     private(set) var transcriptFetchCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// Monotonic count of FULL turned completions (BET-752 task 5). Increments
+    /// at most once per turn: a multi-message turn emits a `turnComplete`
+    /// frame per `message.updated`, so the raw `turnComplete` value flaps
+    /// true repeatedly; the view used to fire a success haptic on every
+    /// false→true edge. The store now coalesces those into ONE completion per
+    /// turn, re-armed only when a genuinely new turn begins (a running start,
+    /// or a `send()`). The view fires the haptic off this counter instead.
+    @Published private(set) var turnCompletionCount = 0
+    /// True until the current turn's completion has been counted once; re-armed
+    /// when a new turn begins. Until a new turn, further `turnComplete` edges
+    /// of the same turn are ignored (deduped per turn).
+    private var completionArmed = true
     /// The permissions payload most recently folded into `permissions`. The
     /// accumulated snapshot is sticky and this sink fires on every stream change,
     /// so applying it unconditionally would clobber whatever `refreshPermissions()`
@@ -519,6 +531,20 @@ final class ChatSessionStore: ObservableObject {
         if !firstSnapshot {
             if runningChanged && running { scheduleRefetch() }
             if completeChanged && turnComplete { scheduleRefetch() }
+        }
+
+        // --- once-per-turn completion signal (BET-752 task 5). A multi-message
+        // turn emits a `turnComplete` frame per `message.updated`, so the raw
+        // false→true edge flaps several times in one turn — and the chat screen
+        // used to fire a success haptic on EVERY edge. Coalesce to ONE
+        // completion per TURN: count a fresh completion edge only while the
+        // latch is armed, then disarm. `send()` re-arms it (a user submit IS a
+        // new turn); the latch also starts armed, so a session opened mid-turn
+        // still counts its first completion. The view fires the haptic off
+        // `turnCompletionCount` instead of the raw `turnComplete` value.
+        if completeChanged && turnComplete && completionArmed {
+            turnCompletionCount += 1
+            completionArmed = false
         }
 
         rebuildBlocks()
@@ -805,6 +831,10 @@ final class ChatSessionStore: ObservableObject {
         running = true
         optimisticRunning = true
         turnComplete = false
+        // A user submit is a genuinely new turn: re-arm the one-per-turn
+        // completion latch so this turn's completion is counted once (BET-752
+        // task 5).
+        completionArmed = true
         sessionError = nil
         if runningSince == nil {
             runningSince = Date()
