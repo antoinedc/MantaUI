@@ -54,6 +54,9 @@ struct SessionListView: View {
     /// tmux's active window, which lit one row in every project and never
     /// cleared at all.)
     @State private var openRow: String?
+    /// Transient failure feedback (rename/fork) shown as a brief toast, the
+    /// same surface the 5s undo toast uses. Driven by `store.actionMessage`.
+    @State private var feedback: String?
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -127,6 +130,7 @@ struct SessionListView: View {
             }
         }
         .overlay(alignment: .bottom) { undoToast }
+        .overlay(alignment: .bottom) { feedbackToast }
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
@@ -153,6 +157,13 @@ struct SessionListView: View {
         // (the tap routed before the list appeared).
         .onAppear { consumePushLink() }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+        // Surface a mutation failure (rename/fork) the store published. Cleared
+        // once consumed so the same message can't re-toast on a later change.
+        .onChange(of: store.actionMessage) { _, message in
+            guard let message, !message.isEmpty else { return }
+            showFeedback(message)
+            store.actionMessage = nil
+        }
     }
 
     @ViewBuilder
@@ -436,6 +447,39 @@ struct SessionListView: View {
         store.pendingDeletes.values.max(by: { $0.startedAt < $1.startedAt })
     }
 
+    // MARK: - Transient feedback toast (rename/fork failures)
+
+    /// The one shared surface for a transient rename/fork failure message.
+    /// Reuses the undo-toast presentation (ultra-thin material capsule) and
+    /// auto-dismisses after a few seconds.
+    private func showFeedback(_ text: String) {
+        feedback = text
+    }
+
+    @ViewBuilder
+    private var feedbackToast: some View {
+        if let text = feedback {
+            HStack(spacing: Metrics.spacing.sp3) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: Metrics.type.small))
+                    .foregroundColor(tokens.warn)
+                Text(text)
+                    .font(.system(size: Metrics.type.small, weight: .medium))
+                    .foregroundColor(tokens.tx1)
+                Spacer()
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp2)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: Metrics.type.listRowRadius))
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+            .task(id: text) {
+                try? await Task.sleep(nanoseconds: UInt64(4 * 1_000_000_000))
+                withAnimation { if feedback == text { feedback = nil } }
+            }
+        }
+    }
+
     // MARK: - Floating capsule (+ search) + create
 
     // The search + create control FLOATS over the list on Liquid Glass, the
@@ -525,10 +569,7 @@ struct SessionListView: View {
                 Button("Save") {
                     let value = renameValue.trimmingCharacters(in: .whitespaces)
                     if !value.isEmpty {
-                        Task {
-                            try? await MantaAPIClient.live().renameWindow(session: targetProject, index: target.index, newName: value)
-                            await store.refresh()
-                        }
+                        Task { await store.renameSession(project: targetProject, index: target.index, newName: value) }
                     }
                     sheetRoute = nil
                 }
@@ -544,10 +585,7 @@ struct SessionListView: View {
     private func fork(window: MantaWindow, project: MantaProject) {
         let sid = window.opencodeSessionId ?? ""
         let newName = "\(window.name) fork"
-        Task {
-            try? await MantaAPIClient.live().forkSession(sessionId: sid, sessionName: project.tmuxSession, windowName: newName)
-            await store.refresh()
-        }
+        Task { await store.forkSession(sessionId: sid, project: project.tmuxSession, newName: newName) }
     }
 
     // MARK: - Empty / error
