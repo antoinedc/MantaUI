@@ -25,6 +25,12 @@ import {
 } from "./chatUtils";
 import { useClickAway } from "./hooks/useClickAway";
 import { useStore } from "./store";
+
+// Lucide icons render a 24-unit viewBox scaled to size. A stroked circle
+// draws r ± strokeWidth/2 (the stroke straddles the path), so at size 16 the
+// Clock's outer disc spans (2·10 + 2)/24·16 = 22/24 of the box and its ring
+// is 2/24 of the box. The dial mirrors that drawn geometry exactly.
+const ICON_PX = 16;
 import { mbtn } from "./ComposerParts";
 
 // The ONLY provider-name-aware thing in this file — an icon/label lookup
@@ -110,12 +116,13 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
         aria-label="plan usage"
         title={title}
       >
-        {/* A 16×16 BOX holding a 13px disc. The box keeps the button's metrics
-            identical to the 16px lucide icons beside it (so the row does not
-            shift), while the disc matches what those icons actually DRAW: a
-            lucide circle is r=10 in a 24 viewBox, i.e. 20/24 of the box, which
-            is 13px at size 16. A full-bleed 16px disc read visibly heavier
-            than the Clock / Key / Webhook glyphs next to it. */}
+        {/* A 16×16 BOX holding a disc sized to a stroked lucide circle. The
+            box keeps the button's metrics identical to the 16px lucide icons
+            beside it (so the row does not shift), while the disc matches what
+            those icons actually DRAW: a lucide circle is r=10 stroked at
+            strokeWidth=2 in a 24 viewBox, and the stroke straddles the path,
+            so the drawn outer is (2·10 + 2)/24 of the box and the ring is
+            2/24 of the box, both scaled by the 16px icon size. */}
         <span
           aria-hidden="true"
           className="inline-flex items-center justify-center"
@@ -125,8 +132,8 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
             aria-hidden="true"
             className="block rounded-full"
             style={{
-              width: 13,
-              height: 13,
+              width: (22 / 24) * ICON_PX,
+              height: (22 / 24) * ICON_PX,
               background:
                 state.tone === "over"
                   ? ringColor
@@ -135,14 +142,20 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
           >
             {/* Inner disc in the surrounding surface colour turns the pie into
                 a ring — skipped for tone "over" (>=100%), which is a solid
-                disc with no hole per the design spec. Ring thickness is
-                (13 - 9) / 2 = 2px, matching the neighbours' strokeWidth={2}
+                disc with no hole per the design spec. The stroke straddles
+                the circle path, so the inner hole is (2·10 - 2)/24 of the box
+                and sits in by the ring width 2/24, both scaled by the 16px
+                icon size — matching the neighbours' strokeWidth={2}
                 (unchanged from BET-756). */}
             {state.tone !== "over" && (
               <span
                 aria-hidden="true"
                 className="block rounded-full bg-bg"
-                style={{ width: 9, height: 9, margin: 2 }}
+                style={{
+                  width: (18 / 24) * ICON_PX,
+                  height: (18 / 24) * ICON_PX,
+                  margin: (2 / 24) * ICON_PX,
+                }}
               />
             )}
           </span>
