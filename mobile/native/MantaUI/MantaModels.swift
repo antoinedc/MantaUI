@@ -335,3 +335,25 @@ struct SecretMeta: Codable, Equatable, Sendable, Identifiable {
     var createdAt: Int?
     var updatedAt: Int?
 }
+
+/// Client→box input for `secrets:set` (mirrors src/shared/types.ts SecretInput
+/// and the `{key,value,scope,sessionID,project,hint}` wire shape in
+/// src/server/rpc.mjs). The value travels device → box and is never returned or
+/// rendered again. Nil optionals are omitted by the synthesized Encodable, so a
+/// shared-scope set sends only `{key,value,scope}`.
+struct SecretInput: Encodable, Sendable {
+    var key: String
+    var value: String
+    var scope: String?
+    var sessionID: String?
+    var project: String?
+    var hint: String?
+}
+
+/// `secrets:set` reply (src/server/secrets.mjs `secretsSetStore`). `meta` is the
+/// value-stripped metadata on success; `error` is present when `ok` is false.
+struct SecretSetResult: Decodable, Equatable, Sendable {
+    var ok: Bool
+    var meta: SecretMeta?
+    var error: String?
+}
