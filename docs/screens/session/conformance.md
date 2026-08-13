@@ -4,7 +4,7 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-05 (f3f5dce)
+Last reviewed: 2026-08-13 (18d3d807) — stage 6's composer-migration PR (#525, merged as c6669362) closed the composer onto the spec; the one divergence it left open (attach + voice composer buttons) is recorded below.
 
 ## Artifacts toggle added to the header (BET-659)
 
