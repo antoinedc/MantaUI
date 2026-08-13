@@ -144,6 +144,67 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(args?.count, 1)
         XCTAssertEqual(args?.first as? String, "ses_1")
     }
+    // MARK: - scheduled tasks & secrets edit (BET-744)
+
+    /// `schedule:delete` is dispatched as `fn(id)` — `args[0]` must be the job
+    /// `ScheduledJob.id` as a bare string (not an array/object).
+    func testScheduleDeleteSendsTheJobIdAsArg0() async throws {
+        let client = makeClient()
+        try await client.deleteSchedule(id: "a1b2c3d4")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/schedule:delete")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(args?.count, 1)
+        XCTAssertEqual(args?.first as? String, "a1b2c3d4")
+    }
+
+    /// `secrets:delete` is dispatched as `fn(id)` — `args[0]` is the
+    /// `SecretMeta.id` store id as a bare string.
+    func testSecretDeleteSendsTheSecretIdAsArg0() async throws {
+        let client = makeClient()
+        try await client.deleteSecret(id: "ab12cd34")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/secrets:delete")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        XCTAssertEqual(args?.count, 1)
+        XCTAssertEqual(args?.first as? String, "ab12cd34")
+    }
+
+    /// `secrets:set` serialises `{key, value, scope, sessionID, hint}` into
+    /// `args[0]` — the box's `{...i}` merge shape (src/server/rpc.mjs).
+    func testSecretSetSerializesKeyValueScopeSessionIDAndHint() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"ok": true, "meta": {"id": "x", "key": "GITHUB_PAT", "scope": "session", "sessionID": "ses_1", "project": null, "hint": "access", "hasValue": true}}}"#
+        _ = try await client.setSecret(SecretInput(key: "GITHUB_PAT", value: "secret", scope: "session", sessionID: "ses_1", hint: "access"))
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/secrets:set")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["key"] as? String, "GITHUB_PAT")
+        XCTAssertEqual(payload?["value"] as? String, "secret")
+        XCTAssertEqual(payload?["scope"] as? String, "session")
+        XCTAssertEqual(payload?["sessionID"] as? String, "ses_1")
+        XCTAssertEqual(payload?["hint"] as? String, "access")
+    }
+
+    /// `secrets:set` decodes `{ok, error}` — the failure reply, surfacing the
+    /// box's error message (e.g. "value is required").
+    func testSecretSetDecodesErrorString() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"ok": false, "error": "value is required"}}"#
+        let result = try await client.setSecret(SecretInput(key: "K", value: ""))
+        XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.error, "value is required")
+        XCTAssertNil(result.meta)
+    }
+
+    /// `secrets:set` decodes `{ok, meta}` — the success reply carries the
+    /// value-stripped metadata, never a value.
+    func testSecretSetDecodesOkAndMeta() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"ok": true, "meta": {"id": "x", "key": "K", "scope": "shared", "sessionID": null, "project": null, "hint": "", "hasValue": true, "createdAt": 1750000000000, "updatedAt": 1750000000000}}}"#
+        let result = try await client.setSecret(SecretInput(key: "K", value: "v", scope: "shared"))
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(result.meta?.key, "K")
+        XCTAssertEqual(result.meta?.scope, "shared")
+        XCTAssertNil(result.error)
+    }
 }
 
 // MARK: - Capturing URLProtocol

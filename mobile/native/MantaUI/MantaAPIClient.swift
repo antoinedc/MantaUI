@@ -311,6 +311,23 @@ final class MantaAPIClient: Sendable {
         return try await call("secrets:list", args: args, as: [SecretMeta].self) ?? []
     }
 
+    /// `schedule:delete` — delete a scheduled-prompt job by its id.
+    /// `args[0]` is the job `id` (a `ScheduledJob.id`).
+    func deleteSchedule(id: String) async throws {
+        _ = try await call("schedule:delete", args: [id], as: VoidResult.self)
+    }
+
+    /// `secrets:set` — store (or upsert) a secret. The value travels to the box
+    /// and is never returned or rendered again; only the metadata comes back.
+    func setSecret(_ input: SecretInput) async throws -> SecretSetResult {
+        try await callRequired("secrets:set", args: [try jsonObject(input)], as: SecretSetResult.self)
+    }
+
+    /// `secrets:delete` — delete a secret by its store id (a `SecretMeta.id`).
+    func deleteSecret(id: String) async throws {
+        _ = try await call("secrets:delete", args: [id], as: VoidResult.self)
+    }
+
     /// `voice:transcribe` — ship recorded audio (base64 over the JSON RPC
     /// wire, as the desktop shim does) to the box's Groq transcription.
     /// Returns the transcribed text, or nil when the clip was empty.
@@ -440,6 +457,17 @@ final class MantaAPIClient: Sendable {
     private func callVoid(_ channel: String, args: [Any]) async throws -> VoidResult? {
         let data = try await transport(channel: channel, args: args)
         return try Self.decode(data, as: VoidResult.self)
+    }
+
+    /// Encode an `Encodable` payload (e.g. `SecretInput`) back into the
+    /// `[String: Any]` JSON-object shape the RPC transport serialises. Nil
+    /// optional properties are omitted, matching the box's `{...i}` merge.
+    private func jsonObject(_ value: some Encodable) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(value)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MantaError.transport("payload is not a JSON object")
+        }
+        return object
     }
 
     private func transport(channel: String, args: [Any]) async throws -> Data {
