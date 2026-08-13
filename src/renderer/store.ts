@@ -415,10 +415,10 @@ type State = {
   // expires on its own.
   pendingScreenshots: PendingScreenshot[];
   // Single global agent-file toast: a file the remote AI pushed to its outbox.
-  // Same single-instance pattern as screenshotToast — App.tsx owns the one
-  // ipcRenderer listener, the active ChatPanel renders the toast, accept /
-  // dismiss clear it globally. In auto-pull (trust) mode it's informational
-  // (autoPulled:true, localPath set); otherwise it's a Save/dismiss prompt.
+  // Single-instance pattern — App.tsx owns the one ipcRenderer listener, the
+  // active ChatPanel renders the toast, accept / dismiss clear it globally. In
+  // auto-pull (trust) mode it's informational (autoPulled:true, localPath set);
+  // otherwise it's a Save/dismiss prompt.
   agentFileToast: AgentFileReady | null;
   // Transient app-level notices (errors + info) shown by the global ToastStack
   // (BET-723). Replaces every native alert() in the renderer. Capped at 5;
