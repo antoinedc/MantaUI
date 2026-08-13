@@ -168,6 +168,11 @@ final class ChatSessionStore: ObservableObject {
     /// reconnecting…" banner so an offline hit does not read as "the model is
     /// quiet". Consumed only; reconnect machinery is owned by the event store.
     @Published private(set) var degraded = false
+    /// A one-shot user-facing message bus for failed chat actions: views set it,
+    /// the composer surfaces it through its existing hint capsule and clears it.
+    /// It is deliberately settable from views because it is a bus, not store
+    /// state — a failed abort/compact/clear/fork/delete must not fail silently.
+    @Published var actionHint: String?
     /// True while a canonical transcript refetch (or the initial load) is in
     /// flight. Drives the ambient hairline sweep on the composer's top divider
     /// (BET-630, D1) — distinct from `running`, which drives the working row.
@@ -785,12 +790,18 @@ final class ChatSessionStore: ObservableObject {
 
     /// Interrupt the running turn (voice `abort`).
     func abort() {
-        Task { try? await api.abort(sessionId: sessionId) }
+        Task {
+            do { try await api.abort(sessionId: sessionId) }
+            catch { await MainActor.run { actionHint = "Couldn't stop the turn — check the connection" } }
+        }
     }
 
     /// Compact the session to free context (voice `compact`).
     func compact() {
-        Task { try? await api.compactSession(sessionId: sessionId) }
+        Task {
+            do { try await api.compactSession(sessionId: sessionId) }
+            catch { await MainActor.run { actionHint = "Compact failed — check the connection" } }
+        }
     }
 
     /// Dispatch a store-level voice action. Returns a human hint string when
