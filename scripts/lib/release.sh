@@ -74,6 +74,42 @@ verify_sha256() {
       (corrupt download or stale manifest — re-run; if it persists, report it)"
 }
 
+# replace_release_payload <pkg-dir> <dest-dir> <node-bin>
+#
+# Replace every path the incoming release owns in <dest-dir> with the copy from
+# the extracted tarball at <pkg-dir>, then stamp RELEASE.json itself so the box
+# records the version it now runs.
+#
+# `includes` is read from <pkg-dir>/RELEASE.json — the INCOMING release, not the
+# installed one. The incoming release is what knows which paths it owns, so a
+# box installed before a path joined the list still picks that path up.
+#
+# Each path is staged as `<dest>/<rel>.new` and swapped in with `mv`, so a
+# failed or interrupted copy can never leave a half-written tree. That matters
+# most for `runtime`: the running manta-server executes from it. Deleting the
+# directory out from under the running process is safe on Linux and macOS (the
+# open binary's inode survives until the process exits) and the caller restarts
+# the server at the end of the update.
+#
+# node-bin is passed in rather than read from a global so this function has no
+# dependency on the caller's variable names.
+replace_release_payload() {
+  local pkg="$1" dest="$2" node_bin="$3" rel includes
+  includes="$("$node_bin" -e 'const i=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).includes||[]; process.stdout.write(i.join("\n"))' "$pkg/RELEASE.json")" \
+    || die "release payload: cannot read includes from $pkg/RELEASE.json"
+  [ -n "$includes" ] || die "release payload: $pkg/RELEASE.json has an empty includes list"
+  for rel in $includes; do
+    [ -n "$rel" ] || continue
+    [ -e "$pkg/$rel" ] || die "release payload: tarball is missing $rel"
+    rm -rf "$dest/$rel.new"
+    mkdir -p "$(dirname "$dest/$rel")"
+    cp -R "$pkg/$rel" "$dest/$rel.new" || die "release payload: copy failed for $rel"
+    rm -rf "$dest/$rel"
+    mv "$dest/$rel.new" "$dest/$rel" || die "release payload: swap failed for $rel"
+  done
+  cp "$pkg/RELEASE.json" "$dest/RELEASE.json"
+}
+
 # sync_opencode_guidance <src-agents-md> <dest-agents-md>
 #
 # Bring a box's ~/.config/opencode/AGENTS.md in sync with the tool guidance

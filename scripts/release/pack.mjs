@@ -122,6 +122,15 @@ const INCLUDE = [
   "llms-install.md",
 ];
 
+// Paths the release OWNS on an installed box — the list self-update.sh
+// replaces wholesale, written to RELEASE.json as `includes`. This is INCLUDE
+// plus `runtime`: the vendored Node is produced by ensureNodeRuntime() during
+// staging rather than copied from the repo, so it cannot be in the staging
+// allowlist above, but it must be replaced on update or a runtime version bump
+// can never reach an installed box. node_modules is deliberately NOT here — it
+// is materialized on the box by `npm ci --omit=dev` after the swap.
+const OWNED_ON_BOX = [...INCLUDE, "runtime"];
+
 // Parse the nodejs.org SHASUMS256.txt into {filename: sha256}. Tolerates the
 // `*` prefix some lines carry for binary-mode sha.
 function parseShaSums(text) {
@@ -392,7 +401,7 @@ async function main() {
         built_at: new Date().toISOString(),
         node: NODE_VERSION,
         arch: ARCH,
-        includes: INCLUDE,
+        includes: OWNED_ON_BOX,
       },
       null,
       2,
