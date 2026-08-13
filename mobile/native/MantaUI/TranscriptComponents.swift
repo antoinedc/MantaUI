@@ -291,6 +291,9 @@ struct StepRowView: View {
                     .accessibilityIdentifier("step-output")
             }
         }
+        // Expand/collapse is animated, matching the file's animation convention
+        // (BET-752 task 6).
+        .animation(.smooth(duration: 0.22), value: revealed)
     }
 
     private var dotColor: Color {
@@ -353,6 +356,9 @@ struct StepGroupView: View {
                         rowsView(rows)
                     }
                 }
+                // Roll-up expand is animated, matching the file's animation
+                // convention (BET-752 task 6).
+                .animation(.smooth(duration: 0.22), value: rollupExpanded)
             }
         }
         .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))

@@ -42,7 +42,6 @@ final class SessionListStore: ObservableObject {
 
     private let api: MantaAPIClient
     private let eventStore: MantaEventStore
-    private var undoTimers: [String: Timer] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private var attentionSessions: Set<String> = []
     private var modelLabels: [String: String] = [:]
@@ -232,7 +231,10 @@ final class SessionListStore: ObservableObject {
     // MARK: - Delete (§7.3)
 
     /// An idle delete: hold it in the 5 s undo window. The RPC is NOT fired;
-    /// it fires from `commitExpiredDeletes` only after the toast expires.
+    /// it fires from `commitExpiredDeletes` only after the toast expires. The
+    /// toast's `.task(id:)` is the SOLE timing owner (BET-752 task 6) — there
+    /// is deliberately no timer here, so a second delete during a live toast
+    /// restarts the view's task and the counts stay coherent.
     func beginIdleDelete(session: String, index: Int) {
         let id = SessionPinID.window(session, index: index)
         cancelPendingDelete(id)
@@ -242,11 +244,6 @@ final class SessionListStore: ObservableObject {
             startedAt: Date()
         )
         pendingDeletes[id] = pending
-        let timer = Timer(timeInterval: PendingDelete.undoWindow, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.commitPendingDelete(id) }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        undoTimers[id] = timer
     }
 
     /// Undo an idle delete within its undo window.
@@ -255,22 +252,23 @@ final class SessionListStore: ObservableObject {
     }
 
     /// Fire the RPC for anything still pending whose window has expired.
-    /// Called by the view when the undo toast is auto-dismissed.
-    func commitExpiredDeletes(now: Date = Date()) {
+    /// Called by the undo toast's `.task(id:)` when it times out. Returns
+    /// whether anything was committed (so the caller can gate a confirm haptic).
+    @discardableResult
+    func commitExpiredDeletes(now: Date = Date()) -> Bool {
         let expired = pendingDeletes.values.filter { $0.expired(now: now) }.map(\.pinID)
-        for id in expired { commitPendingDelete(id) }
+        var committed = false
+        for id in expired where commitPendingDelete(id) { committed = true }
+        return committed
     }
 
     private func cancelPendingDelete(_ id: String) {
         pendingDeletes.removeValue(forKey: id)
-        undoTimers[id]?.invalidate()
-        undoTimers[id] = nil
     }
 
-    private func commitPendingDelete(_ id: String) {
-        guard let pending = pendingDeletes.removeValue(forKey: id) else { return }
-        undoTimers[id]?.invalidate()
-        undoTimers[id] = nil
+    @discardableResult
+    private func commitPendingDelete(_ id: String) -> Bool {
+        guard let pending = pendingDeletes.removeValue(forKey: id) else { return false }
         switch pending.target {
         case .window(let session, let index):
             let chatID = chatSessionID(session: session, index: index)
@@ -289,6 +287,7 @@ final class SessionListStore: ObservableObject {
                 }
             }
         }
+        return true
     }
 
     /// The opencode session id for a window, if any (for chat deletes).
@@ -339,8 +338,6 @@ final class SessionListStore: ObservableObject {
         loadError = nil
         loadedOnce = false
         pendingDeletes = [:]
-        for (_, timer) in undoTimers { timer.invalidate() }
-        undoTimers = [:]
         runningSince = [:]
         attentionSessions = []
         modelLabels = [:]
