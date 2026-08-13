@@ -71,6 +71,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const status = useStore((s) => s.status);
   const jobs = useStore((s) => s.jobs);
   const setActive = useStore((s) => s.setActive);
+  const storeActivateWindow = useStore((s) => s.activateWindow);
   const refresh = useStore((s) => s.refresh);
   const backgroundSyncing = useStore((s) => s.backgroundSyncing);
   const pinnedWindows = useStore((s) => s.pinnedWindows);
@@ -152,16 +153,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     });
 
   const activateWindow = async (proj: Project, idx: number) => {
-    setActive(proj.tmuxSession, idx);
+    // Preserve this site's existing guard: only tell the box to select the
+    // window when the project is ALREADY active (its PTY is mounted). When
+    // switching into a different project, setActive alone lands the store
+    // view; the box PTY is (re)spawned on project switch.
     if (proj.tmuxSession === activeProjectName) {
       try {
-        await window.api.tmuxSelectWindow({
-          sessionName: proj.tmuxSession,
-          windowIndex: idx,
-        });
+        await storeActivateWindow(proj.tmuxSession, idx);
       } catch (e) {
         showError(e);
       }
+    } else {
+      setActive(proj.tmuxSession, idx);
     }
   };
 

@@ -112,6 +112,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   if (!draft) return null;
   const refresh = useStore((s) => s.refresh);
   const setActive = useStore((s) => s.setActive);
+  const activateWindow = useStore((s) => s.activateWindow);
   const applyProjects = useStore((s) => s.applyProjects);
   const updateDraft = useStore((s) => s.updateDraft);
   const dismissDraft = useStore((s) => s.dismissDraft);
@@ -302,11 +303,14 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       if (sessionId) {
         setAutoSubmitPrompt({ sid: sessionId, text, model: draft.model ?? undefined });
       }
-      setActive(sessionName, win?.index ?? createdNorm.windowIndex);
+      // Navigate to the new session (setActive + box-side select-window so the
+      // PTY follows) — one store action shared with the sidebar/jump flows.
       if (win) {
         try {
-          await window.api.tmuxSelectWindow({ sessionName, windowIndex: win.index });
+          await activateWindow(sessionName, win.index);
         } catch { /* non-fatal */ }
+      } else {
+        setActive(sessionName, createdNorm.windowIndex);
       }
       // Abandon the draft — it is now a real session.
       dismissDraft(draftId);
@@ -372,14 +376,12 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           : proj?.windows.find((w) => w.active) ?? proj?.windows[0];
       const sessionId = createdNorm.sessionId ?? win?.opencodeSessionId ?? null;
 
-      setActive(sessionName, win?.index ?? createdNorm.windowIndex);
       if (win) {
         try {
-          await window.api.tmuxSelectWindow({
-            sessionName,
-            windowIndex: win.index,
-          });
+          await activateWindow(sessionName, win.index);
         } catch { /* non-fatal */ }
+      } else {
+        setActive(sessionName, createdNorm.windowIndex);
       }
 
       if (sessionId && text) {

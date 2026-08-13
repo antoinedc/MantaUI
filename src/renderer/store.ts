@@ -499,6 +499,15 @@ type State = {
   configSnapshot: () => Partial<AppConfig>;
   // ----- mutations -----
   setActive: (projectName: string, windowIndex?: number) => void;
+  // Activate a tmux window locally AND on the box (so the PTY follows). Shared
+  // by the sidebar, the ⌥⌘↑↓ / ⌘1..9 / voice-switch / ⌘F jump, the new-session
+  // flow, and the fan-out flow — every call site used to repeat this
+  // setActive + tmuxSelectWindow pair. `setActive` updates the store; the box
+  // select focuses the window (making the PTY follow). Returns the
+  // tmuxSelectWindow promise so each caller keeps its own error handling (they
+  // differ). Call sites with extra behavior (e.g. Sidebar's only-select-when-
+  // already-active guard) keep it around the call, not here.
+  activateWindow: (projectName: string, windowIndex: number) => Promise<void>;
   // New-session draft lifecycle (see NewSessionDraft). createDraft makes +
   // activates a fresh draft; updateDraft patches one (typed prompt, folder,
   // model…); dismissDraft abandons it (committed or cancelled) and re-points
@@ -745,6 +754,14 @@ export const useStore = create<State>((set, get) => ({
         status,
         recentWindows,
       };
+    });
+  },
+
+  activateWindow: (projectName, windowIndex) => {
+    get().setActive(projectName, windowIndex);
+    return window.api.tmuxSelectWindow({
+      sessionName: projectName,
+      windowIndex,
     });
   },
 
