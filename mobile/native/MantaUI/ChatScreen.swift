@@ -22,6 +22,20 @@ import MessagingUI
 // the generated tokens.
 // ===========================================================================
 
+// ===========================================================================
+// BET-752 task 3 — which region the session-loading branch renders.
+//
+// The transcript skeleton (`ChatLoadingSkeleton`) — NOT the full-screen mark
+// loader (`MantaLoader`) — is the loading state. Kept as a pure decision at
+// file scope so a unit test can pin the wiring without rendering a SwiftUI
+// hierarchy.
+// ===========================================================================
+enum ChatLoadingMode { case skeleton; case content }
+
+func chatLoadingMode(isLoading: Bool) -> ChatLoadingMode {
+    isLoading ? .skeleton : .content
+}
+
 /// The BET-627 overflow-sheet items that present a card of their own.
 ///
 /// Attaching is NOT one of them: the composer carries its own paperclip, so a
@@ -215,7 +229,7 @@ private struct ChatScreenContent: View {
     /// no layout shift (BET-752 task 3, reconnecting the built skeleton).
     @ViewBuilder
     private var content: some View {
-        if store.loading {
+        if chatLoadingMode(isLoading: store.loading) == .skeleton {
             ChatLoadingSkeleton()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(tokens.canvas.ignoresSafeArea())

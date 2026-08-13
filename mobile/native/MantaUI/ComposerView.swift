@@ -743,7 +743,7 @@ struct ComposerView: View {
 
     /// Pure: the text + caret location that result from inserting `string` into
     /// `current` at the given selection. Testable without a UITextView.
-    static func inserting(
+    nonisolated static func inserting(
         _ string: String,
         into current: String,
         at selected: NSRange

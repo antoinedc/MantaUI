@@ -337,12 +337,14 @@ final class MantaEventStreamRouterTests: XCTestCase {
 
     /// The live tail is joined in ARRIVAL order. A dictionary's values are
     /// unordered, so the previous shape could shuffle a multi-part answer.
+    /// Separator is a PARAGRAPH break (`\n\n`) so step-narrations don't render
+    /// merged and then pop on the canonical refetch (BET-752 task 6).
     func testLiveTextKeepsArrivalOrder() throws {
         var state = MantaStreamRouter.applying(try flush("msg_2", "part_1", "first"), to: nil)
         state = MantaStreamRouter.applying(try flush("msg_2", "part_2", "second"), to: state)
         state = MantaStreamRouter.applying(try flush("msg_2", "part_3", "third"), to: state)
 
-        XCTAssertEqual(state.liveText, "first\nsecond\nthird")
+        XCTAssertEqual(state.liveText, "first\n\nsecond\n\nthird")
     }
 
     func testReasoningIsNotPartOfTheLiveTail() throws {

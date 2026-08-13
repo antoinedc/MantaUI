@@ -421,6 +421,76 @@ final class ChatStreamMergeTests: XCTestCase {
                        "leaving the session must clear the queue")
     }
 
+    // MARK: - Once-per-turn completion signal (BET-752 task 5)
+
+    /// A multi-MESSAGE turn emits one `turnComplete` frame per `message.updated`,
+    /// so the raw edge flaps several times — but the store must surface exactly
+    /// ONE completion haptic signal per TURN.
+    @MainActor
+    func testOneMultiMessageTurnEmitsOneCompletion() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+
+        // A genuine user turn starts via `send()` (re-arms the once-per-turn
+        // latch).
+        let ok = await store.send(text: "hello", attachments: [], model: nil)
+        XCTAssertTrue(ok)
+
+        // Message A streams and completes.
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m1","partID":"p1","field":"text","text":"first "}}"#)
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await Task.yield()
+        XCTAssertEqual(store.turnCompletionCount, 1, "the first message completion of a turn must count once")
+
+        // Message B — a SECOND completion edge of the SAME turn must not count
+        // again (this is the double-fire being fixed).
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m2","partID":"p2","field":"text","text":"second"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":false,"running":true}}"#)
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await Task.yield()
+        XCTAssertEqual(store.turnCompletionCount, 1,
+                       "a second message completion of the SAME turn must not emit another haptic")
+
+        // A NEW user turn re-arms and counts its own completion once.
+        _ = await store.send(text: "again", attachments: [], model: nil)
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await Task.yield()
+        XCTAssertEqual(store.turnCompletionCount, 2, "a new user turn must count exactly one completion")
+    }
+
+    /// A session opened MID-turn (no `send()` on this device) still counts its
+    /// first completion, because the latch starts armed.
+    @MainActor
+    func testTurnCompletionCountsFirstCompletionOnMidTurnOpen() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        await Task.yield()
+        stream.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses","payload":{"messageID":"m1","partID":"p1","field":"text","text":"hi"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses","payload":{"complete":true,"running":false}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(store.turnCompletionCount, 1, "mid-turn open must count the in-flight turn's completion")
+    }
+
     // MARK: - Mock transport
 
     /// Poll the main actor until `condition` holds (or ~2s elapses). The drain

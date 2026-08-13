@@ -80,6 +80,7 @@
 		E0DE29696DA12A52BE7FCD0D /* TerminalModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3C09F5D2FEAE01B1C9CF1E /* TerminalModels.swift */; };
 		E12FC0E7284E2760AD3A6C4C /* ChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 436675A65BF149932C1EADE0 /* ChatScreen.swift */; };
 		E394FF8B718A3D7871EC749C /* ChatModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4098461F579869804595B0A3 /* ChatModelCatalog.swift */; };
+		E8B921F11FB02F147C910B32 /* PolishTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B82B782F73475FDD71F6D6B5 /* PolishTests.swift */; };
 		EAA66561F9150E1E2D4FBA4A /* MantaReconnectController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 772D1B80A35F4493F828ACC2 /* MantaReconnectController.swift */; };
 		ECB0360A8A26279B6EEF955F /* MantaUIOverflowCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF0199856D7E4C0B0D2595C /* MantaUIOverflowCaptureUITests.swift */; };
 		ED03A3C1AAFA1094A92A9ECA /* MantaDeepLinkUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B7A1F140660F9AC7AF07E00 /* MantaDeepLinkUITests.swift */; };
@@ -174,6 +175,7 @@
 		ABF1AB00CC95EA99A4EF537B /* MantaSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsStore.swift; sourceTree = "<group>"; };
 		AD55034506C4DF218AD7300E /* MantaPairingDriverUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingDriverUITests.swift; sourceTree = "<group>"; };
 		B230F69A60CD3DBC416612B0 /* manta-logo.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "manta-logo.png"; sourceTree = "<group>"; };
+		B82B782F73475FDD71F6D6B5 /* PolishTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolishTests.swift; sourceTree = "<group>"; };
 		B928337494F2C80D8ACB126C /* SessionCreateSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreateSheet.swift; sourceTree = "<group>"; };
 		BA460F4E709501AE6C65D08A /* ChatOverflowSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatOverflowSheet.swift; sourceTree = "<group>"; };
 		C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultilineTextView.swift; sourceTree = "<group>"; };
@@ -248,6 +250,7 @@
 				EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */,
 				57FFB984A951D5C7BD8D02F9 /* MantaSettingsTests.swift */,
 				9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */,
+				B82B782F73475FDD71F6D6B5 /* PolishTests.swift */,
 				9803742B79E4302F8813EFCC /* SessionModelsTests.swift */,
 				DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */,
 			);
@@ -550,6 +553,7 @@
 				7C41CAE9FE6D1E06DEC10142 /* MantaResourceCardModelsTests.swift in Sources */,
 				8A6656EBBD6AEC1B5CE7D0D6 /* MantaSettingsTests.swift in Sources */,
 				B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */,
+				E8B921F11FB02F147C910B32 /* PolishTests.swift in Sources */,
 				E013C537E1082259B979DF35 /* SessionModelsTests.swift in Sources */,
 				C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */,
 			);
