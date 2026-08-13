@@ -69,6 +69,7 @@ import {
   isApprovalCoveredByAlways,
   shortModelName,
   isFastModelId,
+  parseModelRef,
   baseModelId,
   fastModelId,
   hideFastSiblingGroups,
@@ -2047,6 +2048,43 @@ describe("formatJobSummary", () => {
     expect(
       formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
     ).toBe("fix-login · 0 files changed");
+  });
+});
+
+// ===== parseModelRef (BET-801) =====
+
+describe("parseModelRef", () => {
+  it("splits a canonical providerID/modelID ref", () => {
+    expect(parseModelRef("anthropic/claude-sonnet-4-6")).toEqual({
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    });
+  });
+
+  it("splits on the FIRST slash only when the modelID contains a slash", () => {
+    expect(parseModelRef("openai/gpt-4o/mini")).toEqual({
+      providerID: "openai",
+      modelID: "gpt-4o/mini",
+    });
+  });
+
+  it("returns null for absent or empty refs", () => {
+    expect(parseModelRef(null)).toBeNull();
+    expect(parseModelRef(undefined)).toBeNull();
+    expect(parseModelRef("")).toBeNull();
+  });
+
+  it("returns null for a ref with no slash", () => {
+    expect(parseModelRef("anthropic")).toBeNull();
+  });
+
+  it("returns null when either side is empty", () => {
+    expect(parseModelRef("/claude")).toBeNull();
+    expect(parseModelRef("anthropic/")).toBeNull();
+  });
+
+  it("returns null for a non-string (the legacy object shape on disk)", () => {
+    expect(parseModelRef({ providerID: "anthropic", modelID: "claude" } as unknown as string)).toBeNull();
   });
 });
 

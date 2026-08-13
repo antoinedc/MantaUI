@@ -18,6 +18,8 @@ import {
   MAX_RUNNING_JOBS,
   createDelegateEngine,
   adoptSubagentJob,
+  effectiveModelFromMessages,
+  tickActivity,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -629,13 +631,28 @@ function backgroundPart(overrides = {}) {
 
 test("observeEvent adopts a running background:true subagent from a message.part.updated", async () => {
   const a = adoptHarness();
-  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart() } };
+  const part = backgroundPart({
+    state: {
+      ...backgroundPart().state,
+      metadata: {
+        sessionId: "ses_child",
+        background: true,
+        model: { providerID: "anthropic", modelID: "claude-haiku-4-5" },
+      },
+    },
+  });
+  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part } };
   await observeEvent(evt, a.deps, new Map());
   assert.equal(a.jobs.length, 1);
   assert.equal(a.jobs[0].childSessionID, "ses_child");
   assert.equal(a.jobs[0].origin, "subagent");
   assert.equal(a.jobs[0].status, "running");
   assert.equal(a.newWindowCalls[0].existingSessionId, "ses_child");
+  assert.equal(
+    a.jobs[0].model,
+    "anthropic/claude-haiku-4-5",
+    "adoption persists model as the canonical string, never an object",
+  );
 });
 
 test("observeEvent adopts nothing when background is absent from the part", async () => {
@@ -657,7 +674,68 @@ test("observeEvent adopts nothing for a completed background task", async () => 
 });
 
 // ----------------------------------------------------------------------------
-// BET-773: the engine serialises observeEvent per session. opencode emits
+// effectiveModelFromMessages + tickActivity model stamping (BET-801)
+// ----------------------------------------------------------------------------
+
+function modelMessage(providerID, modelID) {
+  return { info: { providerID, modelID }, parts: [] };
+}
+
+test("effectiveModelFromMessages returns the LAST model-bearing message's providerID/modelID", () => {
+  const messages = [
+    modelMessage("anthropic", "claude-opus-5"),
+    { info: {}, parts: [] },
+    modelMessage("anthropic", "claude-sonnet-4-6"),
+    modelMessage("deepseek", "deepseek-chat"),
+  ];
+  assert.equal(effectiveModelFromMessages(messages), "deepseek/deepseek-chat");
+});
+
+test("effectiveModelFromMessages returns null for [], non-array, and messages without a model", () => {
+  assert.equal(effectiveModelFromMessages([]), null);
+  assert.equal(effectiveModelFromMessages(undefined), null);
+  assert.equal(effectiveModelFromMessages("nope"), null);
+  assert.equal(effectiveModelFromMessages(null), null);
+  const noModel = [
+    { info: { role: "user" }, parts: [] },
+    { info: { providerID: "anthropic" }, parts: [] }, // only providerID
+  ];
+  assert.equal(effectiveModelFromMessages(noModel), null);
+});
+
+test("tickActivity stamps job.model from the transcript and publishes delegate.updated exactly once", async () => {
+  const running = runningJob(0);
+  running.model = null;
+  running.activity = null;
+  const h = harness([running]);
+  h.deps.listMessages = async () => [
+    modelMessage("anthropic", "claude-opus-5"),
+    modelMessage("anthropic", "claude-sonnet-4-6"), // last → stripes model
+  ];
+  await tickActivity(h.deps);
+  assert.equal(h.jobs[0].model, "anthropic/claude-sonnet-4-6");
+  const modelPublishes = h.published.filter((p) => p.kind === "delegate.updated");
+  assert.equal(modelPublishes.length, 1, "single delegate.updated for a both-changed tick");
+  assert.equal(modelPublishes[0].payload.id, running.id);
+  assert.equal(modelPublishes[0].payload.status, "running");
+  assert.notEqual(h.jobs[0].activity, null, "activity changed too in this tick");
+});
+
+test("tickActivity does NOT publish when neither activity nor model changed", async () => {
+  const running = runningJob(0);
+  running.model = null;
+  running.activity = null;
+  const h = harness([running]);
+  h.deps.listMessages = async () => [modelMessage("anthropic", "claude-sonnet-4-6")];
+  await tickActivity(h.deps);
+  assert.equal(h.published.length, 1, "first tick stamps model + activity");
+  h.published.length = 0;
+  await tickActivity(h.deps);
+  assert.equal(h.published.length, 0, "second tick with nothing changed does not publish");
+  assert.equal(h.jobs[0].model, "anthropic/claude-sonnet-4-6");
+});
+
+
 // several events per turn boundary and the pump calls observeEvent without
 // awaiting it, so two invocations are in flight at once. Without per-session
 // serialisation each read-store -> decide -> write-store sequence interleaves

@@ -623,7 +623,7 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
             childSessionID: info.childSessionId,
             name: info.description || info.agent,
             prompt: info.prompt,
-            model: info.model,
+            model: info.model ? `${info.model.providerID}/${info.model.modelID}` : null,
           },
           deps,
         );
@@ -891,6 +891,28 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
 // (startActivityPoller) retains the inFlight re-entrancy guard + timer.unref.
 // ---------------------------------------------------------------------------
 
+/**
+ * Last message that names a model → "providerID/modelID", else null. The
+ * messages are opencode transcript entries whose `info` carries optional
+ * providerID/modelID. Guarded for a non-array argument and for messages
+ * with no `info`. Used by tickActivity to stamp the effective model on a job
+ * record (the model the child actually used, observed from its own messages).
+ */
+export function effectiveModelFromMessages(messages) {
+  if (!Array.isArray(messages)) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const info = messages[i]?.info;
+    if (
+      info &&
+      typeof info.providerID === "string" &&
+      typeof info.modelID === "string"
+    ) {
+      return `${info.providerID}/${info.modelID}`;
+    }
+  }
+  return null;
+}
+
 export async function tickActivity(deps) {
   const { load = loadJobs, save = saveJobs, publish, listMessages, now = () => Date.now() } = deps;
   // Under the jobs-store lock: the read-compare-write of `activity` is atomic,
@@ -903,15 +925,25 @@ export async function tickActivity(deps) {
       jobs.map(async (job) => {
         if (job.status !== "running") return;
         let activity = null;
+        let activityChanged = false;
+        let modelChanged = false;
         try {
           const messages = listMessages ? await listMessages(job.childSessionID) : [];
           activity = describeChatActivity(summarizeTranscript(messages));
+          const model = effectiveModelFromMessages(messages);
+          if (model !== null && model !== job.model) {
+            job.model = model;
+            modelChanged = true;
+          }
         } catch (e) {
           console.warn(`[delegate] activity poll failed for ${job.id}:`, e?.message ?? e);
           return;
         }
         if (activity !== job.activity) {
           job.activity = activity;
+          activityChanged = true;
+        }
+        if (activityChanged || modelChanged) {
           changed = true;
           publish?.({
             kind: "delegate.updated",

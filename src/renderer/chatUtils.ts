@@ -1541,6 +1541,20 @@ export function isJobRow(
 // Used by the jobs management card for terminal (done/failed/stopped) rows.
 // The no-worktree case (job ran in the parent cwd, worktree null) renders
 // without a branch. `filesChanged` null/undefined → "0 files".
+// A job record's `model` is the canonical "providerID/modelID" ref. This
+// splits it on the FIRST "/" only — model ids contain slashes, provider ids
+// do not. Returns null for absent/malformed input and for any non-string
+// (defends against a legacy object shape persisted on disk, so the job footer
+// renders plain rather than crashing).
+export function parseModelRef(
+  ref: string | null | undefined,
+): { providerID: string; modelID: string } | null {
+  if (typeof ref !== "string" || ref.length === 0) return null;
+  const idx = ref.indexOf("/");
+  if (idx < 1 || idx === ref.length - 1) return null;
+  return { providerID: ref.slice(0, idx), modelID: ref.slice(idx + 1) };
+}
+
 export function formatJobSummary(job: {
   branch?: string | null;
   filesChanged?: number | null;
