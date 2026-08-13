@@ -245,6 +245,58 @@ from the originating opencode session. Use `plugin_status(id)` only when the
 user explicitly asks for mid-run progress, or after completion to inspect
 the log tail.
 
+## MantaUI forge rules
+
+You have four `forge_rules_*` tools for authoring the box-side rules that
+turn an inbound forge webhook (today: GitHub) into an action. A rules file is
+one `.yaml` per repo, written by you via these tools, stored **on the box** at
+`~/.manta/forge-rules/<host>/<owner>/<repo>.yaml` — never in the repository.
+That placement is the security property: nothing a pull request can edit ever
+reaches what runs on the box, and it replaces a per-repo trust dialog with one
+global toggle (Settings → Extensions → "Run forge rules", default off).
+
+The grammar is deliberately tiny — one `on:` block, three verbs, nothing else:
+
+```yaml
+on:
+  issue.labeled:
+    label: manta
+    do: delegate
+    prompt: "Complete {{url}}. Open a draft PR."
+  checks.failed:
+    branch: mine
+    do: notify
+  review.requested:
+    do: inbox
+```
+
+- Events: `issue.labeled`, `checks.failed`, `review.requested`. No others.
+- Verbs (`do:`): `delegate` (start a background job in its own worktree),
+  `notify` (ping a human), `inbox` (surface in the work inbox).
+- Conditions: `issue.labeled` may carry `label:`; `checks.failed` may carry
+  `branch:`; a rule with no condition fires for every event of its type.
+- `prompt` is only on `delegate`; the only placeholders are `{{url}}` and
+  `{{title}}`. No expressions, no scripting, no shell.
+
+Unknown keys fail validation by name, an unknown verb is rejected, and a stray
+`prompt:` on a non-delegate rule is an error — typo protection matters more than
+flexibility in a file that can start an agent.
+
+- `forge_rules_save(repo, yaml)` — validate, write `~/.manta/forge-rules/…`,
+  register/update the per-repo webhook, hot-reload. Returns "saved and valid"
+  or the validator's errors verbatim (nothing written on an error).
+- `forge_rules_get(repo)` — the current source, for editing.
+- `forge_rules_list()` — every repo with rules, **including INVALID ones with
+  their reason** (a rules file that silently fails to load is worse than one
+  that loudly refuses). Use this to see what's configured and what's broken.
+- `forge_rules_docs()` — the full authoring guide.
+
+Forge events are verified (HMAC over the raw body, constant-time), rate-limited,
+redelivery-deduplicated by `X-GitHub-Delivery`, and filtered by event type in
+the shared webhook ingest — a redelivered event never acts twice. The subsystem
+is gated by the one global toggle; with it off, nothing registers, nothing
+ingests, nothing dispatches.
+
 ## MantaUI background delegation
 
 You have three ways to farm out work, and the axis that separates the last

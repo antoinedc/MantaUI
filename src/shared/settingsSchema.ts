@@ -260,6 +260,22 @@ export const SETTINGS: SettingEntry[] = [
     default: false,
   },
 
+  // ----- forge rules (BET-797) -----
+  // Box-side: a box config key, so it rides the generic configGet/configUpdate
+  // channels and is read by the box server to gate the forge webhook subsystem
+  // (src/server/forgeRules.mjs). Default off — the whole subsystem is dormant
+  // until this is flipped.
+  {
+    id: "forgeRulesEnabled",
+    section: "extensions",
+    label: "Run forge rules",
+    help: "Lets the box register per-repo forge webhooks (GitHub → your box) and ingest them. Rules are AI-authored, live on the box at ~/.manta/forge-rules/, and never travel with a repository. Off by default.",
+    control: "toggle",
+    configKey: "forgeRulesEnabled",
+    platform: "both",
+    default: false,
+  },
+
   // ----- voice (Groq STT) -----
   {
     id: "groqApiKey",

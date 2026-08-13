@@ -87,6 +87,12 @@ import {
 } from "./webhooks.mjs";
 import { putRegistry as pluginsPutRegistry, getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import {
+  getRules as forgeGetRules,
+  listRules as forgeListRules,
+  saveRules as forgeSaveRules,
+  forgeIngest,
+} from "./forgeRules.mjs";
+import {
   ensureAuth,
   createAuthEngine,
   isLocalDirectRequest,
@@ -281,6 +287,16 @@ const webhookEngine = createWebhookEngine({
   sendPrompt: (args) => oc.sendPrompt(args),
   delivery: promptDelivery,
   publish: (evt) => bus.publish(evt),
+  // Forge hooks route to the forge ingest path instead of waking a session.
+  // Ingest verifies + dedupes + filters (all in webhooks.mjs) then RECORDS the
+  // event — this issue does NOT act on events (the rules engine is the next
+  // issue). With the global toggle off, nothing routes (no forge hooks exist
+  // anyway — registration is gated; this check is belt-and-suspenders).
+  forgeIngest: async (args) => {
+    const cfg = await local.configGet();
+    if (cfg?.forgeRulesEnabled !== true) return null;
+    return forgeIngest(args);
+  },
 });
 
 // Background-job engine (BET-378): durable jobs that run in their own
@@ -1518,6 +1534,86 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  // ---------- Forge rules (BET-797) ----------
+  // POST   /api/forge-rules        body {repo, yaml} → {ok, webhook?} on valid,
+  //                               {ok:false, errors:[{path,message}...]} (nothing written)
+  //                               on a validation failure; {ok:false, error} when disabled
+  //                               or the repo identity is unsafe.
+  // GET    /api/forge-rules?repo=  → {yaml} for one repo | {error:"not found"}
+  // GET    /api/forge-rules        → {rules:[{repoKey, valid, error?, yaml}]} — includes
+  //                               INVALID rule files with their reason (a rules file that
+  //                               silently fails to load is worse than one that loudly refuses).
+  // GET    /api/forge-rules/docs   → {docs:"<markdown>"} from docs/forge-rules-authoring.md
+  //
+  // Driven by the forge_rules opencode tool (docs/opencode-tools/forge-rules.ts). The
+  // store lives on the box (~/.manta/forge-rules/) and is gated by the global
+  // AppConfig.forgeRulesEnabled toggle — with it off, no registration, no ingest
+  // routing, no dispatch.
+  if (path === "/api/forge-rules") {
+    try {
+      const cfg = await local.configGet();
+      const enabled = cfg?.forgeRulesEnabled === true;
+      if (req.method === "POST") {
+        if (!enabled) {
+          respondJson(res, 403, { error: "forge rules are disabled" });
+          return;
+        }
+        const body = await readJsonBody(req);
+        const res2 = await forgeSaveRules(
+          { repo: body?.repo, yaml: body?.yaml },
+          { enabled: () => cfg?.forgeRulesEnabled === true },
+        );
+        if (res2.ok !== true) {
+          if (res2.errors) {
+            respondJson(res, 400, { errors: res2.errors });
+          } else {
+            respondJson(res, 400, { error: res2.error ?? "invalid rules" });
+          }
+          return;
+        }
+        respondJson(res, 200, { ok: true, repo: res2.repoKey, webhook: res2.webhook });
+        return;
+      }
+      if (req.method === "GET") {
+        const repo = url.searchParams.get("repo");
+        if (repo) {
+          const g = await forgeGetRules(repo);
+          if (g.ok) respondJson(res, 200, { repo, yaml: g.yaml });
+          else respondJson(res, 404, { error: g.error ?? "not found" });
+          return;
+        }
+        const rules = await forgeListRules();
+        respondJson(res, 200, { rules });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // GET /api/forge-rules/docs — the authoring guide, resolved relative to the
+  // server module dir (PROJECT_ROOT), never process.cwd().
+  if (path === "/api/forge-rules/docs") {
+    try {
+      if (req.method !== "GET") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const docsPath = join(PROJECT_ROOT, "docs", "forge-rules-authoring.md");
+      const text = await readFile(docsPath, "utf-8");
+      respondJson(res, 200, { docs: text });
+    } catch (e) {
+      respondJson(
+        res,
+        500,
+        { error: `failed to read docs/forge-rules-authoring.md: ${String(e?.message ?? e)}` },
+      );
+    }
+    return;
+  }
+
   // ---------- Inbound webhooks (management) ----------
   // POST   /api/webhook        body {label, instructions, sessionID, directory,
   //                            unsigned?} → {id, url, secret} (secret returned ONCE)
@@ -1583,11 +1679,12 @@ const handleRequest = async (req, res) => {
     const token = path.slice("/hook/".length);
     try {
       const rawBody = await readRawBody(req);
-      const signatureHeader = req.headers["x-manta-signature"];
+      // Pass the raw headers so a forge hook can verify via
+      // X-Hub-Signature-256 (GitHub) as well as X-Manta-Signature.
       const result = await webhookEngine.deliver({
         token,
         rawBody,
-        signatureHeader: typeof signatureHeader === "string" ? signatureHeader : "",
+        headers: req.headers,
       });
       res.writeHead(result.status, { "content-type": "application/json" });
       res.end(

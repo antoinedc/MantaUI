@@ -7,11 +7,15 @@ import { rm } from "node:fs/promises";
 import {
   isValidToken,
   verifySignature,
+  resolveSignature,
+  isRedelivery,
+  isEventFiltered,
   formatWebhookTurn,
   createRateLimiter,
   toMeta,
   deliveryUrl,
   createHook,
+  upsertForgeHook,
   listHooks,
   deleteHook,
   deliverWebhook,
@@ -65,6 +69,37 @@ test("verifySignature rejects missing / malformed headers", () => {
   assert.equal(verifySignature("whsec_x", body, "sha256="), false);
   assert.equal(verifySignature("whsec_x", body, "sha256=zzzz"), false); // non-hex
   assert.equal(verifySignature("", body, sign("", body)), false); // empty secret
+});
+
+// The OFFICIAL GitHub HMAC test vector (BET-797). Secret "It's a Secret to
+// Everybody", raw payload "Hello, World!" → sha256=757107ea… This pins the
+// exact wire scheme the forge uses, so a GitHub redelivery to the box's own
+// hostname is verified against the identical bytes.
+test("verifySignature matches the official GitHub HMAC test vector", () => {
+  const header =
+    "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
+  assert.equal(verifySignature("It's a Secret to Everybody", "Hello, World!", header), true);
+  assert.equal(verifySignature("It's a Secret to Everybody", "Hello, World", header), false);
+});
+
+test("resolveSignature accepts X-Hub-Signature-256 for a github hook", () => {
+  const body = '{"action":"labeled"}';
+  const headers = { "x-hub-signature-256": sign("whsec_g", body) };
+  assert.equal(resolveSignature("github", "whsec_g", body, headers), true);
+});
+
+test("resolveSignature accepts X-Manta-Signature for a github hook too", () => {
+  const body = '{"action":"labeled"}';
+  const headers = { "x-manta-signature": sign("whsec_g", body) };
+  assert.equal(resolveSignature("github", "whsec_g", body, headers), true);
+});
+
+test("resolveSignature rejects a bad header and unknown providers (never coerced)", () => {
+  const body = "x";
+  const headers = { "x-hub-signature-256": "sha256=deadbeef" };
+  assert.equal(resolveSignature("github", "whsec_g", body, headers), false);
+  // Unknown provider falls back to manta semantics (never weakens to unsigned).
+  assert.equal(resolveSignature("bogus", "whsec_g", body, headers), false);
 });
 
 // ----------------------------------------------------------------------------
@@ -182,6 +217,33 @@ test("createHook rejects missing sessionID / label", async () => {
   assert.equal((await createHook({ sessionID: "s" }, { load, save })).ok, false);
 });
 
+test("upsertForgeHook persists a github hook and refreshes it on re-save", async () => {
+  const path = tmpStore();
+  const load = () => loadHooks(path);
+  const save = (h) => saveHooks(h, path);
+  try {
+    const first = await upsertForgeHook(
+      { repoKey: "github.com/o/r", label: "github.com/o/r", token: "a".repeat(32), secret: "s1", events: ["issues"] },
+      { load, save },
+    );
+    assert.equal(first.provider, "github");
+    assert.equal(first.secret, "s1");
+    assert.match(first.url, /\/hook\/[0-9a-f]{32}$/);
+
+    // Re-save for the same repo refreshes secret+events, does NOT duplicate.
+    const second = await upsertForgeHook(
+      { repoKey: "github.com/o/r", label: "github.com/o/r", token: "a".repeat(32), secret: "s2", events: ["issues", "pull_request"] },
+      { load, save },
+    );
+    assert.equal(second.secret, "s2");
+    assert.equal(second.events.length, 2);
+    const all = await loadHooks(path);
+    assert.equal(all.filter((h) => h.repoKey === "github.com/o/r").length, 1);
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
 // ----------------------------------------------------------------------------
 // deliverWebhook — status codes + send/defer
 // ----------------------------------------------------------------------------
@@ -227,6 +289,103 @@ test("deliverWebhook returns 401 on bad signature, never sends", async () => {
   );
   assert.equal(res.status, 401);
   assert.equal(sent, 0);
+});
+
+test("deliverWebhook returns 429 (rate limit) BEFORE signature verification", async () => {
+  let sent = 0;
+  // Rate limiter exhausted AND a bad signature — the 429 must win, proving the
+  // flood guard fires before the HMAC cost (BET-797).
+  const res = await deliverWebhook(
+    { token: "a".repeat(32), rawBody: '{"a":1}', headers: { "x-hub-signature-256": "sha256=deadbeef" } },
+    {
+      load: async () => [fakeHook({ provider: "github" })],
+      save: async () => {},
+      sendPrompt: async () => { sent++; },
+      take: () => false,
+    },
+  );
+  assert.equal(res.status, 429);
+  assert.equal(sent, 0);
+});
+
+test("deliverWebhook verifies a github hook via X-Hub-Signature-256 and routes to forgeIngest", async () => {
+  const body = '{"action":"labeled","issue":1}';
+  let ingested = null;
+  let sent = 0;
+  const res = await deliverWebhook(
+    { token: "a".repeat(32), rawBody: body, headers: { "x-hub-signature-256": sign("whsec_test", body) } },
+    {
+      load: async () => [fakeHook({ provider: "github" })],
+      save: async () => {},
+      sendPrompt: async () => { sent++; },
+      forgeIngest: async (args) => { ingested = args; },
+    },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(sent, 0); // a forge hook never wakes a session
+  assert.ok(ingested, "forge hook must route to forgeIngest");
+  assert.equal(ingested.hook.provider, "github");
+  assert.equal(ingested.event, undefined);
+});
+
+test("deliverWebhook dedupes a redelivered X-GitHub-Delivery (acts once)", async () => {
+  const body = '{"action":"labeled"}';
+  const signed = sign("whsec_test", body);
+  const headers = {
+    "x-hub-signature-256": signed,
+    "x-github-event": "issues",
+    "x-github-delivery": "dlv-123",
+  };
+  let ingests = 0;
+  const saved = []; // capture store mutations after each delivery
+  let hooks = [fakeHook({ provider: "github" })];
+  const deps = {
+    load: async () => hooks,
+    save: async (h) => { hooks = h; saved.push(hooks[0].seenDeliveryIds ?? []); },
+    sendPrompt: async () => {},
+    forgeIngest: async () => { ingests++; },
+  };
+  const first = await deliverWebhook({ token: "a".repeat(32), rawBody: body, headers }, deps);
+  assert.equal(first.status, 200);
+  assert.equal(ingests, 1);
+  // Redelivery: same delivery id, GitHub re-sends — ignored.
+  const second = await deliverWebhook({ token: "a".repeat(32), rawBody: body, headers }, deps);
+  assert.equal(second.status, 200);
+  assert.equal(second.deduped, true);
+  assert.equal(ingests, 1, "redelivered event must not act twice");
+  // The delivery id persisted so the second delivery saw it.
+  assert.ok(saved.at(-1)?.includes("dlv-123"));
+});
+
+test("deliverWebhook drops an event type the hook was not registered for", async () => {
+  const body = '{"something":"else"}';
+  const headers = {
+    "x-hub-signature-256": sign("whsec_test", body),
+    "x-github-event": "pull_request", // hook only registered for "issues"
+  };
+  let ingests = 0;
+  const res = await deliverWebhook(
+    { token: "a".repeat(32), rawBody: body, headers },
+    {
+      load: async () => [fakeHook({ provider: "github", events: ["issues"] })],
+      save: async () => {},
+      sendPrompt: async () => {},
+      forgeIngest: async () => { ingests++; },
+    },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(res.filtered, true);
+  assert.equal(ingests, 0, "filtered event must not reach ingest");
+});
+
+test("isRedelivery / isEventFiltered pure semantics", () => {
+  const hook = { provider: "github", seenDeliveryIds: ["d1"], events: ["issues"] };
+  assert.equal(isRedelivery(hook, "d1"), true);
+  assert.equal(isRedelivery(hook, "d2"), false);
+  assert.equal(isRedelivery({}, undefined), false);
+  assert.equal(isEventFiltered(hook, "issues"), false);
+  assert.equal(isEventFiltered(hook, "pull_request"), true);
+  assert.equal(isEventFiltered({}, "anything"), false); // no whitelist → never filters
 });
 
 test("deliverWebhook returns 429 when rate-limited, never sends", async () => {
