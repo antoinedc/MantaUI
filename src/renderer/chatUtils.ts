@@ -1656,22 +1656,16 @@ export function fuzzySessionScore(
 // Background-job nesting for one project. A job's child window (the window
 // whose opencodeSessionId === job.childSessionID) renders as an indented
 // CHILD row under its parent window (the window whose opencodeSessionId ===
-// job.parentSessionID). Only RUNNING jobs nest; terminal jobs are filtered
-// out EXCEPT when the user is currently viewing the child window (so the
-// view isn't yanked mid-read). A running job whose parent window no longer
-// exists is an "orphan" — it stays a top-level row in its project rather
-// than being dropped.
+// job.parentSessionID) whenever both windows exist.
 //
 // Returns:
 //   hidden      — child window indices that must be REMOVED from the
 //                 project's top-level window list (they render nested).
 //   children    — parent window index → ordered child window indices to
 //                 render indented under that parent row.
-//   orphans     — child window indices to render at top level (parent gone).
 export type JobNestingResult = {
   hidden: Set<number>;
   children: Map<number, number[]>;
-  orphans: number[];
 };
 
 export function computeJobNesting(
@@ -1684,11 +1678,9 @@ export function computeJobNesting(
       childSessionID: string | null;
     }
   >,
-  activeWindowIndex: number | undefined,
 ): JobNestingResult {
   const hidden = new Set<number>();
   const children = new Map<number, number[]>();
-  const orphans: number[] = [];
 
   // Index windows by opencodeSessionId for parent/child resolution.
   const byOpencodeId = new Map<string, TmuxWindow>();
@@ -1700,18 +1692,10 @@ export function computeJobNesting(
     if (!job.childSessionID) continue;
     const childWin = byOpencodeId.get(job.childSessionID);
     if (!childWin) continue; // job's window isn't in this project
-    const isRunning = job.status === "running";
-    const isViewed = activeWindowIndex === childWin.index;
-    if (!isRunning && !isViewed) continue; // terminal + not viewed → hidden from rail entirely
-
     const parentWin = job.parentSessionID
       ? byOpencodeId.get(job.parentSessionID)
       : undefined;
-    if (!parentWin) {
-      // Parent window gone → render the child at workspace (top) level.
-      orphans.push(childWin.index);
-      continue;
-    }
+    if (!parentWin) continue; // child stays top-level; parent window is gone
     hidden.add(childWin.index);
     const arr = children.get(parentWin.index) ?? [];
     arr.push(childWin.index);
@@ -1720,8 +1704,7 @@ export function computeJobNesting(
 
   // Sort children by window index for stable render order.
   for (const arr of children.values()) arr.sort((a, b) => a - b);
-  orphans.sort((a, b) => a - b);
-  return { hidden, children, orphans };
+  return { hidden, children };
 }
 
 // Does the window tree disagree with the jobs slice, so the tree needs a
@@ -1769,33 +1752,6 @@ export function shouldResyncWindowsForJobs(
     if (job.status !== "running" && present) return true;
   }
   return false;
-}
-
-// Convenience: is a given window a job child that should be nested (i.e.
-// hidden from the top-level list)? Combines isJobRow with the running/viewed
-// gate so the Sidebar's top-level filter stays a single expression.
-export function isNestedJobChild(
-  jobs: Record<
-    string,
-    { status: string; parentSessionID: string | null; childSessionID: string | null }
-  >,
-  opencodeSessionId: string | null | undefined,
-  project: Project,
-  activeWindowIndex: number | undefined,
-): boolean {
-  if (!opencodeSessionId) return false;
-  const job = jobs[opencodeSessionId];
-  if (!job) return false;
-  if (job.status === "running") {
-    // Only nested if the parent window still exists in this project.
-    return job.parentSessionID
-      ? project.windows.some((w) => w.opencodeSessionId === job.parentSessionID)
-      : false;
-  }
-  // Terminal job: nested only while the user is viewing it.
-  return activeWindowIndex !== undefined && project.windows.some(
-    (w) => w.opencodeSessionId === opencodeSessionId && w.index === activeWindowIndex,
-  );
 }
 
 // BET-418 §A5: conservative glob-cover check. An `always` pattern covers a
