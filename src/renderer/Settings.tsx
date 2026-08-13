@@ -754,7 +754,7 @@ export function Settings({
               <div className="flex-1">
                 <Field placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} />
               </div>
-              <button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} className="px-4 py-2 text-body bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40 disabled:cursor-not-allowed">Add</button>
+              <Button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} tone="default">Add</Button>
             </div>
           </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (
@@ -885,7 +885,7 @@ export function Settings({
               <Button onClick={() => void performRestart()} disabled={restarting} tone="default">
                 {restarting ? "Restarting…" : "Restart opencode"}
               </Button>
-              <button onClick={() => setRestartNeeded(false)} disabled={restarting} className="shrink-0 px-2 py-2 text-body text-text-muted hover:text-text disabled:opacity-40">Later</button>
+              <Button onClick={() => setRestartNeeded(false)} disabled={restarting} tone="ghost">Later</Button>
             </div>
           )}
           {restartError && <div role="alert" className="mb-4 text-body text-danger">{restartError}</div>}
@@ -925,7 +925,7 @@ export function Settings({
             <h3 className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setConfirmRemove(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
+              <Button onClick={() => setConfirmRemove(false)} tone="ghost">Cancel</Button>
               <Button onClick={removeBox} tone="danger">Remove</Button>
             </div>
           </div>
@@ -937,7 +937,7 @@ export function Settings({
             <h3 className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setConfirmReset(false)} className="px-4 py-2 text-body text-text-muted hover:text-text">Cancel</button>
+              <Button onClick={() => setConfirmReset(false)} tone="ghost">Cancel</Button>
               <Button onClick={resetAll} tone="danger">Reset</Button>
             </div>
           </div>
