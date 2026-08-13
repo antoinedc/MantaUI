@@ -28,7 +28,7 @@ import { Card } from "./Card";
 import { Field } from "./Field";
 import { Button } from "./Button";
 import { Eyebrow } from "./Eyebrow";
-import { useSettingsToasts, useApplySetting, ToastStack } from "./settingsApply";
+import { useApplySetting } from "./settingsApply";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import {
@@ -315,7 +315,7 @@ export function Settings({
   const boxToken = useStore((s) => s.boxToken);
   const serverUrl = useStore((s) => s.serverUrl);
   const boxId = useStore((s) => s.boxId);
-  const { toasts, push, dismiss } = useSettingsToasts();
+  const push = useStore((s) => s.pushAppToast);
   const applySetting = useApplySetting(push);
   const dialogRef = useDialog(onClose);
 
@@ -933,13 +933,6 @@ export function Settings({
               {renderSection(activeTab)}
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Local toast stack — inside the dialog so toasts surface above the overlay. */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center px-4 pb-4">
-        <div className="pointer-events-auto w-full max-w-[420px]">
-          <ToastStack toasts={toasts} onDismiss={dismiss} />
         </div>
       </div>
 
