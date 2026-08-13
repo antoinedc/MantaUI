@@ -452,7 +452,10 @@ export function InputArea({
             </span>
           )}
         </span>
-        <span className="shrink-0 flex items-center gap-3 flex-wrap">
+        {/* gap-2 (8px), the SAME gap SessionToolbar uses between its own three
+            icons — so the dial + clock + key + webhook read as one evenly
+            spaced run instead of a detached dial 12px off the group. */}
+        <span className="shrink-0 flex items-center gap-2 flex-wrap">
           <UsageDial providerID={activeProviderID} />
           <SessionToolbar
             scheduleCount={scheduleCount}
