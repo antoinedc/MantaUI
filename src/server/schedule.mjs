@@ -149,6 +149,39 @@ export function cronMatches(expr, date) {
   return true; // both wildcard
 }
 
+// The first instant at or after `from` (minute resolution) at which `cron`
+// fires, or null if there is none within `maxDays`. Pure.
+//
+// The day-level pre-test reuses cronMatches with the minute+hour fields
+// replaced by "*", so a non-matching day costs ONE call instead of 1440.
+// That keeps the worst case (a cron whose date never occurs, e.g. 31 Feb)
+// at ~400 calls rather than ~576,000 — and this runs once per job creation,
+// never in the tick.
+export function firstCronMatchAtOrAfter(cron, from, { maxDays = 400 } = {}) {
+  const fields = String(cron).trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const dayExpr = `* * ${fields[2]} ${fields[3]} ${fields[4]}`;
+
+  const cursor = new Date(from.getTime());
+  cursor.setSeconds(0, 0);
+
+  for (let day = 0; day <= maxDays; day++) {
+    const dayStart = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate());
+    if (cronMatches(dayExpr, dayStart)) {
+      // Walk the minutes of this day, starting at `cursor` on the first day.
+      const probe = new Date(cursor.getTime());
+      while (probe.getDate() === dayStart.getDate() && probe.getMonth() === dayStart.getMonth()) {
+        if (cronMatches(cron, probe)) return probe;
+        probe.setMinutes(probe.getMinutes() + 1);
+      }
+    }
+    // Advance to the start of the next day.
+    cursor.setFullYear(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1);
+    cursor.setHours(0, 0, 0, 0);
+  }
+  return null;
+}
+
 // Stable minute key in LOCAL time: "YYYY-MM-DDTHH:mm". Used as the dedup guard
 // so a job fires at most once per minute even though the poller ticks twice.
 export function minuteKey(date) {
@@ -241,6 +274,13 @@ export async function createJob(
     return { ok: false, error: `invalid kind "${kind}"` };
 
   const jobs = await load();
+  const createdAt = now().getTime();
+  // A one-shot has exactly one due instant. Stamping it at creation is what
+  // lets the tick drop a job whose moment has passed instead of leaving a
+  // yearless cron to re-match next year. Recurring jobs have no due instant.
+  const dueAt = recurring
+    ? null
+    : (firstCronMatchAtOrAfter(cron.trim(), new Date(createdAt))?.getTime() ?? null);
   const job = {
     id: genId(),
     cron: cron.trim(),
@@ -250,7 +290,8 @@ export async function createJob(
     kind,
     sessionID,
     directory: directory || "",
-    createdAt: now().getTime(),
+    createdAt,
+    dueAt,
     lastFiredMinute: null,
   };
   jobs.push(job);
@@ -321,7 +362,7 @@ export function createScheduler({
       const survivors = [];
       const firedSessions = new Set();
 
-      for (const job of jobs) {
+      for (let job of jobs) {
         // Disabled jobs never fire — they were auto-disabled (dead cwd) or
         // manually disabled by the user. Just persist them as-is.
         if (job.disabled) {
@@ -351,6 +392,24 @@ export function createScheduler({
 
         const due = job.lastFiredMinute !== key && cronMatches(job.cron, when);
         if (!due) {
+          // A one-shot whose due instant has passed never fires (there is no
+          // catch-up). Dropping it here is what stops a yearless cron re-matching
+          // 12 months later, and is what keeps the store from accumulating
+          // never-fired jobs. `dueAt == null` covers jobs created before this
+          // field existed AND crons with no match in range — those keep the old
+          // behaviour rather than being silently deleted.
+          if (!job.recurring && job.dueAt === undefined) {
+            // Legacy job created before `dueAt` existed: derive it once from the
+            // fields every job already has, stamp it, and let the rule below apply
+            // on this same tick. This is why no migration script is needed.
+            job = { ...job, dueAt: firstCronMatchAtOrAfter(job.cron, new Date(job.createdAt))?.getTime() ?? null };
+            mutated = true;
+          }
+          if (!job.recurring && typeof job.dueAt === "number" && when.getTime() > job.dueAt) {
+            console.warn(`[schedule] drop one-shot ${job.id}: due instant passed without firing`);
+            mutated = true;
+            continue; // not pushed to survivors
+          }
           survivors.push(job);
           continue;
         }

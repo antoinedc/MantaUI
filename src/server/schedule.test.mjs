@@ -6,6 +6,7 @@ import {
   minuteKey,
   cronForInstant,
   isJobFireable,
+  firstCronMatchAtOrAfter,
   createJob,
   createScheduler,
 } from "./schedule.mjs";
@@ -550,4 +551,145 @@ test("tick does not re-evaluate already-disabled jobs", async () => {
   assert.equal(h.sent.length, 0);
   assert.equal(h.jobs.length, 1);
   assert.equal(h.jobs[0].disabled, true);
+});
+
+// ----------------------------------------------------------------------------
+// firstCronMatchAtOrAfter — BET-778 one-shot expiry
+// ----------------------------------------------------------------------------
+
+test("firstCronMatchAtOrAfter returns the exact instant when from is before it", () => {
+  const res = firstCronMatchAtOrAfter("30 14 15 3 *", localDate(2026, 3, 10, 0, 0));
+  assert.equal(res?.getTime(), localDate(2026, 3, 15, 14, 30).getTime());
+});
+
+test("firstCronMatchAtOrAfter at-or-after returns the same minute when from is exactly on it", () => {
+  const res = firstCronMatchAtOrAfter("30 14 15 3 *", localDate(2026, 3, 15, 14, 30));
+  assert.equal(res?.getTime(), localDate(2026, 3, 15, 14, 30).getTime());
+});
+
+test("firstCronMatchAtOrAfter for a daily cron with from at 10:00 returns next day 09:00", () => {
+  const res = firstCronMatchAtOrAfter("0 9 * * *", localDate(2026, 6, 20, 10, 0));
+  assert.equal(res?.getTime(), localDate(2026, 6, 21, 9, 0).getTime());
+});
+
+test("firstCronMatchAtOrAfter for an impossible date returns null without hanging", () => {
+  // 30 February never occurs.
+  const res = firstCronMatchAtOrAfter("0 0 30 2 *", localDate(2026, 1, 1, 0, 0));
+  assert.equal(res, null);
+});
+
+// ----------------------------------------------------------------------------
+// createJob — dueAt stamping (BET-778)
+// ----------------------------------------------------------------------------
+
+test("createJob stores a dueAt equal to the matching instant for a one-shot", async () => {
+  const { ok, job } = await createJob(
+    {
+      cron: "0 9 18 8 *",
+      prompt: "reset",
+      recurring: false,
+      sessionID: "ses_x",
+      now: () => localDate(2026, 8, 13, 9, 0),
+    },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(ok, true);
+  assert.equal(job.dueAt, localDate(2026, 8, 18, 9, 0).getTime());
+});
+
+test("createJob stores dueAt null for a recurring job", async () => {
+  const { ok, job } = await createJob(
+    {
+      cron: "0 9 * * *",
+      prompt: "check",
+      recurring: true,
+      sessionID: "ses_x",
+      now: () => localDate(2026, 8, 13, 9, 0),
+    },
+    { load: async () => [], save: async () => {} },
+  );
+  assert.equal(ok, true);
+  assert.equal(job.dueAt, null);
+});
+
+// ----------------------------------------------------------------------------
+// createScheduler.tick — drop an expired one-shot (BET-778)
+// ----------------------------------------------------------------------------
+
+test("tick drops a one-shot whose dueAt is in the past without firing", async () => {
+  const now = localDate(2026, 8, 19, 9, 0);
+  const expired = {
+    ...baseJob,
+    id: "expired1",
+    cron: "0 9 18 8 *",
+    recurring: false,
+    dueAt: localDate(2026, 8, 18, 9, 0).getTime(),
+  };
+  const h = harness([expired], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent.length, 0, "expired one-shot must not fire");
+  assert.equal(h.jobs.length, 0, "expired one-shot is not in survivors");
+});
+
+test("tick FIRES a one-shot at its due minute (tie goes to firing, not expiry)", async () => {
+  const now = localDate(2026, 8, 18, 9, 0);
+  const due = {
+    ...baseJob,
+    id: "due1",
+    cron: "0 9 18 8 *",
+    recurring: false,
+    dueAt: localDate(2026, 8, 18, 9, 0).getTime(),
+  };
+  const h = harness([due], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent.length, 1, "one-shot at its due minute fires");
+  assert.equal(h.jobs.length, 0, "fired one-shot is removed as before");
+});
+
+test("tick does NOT drop a recurring job with a past dueAt present", async () => {
+  const now = localDate(2026, 6, 20, 15, 3); // not a */5 minute → not due
+  const recurring = { ...baseJob, id: "rec1", dueAt: 0 };
+  const h = harness([recurring], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.jobs.length, 1, "recurring job survives despite past dueAt");
+  assert.equal(h.jobs[0].id, "rec1");
+});
+
+test("tick stamps and drops a legacy one-shot with no dueAt and a PAST cron date on the same tick", async () => {
+  const now = localDate(2026, 8, 19, 9, 0);
+  const legacy = {
+    ...baseJob,
+    id: "legacy1",
+    cron: "0 9 18 8 *",
+    recurring: false,
+    createdAt: localDate(2026, 8, 1, 0, 0).getTime(),
+  };
+  delete legacy.dueAt;
+  const h = harness([legacy], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent.length, 0, "stale legacy one-shot must not fire");
+  assert.equal(h.jobs.length, 0, "stale legacy one-shot is dropped this tick");
+});
+
+test("tick stamps a legacy one-shot with a FUTURE cron date and lets it survive", async () => {
+  const now = localDate(2026, 8, 13, 9, 0);
+  const legacy = {
+    ...baseJob,
+    id: "legacy2",
+    cron: "0 9 18 8 *",
+    recurring: false,
+    createdAt: localDate(2026, 8, 1, 0, 0).getTime(),
+  };
+  delete legacy.dueAt;
+  const h = harness([legacy], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent.length, 0, "not due yet, must not fire");
+  assert.equal(h.jobs.length, 1, "future legacy one-shot survives");
+  assert.equal(h.jobs[0].dueAt, localDate(2026, 8, 18, 9, 0).getTime());
 });
