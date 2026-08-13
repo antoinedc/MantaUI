@@ -2420,7 +2420,7 @@ export function workingIndicatorLabel({
   elapsed,
   tokens,
 }: {
-  progress: ProgressRecord | null;
+  progress: ProgressRecord | null | undefined;
   /** The present-tense verb WITHOUT an ellipsis (e.g. "Ruminating"). */
   fallbackVerb: string;
   elapsed: string;

@@ -31,7 +31,7 @@ import { QuestionCard } from "./Cards";
 import { Button } from "./Button";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
-import type { OpencodeMessage, QuestionRequest } from "../shared/types";
+import type { OpencodeMessage, ProgressRecord, QuestionRequest } from "../shared/types";
 import {
   createEntryMotionState,
   isBackgroundJobCompletionTurn,
@@ -39,7 +39,6 @@ import {
   formatDuration,
   type EntryMotionState,
   type LiveTurn,
-  type ProgressRecord,
   workingIndicatorLabel,
 } from "./chatUtils";
 
