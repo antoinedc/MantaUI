@@ -323,8 +323,9 @@ export function classifyPushEvent(evt, ctx) {
   const titleOr = (fallback) => label ?? fallback;
 
   switch (type) {
-    case "permission.asked":
-      return {
+    case "permission.asked": {
+      const requestId = typeof props.id === "string" ? props.id : null;
+      const out = {
         kind: "permission",
         title: titleOr("Permission needed"),
         body: label
@@ -333,6 +334,19 @@ export function classifyPushEvent(evt, ctx) {
         sessionId,
         tag: `perm-${tagBase}`,
       };
+      if (requestId) {
+        out.requestId = requestId;
+        // Static action set — permission replies are always these three, so the
+        // client can pre-register them as a fixed notification category (unlike
+        // question answers, whose titles vary per ask).
+        out.actions = [
+          { action: "allow-once", title: "Allow once" },
+          { action: "allow-always", title: "Always allow" },
+          { action: "deny", title: "Deny" },
+        ];
+      }
+      return out;
+    }
     case "question.asked": {
       // The event's properties IS the QuestionRequest: { id: que_…, sessionID,
       // questions: [{ question, header, options:[{label}], multiple?, custom? }] }.
