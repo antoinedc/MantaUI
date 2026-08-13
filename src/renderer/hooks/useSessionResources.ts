@@ -4,8 +4,8 @@
 // resource" cards that hang off a chat session — scheduled prompts (⏰),
 // secrets (🔑), and inbound webhooks (🪝). Each is the same shape:
 //
-//   - a `show*` toggle (opened by the composer toolbar or a mobile ⋯-sheet
-//     `manta-open-*` window CustomEvent),
+//   - a single `openPanel` surface shared by all three cards (opened by the
+//     composer toolbar or a mobile ⋯-sheet `manta-open-*` window CustomEvent),
 //   - a list of metadata + an error string,
 //   - a `refresh*` callback that re-fetches over the `schedule:*` / `secrets:*`
 //     / `webhook:*` window.api channels,
@@ -26,10 +26,25 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ScheduledJob, SecretMeta, WebhookMeta } from "../../shared/types";
 
+/** The three server-owned resource cards that hang off a chat session. */
+export type PanelName = "schedules" | "secrets" | "webhooks";
+
 export type SessionResources = {
+  // ----- The card surface -----
+  //
+  // ONE state for all three cards, not three booleans. "at most one card is
+  // open" is then a property of the state's shape rather than a rule some
+  // caller has to remember to enforce, and every button goes through the same
+  // toggle. Do not split this back into per-card flags.
+  /** Which card is open, or null when none is. */
+  openPanel: PanelName | null;
+  /** Toolbar click: open `name`, or close it if it is already the open one.
+   *  Opening one closes whichever other was open — implicitly. */
+  togglePanel: (name: PanelName) => void;
+  /** A card's × button, and the session-change reset. */
+  closePanel: () => void;
+
   // Scheduled prompts (⏰).
-  showSchedules: boolean;
-  setShowSchedules: React.Dispatch<React.SetStateAction<boolean>>;
   schedules: ScheduledJob[];
   setSchedules: React.Dispatch<React.SetStateAction<ScheduledJob[]>>;
   scheduleError: string | null;
@@ -37,8 +52,6 @@ export type SessionResources = {
   refreshSchedules: () => Promise<void>;
 
   // Secrets (🔑).
-  showSecrets: boolean;
-  setShowSecrets: React.Dispatch<React.SetStateAction<boolean>>;
   secrets: SecretMeta[];
   setSecrets: React.Dispatch<React.SetStateAction<SecretMeta[]>>;
   secretError: string | null;
@@ -46,8 +59,6 @@ export type SessionResources = {
   refreshSecrets: () => Promise<void>;
 
   // Inbound webhooks (🪝).
-  showWebhooks: boolean;
-  setShowWebhooks: React.Dispatch<React.SetStateAction<boolean>>;
   webhooks: WebhookMeta[];
   setWebhooks: React.Dispatch<React.SetStateAction<WebhookMeta[]>>;
   webhookError: string | null;
@@ -56,12 +67,29 @@ export type SessionResources = {
 };
 
 export function useSessionResources(sessionId: string, isActive: boolean): SessionResources {
+  // ----- The card surface -----
+  // One piece of state governs all three cards (see the type comment above).
+  const [openPanel, setOpenPanel] = useState<PanelName | null>(null);
+  const togglePanel = useCallback(
+    (name: PanelName) => setOpenPanel((cur) => (cur === name ? null : name)),
+    [],
+  );
+  const closePanel = useCallback(() => setOpenPanel(null), []);
+
+  // Derived per-card flags, used ONLY as effect dependencies below. They are
+  // booleans, so an effect that watches one re-runs when THAT card opens or
+  // closes — not every time any card changes. Depending on `openPanel`
+  // directly would, for example, refetch schedules every time the secrets card
+  // opened.
+  const schedulesOpen = openPanel === "schedules";
+  const secretsOpen = openPanel === "secrets";
+  const webhooksOpen = openPanel === "webhooks";
+
   // ----- Scheduled prompts (the ⏰ ScheduledTasksCard) -----
   // Jobs are server-owned (manta-server fires them); here we only list + delete
   // via the schedule:* window.api channels. Refetch-driven (open + open-poll +
   // post-delete) — NOT a bus event, because desktop's renderer isn't wired to
   // the server bus. See docs/manta-tools-scheduler.md.
-  const [showSchedules, setShowSchedules] = useState(false);
   const [schedules, setSchedules] = useState<ScheduledJob[]>([]);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const refreshSchedules = useCallback(() => {
@@ -83,7 +111,6 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
   // Refetch-driven like schedules. The card shows shared secrets + this
   // session's scoped ones (sessionId is passed so the agent-visible view
   // matches what tools will resolve).
-  const [showSecrets, setShowSecrets] = useState(false);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [secretError, setSecretError] = useState<string | null>(null);
   const refreshSecrets = useCallback(() => {
@@ -103,7 +130,6 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
   // + revoke via the webhook:* channels (creation is the AI's job via the
   // `webhook` opencode tool, which returns the one-time signing secret).
   // Refetch-driven like schedules/secrets. See docs/manta-tools-webhook.md.
-  const [showWebhooks, setShowWebhooks] = useState(false);
   const [webhooks, setWebhooks] = useState<WebhookMeta[]>([]);
   const [webhookError, setWebhookError] = useState<string | null>(null);
   const refreshWebhooks = useCallback(() => {
@@ -118,20 +144,18 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
       });
   }, [sessionId]);
 
-  // Close the schedules card + clear its state on session change.
+  // Session change closes whatever card is open and drops every cached list.
+  // One effect for all three — the three near-identical copies this replaces
+  // had already drifted (secrets' was added later, with a comment about the
+  // inconsistency).
   useEffect(() => {
-    setShowSchedules(false);
+    setOpenPanel(null);
     setSchedules([]);
     setScheduleError(null);
-  }, [sessionId]);
-
-  // Close the secrets card + clear its state on session change. Schedules and
-  // webhooks already had this reset; secrets did not — an inconsistency, not
-  // an intentional choice. All four resources now follow the same shape.
-  useEffect(() => {
-    setShowSecrets(false);
     setSecrets([]);
     setSecretError(null);
+    setWebhooks([]);
+    setWebhookError(null);
   }, [sessionId]);
 
   // Keep the toolbar schedule count fresh whether or not the card is open:
@@ -145,87 +169,63 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
   useEffect(() => {
     if (!isActive) return;
     void refreshSchedules();
-    const intervalMs = showSchedules ? 10_000 : 30_000;
+    const intervalMs = schedulesOpen ? 10_000 : 30_000;
     const poll = setInterval(() => void refreshSchedules(), intervalMs);
     return () => clearInterval(poll);
-  }, [showSchedules, refreshSchedules, isActive]);
+  }, [schedulesOpen, refreshSchedules, isActive]);
 
   // Secrets are only fetched while the card is open (no toolbar count badge to
   // keep current in the background — unlike schedules). Refetch on open + 10s
   // poll so a secret added on another device shows up.
   useEffect(() => {
-    if (!showSecrets) return;
+    if (!secretsOpen) return;
     void refreshSecrets();
     const poll = setInterval(() => void refreshSecrets(), 10_000);
     return () => clearInterval(poll);
-  }, [showSecrets, refreshSecrets]);
-
-  // Close the webhooks card + clear its state on session change.
-  useEffect(() => {
-    setShowWebhooks(false);
-    setWebhooks([]);
-    setWebhookError(null);
-  }, [sessionId]);
+  }, [secretsOpen, refreshSecrets]);
 
   // Webhooks fetched only while the card is open (creation is agent-driven; the
   // count isn't surfaced on the toolbar, so no background poll). Refetch on open
   // + 10s poll so a model-created hook / a fresh delivery shows up.
   useEffect(() => {
-    if (!showWebhooks) return;
+    if (!webhooksOpen) return;
     void refreshWebhooks();
     const poll = setInterval(() => void refreshWebhooks(), 10_000);
     return () => clearInterval(poll);
-  }, [showWebhooks, refreshWebhooks]);
+  }, [webhooksOpen, refreshWebhooks]);
 
-  // Mobile entry point for the schedules card: the ⋯ sheet (outside ChatPanel)
-  // dispatches a window CustomEvent rather than reaching into this component's
-  // state. Mirrors the manta-scroll-to-question bridge.
+  // Entry point for an out-of-panel opener (the mobile ⋯ sheet dispatched these;
+  // the listeners are the documented bridge and are covered by tests). One loop
+  // over the three names replaces three copy-pasted effects. Open-only — never
+  // a toggle, because the dispatcher has no idea what is currently open.
   useEffect(() => {
-    const onOpenSchedules = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSchedules(true);
-    };
-    window.addEventListener("manta-open-schedules", onOpenSchedules);
-    return () => window.removeEventListener("manta-open-schedules", onOpenSchedules);
-  }, [sessionId]);
-
-  // Mobile entry point for the secrets card (mirror of manta-open-schedules).
-  useEffect(() => {
-    const onOpenSecrets = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowSecrets(true);
-    };
-    window.addEventListener("manta-open-secrets", onOpenSecrets);
-    return () => window.removeEventListener("manta-open-secrets", onOpenSecrets);
-  }, [sessionId]);
-
-  // Mobile entry point for the webhooks card (mirror of manta-open-schedules).
-  useEffect(() => {
-    const onOpenWebhooks = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
-      if (detail?.sessionId === sessionId) setShowWebhooks(true);
-    };
-    window.addEventListener("manta-open-webhooks", onOpenWebhooks);
-    return () => window.removeEventListener("manta-open-webhooks", onOpenWebhooks);
+    const names: PanelName[] = ["schedules", "secrets", "webhooks"];
+    const offs = names.map((name) => {
+      const type = `manta-open-${name}`;
+      const onOpen = (e: Event) => {
+        const detail = (e as CustomEvent).detail as { sessionId?: string } | undefined;
+        if (detail?.sessionId === sessionId) setOpenPanel(name);
+      };
+      window.addEventListener(type, onOpen);
+      return () => window.removeEventListener(type, onOpen);
+    });
+    return () => offs.forEach((off) => off());
   }, [sessionId]);
 
   return {
-    showSchedules,
-    setShowSchedules,
+    openPanel,
+    togglePanel,
+    closePanel,
     schedules,
     setSchedules,
     scheduleError,
     setScheduleError,
     refreshSchedules,
-    showSecrets,
-    setShowSecrets,
     secrets,
     setSecrets,
     secretError,
     setSecretError,
     refreshSecrets,
-    showWebhooks,
-    setShowWebhooks,
     webhooks,
     setWebhooks,
     webhookError,
