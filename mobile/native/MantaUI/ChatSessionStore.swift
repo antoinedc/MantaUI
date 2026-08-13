@@ -141,6 +141,7 @@ struct QueuedPrompt: Equatable {
     let text: String
     let attachments: [SendPromptInput.Attachment]
     let model: SendPromptInput.Model?
+    let mentions: [SendPromptInput.Mention]?
 }
 
 @MainActor
@@ -816,11 +817,11 @@ final class ChatSessionStore: ObservableObject {
     /// the UI doesn't sit on a forever-spinner, and the caller is told so it
     /// can restore the user's typed text.
     @discardableResult
-    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) async -> Bool {
+    func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil) async -> Bool {
         // A send while the turn runs must not reach opencode — it would abort
         // the in-flight turn implicitly. Queue it; the idle edge drains FIFO.
         if running {
-            queuedPrompts.append(QueuedPrompt(text: text, attachments: attachments, model: model))
+            queuedPrompts.append(QueuedPrompt(text: text, attachments: attachments, model: model, mentions: mentions))
             return true
         }
         // Echo the message straight into the transcript and assume the turn is
@@ -854,7 +855,8 @@ final class ChatSessionStore: ObservableObject {
                 sessionId: sessionId,
                 text: text,
                 model: model,
-                attachments: attachments.isEmpty ? nil : attachments
+                attachments: attachments.isEmpty ? nil : attachments,
+                mentions: mentions
             ))
             return true
         } catch {
@@ -893,7 +895,7 @@ final class ChatSessionStore: ObservableObject {
         guard !running, !queuedPrompts.isEmpty else { return }
         let next = queuedPrompts.removeFirst()
         Task { @MainActor in
-            let ok = await send(text: next.text, attachments: next.attachments, model: next.model)
+            let ok = await send(text: next.text, attachments: next.attachments, model: next.model, mentions: next.mentions)
             if !ok {
                 // The send failed after the box accepted going idle — don't lose
                 // the prompt silently. Put it back at the FRONT and tell the user.

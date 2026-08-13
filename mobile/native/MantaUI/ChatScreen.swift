@@ -355,7 +355,10 @@ private struct ChatScreenContent: View {
                             showScrollToBottom = false
                         },
                         onGlassBoxHeightChange: { composerGlassHeight = $0 },
-                        onToggleTrust: { flipTrustMode() }
+                        onToggleTrust: { flipTrustMode() },
+                        sessionDirectory: sessionWindow?.cwd,
+                        onSlashClear: { Task { await clearSession() } },
+                        onSlashFork: { Task { await forkSession() } }
                     )
                 }
                 // Feeds the transcript's bottom content inset its height. Safe

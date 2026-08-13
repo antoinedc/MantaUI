@@ -205,6 +205,61 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(result.meta?.scope, "shared")
         XCTAssertNil(result.error)
     }
+
+    // MARK: - @-file typeahead (BET-749 gap #10)
+
+    /// `opencode:find-files` is dispatched as `fn({query, directory})` — a
+    /// SINGLE payload object carrying both keys — and decodes the box's bare
+    /// `[String]` path list.
+    func testFindFilesSendsQueryAndDirectoryAndDecodesStrings() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": ["src/foo.swift", "src/bar.swift"]}"#
+        let results = try await client.findFiles(query: "foo", directory: "/home/user/project")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:find-files")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["query"] as? String, "foo")
+        XCTAssertEqual(payload?["directory"] as? String, "/home/user/project")
+        XCTAssertEqual(results, ["src/foo.swift", "src/bar.swift"])
+    }
+
+    /// A nil directory omits the key entirely — the box then returns a
+    /// browse-style listing rather than searching a specific cwd.
+    func testFindFilesOmitsDirectoryWhenNil() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": []}"#
+        let results = try await client.findFiles(query: "foo")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:find-files")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["query"] as? String, "foo")
+        XCTAssertNil(payload?["directory"])
+        XCTAssertEqual(results, [])
+    }
+
+    /// A `Mention` built from a file name + range serializes onto
+    /// `opencode:prompt` args UNCHANGED through the existing send path —
+    /// `name` and `source.value/start/end` all land in `args[0].mentions[i]`.
+    func testSendPromptSerializesMentionUnchanged() async throws {
+        let client = makeClient()
+        let mention = SendPromptInput.Mention(
+            name: "src/foo.swift",
+            source: SendPromptInput.MentionSource(value: "@src/foo.swift", start: 4, end: 18)
+        )
+        _ = try await client.sendPrompt(SendPromptInput(
+            sessionId: "ses_1",
+            text: "see @src/foo.swift",
+            mentions: [mention]
+        ))
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:prompt")
+        let args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        let payload = args?.first as? [String: Any]
+        let mentions = payload?["mentions"] as? [[String: Any]]
+        let m = mentions?.first
+        XCTAssertEqual(m?["name"] as? String, "src/foo.swift")
+        let source = m?["source"] as? [String: Any]
+        XCTAssertEqual(source?["value"] as? String, "@src/foo.swift")
+        XCTAssertEqual(source?["start"] as? Int, 4)
+        XCTAssertEqual(source?["end"] as? Int, 18)
+    }
 }
 
 // MARK: - Capturing URLProtocol
