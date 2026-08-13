@@ -587,9 +587,14 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
         const projects = deps.listProjects ? await deps.listProjects() : [];
         const owner = resolveOwner(projects, evt?.properties?.sessionID);
         if (!owner) {
+          const shape = (Array.isArray(projects) ? projects : []).map((p) => ({
+            tmuxSession: p?.tmuxSession,
+            windows: (p?.windows || []).map((w) => `${w?.index}:${w?.opencodeSessionId}`),
+          }));
           console.warn(
             "[delegate] could not resolve the owning window to adopt background subagent:",
             evt?.properties?.sessionID,
+            "projects=", shape,
           );
           return;
         }
@@ -1272,6 +1277,17 @@ export function createApprovalState({ now = () => Date.now() } = {}) {
 
 export function createDelegateEngine(deps) {
   const sawBusy = new Map();
+  // Per-session promise chain. opencode emits several events per turn boundary
+  // and the pump calls observeEvent without awaiting it, so two invocations can
+  // be in flight at once. Every observeEvent branch is a read store -> decide
+  // -> write store sequence with awaits in the middle; without serialisation
+  // each sequence interleaves with itself (one subagent adopted twice, one job
+  // reporting completion twice — BET-773). Serialising per session makes the
+  // second adoption event load a store that already holds the record and the
+  // second idle event find no running job. Per-session, not global: different
+  // sessions share no state, and a global chain would queue every session
+  // behind one slow transcript read.
+  const chains = new Map(); // sessionID -> tail promise
   const approvals = deps.approvals ?? createApprovalState({ now: deps.now });
   // startJobWithApproval: the REST handler's entry point (BET-418 §A). Builds
   // the ruleset, requests approval when trust mode is OFF + tools were
@@ -1306,7 +1322,25 @@ export function createDelegateEngine(deps) {
     startJobWithApproval,
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id) => deleteJob(id, deps),
-    observeEvent: (evt) => observeEvent(evt, deps, sawBusy),
+    observeEvent: (evt) => {
+      const sid = evt?.properties?.sessionID;
+      if (typeof sid !== "string" || !sid) {
+        // Nothing to serialise on — call through unchanged.
+        return observeEvent(evt, deps, sawBusy);
+      }
+      const tail = (chains.get(sid) ?? Promise.resolve())
+        .then(() => observeEvent(evt, deps, sawBusy))
+        .catch((e) => console.warn("[delegate] observeEvent failed:", e?.message ?? e));
+      chains.set(sid, tail);
+      // Drop the chain tail from the map only if it is still the current one,
+      // so the map cannot grow without bound and a live chain is never removed
+      // from under a queued event.
+      tail.then(
+        () => { if (chains.get(sid) === tail) chains.delete(sid); },
+        () => { if (chains.get(sid) === tail) chains.delete(sid); },
+      );
+      return tail;
+    },
     sweep: () => sweepDelegateJobs(deps),
     listJobs: (filter) => listJobs(filter, deps),
     getJob: (id) => getJob(id, deps),

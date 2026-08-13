@@ -655,6 +655,76 @@ test("observeEvent adopts nothing for a completed background task", async () => 
   assert.equal(a.newWindowCalls.length, 0);
 });
 
+// ----------------------------------------------------------------------------
+// BET-773: the engine serialises observeEvent per session. opencode emits
+// several events per turn boundary and the pump calls observeEvent without
+// awaiting it, so two invocations are in flight at once. Without per-session
+// serialisation each read-store -> decide -> write-store sequence interleaves
+// with itself: one subagent is adopted twice (two windows + two records) and
+// one job reports completion twice. These tests go through createDelegateEngine
+// so they exercise the serialising wrapper, not the raw observeEvent.
+// ----------------------------------------------------------------------------
+
+test("BET-773: two identical adoption events produce exactly one window + one record", async () => {
+  const a = adoptHarness();
+  const engine = createDelegateEngine(a.deps);
+  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart() } };
+  // Fire both without awaiting the first — the overlapping case.
+  await Promise.all([engine.observeEvent(evt), engine.observeEvent(evt)]);
+  assert.equal(a.newWindowCalls.length, 1, "newWindow called exactly once");
+  assert.equal(a.jobs.length, 1, "store holds exactly one record");
+  assert.equal(a.jobs[0].origin, "subagent");
+});
+
+test("BET-773: overlapping session.status{idle} and session.idle deliver the completion exactly once", async () => {
+  const h = harness([runningObserverJob()]);
+  h.deps.listMessages = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "all done" }] },
+  ];
+  h.deps.gitRun = async () => ({ stdout: "" });
+  const engine = createDelegateEngine(h.deps);
+  // Prime the engine's own sawBusy for the child session via a busy event.
+  await engine.observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } });
+  // Both terminal triggers fire overlapping.
+  await Promise.all([
+    engine.observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "idle" } } }),
+    engine.observeEvent({ type: "session.idle", properties: { sessionID: "child" } }),
+  ]);
+  assert.equal(h.delivered.length, 1, "deliver called exactly once");
+  const terminal = h.jobs.filter((j) => j.status === "done");
+  assert.equal(terminal.length, 1, "store holds exactly one terminal record");
+});
+
+test("BET-773: events for different sessions are not serialised behind each other", async () => {
+  const h = harness();
+  let releaseA;
+  const gateA = new Promise((r) => { releaseA = r; });
+  let loadCalls = 0;
+  h.deps.load = async () => {
+    loadCalls += 1;
+    if (loadCalls === 1) {
+      // The first event (session A) blocks on a gate until explicitly released.
+      await gateA;
+    }
+    return [];
+  };
+  const engine = createDelegateEngine(h.deps);
+  const a = engine.observeEvent({ type: "session.idle", properties: { sessionID: "A" } });
+  // Give A time to enter its blocking load before B arrives.
+  await new Promise((r) => setTimeout(r, 10));
+  let bResolved = false;
+  const b = engine.observeEvent({ type: "session.idle", properties: { sessionID: "B" } }).then(() => {
+    bResolved = true;
+  });
+  // If B were queued behind A (a global chain), it could not resolve until A is
+  // released. Per-session serialisation lets B run immediately.
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(bResolved, true, "session B processes without waiting for session A");
+  releaseA();
+  await Promise.all([a, b]);
+});
+
+
 test("finishJob does not deliver for origin subagent, but still does for delegate and legacy", async () => {
   const sub = harness([{ ...runningObserverJob(), id: "sub", worktree: null, origin: "subagent" }]);
   await finishJob(sub.jobs[0], "done", null, sub.deps, new Map());
