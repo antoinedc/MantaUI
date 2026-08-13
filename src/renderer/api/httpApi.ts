@@ -964,6 +964,9 @@ export const httpApi: Api = {
   scheduleList: (sessionId) => rpc(IPC.scheduleList, sessionId),
   scheduleDelete: (id) => rpc(IPC.scheduleDelete, id),
 
+  // -- subscription plan usage (manta-server owned; in-process on mobile) --
+  usageList: () => rpc(IPC.usageList),
+
   // -- secrets (manta-server owned; in-process on mobile) --
   secretsList: (sessionId, all) => rpc(IPC.secretsList, sessionId, all),
   secretsSet: (input) => rpc(IPC.secretsSet, input),

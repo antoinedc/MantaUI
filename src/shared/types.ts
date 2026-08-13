@@ -753,6 +753,12 @@ export const IPC = {
   scheduleList: "schedule:list", // (sessionId?) → ScheduledJob[]
   scheduleDelete: "schedule:delete", // (id) → { deleted: boolean }
 
+  // ---- subscription plan usage (manta-server owned; BET-737) ----
+  // Read-only: the current UsageSnapshot[] cache maintained by the usage
+  // poller (src/server/usage.mjs). NOT the context-window indicator — see
+  // the UsageSnapshot/UsageWindow doc comment above for that boundary.
+  usageList: "usage:list", // () → UsageSnapshot[]
+
   // ---- secrets (manta-server owned) ----
   // A secure key→value store on the box. The user adds/edits secrets in the
   // SecretsCard UI; the VALUE never leaves the box and is never returned here
@@ -1048,6 +1054,34 @@ export type ScheduledJob = {
   directory: string;
   createdAt: number;
   lastFiredMinute: string | null;
+};
+
+// Subscription plan usage (BET-737) — the rolling 5-hour session window +
+// the weekly cap for a connected AI provider (Claude Max/Pro, Codex, Kimi For
+// Coding). Server-side: src/server/usage.mjs (poller) + src/server/
+// usageAdapters/*.mjs (one file per provider, all routing their raw payload
+// through normalizeWindow). In-memory only — the poll interval IS the cache
+// TTL, there is no disk store. Read via the `usage:list` RPC channel;
+// live-updated via the `usage.updated` bus event.
+//
+// THIS IS NOT THE CONTEXT-WINDOW INDICATOR (SessionHeader.tsx ContextPill,
+// per-conversation). This is per-SUBSCRIPTION plan usage — never share code,
+// colour scale, or placement with the context pill.
+export type UsageWindow = {
+  kind: "session" | "weekly" | string; // open set — a daily window just works
+  label: string; // "Session (5h)"
+  pct: number; // 0-100, ALWAYS present (derived when the provider reports only absolutes)
+  used?: number; // absolute count when the provider exposes one
+  limit?: number; // absolute cap when the provider exposes one
+  resetsAt?: number; // epoch ms
+  binding?: boolean; // the provider says this window bites first
+};
+export type UsageSnapshot = {
+  provider: string; // adapter id: "claude" | "codex" | "kimi"
+  planLabel?: string; // "Max 20x", "Pro", "Allegretto"
+  windows: UsageWindow[];
+  extras?: { label: string; value: string }[]; // credits balance, model pools…
+  fetchedAt: number; // epoch ms of the successful fetch
 };
 
 // A background-delegation job record (manta store: ~/.manta/delegate-jobs.json).

@@ -114,6 +114,7 @@ export const DEMO_UNIMPLEMENTED = [
   "tmuxSetupConfig",
   "uploadBuffer",
   "uploadFiles",
+  "usageList",
   "voiceClassifyCommand",
   "voiceTranscribe",
   "webhookDelete",

@@ -1,0 +1,495 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { normalizeWindow, createUsagePoller, ADAPTERS } from "./usage.mjs";
+import { claudeAdapter } from "./usageAdapters/claude.mjs";
+import { codexAdapter } from "./usageAdapters/codex.mjs";
+import { kimiAdapter } from "./usageAdapters/kimi.mjs";
+
+// ----------------------------------------------------------------------------
+// Test harness: a fake `fetch`-shaped Response — never touches the network.
+// ----------------------------------------------------------------------------
+
+function fakeResponse(status, body, headers = {}) {
+  const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: (k) => lower[String(k).toLowerCase()] ?? null },
+    json: async () => body,
+  };
+}
+
+function makeAdapter(id, { detect, fetch: doFetch }) {
+  return { id, providerIDs: [id], detect, fetch: doFetch };
+}
+
+// ----------------------------------------------------------------------------
+// normalizeWindow — pure
+// ----------------------------------------------------------------------------
+
+test("normalizeWindow: pct passthrough, rounded and clamped to 0-100", () => {
+  assert.equal(normalizeWindow({ pct: 55 }).pct, 55);
+  assert.equal(normalizeWindow({ pct: 55.6 }).pct, 56);
+  assert.equal(normalizeWindow({ pct: 130 }).pct, 100);
+  assert.equal(normalizeWindow({ pct: -5 }).pct, 0);
+});
+
+test("normalizeWindow: derives pct from used + limit", () => {
+  const w = normalizeWindow({ used: 139, limit: 200 });
+  assert.equal(w.pct, 70); // round(139/200*100) = round(69.5) = 70
+  assert.equal(w.used, 139);
+  assert.equal(w.limit, 200);
+});
+
+test("normalizeWindow: derives used from remaining + limit, then pct", () => {
+  const w = normalizeWindow({ remaining: 61, limit: 200 });
+  assert.equal(w.used, 139);
+  assert.equal(w.limit, 200);
+  assert.equal(w.pct, 70);
+});
+
+test("normalizeWindow: counts may arrive as strings", () => {
+  const w = normalizeWindow({ used: "139", limit: "200" });
+  assert.equal(w.used, 139);
+  assert.equal(w.limit, 200);
+  assert.equal(w.pct, 70);
+
+  const w2 = normalizeWindow({ remaining: "61", limit: "200" });
+  assert.equal(w2.used, 139);
+  assert.equal(w2.pct, 70);
+});
+
+test("normalizeWindow: limit === 0 (or missing denominators) drops the window", () => {
+  assert.equal(normalizeWindow({ used: 5, limit: 0 }), null);
+  assert.equal(normalizeWindow({ remaining: 5, limit: 0 }), null);
+  assert.equal(normalizeWindow({ used: 5 }), null); // no limit at all
+  assert.equal(normalizeWindow({ limit: 200 }), null); // no used/remaining
+  assert.equal(normalizeWindow({}), null);
+  assert.equal(normalizeWindow(null), null);
+  assert.equal(normalizeWindow(undefined), null);
+});
+
+test("normalizeWindow: resetsAt — epoch seconds vs epoch ms vs ISO string", () => {
+  // < 1e12 → treated as epoch seconds.
+  assert.equal(normalizeWindow({ pct: 10, resetsAt: 1735689600 }).resetsAt, 1735689600000);
+  // >= 1e12 → already ms.
+  assert.equal(normalizeWindow({ pct: 10, resetsAt: 1735689600000 }).resetsAt, 1735689600000);
+  // ISO string → Date.parse.
+  const iso = normalizeWindow({ pct: 10, resetsAt: "2025-01-01T00:00:00.000Z" });
+  assert.equal(iso.resetsAt, Date.parse("2025-01-01T00:00:00.000Z"));
+  // Unparseable string → field dropped, window still valid (pct alone is enough).
+  const bad = normalizeWindow({ pct: 10, resetsAt: "not-a-date" });
+  assert.equal(bad.resetsAt, undefined);
+  assert.equal(bad.pct, 10);
+});
+
+test("normalizeWindow: non-finite counts are dropped, not coerced to NaN/Infinity", () => {
+  // used fails to coerce → falls through to "missing denominators" → null.
+  assert.equal(normalizeWindow({ used: "abc", limit: 200 }), null);
+  assert.equal(normalizeWindow({ remaining: "abc", limit: 200 }), null);
+  assert.equal(normalizeWindow({ pct: "abc" }), null);
+  // A window's own output never carries NaN/Infinity.
+  const w = normalizeWindow({ used: 139, limit: 200 });
+  assert.equal(Number.isFinite(w.pct), true);
+});
+
+test("normalizeWindow: kind/label/binding pass through", () => {
+  const w = normalizeWindow({ kind: "weekly", label: "Weekly", pct: 41, binding: true });
+  assert.equal(w.kind, "weekly");
+  assert.equal(w.label, "Weekly");
+  assert.equal(w.binding, true);
+  // binding omitted entirely when not explicitly true.
+  const w2 = normalizeWindow({ pct: 41 });
+  assert.equal("binding" in w2, false);
+});
+
+// ----------------------------------------------------------------------------
+// ADAPTERS registry
+// ----------------------------------------------------------------------------
+
+test("ADAPTERS registers exactly the three built-in providers", () => {
+  const ids = ADAPTERS.map((a) => a.id).sort();
+  assert.deepEqual(ids, ["claude", "codex", "kimi"]);
+  for (const a of ADAPTERS) {
+    assert.equal(typeof a.detect, "function");
+    assert.equal(typeof a.fetch, "function");
+    assert.equal(Array.isArray(a.providerIDs), true);
+  }
+});
+
+// ----------------------------------------------------------------------------
+// createUsagePoller
+// ----------------------------------------------------------------------------
+
+test("poller skips an adapter whose detect() is false — no snapshot, no fetch call", async () => {
+  let fetchCalls = 0;
+  const off = makeAdapter("off", {
+    detect: async () => false,
+    fetch: async () => {
+      fetchCalls++;
+      return { windows: [{ kind: "session", label: "s", pct: 1 }] };
+    },
+  });
+  const on = makeAdapter("on", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 50 }] }),
+  });
+  const poller = createUsagePoller({ adapters: [off, on], now: () => 1000 });
+  await poller.tick();
+  assert.equal(fetchCalls, 0);
+  assert.equal(poller.snapshots.length, 1);
+  assert.equal(poller.snapshots[0].provider, "on");
+});
+
+test("poller quarantines a throwing adapter — the others' snapshots stay intact", async () => {
+  const broken = makeAdapter("broken", {
+    detect: async () => true,
+    fetch: async () => {
+      throw new Error("upstream shape changed");
+    },
+  });
+  const healthy = makeAdapter("healthy", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 33 }] }),
+  });
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const poller = createUsagePoller({ adapters: [broken, healthy], now: () => 1000 });
+    await poller.tick();
+    assert.equal(poller.snapshots.length, 1);
+    assert.equal(poller.snapshots[0].provider, "healthy");
+    assert.equal(warnings.some((a) => String(a[0]).includes("broken")), true);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller drops an adapter whose response has zero usable windows", async () => {
+  const empty = makeAdapter("empty", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [] }),
+  });
+  const poller = createUsagePoller({ adapters: [empty], now: () => 1000 });
+  await poller.tick();
+  assert.equal(poller.snapshots.length, 0);
+});
+
+test("poller: a 429 with Retry-After backs off only that adapter, for exactly that long", async () => {
+  let nowMs = 1_700_000_000_000;
+  let rlFetchCalls = 0;
+  const rateLimited = makeAdapter("rl", {
+    detect: async () => true,
+    fetch: async () => {
+      rlFetchCalls++;
+      if (rlFetchCalls === 1) {
+        const err = new Error("rate limited");
+        err.status = 429;
+        err.retryAfterMs = 5000;
+        throw err;
+      }
+      return { windows: [{ kind: "session", label: "s", pct: 10 }] };
+    },
+  });
+  let okFetchCalls = 0;
+  const ok = makeAdapter("ok", {
+    detect: async () => true,
+    fetch: async () => {
+      okFetchCalls++;
+      return { windows: [{ kind: "session", label: "s", pct: 20 }] };
+    },
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({ adapters: [rateLimited, ok], now: () => nowMs });
+
+    await poller.tick(); // rl fails (429, backoff 5s); ok succeeds
+    assert.equal(rlFetchCalls, 1);
+    assert.equal(okFetchCalls, 1);
+    assert.equal(poller.snapshots.some((s) => s.provider === "rl"), false);
+
+    nowMs += 2000; // still inside the 5s backoff window
+    await poller.tick();
+    assert.equal(rlFetchCalls, 1, "rl must not be fetched again while backed off");
+    assert.equal(okFetchCalls, 2);
+
+    nowMs += 4000; // 6s elapsed since the 429 — backoff has expired
+    await poller.tick();
+    assert.equal(rlFetchCalls, 2, "rl is fetched again once its backoff expires");
+    assert.equal(poller.snapshots.find((s) => s.provider === "rl").windows[0].pct, 10);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: a bare 429 with no Retry-After falls back to the 15-minute default backoff", async () => {
+  let nowMs = 0;
+  let calls = 0;
+  const rl = makeAdapter("rl", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      const err = new Error("rate limited");
+      err.status = 429; // no retryAfterMs
+      throw err;
+    },
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({ adapters: [rl], now: () => nowMs });
+    await poller.tick();
+    assert.equal(calls, 1);
+
+    nowMs += 14 * 60_000; // just under 15 minutes
+    await poller.tick();
+    assert.equal(calls, 1);
+
+    nowMs += 2 * 60_000; // now past 15 minutes total
+    await poller.tick();
+    assert.equal(calls, 2);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: identical consecutive results publish exactly once", async () => {
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 42 }] }),
+  });
+  const published = [];
+  const poller = createUsagePoller({
+    adapters: [adapter],
+    now: () => 1000,
+    publish: (evt) => published.push(evt),
+  });
+  await poller.tick();
+  await poller.tick();
+  await poller.tick();
+  assert.equal(published.length, 1);
+  assert.equal(published[0].kind, "usage.updated");
+});
+
+test("poller: a genuine content change publishes again", async () => {
+  let pct = 10;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct }] }),
+  });
+  const published = [];
+  const poller = createUsagePoller({
+    adapters: [adapter],
+    now: () => 1000,
+    publish: (evt) => published.push(evt),
+  });
+  await poller.tick();
+  pct = 11;
+  await poller.tick();
+  assert.equal(published.length, 2);
+});
+
+test("poller: in-flight guard prevents overlapping ticks", async () => {
+  let concurrent = 0;
+  let maxConcurrent = 0;
+  let calls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      concurrent++;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      concurrent--;
+      return { windows: [{ kind: "session", label: "s", pct: 1 }] };
+    },
+  });
+  const poller = createUsagePoller({ adapters: [adapter], now: () => 1000 });
+  const p1 = poller.tick();
+  const p2 = poller.tick(); // must be a same-tick no-op — inFlight is already true
+  await Promise.all([p1, p2]);
+  assert.equal(maxConcurrent, 1);
+  assert.equal(calls, 1);
+});
+
+// ----------------------------------------------------------------------------
+// Adapter: claude — captured sample payloads, fed inline (no fixture files)
+// ----------------------------------------------------------------------------
+
+test("claude adapter: utilization fraction (0-1) is converted to a percentage", async () => {
+  const sample = {
+    rate_limits: {
+      five_hour: { utilization: 0.78, resets_at: 1735689600 },
+      seven_day: { utilization: 0.41, resets_at: "2025-01-07T09:00:00.000Z" },
+      seven_day_opus: { utilization: 0.64 },
+      seven_day_sonnet: { used_percentage: 18 },
+    },
+  };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.provider, "claude");
+  assert.equal(snap.windows.length, 2);
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.equal(session.label, "Session (5h)");
+  assert.equal(session.pct, 78);
+  assert.equal(session.resetsAt, 1735689600000);
+  const weekly = snap.windows.find((w) => w.kind === "weekly");
+  assert.equal(weekly.pct, 41);
+  assert.equal(weekly.resetsAt, Date.parse("2025-01-07T09:00:00.000Z"));
+  assert.equal(snap.extras.find((e) => e.label === "Opus (7d)").value, "64%");
+  assert.equal(snap.extras.find((e) => e.label === "Sonnet (7d)").value, "18%");
+});
+
+test("claude adapter: used_percentage is preferred over utilization when both are present", async () => {
+  const sample = { rate_limits: { five_hour: { utilization: 0.5, used_percentage: 93 } } };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal(snap.windows.find((w) => w.kind === "session").pct, 93);
+});
+
+test("claude adapter: no absolutes, no planLabel — never fabricated", async () => {
+  const sample = { rate_limits: { five_hour: { utilization: 0.1 } } };
+  const snap = await claudeAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readCredentials: async () => ({ accessToken: "tok" }),
+  });
+  assert.equal("planLabel" in snap, false);
+  assert.equal("used" in snap.windows[0], false);
+  assert.equal("limit" in snap.windows[0], false);
+});
+
+test("claude adapter: detect() requires a non-empty accessToken", async () => {
+  assert.equal(await claudeAdapter.detect({ readCredentials: async () => ({ accessToken: "x" }) }), true);
+  assert.equal(await claudeAdapter.detect({ readCredentials: async () => null }), false);
+  assert.equal(await claudeAdapter.detect({ readCredentials: async () => ({}) }), false);
+});
+
+test("claude adapter: propagates 429 status + Retry-After as retryAfterMs", async () => {
+  await assert.rejects(
+    claudeAdapter.fetch({
+      fetchImpl: async () => fakeResponse(429, {}, { "Retry-After": "30" }),
+      readCredentials: async () => ({ accessToken: "tok" }),
+    }),
+    (err) => {
+      assert.equal(err.status, 429);
+      assert.equal(err.retryAfterMs, 30000);
+      return true;
+    },
+  );
+});
+
+// ----------------------------------------------------------------------------
+// Adapter: codex
+// ----------------------------------------------------------------------------
+
+test("codex adapter: prefers reset_at, falls back to now + reset_after_seconds", async () => {
+  const sample = {
+    rate_limit: {
+      primary_window: { used_percent: 36, reset_after_seconds: 13200 },
+      secondary_window: { used_percent: 91, reset_at: 1735700000000 },
+    },
+    plan_type: "plus",
+    credits: { balance: 14.2 },
+  };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 1_700_000_000_000,
+  });
+  assert.equal(snap.planLabel, "Plus");
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.equal(session.pct, 36);
+  assert.equal(session.resetsAt, 1_700_000_000_000 + 13200 * 1000);
+  const weekly = snap.windows.find((w) => w.kind === "weekly");
+  assert.equal(weekly.pct, 91);
+  assert.equal(weekly.resetsAt, 1735700000000);
+  assert.equal(snap.extras.find((e) => e.label === "Credits balance").value, "14.2");
+});
+
+test("codex adapter: no credits, no plan_type — extras/planLabel omitted, not fabricated", async () => {
+  const sample = { rate_limit: { primary_window: { used_percent: 5, reset_after_seconds: 60 } } };
+  const snap = await codexAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readToken: async () => "tok",
+    now: () => 0,
+  });
+  assert.equal("planLabel" in snap, false);
+  assert.equal("extras" in snap, false);
+});
+
+test("codex adapter: detect() requires a non-empty token", async () => {
+  assert.equal(await codexAdapter.detect({ readToken: async () => "tok" }), true);
+  assert.equal(await codexAdapter.detect({ readToken: async () => null }), false);
+  assert.equal(await codexAdapter.detect({ readToken: async () => "" }), false);
+});
+
+// ----------------------------------------------------------------------------
+// Adapter: kimi — string counts + remaining-only cases
+// ----------------------------------------------------------------------------
+
+test("kimi adapter: weekly (string counts) + session (300-minute limits entry, remaining-only)", async () => {
+  const sample = {
+    usage: { limit: "7168", used: "2214", resetTime: "2025-01-12T16:00:00.000Z" },
+    limits: [
+      { window: { duration: 1, timeUnit: "day" }, detail: { limit: 1000, used: 500 } }, // decoy
+      { window: { duration: 300, timeUnit: "minute" }, detail: { limit: 200, remaining: 61, resetTime: 1735700000 } },
+    ],
+  };
+  const snap = await kimiAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readKey: async () => "key",
+  });
+  assert.equal(snap.provider, "kimi");
+  assert.equal("planLabel" in snap, false); // no planLabel on this endpoint, per spec
+
+  const weekly = snap.windows.find((w) => w.kind === "weekly");
+  assert.equal(weekly.used, 2214);
+  assert.equal(weekly.limit, 7168);
+  assert.equal(weekly.pct, Math.round((2214 / 7168) * 100));
+  assert.equal(weekly.resetsAt, Date.parse("2025-01-12T16:00:00.000Z"));
+
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.equal(session.used, 139); // 200 - 61 (remaining-only plan)
+  assert.equal(session.limit, 200);
+  assert.equal(session.pct, 70);
+  assert.equal(session.resetsAt, 1735700000000); // epoch seconds → ms
+});
+
+test("kimi adapter: a 5h window given in hours (not minutes) still resolves", async () => {
+  const sample = {
+    usage: { limit: 100, used: 10 },
+    limits: [{ window: { duration: 5, timeUnit: "hour" }, detail: { limit: 200, used: 50 } }],
+  };
+  const snap = await kimiAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readKey: async () => "key",
+  });
+  const session = snap.windows.find((w) => w.kind === "session");
+  assert.ok(session);
+  assert.equal(session.used, 50);
+});
+
+test("kimi adapter: no matching 300-minute entry → session window simply absent", async () => {
+  const sample = {
+    usage: { limit: 100, used: 10 },
+    limits: [{ window: { duration: 1, timeUnit: "day" }, detail: { limit: 1000, used: 1 } }],
+  };
+  const snap = await kimiAdapter.fetch({
+    fetchImpl: async () => fakeResponse(200, sample),
+    readKey: async () => "key",
+  });
+  assert.equal(snap.windows.some((w) => w.kind === "session"), false);
+  assert.equal(snap.windows.some((w) => w.kind === "weekly"), true);
+});
+
+test("kimi adapter: detect() requires a non-empty key", async () => {
+  assert.equal(await kimiAdapter.detect({ readKey: async () => "key" }), true);
+  assert.equal(await kimiAdapter.detect({ readKey: async () => null }), false);
+  assert.equal(await kimiAdapter.detect({ readKey: async () => "" }), false);
+});
