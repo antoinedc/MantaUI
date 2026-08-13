@@ -627,7 +627,7 @@ export const ShipConfirmCard = memo(function ShipConfirmCard({
   onApprove,
   onDecline,
 }: {
-  proposal: { head: string; base: string; fileCount: number };
+  proposal: { head: string; base: string; fileCount: number; title?: string; body?: string };
   busy: boolean;
   error: string | null;
   onApprove: (input: { title: string; body: string; draft: boolean }) => void;
@@ -637,10 +637,12 @@ export const ShipConfirmCard = memo(function ShipConfirmCard({
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(true);
   useEffect(() => {
-    setTitle("");
-    setBody("");
+    // Seed the editable fields from the server / agent draft (design §4.5
+    // step 1 — honouring the repo's PR template); the user can still edit them.
+    setTitle(proposal?.title ?? "");
+    setBody(proposal?.body ?? "");
     setDraft(true);
-  }, [proposal?.head]);
+  }, [proposal?.head, proposal?.title, proposal?.body]);
   const canSubmit = title.trim().length > 0 && !busy;
   return (
     <div

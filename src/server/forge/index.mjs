@@ -32,6 +32,8 @@ import { run } from "../tmux.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
 import { createGithubAdapter, GithubRequestError } from "./github.mjs";
+import { readFile as fsReadFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // How long a fetched value is served from memory with no network request at
 // all. After this, the ETag conditional GET (If-None-Match) takes over.
@@ -359,27 +361,114 @@ async function resolveWriteContext(cwd, deps, wantBranch = true) {
 
 /**
  * Ship preview: the facts the [SH1] confirm card shows BEFORE anything is
- * pushed — the head branch, the base branch (the PR target), and the number
- * of changed files on the branch (best-effort, 0 when it can't be computed).
- * Read-only; no push, no PR. This is what populates the editable confirm card;
- * the push+create only ever runs after the human confirms it.
+ * pushed — the head branch, the base branch (the PR target), the number of
+ * changed files on the branch, plus a **drafted title + body** (design §4.5
+ * step 1: "the agent writes a title + body from the diff ... honouring the
+ * repo's PR template"). The card renders these editable; the user can change
+ * them. Read-only; no push, no PR. The push+create only ever runs after the
+ * human confirms the card.
+ *
+ * Drafting is heuristic (no model call): the title is the tip commit subject
+ * (falling back to a humanised branch name) and the body is seeded from the
+ * repo's PR template when one exists, else a short changed-files summary. All
+ * git/fs deps injectable for tests.
  *
  * @param {string} cwd
  * @param {object} [deps] injectable I/O
- * @returns {Promise<{ ok: true, head: string, base: string, fileCount: number } | { ok: false, error: string }>}
+ * @returns {Promise<{ ok: true, head: string, base: string, fileCount: number, title: string, body: string } | { ok: false, error: string }>}
  */
 export async function shipPreview(cwd, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
-  const base = "main";
-  let fileCount = 0;
+  const base = deps.defaultBase ?? "main";
+
+  let files = [];
   try {
     const { stdout } = await run("git", ["-C", cwd, "diff", "--name-only", `origin/${base}...${ctx.head}`, "--"]);
-    fileCount = String(stdout ?? "").split("\n").filter((l) => l.length > 0).length;
+    files = String(stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   } catch {
-    // origin/<base> may not exist locally yet — best-effort 0.
+    // origin/<base> may not exist locally yet — best-effort empty.
   }
-  return { ok: true, head: ctx.head, base, fileCount };
+
+  const title = await draftTitle(cwd, ctx.head, deps);
+  const body = await draftBody(cwd, ctx.head, base, files, deps);
+  return { ok: true, head: ctx.head, base, fileCount: files.length, title, body };
+}
+
+// PR templates, in GitHub's usual discovery order. Resolved against the repo
+// top level.
+const PR_TEMPLATE_CANDIDATES = [
+  ".github/pull_request_template.md",
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  "pull_request_template.md",
+  "PULL_REQUEST_TEMPLATE.md",
+  "docs/pull_request_template.md",
+];
+
+// Title draft: the tip commit subject (the most on-the-nose "what this branch
+// does"), truncated to the GH 72-char subject guideline; falls back to the
+// humanised branch name. All I/O injectable.
+async function draftTitle(cwd, branch, deps) {
+  const gitLog = deps.gitLog ?? defaultGitLog;
+  const subject = (await gitLog(cwd))?.trim() ?? "";
+  if (subject) return subject.slice(0, 72);
+  return humanizeBranch(branch);
+}
+
+async function defaultGitLog(cwd) {
+  try {
+    const { stdout } = await run("git", ["-C", cwd, "log", "-1", "--pretty=%s"]);
+    return String(stdout ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+// Humanise a branch ref into a title-friendly slug: drop the leading scope
+// (`feat/`, `fix/`, …), dashes and underscores to spaces, title case.
+export function humanizeBranch(branch) {
+  const cleaned = String(branch ?? "")
+    .split("/")
+    .pop()
+    .replace(/[-_]+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+// Body draft: the repo's PR template when one exists (honouring step-1's
+// "honouring the repo's PR template"), else a short changed-files summary.
+// Template `${head}` / `${base}` placeholders, if present, are filled.
+async function draftBody(cwd, head, base, files, deps) {
+  const readPrTemplate = deps.readPrTemplate ?? defaultReadPrTemplate;
+  const template = await readPrTemplate(cwd, deps);
+  if (template && template.trim()) {
+    return template
+      .replace(/\$\{head\}/g, head || "")
+      .replace(/\$\{base\}/g, base || "");
+  }
+  if (files.length === 0) return "";
+  return `## What\n\nOpens ${head} → ${base}.\n\n## Changed files\n\n${files.map((f) => `- ${f}`).join("\n")}`;
+}
+
+// Find + read the repo's PR template, best-first from the candidates list.
+async function defaultReadPrTemplate(cwd, deps = {}) {
+  const readFile = deps.readFile ?? fsReadFile;
+  let root = cwd;
+  try {
+    const { stdout } = await run("git", ["-C", cwd, "rev-parse", "--show-toplevel"]);
+    if (stdout?.trim()) root = stdout.trim();
+  } catch {
+    /* cwd already assumed to be the tree root */
+  }
+  for (const rel of PR_TEMPLATE_CANDIDATES) {
+    try {
+      return await readFile(join(root, rel), "utf-8");
+    } catch {
+      // not present — try the next candidate
+    }
+  }
+  return null;
 }
 
 /**

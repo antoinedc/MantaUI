@@ -416,12 +416,14 @@ export type ForgeShipResult =
   | { ok: false; error: string };
 
 // forge:ship-preview — the facts the confirm card needs BEFORE anything is
-// pushed: the head branch, the base branch (PR target), and a best-effort
-// count of files changed on the branch.
+// pushed: the head branch, the base branch (PR target), a best-effort count
+// of files changed on the branch, and a **drafted title + body** (design §4.5
+// step 1) the card seeds editable fields from. The body honours the repo's PR
+// template when one exists.
 export type ForgeShipPreviewInput = { cwd: string };
 
 export type ForgeShipPreviewResult =
-  | { ok: true; head: string; base: string; fileCount: number }
+  | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }
   | { ok: false; error: string };
 
 // forge:merge input — ALWAYS passes the head SHA the user approved so the API

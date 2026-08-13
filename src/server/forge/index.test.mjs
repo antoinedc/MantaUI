@@ -12,6 +12,7 @@ import {
   pullRequestForCwd,
   shipPullRequest,
   shipPreview,
+  humanizeBranch,
   mergePullRequest,
   ForgeRateLimitedError,
 } from "./index.mjs";
@@ -318,6 +319,47 @@ test("shipPreview returns head, base and a best-effort file count", async () => 
   assert.equal(r.head, "feat/forge-seam");
   assert.equal(r.base, "main");
   assert.equal(typeof r.fileCount, "number");
+});
+
+test("shipPreview drafts a title from the tip commit (design step 1)", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    gitLog: async () => "Add forge seam + github adapter",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Add forge seam + github adapter");
+});
+
+test("shipPreview seeds the body from the repo's PR template", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    readPrTemplate: async () => "## Summary\n\n${head} → ${base}\n\n## Checklist\n- [x] tests",
+  });
+  assert.equal(r.ok, true);
+  assert.match(r.body, /tests/);
+  assert.ok(r.body.includes("feat/forge-seam"), "template ${head} placeholder is filled");
+  assert.ok(r.body.includes("main"), "template ${base} placeholder is filled");
+});
+
+test("shipPreview falls back to a changed-files body when there is no template", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    readPrTemplate: async () => null,
+  });
+  // No template + git diff unavailable in the sandbox → empty body, not a throw.
+  assert.equal(r.ok, true);
+  assert.equal(typeof r.body, "string");
+});
+
+test("humanizeBranch drops the scope prefix and title-cases the slug", () => {
+  assert.equal(humanizeBranch("feat/forge-seam"), "Forge seam");
+  assert.equal(humanizeBranch("fix/bug-12"), "Bug 12");
+  assert.equal(humanizeBranch("main"), "Main");
+  assert.equal(humanizeBranch(""), "");
+  assert.equal(humanizeBranch("  "), "");
 });
 
 test("shipPreview: repo with no forge → no_forge", async () => {

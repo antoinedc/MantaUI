@@ -226,7 +226,7 @@ export function ChatPanel({
   const [forgeLoading, setForgeLoading] = useState(false);
   const [forgeConnected, setForgeConnected] = useState(false);
   const [shipOpen, setShipOpen] = useState(false);
-  const [shipProposal, setShipProposal] = useState<{ head: string; base: string; fileCount: number } | null>(null);
+  const [shipProposal, setShipProposal] = useState<{ head: string; base: string; fileCount: number; title: string; body: string } | null>(null);
   const [shipBusy, setShipBusy] = useState(false);
   const [shipError, setShipError] = useState<string | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
@@ -502,7 +502,7 @@ export function ChatPanel({
     try {
       const prev = await window.api.forgeShipPreview({ cwd });
       if (prev.ok) {
-        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount });
+        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title ?? "", body: prev.body ?? "" });
       } else {
         setShipProposal(null);
         setShipError(prev.error);
@@ -2135,7 +2135,7 @@ export function ChatPanel({
       if (shipOpen) list.push(block(
         "ship-confirm", blockOrder("ship-confirm"),
         <ShipConfirmCard
-          proposal={shipProposal ?? { head: "", base: "", fileCount: 0 }}
+          proposal={shipProposal ?? { head: "", base: "", fileCount: 0, title: "", body: "" }}
           busy={shipBusy}
           error={shipError}
           onApprove={confirmShip}
