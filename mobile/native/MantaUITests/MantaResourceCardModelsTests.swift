@@ -82,4 +82,49 @@ final class MantaResourceCardModelsTests: XCTestCase {
         let args = try XCTUnwrap(object["args"] as? [String])
         XCTAssertEqual(args, ["ses_1"])
     }
+
+    // MARK: - artifacts / agent-file outbox (BET-750)
+
+    /// `outbox:list` rows (src/server/outbox.mjs `statRow`) decode 1:1 —
+    /// `{path, name, size, sessionID, mtime, expiresAt}`.
+    func testDecodesOutboxFilePayload() throws {
+        let payload = """
+        {"result": [{
+          "path": "/home/dev/.manta-outbox/ses_1/report.pdf",
+          "name": "report.pdf",
+          "size": 1234,
+          "sessionID": "ses_1",
+          "mtime": 1750000000000,
+          "expiresAt": 1750604800000
+        }]}
+        """
+        let files = try MantaAPIClient.decode(json(payload), as: [OutboxFile].self)
+        let file = try XCTUnwrap(files?.first)
+        XCTAssertEqual(file.path, "/home/dev/.manta-outbox/ses_1/report.pdf")
+        XCTAssertEqual(file.name, "report.pdf")
+        XCTAssertEqual(file.size, 1234)
+        XCTAssertEqual(file.sessionID, "ses_1")
+        XCTAssertEqual(file.mtime, 1750000000000)
+        XCTAssertEqual(file.expiresAt, 1750604800000)
+    }
+
+    /// Outbox rows tolerate null `sessionID`/`expiresAt` (a loose root file, or
+    /// a stat that failed) without failing to decode.
+    func testDecodesOutboxFilePayloadWithNulls() throws {
+        let payload = """
+        {"result": [{
+          "path": "/home/dev/.manta-outbox/loose.txt",
+          "name": "loose.txt",
+          "size": 12,
+          "sessionID": null,
+          "mtime": 1750000000000,
+          "expiresAt": null
+        }]}
+        """
+        let files = try MantaAPIClient.decode(json(payload), as: [OutboxFile].self)
+        let file = try XCTUnwrap(files?.first)
+        XCTAssertNil(file.sessionID)
+        XCTAssertNil(file.expiresAt)
+        XCTAssertEqual(file.size, 12)
+    }
 }

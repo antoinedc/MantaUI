@@ -37,6 +37,7 @@ struct ChatOverflowSheet: View {
 
     var onSchedules: () -> Void
     var onSecrets: () -> Void
+    var onArtifacts: () -> Void
     var onCompact: () -> Void
     var onClear: () -> Void
     var onFork: () -> Void
@@ -74,6 +75,7 @@ struct ChatOverflowSheet: View {
                 Section {
                     row("Scheduled tasks", systemImage: "clock", badge: scheduleCount, action: onSchedules)
                     row("Secrets", systemImage: "key", action: onSecrets)
+                    row("Artifacts", systemImage: "doc", action: onArtifacts)
                 }
                 Section {
                     Button {

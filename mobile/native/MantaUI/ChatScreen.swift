@@ -71,6 +71,7 @@ enum BranchFreshnessPolicy {
 private enum OverflowDestination: String, Identifiable {
     case schedules
     case secrets
+    case artifacts
 
     var id: String { rawValue }
 }
@@ -433,6 +434,7 @@ private struct ChatScreenContent: View {
             projectName: projectName,
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
+            onArtifacts: { overflowDestination = .artifacts },
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
@@ -478,6 +480,11 @@ private struct ChatScreenContent: View {
             )
         case .secrets:
             SecretsCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil }
+            )
+        case .artifacts:
+            ArtifactsCard(
                 sessionId: store.sessionId,
                 onClose: { overflowDestination = nil }
             )
