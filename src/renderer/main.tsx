@@ -41,6 +41,10 @@ import { loadPersistedSnapshot } from "./store";
 // shell that used to branch on `!preload`) is retired — a browser without a
 // preload is now only reachable through `?demo` for the visual gates and
 // marketing shots, which never run the real boot path.
+// TODO(BET-audit L10): this cast widens the ~25-method preload subset to the
+// full `Api` type; the preload shim and httpApi should eventually share one
+// typed contract rather than relying on the renderer assuming the subset
+// masks missing methods.
 const preload = (window as unknown as { __mantaPreload?: Api }).__mantaPreload;
 
 // Demo mode (BET-302): parsed once at module load so the demo branch is

@@ -23,6 +23,12 @@ export function setWindowApi(next: unknown): void {
     configurable: true,
     enumerable: true,
   });
+  // BET-708: signal app-level effects that a transport swap just happened
+  // (first-time pairing does this in-session with no reload). App.tsx bumps
+  // `apiGeneration` on this event to re-run the effects that guard on an
+  // httpApi-only method. Dispatched at boot too (before React mounts, no
+  // listener yet — harmless).
+  window.dispatchEvent(new CustomEvent("manta-api-installed"));
 }
 
 /**

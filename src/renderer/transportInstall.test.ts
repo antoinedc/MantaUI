@@ -68,6 +68,22 @@ describe("installHttpTransport", () => {
     setItemSpy.mockRestore();
     warn.mockRestore();
   });
+
+  it("swaps window.api AND dispatches manta-api-installed on a successful seed", () => {
+    const listener = vi.fn();
+    window.addEventListener("manta-api-installed", listener);
+    try {
+      const result = installHttpTransport({
+        manta_server: "https://x.boxes.mantaui.com",
+        manta_token: "y",
+      });
+      expect(result).toBe(true);
+      expect(window.api).toBe(httpApiSentinel);
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("manta-api-installed", listener);
+    }
+  });
 });
 
 describe("setWindowApi", () => {
@@ -81,5 +97,17 @@ describe("setWindowApi", () => {
     // Must remain writable so a later boot path / pairing can swap it again.
     (window as unknown as { api: unknown }).api = { tag: "third" };
     expect(window.api).toEqual({ tag: "third" });
+  });
+
+  it("dispatches manta-api-installed so app-level effects can re-subscribe", () => {
+    const listener = vi.fn();
+    window.addEventListener("manta-api-installed", listener);
+    try {
+      setWindowApi({ tag: "next" });
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener.mock.calls[0][0].type).toBe("manta-api-installed");
+    } finally {
+      window.removeEventListener("manta-api-installed", listener);
+    }
   });
 });
