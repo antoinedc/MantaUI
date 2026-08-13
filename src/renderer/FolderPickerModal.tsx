@@ -269,26 +269,20 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
               ))}
             </ul>
             <div className="flex gap-2">
-              <button
-                onClick={() => onSelect(fanOut.cwd)}
-                className="text-meta px-3 py-2 border border-border text-text-muted hover:text-text rounded-xs"
-              >
+              <Button tone="default" onClick={() => onSelect(fanOut.cwd)}>
                 Just this folder
-              </button>
+              </Button>
               {onFanOut && (
-                <button
+                <Button
+                  tone="primary"
                   onClick={() => onFanOut(fanOut.cwd, fanOut.worktrees)}
-                  className="text-meta px-3 py-2 bg-accent-solid text-on-accent rounded-xs hover:opacity-90"
                 >
                   One per worktree
-                </button>
+                </Button>
               )}
-              <button
-                onClick={() => setFanOut(null)}
-                className="text-meta px-3 py-2 text-text-faint hover:text-text"
-              >
+              <Button tone="ghost" onClick={() => setFanOut(null)}>
                 Back
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -351,13 +345,9 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
                     className="relative w-full bg-transparent border-0 px-3 py-2 text-meta rounded-xs focus:outline-none font-mono"
                   />
                 </div>
-                <button
-                  onClick={goNavigate}
-                  type="button"
-                  className="shrink-0 px-4 text-meta border border-border rounded-xs bg-bg-soft text-text hover:bg-bg-soft"
-                >
+                <Button tone="default" onClick={goNavigate}>
                   Go
-                </button>
+                </Button>
               </div>
 
               {/* Breadcrumbs — home icon + inter-crumb chevrons, current crumb
