@@ -54,6 +54,16 @@
   <dict>
     <key>PATH</key>
     <string>@@AGENT_PATH@@</string>
+    <!-- Background subagents. Unlocks `task(background: true)` — the tool
+         returns immediately and opencode injects the child's result back into
+         the parent session when it finishes — plus the
+         POST /experimental/session/:id/background detach endpoint. Without it
+         opencode reports `backgroundSubagents:false`, the `background`
+         argument hard-errors, and EVERY subagent blocks its parent turn.
+         Mirrors scripts/systemd/opencode-serve.service; unconditionally on,
+         so there is no placeholder to substitute. -->
+    <key>OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS</key>
+    <string>true</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
