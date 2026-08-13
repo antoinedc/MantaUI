@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UserNotifications
 import MessagingUI
 
 // ===========================================================================
@@ -157,9 +158,16 @@ private struct ChatScreenContent: View {
                 // window/branch lookup.
                 store.start()
                 modelStore.load()
+                MantaPushRouter.shared.visibleSessionID = store.sessionId
+                Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
+                clearDeliveredNotifications(for: store.sessionId)
                 Task { await resolveWindowAndBranch() }
             }
-            .onDisappear { store.stop() }
+            .onDisappear {
+                store.stop()
+                MantaPushRouter.shared.visibleSessionID = nil
+                Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
+            }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
             // is active and haptics are enabled. `onChange` fires exactly once
@@ -174,6 +182,24 @@ private struct ChatScreenContent: View {
                     hapticsEnabled: sessionStore.hapticsEnabled
                 ) {
                     SessionHaptics.fire(.success, enabled: true)
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                // Mirror foreground state to the box so it suppresses redundant
+                // pushes for this session, and clear delivered notifications
+                // when the user comes back to the screen. On background the
+                // screen is still the top of the stack when the app returns,
+                // so visibleSessionID stays set — only the box is told it's
+                // not visible.
+                switch phase {
+                case .active:
+                    MantaPushRouter.shared.visibleSessionID = store.sessionId
+                    Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
+                    clearDeliveredNotifications(for: store.sessionId)
+                case .background, .inactive:
+                    Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
+                default:
+                    break
                 }
             }
             .accessibilityElement(children: .contain)
@@ -193,6 +219,20 @@ private struct ChatScreenContent: View {
         } else {
             loadedLayout
         }
+    }
+
+    /// Drop the delivered notifications for a session the user just opened
+    /// (or returned to) and zero the app-icon badge — the user is reading
+    /// that session, so its notifications are consumed.
+    private func clearDeliveredNotifications(for sessionId: String) {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { list in
+            let ids = list
+                .filter { ($0.request.content.userInfo["sessionId"] as? String) == sessionId }
+                .map(\.request.identifier)
+            if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+        }
+        center.setBadgeCount(0)
     }
 
     private var loadedLayout: some View {

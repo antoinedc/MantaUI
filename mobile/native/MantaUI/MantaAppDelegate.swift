@@ -89,7 +89,17 @@ final class MantaAppDelegate: NSObject, UIApplicationDelegate, @preconcurrency U
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .list, .sound])
+        let sessionID = notification.request.content.userInfo["sessionId"] as? String
+        // UNUserNotificationCenter invokes its delegate on the main thread, so
+        // the (MainActor-isolated) visible-session bookkeeping is readable here
+        // directly — keeping completionHandler in the synchronous nonisolated
+        // frame avoids escaping a `sending` parameter into a Task.
+        let visible = MainActor.assumeIsolated { MantaPushRouter.shared.visibleSessionID }
+        if let sessionID, !sessionID.isEmpty, sessionID == visible {
+            completionHandler([.list])
+        } else {
+            completionHandler([.banner, .list, .sound])
+        }
     }
 
     // Tap → deep-link to the session that fired the notification. The APNs

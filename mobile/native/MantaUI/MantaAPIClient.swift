@@ -368,6 +368,22 @@ final class MantaAPIClient: Sendable {
         }
     }
 
+    /// `POST /push/focus` — tell the box which session the user is looking at so
+    /// its router suppresses redundant pushes (mirrors the desktop's presence
+    /// heartbeat; the endpoint + suppression logic already exist server-side).
+    func reportFocus(sessionId: String?, visible: Bool) async throws {
+        var request = URLRequest(url: serverURL.appendingPathComponent("push/focus"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let tokenValue = tokenProvider(), !tokenValue.isEmpty {
+            request.setValue("Bearer \(tokenValue)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "sessionId": sessionId as Any, "visible": visible,
+        ])
+        _ = try await session.data(for: request)
+    }
+
     // MARK: - Transport + envelope
 
     static func makeRequest(serverURL: URL, channel: String, args: [Any], token: String?) throws -> URLRequest {

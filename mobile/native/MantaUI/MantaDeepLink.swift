@@ -27,6 +27,11 @@ final class MantaPushRouter: ObservableObject {
     /// once it has pushed the matching ChatScreen onto its NavigationStack).
     @Published var pendingSessionID: String?
 
+    /// The opencode sessionId of the ChatScreen currently on screen, nil when
+    /// none is. Written by ChatScreen appear/disappear; read by the notification
+    /// delegate (foreground suppression) and mirrored to the box (/push/focus).
+    @Published var visibleSessionID: String?
+
     private init() {}
 
     func open(sessionID: String) {
