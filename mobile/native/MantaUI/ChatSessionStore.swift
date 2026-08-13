@@ -912,10 +912,28 @@ final class ChatSessionStore: ObservableObject {
     }
 
     /// Compact the session to free context (voice `compact`).
+    ///
+    /// Compact used to fire blind — no confirmation and no feedback that context
+    /// was freed. Both the overflow action (now confirm-gated) and the voice
+    /// `compact` route here, and both surface the outcome through the composer
+    /// `actionHint` bus so a compact is never silent:
+    /// - success surfaces "Compacted — context freed" and schedules the store's
+    ///   standard refresh, so the next `context` frame the box pushes shows the
+    ///   new headroom in the header pill (the `pct` arrives by push on
+    ///   `session.next.step.ended`, so it reflects the freed context once the
+    ///   conversation resumes);
+    /// - failure surfaces "Compact failed — check the connection".
     func compact() {
         Task {
-            do { try await api.compactSession(sessionId: sessionId) }
-            catch { await MainActor.run { actionHint = "Compact failed — check the connection" } }
+            do {
+                try await api.compactSession(sessionId: sessionId)
+                await MainActor.run {
+                    actionHint = "Compacted — context freed"
+                    scheduleRefetch()
+                }
+            } catch {
+                await MainActor.run { actionHint = "Compact failed — check the connection" }
+            }
         }
     }
 

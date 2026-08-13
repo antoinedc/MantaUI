@@ -28,7 +28,6 @@ struct ChatOverflowCaptureScene: View {
                 ChatOverflowSheet(
                     sessionTitle: "better-ui",
                     projectName: "manta",
-                    branch: "main",
                     onSchedules: {},
                     onSecrets: {},
                     onCompact: {},

@@ -562,6 +562,36 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(reflected?.truncated, true)
     }
 
+    // MARK: - Compact feedback (BET-747 task 1)
+
+    /// A failed `compact()` surfaces the composer `actionHint` instead of being
+    /// silent, so a blind compact never reads as success.
+    @MainActor
+    func testFailedCompactSurfacesActionHint() async {
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        store.compact()
+        await waitUntil { store.actionHint == "Compact failed — check the connection" }
+    }
+
+    /// A successful `compact()` surfaces the freed-context hint (and refreshes
+    /// state so the next context frame shows the new headroom).
+    @MainActor
+    func testSuccessfulCompactSurfacesFreedContextHint() async {
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+        store.compact()
+        await waitUntil { store.actionHint == "Compacted — context freed" }
+    }
+
     // MARK: - Mock transport
 
     /// Poll the main actor until `condition` holds (or ~2s elapses). The drain

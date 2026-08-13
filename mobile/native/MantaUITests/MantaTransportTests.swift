@@ -253,6 +253,32 @@ final class MantaTransportTests: XCTestCase {
         try store.delete()
         XCTAssertNil(try store.load())
     }
+
+    // MARK: - Branch-freshness poll (BET-747 task 3)
+
+    /// A tick with no prior fetch always refetches.
+    func testBranchPollRefetchesWhenNeverFetched() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: now, lastFetch: nil),
+                      "the first tick with no prior fetch must refetch")
+    }
+
+    /// A tick before the 5s interval elapses does not refetch.
+    func testBranchPollSkipsEarlyTick() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        let early = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval - 1)
+        XCTAssertFalse(BranchFreshnessPolicy.shouldRefetchAfterTick(now: early, lastFetch: lastFetch))
+    }
+
+    /// A tick at/after the 5s interval refetches — the desktop's cadence, so a
+    /// terminal-side checkout reflects within one tick.
+    func testBranchPollRefetchesOnInterval() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        let at = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval)
+        let later = lastFetch.addingTimeInterval(BranchFreshnessPolicy.pollInterval + 5)
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: at, lastFetch: lastFetch))
+        XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: later, lastFetch: lastFetch))
+    }
 }
 
 private struct SendPromptResult: Decodable {}
