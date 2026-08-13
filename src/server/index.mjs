@@ -766,6 +766,9 @@ const handleRequest = async (req, res) => {
   //                                `verify` (BET-493): when the joiner echoes the
   //                                four characters it provisions a DISTINCT
   //                                Stage-2 device; absent → legacy primary token.
+  // POST   /auth/check {pairing_code} → {box_id}
+  //                                NON-consuming validation for the /pair web
+  //                                page; the code stays claimable (BET-699).
   // DELETE /auth/revoke           → 200 on success; 400/401 on bad token.
   //                                "Remove this box from the device that holds
   //                                the current box_token" (BET-357 §2). Mints
@@ -776,6 +779,7 @@ const handleRequest = async (req, res) => {
   if (
     path === "/auth/pair" ||
     path === "/auth/claim" ||
+    path === "/auth/check" ||
     path === "/auth/revoke"
   ) {
     const ip =
@@ -838,6 +842,17 @@ const handleRequest = async (req, res) => {
           box_id: result.box_id,
           device_id: result.device_id ?? null,
         });
+        return;
+      }
+      if (req.method === "POST" && path === "/auth/check") {
+        const body = await readJsonBody(req);
+        const pairing_code = body?.pairing_code ?? body?.code;
+        const result = authEngine.check({ pairing_code });
+        if (!result.ok) {
+          respondJson(res, result.status ?? 400, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, { box_id: result.box_id });
         return;
       }
       if (req.method === "DELETE" && path === "/auth/revoke") {

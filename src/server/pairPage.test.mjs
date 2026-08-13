@@ -396,23 +396,25 @@ test("readPairAsset returns pair-logo.png bytes (PNG magic)", () => {
 // manual entry sends only the six digits, the server resolves the box (§5.2.9).
 // The /auth/claim server half (code → resolved box) is already covered by
 // auth.test.mjs; this pins that the page wires to that same endpoint.
-test("manual-entry mailbox: shipped page claims the fragment code against /auth/claim (BET-489)", () => {
+test("manual-entry mailbox: shipped page checks the fragment code against /auth/check (BET-699)", () => {
   const html = readPairAsset("pair.html").toString("utf-8");
-  // The claim endpoint is built by claimEndpointFor — it must resolve to the
-  // EXISTING /auth/claim path, never a new route.
+  // The check endpoint is built by claimEndpointFor — it must resolve to the
+  // NON-consuming /auth/check path, never /auth/claim (which would burn the
+  // one-time code and leak the box token to the browser).
   const endpoint = html.match(/function claimEndpointFor\(origin\)\{([\s\S]*?)\n\}/);
   assert.ok(endpoint, "the page must define claimEndpointFor(origin)");
-  assert.match(endpoint[1], /\/auth\/claim/, "the endpoint must reuse /auth/claim");
-  assert.match(endpoint[1], /"\/auth\/claim";/, "endpoint is exactly <origin>/auth/claim");
-  assert.doesNotMatch(endpoint[1], /"\/auth\/claim\?/, "no query appended after /auth/claim");
+  assert.match(endpoint[1], /\/auth\/check/, "the endpoint must be /auth/check");
+  assert.match(endpoint[1], /"\/auth\/check";/, "endpoint is exactly <origin>/auth/check");
+  assert.doesNotMatch(endpoint[1], /"\/auth\/check\?/, "no query appended after /auth/check");
   assert.doesNotMatch(endpoint[1], /[?&]code\s*=/i, "no code in a query string");
-  // doClaim POSTs only {code} to that endpoint — the code travels in the body.
-  const doClaim = html.match(/function doClaim\(code\)\{([\s\S]*?)\n\}/);
-  assert.ok(doClaim, "the page must define doClaim(code)");
-  assert.match(doClaim[1], /fetch\(claimEndpointFor\(origin\)/, "claims via the built endpoint");
-  assert.match(doClaim[1], /method:\s*"POST"/, "must be a POST");
-  assert.match(doClaim[1], /JSON\.stringify\(\{\s*code:\s*code\s*\}\)/, "body carries {code}");
-  assert.doesNotMatch(doClaim[1], /box\s*:/, "manual entry sends no box id");
+  assert.doesNotMatch(endpoint[1], /\/auth\/claim/, "must NOT reuse the consuming /auth/claim");
+  // doCheck POSTs only {code} to that endpoint — the code travels in the body.
+  const doCheck = html.match(/function doCheck\(code\)\{([\s\S]*?)\n\}/);
+  assert.ok(doCheck, "the page must define doCheck(code)");
+  assert.match(doCheck[1], /fetch\(claimEndpointFor\(origin\)/, "checks via the built endpoint");
+  assert.match(doCheck[1], /method:\s*"POST"/, "must be a POST");
+  assert.match(doCheck[1], /JSON\.stringify\(\{\s*code:\s*code\s*\}\)/, "body carries {code}");
+  assert.doesNotMatch(doCheck[1], /box\s*:/, "manual entry sends no box id");
 });
 
 // Fragment-only: the code must never be placed in a path/query the server
@@ -423,30 +425,36 @@ test("the page never puts the code in a path/query the server could log (fragmen
   // The code is sourced only from the URL fragment.
   assert.match(html, /location\.hash/, "code must be read from the fragment");
   // No path/query construction that would surface the code to a proxy log.
-  assert.doesNotMatch(html, /"\/auth\/claim\?"/, "no code-carrying claim URL query");
+  assert.doesNotMatch(html, /"\/auth\/check\?"/, "no code-carrying check URL query");
   assert.doesNotMatch(html, /&code=|&box=/, "no query-string code/box usage");
 });
 
-// The resolved-box card is fed by a claim that resolved the box (the server
-// returns box_id on success). The page must key the "Box found" card off
-// that resolved response — not off any client-side assumption.
-test("resolved-box card is fed by a successful /auth/claim that resolved the box (BET-489)", () => {
+// The resolved-box card is fed by a successful check (the server returns
+// box_id on success). The page must key the "Box found" card off that
+// resolved response — not off any client-side assumption — and the check must
+// NEVER hand back a box_token (validation only; the code stays claimable).
+test("resolved-box card is fed by a successful /auth/check that resolved the box (BET-699)", () => {
   const html = readPairAsset("pair.html").toString("utf-8");
-  const present = html.match(/function presentClaimResult\(res, body\)\{([\s\S]*?)\n\}/);
-  assert.ok(present, "presentClaimResult must exist");
+  const present = html.match(/function presentCheckResult\(res, body\)\{([\s\S]*?)\n\}/);
+  assert.ok(present, "presentCheckResult must exist");
   assert.match(present[1], /res\s*&&\s*res\.ok/, "only a successful response shows the card");
   assert.match(present[1], /body\s*\.\s*box_id/, "keys off the server-resolved box_id");
+  assert.doesNotMatch(present[1], /box_token/, "check must never reference a box_token");
   assert.match(html, /Box found/, "the resolved-box card heading");
+  assert.match(html, /the code stays valid/, "confirms the code is still claimable");
 });
 
-// Failure-state copy renders per §5.4 — the verbatim {cause, action} pairs.
+// Failure-state copy renders per §5.4 — the {cause, action} pairs. The page
+// cannot distinguish a typo from an expired code, so both land on the same
+// "That code didn't work" view (BET-699).
 test("pair.html renders the §5.4 failure-state copy verbatim (BET-489)", () => {
   const html = readPairAsset("pair.html").toString("utf-8");
-  // Expired
-  assert.match(html, /That code expired/);
-  assert.match(html, /Codes last five minutes/);
+  // Validation rejection (wrong/expired/malformed/rate-limited)
+  assert.match(html, /That code didn't work/);
+  assert.match(html, /It may have expired or been mistyped/);
   assert.match(html, /Nothing was linked and nothing changed/);
-  assert.match(html, /Your desktop already has a new one/);
+  assert.match(html, /Get a fresh code/);
+  assert.match(html, /manta pair/);
   assert.match(html, /Scan again/);
   assert.match(html, /Enter a code instead/);
   // Unreachable

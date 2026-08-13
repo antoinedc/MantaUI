@@ -94,6 +94,7 @@ test("parseBearer extracts token from Authorization header", () => {
 test("isExemptPath exempts only /auth pairing + /pair onboarding + /hook delivery + /pages hosting", () => {
   assert.equal(isExemptPath("/auth/pair"), true);
   assert.equal(isExemptPath("/auth/claim"), true);
+  assert.equal(isExemptPath("/auth/check"), true);
   assert.equal(isExemptPath("/pair"), true);
   assert.equal(isExemptPath("/pair/qr.png"), true);
   assert.equal(isExemptPath("/pair/logo.png"), true);
@@ -446,6 +447,67 @@ test("claim rejects an expired code", () => {
   const r = eng.claim({ pairing_code });
   assert.equal(r.ok, false);
   assert.equal(r.status, 403);
+});
+
+// ----------------------------------------------------------------------------
+// auth engine — check (BET-699: /pair page validates WITHOUT consuming)
+// ----------------------------------------------------------------------------
+
+test("check approves the active code and does NOT consume it", () => {
+  const eng = engine({ auth: AUTH });
+  const { pairing_code } = eng.pair();
+
+  const c = eng.check({ pairing_code });
+  assert.equal(c.ok, true);
+  assert.equal(c.box_id, AUTH.box_id);
+
+  // The code is still claimable after check — proving it was never consumed.
+  const claim = eng.claim({ pairing_code });
+  assert.equal(claim.ok, true);
+  assert.equal(claim.box_token, AUTH.box_token);
+});
+
+test("check rejects a wrong code but the active code still claims afterwards", () => {
+  const eng = engine({ auth: AUTH });
+  const { pairing_code } = eng.pair();
+
+  const wrong = eng.check({ pairing_code: "999999" });
+  assert.equal(wrong.ok, false);
+  assert.equal(wrong.status, 403);
+
+  // A non-matching check must NOT consume the real code.
+  const claim = eng.claim({ pairing_code });
+  assert.equal(claim.ok, true);
+});
+
+test("check rejects an expired code", () => {
+  let t = 0;
+  const eng = engine({ auth: AUTH, ttlMs: 100, now: () => t });
+  const { pairing_code } = eng.pair();
+  t = 200; // past TTL
+  const r = eng.check({ pairing_code });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+});
+
+test("check rejects a malformed code", () => {
+  const eng = engine({ auth: AUTH });
+  const r = eng.check({ pairing_code: "abc" });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 400);
+});
+
+test("repeated check calls never consume the code", () => {
+  const eng = engine({ auth: AUTH });
+  const { pairing_code } = eng.pair();
+
+  for (let i = 0; i < 5; i++) {
+    const c = eng.check({ pairing_code });
+    assert.equal(c.ok, true);
+  }
+  // Still claimable after 5 good checks.
+  const claim = eng.claim({ pairing_code });
+  assert.equal(claim.ok, true);
 });
 
 // ----------------------------------------------------------------------------
