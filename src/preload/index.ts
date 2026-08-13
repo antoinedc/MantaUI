@@ -67,6 +67,11 @@ const api = {
     ipcRenderer.invoke(IPC.clipboardWriteText, text),
   clipboardReadImage: (): Promise<ArrayBuffer | null> =>
     ipcRenderer.invoke(IPC.clipboardReadImage),
+  // BET-704: onboarding pair-link clipboard prefill. Read on PairStep mount
+  // + window focus so a link copied elsewhere (chat, terminal) can be
+  // offered as a one-tap prefill — never polled.
+  readClipboardText: (): Promise<string> =>
+    ipcRenderer.invoke(IPC.clipboardReadText),
   readLocalFile: (path: string): Promise<ArrayBuffer> =>
     ipcRenderer.invoke(IPC.readLocalFile, path),
 

@@ -404,6 +404,12 @@ function registerHandlers(): void {
     return buf ? buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) : null;
   });
 
+  // Read the current clipboard TEXT (BET-704: onboarding pair-link
+  // clipboard prefill). PairStep calls this on mount + window focus to
+  // offer a one-tap prefill when a pairing link is sitting in the
+  // clipboard — never polled, never auto-claims.
+  ipcMain.handle(IPC.clipboardReadText, () => clipboard.readText());
+
   // Read an arbitrary local (Mac) file's bytes. Used for Desktop screenshot
   // detection (screenshotDetected source:"file") — only main can touch the
   // OS filesystem; the renderer funnels the bytes into uploadBuffer from there.

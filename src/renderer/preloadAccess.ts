@@ -47,6 +47,12 @@ export interface MantaPreload {
   // main can touch the OS clipboard — this must go through the preload, NOT
   // window.api (which is httpApi in HTTP mode and has no OS access).
   clipboardReadImage(): Promise<ArrayBuffer | null>;
+  // Read the current clipboard TEXT (BET-704: onboarding pair-link
+  // clipboard prefill). PairStep calls this on mount + window focus and
+  // runs the result through `detectPairClipboard` — a hit offers a
+  // one-tap "Use it" prefill of the manual pairing form. Never polled,
+  // never auto-claims; the user still clicks Connect.
+  readClipboardText(): Promise<string>;
   // Read an arbitrary local (Mac) file's bytes — e.g. a Desktop screenshot
   // detected by main's fs.watch. Only main can touch the OS filesystem.
   readLocalFile(path: string): Promise<ArrayBuffer>;

@@ -22,6 +22,11 @@ function makeFakePreload(): MantaPreload {
     onPairLink: vi.fn((_cb: (url: string) => void) => vi.fn()),
     clipboardWriteText: vi.fn(async () => {}),
     clipboardReadImage: vi.fn(async () => null),
+    // BET-704: onboarding pair-link clipboard prefill. Minimal stub —
+    // per-method behavior is exercised by pairPayload.test.ts
+    // (detectPairClipboard) and PairStep's own wiring is untested by
+    // design (issue ground rules).
+    readClipboardText: vi.fn(async () => ""),
     readLocalFile: vi.fn(async () => new ArrayBuffer(0)),
     openExternal: vi.fn(async () => {}),
     revealInFolder: vi.fn(async () => {}),
