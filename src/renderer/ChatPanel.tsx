@@ -25,6 +25,7 @@ import type {
   ForgeCheckRun,
   ForgePullRequestResult,
   OpencodeModel,
+  ProgressRecord,
   PullRequest,
   QuestionRequest,
 } from "../shared/types";
@@ -57,6 +58,7 @@ import {
   MANTA_BUILTIN_NAMES,
   parseModelRef,
   describeMergeFailure,
+  progressAttentionKind,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -77,7 +79,7 @@ import {
 import { useModelCatalog } from "./modelCatalog";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
-import { CompactionCard, PermissionCard, RetryCard } from "./Cards";
+import { BlockedProgressCard, CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
 import { DelegateApprovalCard, ForgeCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, ShipConfirmCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
@@ -1935,6 +1937,61 @@ export function ChatPanel({
   // the row's per-second clock tick advances its elapsed label in place.
   const liveTurn = useMemo(() => computeLiveTurn(messages), [messages]);
 
+  // ===== Session progress (BET-790/791) =====
+  // Live "where is this turn right now" state served by `progress:get`,
+  // refreshed on the `progress.updated` bus event (no poll). The server clamps
+  // step monotonicity — the renderer only displays what it returns and never
+  // re-derives a regressing step. Follows the established live-event-preferred
+  // pattern (same as liveTodos): separate state from messages, reset on
+  // session change, so a canonical transcript refetch cannot overwrite it.
+  const [liveProgress, setLiveProgress] = useState<ProgressRecord | null>(null);
+  const blockedRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    setLiveProgress(null);
+    blockedRef.current = false;
+    const load = () => {
+      window.api
+        .progressGet(sessionId)
+        .then((r) => {
+          if (!active) return;
+          setLiveProgress((r as ProgressRecord | null) || null);
+        })
+        .catch(() => { /* non-fatal — progress is ambient */ });
+    };
+    void load();
+    const unsub = window.api.onProgressUpdated?.((p: { sessionID?: string }) => {
+      if (p.sessionID && p.sessionID === sessionId) void load();
+    });
+    return () => {
+      active = false;
+      unsub?.();
+    };
+  }, [sessionId]);
+
+  // `blocked` lights the same sidebar attention dot a pending question does,
+  // reusing the existing setChatAttention latch (no parallel mechanism). It is
+  // cleared only when we ourselves set it, so a concurrent question's latch is
+  // never wiped — the model reports a different state (or the turn ends) and
+  // the store's setActive clears the dot when the user focuses the window.
+  useEffect(() => {
+    const kind = progressAttentionKind(liveProgress?.state ?? null);
+    // The rail-row tooltip label: only a WORKING turn's model-authored label
+    // (blocked yields to its card, done/failed to the turn ending).
+    const label =
+      liveProgress?.state === "working" && liveProgress.label?.trim()
+        ? liveProgress.label
+        : null;
+    useStore.getState().setChatProgressLabel(sessionId, label);
+    if (kind) {
+      blockedRef.current = true;
+      useStore.getState().setChatAttention(sessionId, "blocked");
+    } else if (blockedRef.current) {
+      blockedRef.current = false;
+      useStore.getState().setChatAttention(sessionId, null);
+    }
+  }, [liveProgress, sessionId]);
+
   // Slash-command provenance per USER message id. Two-source resolution:
   //
   //   (1) Live: opencode emits `command.executed.messageID` pointing at the
@@ -2133,6 +2190,18 @@ export function ChatPanel({
           }}
         />,
       ));
+
+      // BET-791 [C9]: a model reporting it has STOPPED and needs a human
+      // decision earns the one card `blocked` gets — a warn-toned ask in the
+      // blocking tier, alongside permission and question, never below an
+      // ambient card. It is not dismissible by ×; it clears when the model
+      // reports a different state or the turn ends.
+      if (liveProgress?.state === "blocked") {
+        list.push(block(
+          "progress-blocked", blockOrder("progress-blocked"),
+          <BlockedProgressCard progress={liveProgress} />,
+        ));
+      }
     }
     // Ambient tier — fixed priority, independent of arrival order.
     if (retryInfo) list.push(amb("retry",
@@ -2236,7 +2305,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipOpen, shipProposal, shipBusy, shipError, confirmShip, forgeConnected, forgeLoading, forgeResult, mergeError, openShip, doMerge]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipOpen, shipProposal, shipBusy, shipError, confirmShip, forgeConnected, forgeLoading, forgeResult, mergeError, openShip, doMerge, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -2345,6 +2414,7 @@ export function ChatPanel({
         showThinking={showThinking}
         running={running}
         liveTurn={liveTurn}
+        progress={liveProgress}
         isActive={isActive}
         activeTodos={activeTodos}
         onDismissTodos={dismissTodos}

@@ -239,7 +239,7 @@ export type NewSessionDraft = {
 // `attention` (boolean) remains the gate; `attentionKind` is meaningful
 // only when `attention === true`. Defaults to "idle" when unset for
 // backward compat with the existing poller-driven flow.
-export type AttentionKind = "idle" | "question" | "permission";
+export type AttentionKind = "idle" | "question" | "permission" | "blocked";
 // `lastMessageAt` (unix ms, BET-119) is stamped whenever a chat-mode
 // session's `running` value CHANGES (either direction — idle→running marks
 // a new user message, running→idle marks the assistant completion) by
@@ -254,6 +254,10 @@ export type WindowStatusUI = {
   attention: boolean;
   attentionKind?: AttentionKind;
   lastMessageAt?: number;
+  /** BET-791: the model-authored progress label for a working turn, surfaced
+   *  in the rail row's title tooltip (the subagent count's home). Pushed by
+   *  the owning ChatPanel via setChatProgressLabel; null/absent = no label. */
+  progressLabel?: string;
 };
 
 // A screenshot the OS-level detector saw, waiting for the user to attach or
@@ -601,6 +605,10 @@ type State = {
   // path the sidebar `·N` indicator would always be 0 for chat windows.
   // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
   setChatSubagents: (sessionId: string, count: number) => void;
+  // BET-791: reflect a chat-mode window's model-authored progress label into
+  // the store so the rail row's title tooltip (the subagent count's home) can
+  // carry it. Owning window resolved from `sessionId`; label null clears.
+  setChatProgressLabel: (sessionId: string, label: string | null) => void;
   // BET-659: reflect a chat-mode window's live transcript into the store so
   // the Artifacts panel can derive artifacts from it. No-op when unchanged
   // (same guard as setChatSubagents) so keystroke re-renders of ChatPanel —
@@ -1113,6 +1121,7 @@ export const useStore = create<State>((set, get) => ({
         attention,
         attentionKind,
         lastMessageAt,
+        progressLabel: old?.progressLabel,
       };
       return {
         status: {
@@ -1133,9 +1142,9 @@ export const useStore = create<State>((set, get) => ({
       const isActiveHere =
         prev.activeProjectName === owner.tmuxSession &&
         prev.activeWindowByProject[owner.tmuxSession] === owner.windowIndex;
-      // Latch "question" and "permission" unconditionally — these block the
-      // turn and the user MUST act, so the sidebar indicator needs to
-      // persist if they navigate away mid-turn (most common case: user is
+      // Latch "question", "permission" and "blocked" unconditionally — these
+      // block the turn and the user MUST act, so the sidebar indicator needs
+      // to persist if they navigate away mid-turn (most common case: user is
       // typing a follow-up in another window when a permission fires; with
       // the previous `!isActiveHere` gate, no indicator was ever set
       // because the chat panel WAS active at that moment, and no later
@@ -1148,13 +1157,15 @@ export const useStore = create<State>((set, get) => ({
       // gated by `!isActiveHere` — if the user IS on the window when the
       // turn finishes, there's nothing to go check.
       const wantAttention =
-        kind != null && (kind === "question" || kind === "permission" || !isActiveHere);
+        kind != null &&
+        (kind === "question" || kind === "permission" || kind === "blocked" || !isActiveHere);
       const nextWin: WindowStatusUI = {
         running: old?.running ?? false,
         subagents: old?.subagents ?? 0,
         attention: wantAttention,
         attentionKind: wantAttention ? kind ?? "idle" : undefined,
         lastMessageAt: old?.lastMessageAt,
+        progressLabel: old?.progressLabel,
       };
       return {
         status: {
@@ -1182,6 +1193,34 @@ export const useStore = create<State>((set, get) => ({
         attention: old?.attention ?? false,
         attentionKind: old?.attentionKind,
         lastMessageAt: old?.lastMessageAt,
+        progressLabel: old?.progressLabel,
+      };
+      return {
+        status: {
+          ...prev.status,
+          [owner.tmuxSession]: {
+            ...prev.status[owner.tmuxSession],
+            [owner.windowIndex]: nextWin,
+          },
+        },
+      };
+    }),
+
+  setChatProgressLabel: (sessionId, label) =>
+    set((prev) => {
+      const owner = resolveSessionOwner(prev.projects, sessionId);
+      if (!owner) return prev;
+      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
+      // No-op when unchanged (same guard as setChatSubagents) so the
+      // frequent progress refetches don't re-emit to the whole sidebar.
+      if ((old?.progressLabel ?? null) === (label ?? null)) return prev;
+      const nextWin: WindowStatusUI = {
+        running: old?.running ?? false,
+        subagents: old?.subagents ?? 0,
+        attention: old?.attention ?? false,
+        attentionKind: old?.attentionKind,
+        lastMessageAt: old?.lastMessageAt,
+        progressLabel: label ?? undefined,
       };
       return {
         status: {

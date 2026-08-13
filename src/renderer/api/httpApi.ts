@@ -353,6 +353,7 @@ type Kind =
   | "serverUpdateProgress"
   | "delegate.updated"
   | "usage.updated"
+  | "progress.updated"
   | "stream"
   | "sync";
 
@@ -371,6 +372,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
+  "progress.updated": new Set(),
   stream: new Set(),
   sync: new Set(),
 };
@@ -1012,6 +1014,10 @@ export const httpApi: Api = {
 
   // -- session progress (manta-server owned; BET-790) --
   progressGet: (sessionId) => rpc(IPC.progressGet, sessionId),
+  // BET-791: the box publishes `progress.updated` whenever a session's record
+  // is written/cleared. The payload is just a hint ({sessionID}); subscribers
+  // refetch progressGet(). Mirrors onDelegateUpdated's hint-only pattern.
+  onProgressUpdated: (cb) => on<{ sessionID?: string }>("progress.updated", cb),
 
   // -- secrets (manta-server owned; in-process on mobile) --
   secretsList: (sessionId, all) => rpc(IPC.secretsList, sessionId, all),

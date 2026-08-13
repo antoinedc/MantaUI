@@ -73,6 +73,10 @@ final class SessionListStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private var attentionSessions: Set<String> = []
     private var modelLabels: [String: String] = [:]
+    /// opencodeSessionID → the model-authored progress label for a working turn
+    /// (BET-791). Fed from `progress:get` on `progress.updated` frames + a
+    /// backfill on refresh; drives the row subtitle via `rowStatus`.
+    private var progressBySession: [String: String] = [:]
     /// A refresh asked for while one was already in flight. The request used to
     /// be DROPPED (`guard !loading else { return }`) and never rescheduled, so
     /// the foreground/reconnect refresh that raced the launch fetch simply
@@ -86,6 +90,7 @@ final class SessionListStore: ObservableObject {
         self.loadConfig()
         self.eventStore.rawFrameHandler = { [weak self] frame in
             self?.trackAttention(frame: frame)
+            self?.trackProgress(frame: frame)
         }
         eventStore.$sessionStates
             .receive(on: DispatchQueue.main)
@@ -173,6 +178,18 @@ final class SessionListStore: ObservableObject {
             }
         }
         modelLabels = labels
+        // BET-791: backfill the working progress label for every session so
+        // the subtitle is right even when the app (re)connected after a
+        // progress_report but before any live `progress.updated` frame. The
+        // record fetched for a session that has none (or whose turn isn't
+        // `working`) clears any stale label — authoritative to the box.
+        var progress: [String: String] = [:]
+        for s in sessions {
+            if let label = await workingProgressLabel(sessionID: s.id) {
+                progress[s.id] = label
+            }
+        }
+        progressBySession = progress
     }
 
     // MARK: - Row status (reads the S1b store)
@@ -188,7 +205,8 @@ final class SessionListStore: ObservableObject {
             running: running,
             attention: attentionSessions.contains(sid),
             subagentsRunning: subagents,
-            modelLabel: modelLabels[sid]
+            modelLabel: modelLabels[sid],
+            progressLabel: progressBySession[sid]
         )
     }
 
@@ -234,6 +252,32 @@ final class SessionListStore: ObservableObject {
         // to the envelope kind.
         if case .string(let s)? = obj["kind"] { return s }
         return frame.kind
+    }
+
+    // MARK: - Progress (BET-791)
+
+    /// Track `progress.updated` frames: refetch that session's progress record
+    /// (the frame carries only a {sessionID} hint) and stash the working label
+    /// so the row subtitle can show it. Published only when the label actually
+    /// differs (mirrors trackAttention's BET-672 re-render guard).
+    private func trackProgress(frame: MantaStreamFrame) {
+        guard kind(frame) == "progress.updated", let sid = frame.sessionId else { return }
+        Task { [weak self] in
+            let label = await self?.workingProgressLabel(sessionID: sid)
+            guard let self else { return }
+            if self.progressBySession[sid] != label {
+                self.progressBySession[sid] = label
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    /// The model-authored label for a WORKING turn; any other state clears it
+    /// (blocked yields to the card, done/failed to the turn ending). Returns
+    /// nil when the fetch fails or the session has no qualifying record.
+    private func workingProgressLabel(sessionID: String) async -> String? {
+        guard let record = try? await api.progressGet(sessionID: sessionID) else { return nil }
+        return record.workingLabel
     }
 
     // MARK: - Pin (§7.2 swipe-right)

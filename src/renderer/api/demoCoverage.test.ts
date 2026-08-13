@@ -62,6 +62,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onAutoUpdateDownloaded",
   "onDelegateUpdated",
   "onDesktopNotify",
+  "onProgressUpdated",
   "onPtyEvent",
   "onScreenshotDetected",
   "onServerUpdateAvailable",

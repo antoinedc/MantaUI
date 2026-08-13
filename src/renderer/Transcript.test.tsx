@@ -77,6 +77,7 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     showThinking: false,
     running,
     liveTurn: null,
+    progress: null,
     // Entry-motion tests assume the panel is being watched (a hidden panel
     // never animates — that is the session-switch fix).
     isActive: true,

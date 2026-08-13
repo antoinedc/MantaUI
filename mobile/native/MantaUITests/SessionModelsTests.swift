@@ -30,6 +30,23 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(SessionRowSubtitle.text(for: s), "needs you")
     }
 
+    // MARK: - §7.1a progress label (BET-791)
+
+    func testSubtitleWorkingProgressLabelReplacesRunningAndModel() {
+        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8", progressLabel: "Running integration tests")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "Running integration tests")
+    }
+
+    func testSubtitleWorkingProgressLabelEmptyFallsBackToRunning() {
+        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil, progressLabel: "")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "running")
+    }
+
+    func testSubtitleProgressLabelStillLosesToSubagents() {
+        let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 2, modelLabel: nil, progressLabel: "Running integration tests")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s), "2 subagents")
+    }
+
     func testSubtitleIdleIsNil() {
         let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: nil)
         XCTAssertNil(SessionRowSubtitle.text(for: s))

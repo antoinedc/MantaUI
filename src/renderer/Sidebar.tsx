@@ -884,27 +884,31 @@ function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; t
   if (!status) return { variant: "default", title: "Idle" };
   const kind = status.attentionKind ?? "idle";
   const isBlocking =
-    status.attention && (kind === "question" || kind === "permission");
+    status.attention && (kind === "question" || kind === "permission" || kind === "blocked");
   if (isBlocking) {
     return {
       variant: "att",
       title:
         kind === "question"
           ? "Waiting on a question — click to answer"
-          : "Waiting on permission — click to approve or deny",
+          : kind === "blocked"
+            ? "Blocked — needs a decision — click to view"
+            : "Waiting on permission — click to approve or deny",
     };
   }
   if (status.attention && !status.running) {
     return { variant: "idle", title: "Finished — click to view" };
   }
   if (status.running) {
-    return {
-      variant: "run",
-      title:
-        status.subagents > 0
-          ? `Running · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
-          : "Running",
-    };
+    // BET-791: the model-authored progress label (when a working turn names
+    // its step) rides the same title tooltip the subagent count already uses
+    // for the same "say more about a running window" reason — no new slot.
+    const label = status.progressLabel?.trim() ? ` · ${status.progressLabel}` : "";
+    const subs =
+      status.subagents > 0
+        ? ` · ${status.subagents} subagent${status.subagents === 1 ? "" : "s"}`
+        : "";
+    return { variant: "run", title: `Running${label}${subs}` };
   }
   return { variant: "default", title: "Idle" };
 }

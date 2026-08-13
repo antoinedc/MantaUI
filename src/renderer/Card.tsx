@@ -17,15 +17,23 @@ import type { ReactNode } from "react";
 
 const CARD_CHROME = "rounded-lg border border-border bg-bg-soft px-4 py-3";
 const CARD_DANGER_CHROME = "rounded-lg border border-danger bg-danger-bg px-4 py-3";
+const CARD_WARN_CHROME = "rounded-lg border border-warn bg-warn-bg px-4 py-3";
 
 export function Card({
   danger = false,
+  warn = false,
   elevated = false,
   header,
   children,
   actions,
 }: {
   danger?: boolean;
+  /**
+   * Warn re-face (border-warn / bg-warn-bg) for a state that needs the user's
+   * attention but isn't a failure — e.g. BET-791's blocked card. Mirrors the
+   * danger variant exactly; mutually exclusive with `danger`.
+   */
+  warn?: boolean;
   /**
    * Add the `--shadow-md` floating lift. Opt-in (default false) so the shared
    * primitive's existing adopters (GroupCard in Settings) stay flat; only the
@@ -38,7 +46,7 @@ export function Card({
 }) {
   const hasHeader = header !== undefined;
   const hasBody = children !== undefined;
-  const base = danger ? CARD_DANGER_CHROME : CARD_CHROME;
+  const base = danger ? CARD_DANGER_CHROME : warn ? CARD_WARN_CHROME : CARD_CHROME;
   return (
     <div className={elevated ? `${base} shadow-md` : base}>
       {hasHeader && <div className="flex items-start gap-3">{header}</div>}

@@ -72,4 +72,41 @@ describe("WorkingIndicator", () => {
     expect(row.style.marginTop).toBe("");
     expect(row.style.marginBottom).toBe("");
   });
+
+  it("renders the working progress label as a headline + faint meta tail (BET-791 [C8])", () => {
+    pinDemoClock(T0);
+    const liveTurn = makeLiveTurn();
+    const progress = {
+      sessionID: "s1",
+      label: "Running integration tests",
+      step: 3,
+      total: 5,
+      state: "working" as const,
+      detail: "",
+      updatedAt: 0,
+    };
+    h = mount(<WorkingIndicator running liveTurn={liveTurn} progress={progress} />);
+    const label = h!.container.querySelector(".text-text.font-medium");
+    expect(label?.textContent).toBe("Running integration tests");
+    const meta = h!.container.querySelector(".text-text-faint.text-meta");
+    expect(meta?.textContent).toBe("· 3/5 · 1m43s · 432 tokens");
+  });
+
+  it("does NOT split out a blocked progress label — it yields to the blocked card", () => {
+    pinDemoClock(T0);
+    const liveTurn = makeLiveTurn();
+    const progress = {
+      sessionID: "s1",
+      label: "Running integration tests",
+      step: 3,
+      total: 5,
+      state: "blocked" as const,
+      detail: "decide",
+      updatedAt: 0,
+    };
+    h = mount(<WorkingIndicator running liveTurn={liveTurn} progress={progress} />);
+    expect(h!.container.querySelector(".text-text.font-medium")).toBeNull();
+    const meta = h!.container.querySelector(".text-text-faint.text-meta");
+    expect(meta?.textContent).toBe(`${presentVerbFor(liveTurn.verbSeedId)}… · 1m43s · 432 tokens`);
+  });
 });
