@@ -325,4 +325,26 @@ final class SessionListStore: ObservableObject {
             Task { @MainActor in await self?.refresh() }
         }
     }
+
+    // MARK: - Reset on credential change (BET-702 Switch box)
+
+    /// Wipe per-box state after a re-pair switches this device onto a NEW box.
+    /// The old box's project list and per-session status bookkeeping must not
+    /// bleed into the new box; the next `refresh()` repopulates from it. This
+    /// is the single reset path for a credential change — reused by the
+    /// "Switch box?" re-pair flow, never duplicated.
+    func resetForBoxChange() {
+        projects = []
+        loading = false
+        loadError = nil
+        loadedOnce = false
+        pendingDeletes = [:]
+        for (_, timer) in undoTimers { timer.invalidate() }
+        undoTimers = [:]
+        runningSince = [:]
+        attentionSessions = []
+        modelLabels = [:]
+        pinnedWindows = []
+        hapticsEnabled = true
+    }
 }

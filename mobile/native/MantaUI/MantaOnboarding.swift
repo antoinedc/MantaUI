@@ -40,6 +40,11 @@ final class MantaOnboardingFlow: ObservableObject {
 
     @Published var phase: Phase = .entry
 
+    /// BET-702: present the in-app QR scanner sheet. Set by the entry screen's
+    /// "Scan QR code" button AND by the `onboarding-scan` capture scene; the
+    /// onboarding root owns the sheet (so it can be deterministically mounted).
+    @Published var scanRequested = false
+
     // Manual-entry inputs.
     @Published var code = ""
     @Published var boxId = ""
@@ -52,6 +57,12 @@ final class MantaOnboardingFlow: ObservableObject {
     // Credentials returned by a SUCCESSFUL claim, held so a Keychain-save
     // retry can re-attempt ONLY the save (never re-claim a burned code).
     private var savedCredentials: MantaCredentials?
+
+    /// True while the flow is re-pairing a PAIRED device onto a new box (the
+    /// BET-702 "Switch box?" path). A successful claim then completes
+    /// immediately (skip the notifications priming — the device is already a
+    /// Manta client) and `onPaired` is responsible for resetting local state.
+    var isSwitching = false
 
     // No hardcoded ring: the linking progress stages are all resolved through
     // the copy table; there is no positional/color literal anywhere in app code.
@@ -159,6 +170,9 @@ final class MantaOnboardingFlow: ObservableObject {
         let box = "0123abcd0123abcd0123abcd0123abcd"
         let suffix = name.hasPrefix("onboarding-") ? String(name.dropFirst("onboarding-".count)) : name
         switch suffix {
+        case "scan":
+            phase = .entry
+            scanRequested = true
         case "linking":
             pending = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
             activeLinkingStage = 0
@@ -220,7 +234,14 @@ final class MantaOnboardingFlow: ObservableObject {
                 try KeychainCredentialStore.shared.save(credentials)
                 // Stage 3: the Keychain save succeeded.
                 activeLinkingStage = 2
-                phase = .notifications
+                if isSwitching {
+                    // Re-pair onto a new box: the old device is already a
+                    // Manta client — skip the notifications primer and hand off
+                    // so `onPaired` resets the session list + event stream.
+                    onPaired()
+                } else {
+                    phase = .notifications
+                }
             } catch {
                 phase = .failure(.saveFailed)
             }
@@ -313,6 +334,24 @@ struct MantaManualEntryView: View {
             header(title: "Enter the code",
                    subtitle: "Read the six digits off your desktop, or run `manta pair` on the box.")
             VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+                // BET-702: in-app QR scan sits above the manual fields. A
+                // decoded Manta payload routes through the SAME `flow.receive`
+                // path as a deep link. The sheet itself is presented by the
+                // onboarding root via `flow.scanRequested`.
+                Button(action: { flow.scanRequested = true }) {
+                    HStack(spacing: Metrics.spacing.sp3) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: Metrics.type.body))
+                        Text("Scan QR code")
+                            .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    }
+                    .foregroundColor(tokens.onAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Metrics.spacing.sp3)
+                    .background(tokens.accentSolid, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("onboarding-scan-button")
                 OTPField(value: $flow.code, placeholder: "000000", tokens: tokens)
                     .accessibilityIdentifier("onboarding-otp")
                 TextField("Box ID (32 hex)", text: $flow.boxId)
@@ -582,6 +621,14 @@ struct MantaOnboardingRoot: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("onboarding-root")
+        .sheet(isPresented: Binding(
+            get: { flow.scanRequested },
+            set: { if !$0 { flow.scanRequested = false } }
+        )) {
+            MantaQRScannerSheet(tokens: tokens) { payload in
+                flow.receive(payload: payload)
+            }
+        }
     }
 
     @ViewBuilder
@@ -618,6 +665,67 @@ struct MantaOnboardingRoot: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Paired re-pair confirmation (BET-702 "Switch box?")
+
+/// Presenting view for a pairing link that arrives while the device is ALREADY
+/// paired. Shows the current box vs. the new box and lets the user confirm the
+/// re-pair (Switch) or back out (Cancel). On Switch the existing claim path
+/// runs and, on success, replaces the Keychain credentials + resets local state.
+struct MantaSwitchBoxSheet: View {
+    var tokens: Tokens
+    let currentHost: String
+    let newHost: String
+    let onCancel: () -> Void
+    let onSwitch: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("Switch box?")
+                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx1)
+                Text("A Manta pairing link arrived while you're connected to another box. Switching re-pairs this phone to the new one.")
+                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.tx3)
+            }
+            MantaCard(tokens: tokens) {
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+                    hostRow(label: "Current box", host: currentHost)
+                    hostRow(label: "New box", host: newHost)
+                }
+            }
+            MantaPrimaryButton(title: "Switch", disabled: false,
+                               action: onSwitch, tokens: tokens)
+            HStack {
+                Spacer()
+                MantaTextButton(title: "Cancel", tokens: tokens) { onCancel() }
+                Spacer()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.spacing.sp6)
+        .padding(.top, Metrics.spacing.sp6)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("switch-box-sheet")
+    }
+
+    private func hostRow(label: String, host: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp3) {
+            Text(label)
+                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .foregroundColor(tokens.tx4)
+            Spacer(minLength: Metrics.spacing.sp4)
+            Text(host)
+                .font(.system(size: Metrics.type.small, design: .monospaced))
+                .foregroundColor(tokens.tx1)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(label == "Current box" ? "switch-box-current" : "switch-box-new")
     }
 }
 
