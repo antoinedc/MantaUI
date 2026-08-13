@@ -641,6 +641,9 @@ export const IPC = {
   opencodeCommands: "opencode:commands",
   opencodeAgents: "opencode:agents",
   opencodeFindFiles: "opencode:find-files",
+  // BET-698: server-side conversation search over opencode's SQLite
+  // (messageSearch.mjs). Returns { supported, hits }.
+  opencodeSearchMessages: "opencode:search-messages",
   // Slash-command execution: invokes POST /session/{id}/command. Distinct
   // from opencode:prompt — the server treats commands specially (templates,
   // configured agent/model, etc.).
@@ -935,6 +938,21 @@ export const IPC = {
   //   { kind: "error", handleId, message }
   installerEvent: "installer:event",
 } as const;
+
+// BET-698: a ⌘F conversation search hit returned by the server-side
+// messageSearch query (`opencode:search-messages`). Crosses the wire, so it
+// lives in shared/types (moved verbatim from the deleted renderer
+// searchTranscript — the UI is unchanged); `sessionId` is new (the server
+// returns a flat list the client groups by).
+export type TranscriptHit = {
+  sessionId: string;
+  messageId: string;
+  role: "user" | "assistant";
+  pre: string;
+  match: string;
+  post: string;
+  timeCreated: number | null;
+};
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
 // value (manta-server strips it; only secret_provide materializes the value, to a

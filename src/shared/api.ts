@@ -43,6 +43,7 @@ import type {
   SubagentDef,
   SubagentInput,
   PluginRegistryRow,
+  TranscriptHit,
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
@@ -419,6 +420,14 @@ export interface Api {
   opencodeCommands(): Promise<OpencodeCommand[]>;
   opencodeAgents(): Promise<OpencodeAgent[]>;
   opencodeFindFiles(input: { query: string; directory: string }): Promise<string[]>;
+  // BET-698: server-side conversation search. `sessionIds` is the search scope
+  // in priority order (sessionIds[0] = the active conversation). Hit caps stay
+  // server-side defaults. `supported:false` = the box can't search (needs the
+  // Node 24 runtime / opencode.db).
+  opencodeSearchMessages(input: {
+    query: string;
+    sessionIds: string[];
+  }): Promise<{ supported: boolean; hits: TranscriptHit[] }>;
 
   // Slash-command execution.
   opencodeRunCommand(input: {

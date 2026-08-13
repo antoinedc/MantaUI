@@ -1316,6 +1316,18 @@ top, talking to an opencode session over HTTP (via manta-server).
 **Recognition**: presence of `@manta-session-id` tmux user-option on the window
 is THE signal the renderer uses to show `ChatPanel` instead of `Terminal`.
 
+**Conversation search (⌘F, BET-698) is ONE server-side SQLite query** over
+opencode's own store (`src/server/messageSearch.mjs` → `opencode:search-messages`),
+scoped to exactly the chat windows in the sidebar and covering each one's FULL
+history. The renderer (`src/renderer/SearchPalette.tsx`) holds no search logic —
+it sends `{ query, sessionIds }` (active session first, then every other chat
+window in sidebar order) and renders the flat returned hits grouped by session.
+This replaced the old client-side transcript-not download fan-out (which capped
+at 5 sessions per keystroke) and fixed the current-conversation tail-only gap. It
+requires the **Node 24 box runtime** (`node:sqlite`); on an older box the channel
+degrades to `{ supported:false }` and the palette shows "update the box". The DB
+handle is read-only, always.
+
 **Architecture** (HTTP-only — opencode session mgmt + SSE live server-side):
 - opencode runs as a `systemd --user` service (`opencode-serve`) on the Linux
   box, port 4096, bound to 127.0.0.1. manta-server proxies it over HTTP

@@ -1,14 +1,13 @@
 // SearchPalette.tsx — ⌘F conversation search on the shared PaletteShell.
 //
-// Data flow:
-//   - ACTIVE conversation: the live transcript already mirrored into the
-//     store by ChatPanel (store.chatMessages, BET-659) — zero fetch, filtered
-//     synchronously per keystroke.
-//   - OTHER conversations: chat-mode windows from flatSessions(projects),
-//     searched 150ms-debounced. Only the first MAX_LIVE_FETCHES candidates get
-//     a live opencodeMessages fetch per keystroke; the rest are skipped (never
-//     hammer opencode with a dozen full-transcript pulls per keystroke). A seq
-//     guard discards stale async results.
+// Data flow (BET-698): the palette is a DUMB RENDERER of a single server-side
+// query. On query change (120ms debounced) it sends ONE
+// `window.api.opencodeSearchMessages({ query, sessionIds })` — the server
+// searches opencode's own SQLite over ALL of the chat windows' full history —
+// and renders whatever comes back. The old client-side "download N transcripts
+// over HTTP and scan them" fan-out (which capped at 5 sessions/keystroke) is
+// gone, and the active conversation is searched by the same call (fixing the
+// old tail-only gap). The renderer holds no search logic.
 //
 // Jump semantics:
 //   - same session → dispatch the existing `manta-scroll-to-message`
@@ -19,29 +18,40 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
-import { useStore, flatSessions, resolveSessionOwner } from "./store";
-import type { Project } from "../shared/types";
+import { flatSessions, resolveSessionOwner } from "./store";
+import type { Project, TranscriptHit } from "../shared/types";
 import {
   formatAge,
-  searchTranscript,
   type PendingScrollWin,
-  type TranscriptHit,
 } from "./chatUtils";
-import type { OpencodeMessage } from "../shared/types";
 
 const MIN_QUERY_CHARS = 2;
-const CROSS_SEARCH_DEBOUNCE_MS = 150;
-const MAX_OTHER_SESSIONS = 15; // chat windows scanned, sidebar order
-const MAX_LIVE_FETCHES = 5; // candidates that get a live transcript fetch
-const MAX_HITS_CURRENT = 50;
-const MAX_HITS_PER_OTHER = 3;
+const SEARCH_DEBOUNCE_MS = 120;
 
-type OtherSection = {
+type Section = {
   sessionId: string;
-  workspace: string; // project.tmuxSession
-  session: string; // window.name
   hits: TranscriptHit[];
 };
+
+type FlatRow = { sessionId: string; hit: TranscriptHit };
+
+// Group a flat, server-ordered hit list by sessionId in first-appearance order
+// (the server already returns primary-first, then sessions in sidebar order,
+// so the group order follows). The group whose id equals the active session is
+// the "This conversation" section; the rest render under "other conversations".
+function groupHits(hits: TranscriptHit[]): Section[] {
+  const sections: Section[] = [];
+  const seen = new Set<string>();
+  for (const h of hits) {
+    if (seen.has(h.sessionId)) continue;
+    seen.add(h.sessionId);
+    sections.push({
+      sessionId: h.sessionId,
+      hits: hits.filter((x) => x.sessionId === h.sessionId),
+    });
+  }
+  return sections;
+}
 
 export function SearchPalette({
   sessionId,
@@ -56,90 +66,71 @@ export function SearchPalette({
 }) {
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
-  const chatMessages = useStore((s) => s.chatMessages);
-  const currentMessages = chatMessages[sessionId] ?? null;
 
   const q = query.trim();
   const active = q.length >= MIN_QUERY_CHARS;
 
-  const currentHits = useMemo(
-    () =>
-      active && currentMessages
-        ? searchTranscript(currentMessages, q, MAX_HITS_CURRENT)
-        : [],
-    [active, currentMessages, q],
-  );
+  // Search scope: the active session first, then every OTHER chat-mode window
+  // with an opencodeSessionId, in sidebar order, de-duplicated. No cap.
+  const sessionIds = useMemo(() => {
+    const seen = new Set<string>([sessionId]);
+    const ids = [sessionId];
+    for (const f of flatSessions(projects)) {
+      const sid = f.window.opencodeSessionId;
+      if (sid && !seen.has(sid)) {
+        seen.add(sid);
+        ids.push(sid);
+      }
+    }
+    return ids;
+  }, [projects, sessionId]);
 
-  const candidates = useMemo(
-    () =>
-      flatSessions(projects)
-        .filter(
-          (f) =>
-            f.window.opencodeSessionId != null &&
-            f.window.opencodeSessionId !== sessionId,
-        )
-        .slice(0, MAX_OTHER_SESSIONS),
-    [projects, sessionId],
-  );
+  // workspace › session label lookup per sessionId (for section headers).
+  const ownerBySession = useMemo(() => {
+    const m = new Map<string, { tmuxSession: string; name: string }>();
+    for (const f of flatSessions(projects)) {
+      const sid = f.window.opencodeSessionId;
+      if (sid) m.set(sid, { tmuxSession: f.project.tmuxSession, name: f.window.name });
+    }
+    return m;
+  }, [projects]);
 
-  const [otherSections, setOtherSections] = useState<OtherSection[]>([]);
-  const [otherLoading, setOtherLoading] = useState(false);
+  const [groups, setGroups] = useState<Section[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [supported, setSupported] = useState(true);
   const seqRef = useRef(0);
+
   useEffect(() => {
     const seq = ++seqRef.current;
     if (!active) {
-      setOtherSections([]);
-      setOtherLoading(false);
+      setGroups([]);
+      setLoading(false);
       return;
     }
-    setOtherLoading(true);
+    setLoading(true);
     const timer = window.setTimeout(async () => {
-      const found: OtherSection[] = [];
-      await Promise.all(
-        candidates.map(async (c, i) => {
-          const sid = c.window.opencodeSessionId as string;
-          if (i >= MAX_LIVE_FETCHES) return;
-          let messages: OpencodeMessage[] | null = null;
-          try {
-            messages = await window.api.opencodeMessages(sid);
-          } catch {
-            messages = null;
-          }
-          if (!messages) return;
-          const hits = searchTranscript(messages, q, MAX_HITS_PER_OTHER);
-          if (hits.length > 0) {
-            found.push({
-              sessionId: sid,
-              workspace: c.project.tmuxSession,
-              session: c.window.name,
-              hits,
-            });
-          }
-        }),
-      );
-      if (seqRef.current !== seq) return; // stale — a newer query superseded us
-      // Deterministic section order: sidebar (flatSessions) order.
-      const rank = new Map(
-        candidates.map((c, i) => [c.window.opencodeSessionId, i]),
-      );
-      found.sort(
-        (a, b) => (rank.get(a.sessionId) ?? 0) - (rank.get(b.sessionId) ?? 0),
-      );
-      setOtherSections(found);
-      setOtherLoading(false);
-    }, CROSS_SEARCH_DEBOUNCE_MS);
+      try {
+        const res = await window.api.opencodeSearchMessages({ query: q, sessionIds });
+        if (seqRef.current !== seq) return; // stale — a newer query superseded us
+        setSupported(res.supported);
+        setGroups(res.supported ? groupHits(res.hits) : []);
+      } catch {
+        // A transport failure surfaces as no results rather than a new error UI.
+        if (seqRef.current !== seq) return;
+        setGroups([]);
+      } finally {
+        if (seqRef.current === seq) setLoading(false);
+      }
+    }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [active, q, candidates]);
+  }, [active, q, sessionIds]);
 
-  // Flat row list = keyboard-navigation order: current conversation's hits,
-  // then each other-conversation section in render order.
-  type FlatRow = { sessionId: string; hit: TranscriptHit };
+  // Flat row list = keyboard-navigation order across all groups as rendered.
   const flatRows = useMemo<FlatRow[]>(() => {
-    const rows: FlatRow[] = currentHits.map((hit) => ({ sessionId, hit }));
-    for (const s of otherSections)
-      for (const hit of s.hits) rows.push({ sessionId: s.sessionId, hit });
+    const rows: FlatRow[] = [];
+    for (const g of groups) for (const hit of g.hits) rows.push({ sessionId: g.sessionId, hit });
     return rows;
-  }, [currentHits, otherSections, sessionId]);
+  }, [groups]);
 
   useEffect(() => {
     if (sel >= flatRows.length) setSel(0);
@@ -163,8 +154,10 @@ export function SearchPalette({
     onJumpToWindow(owner.tmuxSession, owner.windowIndex);
   };
 
+  const currentGroup = groups.find((g) => g.sessionId === sessionId);
+  const otherGroups = groups.filter((g) => g.sessionId !== sessionId);
   const total = flatRows.length;
-  const convCount = (currentHits.length > 0 ? 1 : 0) + otherSections.length;
+  const convCount = groups.length;
 
   return (
     <PaletteShell
@@ -198,17 +191,24 @@ export function SearchPalette({
             </div>
           );
         }
+        if (!supported) {
+          return (
+            <div className="px-3 py-3 text-label text-text-faint">
+              Search needs a newer box runtime — update the box.
+            </div>
+          );
+        }
         const nodes: ReactNode[] = [];
         let idx = 0;
-        if (currentHits.length > 0) {
+        if (currentGroup && currentGroup.hits.length > 0) {
           nodes.push(
             <SectionHeader
               key="cur-head"
               session="This conversation"
-              count={`${currentHits.length} match${currentHits.length === 1 ? "" : "es"}`}
+              count={`${currentGroup.hits.length} match${currentGroup.hits.length === 1 ? "" : "es"}`}
             />,
           );
-          for (const hit of currentHits) {
+          for (const hit of currentGroup.hits) {
             const i = idx++;
             nodes.push(
               <HitRow
@@ -221,7 +221,7 @@ export function SearchPalette({
             );
           }
         }
-        if (otherSections.length > 0 || otherLoading) {
+        if (otherGroups.length > 0 || loading) {
           nodes.push(
             <div
               key="other-div"
@@ -233,20 +233,21 @@ export function SearchPalette({
             </div>,
           );
         }
-        for (const s of otherSections) {
+        for (const g of otherGroups) {
+          const owner = ownerBySession.get(g.sessionId);
           nodes.push(
             <SectionHeader
-              key={`head-${s.sessionId}`}
-              workspace={s.workspace}
-              session={s.session}
-              count={String(s.hits.length)}
+              key={`head-${g.sessionId}`}
+              workspace={owner?.tmuxSession}
+              session={owner?.name ?? g.sessionId}
+              count={String(g.hits.length)}
             />,
           );
-          for (const hit of s.hits) {
+          for (const hit of g.hits) {
             const i = idx++;
             nodes.push(
               <HitRow
-                key={`${s.sessionId}-${hit.messageId}`}
+                key={`${g.sessionId}-${hit.messageId}`}
                 hit={hit}
                 selected={i === sel}
                 onEnter={() => setSel(i)}
@@ -255,7 +256,7 @@ export function SearchPalette({
             );
           }
         }
-        if (otherLoading) {
+        if (loading) {
           nodes.push(
             <div key="other-loading" className="px-3 py-2 text-meta text-text-faint">
               Searching other conversations…

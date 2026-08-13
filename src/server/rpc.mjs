@@ -26,6 +26,7 @@ import { pollClaudeLogin, claudeCliStatus } from "./opencode.mjs";
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
+import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
@@ -587,6 +588,13 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.opencodeFindFiles, { query, directory })
     // → args[0] = { query, directory }; opencode.mjs findFiles expects same shape
     "opencode:find-files": (input) => oc.findFiles(input),
+
+    // BET-698: server-side conversation search over opencode's SQLite
+    // (messageSearch.mjs). Args { query, sessionIds } — sessionIds[0] is the
+    // active conversation. Degrades to { supported:false } on a box that
+    // hasn't taken the Node 24 runtime yet.
+    // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, sessionIds })
+    "opencode:search-messages": (input) => searchMessages(input ?? {}),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
