@@ -11,6 +11,7 @@
 import { readFile } from "node:fs/promises";
 import { CREDENTIALS_PATH, parseCredentials } from "../claudeAuth.mjs";
 import { normalizeWindow } from "./normalizeWindow.mjs";
+import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -68,15 +69,7 @@ export const claudeAdapter = {
         "anthropic-beta": "oauth-2025-04-20",
       },
     });
-    if (!res.ok) {
-      const err = new Error(`claude usage: HTTP ${res.status}`);
-      err.status = res.status;
-      if (res.status === 429) {
-        const retryAfter = Number(res.headers?.get?.("retry-after"));
-        if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = retryAfter * 1000;
-      }
-      throw err;
-    }
+    if (!res.ok) throw httpError(res, "claude usage");
     const data = await res.json();
     // The issue spec (and some docs) describe the pools nested under
     // `rate_limits`; the LIVE endpoint (verified 2026-08) returns them at the

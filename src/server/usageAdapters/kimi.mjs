@@ -21,6 +21,7 @@
 
 import { loadSecrets, resolveSecret } from "../secrets.mjs";
 import { normalizeWindow } from "./normalizeWindow.mjs";
+import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 const SECRET_KEY = "KIMI_CODE_API_KEY";
@@ -78,15 +79,7 @@ export const kimiAdapter = {
     const res = await fetchImpl(USAGE_URL, {
       headers: { Authorization: `Bearer ${key}` },
     });
-    if (!res.ok) {
-      const err = new Error(`kimi usage: HTTP ${res.status}`);
-      err.status = res.status;
-      if (res.status === 429) {
-        const retryAfter = Number(res.headers?.get?.("retry-after"));
-        if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = retryAfter * 1000;
-      }
-      throw err;
-    }
+    if (!res.ok) throw httpError(res, "kimi usage");
     const data = await res.json();
 
     const windows = [];

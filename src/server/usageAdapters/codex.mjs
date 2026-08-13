@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { normalizeWindow } from "./normalizeWindow.mjs";
+import { httpError } from "./httpError.mjs";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -62,15 +63,7 @@ export const codexAdapter = {
     const res = await fetchImpl(USAGE_URL, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!res.ok) {
-      const err = new Error(`codex usage: HTTP ${res.status}`);
-      err.status = res.status;
-      if (res.status === 429) {
-        const retryAfter = Number(res.headers?.get?.("retry-after"));
-        if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = retryAfter * 1000;
-      }
-      throw err;
-    }
+    if (!res.ok) throw httpError(res, "codex usage");
     const data = await res.json();
     const rl = data?.rate_limit ?? {};
     const nowMs = now();
