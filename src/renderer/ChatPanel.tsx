@@ -19,9 +19,12 @@ import type { VirtuosoHandle } from "react-virtuoso";
 import { Clock, X } from "lucide-react";
 import type {
   AvailableLauncher,
+  CheckRollup,
   DelegateApproval,
   DelegateApprovalTool,
+  ForgeCheckRun,
   OpencodeModel,
+  PullRequest,
   QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
@@ -166,6 +169,9 @@ export function ChatPanel({
   const configDefaultModel = useStore((s) => s.defaultModel);
   const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   const hiddenStatusItems = useStore((s) => s.hiddenStatusItems);
+  // BET-789: the "Connect GitHub…" offer's per-box dismissal flag. Once set,
+  // the offer never re-appears until the config flag is cleared.
+  const forgeConnectOfferDismissed = useStore((s) => s.forgeConnectOfferDismissed);
   // User-configured Anthropic prompt cache TTL — drives the "/clear to
   // save Nk tokens" pill when the session has been idle past this TTL.
   // manta doesn't set the real cache_control.ttl on requests; this is the
@@ -501,15 +507,67 @@ export function ChatPanel({
     };
   }, [sessionId, cwd]);
 
+  // BET-789: forge read path, consumed by SessionHeader. Refreshed on the SAME
+  // timer as the branch indicator (the issue forbids a second poll — a second
+  // timer for the same question is a duplicate code path). Nothing in this
+  // state renders chrome by itself: no PR / no checks → the checks chip is not
+  // registered; forge connected or not a forge origin → no connect offer.
+  const [forge, setForge] = useState<{
+    connected: boolean;
+    kind: string | null;
+    pr: PullRequest | null;
+    checks: ForgeCheckRun[];
+    rollup: CheckRollup;
+  }>({ connected: false, kind: null, pr: null, checks: [], rollup: "none" });
+  const refreshForge = useCallback(async (cwdArg: string) => {
+    try {
+      const [status, prResult] = await Promise.all([
+        window.api.forgeStatus(),
+        window.api.forgePullRequest({ cwd: cwdArg }),
+      ]);
+      setForge({
+        // `status` is a union; both variants carry `connected`.
+        connected: status.connected,
+        // The origin is a recognised forge whenever the read path got far
+        // enough to classify it: "not_connected" is recognised-but-unauth'd
+        // (exactly the connect-offer trigger), "no_forge" is not a forge at
+        // all. github is the only adapter today.
+        kind: prResult.error !== "no_forge" ? "github" : null,
+        pr: prResult.pr,
+        checks: prResult.checks ?? [],
+        rollup: prResult.rollup ?? "none",
+      });
+    } catch {
+      // non-fatal — the forge read path is best-effort; keep last-known.
+    }
+  }, []);
+
+  // BET-789: dismiss the "Connect GitHub…" offer permanently, per-box. Mirror
+  // of AppConfig.forgeConnectOfferDismissed, written through the generic
+  // configUpdate channel (no new RPC). Optimistic store write so the offer
+  // disappears immediately; the config write persists it across restarts.
+  const dismissForgeConnect = useCallback(async () => {
+    useStore.setState({ forgeConnectOfferDismissed: true });
+    try {
+      await window.api.configUpdate({ forgeConnectOfferDismissed: true });
+    } catch {
+      // persistent across restarts is best-effort; the optimistic hide stands.
+    }
+  }, []);
+
   // Branch indicator: poll every 5s while this session is visible. Gated on
   // isActive — hidden panels stop polling; the effect re-fires (one
   // refreshBranch on entry) when isActive flips back on.
   useEffect(() => {
     if (!isActive) return;
     refreshBranch(cwd);
-    const branchPoll = setInterval(() => refreshBranch(cwd), 5000);
+    void refreshForge(cwd);
+    const branchPoll = setInterval(() => {
+      refreshBranch(cwd);
+      void refreshForge(cwd);
+    }, 5000);
     return () => clearInterval(branchPoll);
-  }, [cwd, refreshBranch, isActive]);
+  }, [cwd, refreshBranch, isActive, refreshForge]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -754,6 +812,9 @@ export function ChatPanel({
     setInput("");
     // Snap the branch indicator to current truth on every submit.
     refreshBranch(cwd);
+    // Forge state rides the same "ask the box" moment — a submit is the other
+    // trigger (with the branch poll) for re-deriving the session's PR/checks.
+    void refreshForge(cwd);
     // If the pinned todo list is fully terminal, hide the stale checklist.
     if (activeTodosRef.current && allTodosTerminal(activeTodosRef.current)) {
       setTodosDismissed(true);
@@ -2137,6 +2198,15 @@ export function ChatPanel({
         artifactsOpen={artifactsOpen}
         onToggleArtifacts={onToggleArtifacts}
         hiddenStatusItems={hiddenStatusItems}
+        pr={forge.pr}
+        checks={forge.checks}
+        checksRollup={forge.rollup}
+        forgeConnected={forge.connected}
+        forgeKind={forge.kind}
+        forgeConnectOfferDismissed={forgeConnectOfferDismissed}
+        onOpenExternal={(url) => void window.api.openExternal(url)}
+        onFillComposer={updateInputWithHistoryReset}
+        onDismissForgeConnect={dismissForgeConnect}
       />
 
       <Transcript

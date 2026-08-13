@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { DelegateApprovalTool, OpencodeMessage, OpencodeModel, PermissionRequest, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
@@ -2670,6 +2670,97 @@ export function selectStatusItems(
     (overflowFor(it, containerWidth) ? overflow : visible).push(it);
   }
   return { visible, overflow };
+}
+
+// ===== Session-header forge delta (BET-789) =====
+// Pure helpers for the forge chips in the session header: the checks chip's
+// per-state descriptor, the PR-suffixed branch label, and the connect-offer
+// decision. All computed from props alone — no DOM, no channels, no network.
+
+/** Count a check list into the three traffic-light buckets. A check with no
+ * conclusion yet (still queued / in progress / pending) is "running". */
+export function countsForChecks(checks: ForgeCheckRun[]): {
+  passed: number;
+  failed: number;
+  running: number;
+} {
+  let passed = 0;
+  let failed = 0;
+  let running = 0;
+  for (const c of checks) {
+    const done = c.conclusion;
+    if (!done || c.status === "queued" || c.status === "in_progress") running++;
+    else if (done === "success") passed++;
+    else failed++;
+  }
+  return { passed, failed, running };
+}
+
+export type ChecksChipTone = "ok" | "warn" | "danger";
+
+/** The checks chip's label + tone + registry priority for a given rollup.
+ * `none` yields null — no chip at all. The caller additionally gates on "no
+ * PR" and "forge not connected" before calling, so absence of a chip is the
+ * "there is nothing to say" state (§4.3 [C2]). Priority is a function of
+ * state (§4.3): red outranks the menu+artifacts pin (survives the narrow
+ * layout), green/yellow sit low so they are the first thing to overflow. */
+export function checksChipDescriptor(
+  rollup: CheckRollup,
+  counts: { passed: number; failed: number; running: number },
+): { label: string; tone: ChecksChipTone; priority: number } | null {
+  switch (rollup) {
+    case "green":
+      return { label: `✓ ${counts.passed}`, tone: "ok", priority: 40 };
+    case "red":
+      return { label: `✗ ${counts.failed} failed`, tone: "danger", priority: 90 };
+    case "yellow":
+      return { label: `◐ ${counts.running} running`, tone: "warn", priority: 40 };
+    case "none":
+    default:
+      return null;
+  }
+}
+
+/** Branch chip label: plain `⎇ branch`, or `⎇ branch · #412` when a PR
+ * rides the chip. Null when there is no branch (chip not rendered at all).
+ * The `⎇` stands in for the GitBranch icon the chip actually renders — the
+ * label is the string form for tests/titles. */
+export function branchChipLabel(
+  branch: string | null,
+  pr: { number: number } | null,
+): string | null {
+  if (!branch) return null;
+  return pr ? `⎇ ${branch} · #${pr.number}` : `⎇ ${branch}`;
+}
+
+/** Whether to surface the one-line "Connect GitHub" offer under the header
+ * (§4.5 [S10]). Only when the forge is NOT connected AND the session origin
+ * is a recognised forge AND the offer has not been permanently dismissed. */
+export function shouldOfferForgeConnect({
+  connected,
+  forgeKind,
+  dismissed,
+}: {
+  connected: boolean;
+  forgeKind: string | null;
+  dismissed: boolean;
+}): boolean {
+  if (connected) return false;
+  if (dismissed) return false;
+  return forgeKind != null;
+}
+
+/** The "send failures to the agent" composer fill — names each failing check
+ * (plus its log URL) so the agent can act without the user transcribing. This
+ * FILLS the composer; it does not submit. */
+export function failuresToAgentPrompt(checks: ForgeCheckRun[]): string {
+  const failed = checks.filter((c) => {
+    const done = c.conclusion;
+    return done && done !== "success" && c.status !== "in_progress" && c.status !== "queued";
+  });
+  if (failed.length === 0) return "";
+  const lines = failed.map((c) => `- ${c.name}${c.url ? ` (${c.url})` : ""}`);
+  return `Checks are failing on this pull request:\n${lines.join("\n")}\n\nPlease investigate and fix them.`;
 }
 
 // ===== Pinned card stack arbiter (BET-783) =====

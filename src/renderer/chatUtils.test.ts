@@ -92,6 +92,11 @@ import {
   usageStale,
   pruneVisitedSessions,
   selectStatusItems,
+  checksChipDescriptor,
+  countsForChecks,
+  branchChipLabel,
+  shouldOfferForgeConnect,
+  failuresToAgentPrompt,
   zeroStateMode,
   initialRepoSelection,
   describeRepoRow,
@@ -3668,5 +3673,109 @@ describe("planHighlightRanges", () => {
 
   it("returns [] for an empty lengths array (a row with no text nodes)", () => {
     expect(planHighlightRanges([], "", "cat")).toEqual([]);
+  });
+});
+
+// ===== checksChipDescriptor / branchChipLabel / shouldOfferForgeConnect (BET-789) =====
+
+describe("countsForChecks", () => {
+  it("buckets success / other-conclusion / pending into passed / failed / running", () => {
+    const checks = [
+      { name: "a", conclusion: "success" },
+      { name: "b", conclusion: "failure" },
+      { name: "c", conclusion: "timed_out" },
+      { name: "d" },
+      { name: "e", status: "in_progress" },
+      { name: "f", status: "queued" },
+    ];
+    expect(countsForChecks(checks)).toEqual({ passed: 1, failed: 2, running: 3 });
+  });
+
+  it("empty list → all zero", () => {
+    expect(countsForChecks([])).toEqual({ passed: 0, failed: 0, running: 0 });
+  });
+});
+
+describe("checksChipDescriptor", () => {
+  it("green → ✓ N, ok tone, priority 40 (first to overflow)", () => {
+    expect(checksChipDescriptor("green", { passed: 7, failed: 0, running: 0 })).toEqual({
+      label: "✓ 7",
+      tone: "ok",
+      priority: 40,
+    });
+  });
+
+  it("red → ✗ N failed, danger tone, priority 90 (survives the narrow layout)", () => {
+    expect(checksChipDescriptor("red", { passed: 0, failed: 2, running: 0 })).toEqual({
+      label: "✗ 2 failed",
+      tone: "danger",
+      priority: 90,
+    });
+  });
+
+  it("yellow → ◐ N running, warn tone, priority 40", () => {
+    expect(checksChipDescriptor("yellow", { passed: 0, failed: 0, running: 3 })).toEqual({
+      label: "◐ 3 running",
+      tone: "warn",
+      priority: 40,
+    });
+  });
+
+  it("none → null (no chip — nothing to say)", () => {
+    expect(checksChipDescriptor("none", { passed: 0, failed: 0, running: 0 })).toBeNull();
+  });
+});
+
+describe("branchChipLabel", () => {
+  it("branch only → ⎇ branch", () => {
+    expect(branchChipLabel("feat/forge-seam", null)).toBe("⎇ feat/forge-seam");
+  });
+
+  it("branch + pr → ⎇ branch · #412", () => {
+    expect(branchChipLabel("feat/forge-seam", { number: 412 })).toBe(
+      "⎇ feat/forge-seam · #412",
+    );
+  });
+
+  it("no branch → null (chip not rendered), whatever the PR state", () => {
+    expect(branchChipLabel(null, null)).toBeNull();
+    expect(branchChipLabel(null, { number: 412 })).toBeNull();
+  });
+});
+
+describe("shouldOfferForgeConnect", () => {
+  const cases: [boolean, string | null, boolean, boolean][] = [
+    // connected  forgeKind               dismissed  expected
+    [false, "github", false, true], // forge present, not connected, not dismissed → offer
+    [false, "github", true, false], // dismissed → permanent
+    [false, null, false, false], // not a forge origin → no offer
+    [false, null, true, false],
+    [true, "github", false, false], // connected → never offer
+    [true, "github", true, false],
+    [true, null, false, false],
+    [true, null, true, false],
+  ];
+  for (const [connected, forgeKind, dismissed, expected] of cases) {
+    it(`connected=${connected} forgeKind=${forgeKind ?? "null"} dismissed=${dismissed} → ${expected}`, () => {
+      expect(shouldOfferForgeConnect({ connected, forgeKind, dismissed })).toBe(expected);
+    });
+  }
+});
+
+describe("failuresToAgentPrompt", () => {
+  it("names failing checks with their log URLs", () => {
+    const prompt = failuresToAgentPrompt([
+      { name: "typecheck-test", conclusion: "failure", url: "https://x/logs/1" },
+      { name: "duplication-gate", conclusion: "failure" },
+      { name: "lint", conclusion: "success" },
+    ]);
+    expect(prompt).toContain("typecheck-test");
+    expect(prompt).toContain("https://x/logs/1");
+    expect(prompt).toContain("duplication-gate");
+    expect(prompt).not.toContain("lint");
+  });
+
+  it("no failing checks → empty body", () => {
+    expect(failuresToAgentPrompt([])).toBe("");
   });
 });
