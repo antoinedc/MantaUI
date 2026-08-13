@@ -334,9 +334,16 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
                         void select();
                         return;
                       }
-                      if (e.key === "Escape") {
-                        if (suggestion) setSuggestion(null);
-                        else onCancel();
+                      // Escape is otherwise handled by Modal (BET-724): it
+                      // dismisses regardless of which inner element has
+                      // focus. But with a live inline suggestion, the FIRST
+                      // Escape should just dismiss the ghost-text completion
+                      // — restored per review (BET-724 cycle 1 Question) —
+                      // so stop it here and only let a second, suggestion-
+                      // free Escape bubble up to Modal and close the dialog.
+                      if (e.key === "Escape" && suggestion) {
+                        e.stopPropagation();
+                        setSuggestion(null);
                       }
                     }}
                     spellCheck={false}

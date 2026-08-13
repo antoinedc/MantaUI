@@ -26,6 +26,7 @@ import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
 import { Tag } from "./Tag";
 import { Dropdown, MenuItem } from "./MenuItem";
+import { ConfirmModal } from "./ConfirmModal";
 
 // Cache-segment colors for the header pill.
 const CACHE_WRITE_COLOR = cssVar("--warn");
@@ -114,6 +115,9 @@ export function SessionHeader({
       ? `${breadcrumb.project} / ${breadcrumb.window}`
       : breadcrumb.project
     : "";
+  // BET-724 §D7: the confirm dialogs for Delete/Clear name the session — the
+  // window name reads better than the full "project / window" breadcrumb.
+  const sessionName = breadcrumb?.window ?? breadcrumb?.project ?? "this session";
 
   return (
     <div
@@ -194,6 +198,7 @@ export function SessionHeader({
             onCompact={onCompact}
             onClear={onClear}
             onDelete={onDelete}
+            sessionName={sessionName}
           />
         )}
       </div>
@@ -470,6 +475,7 @@ function SessionMenu({
   onCompact,
   onClear,
   onDelete,
+  sessionName,
 }: {
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
@@ -478,8 +484,13 @@ function SessionMenu({
   onCompact: () => void;
   onClear: () => void;
   onDelete: () => void;
+  // BET-724 §D7: names the session in the Delete confirm's body copy.
+  sessionName: string;
 }) {
   const [open, setOpen] = useState(false);
+  // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
+  // sidebar's inline delete confirm — previously both fired instantly.
+  const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   useClickAway(rootRef, open, () => setOpen(false));
 
@@ -589,17 +600,39 @@ function SessionMenu({
           {item(
             <Eraser size={14} aria-hidden="true" />,
             "Clear session",
-            onClear,
+            () => setConfirm("clear"),
           )}
           <div className="my-1 border-t border-border-subtle" role="separator" />
           {item(
             <Trash2 size={14} aria-hidden="true" />,
             "Delete session",
-            onDelete,
+            () => setConfirm("delete"),
             true,
           )}
         </Dropdown>
       )}
+      <ConfirmModal
+        open={confirm === "delete"}
+        title="Delete this session?"
+        body={`“${sessionName}” and its tmux window will be killed on the box. This can't be undone.`}
+        confirmLabel="Delete session"
+        onConfirm={() => {
+          setConfirm(null);
+          onDelete();
+        }}
+        onCancel={() => setConfirm(null)}
+      />
+      <ConfirmModal
+        open={confirm === "clear"}
+        title="Clear this conversation?"
+        body="The session keeps running but its context is gone."
+        confirmLabel="Clear"
+        onConfirm={() => {
+          setConfirm(null);
+          onClear();
+        }}
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

@@ -279,3 +279,92 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
     expect(row.className).not.toContain("px-3");
   });
 });
+
+describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function openMenuWith(overrides: Parameters<typeof mountSessionHeader>[0]) {
+    h = mountSessionHeader(overrides);
+    const trigger = h.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Session actions"]',
+    );
+    expect(trigger).toBeTruthy();
+    act(() => trigger!.click());
+  }
+
+  // The menu row and the confirm's own action button can share a label
+  // ("Delete session") — this only searches the DROPDOWN's menuitem rows.
+  function menuItemByText(text: string): HTMLElement {
+    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    expect(menu).toBeTruthy();
+    const rows = [...menu.querySelectorAll<HTMLElement>("button[role='menuitem']")];
+    const el = rows.find((b) => b.textContent?.trim().includes(text));
+    expect(el, `expected a "${text}" menu row`).toBeTruthy();
+    return el!;
+  }
+
+  // The confirm's own action button lives inside the Modal's dialog panel —
+  // this only searches there, never the dropdown's menuitem rows.
+  function confirmButtonByText(text: string): HTMLButtonElement {
+    const dialog = h!.container.querySelector('div[role="dialog"]') as HTMLElement;
+    expect(dialog).toBeTruthy();
+    const el = [...dialog.querySelectorAll("button")].find(
+      (b) => b.textContent === text,
+    ) as HTMLButtonElement | undefined;
+    expect(el, `expected a "${text}" confirm button`).toBeTruthy();
+    return el!;
+  }
+
+  it("Delete session opens a confirm instead of calling onDelete immediately", () => {
+    let deleted = 0;
+    openMenuWith({ onDelete: () => deleted++ });
+    act(() => menuItemByText("Delete session").click());
+    expect(deleted).toBe(0);
+    expect(h!.text()).toContain("Delete this session?");
+  });
+
+  it("confirming Delete calls onDelete exactly once", () => {
+    let deleted = 0;
+    openMenuWith({ onDelete: () => deleted++ });
+    act(() => menuItemByText("Delete session").click());
+    act(() => confirmButtonByText("Delete session").click());
+    expect(deleted).toBe(1);
+  });
+
+  it("cancelling the Delete confirm does not call onDelete", () => {
+    let deleted = 0;
+    openMenuWith({ onDelete: () => deleted++ });
+    act(() => menuItemByText("Delete session").click());
+    act(() => confirmButtonByText("Cancel").click());
+    expect(deleted).toBe(0);
+  });
+
+  it("Clear session opens a confirm instead of calling onClear immediately", () => {
+    let cleared = 0;
+    openMenuWith({ onClear: () => cleared++ });
+    act(() => menuItemByText("Clear session").click());
+    expect(cleared).toBe(0);
+    expect(h!.text()).toContain("Clear this conversation?");
+  });
+
+  it("confirming Clear calls onClear exactly once", () => {
+    let cleared = 0;
+    openMenuWith({ onClear: () => cleared++ });
+    act(() => menuItemByText("Clear session").click());
+    act(() => confirmButtonByText("Clear").click());
+    expect(cleared).toBe(1);
+  });
+
+  it("the Delete confirm names the session from the breadcrumb window", () => {
+    openMenuWith({
+      breadcrumb: { project: "better-ui", window: "fix-onboarding" },
+      onDelete: () => {},
+    });
+    act(() => menuItemByText("Delete session").click());
+    expect(h!.text()).toContain("fix-onboarding");
+  });
+});

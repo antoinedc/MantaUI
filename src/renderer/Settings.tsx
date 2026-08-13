@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useStore } from "./store";
 import { Modal } from "./Modal";
+import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
 import { Toggle } from "./Toggle";
 import { ProvidersCard } from "./ProvidersCard";
@@ -58,9 +59,18 @@ function formatTimeout(ms: number): string {
   return `${Math.round(ms / 60_000)}m`;
 }
 
-// ===== Dialog semantics (BET-419 §C): focus trap + Esc + focus restore =====
+// ===== Dialog semantics (BET-419 §C, BET-724): focus trap + Esc + focus
+// restore. The trap/initial-focus/restore piece is the shared `useFocusTrap`
+// hook (BET-724 lifted it out of here into Modal.tsx's shared implementation
+// — this is the one remaining caller of the "own top-level dialog" flavor).
+// Escape-to-close stays local to Settings, since Settings itself isn't built
+// on the Modal primitive; it defers to a nested Modal (e.g. the "Remove box?"
+// / "Reset all settings?" confirms rendered inline below, or a portal'd
+// dialog like the model-edit modal) whenever one is open, so Escape closes
+// only the innermost dialog instead of closing all of Settings around it.
 function useDialog(onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(ref, true);
   // `onClose` is an inline arrow from App (recreated on every App render), so
   // the effect MUST NOT key off its identity — otherwise ANY App re-render
   // (e.g. a background SSE/window-status update ticking in every few seconds)
@@ -72,34 +82,25 @@ function useDialog(onClose: () => void) {
   useEffect(() => {
     const root = ref.current;
     if (!root) return;
-    const opener = document.activeElement as HTMLElement | null;
-    const firstFocusable = root.querySelector<HTMLElement>("h2[tabindex], button, input, select, textarea, a[href]");
-    (firstFocusable ?? root).focus();
     const onKey = (e: globalThis.KeyboardEvent) => {
-      // Only respond to events originating INSIDE this dialog. A portal'd
-      // nested modal (e.g. the model-edit dialog, rendered into document.body)
-      // lives outside `root`, so its Esc/Tab must be handled by the modal
-      // itself — otherwise Settings would steal Esc and close itself while
-      // the user is typing in (or dismissing) the nested modal.
-      if (e.target instanceof Node && !root.contains(e.target)) return;
-      if (e.key === "Escape") { e.preventDefault(); onCloseRef.current(); return; }
-      if (e.key !== "Tab") return;
-      const focusables = root.querySelectorAll<HTMLElement>(
-        'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])',
-      );
-      if (focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement | null;
+      // A portal'd nested modal (e.g. the model-edit dialog, rendered into
+      // document.body) lives outside `root` in the DOM — its own Escape
+      // handler owns it, not Settings'.
+      if (target instanceof Node && !root.contains(target)) return;
+      // An INLINE nested modal (e.g. the "Remove box?" / "Reset all
+      // settings?" confirms, rendered as normal children of this dialog) IS
+      // inside `root` — but if focus is currently inside ITS panel, that
+      // modal's own Escape ownership (Modal.tsx, BET-724) should win, not
+      // Settings'. Bail so Settings never steals Escape from an open confirm.
+      const nestedDialog = target?.closest('[role="dialog"]');
+      if (nestedDialog && nestedDialog !== root) return;
+      e.preventDefault();
+      onCloseRef.current();
     };
     document.addEventListener("keydown", onKey, true);
-    return () => {
-      document.removeEventListener("keydown", onKey, true);
-      if (opener && typeof opener.focus === "function") opener.focus();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => document.removeEventListener("keydown", onKey, true);
   }, []);
   return ref;
 }
@@ -919,7 +920,7 @@ export function Settings({
       </div>
 
       {/* In-app confirm: Remove box (replaces window.confirm — BET-419 §D). */}
-      <Modal open={confirmRemove} size="md" label="Remove this box?">
+      <Modal open={confirmRemove} size="md" label="Remove this box?" onDismiss={() => setConfirmRemove(false)}>
           <div className="space-y-4">
             <h3 className="text-title font-semibold">Remove this box?</h3>
             <div className="text-body text-text-faint">The desktop will forget its pairing and saved projects. If the box is reachable, its current token is also revoked. If the box is offline, the local credentials are cleared and the box's token will be rotated the next time it starts.</div>
@@ -931,7 +932,7 @@ export function Settings({
         </Modal>
 
       {/* In-app confirm: Reset all settings (BET-419 §B.3). */}
-      <Modal open={confirmReset} size="md" label="Reset all settings?">
+      <Modal open={confirmReset} size="md" label="Reset all settings?" onDismiss={() => setConfirmReset(false)}>
           <div className="space-y-4">
             <h3 className="text-title font-semibold">Reset all settings?</h3>
             <div className="text-body text-text-faint">Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.</div>

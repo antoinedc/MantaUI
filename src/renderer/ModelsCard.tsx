@@ -96,15 +96,9 @@ function EditModelModal({
 
   return (
     <Modal open={open} size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
-      <div
-        className="space-y-4"
-        onKeyDown={(e) => {
-          if (e.key === "Escape") {
-            e.stopPropagation();
-            onCancel();
-          }
-        }}
-      >
+      {/* Escape is owned by Modal (BET-724) via onDismiss above — no
+          hand-rolled handler needed here. */}
+      <div className="space-y-4">
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="text-body font-semibold text-text">Edit model</div>

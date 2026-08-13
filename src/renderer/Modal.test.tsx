@@ -126,3 +126,131 @@ describe("Modal", () => {
     expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
   });
 });
+
+// ===== Escape + focus trap + restore (BET-724) =====
+describe("Modal — Escape + focus trap + restore (BET-724)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("calls onDismiss on Escape, regardless of which inner element has focus", () => {
+    let dismissed = 0;
+    h = mount(
+      <Modal label="L" onDismiss={() => dismissed++}>
+        <button>ok</button>
+      </Modal>,
+    );
+    const btn = h.container.querySelector("button")!;
+    act(() => {
+      btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(dismissed).toBe(1);
+  });
+
+  it("does nothing on Escape when onDismiss is omitted", () => {
+    h = mount(
+      <Modal label="L">
+        <button>ok</button>
+      </Modal>,
+    );
+    const btn = h.container.querySelector("button")!;
+    expect(() => {
+      act(() => {
+        btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+    }).not.toThrow();
+    expect(h.text()).toContain("ok");
+    expect(h.container.querySelector('div[role="dialog"]')).toBeTruthy();
+  });
+
+  it("focuses the first focusable element inside the panel on open", () => {
+    h = mount(
+      <Modal label="L">
+        <div>
+          <span>not focusable</span>
+          <button>first</button>
+          <button>second</button>
+        </div>
+      </Modal>,
+    );
+    const buttons = h.container.querySelectorAll("button");
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("falls back to focusing the panel itself (tabIndex=-1) when nothing inside is focusable", () => {
+    h = mount(<Modal label="L">plain text</Modal>);
+    const panel = h.container.querySelector('div[role="dialog"]') as HTMLElement;
+    expect(panel).toBeTruthy();
+    expect(document.activeElement).toBe(panel);
+    expect(panel.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("traps Tab within the panel (wraps last → first)", () => {
+    h = mount(
+      <Modal label="L">
+        <button>first</button>
+        <button>second</button>
+      </Modal>,
+    );
+    const buttons = [...h.container.querySelectorAll("button")] as HTMLButtonElement[];
+    buttons[1].focus();
+    act(() => {
+      buttons[1].dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("restores focus to the opener on unmount", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    h = mount(
+      <Modal label="L">
+        <button>inside</button>
+      </Modal>,
+    );
+    expect(document.activeElement).not.toBe(opener);
+
+    h.unmount();
+    h = null;
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  // BET-724 review cycle 1 Block: the trap used to force-focus the first
+  // focusable element from a passive effect, which runs AFTER React applies
+  // `autoFocus` during commit — so it clobbered `autoFocus` (stealing focus
+  // onto e.g. a Close button rendered before the autofocused field) and, by
+  // reading `document.activeElement` too late, captured the panel's OWN
+  // autofocused child as the "opener" instead of the real one, so
+  // focus-restore silently no-op'd. Regression-guards both halves.
+  it("respects a child's autoFocus instead of stealing it, and still restores the real opener on unmount", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(document.activeElement).toBe(opener);
+
+    h = mount(
+      <Modal label="L">
+        <button aria-label="Close">x</button>
+        {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+        <input autoFocus placeholder="path" />
+      </Modal>,
+    );
+    const input = h.container.querySelector("input")!;
+    // Focus stayed on the autofocused input, NOT the earlier Close button.
+    expect(document.activeElement).toBe(input);
+
+    h.unmount();
+    h = null;
+    // Restored to the REAL pre-open opener, not the autofocused input.
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+});
