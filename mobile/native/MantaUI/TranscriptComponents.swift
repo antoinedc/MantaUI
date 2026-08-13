@@ -104,6 +104,36 @@ struct MantaProse: View {
     }
 }
 
+// MARK: - Live prose (the streaming tail, BET-752 §4.4 task 1)
+//
+// The one `.prose` row that is NOT a completed canonical block: the LIVE
+// streaming tail. Its text grows on every `stream:flush`, so rebuilding the
+// full `MarkdownView(text)` from scratch each flush re-parses the whole
+// accumulated turn — O(n²) markdown work that janks late in long answers.
+//
+// The live tail therefore renders as a lightweight plain `Text` (no markdown
+// parse) at the same metrics/padding as `MantaProse`, so the transient stream
+// stays visually continuous and the completed canonical block restores real
+// markdown the moment the turn-boundary refetch replaces it (the refetch is the
+// source of truth; this is only the live tail path, per the issue).
+struct LiveProseTail: View {
+    let text: String
+    let tokens: Tokens
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: Metrics.type.body))
+            .foregroundColor(tokens.tx1)
+            .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("live-tail")
+    }
+}
+
 // MARK: - Markdown table style
 //
 // Token-mapped GFM table, mirroring desktop's MarkdownBody table treatment:
