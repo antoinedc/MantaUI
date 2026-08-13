@@ -10,6 +10,10 @@ import {
   createForgeRuntime,
   forgeStatus,
   pullRequestForCwd,
+  shipPullRequest,
+  shipPreview,
+  humanizeBranch,
+  mergePullRequest,
   ForgeRateLimitedError,
 } from "./index.mjs";
 
@@ -226,4 +230,142 @@ test("pullRequestForCwd: no open PR → well-formed empty result, not an error",
 test("getAdapter throws UnsupportedByForgeError for an unknown kind", async () => {
   const runtime = createForgeRuntime({ fetch: async () => json({}, 200, {}) });
   assert.throws(() => runtime.getAdapter("gitea", "t"), (e) => e.name === "UnsupportedByForgeError");
+});
+
+// ---- Box-facing writes: shipPullRequest + mergePullRequest (BET-794) -------
+
+function writeAdapter({ created = { ...OPEN_PR, number: 77 }, merge = { merged: true } } = {}) {
+  return {
+    kind: "github",
+    createPullRequest: async () => ({ data: created, stale: false }),
+    merge: async (_repo, _n, input) => ({ data: merge, input, stale: false }),
+  };
+}
+
+const SHIP_DEPS = {
+  gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+  currentBranch: async () => "feature/forge",
+  resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+  getAdapter: () => writeAdapter(),
+  gitPush: async (input) => ({ input }),
+};
+
+test("shipPullRequest: no forge → no_forge, never pushes", async () => {
+  const pushed = [];
+  const r = await shipPullRequest("/repo", { title: "t" }, {
+    ...SHIP_DEPS,
+    gitRemoteOrigin: async () => null,
+    gitPush: async (i) => { pushed.push(i); },
+  });
+  assert.deepEqual(r, { ok: false, error: "no_forge" });
+  assert.equal(pushed.length, 0);
+});
+
+test("shipPullRequest: push (setUpstream) then createPullRequest with draft", async () => {
+  const pushed = [];
+  const created = { ...OPEN_PR, number: 88, draft: true };
+  const adapter = writeAdapter({ created });
+  const r = await shipPullRequest("/repo", { title: "Forge seam", body: "B", base: "main", draft: true }, {
+    ...SHIP_DEPS,
+    getAdapter: () => adapter,
+    gitPush: async (i) => { pushed.push(i); return { stdout: "", stderr: "" }; },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.url, created.url);
+  assert.equal(pushed.length, 1);
+  assert.deepEqual(pushed[0], { cwd: "/repo", branch: "feature/forge", setUpstream: true });
+});
+
+test("shipPullRequest: push failure surfaces a push-failed error, never creates", async () => {
+  const r = await shipPullRequest("/repo", { title: "t" }, {
+    ...SHIP_DEPS,
+    gitPush: async () => { throw new Error("network down"); },
+  });
+  assert.equal(r.ok, false);
+  assert.ok(r.error.startsWith("push failed"));
+});
+
+test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure", async () => {
+  let mergeInput = null;
+  const adapter = {
+    kind: "github",
+    merge: async (_repo, _n, input) => { mergeInput = input; return { data: { merged: true }, stale: false }; },
+  };
+  const ok = await mergePullRequest("/repo", { number: 42, method: "merge", sha: "abc123" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => adapter,
+  });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(mergeInput, { method: "merge", sha: "abc123" });
+
+  const failing = {
+    kind: "github",
+    merge: async () => { const e = new Error("head sha no longer matches"); e.kind = "sha_mismatch"; throw e; },
+  };
+  const r = await mergePullRequest("/repo", { number: 42, method: "merge", sha: "abc999" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => failing,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "sha_mismatch");
+});
+
+test("shipPreview returns head, base and a best-effort file count", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.head, "feat/forge-seam");
+  assert.equal(r.base, "main");
+  assert.equal(typeof r.fileCount, "number");
+});
+
+test("shipPreview drafts a title from the tip commit (design step 1)", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    gitLog: async () => "Add forge seam + github adapter",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Add forge seam + github adapter");
+});
+
+test("shipPreview seeds the body from the repo's PR template", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    readPrTemplate: async () => "## Summary\n\n${head} → ${base}\n\n## Checklist\n- [x] tests",
+  });
+  assert.equal(r.ok, true);
+  assert.match(r.body, /tests/);
+  assert.ok(r.body.includes("feat/forge-seam"), "template ${head} placeholder is filled");
+  assert.ok(r.body.includes("main"), "template ${base} placeholder is filled");
+});
+
+test("shipPreview falls back to a changed-files body when there is no template", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    readPrTemplate: async () => null,
+  });
+  // No template + git diff unavailable in the sandbox → empty body, not a throw.
+  assert.equal(r.ok, true);
+  assert.equal(typeof r.body, "string");
+});
+
+test("humanizeBranch drops the scope prefix and title-cases the slug", () => {
+  assert.equal(humanizeBranch("feat/forge-seam"), "Forge seam");
+  assert.equal(humanizeBranch("fix/bug-12"), "Bug 12");
+  assert.equal(humanizeBranch("main"), "Main");
+  assert.equal(humanizeBranch(""), "");
+  assert.equal(humanizeBranch("  "), "");
+});
+
+test("shipPreview: repo with no forge → no_forge", async () => {
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    gitRemoteOrigin: async () => null,
+  });
+  assert.deepEqual(r, { ok: false, error: "no_forge" });
 });

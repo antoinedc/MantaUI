@@ -133,8 +133,9 @@ export function buildJobPrompt({ prompt, worktree, branch }) {
     "You are running as a background job. The user is not watching this session and\n" +
     "cannot see your intermediate output — only your final message is reported back.\n\n" +
     `You are working in an isolated git worktree at ${worktree}, on branch ${branch}.\n` +
-    "Commit your work to that branch before you finish. Do not push, do not open a\n" +
-    "pull request, do not merge, and do not touch any other checkout.\n\n" +
+    "Commit your work to that branch before you finish. You may open a draft pull\n" +
+    "request for it (never a non-draft one without a human confirming), but you may\n" +
+    "never merge, never force-push, and never touch any other checkout.\n\n" +
     "When you are done, end with a short summary of what you changed and why."
   );
 }

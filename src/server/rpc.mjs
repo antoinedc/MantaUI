@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeStatus, pullRequestForCwd } from "./forge/index.mjs";
+import { forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest } from "./forge/index.mjs";
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
 // path resolves identically. The script lives at <repoRoot>/scripts/
@@ -308,6 +308,24 @@ export function buildHandlers({
     "forge:status": () => forgeStatus(),
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
+
+    // BET-794: forge write path. Both box-side — a forge token never reaches
+    // the renderer; the server resolves it. forge:ship previews/creates a PR
+    // (push then create) ONLY after the renderer's human confirm card.
+    // forge:merge merges with the head SHA the user approved, surfacing the
+    // distinguished failure kind (sha_mismatch / cannot_merge / permission).
+    "forge:ship": (input) =>
+      shipPullRequest(
+        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : {},
+      ),
+    "forge:ship-preview": (input) =>
+      shipPreview(typeof input === "object" && input !== null ? input.cwd : ""),
+    "forge:merge": (input) =>
+      mergePullRequest(
+        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : {},
+      ),
 
     // preload: ipcRenderer.invoke(IPC.clipboardWriteText, text)  → args[0] = text (string)
     "clipboard:write-text": (text) => local.clipboardWriteText(text),

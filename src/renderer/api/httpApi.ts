@@ -700,6 +700,11 @@ export const httpApi: Api = {
   forgeStatus: () => rpc(IPC.forgeStatus),
   forgePullRequest: (input) => rpc(IPC.forgePullRequest, input),
 
+  // -- forge write path (BET-794) --
+  forgeShip: (input) => rpc(IPC.forgeShip, input),
+  forgeShipPreview: (input) => rpc(IPC.forgeShipPreview, input),
+  forgeMerge: (input) => rpc(IPC.forgeMerge, input),
+
   // -- tmux config management --
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),

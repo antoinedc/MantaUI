@@ -340,8 +340,10 @@ work yourself.
 
 **A `delegate` job starts with NO knowledge of this conversation.** Put
 everything it needs in the prompt: the goal, the relevant files/paths,
-constraints, and what "done" looks like. It never pushes, merges, or
-touches this checkout.
+constraints, and what "done" looks like. It commits to its own branch in its
+isolated worktree, and it **may open a draft pull request** for that branch —
+but it must **never merge**, never force-push, and must not touch any other
+checkout.
 
 **Install/update is a COPY, never a symlink.** Copy
 `docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`

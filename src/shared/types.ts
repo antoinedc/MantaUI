@@ -399,6 +399,56 @@ export type ForgePullRequestResult = {
   error: "no_forge" | "not_connected" | null;
 };
 
+// ----- Forge write path (BET-794) -----
+
+// forge:ship input — push the current branch then (only after the renderer's
+// human confirm card) open a pull request. `base` defaults to "main".
+export type ForgeShipInput = {
+  cwd: string;
+  title: string;
+  body?: string;
+  base?: string;
+  draft?: boolean;
+};
+
+export type ForgeShipResult =
+  | { ok: true; pr: PullRequest; url: string }
+  | { ok: false; error: string };
+
+// forge:ship-preview — the facts the confirm card needs BEFORE anything is
+// pushed: the head branch, the base branch (PR target), a best-effort count
+// of files changed on the branch, and a **drafted title + body** (design §4.5
+// step 1) the card seeds editable fields from. The body honours the repo's PR
+// template when one exists.
+export type ForgeShipPreviewInput = { cwd: string };
+
+export type ForgeShipPreviewResult =
+  | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }
+  | { ok: false; error: string };
+
+// forge:merge input — ALWAYS passes the head SHA the user approved so the API
+// cannot merge a commit that landed after the reviewed diff (issue §4).
+export type ForgeMergeInput = {
+  cwd: string;
+  number: number;
+  method?: string;
+  sha: string;
+};
+
+// The distinguished merge-failure kind — status codes, not messages:
+// `sha_mismatch` (409: the head SHA moved), `cannot_merge` (405: branch
+// protection / draft / conflict), `permission` (403), or a raw `http_N`.
+export type ForgeMergeFailureKind =
+  | "sha_mismatch"
+  | "cannot_merge"
+  | "permission"
+  | string;
+
+export type ForgeMergeResult =
+  | { ok: true; data: Record<string, unknown> }
+  | { ok: false; error: string; kind: ForgeMergeFailureKind | null };
+
+
 // ----- IPC inputs -----
 
 // BET-138: the pty is a shell-in-cwd (or, for a launcher mode, an AI CLI TUI
@@ -630,6 +680,14 @@ export const IPC = {
   // WITHOUT ever crossing a token.
   forgeStatus: "forge:status",
   forgePullRequest: "forge:pull-request",
+
+  // BET-794: forge write path. Both box-side only — the renderer never sees a
+  // forge token. forge:ship pushes the current branch then opens a PR (only
+  // after the renderer's human confirm). forge:merge merges with the head SHA
+  // the user approved and surfaces the distinguished failure kind.
+  forgeShip: "forge:ship",
+  forgeShipPreview: "forge:ship-preview",
+  forgeMerge: "forge:merge",
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",

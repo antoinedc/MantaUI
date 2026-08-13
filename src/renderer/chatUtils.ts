@@ -2882,3 +2882,59 @@ export function describeRepoRow(repo: RepoHit): string {
   if (!repo.originUrl) return `${branch} · ${repo.path} · no remote`;
   return branch;
 }
+
+// ===== Forge merge gate (BET-794) =====
+
+/**
+ * Whether the merge affordance is enabled for a pull request, plus a
+ * user-visible reason when it is not. Merge is enabled ONLY when ALL hold:
+ * the checks rollup is `green`, there are no unresolved review threads, and
+ * the forge reports `mergeable === true`. Every blocking combination yields a
+ * distinct reason so the UI can explain "why can't I merge" instead of a bare
+ * disabled button.
+ *
+ * `mergeable: null` means the forge is still computing mergeability — NOT
+ * mergeable, reason "still computing" (the caller may retry).
+ *
+ * @param {{ rollup: CheckRollup, unresolvedThreads: number, mergeable: true | false | null }} input
+ * @returns {{ can: boolean, reason: string | null }}
+ */
+export function canMerge({
+  rollup,
+  unresolvedThreads,
+  mergeable,
+}: {
+  rollup: CheckRollup;
+  unresolvedThreads: number;
+  mergeable: true | false | null;
+}): { can: boolean; reason: string | null } {
+  if (mergeable === null) return { can: false, reason: "still computing" };
+  if (mergeable !== true) return { can: false, reason: "not mergeable" };
+  if (rollup !== "green") {
+    const reason = rollup === "yellow" ? "checks still running" : rollup === "red" ? "checks failing" : "no checks";
+    return { can: false, reason };
+  }
+  if (unresolvedThreads > 0) {
+    return { can: false, reason: `${unresolvedThreads} unresolved thread${unresolvedThreads === 1 ? "" : "s"}` };
+  }
+  return { can: true, reason: null };
+}
+
+/**
+ * The user-facing message for a merge failure, keyed by its distinguished kind
+ * (status code, not a generic error): `sha_mismatch` (409), `cannot_merge`
+ * (405), `permission` (403). Each has a different next action, so each must be
+ * surfaced distinctly rather than as a bare "Merge failed".
+ */
+export function describeMergeFailure(kind: string | null | undefined): string {
+  switch (kind) {
+    case "sha_mismatch":
+      return "Merge failed — the head SHA moved. This PR changed after you reviewed it; re-review before merging.";
+    case "cannot_merge":
+      return "Cannot merge — the PR is blocked (branch protection, draft, or a conflict).";
+    case "permission":
+      return "No permission to merge this pull request.";
+    default:
+      return kind ? `Merge failed (${kind}).` : "Merge failed.";
+  }
+}

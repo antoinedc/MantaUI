@@ -75,7 +75,11 @@ test("buildJobPrompt includes the git paragraph when a worktree is present", () 
   assert.ok(out.includes("/repo/wt-login"));
   assert.ok(out.includes("branch fix-login"));
   assert.ok(out.includes("Commit your work to that branch before you finish."));
-  assert.ok(out.includes("Do not push, do not open a"));
+  // BET-794: a background job MAY open a draft pull request, but may NEVER merge
+  // or force-push — the prohibition stays explicit in the prompt contract.
+  assert.ok(out.includes("You may open a draft pull"));
+  assert.ok(out.includes("never merge"));
+  assert.ok(!out.includes("Do not push, do not open a"));
   assert.ok(out.includes("When you are done, end with a short summary"));
 });
 

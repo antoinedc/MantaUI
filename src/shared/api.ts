@@ -42,6 +42,12 @@ import type {
   ForgeProbeResult,
   ForgeStatusResult,
   ForgePullRequestResult,
+  ForgeShipInput,
+  ForgeShipResult,
+  ForgeShipPreviewInput,
+  ForgeShipPreviewResult,
+  ForgeMergeInput,
+  ForgeMergeResult,
   ProviderEndpoint,
   DiscoverResult,
   ProviderInput,
@@ -175,6 +181,15 @@ export interface Api {
   // and the server resolves cwd → origin → repo.
   forgeStatus(): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
+
+  // BET-794: forge write path (box-side only — a token never leaves the box).
+  // forgeShip pushes the current branch then opens a PR — this is called ONLY
+  // after the renderer's human confirm card (never auto-submitted). forgeMerge
+  // merges the PR with the head SHA the user approved, surfacing the
+  // distinguished failure kind.
+  forgeShip(input: ForgeShipInput): Promise<ForgeShipResult>;
+  forgeShipPreview(input: ForgeShipPreviewInput): Promise<ForgeShipPreviewResult>;
+  forgeMerge(input: ForgeMergeInput): Promise<ForgeMergeResult>;
 
   tmuxConfigStatus(): Promise<TmuxConfigStatus>;
   tmuxSetupConfig(): Promise<TmuxConfigStatus>;
