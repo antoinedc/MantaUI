@@ -384,7 +384,12 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         // pre-S1b renderer semantics) — the box is the single source of truth,
         // so it must report the same value the renderer's raw handler does.
         st.running = type === "busy" || type === "working" || type === "retry";
-        emit(sid, "running", { running: st.running });
+        // `type` is ADDITIVE, not the indicator: `running` stays the single
+        // source of truth for the running boolean, while `type` carries the
+        // raw "busy" | "working" | "retry" (or null) so a thin client (iOS)
+        // can distinguish a retry from a plain busy spinner without changing
+        // what desktop already reads. Desktop ignores the new field.
+        emit(sid, "running", { running: st.running, type });
         return;
       }
       case "session.idle": {

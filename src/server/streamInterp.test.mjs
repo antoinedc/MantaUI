@@ -328,7 +328,7 @@ test("session.error with a MessageAbortedError name emits NOTHING", () => {
   assert.equal(events.length, 0, "an abort is not a failure — no frames emitted");
 });
 
-test("session.status retry reports running true (parity with pre-S1b renderer)", () => {
+test("session.status retry reports running true and carries type retry (parity with pre-S1b renderer)", () => {
   const { interp, events } = make();
   interp.interpret({
     type: "session.status",
@@ -337,6 +337,9 @@ test("session.status retry reports running true (parity with pre-S1b renderer)",
   const ev = events.find((e) => e.sub === "running");
   assert.ok(ev);
   assert.equal(ev.payload.running, true);
+  // BET-758: the retry-ness must reach the device so iOS can render a retry
+  // banner; `running` stays the single source of truth, `type` is additive.
+  assert.equal(ev.payload.type, "retry");
 });
 
 // ---------------------------------------------------------------------------
@@ -358,6 +361,8 @@ test("session.status reports running from the NESTED status.type the box sends",
   const ev = events.find((e) => e.sub === "running");
   assert.ok(ev);
   assert.equal(ev.payload.running, true);
+  // BET-758: the nested busy type is forwarded additively.
+  assert.equal(ev.payload.type, "busy");
 });
 
 test("message.part.delta flushes from the FLAT delta the box sends", () => {
