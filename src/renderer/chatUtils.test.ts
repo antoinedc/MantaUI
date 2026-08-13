@@ -3207,7 +3207,7 @@ describe("usageDialState", () => {
     expect(usageDialState(snap, false).visible).toBe(true);
   });
 
-  it("picks the HIGHER of two windows as the binding one", () => {
+  it("reports the FIRST window, not the highest — a 40% session beats an 85% weekly", () => {
     const snap = usageSnapshot({
       windows: [
         { kind: "session", label: "Session (5h)", pct: 40 },
@@ -3215,8 +3215,22 @@ describe("usageDialState", () => {
       ],
     });
     const state = usageDialState(snap, true);
-    expect(state.pct).toBe(85);
-    expect(state.window?.kind).toBe("weekly");
+    expect(state.pct).toBe(40);
+    expect(state.window?.kind).toBe("session");
+    expect(state.tone).toBe("under");
+  });
+
+  it("a later window over threshold still makes the dial visible at 0% primary", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "Session (5h)", pct: 0 },
+        { kind: "weekly", label: "Weekly", pct: 95 },
+      ],
+    });
+    const state = usageDialState(snap, false);
+    expect(state.visible).toBe(true); // the weekly is what surfaces it
+    expect(state.pct).toBe(0); // …but the number shown is the session's
+    expect(state.window?.kind).toBe("session");
   });
 
   it("a snapshot with a single window works", () => {

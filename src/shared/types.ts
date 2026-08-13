@@ -1092,6 +1092,10 @@ export type UsageSnapshot = {
   // and opencode's providerID are different namespaces on purpose.
   providerIDs: string[];
   planLabel?: string; // "Max 20x", "Pro", "Allegretto"
+  // ORDERED SHORTEST-FIRST — the session (5h) window before the weekly one.
+  // The composer dial reports windows[0] as "your usage right now", so an
+  // adapter that emits weekly first makes the dial lie. Every adapter in
+  // src/server/usageAdapters/ upholds this.
   windows: UsageWindow[];
   extras?: { label: string; value: string }[]; // credits balance, model pools…
   fetchedAt: number; // epoch ms of the successful fetch

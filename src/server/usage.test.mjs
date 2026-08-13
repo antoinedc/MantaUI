@@ -536,6 +536,7 @@ test("kimi adapter: weekly (string counts) + session (300-minute limits entry, r
   });
   assert.equal(snap.provider, "kimi");
   assert.equal("planLabel" in snap, false); // no planLabel on this endpoint, per spec
+  assert.equal(snap.windows[0].kind, "session"); // shortest-first ordering contract
 
   const weekly = snap.windows.find((w) => w.kind === "weekly");
   assert.equal(weekly.used, 2214);

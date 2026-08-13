@@ -2454,9 +2454,9 @@ export type UsageDialState = {
   visible: boolean;
   pct: number;
   tone: UsageDialTone;
-  // The window that drives the dial's colour/visibility — the HIGHEST pct
-  // among the snapshot's windows (the one that bites first in practice,
-  // independent of whether the provider set its own `binding` flag).
+  // The window the dial reports — always `windows[0]`, the snapshot's primary
+  // (shortest) window. NOT the highest-pct one: visibility uses the worst
+  // window, but the number and colour shown are the primary window's.
   window: UsageWindow | null;
 };
 
@@ -2485,13 +2485,25 @@ export function usageDialState(
   if (windows.length === 0) {
     return { visible: false, pct: 0, tone: "under", window: null };
   }
-  const binding = windows.reduce((max, w) => (w.pct > max.pct ? w : max));
-  const pct = binding.pct;
+  // The dial reports the PRIMARY window — `windows[0]`, which every adapter
+  // emits shortest-first (session before weekly; see the ordering contract on
+  // UsageSnapshot.windows in src/shared/types.ts). It used to report the
+  // highest-pct window instead, which meant a 0%-used 5h session rendered a
+  // 40%-full ring because the WEEKLY window was at 40% — read next to the send
+  // button, that says "you have burnt 40% of what you can do right now", which
+  // is the opposite of the truth. The weekly number is still one click away in
+  // the popover, which lists every window.
+  const primary = windows[0];
+  // Visibility, unlike the value, is still driven by the WORST window: a
+  // weekly at 95% must still surface the dial when the session window is
+  // empty, or the number about to block you is invisible unless the opt-in
+  // "always show" setting is on.
+  const worstPct = windows.reduce((max, w) => (w.pct > max ? w.pct : max), 0);
   return {
-    visible: pct >= 70 || alwaysShow,
-    pct,
-    tone: usageTone(pct),
-    window: binding,
+    visible: worstPct >= 70 || alwaysShow,
+    pct: primary.pct,
+    tone: usageTone(primary.pct),
+    window: primary,
   };
 }
 

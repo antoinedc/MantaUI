@@ -79,10 +79,10 @@ export const kimiAdapter = {
     if (!res.ok) throw httpError(res, "kimi usage");
     const data = await res.json();
 
+    // Windows are emitted SHORTEST-FIRST (session before weekly) — the
+    // ordering contract on UsageSnapshot.windows: the composer dial reports
+    // windows[0] and must never show a weekly number as "right now".
     const windows = [];
-    // `usage` is the WEEKLY window.
-    const weekly = windowFromDetail(data?.usage, "weekly", "Weekly");
-    if (weekly) windows.push(weekly);
 
     // `limits[]` entries carry `window` + `detail`; the 300-minute (5h) entry
     // is the session window.
@@ -90,6 +90,10 @@ export const kimiAdapter = {
     const sessionEntry = limitsArr.find((l) => minutesOf(l?.window) === 300);
     const session = windowFromDetail(sessionEntry?.detail, "session", "Session (5h)");
     if (session) windows.push(session);
+
+    // `usage` is the WEEKLY window.
+    const weekly = windowFromDetail(data?.usage, "weekly", "Weekly");
+    if (weekly) windows.push(weekly);
 
     // No planLabel on this endpoint — it needs a cookie-auth web API, out of
     // scope per the issue spec.
