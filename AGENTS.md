@@ -905,21 +905,25 @@ result is delivered back as a separate later message when the job finishes.
 Same "MantaUI tools" pattern as schedule/serve-page/peers/notify/secrets
 (`docs/manta-tools-scheduler.md`). Key facts:
 
-**TERMINOLOGY — "subagent" means two different things, and conflating them
-sends you to the wrong half of the codebase.** Both are colloquially "a
-subagent"; only the second one is this section.
+**TERMINOLOGY — "subagent" means three different things, and conflating them
+sends you to the wrong half of the codebase.** All three are colloquially "a
+subagent"; only the third one is this section.
 
 | Term | Started by | Surface | Owns |
 |---|---|---|---|
-| **inline subagent** | the `task` tool | the TRANSCRIPT — collapsed card, expand for the child's turns (see "Subagent rendering") | nothing: no tmux window, no worktree, no branch, and **no sidebar row, ever** |
-| **background job**, a.k.a. **delegated subagent** | the `delegate` tool | the SIDEBAR RAIL — nested under the session that started it | its own opencode session, tmux window, git worktree + branch |
+| **inline subagent** | the `task` tool (foreground) | the TRANSCRIPT — collapsed card, expand for the child's turns (see "Subagent rendering") | nothing: no tmux window, no worktree, no branch, and **no sidebar row, ever** |
+| **backgrounded subagent** | the `task` tool with `background: true` | a nested SIDEBAR ROW under the session that started it | its own opencode session + tmux window, but **no worktree** |
+| **background job**, a.k.a. **delegated subagent** | the `delegate` tool | a nested SIDEBAR ROW under the session that started it | its own opencode session, tmux window, git worktree + branch |
 
-The two coexist deliberately (the model picks per task) and nothing about one
-implies the other. So "delegated subagents don't show in the rail" is a bug
-report about THIS section, while "subagents don't show in the rail" is very
-likely someone looking for inline `task` children, which are working as
-designed. When writing user-facing copy prefer **"background job"** for the
-delegated kind — the rail row, branch and worktree all belong to it.
+All three coexist deliberately (the model picks per task) and nothing about
+one implies the other. So "delegated subagents don't show in the rail" is a
+bug report about THIS section, while "inline subagents don't show in the
+rail" is very likely someone looking at `task` children run in the
+foreground, which are working as designed — they never get a row. A
+backgrounded subagent and a background job DO both get a rail row now; the
+difference between those two is the worktree. When writing user-facing copy
+prefer **"background job"** for the `delegate` kind — the rail row, branch
+and worktree all belong to it.
 
 - **Global opencode tool**, `docs/opencode-tools/delegate.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
@@ -933,12 +937,14 @@ delegated kind — the rail row, branch and worktree all belong to it.
   `delegate_list` GETs `/api/delegate?sessionID=`; `delegate_stop` POSTs
   `/api/delegate/:id/stop`. `execute` returns promptly; the engine owns the
   lifecycle.
-- **Background vs. blocking is the model's choice.** `delegate`'s description
-  steers mode selection: use it for long-running independent work you do NOT
-  need the answer to continue (research, broad refactor, test-suite
-  run-and-fix); use the ordinary built-in `task` tool when you need the
-  answer first. Both modes coexist. Every job costs a full extra model
-  session, so the description forbids speculative fan-out and nested jobs.
+- **Three-way mode selection is the model's choice.** `delegate`'s
+  description steers it: use the built-in `task` tool in the foreground when
+  you need the answer before you can continue, or with `background: true`
+  for long independent work that will not edit files; use `delegate` when
+  the work WILL edit files, since it is the only one that gets its own git
+  worktree and branch (see the TERMINOLOGY table above). Every job costs a
+  full extra model session, so the description forbids speculative fan-out
+  and nested jobs.
 - **The "you do NOT have the result yet" return string is load-bearing.**
   `delegate` returns immediately with the job's name + id and an explicit
   reminder that the result is NOT available yet and will arrive as a later
