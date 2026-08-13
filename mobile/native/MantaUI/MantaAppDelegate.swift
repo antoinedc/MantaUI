@@ -29,8 +29,24 @@ final class MantaAppDelegate: NSObject, UIApplicationDelegate, @preconcurrency U
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        Self.registerNotificationCategories()
         MantaPushService.applyRegistrationState()
         return true
+    }
+
+    private static func registerNotificationCategories() {
+        let permission = UNNotificationCategory(
+            identifier: "MANTA_PERMISSION",
+            actions: [
+                // No .foreground option: the reply runs in the background without
+                // opening the app — that is the entire point of the feature.
+                UNNotificationAction(identifier: "allow-once", title: "Allow once"),
+                UNNotificationAction(identifier: "allow-always", title: "Always allow"),
+                UNNotificationAction(identifier: "deny", title: "Deny", options: [.destructive]),
+            ],
+            intentIdentifiers: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([permission])
     }
 
     func application(
@@ -85,7 +101,30 @@ final class MantaAppDelegate: NSObject, UIApplicationDelegate, @preconcurrency U
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        if let sessionID = userInfo["sessionId"] as? String, !sessionID.isEmpty {
+        let sessionID = userInfo["sessionId"] as? String
+        let requestID = userInfo["requestId"] as? String
+        let reply: PermissionReply?
+        switch response.actionIdentifier {
+        case "allow-once": reply = .once
+        case "allow-always": reply = .always
+        case "deny": reply = .reject
+        default: reply = nil
+        }
+        if let reply, let requestID, !requestID.isEmpty {
+            // Background reply — the app is NOT foregrounded. completionHandler
+            // must run after the network call so iOS keeps us alive for it. The
+            // handler is `sending`/non-Sendable, so a @Sendable Task can't
+            // capture it directly — box it (UNUserNotificationCenter handlers
+            // are safe to call from any thread, which is what the box does).
+            let done = NotificationCompletionHandler(completionHandler)
+            Task {
+                try? await MantaAPIClient.live().permissionReply(
+                    requestId: requestID, reply: reply, sessionId: sessionID)
+                done.run()
+            }
+            return
+        }
+        if let sessionID, !sessionID.isEmpty {
             Task { @MainActor in
                 MantaPushRouter.shared.open(sessionID: sessionID)
             }
@@ -140,12 +179,26 @@ enum MantaPushService {
     }
 
     private static func register(_ token: String) {
-        // No box to register with until pairing saves credentials.
         let client = MantaAPIClient.live()
         guard KeychainCredentialStore.shared.serverURL != nil,
               KeychainCredentialStore.shared.boxToken != nil else {
             return
         }
+        Task {
+            try? await client.registerApnsToken(token)
+        }
+    }
+}
+
+/// UNUserNotificationCenter's completion handlers are safe to call from any
+/// thread, but they're typed as `sending` (non-Sendable), so a @Sendable Task
+/// can't capture one directly. Box it so the background permission reply can
+/// invoke the handler after its network call. The annotation is needed only
+/// because the handler's type is non-Sendable by protocol fiat, not by meaning.
+private final class NotificationCompletionHandler: @unchecked Sendable {
+    let run: () -> Void
+    init(_ run: @escaping () -> Void) { self.run = run }
+}
         Task {
             try? await client.registerApnsToken(token)
         }
