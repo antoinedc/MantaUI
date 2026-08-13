@@ -322,10 +322,11 @@ private struct SecretAddForm: View {
 
     private func save() async {
         saving = true
-        defer {
-            saving = false
-            errorMessage = nil
-        }
+        // Clear any prior error at the START of a save attempt so a stale
+        // message doesn't linger after a subsequent successful save; a failed
+        // set then sets `errorMessage` below and it is NOT cleared on return.
+        errorMessage = nil
+        defer { saving = false }
         let input = SecretInput(
             key: key,
             value: value,
