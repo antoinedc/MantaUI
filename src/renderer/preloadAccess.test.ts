@@ -78,6 +78,8 @@ function makeFakePreload(): MantaPreload {
       pendingFingerprint: null,
       waitingForPassphrase: false,
       passphraseHandleId: null,
+      activeHandleId: null,
+      target: null,
     })),
     installerGetDiagnostics: vi.fn(async () => ""),
     onInstallerEvent: vi.fn(() => vi.fn()),

@@ -42,6 +42,12 @@ const LOG_TAIL_MAX = 200;
 let nextHandleSeq = 0;
 // Most recent preflight verdict, read back by IPC.installerState.
 let activePreflight: PreflightResult | null = null;
+// BET-705 b: the SshTarget the most recent installerStart was asked to
+// install. It's the SINGLE source of truth for the auto-claim after `done` —
+// the claim must go against the same host the install used, even after a
+// renderer remount reset the host picker. Overwritten on each new install
+// start; NOT cleared on completion (the claim runs after `done`).
+let lastInstallTarget: SshTarget | null = null;
 
 // BET-361: when preflight hits a never-seen host, the install PAUSES here
 // waiting for the renderer's "Trust this host" answer. The deferred is
@@ -175,6 +181,11 @@ export function registerInstallerHandlers(
     stage: activeStage,
     logTail: [...logTail],
     preflight: activePreflight,
+    // BET-705 b: expose the active handle id so a renderer remount can
+    // restore it (needed for Cancel), and the stored install target so the
+    // auto-claim is always against the host that was actually installed.
+    activeHandleId: activeHandle?.handleId ?? null,
+    target: lastInstallTarget,
     // BET-361: mirror the trust-pause so a renderer remount re-shows the
     // fingerprint prompt and routes its answer to the right handle.
     waitingForTrust: waitingForTrust !== null,
@@ -203,6 +214,9 @@ export function registerInstallerHandlers(
     // (BET-384) is already normalized by resolveInstallTarget on the
     // renderer side, so there's nothing further to trim on an object.
     const alias = typeof input.alias === "string" ? input.alias.trim() : input.alias;
+    // BET-705 b: record the target this install is actually installing —
+    // the auto-claim that follows `done` must go against THIS host.
+    lastInstallTarget = alias;
     const handleId = `install-${++nextHandleSeq}-${Date.now()}`;
     activeStage = "preflight";
     logTail.length = 0;
@@ -400,9 +414,17 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(IPC.installerMintAndClaim, async (
     _e,
-    input: { alias: SshTarget; claimUrlOverride?: string },
+    input: { alias?: SshTarget; claimUrlOverride?: string },
   ) => {
-    const result = await mintAndClaim(input.alias, {
+    // BET-705 b: prefer the stored install target (the single source of
+    // truth — survives renderer remounts/host-picker resets); fall back to
+    // the renderer-passed alias only when no install target is stored (e.g.
+    // the app restarted between install and claim).
+    const target = lastInstallTarget ?? input?.alias;
+    if (target == null) {
+      throw new Error("no install target to claim");
+    }
+    const result = await mintAndClaim(target, {
       persist,
       claimUrlOverride: input.claimUrlOverride,
       askpassEnv: activeAskpass?.env,

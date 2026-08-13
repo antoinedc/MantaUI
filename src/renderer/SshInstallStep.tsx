@@ -43,7 +43,7 @@ import {
   sshTargetLabel,
   type HostFieldSelection,
 } from "../shared/sshTarget";
-import type { ClaimOutcome } from "../shared/claim.mjs";
+import { claimWithRetry } from "./claimRetry";
 
 const ACCENT = "var(--accent)";
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
@@ -59,16 +59,6 @@ const LOG_LINES_MAX = 500;
 // cycle 1 nit).
 const JUST_REFRESHED_DECAY_MS = 60_000;
 
-// BET-390 amendment: the install's final act starts/restarts the box service,
-// and the auto-claim fires the instant the install process exits — so the
-// first mint can race a service that isn't listening on loopback yet. A
-// single retry after this wait fixes the observed non-deterministic failure;
-// the retry is bounded to one extra attempt and the final failure still
-// surfaces the real message. Only transient kinds (network / server_error)
-// are retried — a wrong_code or invalid_response won't be fixed by trying
-// again.
-const CLAIM_RETRY_DELAY_MS = 3_000;
-
 const INITIAL_STAGE: InstallStageId = "preflight";
 const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
 
@@ -80,13 +70,6 @@ const INSTALL_STAGE_LABELS: string[] = INSTALL_STAGES.map((s) => s.label);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-// BET-390: only failure kinds that can be caused by the box service not being
-// ready yet are worth a retry. A wrong/expired code or a malformed response
-// won't change on a second attempt.
-function isTransientClaimFailure(outcome: ClaimOutcome): boolean {
-  return !outcome.ok && (outcome.kind === "network" || outcome.kind === "server_error");
 }
 
 export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
@@ -164,6 +147,22 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [passphraseInput, setPassphraseInput] = useState("");
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
+  // BET-705 c: while the auto-claim is retrying a transient failure, how many
+  // seconds have elapsed so far — drives the "the box is starting up (Ns)"
+  // banner. null when not mid-retry.
+  const [claimElapsed, setClaimElapsed] = useState<number | null>(null);
+  // True after the user cancels an install, until the next install starts —
+  // renders a neutral "Install cancelled." card instead of a failure one.
+  const [cancelled, setCancelled] = useState(false);
+
+  // BET-705 a: handles whose install is over (cancelled, or finished) and must
+  // never affect the UI again. Guards against a late `done`/`error` from an
+  // old install flipping a NEW install's UI during the null-handle window
+  // between startInstall and the installerStart response. Never cleared — it
+  // stays valid for the app session and is bounded by install attempts.
+  const deadHandlesRef = useRef<Set<string>>(new Set());
+  // BET-705 d: set when the user cancels; reset on the next install start.
+  const cancelRequestedRef = useRef(false);
 
   // ---------- Host list load (mount + manual refresh share this) ----------
   //
@@ -289,6 +288,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       if (s.active) {
         const info = currentStageInfo(s.stage);
         setRunning(true);
+        // BET-705 b: restore the active handle so Cancel works after a
+        // renderer remount (previously this was never restored, so cancel
+        // no-opped).
+        setActiveHandle(s.activeHandleId);
         setStage(s.stage);
         setStageIndex(info.index);
         setLines(s.logTail);
@@ -307,7 +310,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     const unsub = preload.onInstallerEvent((evt: InstallerEvent) => {
       // Only react to events from the CURRENT handle — stale events from a
       // previous install (after the user clicked Cancel + tried again) must
-      // not update the new install's UI.
+      // not update the new install's UI. A dead handle (cancelled, or already
+      // finished) is ignored outright, even while activeHandle is null in the
+      // window between startInstall and the installerStart response (BET-705 a).
+      if (deadHandlesRef.current.has(evt.handleId)) return;
       if (activeHandle !== null && evt.handleId !== activeHandle) return;
       switch (evt.kind) {
         case "line":
@@ -333,6 +339,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setFingerprintPrompt(null);
           setPassphrasePrompt(null);
           setPassphraseInput("");
+          // A finished handle can't speak again (BET-705 a).
+          deadHandlesRef.current.add(evt.handleId);
           break;
         case "fingerprint":
           // The install is paused waiting for a trust decision — show the
@@ -352,13 +360,21 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setPassphraseInput("");
           break;
         case "done":
+          // BET-705 d: a cancel surfaces as a done with !ok and the
+          // SIGTERM signal — render a neutral "Install cancelled." card
+          // instead of the failure copy, and skip the auto-claim.
+          if (!evt.ok && cancelRequestedRef.current) {
+            setCancelled(true);
+          }
           setDone({ ok: evt.ok, code: evt.code, signal: evt.signal });
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
           setPassphrasePrompt(null);
           setPassphraseInput("");
-          if (evt.ok) {
+          // A finished handle can't speak again (BET-705 a).
+          deadHandlesRef.current.add(evt.handleId);
+          if (evt.ok && !cancelRequestedRef.current) {
             // Auto-claim on success — the whole point of the flow. The
             // user typed a host, nothing else.
             void runClaim();
@@ -371,6 +387,8 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
           setFingerprintPrompt(null);
           setPassphrasePrompt(null);
           setPassphraseInput("");
+          // A finished handle can't speak again (BET-705 a).
+          deadHandlesRef.current.add(evt.handleId);
           break;
       }
     });
@@ -425,6 +443,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     setLines([]);
     setDone(null);
     setClaimError(null);
+    setClaimElapsed(null);
+    setCancelled(false);
+    cancelRequestedRef.current = false;
     // Clear the previous handle so the event guard doesn't discard this
     // install's events (esp. a `preflight-failed` push, which main sends
     // BEFORE the installerStart invoke below resolves) while it's still
@@ -453,6 +474,22 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // process abort instead of silently no-oping (BET-361/360).
     const handleId = activeHandle ?? fingerprintPrompt?.handleId ?? passphrasePrompt?.handleId;
     if (!handleId) return;
+    // BET-705 d: this is a user-initiated cancel, not a real failure — a
+    // late `done` from the SIGTERM must render "Install cancelled." not the
+    // failed card (and must never re-run the auto-claim).
+    cancelRequestedRef.current = true;
+    // BET-705 a: the cancelled handle is dead — its late `done` / `error`
+    // (or a `preflight-failed` from a paused-prompt abort) must not be able
+    // to hijack a subsequent install.
+    deadHandlesRef.current.add(handleId);
+    // Reflect the cancellation immediately — the terminal `done` for this
+    // handle is now dropped by the dead-handle guard, so flip the UI here.
+    setRunning(false);
+    setActiveHandle(null);
+    setFingerprintPrompt(null);
+    setPassphrasePrompt(null);
+    setPassphraseInput("");
+    setCancelled(true);
     await preload.installerCancel({ handleId });
   }
 
@@ -498,43 +535,41 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   }
 
   async function runClaim() {
+    // BET-705 b: the claim target now lives in MAIN (the SshTarget passed to
+    // installerStart), so a renderer remount that reset the host picker can't
+    // claim against the wrong host. We still resolve the current selection as
+    // a passed-through FALLBACK (keeps the IPC arg shape; used only when no
+    // install target is stored, e.g. app restarted between install + claim) —
+    // but we never bail on an invalid current selection, because main's
+    // stored target is the source of truth.
     const resolved = resolveInstallTarget(currentSelection());
-    if (!resolved.ok) {
-      setClaimError(resolved.error);
-      return;
-    }
     setClaimRunning(true);
     setClaimError(null);
+    setClaimElapsed(0);
+    // Tick the "(Ns)" countdown once a second while retrying.
+    const tick = setInterval(() => setClaimElapsed((s) => (s ?? 0) + 1), 1000);
     try {
-      const outcome = await preload.installerMintAndClaim({
-        alias: resolved.target,
-      });
+      const attempt = () =>
+        preload.installerMintAndClaim({
+          alias: resolved.ok ? resolved.target : undefined,
+        });
+      // BET-705 c: retry transient failures (the box service not listening
+      // yet) every few seconds up to a 45s budget, with a visible countdown.
+      const { outcome } = await claimWithRetry(attempt, { sleep, now: Date.now });
       if (outcome.ok) {
         // Mirror the manual PairStep onPaired — advances onboarding to
         // step 2 exactly as a typed pairing code would.
         onPaired();
         return;
       }
-      // BET-390 amendment: a transient failure (the box service not yet
-      // listening) is retried once after a short wait. claimRunning stays
-      // true across the wait so the banner keeps reading "Pairing…".
-      if (isTransientClaimFailure(outcome)) {
-        await sleep(CLAIM_RETRY_DELAY_MS);
-        const retry = await preload.installerMintAndClaim({
-          alias: resolved.target,
-        });
-        if (retry.ok) {
-          onPaired();
-          return;
-        }
-        setClaimError(`Pairing failed: ${retry.message}`);
-      } else {
-        setClaimError(`Pairing failed: ${outcome.message}`);
-      }
+      // Non-transient failure, or the retry budget exhausted → the real error.
+      setClaimError(`Pairing failed: ${outcome.message}`);
     } catch (e) {
       setClaimError(e instanceof Error ? e.message : String(e));
     } finally {
+      clearInterval(tick);
       setClaimRunning(false);
+      setClaimElapsed(null);
     }
   }
 
@@ -930,9 +965,20 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       )}
 
       {/* In-flight claim only. There is no success message: a successful
-          claim advances onboarding to step 2, which unmounts this step. */}
-      {claimRunning && <section className="text-body">Pairing…</section>}
-      {done && !done.ok && (
+          claim advances onboarding to step 2, which unmounts this step.
+          BET-705 c: while retrying a transient failure we show the elapsed
+          countdown ("the box is starting up"). */}
+      {claimRunning && (
+        <section className="text-body">
+          {claimElapsed !== null && claimElapsed > 0
+            ? `Pairing… the box is starting up (${claimElapsed}s)`
+            : "Pairing…"}
+        </section>
+      )}
+      {/* BET-705 d: a user cancel is not a failure — render a neutral card and
+          let the normal "Install & pair" affordance reset the flow. */}
+      {cancelled && <section className="text-body">Install cancelled.</section>}
+      {done && !done.ok && !cancelled && (
         <section
           className="text-body space-y-2"
           style={{ color: DANGER }}
