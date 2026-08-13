@@ -9,6 +9,7 @@ import { getMantaPreload } from "./preloadAccess";
 import { IS_MAC } from "./platform";
 import { terminalShortcut } from "./chatUtils";
 import { useResolvedTheme } from "./theme";
+import { useStore } from "./store";
 
 /**
  * Handle an OSC 52 escape sequence: decode the base64 payload and write the
@@ -83,6 +84,8 @@ export function Terminal({ sessionKey, cwd, active, launcher, tmuxTarget }: Prop
   const searchRef = useRef<SearchAddon | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // BET-723: upload / peek failures surface as global toasts, not native alert().
+  const pushAppToast = useStore((s) => s.pushAppToast);
   // dragenter/leave fire for nested elements too — count depth so we only
   // hide the overlay when the cursor truly leaves the terminal area.
   const dragDepth = useRef(0);
@@ -170,7 +173,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
             text: p,
             activate: () => {
               window.api.peekRemoteFile(p).catch((e) => {
-                alert(e instanceof Error ? e.message : String(e));
+                pushAppToast({ tone: "error", message: e instanceof Error ? e.message : String(e) });
               });
             },
             decorations: { underline: true, pointerCursor: true },
@@ -435,7 +438,7 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
       window.api.ptyWrite(sessionKey, text);
       termRef.current?.focus();
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+      pushAppToast({ tone: "error", message: err instanceof Error ? err.message : String(err) });
     } finally {
       setUploading(false);
     }

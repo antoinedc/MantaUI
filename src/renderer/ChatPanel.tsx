@@ -44,7 +44,6 @@ import {
   buildTitleInstruction,
   sanitizeGeneratedTitle,
   detectCommandFromText,
-  formatBytes,
   type EntryMotionState,
   type StaleCacheResult,
   type PendingScrollWin,
@@ -81,7 +80,7 @@ import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
-import { ToastStack, type ToastItem } from "./Toast";
+import { ACCEPT_SCREENSHOT_EVENT } from "./GlobalToasts";
 import { getMantaPreload } from "./preloadAccess";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
@@ -452,21 +451,19 @@ export function ChatPanel({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   // Agent @-mentions state — populated by useTypeahead, consumed by submit.
   const [agentMentions, setAgentMentions] = useState<AgentMention[]>([]);
-  // Ephemeral system notice (e.g. /help output) rendered above the input.
+  // Ephemeral system notice (e.g. /help output). Lives in the store so the
+  // App-level global toast host (BET-723) renders it over every pane type.
   // Cleared on dismiss or on next session change.
-  const [systemNotice, setSystemNotice] = useState<string | null>(null);
+  const setSystemNotice = useStore((s) => s.setSystemNotice);
   // Whether the panel is currently being dragged over with files (for the
   // big "drop to attach" overlay).
   const [dragHover, setDragHover] = useState(false);
-  // Screenshot detection toast — global, lives in the store. App.tsx owns
-  // the single ipcRenderer subscription; this panel reads + clears it.
-  // Only the active panel renders it (gated below by `isActive`).
+  // Screenshot detection toast — global, lives in the store. App.tsx's global
+  // toast host owns the render + dismiss; this panel only runs the accept /
+  // upload flow ("Add to chat"), which needs the active session's own
+  // attachment state. Triggered by the ACCEPT_SCREENSHOT_EVENT below.
   const screenshotToast = useStore((s) => s.screenshotToast);
   const setScreenshotToast = useStore((s) => s.setScreenshotToast);
-  // Agent → laptop file push toast (single global instance, like screenshots).
-  const agentFileToast = useStore((s) => s.agentFileToast);
-  const setAgentFileToast = useStore((s) => s.setAgentFileToast);
-  const [agentFileSaving, setAgentFileSaving] = useState(false);
   // Ref mirror of the child-status map so `toggleTaskExpand` can read
   // current values synchronously without taking them as deps.
   const liveChildStatusRef = useRef<Map<string, "running" | "idle">>(new Map());
@@ -1532,126 +1529,21 @@ export function ChatPanel({
     }
   }, [screenshotToast, tmuxSession]);
 
-  // Agent → laptop file push. In require-confirm mode the toast's "Save" button
-  // calls this: pull the remote outbox file to the downloads dir, then flip the
-  // toast to the saved state (so the user can Reveal it). In auto-pull mode the
-  // file is already down (main did it in the poller) and this isn't called.
-  const saveAgentFile = useCallback(async () => {
-    const toast = agentFileToast;
-    if (!toast || agentFileSaving) return;
-    setAgentFileSaving(true);
-    try {
-      const localPath = await window.api.agentPullFile(toast.remotePath);
-      // Desktop returns a real local path → flip the toast to the saved state
-      // so the user can Reveal it in Finder. Mobile returns "" (the download
-      // was handed to the browser; there's no OS file manager to reveal into)
-      // → just dismiss the toast.
-      if (localPath) {
-        setAgentFileToast({ ...toast, autoPulled: true, localPath });
-      } else {
-        setAgentFileToast(null);
-      }
-    } catch (err) {
-      setSendError(`Couldn't save file: ${String((err as Error)?.message ?? err)}`);
-      setAgentFileToast(null);
-    } finally {
-      setAgentFileSaving(false);
-    }
-  }, [agentFileToast, agentFileSaving, setAgentFileToast]);
-
-  const revealAgentFile = useCallback(() => {
-    const local = agentFileToast?.localPath;
-    if (local) void window.api.revealInFolder(local);
-    setAgentFileToast(null);
-  }, [agentFileToast, setAgentFileToast]);
-
-  // ===== Unified toast stack (BET-416 §D) =====
-  //
-  // The three previous in-app toast implementations (screenshot-detected,
-  // agent-sent-file, systemNotice) collapse into ONE ToastStack. Only the
-  // active panel renders it (mirrors the prior per-panel gating). The stack
-  // is newest-on-top, capped at three. Each toast carries an action when it
-  // has one (Add to chat / Save / Reveal) — action-bearing toasts never
-  // auto-dismiss; systemNotice (/help reference) opts out of auto-dismiss
-  // with ttl: null. A small order list tracks arrival so "newest on top" is
-  // real, not a fixed priority.
-  const [toastOrder, setToastOrder] = useState<string[]>([]);
-  const activeToastIds = useMemo(() => {
-    const ids: string[] = [];
-    if (screenshotToast) ids.push("screenshot");
-    if (agentFileToast) ids.push("agent-file");
-    if (systemNotice) ids.push("system-notice");
-    return ids;
-  }, [screenshotToast, agentFileToast, systemNotice]);
+  // The App-level toast host (BET-723) renders the screenshot toast globally
+  // and routes its "Add to chat" action here — this panel owns the active
+  // session's attachment state, so only it can accept. Gated on isActive so a
+  // hidden panel never consumes an action aimed at the visible one (the detail
+  // sessionId match is the routing backstop).
   useEffect(() => {
-    setToastOrder((prev) => {
-      const incoming = activeToastIds.filter((id) => !prev.includes(id));
-      const survivors = prev.filter((id) => activeToastIds.includes(id));
-      // Newly-arrived toasts go first (newest on top); survivors keep order.
-      return [...incoming, ...survivors];
-    });
-  }, [activeToastIds]);
-
-  const dismissToast = useCallback((id: string) => {
-    if (id === "screenshot") setScreenshotToast(null);
-    else if (id === "agent-file") setAgentFileToast(null);
-    else if (id === "system-notice") setSystemNotice(null);
-  }, [setScreenshotToast, setAgentFileToast, setSystemNotice]);
-
-  const toasts: ToastItem[] = useMemo(() => {
-    const items: ToastItem[] = [];
-    for (const id of toastOrder) {
-      if (id === "screenshot" && screenshotToast) {
-        items.push({
-          id: "screenshot",
-          message:
-            screenshotToast.source === "file" && screenshotToast.path
-              ? `Screenshot: ${screenshotToast.path.split("/").pop()}`
-              : "Screenshot in clipboard",
-          action: { label: "Add to chat", onClick: () => void acceptScreenshot() },
-        });
-      } else if (id === "agent-file" && agentFileToast) {
-        const size = formatBytes(agentFileToast.size);
-        items.push({
-          id: "agent-file",
-          message: (
-            <>
-              <span className="text-text">↓ {agentFileToast.name}</span>
-              {size && <span className="text-text-faint"> · {size}</span>}
-              <span className="text-text-faint">
-                {agentFileToast.autoPulled ? " · saved to Downloads" : " — AI sent you a file"}
-              </span>
-            </>
-          ),
-          action: agentFileToast.autoPulled
-            ? agentFileToast.localPath
-              ? { label: "Reveal", onClick: revealAgentFile }
-              : undefined
-            : {
-                label: agentFileSaving ? "Saving…" : "Save",
-                onClick: () => void saveAgentFile(),
-                disabled: agentFileSaving,
-              },
-        });
-      } else if (id === "system-notice" && systemNotice) {
-        items.push({
-          id: "system-notice",
-          message: systemNotice,
-          ttl: null, // user-invoked reference content (/help) — no auto-dismiss
-        });
-      }
-    }
-    return items;
-  }, [
-    toastOrder,
-    screenshotToast,
-    agentFileToast,
-    systemNotice,
-    agentFileSaving,
-    acceptScreenshot,
-    revealAgentFile,
-    saveAgentFile,
-  ]);
+    const onAcceptScreenshot = (e: Event) => {
+      if (!isActive) return;
+      const detail = (e as CustomEvent<{ sessionId?: string }>).detail;
+      if (detail?.sessionId != null && detail.sessionId !== sessionId) return;
+      void acceptScreenshot();
+    };
+    window.addEventListener(ACCEPT_SCREENSHOT_EVENT, onAcceptScreenshot);
+    return () => window.removeEventListener(ACCEPT_SCREENSHOT_EVENT, onAcceptScreenshot);
+  }, [isActive, sessionId, acceptScreenshot]);
 
   // Panel-level drag handlers. We listen on the chat container; the body of
   // the panel paints a dotted overlay while dragHover is true. App.tsx
@@ -2345,29 +2237,6 @@ export function ChatPanel({
         )}
       </CardMount>
 
-      {/* Unified toast stack (BET-416 §D). Replaces the three previous in-app
-          toast implementations (screenshot-detected, agent-sent-file,
-          systemNotice). Bottom-centre, newest on top, max three stacked.
-          Action-bearing toasts (Add to chat / Save / Reveal) never
-          auto-dismiss; the /help systemNotice opts out of auto-dismiss.
-          Only the active panel renders it — the toasts live in global store
-          state (screenshot / agent-file) or panel-local state (systemNotice),
-          one instance app-wide. */}
-      {/* Bottom cluster: a relative wrapper around the composer so the toast
-          overlay can anchor to the composer's OWN top edge (bottom:100%)
-          instead of a fixed pixel guess. Toasts therefore stay just above the
-          box however tall it grows with the input, and as a pure overlay they
-          never shift the transcript or composer layout (BET-677). */}
-      <div className="relative shrink-0">
-        {isActive && (
-          <div
-            className="pointer-events-none absolute inset-x-0 z-40"
-            style={{ bottom: "100%" }}
-          >
-            <ToastStack toasts={toasts} onDismiss={dismissToast} />
-          </div>
-        )}
-
       {jobOwnership ? (
         <ReadOnlyJobBar
           job={jobOwnership}
@@ -2472,7 +2341,6 @@ export function ChatPanel({
         onPaste={onPaste}
       />
       )}
-      </div>
     </div>
   );
 }

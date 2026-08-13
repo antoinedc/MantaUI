@@ -5,6 +5,7 @@ import { Sidebar, type SidebarHandle } from "./Sidebar";
 import { Terminal } from "./Terminal";
 import { ChatPanel } from "./ChatPanel";
 import { ArtifactsPanel } from "./ArtifactsPanel";
+import { GlobalToasts } from "./GlobalToasts";
 import { Settings } from "./Settings";
 import { SearchPalette } from "./SearchPalette";
 import { SETTING_SECTIONS, type SettingSectionId } from "../shared/settingsSchema";
@@ -1111,6 +1112,9 @@ function AppInner() {
   // is hidden so the two don't stack. Non-chat panes (terminal / AI-TUI /
   // new-session) keep the titlebar's drag region + breadcrumb + toggle.
   const isChatPaneActive = activeChatSessionId != null && mode === "chat";
+  // BET-723: the global toast host can route a screenshot "Add to chat" only
+  // when the foreground pane is a real chat session (not a draft over it).
+  const screenshotCanAddToChat = activeChatSessionId != null && !activeDraft && mode === "chat";
 
   return (
     // data-screen is the visual harness's handle on the app shell (see
@@ -1408,6 +1412,14 @@ function AppInner() {
           )}
         </div>
       </main>
+      {/* BET-723 §D4: ONE global toast host, rendered over every pane type
+          (terminal / TUI / draft / chat) as a sibling of <main>. */}
+      {!showOnboarding && (
+        <GlobalToasts
+          activeChatSessionId={activeChatSessionId}
+          canAddToChat={screenshotCanAddToChat}
+        />
+      )}
       {/* BET-659: the Artifacts panel — a fixed-width sibling of <main>, so a
           chat pane is required for it to show (there's no panel to open in a
           terminal). The outer shell is already `flex` and <main> is
