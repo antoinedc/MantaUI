@@ -466,10 +466,13 @@ export function ArtifactsPanel({
   widthRef.current = width;
 
   const [tab, setTab] = useState<ArtifactKind>("link");
-  // BET-726 Task 3.2: roving-tabindex arrow nav on the tab bar — the exact
-  // pattern Settings.tsx's section rail already uses (`onRailKeyDown` there:
-  // move the active tab AND focus, on Left/Right). Refs keyed by kind so
-  // ArrowLeft/Right can call `.focus()` on the tab it moves to.
+  // BET-726 Task 3.2: arrow-key nav on the tab bar — the exact pattern
+  // Settings.tsx's section rail already uses (`onRailKeyDown` there: move
+  // the active tab state AND DOM focus, on Left/Right). Note this is NOT a
+  // roving-tabindex widget (neither this port nor Settings' original manages
+  // `tabIndex` — every tab stays in the normal Tab order); only the active
+  // tab and focus move on arrow keys. Refs keyed by kind so ArrowLeft/Right
+  // can call `.focus()` on the tab it moves to.
   const tabRefs = useRef<Record<ArtifactKind, HTMLButtonElement | null>>({
     link: null,
     image: null,

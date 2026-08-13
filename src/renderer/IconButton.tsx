@@ -45,6 +45,8 @@ export function IconButton({
   size = "md",
   ariaHaspopup,
   ariaExpanded,
+  ariaOwns,
+  ariaActiveDescendant,
   hook,
   disabled,
 }: {
@@ -60,6 +62,14 @@ export function IconButton({
   /** Menu/popover semantics for a trigger-style icon button. */
   ariaHaspopup?: "menu" | "dialog" | "listbox" | "grid" | "tree" | "true" | "false";
   ariaExpanded?: boolean;
+  /** The id of a popup surface this trigger owns but does not contain in the
+   *  DOM (e.g. a sibling `Dropdown`) — makes an `ariaActiveDescendant`
+   *  relationship well-formed when the two aren't ancestor/descendant. */
+  ariaOwns?: string;
+  /** The currently-highlighted descendant's id, for a trigger that keeps DOM
+   *  focus while driving a roving highlight in its (possibly sibling) popup —
+   *  e.g. SessionHeader's ⋯ menu (BET-726 review cycle 1 Question 1). */
+  ariaActiveDescendant?: string;
   /** Renders the native `disabled` attribute + the not-allowed cursor, and suppresses the hover fill (a disabled icon button stays flat). */
   disabled?: boolean;
   /**
@@ -86,6 +96,8 @@ export function IconButton({
       title={title ?? label}
       aria-haspopup={ariaHaspopup}
       aria-expanded={ariaExpanded}
+      aria-owns={ariaOwns}
+      aria-activedescendant={ariaActiveDescendant}
     >
       {cloneElement(icon, { size: iconSize, "aria-hidden": true })}
     </button>

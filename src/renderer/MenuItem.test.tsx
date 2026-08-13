@@ -414,6 +414,30 @@ describe("SessionMenu — keyboard roving highlight (BET-726 Task 3.1)", () => {
     });
   }
 
+  // BET-726 review cycle 1 Question 1: the highlight used to be visual-only
+  // — a screen reader following the arrow keys was told nothing, since DOM
+  // focus never leaves the trigger. `aria-activedescendant` on the trigger
+  // (the element that actually holds focus, matching ModelMenu's own
+  // `<input>`-carries-it idiom) plus `aria-owns` (trigger and Dropdown are
+  // DOM siblings, not ancestor/descendant) closes that gap.
+  it("wires aria-owns + aria-activedescendant on the trigger as the highlight moves", () => {
+    const trigger = openMenu();
+    const dropdown = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    expect(trigger.getAttribute("aria-owns")).toBe(dropdown.id);
+    expect(trigger.hasAttribute("aria-activedescendant")).toBe(false);
+    press(trigger, "ArrowDown");
+    const chatRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Chat"),
+    )!;
+    expect(chatRow.id).toBeTruthy();
+    expect(trigger.getAttribute("aria-activedescendant")).toBe(chatRow.id);
+    press(trigger, "ArrowDown");
+    const terminalRow = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+      (b) => b.textContent?.includes("Terminal"),
+    )!;
+    expect(trigger.getAttribute("aria-activedescendant")).toBe(terminalRow.id);
+  });
+
   it("ArrowDown highlights the first row (bg-fill-hover) and Enter activates it", () => {
     let changed: unknown = null;
     const trigger = openMenu({ onModeChange: (m) => { changed = m; } });

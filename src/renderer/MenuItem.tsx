@@ -65,6 +65,7 @@ export function MenuItem({
   trailing,
   onSelect,
   highlighted = false,
+  id,
 }: {
   /** Which surface + foreground the row carries. normal is the default. */
   variant?: MenuItemVariant;
@@ -80,10 +81,15 @@ export function MenuItem({
    *  `--fill-hover` fill MenuOption's `active` prop gives the model/effort
    *  menus, applied unconditionally instead of only on `:hover`. */
   highlighted?: boolean;
+  /** Option id — the aria-activedescendant target for a caller-owned roving
+   *  highlight (BET-726 review cycle 1 Question 1), same role `MenuOption`'s
+   *  `id` plays for the model/effort menus. */
+  id?: string;
 }) {
   return (
     <button
       type="button"
+      id={id}
       role="menuitem"
       onClick={onSelect}
       className={`${ITEM_BASE} ${VARIANT[variant]}${highlighted ? " bg-fill-hover" : ""}`}
@@ -133,6 +139,7 @@ const DROPDOWN_FOOTER = "border-t border-border-subtle p-2 flex-none";
 
 export function Dropdown({
   hook,
+  id,
   placement = "below",
   align = "end",
   width = "menu",
@@ -144,6 +151,12 @@ export function Dropdown({
 }: {
   /** Optional `manta-*` identity class for the call site (no styling). */
   hook?: string;
+  /** Optional DOM id — lets a caller-owned trigger reference this surface via
+   *  `aria-owns` when it drives a roving `aria-activedescendant` highlight
+   *  (BET-726 review cycle 1 Question 1: the trigger and this surface are
+   *  DOM siblings, not ancestor/descendant, so `aria-owns` is what makes the
+   *  activedescendant relationship well-formed). */
+  id?: string;
   /** below (top-full, SessionHeader's menu) | above (bottom-full, composer). */
   placement?: DropdownPlacement;
   /** start (left-0) | end (right-0, today's right-aligned default). */
@@ -163,6 +176,7 @@ export function Dropdown({
 }) {
   return (
     <div
+      id={id}
       role={role}
       className={
         `${hook ? `${hook} ` : ""}` +

@@ -358,9 +358,13 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   // F2 → the same rename entry point the row's double-click already uses
   // (BET-726 Task 2.1). Project groups and windows are renameable; job rows
-  // never were (JobChildRow has no onRename), so they're a no-op here too.
+  // never were (JobChildRow has no onRename / RenameInput), so they're an
+  // explicit no-op here too — `resolveFocusedWindow` resolves a `job:` key
+  // to the same live window `win:` would, so without this guard F2 on a job
+  // row would set `renameTarget` to that window's index with nothing on
+  // screen listening for it (BET-726 review cycle 1 nit).
   const renameFocused = () => {
-    if (!focusedKey) return;
+    if (!focusedKey || focusedKey.startsWith("job:")) return;
     if (focusedKey.startsWith("group:")) {
       const session = focusedKey.slice("group:".length);
       startRename({ kind: "project", old: session }, session);
@@ -397,6 +401,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   };
 
   const onRailKeyDown = (e: React.KeyboardEvent) => {
+    // BET-726 review cycle 1, Block (fix-here): the hover-revealed pin /
+    // GroupHeader +/X / draft-dismiss buttons became Tab-reachable (Task
+    // 2.3, `tabIndex={-1}` removed), but they're still DOM descendants of
+    // this tree container — their keydowns were bubbling into this handler
+    // with no target check, so Enter/Space fired `activateFocused()` for
+    // whatever row `focusedKey` last pointed at (not the button under focus)
+    // and Delete/Backspace opened the confirm for that same possibly-
+    // unrelated row. Rows are `<div role="treeitem">`, never `<button>`, so
+    // bailing out for any button-descendant target leaves the row's own
+    // arrow/Enter/F2/Delete handling untouched and lets the button run its
+    // own click/keyboard behavior instead of having it hijacked.
+    if ((e.target as HTMLElement).closest("button")) return;
     switch (e.key) {
       case "ArrowDown":
         e.preventDefault();

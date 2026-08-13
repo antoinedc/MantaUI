@@ -10,7 +10,7 @@
 // result) and handlers (fork / compact / clear / delete) are passed in as
 // props by ChatPanel, which owns the session lifecycle.
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
 import {
   ctxStageColor,
@@ -500,6 +500,18 @@ function SessionMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   useClickAway(rootRef, open, () => setOpen(false));
 
+  // BET-726 review cycle 1 Question 1: the highlight above was visual-only —
+  // a screen reader following the arrow keys heard nothing, because DOM
+  // focus never leaves the ⋯ trigger (this menu has no input to move focus
+  // into, unlike ModelMenu's search box). `aria-activedescendant` on the
+  // element that DOES hold focus is exactly ModelMenu's own idiom (its
+  // `<input>` carries `aria-activedescendant`, not the Dropdown surface) —
+  // applied here to the trigger instead. `useId` keeps ids collision-safe
+  // if more than one SessionHeader is ever mounted at once.
+  const menuUid = useId();
+  const dropdownDomId = `session-menu-${menuUid}`;
+  const rowDomId = (rowId: string) => `session-menu-${menuUid}-${rowId.replace(/:/g, "-")}`;
+
   // Reset the roving highlight each time the menu (re)opens, so a stale
   // index from a previous open never carries over.
   useEffect(() => {
@@ -578,6 +590,7 @@ function SessionMenu({
     danger = false,
   ) => (
     <MenuItem
+      id={rowDomId(id)}
       icon={icon}
       variant={danger ? "danger" : "normal"}
       highlighted={highlightedRow === id}
@@ -599,6 +612,7 @@ function SessionMenu({
     const active = isActive(m);
     return (
       <MenuItem
+        id={rowDomId(id)}
         icon={icon}
         variant={active ? "active" : "normal"}
         highlighted={highlightedRow === id}
@@ -628,9 +642,11 @@ function SessionMenu({
         onClick={() => setOpen((v) => !v)}
         ariaHaspopup="menu"
         ariaExpanded={open}
+        ariaOwns={open ? dropdownDomId : undefined}
+        ariaActiveDescendant={open ? (highlightedRow ? rowDomId(highlightedRow) : undefined) : undefined}
       />
       {open && (
-        <Dropdown hook="manta-session-menu-dropdown">
+        <Dropdown hook="manta-session-menu-dropdown" id={dropdownDomId}>
           {hasMode && (
             <>
               <div className={`${GROUP_LABEL} pt-1`} role="presentation">
