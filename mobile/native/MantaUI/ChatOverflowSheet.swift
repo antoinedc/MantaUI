@@ -19,6 +19,18 @@ import SwiftUI
 // web dialog, which stamps the box hostname on itself (DECISIONS.md:709-715).
 // ===========================================================================
 
+/// The compact confirm gate (BET-747 task 1): a blind tap on the overflow
+/// "Compact session" row must NOT reach the store — it only arms the confirm
+/// sheet. A compact proceeds solely from the confirm-sheet's destructive action.
+/// Extracted at file scope so the gate's before/after decision is unit-testable
+/// without rendering the SwiftUI hierarchy.
+enum CompactConfirmGate {
+    /// Whether a compact action is allowed to proceed. `confirmed` is `true`
+    /// only after the user taps the confirm sheet's destructive "Compact
+    /// session" button; a plain row tap (`false`) withholds the store call.
+    static func shouldProceed(confirmed: Bool) -> Bool { confirmed }
+}
+
 struct ChatOverflowSheet: View {
     let sessionTitle: String
     let projectName: String
@@ -57,7 +69,7 @@ struct ChatOverflowSheet: View {
                 }
                 Section {
                     Button {
-                        confirmingCompact = true
+                        onCompactTap()
                     } label: {
                         Label("Compact session", systemImage: "arrow.down.right.and.arrow.up.left")
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -152,5 +164,18 @@ struct ChatOverflowSheet: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// A tap on the "Compact session" row. Conceived as a destructive control
+    /// (compacting summarizes/drops the transcript's context), it must not fire
+    /// the store on a blind tap — `CompactConfirmGate.shouldProceed(confirmed: false)`
+    /// withholds it and arms the confirm sheet instead; the store runs only from
+    /// the confirm sheet's destructive action.
+    private func onCompactTap() {
+        if CompactConfirmGate.shouldProceed(confirmed: false) {
+            onCompact()
+        } else {
+            confirmingCompact = true
+        }
     }
 }

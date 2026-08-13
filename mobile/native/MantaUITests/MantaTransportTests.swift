@@ -279,6 +279,36 @@ final class MantaTransportTests: XCTestCase {
         XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: at, lastFetch: lastFetch))
         XCTAssertTrue(BranchFreshnessPolicy.shouldRefetchAfterTick(now: later, lastFetch: lastFetch))
     }
+
+    /// A submit ALWAYS refetches, even immediately after a fetch (the 5s tick
+    /// interval has not yet elapsed) — the next message may land on a freshly
+    /// checked-out branch, so the submit edge can't wait for the next tick.
+    func testBranchRefetchOnSubmitOverridesInterval() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch),
+            "a submit must refetch even before the 5s interval elapses"
+        )
+    }
+
+    /// A submit with no prior fetch also refetches.
+    func testBranchRefetchOnSubmitWhenNeverFetched() {
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: Date(timeIntervalSince1970: 1_000), lastFetch: nil)
+        )
+    }
+
+    /// A plain tick (didSubmit == false) still follows the 5s interval — it is
+    /// not upgraded to an unconditional refetch by the submit path.
+    func testBranchTickRespectsIntervalEvenWhenNotSubmit() {
+        let lastFetch = Date(timeIntervalSince1970: 1_000)
+        XCTAssertFalse(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(1), lastFetch: lastFetch)
+        )
+        XCTAssertTrue(
+            BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: lastFetch.addingTimeInterval(5), lastFetch: lastFetch)
+        )
+    }
 }
 
 private struct SendPromptResult: Decodable {}

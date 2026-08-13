@@ -756,3 +756,20 @@ final class ChatStreamDeltaTests: XCTestCase {
         XCTAssertTrue(c.turnComplete)
     }
 }
+
+// MARK: - Overflow compact confirm gate (BET-747 task 1)
+
+/// The overflow "Compact session" row must NOT reach the store on a blind tap:
+/// `CompactConfirmGate` withholds the action until the confirm sheet's
+/// destructive button is confirmed.
+final class CompactConfirmGateTests: XCTestCase {
+
+    /// A plain row tap (confirmed == false) yields false — a blind tap must not
+    /// call the store, but arm the confirm sheet instead.
+    func testCompactWithheldUntilConfirmation() {
+        XCTAssertFalse(CompactConfirmGate.shouldProceed(confirmed: false),
+                       "a blind tap must not compact — confirmation is required")
+        XCTAssertTrue(CompactConfirmGate.shouldProceed(confirmed: true),
+                      "a compact proceeds only after the confirm sheet's destructive action")
+    }
+}

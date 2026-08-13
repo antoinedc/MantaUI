@@ -47,10 +47,19 @@ enum BranchFreshnessPolicy {
 
     /// Whether a tick at `now` warrants a refetch, given `lastFetch`. No prior
     /// fetch always refetches; otherwise a tick refetches once the interval has
-    /// elapsed. (A submit unconditionally refetches — callers bypass this.)
+    /// elapsed. (A submit unconditionally refetches — see `shouldRefresh`.)
     static func shouldRefetchAfterTick(now: Date, lastFetch: Date?) -> Bool {
         guard let lastFetch else { return true }
         return now.timeIntervalSince(lastFetch) >= pollInterval
+    }
+
+    /// Whether a branch refresh is warranted for the given trigger. A submit —
+    /// a turn just started running, so the next message may land on a
+    /// freshly-checked-out branch — ALWAYS refetches, even if the 5s interval
+    /// has not yet elapsed. A tick (no submit) follows `shouldRefetchAfterTick`.
+    static func shouldRefresh(didSubmit: Bool, now: Date, lastFetch: Date?) -> Bool {
+        if didSubmit { return true }
+        return shouldRefetchAfterTick(now: now, lastFetch: lastFetch)
     }
 }
 
@@ -211,10 +220,14 @@ private struct ChatScreenContent: View {
             .task { await pollBranch() }
             // A submit starts a turn optimistically (`send()` sets running), so
             // refreshing the branch on the running edge covers "refresh on
-            // submit" — the new message is being written in `cwd`'s current
-            // branch.
+            // submit" — the new message is written in `cwd`'s current branch
+            // (which a terminal-side checkout just changed). Only the turn START
+            // (running true) warrants it; the settle edge does not. The
+            // submit-override decision is `BranchFreshnessPolicy.shouldRefresh`.
             .onChange(of: store.running) { _, running in
-                if running { Task { await refreshBranch() } }
+                if running, BranchFreshnessPolicy.shouldRefresh(didSubmit: true, now: Date(), lastFetch: nil) {
+                    Task { await refreshBranch() }
+                }
             }
             // BET-673: fire one success haptic when a turn completes while the
             // user has scrolled up (scroll-to-bottom chip showing) and the scene
@@ -481,7 +494,7 @@ private struct ChatScreenContent: View {
     private func pollBranch() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: UInt64(BranchFreshnessPolicy.pollInterval * 1_000_000_000))
-            if BranchFreshnessPolicy.shouldRefetchAfterTick(now: Date(), lastFetch: lastBranchFetch) {
+            if BranchFreshnessPolicy.shouldRefresh(didSubmit: false, now: Date(), lastFetch: lastBranchFetch) {
                 await refreshBranch()
             }
         }
