@@ -473,7 +473,10 @@ export function sortRepoHits(hits) {
 // that looks like a token (never return a secret). Pure.
 export function parseGhAuthStatus(text) {
   if (typeof text !== "string") return null;
-  const m = /as ([^()\n]+?)\s*\(/.exec(text);
+  // Legacy gh: "Logged in to github.com as octocat (…)". Modern gh no longer
+  // emits the "as …" phrasing — it prints "account octocat (…)" instead
+  // ("Logged in to github.com account octocat"). Accept both forms.
+  const m = /(?:as |account )([^()\n]+?)\s*\(/.exec(text);
   if (!m) return null;
   const login = m[1].trim();
   if (!login) return null;
