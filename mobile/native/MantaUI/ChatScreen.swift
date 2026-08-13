@@ -325,6 +325,24 @@ private struct ChatScreenContent: View {
                 .frame(height: Self.headerReservedHeight + Metrics.spacing.sp6)
         }
         .overlay(alignment: .top) { header }
+        // Offline must not read as "the model is quiet": a slim banner pinned
+        // just below the floating header, declared AFTER the header so it draws
+        // on top of it. It offsets by the exact height the transcript reserves
+        // (`headerReservedHeight`) plus a gap, so it never overlaps the two
+        // header buttons. It disappears on its own when `degraded` flips false.
+        .overlay(alignment: .top) {
+            if store.degraded {
+                Text("Connection lost — reconnecting…")
+                    .font(.system(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.danger)
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .background(tokens.danger.opacity(0.12), in: Capsule())
+                    .padding(.top, Self.headerReservedHeight + Metrics.spacing.sp2)
+                    .transition(.opacity)
+                    .accessibilityIdentifier("connection-banner")
+            }
+        }
         .sheet(isPresented: $showOverflow) { overflowSheet }
         .sheet(item: $overflowDestination) { destination in
             destinationCard(destination)

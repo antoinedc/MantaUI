@@ -163,6 +163,11 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True while the box was connected and the stream dropped (mirrors
+    /// MantaEventStore.degraded). Drives the chat screen's "Connection lost —
+    /// reconnecting…" banner so an offline hit does not read as "the model is
+    /// quiet". Consumed only; reconnect machinery is owned by the event store.
+    @Published private(set) var degraded = false
     /// True while a canonical transcript refetch (or the initial load) is in
     /// flight. Drives the ambient hairline sweep on the composer's top divider
     /// (BET-630, D1) — distinct from `running`, which drives the working row.
@@ -266,6 +271,13 @@ final class ChatSessionStore: ObservableObject {
         eventStore.$connectionState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
+            .store(in: &cancellables)
+
+        // Degraded state feeds the chat banner; distinct values only, so a
+        // republished identical value does not re-render the banner.
+        eventStore.$degraded
+            .removeDuplicates()
+            .sink { [weak self] d in self?.degraded = d }
             .store(in: &cancellables)
     }
 
