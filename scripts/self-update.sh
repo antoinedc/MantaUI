@@ -11,13 +11,21 @@
 #     + `git reset --hard origin/main`.
 #   * packaged install (every box created by `curl mantaui.com/install.sh`):
 #     a plain directory with RELEASE.json (no .git). Update = download the
-#     release tarball for this arch, verify it, extract it, and replace only
-#     the payload paths the release owns (`includes` in RELEASE.json) —
-#     never `runtime/` or `node_modules/`, which are installed separately and
-#     must survive.
+#     release tarball for this arch, verify it, extract it, and replace the
+#     payload paths the incoming release owns (`includes` in RELEASE.json) —
+#     which DOES include `runtime/` (the vendored Node, so a runtime version
+#     bump can reach an installed box) but NOT `node_modules/` (which is
+#     reinstalled by the `npm ci --omit=dev` step that runs immediately after).
 #
 # The install kind is detected, not assumed, so a box installed before the
 # updater understood packaged installs (or whose git fetch fails) self-heals.
+#
+# Two-hop note (do not "fix"): an installed box runs the copy of this script
+# it already has on disk, so the FIRST update after a payload-swap change ships
+# the new script but still performs the swap with the OLD logic — `runtime/`
+# moves on the update AFTER that one. This is inherent to a self-replacing
+# updater (bash reads a script incrementally, so it must not rewrite itself
+# mid-run) and is acceptable.
 #
 # Regardless of kind, the tail is shared and never duplicated: reinstall
 # prod-only deps, refresh the manta-native opencode tools + agent guidance,
@@ -85,6 +93,9 @@ fi
 
 echo "MANTA_PROGRESS 2/6 Downloading update"
 if [ "$INSTALL_KIND" = "git" ]; then
+  # A git checkout has no vendored runtime under version control — the box runs
+  # whatever Node is on PATH. So a git box's runtime is only ever updated by
+  # re-running install.sh, never by this script. (Comment only; no code.)
   log "self-update: fetching origin/main into $MANTA_HOME"
   git -C "$MANTA_HOME" fetch origin main -q
 
@@ -159,21 +170,14 @@ else
   [ -f "$WORK/pkg/RELEASE.json" ] \
     || die "self-update: bad tarball — missing RELEASE.json"
 
-  # Replace ONLY the paths the release owns (`includes` in RELEASE.json).
-  # Never touch runtime/ or node_modules/ — the bundled runtime + prebuilt
-  # deps are installed separately and must survive.
-  INCLUDES="$("$NODE_CMD" -e 'const i=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).includes||[]; process.stdout.write(i.join("\n"))' "$MANTA_HOME/RELEASE.json")"
-  for rel in $INCLUDES; do
-    [ -n "$rel" ] || continue
-    rm -rf "$MANTA_HOME/$rel"
-    mkdir -p "$(dirname "$MANTA_HOME/$rel")"
-    cp -R "$WORK/pkg/$rel" "$MANTA_HOME/$rel"
-  done
-  # RELEASE.json is the box's version marker but is intentionally NOT in the
-  # `includes` list (which excludes runtime/node_modules). Copy it anyway so
-  # the tree actually ends up at the manifest version — without this the box
-  # would believe it is forever on the old version and re-download every run.
-  cp "$WORK/pkg/RELEASE.json" "$MANTA_HOME/RELEASE.json"
+  # Replace ONLY the paths the incoming release owns (`includes` in its
+  # RELEASE.json — read from the INCOMING release, not the installed one, so a
+  # box installed before a path joined the list still picks it up). This is a
+  # single call into scripts/lib/release.sh: it stages each path as
+  # `<dest>/<rel>.new` and swaps with `mv`, so a failed copy can never leave a
+  # half-written tree — most important for `runtime/`, which the running server
+  # executes from. It also stamps RELEASE.json so the box records its version.
+  replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
   ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
 fi
 

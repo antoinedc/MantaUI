@@ -72,6 +72,7 @@ test("the throw message lists every supported arch", () => {
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 const PACK_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "pack.mjs");
 
@@ -100,4 +101,38 @@ test("pack.mjs --arch bogus fails the parseArgs validation with the right messag
   assert.match(stderr, /darwin-arm64/);
   assert.match(stderr, /\bx64\b/);
   assert.match(stderr, /\barm64\b/);
+});
+
+// The staging allowlist (INCLUDE) and the owned-on-box list (OWNED_ON_BOX =
+// [...INCLUDE, "runtime"]) are two distinct concepts in pack.mjs. INCLUDE is
+// which repo paths get COPIED into the tarball; OWNED_ON_BOX is which paths
+// self-update replaces on an installed box. They must differ by exactly
+// `runtime`: the vendored Node is produced by ensureNodeRuntime() during
+// staging (so it can't be in INCLUDE), but it must be replaced on update (so
+// it has to be in OWNED_ON_BOX).
+//
+// pack.mjs can't be imported (main() runs on import and hits the network), so
+// we read its SOURCE and evaluate the two array literals — the same way the
+// harness above reaches into the script without running it.
+const PACK_SRC = readFileSync(PACK_SCRIPT, "utf8");
+
+function evalArrayLiteral(declName, scope = {}) {
+  const m = PACK_SRC.match(new RegExp(`const\\s+${declName}\\s*=\\s*(\\[[\\s\\S]*?\\];)`));
+  assert.ok(m, `could not find const ${declName} in pack.mjs`);
+  return Function(...Object.keys(scope), `return ${m[1]}`)(...Object.values(scope));
+}
+
+test("OWNED_ON_BOX = INCLUDE + runtime: owned list has runtime, staging allowlist does not, otherwise equal", () => {
+  const include = evalArrayLiteral("INCLUDE");
+  const owned = evalArrayLiteral("OWNED_ON_BOX", { INCLUDE: include });
+
+  assert.ok(owned.includes("runtime"), "owned-on-box list must include runtime");
+  assert.ok(!include.includes("runtime"), "staging allowlist must NOT include runtime");
+  assert.deepEqual(
+    owned.filter((p) => p !== "runtime"),
+    include,
+    "owned list must otherwise equal the staging allowlist",
+  );
+  // guard against the two lists silently collapsing back into one
+  assert.notDeepEqual(owned, include);
 });
