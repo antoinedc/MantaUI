@@ -44,7 +44,7 @@ import {
   shouldWarnStaleCache,
   type UsageAlertLevel,
 } from "./usageEscalation";
-import { cronForInstant } from "../shared/scheduleCron.mjs";
+
 import { providerLabel } from "./UsageDial";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
@@ -622,7 +622,7 @@ function AppInner() {
     }) => {
       try {
         return await window.api.scheduleCreate({
-          cron: cronForInstant(new Date(input.fireAt)),
+          fireAt: input.fireAt,
           prompt: input.prompt,
           recurring: false,
           label: input.label,

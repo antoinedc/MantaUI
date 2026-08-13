@@ -25,13 +25,25 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
-// cronForInstant is pure (no node deps), so it lives in src/shared where the
-// RENDERER can also import it for the usage reset actions — re-exported here
-// so `src/server/schedule.test.mjs` and the server side consume it from this
-// module (single source of truth, not duplicated across the process boundary).
-export { cronForInstant } from "../shared/scheduleCron.mjs";
 
 const STORE_PATH = statePath("schedule.json");
+
+// Render a 5-field cron expression ("M H D MO *") that fires ONCE at a given
+// absolute instant, interpreted in the box's LOCAL time. The DOW is "*" so the
+// job fires on whatever weekday that date falls on.
+//
+// This conversion runs on the box — in the same timezone `cronMatches`
+// interprets — which is why callers hand it an absolute instant rather than a
+// pre-rendered cron: an epoch-ms instant carries no timezone, so rendering it
+// here yields precisely the wall-clock moment the caller meant, no matter what
+// timezone the caller was in.
+//
+// Pure. Watch the month off-by-one: JS getMonth() is 0-11, cron months are
+// 1-12, so a December job (getMonth() === 11) must render month "12".
+export function cronForInstant(date) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(date.getMinutes())} ${p(date.getHours())} ${p(date.getDate())} ${date.getMonth() + 1} *`;
+}
 
 // minute-granularity cron only needs sub-minute polling. 30s guarantees every
 // minute is observed at least once; the lastFiredMinute guard makes a second
@@ -204,10 +216,21 @@ export async function createJob(
     sessionID,
     directory = "",
     kind = "prompt",
+    fireAt,
     now = () => new Date(),
   },
   { load = loadJobs, save = saveJobs, publish } = {},
 ) {
+  // A caller that knows the absolute instant (the renderer's usage reset
+  // actions) sends `fireAt` instead of `cron`; rendering it here — on the box —
+  // is what keeps it in the timezone cronMatches interprets. `fireAt` is never
+  // stored: it collapses into the normal `cron` field and every downstream path
+  // is unchanged.
+  if (fireAt !== undefined) {
+    if (typeof fireAt !== "number" || !Number.isFinite(fireAt))
+      return { ok: false, error: "fireAt must be a finite epoch-ms number" };
+    cron = cronForInstant(new Date(fireAt));
+  }
   const v = validateCron(cron);
   if (!v.valid) return { ok: false, error: v.error };
   if (typeof prompt !== "string" || !prompt.trim())
