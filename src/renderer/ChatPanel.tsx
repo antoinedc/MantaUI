@@ -26,6 +26,7 @@ import type {
 } from "../shared/types";
 import { useStore } from "./store";
 import type { PendingScreenshot } from "./store";
+import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
   selectActiveTodos,
@@ -291,6 +292,11 @@ export function ChatPanel({
   // scroll inline: the optimistic row it just queued is not committed yet, so
   // `index: "LAST"` would resolve to the PREVIOUS last message.
   const forceTailRef = useRef(false);
+  // Canceller for the in-flight message-flash wait (BET-805). Held across
+  // `flashMessageRow` calls so a pending wait from a previous jump can be
+  // cancelled before starting a new one, and cleared in the session-change
+  // cleanup so a wait can't fire against a transcript the user has left.
+  const messageFlashCancelRef = useRef<(() => void) | null>(null);
   const onAtBottomChange = useCallback((atBottom: boolean) => {
     atBottomRef.current = atBottom;
   }, []);
@@ -487,6 +493,12 @@ export function ChatPanel({
     // away and back would re-run the reset and wipe staged attachments, @agent
     // mentions and the /help notice out of the composer. The poll lives in its
     // own visibility-gated effect below.
+    return () => {
+      // Cancel a pending message-flash wait on session change/unmount so it
+      // can't fire against a transcript the user has since left.
+      messageFlashCancelRef.current?.();
+      messageFlashCancelRef.current = null;
+    };
   }, [sessionId, cwd]);
 
   // Branch indicator: poll every 5s while this session is visible. Gated on
@@ -547,18 +559,16 @@ export function ChatPanel({
   // callers can retry later (e.g. the ⌘F cross-conversation jump, where the
   // window has just been activated and its transcript is still streaming in).
   // scrollToMessage scrolls via Virtuoso's scrollToIndex; the target row may
-  // not be in the DOM until Virtuoso renders it, so we flash once it exists
-  // (a frame or two later for the smooth scroll).
+  // not be in the DOM until Virtuoso renders it, so flashMessageRow polls for
+  // it (a frame or two later for the smooth scroll) instead of flashing on a
+  // single immediate lookup.
   const scrollFlashMessage = useCallback(
     (messageId: string): boolean => {
       scrollToMessage(messageId);
-      requestAnimationFrame(() => {
-        const el = document.querySelector<HTMLElement>(
-          `[data-message-id="${messageId}"]`,
-        );
-        el?.classList.add("manta-message-flash");
-        window.setTimeout(() => el?.classList.remove("manta-message-flash"), 1200);
-      });
+      // Cancel any pending wait from a previous jump so it can't flash against
+      // a row the user has already scrolled past or a transcript they've left.
+      messageFlashCancelRef.current?.();
+      messageFlashCancelRef.current = flashMessageRow(messageId);
       return (messagesRef.current ?? []).some((m) => m.info.id === messageId);
     },
     [scrollToMessage],
