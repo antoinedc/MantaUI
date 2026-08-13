@@ -568,14 +568,18 @@ function AppInner() {
       fireAt: number;
       sessionID: string;
     }) => {
-      return window.api.scheduleCreate({
-        cron: cronForInstant(new Date(input.fireAt)),
-        prompt: input.prompt,
-        recurring: false,
-        label: input.label,
-        sessionID: input.sessionID,
-        kind: input.kind,
-      });
+      try {
+        return await window.api.scheduleCreate({
+          cron: cronForInstant(new Date(input.fireAt)),
+          prompt: input.prompt,
+          recurring: false,
+          label: input.label,
+          sessionID: input.sessionID,
+          kind: input.kind,
+        });
+      } catch (err) {
+        return { ok: false as const, error: String((err as Error)?.message ?? err) };
+      }
     },
     [],
   );
