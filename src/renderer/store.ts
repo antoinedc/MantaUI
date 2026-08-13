@@ -12,6 +12,7 @@ import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
+import type { ToastItem } from "./Toast";
 import {
   type ModelSelection,
   readSavedActiveSession,
@@ -46,6 +47,10 @@ let draftSeq = 0;
 function newDraftId() {
   return `draft-${++draftSeq}`;
 }
+
+// Monotonic id source for app toasts (the global ToastStack). A plain counter
+// (not crypto.randomUUID) keeps store tests deterministic, mirroring draftSeq.
+let appToastSeq = 0;
 
 // Overlay the desktop-local pairing secrets (serverUrl/boxToken) onto a config
 // snapshot. In http mode window.api.configGet() returns the manta-server's config,
@@ -399,6 +404,17 @@ type State = {
   // dismiss clear it globally. In auto-pull (trust) mode it's informational
   // (autoPulled:true, localPath set); otherwise it's a Save/dismiss prompt.
   agentFileToast: AgentFileReady | null;
+  // Transient app-level notices (errors + info) shown by the global ToastStack
+  // (BET-723). Replaces every native alert() in the renderer. Capped at 5;
+  // each has its own id, dismissible via dismissAppToast.
+  appToasts: ToastItem[];
+  pushAppToast: (t: Omit<ToastItem, "id"> & { id?: string }) => void;
+  dismissAppToast: (id: string) => void;
+  // Ephemeral user-invoked system notice (/help reference text) shown by the
+  // global ToastStack. Moved up from ChatPanel to the store so the App-level
+  // toast host can render it over every pane type.
+  systemNotice: string | null;
+  setSystemNotice: (t: string | null) => void;
   // Single global auto-update prompt. Set when main pushes an
   // updateDownloaded event (electron-updater finished downloading a new
   // version). The renderer shows a "Restart to update" bar; clicking it
@@ -646,6 +662,8 @@ export const useStore = create<State>((set, get) => ({
   chatMessages: {},
   screenshotToast: null,
   agentFileToast: null,
+  appToasts: [],
+  systemNotice: null,
   updatePrompt: null,
   updateError: null,
   boxIncompatible: false,
@@ -907,6 +925,14 @@ export const useStore = create<State>((set, get) => ({
 
   setScreenshotToast: (t) => set({ screenshotToast: t }),
   setAgentFileToast: (t) => set({ agentFileToast: t }),
+  pushAppToast: (t) =>
+    set((prev) => {
+      const id = t.id ?? `toast-${Date.now()}-${++appToastSeq}`;
+      return { appToasts: [...prev.appToasts, { ...t, id }].slice(-5) };
+    }),
+  dismissAppToast: (id) =>
+    set((prev) => ({ appToasts: prev.appToasts.filter((t) => t.id !== id) })),
+  setSystemNotice: (t) => set({ systemNotice: t }),
   setUpdatePrompt: (p) => set({ updatePrompt: p }),
   setUpdateError: (p) => set({ updateError: p }),
   setBoxIncompatible: (b) => set({ boxIncompatible: b }),

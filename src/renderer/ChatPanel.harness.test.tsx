@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
+import { GlobalToasts } from "./GlobalToasts";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import {
   installMockApi,
@@ -784,8 +785,18 @@ describe("ChatPanel screenshot accept", () => {
   // the "Add to chat" toast button, which routes the buffered bytes through
   // window.api.uploadBuffer. Returns the mounted harness for assertions; the
   // describe-scoped `h` is also set so the shared afterEach unmounts it.
+  //
+  // Since BET-723 the toast host lives at App level (GlobalToasts), not in
+  // ChatPanel — the panel only RUNS the accept once the host's "Add to chat"
+  // action dispatches manta-accept-screenshot. So both are mounted together,
+  // with the host routing to this panel's session id.
   async function mountScreenshotAndClickAddToChat(): Promise<Harness> {
-    h = mount(<ChatPanel {...PROPS} />);
+    h = mount(
+      <>
+        <ChatPanel {...PROPS} />
+        <GlobalToasts activeChatSessionId={PROPS.sessionId} canAddToChat />
+      </>,
+    );
     await h.flush();
 
     const addBtn = Array.from(h.container.querySelectorAll("button")).find(

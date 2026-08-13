@@ -83,14 +83,16 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   // Downloaded desktop auto-update (BET-416 §E): signalled as a dot on the
   // Settings entry, not a full-width bar.
   const updateAvailable = useStore((s) => s.updatePrompt != null);
+  // BET-723: sidebar errors/notices surface as global toasts, not native alert().
+  const pushAppToast = useStore((s) => s.pushAppToast);
 
   const showError = (e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);
-    alert(msg);
+    pushAppToast({ tone: "error", message: msg });
   };
 
   const showNotice = (msg: string) => {
-    alert(msg);
+    pushAppToast({ tone: "info", message: msg });
   };
 
   // When a new-session DRAFT is the foreground view, no real session should

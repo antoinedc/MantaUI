@@ -32,6 +32,9 @@ export type ToastAction = {
 export type ToastItem = {
   id: string;
   message: ReactNode;
+  /** Tonal variant. `"error"` renders a danger left-edge accent (BET-723 §D5);
+   *  defaults to the plain info look. */
+  tone?: "info" | "error";
   /** Optional single action (Undo / Save / Reveal). Presence disables
    *  auto-dismiss. */
   action?: ToastAction;
@@ -74,7 +77,9 @@ export function Toast({ toast, onDismiss }: ToastProps) {
   return (
     <div
       role="status"
-      className="w-full max-w-[420px] rounded-lg border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md"
+      className={`w-full max-w-[420px] rounded-lg border border-border bg-bg-soft px-3 py-2 text-meta text-text-muted flex items-center gap-2 shadow-md ${
+        toast.tone === "error" ? "border-l-2 border-l-danger" : ""
+      }`}
     >
       <span className="flex-1 min-w-0 whitespace-pre-wrap break-words">{toast.message}</span>
       {toast.action && (

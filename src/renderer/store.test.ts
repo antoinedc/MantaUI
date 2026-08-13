@@ -1110,3 +1110,51 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
     expect(useStore.getState().syncSeq).toBe(10);
   });
 });
+
+describe("app toasts (BET-723)", () => {
+  beforeEach(() => {
+    useStore.setState({ appToasts: [], systemNotice: null });
+  });
+
+  it("pushAppToast appends with a unique generated id", () => {
+    useStore.getState().pushAppToast({ message: "one" });
+    const one = useStore.getState().appToasts;
+    expect(one).toHaveLength(1);
+    expect(one[0].message).toBe("one");
+    expect(one[0].id).toMatch(/^toast-/);
+    useStore.getState().pushAppToast({ message: "two" });
+    const two = useStore.getState().appToasts;
+    expect(two).toHaveLength(2);
+    // ids are unique
+    expect(new Set(two.map((t) => t.id)).size).toBe(2);
+  });
+
+  it("pushAppToast respects an explicit id", () => {
+    useStore.getState().pushAppToast({ message: "x", id: "custom-1" });
+    expect(useStore.getState().appToasts[0].id).toBe("custom-1");
+  });
+
+  it("pushAppToast caps the slice at 5, dropping the oldest", () => {
+    for (let i = 1; i <= 6; i++) useStore.getState().pushAppToast({ message: `m${i}` });
+    const toasts = useStore.getState().appToasts;
+    expect(toasts).toHaveLength(5);
+    // Oldest dropped, newest retained in order
+    expect(toasts.map((t) => t.message)).toEqual(["m2", "m3", "m4", "m5", "m6"]);
+  });
+
+  it("dismissAppToast removes by id", () => {
+    useStore.getState().pushAppToast({ message: "keep" });
+    useStore.getState().pushAppToast({ message: "drop" });
+    const { appToasts, dismissAppToast } = useStore.getState();
+    dismissAppToast(appToasts[1].id);
+    expect(useStore.getState().appToasts.map((t) => t.message)).toEqual(["keep"]);
+  });
+
+  it("setSystemNotice sets and clears the notice", () => {
+    expect(useStore.getState().systemNotice).toBeNull();
+    useStore.getState().setSystemNotice("/help text");
+    expect(useStore.getState().systemNotice).toBe("/help text");
+    useStore.getState().setSystemNotice(null);
+    expect(useStore.getState().systemNotice).toBeNull();
+  });
+});
