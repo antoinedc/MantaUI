@@ -102,11 +102,14 @@ export function GlobalToasts({ activeChatSessionId, canAddToChat }: Props) {
       } else {
         setAgentFileToast(null);
       }
-    } catch (err) {
-      setAgentFileToast(null);
+    } catch {
+      // M5: a thrown download failure must NOT look like a saved file. Keep
+      // the agent-file toast UP (so the user can retry) and surface the
+      // failure clearly. Downloads are non-destructive — the source file stays
+      // until the TTL sweep — so retrying is always safe.
       pushAppToast({
         tone: "error",
-        message: `Couldn't save file: ${String((err as Error)?.message ?? err)}`,
+        message: "Download failed — tap Save to retry",
       });
     } finally {
       setAgentFileSaving(false);

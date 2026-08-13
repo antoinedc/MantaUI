@@ -488,11 +488,33 @@ function dispatchFrame(data: unknown) {
     // flat `{ kind, payload }` envelope and dispatches `payload` alone. This
     // keeps the stream consumer's `sub`/`sessionId` routing (useSseBus.scoped
     // to the viewed session) intact without changing the other kinds' shape.
-    for (const fn of set) {
-      fn(kind === "stream" ? { sub, sessionId, payload } : payload);
-    }
+    dispatchToListeners(
+      set,
+      kind === "stream" ? { sub, sessionId, payload } : payload,
+      kind,
+    );
   } catch {
     // non-JSON / control frame — ignore
+  }
+}
+
+// Dispatch one frame's payload to every listener on a kind. M2: a throwing
+// listener must not starve the rest of this frame, and it must be VISIBLE —
+// the outer dispatchFrame catch is for JSON parse, not listener bugs. So each
+// listener gets its own try/catch and a healthy listener still runs after a
+// throwing one. Exported (kind label is optional) so the harness can unit-test
+// the isolation directly.
+export function dispatchToListeners(
+  set: Set<(arg: unknown) => void>,
+  arg: unknown,
+  kind?: string,
+): void {
+  for (const fn of set) {
+    try {
+      fn(arg);
+    } catch (e) {
+      console.error("[events] listener threw for kind", kind ?? "unknown", e);
+    }
   }
 }
 
@@ -787,8 +809,9 @@ export const httpApi: Api = {
   onAgentFileReady: (cb) => on<AgentFileReady>("agentFile", cb),
   // "Pull to downloads" on a device = trigger a browser download of the
   // server-local file. We point an <a download> at /api/download and let the
-  // WebView/browser save it (the server deletes the source on success — the
-  // one-shot mailbox). Returns "" so the ChatPanel toast knows there's no
+  // WebView/browser save it (the download is NON-destructive — the source
+  // stays in ~/.manta-outbox/ until the TTL sweep, so a retry after failure is
+  // always safe). Returns "" so the ChatPanel toast knows there's no
   // local path to "Reveal" (a desktop-only affordance) and just dismisses.
   agentPullFile: async (remotePath) => {
     try {
@@ -816,10 +839,13 @@ export const httpApi: Api = {
       // Revoke on the next tick so the click has a chance to start the save.
       setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     } catch (e) {
-      // Re-throw auth errors so the UI can route to pairing; swallow the rest
-      // (a failed download trigger is non-fatal to the chat flow).
-      if (e instanceof AuthRequiredError) throw e;
-      /* download trigger failed — non-fatal */
+      // M5: a failed download must NOT look like a successful save. Auth
+      // errors are thrown (so the UI can route to pairing) AND every other
+      // failure is thrown too — it used to be swallowed and fall through to
+      // the `return ""` below, which is the SUCCESS sentinel, so a failed
+      // download rendered as a saved file. Throwing lets the Save handler keep
+      // the toast up and offer a retry.
+      throw e;
     }
     return "";
   },

@@ -7,6 +7,7 @@ import {
   TOKEN_KEY,
   serverBase,
   httpApi,
+  dispatchToListeners,
 } from "./httpApi.js";
 
 // Mock browser APIs for tests that touch the WebSocket stream.
@@ -420,5 +421,37 @@ describe("httpApi bootstrap metadata fail-fast timeout", () => {
     await httpApi.opencodeModels();
 
     expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dispatchToListeners — M2: one throwing listener must not starve the rest
+// ---------------------------------------------------------------------------
+
+describe("dispatchToListeners", () => {
+  it("calls every listener in the set", () => {
+    const calls: unknown[] = [];
+    const set = new Set<(arg: unknown) => void>([
+      (a) => calls.push(a),
+      (a) => calls.push(a),
+    ]);
+    dispatchToListeners(set, "payload");
+    expect(calls).toEqual(["payload", "payload"]);
+  });
+
+  it("still calls the later listeners when an earlier one throws (M2)", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const seen: unknown[] = [];
+    const set = new Set<(arg: unknown) => void>([
+      () => {
+        throw new Error("boom");
+      },
+      (a) => seen.push(a),
+      (a) => seen.push(a),
+    ]);
+    expect(() => dispatchToListeners(set, "payload", "opencode")).not.toThrow();
+    expect(seen).toEqual(["payload", "payload"]);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
