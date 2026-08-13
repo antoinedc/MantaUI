@@ -565,6 +565,12 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            if let err = store.sessionError {
+                ChatNoticeRow(text: err.message, color: tokens.danger, tokens: tokens)
+            }
+            if let trunc = store.truncation, !store.running {
+                ChatNoticeRow(text: trunc.label ?? "Response truncated", color: tokens.warn, tokens: tokens)
+            }
             if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
                 TodosCard(payload: todos, tokens: tokens)
             }
@@ -968,5 +974,27 @@ private struct QuestionCard: View {
                 customText: customText
             )
         )
+    }
+}
+
+// MARK: - Shared notice row (session errors / truncation)
+
+private struct ChatNoticeRow: View {
+    let text: String
+    let color: Color
+    let tokens: Tokens
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: Metrics.type.xs, weight: .semibold))
+                .foregroundColor(color)
+            Text(text)
+                .font(.system(size: Metrics.type.xs))
+                .foregroundColor(color)
+                .lineLimit(3)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 }

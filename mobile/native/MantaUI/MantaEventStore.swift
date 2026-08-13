@@ -48,6 +48,7 @@ struct MantaSessionStreamState: Equatable, Sendable {
     var context: StreamContextPayload?
     var cache: StreamCachePayload?
     var truncation: StreamTruncationPayload?
+    var sessionError: StreamSessionErrorPayload?
     var todos: StreamTodosPayload?
     var questions: StreamQuestionsPayload?
     var subagents: [StreamSubagentPayload] = []
@@ -108,7 +109,11 @@ enum MantaStreamRouter {
                 s.appending(p)
             }
         case "running":
-            if let p = try? frame.decodedPayload(StreamRunningPayload.self) { s.running = p.running }
+            if let p = try? frame.decodedPayload(StreamRunningPayload.self) {
+                s.running = p.running
+                // A new turn clears any stale error surfaced by the previous one.
+                if p.running { s.sessionError = nil }
+            }
         case "turnComplete":
             if let p = try? frame.decodedPayload(StreamTurnCompletePayload.self) {
                 s.turnComplete = p.complete
@@ -123,6 +128,8 @@ enum MantaStreamRouter {
             }
         case "truncation":
             s.truncation = try? frame.decodedPayload(StreamTruncationPayload.self)
+        case "sessionError":
+            s.sessionError = try? frame.decodedPayload(StreamSessionErrorPayload.self)
         case "context":
             s.context = try? frame.decodedPayload(StreamContextPayload.self)
         case "cache":
