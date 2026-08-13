@@ -16,7 +16,7 @@ import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
-import { resolveToolOutput, cssVar } from "./chatUtils";
+import { resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
 import {
@@ -44,19 +44,6 @@ export function formatFileDiff(additions: number, deletions: number): React.Reac
       {deletions > 0 && <span className="text-danger">−{deletions}</span>}
     </>
   );
-}
-
-// Bullet color/animation by part kind + tool status. Text gets grey; tools
-// blink grey while running/pending, turn green on completion, red on error.
-export function bulletStyle(part: OpencodePart): { color: string; pulse: boolean } {
-  if (part.type !== "tool") {
-    return { color: cssVar("--tx4"), pulse: false };           // text/other: grey
-  }
-  const status = String(((part as Record<string, unknown>).state as { status?: string } | undefined)?.status ?? "");
-  if (status === "completed") return { color: cssVar("--ok"), pulse: false }; // green
-  if (status === "error") return { color: cssVar("--danger"), pulse: false };     // red
-  // "running" / "pending" / unknown-but-active → blinking grey
-  return { color: cssVar("--tx4"), pulse: true };
 }
 
 // Memoized so re-renders of a memo'd MessageRow whose parts haven't
