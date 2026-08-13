@@ -17,7 +17,7 @@
 // Dependencies injected via params:
 //   - setMessages (from useTranscriptState)
 //   - scheduleRefetch / spliceMessage / etc. (from useTranscriptState)
-//   - input, setInput (for submit)
+//   - input (for submit)
 //   - inputRef (for submit)
 //   - running, setRunning (owned by this hook)
 //   - messageQueue, setMessageQueue (owned by this hook)
@@ -139,7 +139,7 @@ export type SseBus = {
   branch: string | null;
   refreshBranch: (cwd: string) => void;
   submit: () => void;
-  submitRef: React.RefObject<() => void>;
+  submitRef: React.RefObject<(textOverride?: string) => void>;
   abort: () => void;
   replyPermission: (id: string, reply: "once" | "always" | "reject") => void;
   replyQuestion: (q: QuestionRequest, answers: string[][]) => void;
@@ -191,8 +191,7 @@ export function useSseBus(params: {
   // through to the raw-message path.
   providerID: string | null;
   submit: () => void;
-  submitRef: React.RefObject<() => void>;
-  setInput: (v: string) => void;
+  submitRef: React.RefObject<(textOverride?: string) => void>;
 }): SseBus {
   const {
     sessionId,
@@ -210,7 +209,6 @@ export function useSseBus(params: {
     providerID,
     submit,
     submitRef,
-    setInput,
   } = params;
 
   const [running, setRunning] = useState(false);
@@ -226,6 +224,7 @@ export function useSseBus(params: {
     messageQueueRef.current = messageQueue;
   }, [messageQueue]);
   const drainAbortRef = useRef(false);
+  const drainingRef = useRef(false);
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [questions, setQuestions] = useState<QuestionRequest[]>([]);
   const questionsRef = useRef<QuestionRequest[]>([]);
@@ -832,27 +831,26 @@ export function useSseBus(params: {
   }, [sessionId]);
 
   // Drain effect: when running flips false and there's a queued prompt, submit
-  // it. This is the SOLE drain effect (a duplicate in ChatPanel was removed —
-  // both fired on the same running→false edge and double-submitted).
-  //
-  // Ordering matters: setInput(queued) runs NOW (synchronously in this effect),
-  // and the actual submit is deferred to a setTimeout(0). The gap lets React
-  // re-render so submitRef.current is reassigned to a fresh submit() closure
-  // that captures the new `input` — submit() reads `input` from its render
-  // closure (not a ref), so calling it before the input-set re-render would
-  // read the stale empty value and no-op. Do NOT collapse setInput into the
-  // timeout alongside submitRef.current() — that reintroduces the stale-closure
-  // bug where the queued prompt is silently dropped.
+  // it — EXACTLY ONE item per idle edge. The queued text is passed explicitly
+  // via submit's textOverride (same pattern as ChatPanel's autoSubmit), so the
+  // old setInput + setTimeout(0) re-render dance is gone and a second queued
+  // item can no longer overwrite the first before its deferred submit fires.
+  // drainingRef gates re-entrancy: setMessageQueue re-triggers this effect
+  // synchronously (before running flips true), and without the gate the second
+  // item would submit mid-turn. It re-arms when running goes true (submit sets
+  // it synchronously on the non-error path). This is the SOLE drain effect (a
+  // duplicate in ChatPanel was removed — see the "no double send" test).
   useEffect(() => {
-    if (!running && messageQueue.length > 0) {
-      const queued = messageQueue[0];
-      setMessageQueue((prev) => prev.slice(1));
-      drainAbortRef.current = false;
-      setInput(queued);
-      setTimeout(() => {
-        submitRef.current?.();
-      }, 0);
+    if (running) {
+      drainingRef.current = false;
+      return;
     }
+    if (drainingRef.current || messageQueue.length === 0) return;
+    drainingRef.current = true;
+    const queued = messageQueue[0];
+    setMessageQueue((prev) => prev.slice(1));
+    drainAbortRef.current = false;
+    submitRef.current?.(queued);
   }, [running, messageQueue]);
 
   return {
