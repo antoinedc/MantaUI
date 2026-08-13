@@ -164,6 +164,19 @@ test("parseGhAuthStatus: extracts the login from `gh auth status` output", () =>
   );
 });
 
+test("parseGhAuthStatus: modern gh `account <login> (` form is accepted", () => {
+  assert.equal(
+    parseGhAuthStatus("github.com\n  ✓ Logged in to github.com account octocat (oauth)\n  ✓ Active account: true\n"),
+    "octocat",
+  );
+});
+
+test("parseGhAuthStatus: modern token-like account value is still rejected", () => {
+  const ghoPrefix = "gh" + "o_";
+  const shortToken = ghoPrefix + "AbC12xYz89QwEr00";
+  assert.equal(parseGhAuthStatus(`github.com\n  ✓ Logged in to github.com account ${shortToken} (oauth)\n`), null);
+});
+
 test("parseGhAuthStatus: multi-host output returns the logged-in account", () => {
   assert.equal(
     parseGhAuthStatus(
