@@ -21,7 +21,6 @@ import type {
   AvailableLauncher,
   DelegateApproval,
   DelegateApprovalTool,
-  DelegateJob,
   OpencodeModel,
   QuestionRequest,
 } from "../shared/types";
@@ -210,27 +209,15 @@ export function ChatPanel({
 
   // BET-418 §D: detect whether THIS session is a background job's child. A
   // job session is read-only (no composer, no cards, no model picker/fork/
-  // compact/clear); the composer is replaced by ReadOnlyJobBar. Poll the
-  // box-wide job list (no-arg delegateList) and match on childSessionID.
-  const [jobOwnership, setJobOwnership] = useState<DelegateJob | null>(null);
-  useEffect(() => {
-    setJobOwnership(null);
-    // Hidden panel — stop polling; the effect re-runs (and refires once) when
-    // isActive flips back on.
-    if (!isActive) return;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const list = await window.api.delegateList();
-        const arr = Array.isArray(list) ? list : [];
-        const match = arr.find((j) => j.childSessionID === sessionId) ?? null;
-        if (!cancelled) setJobOwnership(match);
-      } catch { /* non-fatal */ }
-    };
-    void poll();
-    const t = setInterval(poll, 10_000);
-    return () => { cancelled = true; clearInterval(t); };
-  }, [sessionId, isActive]);
+  // compact/clear); the composer is replaced by ReadOnlyJobBar. Derived from
+  // the store's `jobs` slice (keyed by childSessionID, fed by App.tsx's single
+  // 30s delegateList poll + real-time `delegate.updated` refetch) — the panel
+  // no longer runs its own 10s delegateList poll.
+  const jobs = useStore((s) => s.jobs);
+  const jobOwnership = useMemo(
+    () => jobs[sessionId] ?? null,
+    [jobs, sessionId],
+  );
 
   const projects = useStore((s) => s.projects);
   const setActive = useStore((s) => s.setActive);
@@ -2246,7 +2233,18 @@ export function ChatPanel({
             if (jobOwnership.status !== "running") return;
             void window.api
               .delegateStop(jobOwnership.id)
-              .then(() => setJobOwnership((j) => (j ? { ...j, status: "stopped" } : j)))
+              .then(() => {
+                // Optimistically flip this job to stopped in the store's jobs
+                // slice (server `delegate.updated` refetch confirms shortly).
+                const st = useStore.getState();
+                const job = st.jobs[sessionId];
+                if (!job) return;
+                st.setJobs(
+                  Object.values(st.jobs).map((j) =>
+                    j.childSessionID === sessionId ? { ...j, status: "stopped" } : j,
+                  ),
+                );
+              })
               .catch(() => { /* best-effort */ });
           }}
         />

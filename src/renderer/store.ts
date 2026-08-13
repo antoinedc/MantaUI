@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   AgentFileReady,
   AppConfig,
+  DelegateJob,
   OpencodeMessage,
   Project,
   TmuxWindow,
@@ -22,21 +23,16 @@ import {
 
 // Background-delegation jobs, keyed by the job's child opencode session id.
 // The renderer learns which sidebar windows are jobs (and their per-row
-// activity summary) from this slice. It is fed by a single app-level 30s poll
-// in App.tsx / MobileApp.tsx that calls window.api.delegateList() (no-arg =
-// all jobs) — exactly one poll, shared by desktop and mobile — PLUS an
-// immediate refetch on every `delegate.updated` bus event (BET-414) so a new
-// job nests under its parent within ~1s instead of waiting for the poll. The
-// renderer never computes the activity text; it renders the `activity` field
-// verbatim. `parentSessionID`/`childSessionID` are carried so the sidebar can
-// nest a job's child window under its parent window (BET-414).
-export type JobRow = {
-  name: string;
-  status: string;
-  activity: string;
-  parentSessionID: string | null;
-  childSessionID: string | null;
-};
+// activity summary) from this slice, and ChatPanel derives whether the panel
+// it is viewing is a background job's read-only child. It is fed by a single
+// app-level 30s poll in App.tsx / MobileApp.tsx that calls
+// window.api.delegateList() (no-arg = all jobs) — exactly one poll, shared by
+// desktop and mobile — PLUS an immediate refetch on every `delegate.updated`
+// bus event (BET-414) so a new job nests under its parent within ~1s instead
+// of waiting for the poll. The renderer never computes the activity text; it
+// renders the `activity` field verbatim. The FULL DelegateJob is retained (not
+// a reduced {name,status,activity} row) because ChatPanel's ReadOnlyJobBar
+// renders a job's branch/files-changed summary and Stop needs its id.
 
 // Cap on simultaneous in-flight requests for the startup opencode fan-outs
 // (`replayChatAttention`, `backfillLastMessageTimes`) — see BET-135.
@@ -395,7 +391,7 @@ type State = {
   // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
-  jobs: Record<string, JobRow>;
+  jobs: Record<string, DelegateJob>;
   // BET-738: subscription plan usage snapshots (one per connected provider),
   // fed by the composer's UsageDial. Primed once with window.api.usageList()
   // on mount and kept live by the `usage.updated` bus event — App.tsx does
@@ -545,9 +541,9 @@ type State = {
   applyPairing: (p: { serverUrl: string; boxId: string; boxToken: string }) => void;
   applyStatusBatch: (batch: WindowStatus[]) => void;
   // Replace the jobs slice from an app-level poll (BET-381). Accepts the raw
-  // DelegateJob[] from delegateList() and reduces it to the minimal
-  // {name,status,activity} map keyed by childSessionID.
-  setJobs: (jobs: { childSessionID: string | null; parentSessionID?: string | null; name: string; status: string; activity: string | null }[]) => void;
+  // DelegateJob[] from delegateList() and keys the full objects by
+  // childSessionID (ChatPanel + the sidebar both read the full job).
+  setJobs: (jobs: DelegateJob[]) => void;
   // Replace the usage slice (BET-738) from window.api.usageList() or the
   // `usage.updated` bus payload. Both hand over the full current array —
   // this is a straight replace, not a merge (the poller's contract is "the
@@ -1013,16 +1009,10 @@ export const useStore = create<State>((set, get) => ({
 
   setJobs: (jobs) =>
     set(() => {
-      const next: Record<string, JobRow> = {};
+      const next: Record<string, DelegateJob> = {};
       for (const j of jobs) {
         if (!j.childSessionID) continue;
-        next[j.childSessionID] = {
-          name: j.name,
-          status: j.status,
-          activity: j.activity ?? "",
-          parentSessionID: j.parentSessionID ?? null,
-          childSessionID: j.childSessionID,
-        };
+        next[j.childSessionID] = j;
       }
       return { jobs: next };
     }),

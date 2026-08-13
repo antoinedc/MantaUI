@@ -1530,7 +1530,7 @@ function isAuthErrorName(
 // session id. False for ordinary chat/terminal windows and when the window
 // has no opencode session id (a claude-TUI window).
 export function isJobRow(
-  jobs: Record<string, { name: string; status: string; activity: string }>,
+  jobs: Record<string, { name: string; status: string; activity: string | null }>,
   opencodeSessionId: string | null | undefined,
 ): boolean {
   if (!opencodeSessionId) return false;
