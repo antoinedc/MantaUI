@@ -1,4 +1,5 @@
 import SwiftUI
+import FirebaseCore
 
 @main
 struct MantaUIApp: App {
@@ -21,7 +22,11 @@ struct MantaUIApp: App {
 
     init() {
         // Before anything else, so a crash during start-up is captured too.
-        CrashReports.install()
+        // configure() installs Crashlytics' handlers as a side effect; there is
+        // no separate "start recording" call and no upload call anywhere — a
+        // crash is written to disk in the dying process and sent on the NEXT
+        // launch by the SDK itself.
+        FirebaseApp.configure()
         let event = MantaEventStore()
         _store = StateObject(wrappedValue: event)
         _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
@@ -39,8 +44,6 @@ struct MantaUIApp: App {
                 .task {
                     store.start()
                     sessionStore.bindResync()
-                    // Ship the previous run's crash, if it ended in one.
-                    CrashReports.uploadPending(using: MantaAPIClient.live())
                 }
         }
     }

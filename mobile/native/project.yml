@@ -6,15 +6,16 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-# PLCrashReporter captures what the OS would report but the phone will not hand
-# over: a Mac only receives a device's crash reports through a live Xcode
-# connection, and this device is used untethered. The report is written locally
-# on crash and uploaded to the box on the NEXT launch, so a crash is diagnosable
-# with no cable, no Xcode and no third-party service.
+# Crash capture is Firebase Crashlytics. It replaced PLCrashReporter (which
+# wrote a report locally and uploaded it to the box on the next launch) because
+# the two cannot coexist: both install Mach exception handlers, they fight over
+# the same task exception port, and the loser silently drops the crash you
+# needed. Crashlytics was chosen over keeping PLCrashReporter for the grouping,
+# cross-user impact data, and the agent-readable MCP surface.
 packages:
-  CrashReporter:
-    url: https://github.com/microsoft/plcrashreporter
-    from: "1.11.1"
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk
+    from: "12.17.0"
   MessagingUI:
     url: https://github.com/FluidGroup/swiftui-messaging-ui
     from: "1.0.0"
@@ -37,8 +38,16 @@ targets:
       - path: MantaUI
         excludes:
           - "Resources/terminal"
+          - "GoogleService-Info.plist"
       - path: MantaUI/Resources/terminal
         type: folder
+      # Excluded from the directory entry above and re-added explicitly so its
+      # build phase is stated rather than inferred: xcodegen's file-type
+      # guessing for a .plist is the same machinery that special-cases
+      # Info.plist, and this file MUST land in Copy Bundle Resources or
+      # FirebaseApp.configure() finds no options and traps at launch.
+      - path: MantaUI/GoogleService-Info.plist
+        buildPhase: resources
       # The design tokens are GENERATED (scripts/gen-swift-tokens.mjs reads
       # src/renderer/tokens.css). Referenced by path from the app target so the
       # Swift source of truth stays the generated file — never copied or
@@ -49,8 +58,13 @@ targets:
       # copied or hand-edited.
       - path: ../../generated/swift/SettingsSchema.swift
     dependencies:
-      - package: CrashReporter
-        product: CrashReporter
+      # Crashlytics only — NOT FirebaseAnalytics. Analytics is optional for
+      # Crashlytics and buys breadcrumb logs; it costs an analytics/tracking
+      # surface this app has no other use for, and the Firebase project has
+      # IS_ANALYTICS_ENABLED false. Add it deliberately if breadcrumbs are
+      # wanted, not by reflex.
+      - package: Firebase
+        product: FirebaseCrashlytics
       - package: MessagingUI
         product: MessagingUI
       - package: MarkdownView
@@ -78,6 +92,30 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
         SWIFT_EMIT_LOC_STRINGS: YES
+        # Required by Firebase: its Obj-C categories are stripped by the linker
+        # without this, and the symptom is a runtime selector-not-found crash,
+        # not a link error.
+        OTHER_LDFLAGS: "-ObjC"
+        # Crashlytics symbolicates from dSYMs, and Xcode's DEFAULT for Debug is
+        # plain `dwarf` — no dSYM is produced at all. The device build this app
+        # is installed with (ios-mantaui plugin) is a DEBUG build, so leaving
+        # the default would mean every crash from the phone comes back as raw
+        # addresses. Set on `base` so it holds for every configuration, which
+        # is what Firebase's docs require ("for all your build types").
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+    # MUST be the last build phase — Crashlytics cannot process the dSYMs
+    # otherwise. xcodegen emits postBuildScripts after compile/resources/link,
+    # which satisfies that. The inputFiles list is not decoration: with User
+    # Script Sandboxing on, Xcode only lets the script read files declared here.
+    postBuildScripts:
+      - name: Crashlytics dSYM upload
+        script: '"${BUILD_DIR%/Build/*}/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/run"'
+        inputFiles:
+          - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}
+          - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}/Contents/Resources/DWARF/${PRODUCT_NAME}
+          - ${DWARF_DSYM_FOLDER_PATH}/${DWARF_DSYM_FILE_NAME}/Contents/Info.plist
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/GoogleService-Info.plist
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
   # S1a: the unit-test target. Hosted off the app target so the transport core
   # (models, RPC client, Keychain store) is reachable via @testable import.
   MantaUITests:

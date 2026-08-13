@@ -48,6 +48,7 @@ struct SettingsScreen: View {
                         } else {
                             sectionList
                             resetAllFooter
+                            crashTestFooter
                         }
                     }
                     .padding(.bottom, Metrics.spacing.sp6)
@@ -321,6 +322,38 @@ struct SettingsScreen: View {
     }
 
     // MARK: - Reset-all + undo
+
+    // DEBUG-ONLY. Crashlytics has no way to prove itself other than a real
+    // crash, and the report only uploads on the NEXT launch — so verifying the
+    // integration means deliberately killing the app once. Gated on #if DEBUG
+    // so it cannot ship in an archived build; the device installs the plugin
+    // makes are Debug, which is exactly where this is needed.
+    //
+    // fatalError (not an array overrun) because it is unambiguous in the
+    // report and cannot be mistaken for a genuine bug someone should chase.
+    @ViewBuilder
+    private var crashTestFooter: some View {
+        #if DEBUG
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            Text("Crash reporting (debug)")
+                .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                .foregroundColor(tokens.tx2)
+                .textCase(.uppercase)
+            Text("Kills the app on purpose to verify Crashlytics. The report uploads the next time the app is opened, and only when the Xcode debugger is not attached.")
+                .font(.system(size: Metrics.type.small))
+                .foregroundColor(tokens.tx3)
+            Button {
+                fatalError("MantaUI Crashlytics verification crash")
+            } label: {
+                Text("Force a test crash")
+                    .font(.system(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.danger)
+            }
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp3)
+        #endif
+    }
 
     private var resetAllFooter: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
