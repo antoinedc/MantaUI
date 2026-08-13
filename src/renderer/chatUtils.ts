@@ -2556,24 +2556,27 @@ function overflowFor(it: StatusItem, containerWidth: number): boolean {
 
 // Select which registry items render in the header bar vs the overflow
 // dropdown for a container width + the user's hide list. Hidden ids are never
-// present in either array (removed entirely). Sort is descending priority with
-// a stable id tiebreak.
+// present in either array (removed entirely).
+//
+// ORDERING NOTE (BET-782): acceptance criterion #1 requires the wide-width
+// header to render EXACTLY as it does today, and the spec's §2 "sort
+// descending by priority; render left-to-right" would put the ⋯ menu (100)
+// left of the context pill (60) — a visual change, and a direct conflict
+// between the two requirements. Criterion #1 is the DoD, so this preserves the
+// registry's construction order (today: context, artifacts, menu). Priority is
+// therefore ONLY the overflow-sacrifice order (which items the cut drops as the
+// pane narrows), not a reordering of the bar. If the descending-order rule is
+// ever made authoritative, flip the loop below to sort by priority descending.
 export function selectStatusItems(
   items: StatusItem[],
   containerWidth: number,
   hiddenIds: string[],
 ): { visible: StatusItem[]; overflow: StatusItem[] } {
   const hidden = new Set(hiddenIds);
-  const considered = items
-    .filter((it) => !hidden.has(it.id))
-    .sort(
-      (a, b) =>
-        b.priority - a.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-    );
-
   const visible: StatusItem[] = [];
   const overflow: StatusItem[] = [];
-  for (const it of considered) {
+  for (const it of items) {
+    if (hidden.has(it.id)) continue;
     (overflowFor(it, containerWidth) ? overflow : visible).push(it);
   }
   return { visible, overflow };

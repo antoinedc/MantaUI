@@ -255,7 +255,8 @@ export function SessionHeader({
       )}
 
       {/* Right group — the registry's visible items + the overflow trigger.
-            Descending priority = left-to-right: menu, artifacts, context.
+            Order preserves today's wide-width visual (context, artifacts,
+            menu — acceptance #1); priority drives only the overflow cut.
             Opts out of the header's drag region so the controls stay
             clickable. */}
       <div
