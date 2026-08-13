@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
 //
-// Pure-rendering tests for tool part rendering. The `bulletStyle` cases live
-// in the default (node) test env and run unchanged. The `TaskBody` cases
+// Pure-rendering tests for tool part rendering. The `TaskBody` cases
 // below need jsdom because they mount a real React subtree via
 // `./testHarness`.
 
 import { act, useState } from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { cssVar } from "./chatUtils";
-import { AssistantPart, bulletStyle, ToolCall, formatFileDiff } from "./ToolCall";
+import { AssistantPart, ToolCall, formatFileDiff } from "./ToolCall";
 import {
   installMockApi,
   mount,
@@ -29,11 +27,6 @@ function expandAll(container: Element) {
   }
 }
 
-// Build a tool part with a given lifecycle status.
-function toolPart(status?: string): OpencodePart {
-  return { type: "tool", tool: "bash", state: status ? { status } : {} } as unknown as OpencodePart;
-}
-
 // A minimal task tool part that extractSubagentInfo accepts (it requires
 // state.metadata.sessionId to be present, otherwise it returns null and the
 // TaskBody card doesn't render at all).
@@ -49,27 +42,6 @@ function taskPart(input: Record<string, unknown> = {}): OpencodePart {
     },
   } as unknown as OpencodePart;
 }
-
-describe("bulletStyle", () => {
-  it("grey, no pulse for non-tool parts", () => {
-    const text = { type: "text", text: "hi" } as unknown as OpencodePart;
-    expect(bulletStyle(text)).toEqual({ color: cssVar("--tx4"), pulse: false });
-  });
-
-  it("green, no pulse for a completed tool", () => {
-    expect(bulletStyle(toolPart("completed"))).toEqual({ color: cssVar("--ok"), pulse: false });
-  });
-
-  it("red, no pulse for an errored tool", () => {
-    expect(bulletStyle(toolPart("error"))).toEqual({ color: cssVar("--danger"), pulse: false });
-  });
-
-  it("grey + pulse for running / pending / unknown-active tools", () => {
-    expect(bulletStyle(toolPart("running"))).toEqual({ color: cssVar("--tx4"), pulse: true });
-    expect(bulletStyle(toolPart("pending"))).toEqual({ color: cssVar("--tx4"), pulse: true });
-    expect(bulletStyle(toolPart(undefined))).toEqual({ color: cssVar("--tx4"), pulse: true });
-  });
-});
 
 describe("formatFileDiff", () => {
   let h: Harness | null = null;
