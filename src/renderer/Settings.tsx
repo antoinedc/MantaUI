@@ -401,7 +401,8 @@ export function Settings({
         actions: [{ label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } }],
       });
     } catch (e) {
-      useStore.setState({ skillRegistryUrls: prev });      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
+      useStore.setState({ skillRegistryUrls: prev });
+      push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
     }
   };
   const onAddRegistry = () => {

@@ -155,12 +155,10 @@ test("cronForInstant output matches cronMatches at that instant", () => {
 // ----------------------------------------------------------------------------
 
 test("createJob defaults kind to prompt and stores it on the job", async () => {
-  const { ok, job } = await createJob({
-    cron: "0 9 * * *",
-    prompt: "check the deploy",
-    recurring: false,
-    sessionID: "ses_x",
-  });
+  const { ok, job } = await createJob(
+    { cron: "0 9 * * *", prompt: "check the deploy", recurring: false, sessionID: "ses_x" },
+    { load: async () => [], save: async () => {} }, // never touch the live store
+  );
   assert.equal(ok, true);
   assert.equal(job.kind, "prompt");
 });

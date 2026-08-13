@@ -27,6 +27,7 @@ import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
+import { Callout } from "./Callout";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -628,6 +629,9 @@ function AppInner() {
           const fireAt = fireAtFor(resetsAt);
           const sessionID = activeChatRef.current;
           const toastId = `usage-limit-${alert.key}-${Date.now()}`;
+          // Actions are hidden when the window has no resetsAt (can't compute a
+          // fireAt) OR when no chat session is active (a job needs a sessionID).
+          // The toast still shows its message either way.
           const hasActions = fireAt != null && sessionID != null;
           pushAppToastStore({
             id: toastId,
@@ -698,7 +702,8 @@ function AppInner() {
     return off;
   }, [apiGeneration, scheduleAtReset, pushAppToastStore, dismissAppToastStore]);
 
-  // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel  // used to register its own listener, so a single detection fanned out into
+  // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
+  // used to register its own listener, so a single detection fanned out into
   // N toasts (one per mounted chat). Now the toast lives in the store, the
   // active ChatPanel renders it, and accept/dismiss clear it globally.
   // Routes through the typed preload accessor so it no-ops on mobile/web.
@@ -1697,21 +1702,18 @@ function AppInner() {
               session on your behalf and the agent will resume unattended. You can cancel it any
               time from ⏰ scheduled tasks.
             </div>
-            {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl ?? "1h") && (
-              <div className="rounded-xs border border-warn/40 bg-warn/10 px-3 py-2 text-meta text-warn">
+            {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
+              <Callout tone="warn">
                 The reset is {describeResetDistance(keepGoing.fireAt - Date.now())} away — well past
                 your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
                 conversation will be re-sent and re-billed as fresh input, which costs significantly
                 more than a reply now.
-              </div>
+              </Callout>
             )}
             <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setKeepGoing(null)}
-                className="px-4 py-2 text-body text-text-muted hover:text-text"
-              >
+              <Button tone="ghost" onClick={() => setKeepGoing(null)}>
                 Cancel
-              </button>
+              </Button>
               <Button tone="primary" onClick={() => void confirmKeepGoing()}>
                 Schedule it
               </Button>
