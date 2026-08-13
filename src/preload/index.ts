@@ -231,7 +231,7 @@ const api = {
   // renderer treats success and failure the same way regardless of which
   // entry point produced them.
   installerMintAndClaim: (input: {
-    alias: SshTarget;
+    alias?: SshTarget;
     claimUrlOverride?: string;
   }): Promise<ClaimOutcome> =>
     ipcRenderer.invoke(IPC.installerMintAndClaim, input),

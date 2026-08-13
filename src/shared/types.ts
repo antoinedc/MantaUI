@@ -1,6 +1,7 @@
 // Type-only, erased at compile time (preloadAccess.ts does the same).
 import type { PreflightResult, PreflightFailure } from "../main/installer/preflight.js";
 import type { HostFingerprint } from "../main/installer/fingerprint.js";
+import type { SshTarget } from "./sshTarget.js";
 
 // ----- Local app config -----
 // Source of truth for sessions/windows is tmux on the remote. We only persist
@@ -440,6 +441,14 @@ export type InstallerState = {
   waitingForPassphrase: boolean;
   // The handle id the paused passphrase prompt belongs to, or null.
   passphraseHandleId: string | null;
+  // BET-705 b: the currently-active install's handle id, or null. The renderer
+  // restores `activeHandle` from this on remount so Cancel still works after a
+  // page refresh (previously activeHandle was never recovered).
+  activeHandleId: string | null;
+  // BET-705 b: the SshTarget the active install targets, or null. Retained so
+  // the auto-claim after `done` resolves against the SAME host even after a
+  // renderer remount reset the host picker to a different selection.
+  target: SshTarget | null;
 };
 
 // Desktop auto-update (electron-updater) payloads, shared by the preload

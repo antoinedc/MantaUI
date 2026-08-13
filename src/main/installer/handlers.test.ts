@@ -308,6 +308,49 @@ describe("registerInstallerHandlers — installerStart preflight fold (BET-383)"
   });
 });
 
+// BET-705 b: installerState exposes the active handle id (so a remount can
+// restore Cancel) and the stored install target (so the auto-claim resolves
+// against the host that was actually installed, never the picker's current
+// selection).
+describe("registerInstallerHandlers — activeHandleId + target (BET-705 b)", () => {
+  it("installerState reports the active handle id and the stored target after a start", async () => {
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const stateHandler = ipcState.handlers.get(IPC.installerState);
+
+    await startHandler!(null, { alias: "prod.example.com" });
+    const state = (await stateHandler!(null, undefined)) as {
+      active: boolean;
+      activeHandleId: string | null;
+      target: unknown;
+    };
+    expect(state.active).toBe(true);
+    expect(state.activeHandleId).toMatch(/^install-/);
+    expect(state.target).toBe("prod.example.com");
+    await flushMicrotasks();
+  });
+
+  it("installerMintAndClaim prefers the stored install target over the renderer's alias", async () => {
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const claimHandler = ipcState.handlers.get(IPC.installerMintAndClaim);
+
+    // Install ran against origin.example.com, then finished (clears the
+    // active handle but NOT the stored target — the claim comes after done).
+    await startHandler!(null, { alias: "origin.example.com" });
+    await flushMicrotasks();
+
+    // The renderer (post-remount host-picker reset) passes a stale alias —
+    // main must still claim against the stored target.
+    await claimHandler!(null, { alias: "wrong.example.com" });
+    const [targetArg] = mintState.mintAndClaim.mock.calls[0];
+    expect(targetArg).toBe("origin.example.com");
+    await flushMicrotasks();
+  });
+});
+
 // BET-361: a never-seen host pauses the install for a trust decision.
 // The handler must (a) emit a `fingerprint` event, (b) hold the slot while
 // waiting, (c) resume into runInstall after a Trust answer + successful

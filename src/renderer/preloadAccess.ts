@@ -163,7 +163,7 @@ export interface MantaPreload {
   // same way regardless of which entry point produced them. Persists
   // credentials through main's existing claim path (single config writer).
   installerMintAndClaim(input: {
-    alias: SshTarget;
+    alias?: SshTarget;
     claimUrlOverride?: string;
   }): Promise<ClaimOutcome>;
 
