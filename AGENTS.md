@@ -1998,6 +1998,89 @@ agent blocks — so a not-yet-registered model still shows up.
    in `chatUtils.test.ts` (2). All pure/injected-I/O — no real opencode.jsonc
    or systemctl call in the suite.
 
+## iOS crash reporting — Firebase Crashlytics (replaced PLCrashReporter)
+
+Crash capture for the native app (`mobile/native`) is **Firebase Crashlytics**.
+It replaced PLCrashReporter on 2026-08-13. Do not run both.
+
+- **Why not both.** Both install Mach exception handlers and compete for the
+  same task-level exception port. They chain unreliably and the loser silently
+  drops the crash — you get a crash reporter that is quiet exactly when it
+  matters. Firebase's own docs warn against a second reporter. If you want the
+  old box-upload behaviour back, REMOVE Crashlytics first.
+- **What was deleted**: `mobile/native/MantaUI/CrashReports.swift` (PLCrashReporter
+  capture + `uploadPending` → `POST /api/upload` into `~/.manta-uploads/crash/`)
+  and the `CrashReporter` SPM package. There is no longer a crash path to the
+  box; reports go to the Firebase console and are readable by an agent through
+  the Firebase MCP server's `crashlytics_*` tools.
+- **Wiring is one call**: `FirebaseApp.configure()` in `MantaUIApp.init()`.
+  Crashlytics installs its handlers as a side effect — there is no "start"
+  call, and no upload call anywhere. A crash is written on-device in the dying
+  process and sent by the SDK on the **next launch**.
+- **Three project.yml settings are load-bearing, and each fails silently-ish:**
+  - `OTHER_LDFLAGS: -ObjC` — without it the linker strips Firebase's Obj-C
+    categories and you get a runtime selector-not-found crash, not a link error.
+  - `DEBUG_INFORMATION_FORMAT: dwarf-with-dsym` on **base**, not just Release.
+    Xcode's Debug default is plain `dwarf`, which produces NO dSYM — and the
+    `ios-mantaui` plugin installs a **Debug** build, so the default would mean
+    every crash off the phone came back as raw addresses.
+  - The `Crashlytics dSYM upload` entry must stay in **`postBuildScripts`** so
+    it is the LAST build phase; Crashlytics cannot process dSYMs otherwise. Its
+    `inputFiles` list is not decoration — with User Script Sandboxing on, Xcode
+    only lets the script read files declared there.
+- **The phase calls `upload-symbols` DIRECTLY, not Firebase's documented
+  `Crashlytics/run` wrapper. Do not "fix" it back.** `run` was used first and
+  silently uploaded NOTHING: the phase executed, the build was green, and the
+  console still said "2 unprocessed crashes — upload 1 dSYM file", with no
+  upload line anywhere in a 7,441-line build log. `run` backgrounds its work, so
+  a failure inside it neither prints nor fails the build. The same
+  `upload-symbols` call run by hand against the same dSYM submitted both UUIDs
+  instantly. Observable beats documented.
+- **The two-UUID trap (`ENABLE_DEBUG_DYLIB`).** Xcode 16+ sets it YES for
+  Debug, splitting the binary: real code goes to `<name>.debug.dylib`, the main
+  executable becomes a stub, and the dSYM carries TWO arm64 slices with
+  different UUIDs. A crash references the **debug.dylib's** UUID, so uploading
+  only the `${PRODUCT_NAME}` slice leaves every Debug crash unsymbolicated —
+  which is exactly the state this shipped in first. Passing the whole `.dSYM`
+  BUNDLE makes `upload-symbols` walk both slices. Release is not split and
+  yields one slice, so one command covers both and there is no per-config
+  branch. **This never affected the Codemagic TestFlight path** (it archives
+  Release); it only ever broke local Debug device installs.
+- **On-demand upload**: the `ios-crashlytics-dsym` plugin (`action: upload`)
+  uploads the last device build's dSYM from the Mac and prints the submitted
+  UUIDs. Use it when a crash arrives unsymbolicated rather than rebuilding.
+  Note its `action: diagnose` prints `ENABLE_DEBUG_DYLIB` /
+  `ENABLE_USER_SCRIPT_SANDBOXING` / the SPM checkout contents — the three
+  things that determine whether the in-build phase can work at all.
+- **`GoogleService-Info.plist` is committed on purpose** and is excluded from
+  the `MantaUI` directory source entry, then re-added with an explicit
+  `buildPhase: resources`. It must land in Copy Bundle Resources or
+  `FirebaseApp.configure()` finds no options and traps at launch. It is
+  committed because the `ios-mantaui` build clone is force-reset to origin and
+  `git clean`s `mobile/native` — an untracked file would be wiped. The `AIza…`
+  key in it is a client identifier, not a secret (extractable from any IPA;
+  access is bounded by Firebase Security Rules / App Check).
+- **Bundle id must match the Firebase app exactly.** The first plist issued for
+  this was registered to `com.antoinedc.manta` while the app is
+  `com.antoinedc.mantaui`; that mismatch fails at configure time. Firebase app
+  id `1:789525210372:ios:423827eb6f93a9c8b45c51`, project `manta-76416`.
+- **Analytics is deliberately NOT linked.** It is optional for Crashlytics and
+  buys breadcrumb logs, at the cost of an analytics surface this app has no
+  other use for (`IS_ANALYTICS_ENABLED` is false in the plist). Add it as a
+  decision, not by reflex.
+- **Verifying it**: there is no test-crash button in the app — a `#if DEBUG`
+  one existed only to prove the integration (commit `ed8a682`) and was removed
+  once it had (`SettingsScreen.crashTestFooter`; restore from git if needed).
+  To re-verify, add a `fatalError(...)` behind a temporary control, or crash the
+  app any other way. Two rules make or break the test: the report uploads on the
+  **NEXT launch**, not the crashing one, and **only with the Xcode debugger
+  detached** — the debugger intercepts the signal and Crashlytics never sees it.
+  The plugin's `devicectl process launch` is detached, so a plugin install + tap
+  + reopen is a valid test. Proven end-to-end 2026-08-13: the crash symbolicated
+  to `SettingsScreen.swift:346` with the frame attributed to
+  `MantaUI.debug.dylib` — which is itself the evidence for the split-binary note
+  above.
+
 ## iOS release / TestFlight (Codemagic — the WORKING mechanism)
 
 The iOS app (the Capacitor wrapper in `mobile/ios/`) ships to TestFlight via
