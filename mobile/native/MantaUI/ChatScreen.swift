@@ -690,6 +690,15 @@ private struct ChatScreenContent: View {
             if let trunc = store.truncation, !store.running {
                 ChatNoticeRow(text: trunc.label ?? "Response truncated", color: tokens.warn, tokens: tokens)
             }
+            if !store.queuedPrompts.isEmpty {
+                ChatNoticeRow(
+                    text: store.queuedPrompts.count == 1
+                        ? "1 message queued — sends when this turn finishes"
+                        : "\(store.queuedPrompts.count) messages queued — send when this turn finishes",
+                    color: tokens.tx2,
+                    tokens: tokens
+                )
+            }
             if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
                 TodosCard(payload: todos, tokens: tokens)
             }

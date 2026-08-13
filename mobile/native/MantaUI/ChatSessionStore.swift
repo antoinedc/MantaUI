@@ -135,6 +135,14 @@ enum ChatStreamDelta {
     }
 }
 
+/// A prompt accepted while a turn was running, held until the session goes
+/// idle. Carries everything `send()` needs so the drain replays it verbatim.
+struct QueuedPrompt: Equatable {
+    let text: String
+    let attachments: [SendPromptInput.Attachment]
+    let model: SendPromptInput.Model?
+}
+
 @MainActor
 final class ChatSessionStore: ObservableObject {
 
@@ -161,6 +169,10 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var permissions: [PermissionRequest] = []
     @Published private(set) var subagents: [StreamSubagentPayload] = []
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
+    /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
+    /// POSTed while `running`, which is what used to implicitly abort the
+    /// in-flight turn.
+    @Published private(set) var queuedPrompts: [QueuedPrompt] = []
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
     /// True while the box was connected and the stream dropped (mirrors
@@ -309,6 +321,8 @@ final class ChatSessionStore: ObservableObject {
         // child-store eviction — the transcript-capped half runs per rebuild.
         eventStore.unregisterSession(sessionId)
         childStores.removeAll()
+        // A queued prompt must never fire into a session the user has left.
+        queuedPrompts.removeAll()
     }
 
     func load() {
@@ -452,6 +466,12 @@ final class ChatSessionStore: ObservableObject {
         } else {
             runningSince = nil
         }
+
+        // The session just went idle (stream fold set `running = false`): any
+        // queued prompt may now be sent. Guard-based, so firing on whichever
+        // path folded running down is harmless — a second call is a no-op while
+        // running (the drain's send sets it optimistically) or an empty queue.
+        drainQueuedPromptIfIdle()
 
         // Register a store for any subagent that has a child session id, so the
         // drill-in destination can resolve it without mutating state during a
@@ -730,6 +750,12 @@ final class ChatSessionStore: ObservableObject {
     /// can restore the user's typed text.
     @discardableResult
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?) async -> Bool {
+        // A send while the turn runs must not reach opencode — it would abort
+        // the in-flight turn implicitly. Queue it; the idle edge drains FIFO.
+        if running {
+            queuedPrompts.append(QueuedPrompt(text: text, attachments: attachments, model: model))
+            return true
+        }
         // Echo the message straight into the transcript and assume the turn is
         // running. The box confirms both within a second (running frame, then
         // the canonical refetch replaces this block), but without the echo the
@@ -785,6 +811,23 @@ final class ChatSessionStore: ObservableObject {
                 rebuildBlocks()
             }
             return false
+        }
+    }
+
+    /// Drain ONE queued prompt now that the session is idle. One per edge: the
+    /// send() below sets `running = true` optimistically, so a second queued
+    /// item waits for the next idle. Strict FIFO.
+    private func drainQueuedPromptIfIdle() {
+        guard !running, !queuedPrompts.isEmpty else { return }
+        let next = queuedPrompts.removeFirst()
+        Task { @MainActor in
+            let ok = await send(text: next.text, attachments: next.attachments, model: next.model)
+            if !ok {
+                // The send failed after the box accepted going idle — don't lose
+                // the prompt silently. Put it back at the FRONT and tell the user.
+                queuedPrompts.insert(next, at: 0)
+                actionHint = "Queued message failed to send — will retry on next turn"
+            }
         }
     }
 

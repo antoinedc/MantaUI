@@ -209,13 +209,13 @@ struct QuestionRequest: Codable, Equatable, Sendable {
 }
 
 struct SendPromptInput: Sendable {
-    struct Model: Sendable {
+    struct Model: Sendable, Equatable {
         var providerID: String
         var modelID: String
         var variant: String?
     }
 
-    struct Attachment: Sendable {
+    struct Attachment: Sendable, Equatable {
         var remotePath: String
         var mime: String
         var filename: String?
