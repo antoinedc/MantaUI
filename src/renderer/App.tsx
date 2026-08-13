@@ -1457,12 +1457,12 @@ function AppInner() {
               running in any session. Any unsaved work in a running turn is lost.
             </div>
             <div className="flex justify-end gap-2">
-              <button
+              <Button
+                tone="ghost"
                 onClick={() => setConfirmServerUpdate(false)}
-                className="px-4 py-2 text-body text-text-muted hover:text-text"
               >
                 Cancel
-              </button>
+              </Button>
               <Button
                 tone="primary"
                 onClick={() => {
