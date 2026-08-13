@@ -251,6 +251,13 @@ const IS_DEMO = new URLSearchParams(window.location.search).has("demo");
               `\r\n\x1b[2m[shell exited: ${e.code ?? "?"}]\x1b[0m\r\n`,
             );
         });
+      }).catch((e: unknown) => {
+        if (cancelled) return;
+        // M3: a failed spawn must be visible IN the pane — a blank terminal
+        // reads as a hang. \r\n because xterm needs CRLF.
+        term.write(
+          `\r\n\x1b[31mFailed to start terminal: ${e instanceof Error ? e.message : String(e)}\x1b[0m\r\n`,
+        );
       });
     });
 

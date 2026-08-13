@@ -22,12 +22,29 @@ import type { AppConfig } from "../shared/types.js";
 
 const RECONNECT_MS = 3000;
 
+// M8: stale-frame liveness watchdog. The server heartbeats /events every 15s
+// (`kind:"heartbeat"` frames), but a half-open stream (laptop sleep/wake, NAT
+// idle timeout) emits neither `end` nor `error` — the reconnect path below
+// never fires and the bus silently dies until app restart. So stamp
+// `lastFrameAt` on every received frame and, if nothing arrives for STALE_MS,
+// destroy the response and let the existing reconnect path run.
+const STALE_MS = 45_000; // 3 missed 15s heartbeats
+const WATCHDOG_INTERVAL_MS = 15_000;
+
+export { STALE_MS };
+
 export type BusEnvelope = {
   kind?: string;
   payload?: unknown;
 };
 
 export type BusConsumer = { stop(): void };
+
+// M8: pure liveness decision — has no frame arrived within STALE_MS? Extracted
+// so the constant + threshold are pinned by a unit test.
+export function isStale(lastFrameAt: number, now: number, staleMs: number): boolean {
+  return now - lastFrameAt > staleMs;
+}
 
 export function createBusConsumer(
   configGetter: () => AppConfig,
@@ -37,6 +54,8 @@ export function createBusConsumer(
   let stopped = false;
   let current: IncomingMessage | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
+  let watchdogTimer: NodeJS.Timeout | null = null;
+  let lastFrameAt = Date.now();
 
   function scheduleReconnect(): void {
     if (stopped || reconnectTimer) return;
@@ -45,6 +64,28 @@ export function createBusConsumer(
       connect();
     }, RECONNECT_MS);
     reconnectTimer.unref?.();
+  }
+
+  // The watchdog shares the existing reconnect scheduling — there is no second
+  // reconnect implementation. On a stale stream it just tears the active
+  // response down (which, like `end`/`error`, lets the reconnect path run) and
+  // schedules the same reconnect the `end` handler would.
+  function startWatchdog(): void {
+    if (stopped || watchdogTimer) return;
+    watchdogTimer = setInterval(() => {
+      if (isStale(lastFrameAt, Date.now(), STALE_MS)) {
+        console.error("[bus] stale stream (no frames for 45s) — reconnecting");
+        const res = current;
+        current = null;
+        try {
+          res?.destroy();
+        } catch {
+          /* already gone */
+        }
+        scheduleReconnect();
+      }
+    }, WATCHDOG_INTERVAL_MS);
+    watchdogTimer.unref?.();
   }
 
   function handleFrame(raw: string): void {
@@ -67,6 +108,10 @@ export function createBusConsumer(
 
   function connect(): void {
     if (stopped) return;
+    // (Re)connect resets the liveness clock so the watchdog doesn't fire while
+    // the fresh stream is still warming toward its first heartbeat (≤15s away).
+    lastFrameAt = Date.now();
+    startWatchdog();
     const cfg = configGetter?.();
     if (!cfg || !cfg.serverUrl) {
       scheduleReconnect();
@@ -98,6 +143,7 @@ export function createBusConsumer(
         res.setEncoding("utf-8");
         let buf = "";
         res.on("data", (chunk: string) => {
+          lastFrameAt = Date.now(); // any data counts as liveness (heartbeats included)
           buf += chunk;
           let idx: number;
           while ((idx = buf.indexOf("\n\n")) !== -1) {
@@ -134,6 +180,8 @@ export function createBusConsumer(
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = null;
       try {
         current?.destroy();
       } catch {
