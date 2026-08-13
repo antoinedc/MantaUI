@@ -104,12 +104,15 @@ test("pack.mjs --arch bogus fails the parseArgs validation with the right messag
 });
 
 // The staging allowlist (INCLUDE) and the owned-on-box list (OWNED_ON_BOX =
-// [...INCLUDE, "runtime"]) are two distinct concepts in pack.mjs. INCLUDE is
-// which repo paths get COPIED into the tarball; OWNED_ON_BOX is which paths
-// self-update replaces on an installed box. They must differ by exactly
-// `runtime`: the vendored Node is produced by ensureNodeRuntime() during
-// staging (so it can't be in INCLUDE), but it must be replaced on update (so
-// it has to be in OWNED_ON_BOX).
+// [...INCLUDE, "runtime", "node_modules"]) are two distinct concepts in
+// pack.mjs. INCLUDE is which repo paths get COPIED into the tarball;
+// OWNED_ON_BOX is which paths self-update replaces on an installed box.
+//
+// They differ by exactly two entries — `runtime` and `node_modules` — and for
+// the same underlying reason: both are PRODUCED during staging rather than
+// copied from the repo, so neither can be in INCLUDE, yet both must reach an
+// installed box on update. The full rationale for each lives on OWNED_ON_BOX
+// in pack.mjs and is deliberately not restated here.
 //
 // pack.mjs can't be imported (main() runs on import and hits the network), so
 // we read its SOURCE and evaluate the two array literals — the same way the
@@ -122,17 +125,32 @@ function evalArrayLiteral(declName, scope = {}) {
   return Function(...Object.keys(scope), `return ${m[1]}`)(...Object.values(scope));
 }
 
-test("OWNED_ON_BOX = INCLUDE + runtime: owned list has runtime, staging allowlist does not, otherwise equal", () => {
+test("OWNED_ON_BOX = INCLUDE + runtime + node_modules: staged-not-copied paths are owned, otherwise equal", () => {
   const include = evalArrayLiteral("INCLUDE");
   const owned = evalArrayLiteral("OWNED_ON_BOX", { INCLUDE: include });
 
-  assert.ok(owned.includes("runtime"), "owned-on-box list must include runtime");
-  assert.ok(!include.includes("runtime"), "staging allowlist must NOT include runtime");
+  for (const staged of ["runtime", "node_modules"]) {
+    assert.ok(owned.includes(staged), `owned-on-box list must include ${staged}`);
+    assert.ok(!include.includes(staged), `staging allowlist must NOT include ${staged}`);
+  }
   assert.deepEqual(
-    owned.filter((p) => p !== "runtime"),
+    owned.filter((p) => p !== "runtime" && p !== "node_modules"),
     include,
     "owned list must otherwise equal the staging allowlist",
   );
   // guard against the two lists silently collapsing back into one
   assert.notDeepEqual(owned, include);
+});
+
+// BET-829 regression. Dropping node_modules from the owned list would silently
+// restore the old behaviour: the box would fall back to `npm ci` on a machine
+// with no compiler and a mismatched system Node, and the failure only surfaces
+// as a manta-server that will not start after the next restart.
+test("BET-829: node_modules stays release-owned so the box never rebuilds deps locally", () => {
+  const include = evalArrayLiteral("INCLUDE");
+  const owned = evalArrayLiteral("OWNED_ON_BOX", { INCLUDE: include });
+  assert.ok(
+    owned.includes("node_modules"),
+    "node_modules must be release-owned — the tarball ships a prebuilt, arch- and ABI-verified tree",
+  );
 });

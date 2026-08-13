@@ -21,6 +21,7 @@ import {
   existsSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   statSync,
   mkdirSync,
 } from "node:fs";
@@ -79,6 +80,17 @@ function allPaths(root) {
  * bash subprocess. Returns { status, stdout }.
  */
 function runReplace(pkg, dest) {
+  return sourceAndRun(`replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'`);
+}
+
+/**
+ * The one place a bash subprocess is built for these tests: define the
+ * `log`/`ok`/`warn`/`die` helpers release.sh expects its CALLER to own, source
+ * the library, then run `body`. `preamble` injects anything that must be set
+ * before sourcing (PATH, seed variables). Returns { status, stdout } with
+ * stderr folded in, so assertions can match on `die` output.
+ */
+function sourceAndRun(body, { preamble = "" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "manta-release-"));
   const script = join(dir, "run.sh");
   writeFileSync(
@@ -89,8 +101,9 @@ log()  { printf 'log: %s\\n' "$*"; }
 ok()   { printf 'ok: %s\\n' "$*"; }
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die()  { printf 'die: %s\\n' "$*" >&2; exit 1; }
+${preamble}
 source '${RELEASE_LIB}'
-replace_release_payload '${pkg}' '${dest}' '${NODE_CMD}'
+${body}
 exit $?
 `,
     { mode: 0o755 },
@@ -237,4 +250,130 @@ test("no *.new staging directories survive a successful run", () => {
     rmSync(pkg, { recursive: true, force: true });
     rmSync(dest, { recursive: true, force: true });
   }
+});
+
+// --- install_prod_deps (BET-829) --------------------------------------------
+//
+// The old update step was a bare `npm ci --omit=dev`, which DELETES
+// node_modules before installing. Every failure mode therefore left the box
+// without a loadable node-pty — a manta-server that cannot start. These cases
+// pin the two properties that make it survivable: prefer the prebuilt tree the
+// release payload already carries, and never destroy a working tree on failure.
+
+/**
+ * Source release.sh and call `install_prod_deps <dest>` with a stubbed `npm`
+ * on PATH whose exit status the test chooses, so no real install ever runs.
+ * `replaced` seeds REPLACED_NODE_MODULES the way replace_release_payload would.
+ */
+function runInstallDeps(dest, { npmExit = 0, replaced = 0, npmOnPath = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-deps-"));
+  const binDir = join(dir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  // Hermetic PATH: the ONLY entry is binDir, so `npmOnPath:false` really means
+  // npm is unreachable (this box has a system /usr/bin/npm that would
+  // otherwise satisfy the lookup and void the test). The coreutils the
+  // function genuinely needs are symlinked in explicitly.
+  for (const cmd of ["rm", "mv", "mkdir"]) {
+    const src = ["/bin/", "/usr/bin/"].map((p) => p + cmd).find((p) => existsSync(p));
+    if (src) symlinkSync(src, join(binDir, cmd));
+  }
+  if (npmOnPath) {
+    // A fake npm that mimics the destructive part of `npm ci`: it wipes the
+    // target node_modules FIRST, then exits with the status under test. If the
+    // function did not set the tree aside beforehand, a non-zero exit leaves
+    // nothing behind — which is exactly the brick we are testing against.
+    writeFileSync(
+      join(binDir, "npm"),
+      `#!/bin/sh\nrm -rf '${dest}/node_modules'\nmkdir -p '${dest}/node_modules'\necho fresh > '${dest}/node_modules/INSTALLED'\nexit ${npmExit}\n`,
+      { mode: 0o755 },
+    );
+  }
+  try {
+    return sourceAndRun(`install_prod_deps '${dest}'`, {
+      preamble: `export PATH='${binDir}'\nREPLACED_NODE_MODULES=${replaced}`,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("install_prod_deps: skips npm entirely when the payload already supplied node_modules", () => {
+  const dest = mkdtempSync(join(tmpdir(), "manta-dest-"));
+  writeTree(dest, { "node_modules/from-payload.txt": "prebuilt" });
+  // npm is absent from PATH: if the function tried to run it, this would fail.
+  const r = runInstallDeps(dest, { replaced: 1, npmOnPath: false });
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /came from the release payload/);
+  assert.equal(
+    readFileSync(join(dest, "node_modules/from-payload.txt"), "utf8"),
+    "prebuilt",
+    "the payload tree must be left exactly as swapped in",
+  );
+  rmSync(dest, { recursive: true, force: true });
+});
+
+test("install_prod_deps: runs npm ci when there is no payload tree (git checkout)", () => {
+  const dest = mkdtempSync(join(tmpdir(), "manta-dest-"));
+  writeTree(dest, { "node_modules/old.txt": "stale" });
+  const r = runInstallDeps(dest, { replaced: 0, npmExit: 0 });
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(existsSync(join(dest, "node_modules/INSTALLED")), "npm ci should have installed");
+  assert.ok(
+    !existsSync(join(dest, "node_modules.prev")),
+    "the set-aside copy must be cleaned up on success",
+  );
+  rmSync(dest, { recursive: true, force: true });
+});
+
+test("install_prod_deps: RESTORES the previous node_modules when npm ci fails (the brick case)", () => {
+  const dest = mkdtempSync(join(tmpdir(), "manta-dest-"));
+  writeTree(dest, { "node_modules/node-pty/pty.node": "working-binding" });
+  const r = runInstallDeps(dest, { replaced: 0, npmExit: 1 });
+  assert.equal(r.status, 1, "a failed dependency install must still fail the update");
+  assert.equal(
+    readFileSync(join(dest, "node_modules/node-pty/pty.node"), "utf8"),
+    "working-binding",
+    "the working tree must be restored so the box still starts — this is the whole point",
+  );
+  assert.ok(!existsSync(join(dest, "node_modules.prev")), "no leftover set-aside directory");
+  assert.match(r.stdout, /restoring the previous node_modules/);
+  rmSync(dest, { recursive: true, force: true });
+});
+
+test("install_prod_deps: fails with actionable guidance when npm is not on PATH", () => {
+  const dest = mkdtempSync(join(tmpdir(), "manta-dest-"));
+  writeTree(dest, { "node_modules/keep.txt": "keep" });
+  const r = runInstallDeps(dest, { replaced: 0, npmOnPath: false });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /npm not found on PATH/);
+  assert.equal(
+    readFileSync(join(dest, "node_modules/keep.txt"), "utf8"),
+    "keep",
+    "bailing early must not have touched the existing tree",
+  );
+  rmSync(dest, { recursive: true, force: true });
+});
+
+test("replace_release_payload: signals when it swapped node_modules from the payload", () => {
+  const pkg = mkdtempSync(join(tmpdir(), "manta-pkg-"));
+  const dest = mkdtempSync(join(tmpdir(), "manta-dest-"));
+  writeTree(pkg, {
+    "RELEASE.json": JSON.stringify({ version: "9.9.9", includes: ["src", "node_modules"] }),
+    "src/server/index.mjs": "new",
+    "node_modules/node-pty/pty.node": "prebuilt-verified",
+  });
+  writeTree(dest, {
+    "RELEASE.json": JSON.stringify({ version: "0.0.1", includes: ["src"] }),
+    "src/server/index.mjs": "old",
+    "node_modules/node-pty/pty.node": "stale",
+  });
+  const r = runReplace(pkg, dest);
+  assert.equal(r.status, 0, r.stdout);
+  assert.equal(
+    readFileSync(join(dest, "node_modules/node-pty/pty.node"), "utf8"),
+    "prebuilt-verified",
+    "node_modules must be swapped from the payload when the release owns it",
+  );
+  rmSync(pkg, { recursive: true, force: true });
+  rmSync(dest, { recursive: true, force: true });
 });

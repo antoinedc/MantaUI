@@ -95,6 +95,10 @@ verify_sha256() {
 # dependency on the caller's variable names.
 replace_release_payload() {
   local pkg="$1" dest="$2" node_bin="$3" rel includes
+  # Tells install_prod_deps whether this run already installed a prebuilt,
+  # build-time-verified node_modules from the payload. Reset per call so a
+  # caller can never inherit a stale "yes" from an earlier invocation.
+  REPLACED_NODE_MODULES=0
   includes="$("$node_bin" -e 'const i=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).includes||[]; process.stdout.write(i.join("\n"))' "$pkg/RELEASE.json")" \
     || die "release payload: cannot read includes from $pkg/RELEASE.json"
   [ -n "$includes" ] || die "release payload: $pkg/RELEASE.json has an empty includes list"
@@ -106,6 +110,7 @@ replace_release_payload() {
     cp -R "$pkg/$rel" "$dest/$rel.new" || die "release payload: copy failed for $rel"
     rm -rf "$dest/$rel"
     mv "$dest/$rel.new" "$dest/$rel" || die "release payload: swap failed for $rel"
+    [ "$rel" = "node_modules" ] && REPLACED_NODE_MODULES=1
   done
   cp "$pkg/RELEASE.json" "$dest/RELEASE.json"
 }
@@ -170,4 +175,80 @@ sync_opencode_guidance() {
     rm -f "$tmp"
     ok "opencode AGENTS.md already current."
   fi
+}
+
+# install_prod_deps <dest-dir>
+#
+# Make <dest-dir>/node_modules correct for the box, NON-DESTRUCTIVELY (BET-829).
+#
+# WHY THIS IS NOT JUST `npm ci` ANY MORE
+# --------------------------------------
+# The old update step was a bare `npm ci --omit=dev --prefix <dest>`. `npm ci`
+# DELETES node_modules before it installs, so every way it could fail left the
+# box with no loadable `node-pty` — i.e. a manta-server that cannot start. It
+# failed routinely:
+#
+#   * no `npm` on a service PATH (fixed by the PATH pin in self-update.sh);
+#   * no C toolchain — a clean VPS has no `make`/`g++`, and install.sh never
+#     installs one because the release tarball ships node_modules PREBUILT;
+#   * a system npm bound to a different Node than the vendored runtime, which
+#     "succeeds" while producing a binding for the wrong ABI;
+#   * npm does not preserve the executable bit on node-pty's `spawn-helper`,
+#     which pack.mjs explicitly repairs at build time and an on-box install
+#     silently would not.
+#
+# So the release payload is the PREFERRED source: pack.mjs materializes an
+# --omit=dev tree, repairs spawn-helper, and PROVES it by requiring node-pty
+# through the vendored node for that exact arch. If the incoming release owns
+# node_modules, replace_release_payload has already swapped that verified tree
+# in and there is nothing to do here.
+#
+# `npm ci` remains the fallback for the cases with no payload to take deps
+# from — a git-kind checkout, or a packaged box updating to a release built
+# before node_modules joined `includes`. It is now wrapped so a failure is
+# survivable: the existing tree is moved aside (a rename, so it is cheap and
+# on the same filesystem) and restored if the install fails, leaving the box
+# exactly as bootable as it was before the attempt.
+install_prod_deps() {
+  local dest="$1" backup="$1/node_modules.prev"
+
+  # Set by replace_release_payload in THIS run when the incoming release owned
+  # node_modules. Deliberately a run-scoped variable rather than a marker file
+  # on disk: a marker would go stale the moment a box updated to a release that
+  # did NOT ship node_modules, and we would then skip the install that release
+  # actually needed.
+  if [ "${REPLACED_NODE_MODULES:-0}" = "1" ]; then
+    ok "self-update: prod deps came from the release payload (prebuilt, arch- and ABI-verified at build time)"
+    return 0
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    die "self-update: npm not found on PATH.
+      The box vendors its own npm at \$MANTA_HOME/runtime/node/bin; if that
+      directory is missing, the install is incomplete — re-run install.sh."
+  fi
+
+  log "self-update: reinstalling prod-only deps with npm ci"
+  rm -rf "$backup"
+  if [ -d "$dest/node_modules" ]; then
+    mv "$dest/node_modules" "$backup" || die "self-update: could not set aside node_modules"
+  fi
+
+  if npm ci --omit=dev --prefix "$dest"; then
+    rm -rf "$backup"
+    ok "self-update: prod deps installed"
+    return 0
+  fi
+
+  # Restore, so a box whose deps cannot be rebuilt here still starts. This is
+  # the difference between "the update failed" and "the box is bricked".
+  warn "self-update: npm ci failed — restoring the previous node_modules"
+  rm -rf "$dest/node_modules"
+  if [ -d "$backup" ]; then
+    mv "$backup" "$dest/node_modules" || die "self-update: could not restore node_modules — box may not start; re-run install.sh"
+    die "self-update: dependency install failed; previous node_modules restored.
+      The box still runs, but it is now on new source with older deps — re-run
+      install.sh to get a matching prebuilt tree."
+  fi
+  die "self-update: dependency install failed and there was no previous node_modules to restore — re-run install.sh"
 }
