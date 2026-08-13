@@ -91,6 +91,28 @@ else
   NODE_CMD="node"
 fi
 
+# Put the box's OWN vendored runtime FIRST on PATH (BET-829). install.sh does
+# exactly this; this script never did, and every consequence was a silent brick:
+#
+#   * `npm` is not on the PATH a service gets at all. manta-server's systemd
+#     unit / LaunchAgent carries a minimal PATH that excludes
+#     runtime/node/bin, and an install.sh box has NO system npm (it vendors
+#     Node precisely so it needs none) — so the `npm ci` below died with
+#     "npm: command not found" AFTER the payload swap had already happened.
+#   * Worse, on a box that DOES have a system npm, that npm belongs to a
+#     DIFFERENT Node (e.g. system v22 while the box runs vendored v24). It
+#     rebuilds node-pty's native binding for the wrong ABI, the update reports
+#     success, and manta-server then fails to start at the next restart. A
+#     silent-success brick is worse than a loud failure.
+#
+# Pinning PATH here makes `npm`/`node`/`node-gyp` resolve to the SAME runtime
+# that will load the result. Guarded because a git-kind checkout may have no
+# vendored runtime (it runs whatever Node is on PATH, by design).
+if [ -d "$MANTA_HOME/runtime/node/bin" ]; then
+  PATH="$MANTA_HOME/runtime/node/bin:$PATH"
+  export PATH
+fi
+
 echo "MANTA_PROGRESS 2/6 Downloading update"
 if [ "$INSTALL_KIND" = "git" ]; then
   # A git checkout has no vendored runtime under version control — the box runs
@@ -182,8 +204,7 @@ else
 fi
 
 echo "MANTA_PROGRESS 3/6 Installing dependencies"
-log "self-update: reinstalling prod-only deps"
-npm ci --omit=dev --prefix "$MANTA_HOME"
+install_prod_deps "$MANTA_HOME"
 
 # --- Refresh the manta-native opencode tools --------------------------------
 # The AI-facing tool sources (docs/opencode-tools/*.ts) are COPIED into

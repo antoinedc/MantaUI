@@ -127,9 +127,23 @@ const INCLUDE = [
 // plus `runtime`: the vendored Node is produced by ensureNodeRuntime() during
 // staging rather than copied from the repo, so it cannot be in the staging
 // allowlist above, but it must be replaced on update or a runtime version bump
-// can never reach an installed box. node_modules is deliberately NOT here — it
-// is materialized on the box by `npm ci --omit=dev` after the swap.
-const OWNED_ON_BOX = [...INCLUDE, "runtime"];
+// can never reach an installed box.
+//
+// `node_modules` is here too, as of BET-829. It used to be excluded on the
+// grounds that the box would materialize it with `npm ci --omit=dev` after the
+// swap — but doing that ON the box was the single worst step in the update
+// path. It needs a C toolchain a clean VPS does not have (install.sh never
+// installs one, precisely because this tarball ships deps prebuilt); it builds
+// against whatever Node the SYSTEM has rather than the vendored runtime, so a
+// box with a mismatched system npm gets a wrong-ABI binding and a "successful"
+// update that will not start; and it silently loses the node-pty
+// `spawn-helper` executable bit that this script repairs below.
+//
+// The tree staged here is strictly better than anything the box could build:
+// it is --omit=dev, spawn-helper is repaired, and it is PROVEN by requiring
+// node-pty through the vendored node for this exact arch before we tar it.
+// Tarballs are per-arch, so the copy a box downloads always matches it.
+const OWNED_ON_BOX = [...INCLUDE, "runtime", "node_modules"];
 
 // Parse the nodejs.org SHASUMS256.txt into {filename: sha256}. Tolerates the
 // `*` prefix some lines carry for binary-mode sha.
