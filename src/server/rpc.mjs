@@ -291,6 +291,12 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.fsListDirs, partial)  → args[0] = partial (string)
     "fs:list-dirs": (partial) => local.fsListDirs(partial),
 
+    // BET-786: probe the box for git repos + read origins + detect the gh CLI.
+    // Server-side only; no renderer-supplied depth/caps (a renderer-supplied
+    // depth would be a DoS on the user's own box).
+    // preload: ipcRenderer.invoke(IPC.forgeProbe)  → no args
+    "forge:probe": () => local.forgeProbe(),
+
     // preload: ipcRenderer.invoke(IPC.clipboardWriteText, text)  → args[0] = text (string)
     "clipboard:write-text": (text) => local.clipboardWriteText(text),
 

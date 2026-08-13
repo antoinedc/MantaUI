@@ -693,6 +693,9 @@ export const httpApi: Api = {
   // -- filesystem --
   fsListDirs: (partial) => rpc(IPC.fsListDirs, partial),
 
+  // -- repo probe (BET-786) --
+  forgeProbe: () => rpc(IPC.forgeProbe),
+
   // -- tmux config management --
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),

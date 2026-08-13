@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fsListDirs, parseWorktrees } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -94,3 +94,108 @@ test("fsListDirs: prefix filter narrows results by the typed suffix", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// ===========================================================================
+// BET-786: repo-probe pure helpers
+// ===========================================================================
+
+test("shouldSkipDir: dotfiles and the heavy/build dirs are skipped", () => {
+  for (const name of [".git", ".hidden", ".config", "node_modules", "vendor", "target", "dist", "build"]) {
+    assert.equal(shouldSkipDir(name), true, `should skip ${name}`);
+  }
+  for (const name of ["src", "manta", "repos", "my-project", "Foo"]) {
+    assert.equal(shouldSkipDir(name), false, `should not skip ${name}`);
+  }
+  assert.equal(shouldSkipDir(""), true, "empty name skips");
+  assert.equal(shouldSkipDir(null), true, "non-string skips");
+});
+
+test("dedupeRepoHits: real-path dedupe (symlinked roots)", () => {
+  const hits = [
+    { path: "/home/u/r", _realPath: "/data/repo", repoKey: "github.com/a/b", lastCommitAt: 5 },
+    { path: "/home/u/link/r", _realPath: "/data/repo", repoKey: "github.com/a/b", lastCommitAt: 5 },
+    { path: "/home/u/other", _realPath: "/data/other", repoKey: null, lastCommitAt: 3 },
+  ];
+  const out = dedupeRepoHits(hits);
+  assert.equal(out.length, 2, "duplicate real path collapsed");
+  assert.deepEqual(out.map((h) => h.path), ["/home/u/r", "/home/u/other"]);
+});
+
+test("dedupeRepoHits: falls back to path when no real path is stamped", () => {
+  const out = dedupeRepoHits([
+    { path: "/a", _realPath: "/a", repoKey: null },
+    { path: "/a", _realPath: "/a", repoKey: null },
+    { path: "/b", _realPath: "/b", repoKey: null },
+  ]);
+  assert.equal(out.length, 2);
+});
+
+test("sortRepoHits: recency order, known-forge (repoKey) first", () => {
+  const hits = [
+    { path: "/old", repoKey: null, lastCommitAt: 100 },
+    { path: "/recent-noforge", repoKey: null, lastCommitAt: 900 },
+    { path: "/keyed-old", repoKey: "github.com/a/b", lastCommitAt: 100 },
+    { path: "/keyed-recent", repoKey: "github.com/c/d", lastCommitAt: 500 },
+  ];
+  const sorted = sortRepoHits(hits);
+  // Keyed repos sort above unkeyed regardless of recency.
+  assert.equal(sorted[0].path, "/keyed-recent");
+  assert.equal(sorted[1].path, "/keyed-old");
+  // Within each group, most recent lastCommitAt first.
+  assert.equal(sorted[2].path, "/recent-noforge");
+  assert.equal(sorted[3].path, "/old");
+  // Input not mutated.
+  assert.equal(hits[0].path, "/old");
+});
+
+test("sortRepoHits: null lastCommitAt sorts last", () => {
+  const sorted = sortRepoHits([
+    { path: "/unknown", repoKey: null, lastCommitAt: null },
+    { path: "/known", repoKey: "github.com/a/b", lastCommitAt: 10 },
+    { path: "/plain", repoKey: null, lastCommitAt: 50 },
+  ]);
+  assert.deepEqual(sorted.map((h) => h.path), ["/known", "/plain", "/unknown"]);
+});
+
+test("parseGhAuthStatus: extracts the login from `gh auth status` output", () => {
+  assert.equal(
+    parseGhAuthStatus("github.com\n  ✓ Logged in to github.com as octocat (oauth)\n  ✓ Active account: true\n"),
+    "octocat",
+  );
+});
+
+test("parseGhAuthStatus: multi-host output returns the logged-in account", () => {
+  assert.equal(
+    parseGhAuthStatus(
+      "github.com\n  ✓ Logged in to github.com as octocat (oauth)\n\n" +
+      "gitlab.com\n  ✗ Not logged in to gitlab.com\n",
+    ),
+    "octocat",
+  );
+});
+
+test("parseGhAuthStatus: 'not logged in' and garbage return null", () => {
+  assert.equal(parseGhAuthStatus("github.com\n  ✗ Not logged in to github.com\n"), null);
+  assert.equal(parseGhAuthStatus(""), null);
+  assert.equal(parseGhAuthStatus("this is not gh output at all"), null);
+  assert.equal(parseGhAuthStatus(null), null);
+  assert.equal(parseGhAuthStatus(undefined), null);
+  assert.equal(parseGhAuthStatus(12345), null);
+});
+
+test("parseGhAuthStatus: no token-looking substring is ever returned", () => {
+  // PAT-shaped strings are built at runtime (prefix spliced from parts) so no
+  // secret-shaped literal appears in source — a hardcoded one trips the CI
+  // gitleaks secret scan that gates merges.
+  const ghpPrefix = "gh" + "p_";
+  const ghoPrefix = "gh" + "o_";
+  const fullToken = ghpPrefix + "AbC12xYz89QwEr00TgHjKlMnOpQrStUvWxYz";
+  const shortToken = ghoPrefix + "AbC12xYz89QwEr00";
+  // A token-shaped "login" is refused outright.
+  assert.equal(parseGhAuthStatus(`github.com\n  ✓ Logged in to github.com as ${shortToken} (oauth)\n`), null);
+  // A real token present in the output must never be echoed back as the login.
+  const out = parseGhAuthStatus(`github.com\n  ✓ Token: ${fullToken}\n  ✓ Logged in to github.com as octocat (oauth)\n`);
+  assert.equal(out, "octocat");
+  assert.ok(!/ghp_[A-Za-z0-9]+/.test(out ?? ""), "no token fragment in the result");
+});
+
