@@ -12,6 +12,12 @@
 
 import { createContext, type ReactNode } from "react";
 import type { OpencodeMessage, OpencodeModel } from "../shared/types";
+// TokenUsage now lives in src/shared/types.ts (the single source — it also
+// types OpencodeMessageInfo.tokens, which killed the renderer's
+// `as unknown as { tokens?: TokenUsage }` casts, BET-733/L10). Re-exported here
+// so the existing renderer `import { TokenUsage } from "./chatShared"` call
+// sites are unchanged.
+export type { TokenUsage } from "../shared/types";
 
 // In-flight attachments tracked alongside the textarea content. Each chip
 // rendered above the input maps to one entry; `status` drives the chip
@@ -59,14 +65,6 @@ export type TypeaheadRow = {
   secondary?: string;         // dim caption: command description / agent description
 };
 
-// Token accounting surfaced by the running indicator / context bar.
-export type TokenUsage = {
-  total?: number;
-  input: number;
-  output: number;
-  reasoning: number;
-  cache: { read: number; write: number };
-};
 
 // One tool part's `state` shape (opencode tool-call lifecycle). Extracted so
 // the tool-rendering components share a single definition.

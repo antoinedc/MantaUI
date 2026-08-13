@@ -695,20 +695,16 @@ export const demoPages: ServedPageMeta[] = [
 
 // Attach cumulative tokens to the in-flight assistant message so the context
 // bar (and `latestTokens` memo in ChatPanel) reads a realistic breakdown.
-// `OpencodeMessageInfo` doesn't type the `tokens` field directly — the
-// renderer reads it via `(info as unknown as { tokens?: TokenUsage }).tokens`
-// at chatPanel.tsx:1446, so the same `as unknown as` cast lets us attach
-// the live numbers without breaking the typed surface.
+// The `tokens` field is declared on OpencodeMessageInfo (BET-733/L10), so it
+// can be set on the typed surface directly.
 demoMessages[1].info = {
   ...demoMessages[1].info,
-  ...({
-    tokens: {
-      input: 1234,
-      output: 418,
-      reasoning: 67,
-      cache: { read: 68_921, write: 0 },
-    },
-  } as unknown as Record<string, unknown>),
+  tokens: {
+    input: 1234,
+    output: 418,
+    reasoning: 67,
+    cache: { read: 68_921, write: 0 },
+  },
 };
 
 // =============================================================================

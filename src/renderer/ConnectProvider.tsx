@@ -350,7 +350,11 @@ export function ConnectProvider({
       }
     }, CLAUDE_POLL_INTERVAL_MS);
     return () => window.clearInterval(handle);
-  }, [phase, safeSetPhase, mounted]);
+    // Narrowed to the discriminant that should restart the poll. Dependent on
+    // the whole `phase` object, every cosmetic update (`{...phase, url}` /
+    // `inputError` below) mutates the object and re-runs this effect — which
+    // resets `startedWall` above and silently defeats the 5-minute cap.
+  }, [phase.kind, phase.kind === "needsClaudeLogin" ? phase.ptySessionKey : null, safeSetPhase, mounted]);
 
   // BET-421 §E: lazy Claude CLI install poll. While `installingClaudeCli`,
   // poll opencodeClaudeCliStatus() every 2s. When the binary appears on
@@ -429,7 +433,10 @@ export function ConnectProvider({
       window.clearInterval(handle);
       dispose();
     };
-  }, [phase, safeSetPhase, mounted]);
+    // Narrowed to the discriminant (same shape as the install-elapsed effect)
+    // so cosmetic `phase` object updates can't reset `startedWall` and dodge
+    // the 5-minute install cap.
+  }, [phase.kind, phase.kind === "installingClaudeCli" ? phase.ptySessionKey : null, safeSetPhase, mounted]);
 
   // Device-code poll (waiting). Polls `{action:"status"}` every 3s; the
   // provider-id appearing in `connected[]` is the success signal (opencode
