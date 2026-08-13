@@ -97,6 +97,7 @@ export function SplitChip({
   extraHook,
   extraPressed,
   extraDisabled = false,
+  loading = false,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
   left: ReactNode;
@@ -165,15 +166,33 @@ export function SplitChip({
   extraPressed?: boolean;
   /** Render the extra segment non-interactive (dimmed, `disabled`). */
   extraDisabled?: boolean;
+  /**
+   * The control is still resolving what it describes. All segments drop their
+   * hover affordance together and the shell reports `aria-busy` — they describe
+   * ONE subject (in the composer: the model, its effort and its fast twin), so
+   * a chip that looked half-live would imply the other half is known.
+   *
+   * Deliberately PRESENTATIONAL: it does not `disabled` the segments. A caller
+   * whose segments are already inert while loading (ModelPicker's effort/toggle
+   * early-return on an empty variant/fast resolution) gets that for free, and
+   * one whose left segment opens a self-describing menu keeps it reachable —
+   * which matters because a catalog fetch that fails leaves this state up until
+   * the next remount, and a hard-disabled chip would be the user's only
+   * affordance taken away.
+   */
+  loading?: boolean;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
   const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
-  const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`;
+  const idle = loading ? " cursor-default" : " hover:bg-fill-hover hover:text-text";
+  const leftClass = `${leftHook ? `${leftHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full${idle}`;
   // `rightAccent` is a COLOUR accent only. It used to add `font-semibold` too,
   // which made the effort label the heaviest text in the composer — the accent
   // already carries the emphasis, and the extra weight only shouted.
-  const rightClass = `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover${rightAccent ? " text-accent-tx" : ""}`;
+  const rightClass =
+    `${rightHook ? `${rightHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border` +
+    `${loading ? " cursor-default" : " hover:bg-fill-hover"}${rightAccent && !loading ? " text-accent-tx" : ""}`;
   // The toggle segment shares the divider + padding of the right segment, so
   // the three read as one control. Only its TONE differs, across three states
   // that must be told apart at a glance:
@@ -194,16 +213,21 @@ export function SplitChip({
     : extraDisabled
       ? "text-text-quiet"
       : "text-text-faint";
-  const extraInteraction = extraDisabled
-    ? "opacity-50 cursor-not-allowed"
-    : extraPressed
-      ? "hover:bg-fill-hover"
-      : "hover:bg-fill-hover hover:text-text";
+  const extraInteraction = loading
+    ? "cursor-default"
+    : extraDisabled
+      ? "opacity-50 cursor-not-allowed"
+      : extraPressed
+        ? "hover:bg-fill-hover"
+        : "hover:bg-fill-hover hover:text-text";
   const extraClass =
     `${extraHook ? `${extraHook} ` : ""}inline-flex items-center ${CHIP_PAD} h-full border-l border-border ` +
     `${extraTone} ${extraInteraction}`;
   return (
-    <div className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}>
+    <div
+      className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}
+      aria-busy={loading || undefined}
+    >
       <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
         {left}
       </button>
@@ -216,8 +240,11 @@ export function SplitChip({
           onClick={onExtraClick}
           title={extraTitle}
           aria-label={extraLabel}
+          // `aria-pressed` is dropped while loading: the toggle's state is a
+          // property of a model we haven't resolved, so reporting `false` would
+          // assert "off" rather than "unknown".
           disabled={extraDisabled}
-          aria-pressed={extraPressed}
+          aria-pressed={loading ? undefined : extraPressed}
           className={extraClass}
         >
           {extra}
