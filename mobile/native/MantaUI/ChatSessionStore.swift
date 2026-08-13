@@ -168,6 +168,11 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var questions: [QuestionRequest] = []
     @Published private(set) var permissions: [PermissionRequest] = []
     @Published private(set) var subagents: [StreamSubagentPayload] = []
+    /// Live tools currently running on the box, in start order (BET-753). The
+    /// chat renders each as a running-tool row with its live bash tail; a tool
+    /// leaves the set the moment its `toolEnded` frame lands, and the canonical
+    /// turn-boundary refetch renders it as a step row.
+    @Published private(set) var runningTools: [LiveTool] = []
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
     /// POSTed while `running`, which is what used to implicitly abort the
@@ -413,6 +418,7 @@ final class ChatSessionStore: ObservableObject {
         sessionError = s.sessionError
         todos = s.todos
         subagents = s.subagents
+        runningTools = s.runningTools
 
         // Which frame (if any) just changed this session's stream state. The
         // `$sessionStates` sink fires on every republish, so the stamp only

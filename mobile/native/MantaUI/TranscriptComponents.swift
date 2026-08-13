@@ -393,6 +393,85 @@ struct StepGroupView: View {
     }
 }
 
+// MARK: - Live running tool row (BET-753)
+//
+// The LIVE counterpart to a canonical step row. While a tool call is still in
+// flight the box streams `toolStarted`/`toolOutput`/`toolEnded` frames, and
+// this row renders what the box is doing mid-turn (tool name + status + the
+// accumulated bash tail) pinned above the composer, so the phone shows
+// something instead of nothing until the turn-boundary refetch lands.
+//
+// It mirrors the canonical `StepRowView` treatment (status dot + tool name +
+// mono tail on a `panel` group) so the live→canonical swap at the refetch
+// boundary doesn't pop. It is an OVERLAY — never part of the canonical
+// transcript (that remains `ChatSessionStore.swift`'s source of truth).
+struct RunningToolRow: View {
+    let tool: LiveTool
+    let tokens: Tokens
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Circle()
+                    .fill(tokens.accent)
+                    .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
+                Text(tool.name ?? "tool")
+                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
+                // The box's human title for the part (e.g. "Run: npm test"),
+                // when it differs from the bare tool name.
+                if let hint = tool.presentationHint, !hint.isEmpty, hint != tool.name {
+                    Text(hint)
+                        .font(.system(size: Metrics.type.xs, design: .monospaced))
+                        .foregroundColor(tokens.tx4)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+                Text(statusText)
+                    .font(.system(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
+            }
+            .padding(.vertical, Metrics.type.stepRowY)
+            .padding(.horizontal, Metrics.spacing.sp3)
+
+            if !tool.tail.isEmpty {
+                Text(tool.tail)
+                    .font(.system(size: Metrics.type.xs, design: .monospaced))
+                    .foregroundColor(tokens.tx3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, Metrics.spacing.sp2)
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .background(tokens.inset)
+                    .accessibilityIdentifier("running-tool-tail")
+            }
+        }
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("running-tool-row")
+    }
+
+    /// The row's live status label. The wire `status` is one of
+    /// pending/running/completed/error; while the row renders the tool is
+    /// still in flight, so this stays truthful to the incoming value.
+    private var statusText: String {
+        switch (tool.status ?? "").lowercased() {
+        case "error": return "error"
+        case "pending": return "queued"
+        case "completed": return "done"
+        default: return "running"
+        }
+    }
+}
+
 // MARK: - Subagents (§8a) — a drill-in screen, not an inline expansion
 //
 // A subagent is a session, not a tool call: it streams, owns its own steps and

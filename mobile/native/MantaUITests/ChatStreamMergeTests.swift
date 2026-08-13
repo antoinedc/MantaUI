@@ -491,6 +491,77 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(store.turnCompletionCount, 1, "mid-turn open must count the in-flight turn's completion")
     }
 
+    // MARK: - Live tools (BET-753)
+
+    /// A `toolStarted` frame surfaces a running-tool row on the store, even
+    /// before any canonical transcript rows exist.
+    func testToolStartedPopulatesRunningTools() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#)
+
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        XCTAssertEqual(store.runningTools.count, 1)
+        XCTAssertEqual(store.runningTools[0].idx, "toolu_1")
+        XCTAssertEqual(store.runningTools[0].name, "bash")
+        XCTAssertEqual(store.runningTools[0].presentationHint, "Run: npm test")
+    }
+
+    /// Appended `toolOutput` deltas for the same `idx` concatenate in order; a
+    /// new `idx` starts a fresh tail.
+    func testToolOutputConcatenatesByIndexInOrder() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","status":"running"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"one\n"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"two\n"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_2","toolName":"read","status":"running"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_2","text":"file.txt"}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(store.runningTools.map(\.idx), ["toolu_1", "toolu_2"])
+        XCTAssertEqual(store.runningTools[0].tail, "one\ntwo\n", "deltas for the same idx concatenate in order")
+        XCTAssertEqual(store.runningTools[1].tail, "file.txt", "a new idx starts a fresh tail")
+    }
+
+    /// `toolEnded` removes the running tool; the store surfaces the outcome
+    /// (`ok:false`/`truncated`) on the retained record until the canonical
+    /// refetch takes over.
+    func testToolEndedRemovesRunningToolAndReflectsOutcome() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","status":"running"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","text":"boom\n"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(store.runningTools.count, 0, "an ended tool leaves the running set")
+        let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
+        XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
+        XCTAssertEqual(reflected?.ok, false)
+        XCTAssertEqual(reflected?.truncated, true)
+    }
+
     // MARK: - Mock transport
 
     /// Poll the main actor until `condition` holds (or ~2s elapses). The drain

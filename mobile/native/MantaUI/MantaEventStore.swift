@@ -34,6 +34,24 @@ struct StreamTextChunk: Equatable, Sendable {
     var text: String
 }
 
+/// A tool call currently in flight (BET-753), keyed by its stable tool part id
+/// (`idx`). The device renders it as a LIVE running-tool row (with the
+/// accumulated bash tail) that converges to a canonical step row once the
+/// turn-boundary refetch lands. Mirror of the server's `st.tools` record.
+struct LiveTool: Equatable, Sendable {
+    var idx: String
+    var name: String?
+    var presentationHint: String?
+    var status: String?
+    /// Accumulated incremental stdout tail, concatenated in arrival order.
+    var tail: String = ""
+    /// True once the `toolEnded` frame lands; an ended tool no longer renders
+    /// as a running row (the record is kept so the outcome can be reflected).
+    var ended: Bool = false
+    var ok: Bool = true
+    var truncated: Bool = false
+}
+
 struct MantaSessionStreamState: Equatable, Sendable {
     var sessionId: String
     /// Accumulated flushed text, one entry per (part, field), in ARRIVAL order
@@ -53,9 +71,24 @@ struct MantaSessionStreamState: Equatable, Sendable {
     var questions: StreamQuestionsPayload?
     var permissions: StreamPermissionsPayload?
     var subagents: [StreamSubagentPayload] = []
+    /// Live tools in flight keyed by their stable tool part id (`idx`), and
+    /// the order they started in. A `toolEnded` removes the idx from the order
+    /// (so `runningTools` yields only still-running tools) but keeps the record
+    /// so the outcome can be reflected; the whole map is cleared on
+    /// `turnComplete`, when the turn's canonical refetch has taken the tools
+    /// over as step rows (BET-753).
+    var tools: [String: LiveTool] = [:]
+    var toolStartOrder: [String] = []
 
     init(sessionId: String) {
         self.sessionId = sessionId
+    }
+
+    /// The still-running tools, in start order. Ended tools are already gone
+    /// from `toolStartOrder`, so this is exactly what the running-tool rows
+    /// render (BET-753).
+    var runningTools: [LiveTool] {
+        toolStartOrder.compactMap { tools[$0] }
     }
 
     /// partID -> accumulated text, for callers that only want a lookup.
@@ -131,6 +164,37 @@ enum MantaStreamRouter {
                 // life of the session, so the working row and session-list timer
                 // never stopped.
                 s.running = p.running
+            }
+            // A finished turn has no running tools; the canonical refetch now
+            // owns them as step rows, so drop the live map to bound memory
+            // (BET-753).
+            s.tools.removeAll()
+            s.toolStartOrder.removeAll()
+        case "toolStarted":
+            if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
+                s.tools[p.idx] = LiveTool(
+                    idx: p.idx,
+                    name: p.toolName,
+                    presentationHint: p.toolPresentationHint,
+                    status: p.status
+                )
+                if !s.toolStartOrder.contains(p.idx) { s.toolStartOrder.append(p.idx) }
+            }
+        case "toolOutput":
+            if let p = try? frame.decodedPayload(StreamToolOutputPayload.self),
+               var t = s.tools[p.idx] {
+                t.tail += p.text
+                t.status = "running"
+                s.tools[p.idx] = t
+            }
+        case "toolEnded":
+            if let p = try? frame.decodedPayload(StreamToolEndedPayload.self),
+               var t = s.tools[p.idx] {
+                t.ended = true
+                t.ok = p.ok
+                t.truncated = p.truncated ?? false
+                s.tools[p.idx] = t
+                s.toolStartOrder.removeAll { $0 == p.idx }
             }
         case "truncation":
             s.truncation = try? frame.decodedPayload(StreamTruncationPayload.self)
