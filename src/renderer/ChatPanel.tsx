@@ -2216,7 +2216,6 @@ export function ChatPanel({
         ));
       }
     }
-    }
     // Ambient tier — fixed priority, independent of arrival order.
     if (retryInfo) list.push(amb("retry",
       <div className="shrink-0 px-4 pt-2"><RetryCard info={retryInfo} /></div>));
