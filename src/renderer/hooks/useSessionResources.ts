@@ -1,33 +1,17 @@
 // ===== useSessionResources =====
 //
 // Extracted from ChatPanel.tsx (BET-63). Owns the three "server-owned
-// resource" cards that hang off a chat session — scheduled prompts (⏰),
-// secrets (🔑), and inbound webhooks (🪝). Each is the same shape:
+// resource" cards hanging off a chat session — scheduled prompts (⏰), secrets
+// (🔑), inbound webhooks (🪝). Each card is the same shape: a shared `openPanel`
+// surface, a metadata list + error, a `refresh*` callback, a poll effect while
+// open (schedules also background-polls so its toolbar count stays fresh), a
+// `manta-open-*` window-CustomEvent opener, and a session-change reset.
 //
-//   - a single `openPanel` surface shared by all three cards (opened by the
-//     composer toolbar or a mobile ⋯-sheet `manta-open-*` window CustomEvent),
-//   - a list of metadata + an error string,
-//   - a `refresh*` callback that re-fetches over the `schedule:*` / `secrets:*`
-//     / `webhook:*` window.api channels,
-//   - a poll effect while the card is open (schedules also background-polls so
-//     its toolbar count stays fresh), and
-//   - a session-change reset.
+// The three cards are ONE generic `useResourceCard` helper parameterized by
+// the fetch call, the event name, the background-poll flag, and the empty
+// value; the public `useSessionResources` return shape is unchanged.
 //
-// The three cards are implemented by ONE generic `useResourceCard` helper
-// parameterized by the fetch call, the `manta-open-*` event name, the
-// background-poll flag, and the empty value. The three exported surface
-// fields are thin instantiations on top of it — the public
-// `useSessionResources` return shape is unchanged.
-//
-// This slice is completely independent of the fragile SSE / pin-to-bottom /
-// message-drain core, which is exactly why it's the safe first hook to pull
-// out of the container: nothing here touches `messages`, the delta buffer, or
-// the scroll refs. The behavior is byte-for-byte the same as when it lived
-// inline in ChatPanel — see the git history of ChatPanel.tsx for the original
-// call sites.
-//
-// No Electron-only deps — only `window.api.*`, which the mobile HTTP server
-// shims.
+// Only `window.api.*` — no Electron-only deps (the mobile HTTP server shims it).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ScheduledJob, SecretMeta, WebhookMeta } from "../../shared/types";
@@ -37,15 +21,10 @@ export type PanelName = "schedules" | "secrets" | "webhooks";
 
 export type SessionResources = {
   // ----- The card surface -----
-  //
-  // ONE state for all three cards, not three booleans. "at most one card is
-  // open" is then a property of the state's shape rather than a rule some
-  // caller has to remember to enforce, and every button goes through the same
-  // toggle. Do not split this back into per-card flags.
+  // ONE state for all three cards ("at most one open" falls out of the shape).
   /** Which card is open, or null when none is. */
   openPanel: PanelName | null;
-  /** Toolbar click: open `name`, or close it if it is already the open one.
-   *  Opening one closes whichever other was open — implicitly. */
+  /** Toolbar click: open `name`, or close it if already open. */
   togglePanel: (name: PanelName) => void;
   /** A card's × button, and the session-change reset. */
   closePanel: () => void;
@@ -72,13 +51,10 @@ export type SessionResources = {
   refreshWebhooks: () => Promise<void>;
 };
 
-// One card's shared state (list + error + refresh), poll cadence, and open-
-// bridge listener. The three cards (schedules/secrets/webhooks) differ ONLY
-// in: the fetch call, the `manta-open-*` event name (= panelName), whether it
-// background-polls (schedules does; the others poll only while their card is
-// open), and the "server unreachable" message. Everything else — the list/
-// error state, the session-change reset, the open-poll and background-poll,
-// and the out-of-panel opener listener — is one copy.
+// One card's shared list/error/refresh state, poll cadence, and open-bridge
+// listener. Cards differ only in the fetch call, event name (= panelName), the
+// background-poll flag (schedules background-polls; the others poll only while
+// their card is open), and the "server unreachable" message.
 type ResourceCardConfig<T> = {
   panelName: PanelName;
   sessionId: string;
@@ -97,37 +73,24 @@ type ResourceCardConfig<T> = {
 };
 
 function useResourceCard<T>({
-  panelName,
-  sessionId,
-  isActive,
-  openPanel,
-  setOpenPanel,
-  fetch,
-  empty,
-  backgroundPoll,
-  unreachable,
+  panelName, sessionId, isActive, openPanel, setOpenPanel, fetch, empty, backgroundPoll, unreachable,
 }: ResourceCardConfig<T>) {
   const [items, setItems] = useState<T[]>(empty);
   const [error, setError] = useState<string | null>(null);
-
-  // fetch/empty are passed inline from the caller (recreated each render), so
-  // read them through refs to keep `refresh` a stable identity across renders
-  // and to keep the session-reset effect from re-firing every render.
+  // fetch/empty are passed inline (recreated each render); hold them in refs so
+  // `refresh` keeps a stable identity and the reset effect doesn't re-fire.
   const fetchRef = useRef(fetch);
   fetchRef.current = fetch;
   const emptyRef = useRef(empty);
   emptyRef.current = empty;
 
   const refresh = useCallback(() => {
-    return fetchRef
-      .current(sessionId)
+    return fetchRef.current(sessionId)
       .then((data) => {
         setItems(Array.isArray(data) ? data : emptyRef.current);
         setError(null);
       })
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : unreachable);
-      });
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : unreachable));
   }, [sessionId, unreachable]);
 
   // Session change resets this card's cached list + error (the outer hook
@@ -137,13 +100,10 @@ function useResourceCard<T>({
     setError(null);
   }, [sessionId]);
 
-  // Derive per-card "is this card open?" for the poll cadence (see type
-  // comment on openPanel).
   const opened = openPanel === panelName;
 
-  // Poll freshness. schedules background-polls (10s while open, 30s closed,
-  // stopped while the panel is hidden) so its toolbar count stays current; the
-  // others poll only while their card is open (10s).
+  // Poll freshness: schedules background-polls (10s open / 30s closed, stopped
+  // while hidden); the others poll only while their card is open (10s).
   useEffect(() => {
     if (backgroundPoll) {
       if (!isActive) return;
@@ -152,17 +112,14 @@ function useResourceCard<T>({
       const poll = setInterval(() => void refresh(), intervalMs);
       return () => clearInterval(poll);
     }
-    // Non-background cards poll only while open.
     if (!opened) return;
     void refresh();
     const poll = setInterval(() => void refresh(), 10_000);
     return () => clearInterval(poll);
   }, [opened, isActive, backgroundPoll, refresh]);
 
-  // Entry point for an out-of-panel opener (the mobile ⋯ sheet dispatched
-  // these; the listeners are the documented bridge and are covered by tests).
-  // Open-only — never a toggle, because the dispatcher has no idea what is
-  // currently open.
+  // Open this card from an out-of-panel `manta-open-*` bridge. Open-only —
+  // never a toggle, because the dispatcher has no idea what is open.
   useEffect(() => {
     const type = `manta-open-${panelName}`;
     const onOpen = (e: Event) => {
@@ -177,8 +134,8 @@ function useResourceCard<T>({
 }
 
 export function useSessionResources(sessionId: string, isActive: boolean): SessionResources {
-  // ----- The card surface -----
-  // One piece of state governs all three cards (see the type comment above).
+  // One piece of state governs all three cards (at most one open — see the
+  // type comment).
   const [openPanel, setOpenPanel] = useState<PanelName | null>(null);
   const togglePanel = useCallback(
     (name: PanelName) => setOpenPanel((cur) => (cur === name ? null : name)),
@@ -186,56 +143,28 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
   );
   const closePanel = useCallback(() => setOpenPanel(null), []);
 
-  // ----- Scheduled prompts (the ⏰ ScheduledTasksCard) -----
-  // Jobs are server-owned (manta-server fires them); here we only list + delete
-  // via the schedule:* window.api channels. Refetch-driven (open + open-poll +
-  // post-delete) — NOT a bus event, because desktop's renderer isn't wired to
-  // the server bus. See docs/manta-tools-scheduler.md.
+  // Scheduled prompts (⏰): server-owned; list + delete via schedule:* channels.
+  // Refetch-driven (open + open-poll + post-delete), NOT a bus event.
   const schedules = useResourceCard<ScheduledJob>({
-    panelName: "schedules",
-    sessionId,
-    isActive,
-    openPanel,
-    setOpenPanel,
-    fetch: (sid) => window.api.scheduleList(sid),
-    empty: [],
-    backgroundPoll: true,
+    panelName: "schedules", sessionId, isActive, openPanel, setOpenPanel,
+    fetch: (sid) => window.api.scheduleList(sid), empty: [], backgroundPoll: true,
     unreachable: "schedule server unreachable",
   });
 
-  // ----- Secrets (the 🔑 SecretsCard) -----
-  // Secrets are server-owned (the value never leaves the box; the AI reads
-  // them via the secret_* opencode tools). Here the user adds/edits/deletes via
-  // secrets:* window.api channels. list returns METADATA ONLY (no values).
-  // Refetch-driven like schedules. The card shows shared secrets + this
-  // session's scoped ones (sessionId is passed so the agent-visible view
-  // matches what tools will resolve).
+  // Secrets (🔑): server-owned (values never leave the box). list returns
+  // METADATA ONLY (no values). Refetch-driven like schedules.
   const secrets = useResourceCard<SecretMeta>({
-    panelName: "secrets",
-    sessionId,
-    isActive,
-    openPanel,
-    setOpenPanel,
-    fetch: (sid) => window.api.secretsList(sid),
-    empty: [],
-    backgroundPoll: false,
+    panelName: "secrets", sessionId, isActive, openPanel, setOpenPanel,
+    fetch: (sid) => window.api.secretsList(sid), empty: [], backgroundPoll: false,
     unreachable: "secrets server unreachable",
   });
 
-  // ----- Inbound webhooks (the 🪝 WebhooksCard) -----
-  // Hooks are server-owned (external POSTs wake the session); here we only list
-  // + revoke via the webhook:* channels (creation is the AI's job via the
-  // `webhook` opencode tool, which returns the one-time signing secret).
-  // Refetch-driven like schedules/secrets. See docs/manta-tools-webhook.md.
+  // Inbound webhooks (🪝): server-owned (external POSTs wake the session).
+  // list + revoke via webhook:* channels (creation is the AI's job).
+  // Refetch-driven like schedules/secrets.
   const webhooks = useResourceCard<WebhookMeta>({
-    panelName: "webhooks",
-    sessionId,
-    isActive,
-    openPanel,
-    setOpenPanel,
-    fetch: (sid) => window.api.webhookList(sid),
-    empty: [],
-    backgroundPoll: false,
+    panelName: "webhooks", sessionId, isActive, openPanel, setOpenPanel,
+    fetch: (sid) => window.api.webhookList(sid), empty: [], backgroundPoll: false,
     unreachable: "webhook server unreachable",
   });
 
@@ -246,23 +175,15 @@ export function useSessionResources(sessionId: string, isActive: boolean): Sessi
   }, [sessionId]);
 
   return {
-    openPanel,
-    togglePanel,
-    closePanel,
-    schedules: schedules.items,
-    setSchedules: schedules.setItems,
-    scheduleError: schedules.error,
-    setScheduleError: schedules.setError,
+    openPanel, togglePanel, closePanel,
+    schedules: schedules.items, setSchedules: schedules.setItems,
+    scheduleError: schedules.error, setScheduleError: schedules.setError,
     refreshSchedules: schedules.refresh,
-    secrets: secrets.items,
-    setSecrets: secrets.setItems,
-    secretError: secrets.error,
-    setSecretError: secrets.setError,
+    secrets: secrets.items, setSecrets: secrets.setItems,
+    secretError: secrets.error, setSecretError: secrets.setError,
     refreshSecrets: secrets.refresh,
-    webhooks: webhooks.items,
-    setWebhooks: webhooks.setItems,
-    webhookError: webhooks.error,
-    setWebhookError: webhooks.setError,
+    webhooks: webhooks.items, setWebhooks: webhooks.setItems,
+    webhookError: webhooks.error, setWebhookError: webhooks.setError,
     refreshWebhooks: webhooks.refresh,
   };
 }
