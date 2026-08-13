@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rm, readFile, stat, writeFile } from "node:fs/promises";
+import { rm, readFile, stat } from "node:fs/promises";
 import {
   isValidToken,
   isValidPairingCode,
@@ -12,7 +12,6 @@ import {
   isPublicAssetPath,
   loadAuth,
   saveAuth,
-  deleteAuth,
   ensureAuth,
   createPairingRegistry,
   createAuthEngine,
@@ -263,6 +262,32 @@ test("ensureAuth generates + persists a fresh identity on first run, then is sta
   }
 });
 
+test("ensureAuth is single-flight under concurrent first-run calls (BET-771)", async () => {
+  // Regression for the check-then-act race: two concurrent first-run calls
+  // must mint ONE shared identity, not two (where last-write-wins silently
+  // swaps the box). Serialized by the internal mutex, the second call reloads
+  // the store the first just wrote, so both observe the SAME box.
+  const path = tmpPath("ensure-concurrent");
+  const load = () => loadAuth(path);
+  let saves = 0;
+  const save = async (a) => {
+    saves++;
+    await saveAuth(a, path);
+  };
+  try {
+    const [a, b] = await Promise.all([
+      ensureAuth({ load, save }),
+      ensureAuth({ load, save }),
+    ]);
+    assert.equal(isValidToken(a.box_id), true);
+    assert.equal(isValidToken(a.box_token), true);
+    assert.deepEqual(b, a); // both observe the SAME identity
+    assert.equal(saves, 1); // minted + persisted exactly once
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
 // ----------------------------------------------------------------------------
 // pairing registry
 // ----------------------------------------------------------------------------
@@ -316,10 +341,10 @@ const AUTH = { box_id: HEX32, box_token: HEX32B, created_at: 0 };
 
 // SAFETY — build engines through this helper, never `createAuthEngine` directly.
 //
-// createAuthEngine's saveAuth/deleteAuth default to the REAL box store
-// (~/.manta/auth.json). revoke() with a MATCHING token therefore unlinks that
-// file and mints a fresh identity in it — so a revoke test written without
-// injection rotates the box_id/box_token of whatever machine runs the suite.
+// createAuthEngine's saveAuth DEFAULT targets the real box store
+// (~/.manta/auth.json). revoke() with a MATCHING token therefore mints and
+// persists a fresh identity there — so a revoke test written without injection
+// rotates the box_id/box_token of whatever machine runs the suite.
 // That is not hypothetical: on the dev box (which also hosts the self-hosted CI
 // runner) every `npm test` regenerated the identity on disk while the running
 // manta-server kept the old token in memory, so each manta-native AI tool —
@@ -331,7 +356,6 @@ const AUTH = { box_id: HEX32, box_token: HEX32B, created_at: 0 };
 function engine(opts = {}) {
   return createAuthEngine({
     saveAuth: async () => {},
-    deleteAuth: async () => {},
     // Fresh in-memory device registry with no-op persistence: keeps the
     // device store (devices.json) OFF the real/sandboxed filesystem and
     // isolates each engine so a claim/revoke in one test can't leak into
@@ -582,7 +606,6 @@ test("revoke: valid token deletes box_token from auth.json (BET-357 §2)", async
   const eng = engine({
     auth: initial,
     saveAuth: (a) => saveAuth(a, path),
-    deleteAuth: () => deleteAuth(path),
   });
 
   const r = await eng.revoke({ token: HEX32B });
@@ -618,6 +641,39 @@ test("revoke: valid token deletes box_token from auth.json (BET-357 §2)", async
   await rm(path, { force: true });
 });
 
+test("revoke: whole-box reset is a single atomic store write (BET-771)", async () => {
+  // Regression for the old delete-then-save pair. The on-disk store must
+  // transition old → fresh in ONE write (writeJsonAtomic's temp-then-rename),
+  // never pass through a window where the file is absent — a power-fail there
+  // would leave no store and a reboot would mint a whole new identity.
+  const path = tmpPath("revoke-atomic");
+  const initial = { box_id: HEX32, box_token: HEX32B, created_at: 1000 };
+  await saveAuth(initial, path);
+  let writes = 0;
+  const eng = engine({
+    auth: initial,
+    saveAuth: (a) => {
+      writes++;
+      return saveAuth(a, path);
+    },
+  });
+
+  const r = await eng.revoke({ token: HEX32B });
+  assert.equal(r.ok, true);
+  assert.equal(writes, 1); // exactly one store write — no separate delete step
+  assert.equal(isValidToken(r.box_id), true);
+  assert.notEqual(r.box_id, HEX32);
+  // The store still exists (atomically replaced, never removed) and holds the
+  // fresh identity — no "missing store → reboot re-mints a new box" gap.
+  const onDisk = loadAuth(path);
+  assert.notEqual(onDisk, null);
+  assert.equal(onDisk.box_id, r.box_id);
+  assert.notEqual(onDisk.box_token, HEX32B);
+  assert.equal(isValidToken(onDisk.box_token), true);
+
+  await rm(path, { force: true });
+});
+
 test("revoke: pair + claim after revoke returns the NEW identity, not the old one", async () => {
   // End-to-end: a real revoke is followed by a fresh pair+claim. The claim
   // must surface the new identity (so any device that re-pairs next gets a
@@ -629,7 +685,6 @@ test("revoke: pair + claim after revoke returns the NEW identity, not the old on
   const eng = engine({
     auth: initial,
     saveAuth: (a) => saveAuth(a, path),
-    deleteAuth: () => deleteAuth(path),
   });
 
   await eng.revoke({ token: HEX32B });
@@ -658,25 +713,6 @@ test("revoke: clears any active pairing code (the old identity's code is moot)",
   assert.equal(eng.hasActivePairing(), false);
   const staleClaim = eng.claim({ pairing_code: stale });
   assert.equal(staleClaim.ok, false);
-});
-
-test("deleteAuth: idempotent — missing file is not an error", async () => {
-  const path = tmpPath("delete-missing");
-  // Should not throw, even though the file doesn't exist.
-  await deleteAuth(path);
-  await deleteAuth(path); // twice for good measure
-});
-
-test("deleteAuth: removes the file and the next loadAuth returns null", async () => {
-  const path = tmpPath("delete-roundtrip");
-  try {
-    await writeFile(path, JSON.stringify({ box_id: HEX32, box_token: HEX32B }), "utf-8");
-    assert.equal(loadAuth(path)?.box_token, HEX32B);
-    await deleteAuth(path);
-    assert.equal(loadAuth(path), null);
-  } finally {
-    await rm(path, { force: true });
-  }
 });
 
 // ----------------------------------------------------------------------------
