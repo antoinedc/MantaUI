@@ -26,7 +26,6 @@ struct ChatOverflowSheet: View {
 
     var onSchedules: () -> Void
     var onSecrets: () -> Void
-    var onWebhooks: () -> Void
     var onCompact: () -> Void
     var onClear: () -> Void
     var onFork: () -> Void
@@ -51,7 +50,6 @@ struct ChatOverflowSheet: View {
                 Section {
                     row("Scheduled tasks", systemImage: "clock", badge: scheduleCount, action: onSchedules)
                     row("Secrets", systemImage: "key", action: onSecrets)
-                    row("Webhooks", systemImage: "bolt.horizontal", action: onWebhooks)
                 }
                 Section {
                     row("Compact session", systemImage: "arrow.down.right.and.arrow.up.left", action: onCompact)

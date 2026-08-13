@@ -325,6 +325,24 @@ private struct ChatScreenContent: View {
                 .frame(height: Self.headerReservedHeight + Metrics.spacing.sp6)
         }
         .overlay(alignment: .top) { header }
+        // Offline must not read as "the model is quiet": a slim banner pinned
+        // just below the floating header, declared AFTER the header so it draws
+        // on top of it. It offsets by the exact height the transcript reserves
+        // (`headerReservedHeight`) plus a gap, so it never overlaps the two
+        // header buttons. It disappears on its own when `degraded` flips false.
+        .overlay(alignment: .top) {
+            if store.degraded {
+                Text("Connection lost — reconnecting…")
+                    .font(.system(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.danger)
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .background(tokens.danger.opacity(0.12), in: Capsule())
+                    .padding(.top, Self.headerReservedHeight + Metrics.spacing.sp2)
+                    .transition(.opacity)
+                    .accessibilityIdentifier("connection-banner")
+            }
+        }
         .sheet(isPresented: $showOverflow) { overflowSheet }
         .sheet(item: $overflowDestination) { destination in
             destinationCard(destination)
@@ -340,7 +358,6 @@ private struct ChatScreenContent: View {
             branch: branch,
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
-            onWebhooks: {},
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
@@ -396,10 +413,22 @@ private struct ChatScreenContent: View {
     /// and re-point it at the new id; the transcript comes back empty because
     /// the session really is new.
     private func clearSession() async {
-        guard let w = sessionWindow else { return }
-        let newId = try? await MantaAPIClient.live().clearSession(
-            sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
-        guard let newId, !newId.isEmpty else { return }
+        guard let w = sessionWindow else {
+            store.actionHint = "Can't clear — session's window not found. Go back and reopen from the list."
+            return
+        }
+        let newId: String?
+        do {
+            newId = try await MantaAPIClient.live().clearSession(
+                sessionName: w.name, windowIndex: w.index, cwd: w.cwd, title: title)
+        } catch {
+            await MainActor.run { store.actionHint = "Clear failed — the session is still there" }
+            return
+        }
+        guard let newId, !newId.isEmpty else {
+            await MainActor.run { store.actionHint = "Clear failed — the session is still there" }
+            return
+        }
         // Carry the chosen model + effort to the new session id before the
         // wrapper rebuilds the stores against it (matching the desktop's clear,
         // which copies the override into the new session's key). The catalog
@@ -409,11 +438,23 @@ private struct ChatScreenContent: View {
     }
 
     private func forkSession() async {
-        guard let w = sessionWindow else { return }
-        let newSessionId = try? await MantaAPIClient.live().forkSession(
-            sessionId: store.sessionId, sessionName: w.name,
-            windowName: "\(title)-fork", cwd: w.cwd)
-        guard let newSessionId, !newSessionId.isEmpty else { return }
+        guard let w = sessionWindow else {
+            store.actionHint = "Can't fork — session's window not found. Go back and reopen from the list."
+            return
+        }
+        let newSessionId: String?
+        do {
+            newSessionId = try await MantaAPIClient.live().forkSession(
+                sessionId: store.sessionId, sessionName: w.name,
+                windowName: "\(title)-fork", cwd: w.cwd)
+        } catch {
+            await MainActor.run { store.actionHint = "Fork failed — nothing was created" }
+            return
+        }
+        guard let newSessionId, !newSessionId.isEmpty else {
+            await MainActor.run { store.actionHint = "Fork failed — nothing was created" }
+            return
+        }
         // Fork = a full copy of the session in a fresh window. Land on the
         // fork: push the new session as the next destination (sessionId is
         // present, so it opens the forked chat). The original stays one pop
@@ -428,17 +469,27 @@ private struct ChatScreenContent: View {
     /// navigationDestination routes it to the native terminal instead of the
     /// chat screen.
     private func openTerminal() async {
-        guard let w = sessionWindow else { return }
+        guard let w = sessionWindow else {
+            store.actionHint = "Can't open terminal — session's window not found. Go back and reopen from the list."
+            return
+        }
         await MainActor.run {
             path.append(SessionOpenTarget(project: projectName, windowIndex: w.index, name: title, sessionId: nil))
         }
     }
 
     private func deleteSession() async {
-        guard let w = sessionWindow else { return }
-        try? await MantaAPIClient.live().deleteSession(
-            sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
-        await MainActor.run { dismiss() }
+        guard let w = sessionWindow else {
+            store.actionHint = "Can't delete — session's window not found."
+            return
+        }
+        do {
+            try await MantaAPIClient.live().deleteSession(
+                sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
+            await MainActor.run { dismiss() }
+        } catch {
+            await MainActor.run { store.actionHint = "Delete failed — the session is still there" }
+        }
     }
 
     // MARK: - Header (§8)
@@ -481,6 +532,25 @@ private struct ChatScreenContent: View {
 
                 Spacer(minLength: 0)
 
+                // Context percent pill — a centred, non-interactive capsule that
+                // appears once the box reports context stats for this session.
+                // It deliberately keeps the header at its two glass CONTROL
+                // buttons (BET-627) plus this informational element; a plain
+                // material capsule (not `.glassEffect` on a Text, which the
+                // header buttons' note warns can eat touches) is the approved
+                // non-interactive treatment.
+                if let ctx = store.context {
+                    Text("\(Int(ctx.pct.rounded()))% ctx")
+                        .font(.system(size: Metrics.type.xs, weight: .semibold))
+                        .foregroundColor(ctxColor(ctx.pct))
+                        .padding(.horizontal, Metrics.spacing.sp2)
+                        .frame(height: Metrics.type.chatHeaderBtn)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .accessibilityLabel("Context \(Int(ctx.pct.rounded())) percent used")
+                }
+
+                Spacer(minLength: 0)
+
                 // Trailing 38×38 glass button (§8) — the overflow sheet, which is
                 // where every session action lives (DECISIONS.md:667-670).
                 Button {
@@ -498,6 +568,15 @@ private struct ChatScreenContent: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
+    }
+
+    /// Same stage thresholds as the desktop ctx bar: calm → warn at 70 → hot at
+    /// 90. `tokens` has no `warning` token, so the mid stage uses `warn` (the
+    /// amber the todos card uses).
+    private func ctxColor(_ pct: Double) -> Color {
+        if pct >= 90 { return tokens.danger }
+        if pct >= 70 { return tokens.warn }
+        return tokens.tx2
     }
 
     // MARK: - Transcript (BET-481 container; anchor + landing corrected)

@@ -163,6 +163,16 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
+    /// True while the box was connected and the stream dropped (mirrors
+    /// MantaEventStore.degraded). Drives the chat screen's "Connection lost —
+    /// reconnecting…" banner so an offline hit does not read as "the model is
+    /// quiet". Consumed only; reconnect machinery is owned by the event store.
+    @Published private(set) var degraded = false
+    /// A one-shot user-facing message bus for failed chat actions: views set it,
+    /// the composer surfaces it through its existing hint capsule and clears it.
+    /// It is deliberately settable from views because it is a bus, not store
+    /// state — a failed abort/compact/clear/fork/delete must not fail silently.
+    @Published var actionHint: String?
     /// True while a canonical transcript refetch (or the initial load) is in
     /// flight. Drives the ambient hairline sweep on the composer's top divider
     /// (BET-630, D1) — distinct from `running`, which drives the working row.
@@ -266,6 +276,13 @@ final class ChatSessionStore: ObservableObject {
         eventStore.$connectionState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
+            .store(in: &cancellables)
+
+        // Degraded state feeds the chat banner; distinct values only, so a
+        // republished identical value does not re-render the banner.
+        eventStore.$degraded
+            .removeDuplicates()
+            .sink { [weak self] d in self?.degraded = d }
             .store(in: &cancellables)
     }
 
@@ -773,12 +790,18 @@ final class ChatSessionStore: ObservableObject {
 
     /// Interrupt the running turn (voice `abort`).
     func abort() {
-        Task { try? await api.abort(sessionId: sessionId) }
+        Task {
+            do { try await api.abort(sessionId: sessionId) }
+            catch { await MainActor.run { actionHint = "Couldn't stop the turn — check the connection" } }
+        }
     }
 
     /// Compact the session to free context (voice `compact`).
     func compact() {
-        Task { try? await api.compactSession(sessionId: sessionId) }
+        Task {
+            do { try await api.compactSession(sessionId: sessionId) }
+            catch { await MainActor.run { actionHint = "Compact failed — check the connection" } }
+        }
     }
 
     /// Dispatch a store-level voice action. Returns a human hint string when
@@ -892,10 +915,4 @@ final class ChatSessionStore: ObservableObject {
     /// live elapsed against its own 1s tick rather than stream-state changes
     /// (BET-630, D1).
     var runningStart: Date? { runningSince }
-
-    /// §8 header subtitle ("running · 2m · 8%" / "idle").
-    var headerSubtitle: String {
-        let elapsed = runningSince.map { Date().timeIntervalSince($0) } ?? 0
-        return ChatHeaderSubtitle.text(running: running, elapsed: elapsed, contextPct: context?.pct)
-    }
 }

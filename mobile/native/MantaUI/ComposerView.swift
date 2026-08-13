@@ -130,6 +130,11 @@ struct ComposerView: View {
         .onChange(of: photoItems) { _ in
             Task { await processPhotos() }
         }
+        .onChange(of: store.actionHint) { _, hint in
+            guard let hint else { return }
+            surfaceHint(hint)
+            store.actionHint = nil
+        }
         .onAppear {
             modelStore.load()
             checkMicAvailability()

@@ -299,24 +299,6 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertTrue(blocks.isEmpty)
     }
 
-    // MARK: - Header subtitle (§8)
-
-    func testHeaderSubtitleRunningWithContext() {
-        XCTAssertEqual(ChatHeaderSubtitle.text(running: true, elapsed: 61, contextPct: 8.4), "running · 1m · 8%")
-    }
-
-    func testHeaderSubtitleRunningNoContext() {
-        XCTAssertEqual(ChatHeaderSubtitle.text(running: true, elapsed: 0, contextPct: nil), "running · 0s")
-    }
-
-    func testHeaderSubtitleIdleWithContext() {
-        XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: 12.6), "idle · 13%")
-    }
-
-    func testHeaderSubtitleIdle() {
-        XCTAssertEqual(ChatHeaderSubtitle.text(running: false, elapsed: 0, contextPct: nil), "idle")
-    }
-
     // MARK: - Question answers (§7.5)
 
     private func q(_ question: String, options: [String], multiple: Bool = false) -> QuestionInfo {
