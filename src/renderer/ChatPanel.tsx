@@ -400,7 +400,6 @@ export function ChatPanel({
       null,
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
-    setInput,
   });
 
   // Manual dismiss of the pinned todo card — the user's escape hatch for a

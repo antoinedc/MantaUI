@@ -479,10 +479,10 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  async function queueASecondMessage(container: HTMLElement) {
+  async function queueASecondMessage(container: HTMLElement, text = "second message") {
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await act(async () => {
-      typeInto(textarea, "second message");
+      typeInto(textarea, text);
     });
     await act(async () => {
       textarea.dispatchEvent(
@@ -637,6 +637,83 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
     );
     expect(promptCalls.length).toBe(1);
   });
+
+  // REGRESSION (BET-709): queue drain silently dropped all but the last queued
+  // prompt. The old drain did `setInput(queued)` then deferred the actual
+  // submit to `setTimeout(0)`; with ≥2 items queued at the running→false edge,
+  // the effect re-ran (React's scheduler beats setTimeout(0)) and the second
+  // run overwrote the input before the first submit fired — "a" was never
+  // sent, with no error. The drain now submits the queued text EXPLICITLY via
+  // submitRef(textOverride), one item per idle edge, so every can be drained.
+  it("drains ≥2 queued messages exactly once, in FIFO order (no first-message loss)", async () => {
+    h = await mountDrainHarness();
+
+    // Turn running; queue TWO distinct messages mid-turn.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+    await queueASecondMessage(h.container, "first queued");
+    await queueASecondMessage(h.container, "second queued");
+    await h.flush();
+
+    // A tool completes → drain-abort fires opencodeAbort.
+    await emitAndFlush(bus, h, {
+      type: "message.part.updated",
+      properties: {
+        sessionID: "ses_test",
+        messageID: "msg_1",
+        part: { type: "tool", state: { status: "completed" } },
+      },
+    });
+    // The abort flips the session idle; wait out the settle window then flush
+    // so the FIRST drain edge runs.
+    await emitStreamAndFlush(bus, h, {
+      sub: "turnComplete",
+      sessionId: "ses_test",
+      payload: { complete: true, running: false },
+    });
+    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
+    await h.flush();
+
+    // First idle edge: the FIRST queued text is submitted exactly once, the
+    // second not at all yet. submit() flips running true synchronously, so the
+    // drain effect re-arms and the second item waits for the NEXT idle edge.
+    let firstCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
+      JSON.stringify(args).includes("first queued"),
+    );
+    const secondCallsSoFar = (api.calls.opencodePrompt ?? []).filter((args) =>
+      JSON.stringify(args).includes("second queued"),
+    );
+    expect(firstCalls.length).toBe(1);
+    expect(secondCallsSoFar.length).toBe(0);
+
+    // Start a second turn, then let it complete idle.
+    await emitStreamAndFlush(bus, h, {
+      sub: "running",
+      sessionId: "ses_test",
+      payload: { running: true },
+    });
+    await emitStreamAndFlush(bus, h, {
+      sub: "turnComplete",
+      sessionId: "ses_test",
+      payload: { complete: true, running: false },
+    });
+    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
+    await h.flush();
+
+    // Second idle edge: the SECOND queued text is now submitted exactly once,
+    // and the first is still exactly once (no double send).
+    firstCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
+      JSON.stringify(args).includes("first queued"),
+    );
+    const secondCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
+      JSON.stringify(args).includes("second queued"),
+    );
+    expect(firstCalls.length).toBe(1);
+    expect(secondCalls.length).toBe(1);
+  });
 });
 
 // BET-692 — running must only flip false on a SETTLED completion. The box
@@ -678,7 +755,6 @@ describe("useSseBus running settle on turnComplete (BET-692)", () => {
       providerID: null,
       submit: () => {},
       submitRef,
-      setInput: () => {},
     });
     probe = { running: sse.running };
     return <div data-testid="running-probe" />;
