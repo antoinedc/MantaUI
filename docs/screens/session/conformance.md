@@ -60,6 +60,15 @@ mockup deltas, all of them the app moving ahead of the drawing:
   draws `Tag` at the new `sm` density (20px, `--tx3`) on the glass surface, with
   `plain` suppressing Tag's own edge so it does not double the pill's. Owner
   direction was "slightly smaller"; it had been the tallest element in the row.
+- **Composer attach + voice buttons not wired (BET-620).** The stage-6 composer
+  migration (PR #525) closed the composer's `--measure` cap (72ch, `mx-auto`),
+  the send button, the placeholder copy and the meta-row/mbtn densities onto the
+  spec — but the mockup's `Attach` (paperclip) and `Voice` (mic) `.mbtn`s are
+  still not rendered by the session composer. Recorded as open, not a defect:
+  upload plumbing (drag-drop / paste / `⌘V`) and `MicButton` (inline desktop
+  mic) both exist and work, but surfacing them as composer controls is a
+  feature, not a restyle — the mockup itself says so
+  (`docs/screens/session/mockup.html:44`).
 
 ## Resolved
 
