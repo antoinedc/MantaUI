@@ -129,7 +129,7 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
             <span
               aria-hidden="true"
               className="block rounded-full bg-bg"
-              style={{ width: 10, height: 10, margin: 3 }}
+              style={{ width: 12, height: 12, margin: 2 }}
             />
           )}
         </span>
@@ -139,7 +139,7 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
         <div
           role="dialog"
           aria-label="Plan usage"
-          className="manta-usage-popover absolute right-0 top-full mt-1 z-30 w-[320px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
+          className="manta-usage-popover manta-menu-in absolute right-0 bottom-full mb-1 z-30 w-[320px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
         >
           <div className="flex items-baseline justify-between gap-2 mb-3">
             <span className="text-prose font-semibold text-text">{label}</span>
