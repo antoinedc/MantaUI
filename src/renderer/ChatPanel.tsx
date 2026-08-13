@@ -286,8 +286,22 @@ export function ChatPanel({
   // the deleted `pinnedToBottom` ref) fed by Virtuoso's atBottomStateChange.
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const atBottomRef = useRef(true);
+  // Set by submit(), consumed by the force-tail effect below. Submit cannot
+  // scroll inline: the optimistic row it just queued is not committed yet, so
+  // `index: "LAST"` would resolve to the PREVIOUS last message.
+  const forceTailRef = useRef(false);
   const onAtBottomChange = useCallback((atBottom: boolean) => {
     atBottomRef.current = atBottom;
+  }, []);
+  // The ONE way this panel scrolls the transcript to its tail. Every caller
+  // goes through here: submit's force-pin, the question-card reveal, the
+  // composer-resize rescue and the re-activation re-pin. `atBottomRef` is set
+  // eagerly rather than waiting for Virtuoso's async atBottomStateChange, so
+  // the followOutput gate and resizeInput's rescue agree with the scroll we
+  // just asked for.
+  const scrollToTail = useCallback((behavior: "auto" | "smooth" = "auto") => {
+    atBottomRef.current = true;
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior });
   }, []);
   // Mirror of `messages` for event listeners (deep-link jumps) that need the
   // current list without re-registering on every message update.
@@ -517,7 +531,7 @@ export function ChatPanel({
         if (questions.length > 0) {
           // The question cards live in the transcript's footer; scroll the last
           // row into view so the footer (with the cards) is revealed.
-          virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
+          scrollToTail("smooth");
           wantQuestionScroll.current = false;
         }
       }
@@ -607,10 +621,10 @@ export function ChatPanel({
   // start: questions arrive via the async fetch after this panel mounts).
   useEffect(() => {
     if (wantQuestionScroll.current && questions.length > 0) {
-      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
+      scrollToTail("smooth");
       wantQuestionScroll.current = false;
     }
-  }, [questions]);
+  }, [questions, scrollToTail]);
 
   // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
   // container is at the bottom we re-scroll so the input growing pushes the
@@ -624,9 +638,9 @@ export function ChatPanel({
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
     if (atBottomRef.current) {
-      virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+      scrollToTail();
     }
-  }, []);
+  }, [scrollToTail]);
   useEffect(() => {
     resizeInput();
   }, [input, resizeInput]);
@@ -673,8 +687,8 @@ export function ChatPanel({
   useEffect(() => {
     if (!isActive) return;
     if (!atBottomRef.current) return;
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
-  }, [isActive]);
+    scrollToTail();
+  }, [isActive, scrollToTail]);
 
   // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
   // delta buffer are suppressed (see the gating refs near refetchTimer) so we
@@ -757,10 +771,10 @@ export function ChatPanel({
         ],
       },
     ]);
-    // Force-pin to the tail after the optimistic append (replaces the deleted
-    // `pinnedToBottom.current = true; prevScrollHeight.current = 0` force-pin —
-    // Virtuoso owns the scroll, so the force-pin is one scrollToIndex).
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "auto" });
+    // Force-pin to the tail. The scroll is deferred to the force-tail effect
+    // because the optimistic row above has not been committed yet — scrolling
+    // here would land on the previous last message.
+    forceTailRef.current = true;
 
     // Slash-command path: manta-local builtins → opencode commands → normal prompt.
     const slashMatch = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/);
@@ -896,6 +910,17 @@ export function ChatPanel({
   // latest version without adding submit to the effect's dependency array
   // (which would re-arm the effect on every keystroke).
   submitRef.current = submit;
+
+  // Post-commit half of submit()'s force-pin. Runs once per submit (the ref
+  // gate), after React has committed the optimistic user row and after the
+  // composer has resized, which is what makes `index: "LAST"` resolve to the
+  // message the user just sent. Ordinary streaming stickiness is still
+  // Virtuoso's followOutput — this effect does nothing when the ref is unset.
+  useEffect(() => {
+    if (!forceTailRef.current) return;
+    forceTailRef.current = false;
+    scrollToTail();
+  }, [messages, scrollToTail]);
 
   // Optimistic "new session" auto-submit: seed the composer with the draft's
   // prompt and fire the panel's OWN submit once, on mount. Going through submit
