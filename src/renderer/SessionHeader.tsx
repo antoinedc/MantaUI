@@ -13,7 +13,6 @@
 import {
   Fragment,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -142,20 +141,32 @@ export function SessionHeader({
   // the user's hide list, what renders in the bar vs the `⋯ +N` overflow.
   // `branch` and `breadcrumb` stay in the LEFT group and are NOT registered.
   const headerRef = useRef<HTMLDivElement>(null);
-  // The cut container width, re-measured each render. Re-renders are driven by
-  // the very state that resizes the pane (sidebar / artifacts panel — BET-782
-  // §3 says the pane width is a function of those, NOT the viewport), so a
-  // plain layout-effect re-measure keeps the overflow current without a
-  // ResizeObserver or window.innerWidth listener (both forbidden). A
-  // zero/unknown width (jsdom, pre-layout) is treated as "everything fits" to
-  // preserve today's wide-width render.
+  // The cut container width, measured by a ResizeObserver on the header
+  // element (BET-811). The pre-BET-811 per-render layout-effect re-measure went
+  // stale the moment the pane resized without a React re-render (OS-window
+  // resize, sidebar-splitter drag) — the exact case the overflow exists for.
+  // The observer reacts to any size change of the header itself, whatever the
+  // cause, so the cut stays current under both React and non-React resizes.
+  // This measures the PANE, not the viewport — the container-query spirit the
+  // original rule (forbid window.innerWidth / media query) was written to
+  // enforce. A zero/unknown width (jsdom, pre-layout) is treated as "everything
+  // fits" to preserve today's wide-width render.
   const [paneWidth, setPaneWidth] = useState<number>(Infinity);
-  useLayoutEffect(() => {
+  useEffect(() => {
     const el = headerRef.current;
-    const w = el ? el.getBoundingClientRect().width : Infinity;
-    const effective = w > 0 ? w : Infinity;
-    setPaneWidth((prev) => (prev === effective ? prev : effective));
-  });
+    if (!el) return;
+    const measure = () => {
+      const w = el.getBoundingClientRect().width;
+      const effective = w > 0 ? w : Infinity;
+      setPaneWidth((prev) => (prev === effective ? prev : effective));
+    };
+    // Measure once so the first render reflects the actual width — the observer
+    // only fires on a subsequent change.
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const registry: StatusItem[] = [];
   if (showContext) {
@@ -295,7 +306,7 @@ function StatusOverflow({ items }: { items: StatusItem[] }) {
         className="manta-status-overflow-trigger inline-flex items-center gap-1 rounded-md p-1 text-text-faint hover:bg-fill-hover hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
       >
         <MoreHorizontal size={16} aria-hidden="true" />
-        <span className="text-micro font-semibold tabular-nums">+{items.length}</span>
+        <span className="text-meta font-semibold tabular-nums">+{items.length}</span>
       </button>
       {open && (
         <Dropdown hook="manta-status-overflow-dropdown">
