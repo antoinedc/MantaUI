@@ -2070,11 +2070,18 @@ It replaced PLCrashReporter on 2026-08-13. Do not run both.
   buys breadcrumb logs, at the cost of an analytics surface this app has no
   other use for (`IS_ANALYTICS_ENABLED` is false in the plist). Add it as a
   decision, not by reflex.
-- **Verifying it**: Settings → "Crash reporting (debug)" → Force a test crash.
-  The row is `#if DEBUG` so it cannot ship in an archive. The report uploads on
-  the NEXT launch and **only with the Xcode debugger detached** — the debugger
-  intercepts the signal. The plugin's `devicectl process launch` is detached,
-  so a plugin install + tap + reopen is a valid test.
+- **Verifying it**: there is no test-crash button in the app — a `#if DEBUG`
+  one existed only to prove the integration (commit `ed8a682`) and was removed
+  once it had (`SettingsScreen.crashTestFooter`; restore from git if needed).
+  To re-verify, add a `fatalError(...)` behind a temporary control, or crash the
+  app any other way. Two rules make or break the test: the report uploads on the
+  **NEXT launch**, not the crashing one, and **only with the Xcode debugger
+  detached** — the debugger intercepts the signal and Crashlytics never sees it.
+  The plugin's `devicectl process launch` is detached, so a plugin install + tap
+  + reopen is a valid test. Proven end-to-end 2026-08-13: the crash symbolicated
+  to `SettingsScreen.swift:346` with the frame attributed to
+  `MantaUI.debug.dylib` — which is itself the evidence for the split-binary note
+  above.
 
 ## iOS release / TestFlight (Codemagic — the WORKING mechanism)
 
