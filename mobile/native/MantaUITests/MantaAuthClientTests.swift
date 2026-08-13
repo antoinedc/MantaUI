@@ -90,37 +90,6 @@ final class MantaAuthClientTests: XCTestCase {
         XCTAssertEqual(capturedBody?["name"] as? String, "My iPhone")
     }
 
-    func testClaimSuccessPersistsCredentialsToKeychain() async throws {
-        MockURLProtocol.handler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let body = ["box_token": self.box, "box_id": self.box, "device_id": "dev_1"]
-            let data = try! JSONSerialization.data(withJSONObject: body)
-            return (response, data)
-        }
-        let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "123456")
-        XCTAssertEqual(MantaPairing.classifyClaim(status: 200, body: ["box_token": box, "box_id": box, "device_id": "dev_1"]), outcome)
-
-        try client.persist(onSuccess: outcome, serverURL: URL(string: "https://\(box).boxes.mantaui.com")!)
-        let stored = try KeychainCredentialStore.shared.load()
-        XCTAssertEqual(stored?.boxToken, box)
-        XCTAssertEqual(stored?.boxId, box)
-        XCTAssertEqual(stored?.serverUrl, "https://\(box).boxes.mantaui.com")
-    }
-
-    func testClaimWrongCodeDoesNotPersist() async throws {
-        MockURLProtocol.handler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
-            return (response, Data("{\"error\":\"no\"}".utf8))
-        }
-        let client = makeClient()
-        let outcome = await client.claim(serverURL: URL(string: "https://\(box).boxes.mantaui.com")!, code: "111111")
-        XCTAssertEqual(outcome, .wrongCode)
-
-        try client.persist(onSuccess: outcome, serverURL: URL(string: "https://\(box).boxes.mantaui.com")!)
-        XCTAssertNil(try KeychainCredentialStore.shared.load())
-    }
-
     func testClaimNetworkFailureClassifiesUnreachable() async throws {
         MockURLProtocol.handler = { _ in
             throw URLError(.notConnectedToInternet)

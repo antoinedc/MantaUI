@@ -216,7 +216,13 @@ final class MantaOnboardingFlow: ObservableObject {
         // Progress stages are informational; the volunteer device-registry name
         // is surfaced server-side so a linked device is identifiable (§6.3).
         let name = UIDevice.current.name
-        let serverURL = claimTarget(payload)
+        // A resolvable claim target is a precondition — without one the response
+        // could never have been a success, so surface the same failure class the
+        // unreachable code path used to.
+        guard let serverURL = claimTarget(payload) else {
+            phase = .failure(.serverError)
+            return
+        }
         // Stage 1: the claim request starts.
         activeLinkingStage = 0
         let outcome = await auth.claim(payload, deviceName: name)
@@ -256,9 +262,8 @@ final class MantaOnboardingFlow: ObservableObject {
         }
     }
 
-    private func claimTarget(_ payload: MantaPairing.PairPayload) -> URL {
+    private func claimTarget(_ payload: MantaPairing.PairPayload) -> URL? {
         MantaPairing.claimBaseURL(payload)
-            ?? URL(string: "https://")!
     }
 
     private func requestNotificationAuthorization() async {
