@@ -444,19 +444,26 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
   // ---- voice (simplified: just insert transcribed text) ----
   const voiceRecorder = useVoiceRecorder({
-    onResult: (text) => {
-      if (!text) return;
-      const prev = useStore.getState().drafts.find((d) => d.id === draftId)?.input ?? "";
-      const sep = prev && !prev.endsWith(" ") ? " " : "";
-      updateDraft(draftId, { input: prev + sep + text });
-      requestAnimationFrame(() => {
-        const el = inputRef.current;
-        if (el) {
-          el.focus();
-          const end = el.value.length;
-          el.setSelectionRange(end, end);
-        }
-      });
+    onComplete: async ({ blob, mime }) => {
+      try {
+        const buffer = await blob.arrayBuffer();
+        const res = await window.api.voiceTranscribe({ buffer, mime });
+        const text = res.text.trim();
+        if (!text) return;
+        const prev = useStore.getState().drafts.find((d) => d.id === draftId)?.input ?? "";
+        const sep = prev && !prev.endsWith(" ") ? " " : "";
+        updateDraft(draftId, { input: prev + sep + text });
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (el) {
+            el.focus();
+            const end = el.value.length;
+            el.setSelectionRange(end, end);
+          }
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     },
     onError: (err: Error) => setError(err.message),
     onEmpty: () => {},

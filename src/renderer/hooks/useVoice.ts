@@ -2,19 +2,22 @@
 //
 // Extracted from ChatPanel.tsx (BET-64). Wraps `useVoiceRecorder` from
 // `./voice.ts` and adds the dictation-only behaviour, keybinds, and gating.
-// The transcribed text is inserted at the caret.
+// Orchestration lives HERE, on top of the recorder's onComplete artifact:
+// we transcribe via `voice:transcribe`, insert into the composer at the
+// caret, and keep the desktop keyboard driving the session.
 //
 // The hook owns:
 //   - The voiceRecorder instance (via useVoiceRecorder)
 //   - The desktop voice keybinds (Ctrl+M / Enter / Esc)
 //   - The voiceEnabled gate (groqApiKey + MediaRecorder support)
+//   - The transcription step (recorder hands back {blob, mime, peaks})
 //
 // No Electron-only deps — only `window.api.*`, which the mobile HTTP server
 // shims.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useVoiceRecorder } from "../voice";
-import type { VoicePhase } from "../voice";
+import type { VoiceArtifact, VoicePhase } from "../voice";
 
 export type Voice = {
   voiceEnabled: boolean;
@@ -22,7 +25,11 @@ export type Voice = {
   voiceProcessing: boolean;
   voiceRecorder: {
     phase: VoicePhase;
+    elapsedSec: number;
+    nearLimit: boolean;
     start: () => void;
+    pause: () => void;
+    resume: () => void;
     stop: () => void;
     cancel: () => void;
   };
@@ -47,10 +54,13 @@ export function useVoice(params: {
     groqApiKey,
   } = params;
 
-  // When the user presses Enter (or Ctrl+M) WHILE the desktop voice
-  // recorder is active, we want the transcribed text to land in the
-  // composer AND immediately submit, in one keystroke.
+  // When the user presses Enter (or Ctrl+M) WHILE the desktop voice recorder
+  // is active, we want the transcribed text to land in the composer AND
+  // immediately submit, in one keystroke.
   const submitAfterTranscribeRef = useRef(false);
+  // Transcription in flight — the recorder's own phases don't include
+  // "processing" (that is our business now), so we track it here for the UI.
+  const [transcribing, setTranscribing] = useState(false);
 
   // Insert text at the caret, mirroring the composer's append behaviour.
   const insertAtCaret = (text: string) => {
@@ -78,11 +88,36 @@ export function useVoice(params: {
   };
 
   const voiceRecorder = useVoiceRecorder({
-    onResult: (text) => {
-      insertAtCaret(text);
-      if (submitAfterTranscribeRef.current) {
+    onComplete: async (artifact: VoiceArtifact) => {
+      // Transcribe the artifact the recorder handed back. The new upload
+      // route is NOT used yet — that lands with the transcript ticket.
+      setTranscribing(true);
+      try {
+        const buffer = await artifact.blob.arrayBuffer();
+        const res = await window.api.voiceTranscribe({
+          buffer,
+          mime: artifact.mime,
+        });
+        const text = res.text.trim();
+        if (!text) {
+          // Pipeline worked but Groq heard no speech (silence / too quiet /
+          // unintelligible). Surface it so the release isn't a silent no-op.
+          submitAfterTranscribeRef.current = false;
+          setSystemNotice(
+            "Didn't catch any speech. Try again, a little louder or closer to the mic.",
+          );
+          return;
+        }
+        insertAtCaret(text);
+        if (submitAfterTranscribeRef.current) {
+          submitAfterTranscribeRef.current = false;
+          setTimeout(() => submitRef.current?.(), 0);
+        }
+      } catch (e) {
         submitAfterTranscribeRef.current = false;
-        setTimeout(() => submitRef.current?.(), 0);
+        setSendError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setTranscribing(false);
       }
     },
     onError: (e) => {
@@ -96,6 +131,9 @@ export function useVoice(params: {
           ? "Didn't catch that — the recording was too short. Hold a bit longer."
           : "Didn't catch any speech. Try again, a little louder or closer to the mic.",
       );
+    },
+    onWarning: (msg) => {
+      setSystemNotice(msg);
     },
   });
 
@@ -115,8 +153,9 @@ export function useVoice(params: {
   voiceCancelRef.current = voiceRecorder.cancel;
   const voiceRecording =
     voiceRecorder.phase === "recording" ||
-    voiceRecorder.phase === "requesting";
-  const voiceProcessing = voiceRecorder.phase === "processing";
+    voiceRecorder.phase === "requesting" ||
+    voiceRecorder.phase === "paused";
+  const voiceProcessing = transcribing;
 
   // Desktop voice keybinds (Ctrl+M / Enter / Esc)
   useEffect(() => {
@@ -125,7 +164,11 @@ export function useVoice(params: {
       if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "m" || e.key === "M")) {
         e.preventDefault();
         const phase = voicePhaseRef.current;
-        if (phase === "recording" || phase === "requesting") {
+        if (
+          phase === "recording" ||
+          phase === "requesting" ||
+          phase === "paused"
+        ) {
           submitAfterTranscribeRef.current = false;
           voiceStopRef.current();
         } else if (phase === "idle" || phase === "error") {
@@ -142,7 +185,7 @@ export function useVoice(params: {
         !e.ctrlKey &&
         !e.altKey
       ) {
-        if (phase !== "recording") return;
+        if (phase !== "recording" && phase !== "paused") return;
         e.preventDefault();
         e.stopPropagation();
         submitAfterTranscribeRef.current = true;
@@ -167,7 +210,11 @@ export function useVoice(params: {
     voiceProcessing,
     voiceRecorder: {
       phase: voiceRecorder.phase,
+      elapsedSec: voiceRecorder.elapsedSec,
+      nearLimit: voiceRecorder.nearLimit,
       start: voiceRecorder.start,
+      pause: voiceRecorder.pause,
+      resume: voiceRecorder.resume,
       stop: voiceRecorder.stop,
       cancel: voiceRecorder.cancel,
     },
