@@ -245,3 +245,37 @@ export function buildUniversalPairLink(p: PairPayload): string {
   }
   return base;
 }
+
+/**
+ * Detect whether a raw clipboard-read string is a pairing payload — the pure
+ * core of the "clipboard prefill" affordance (BET-704): a user who received
+ * a pairing link (chat message, terminal copy) and opens the desktop app
+ * shouldn't have to retype it.
+ *
+ * Trims the input and delegates to `parsePairPayload`, which — since
+ * BET-703 — already accepts BOTH the custom-scheme form
+ * (`<scheme>://pair?box=…&code=…`) and the deferred-deeplink https form
+ * (including the universal-link host `buildUniversalPairLink` emits, since
+ * the parser's https branch only checks the `/m` path, not the host).
+ * Returns null for anything that isn't a recognized pairing URL, including
+ * a bare 6-digit code — a code alone carries no box id and can never claim
+ * on its own, so it is never treated as a hit.
+ *
+ * `scheme` defaults to `"manta"`, matching `parsePairPayload` /
+ * `prefillFromPairLink` — pass the channel's own scheme (e.g.
+ * `PAIR_PREFILL_SCHEME` in PairStep.tsx) so a staging/dev desktop detects
+ * its own channel's custom-scheme links, not just prod's.
+ *
+ * Pure — no DOM, no clipboard access. The caller (PairStep.tsx) is
+ * responsible for the actual `navigator`/preload clipboard read and for
+ * deciding when to offer the detected payload (mount + focus, never a
+ * poll — see PairStep.tsx).
+ */
+export function detectPairClipboard(
+  raw: string,
+  scheme: string = "manta",
+): PairPayload | null {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) return null;
+  return parsePairPayload(trimmed, scheme);
+}

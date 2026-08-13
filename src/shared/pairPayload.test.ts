@@ -3,6 +3,7 @@ import {
   parsePairPayload,
   buildPairPayload,
   buildUniversalPairLink,
+  detectPairClipboard,
   UNIVERSAL_LINK_HOST,
   type PairPayload,
 } from "./pairPayload";
@@ -469,6 +470,52 @@ const ROUND_TRIP_CASES: PairPayload[] = [
   { boxId: BOX, code: "000000", serverUrl: "http://192.168.1.10:8787" },
   { boxId: BOX, code: "987654", serverUrl: "https://mybox.ts.net" },
 ];
+
+// BET-704: clipboard-prefill detection. `detectPairClipboard` is the pure
+// core of the "a pairing link is sitting in the clipboard" affordance —
+// PairStep.tsx owns the actual clipboard read + banner wiring (untested by
+// design), this file pins the detection logic itself.
+describe("detectPairClipboard", () => {
+  it("detects the manta://pair?... custom-scheme form", () => {
+    expect(
+      detectPairClipboard(`manta://pair?box=${BOX}&code=847291`),
+    ).toEqual({ boxId: BOX, code: "847291" });
+  });
+
+  it("detects the universal-link https form (BET-703)", () => {
+    const link = buildUniversalPairLink({ boxId: BOX, code: "847291" });
+    expect(detectPairClipboard(link)).toEqual({ boxId: BOX, code: "847291" });
+  });
+
+  it("trims surrounding whitespace before detecting", () => {
+    expect(
+      detectPairClipboard(`  manta://pair?box=${BOX}&code=847291  `),
+    ).toEqual({ boxId: BOX, code: "847291" });
+  });
+
+  it("returns null for a bare 6-digit code (no box id, can't claim alone)", () => {
+    expect(detectPairClipboard("847291")).toBeNull();
+  });
+
+  it("returns null for garbage / unrelated clipboard text", () => {
+    expect(detectPairClipboard("hello world")).toBeNull();
+    expect(detectPairClipboard("")).toBeNull();
+    expect(detectPairClipboard("   ")).toBeNull();
+    expect(detectPairClipboard("https://example.com")).toBeNull();
+    expect(
+      detectPairClipboard(`manta://connect?box=${BOX}&code=847291`),
+    ).toBeNull();
+  });
+
+  it("respects a non-default scheme (channel-aware, matching prefillFromPairLink)", () => {
+    const link = `manta-staging://pair?box=${BOX}&code=847291`;
+    expect(detectPairClipboard(link)).toBeNull(); // wrong scheme for default
+    expect(detectPairClipboard(link, "manta-staging")).toEqual({
+      boxId: BOX,
+      code: "847291",
+    });
+  });
+});
 
 describe("round-trip", () => {
   it("parsePairPayload(buildPairPayload(p)) deep-equals p for valid canonical inputs", () => {

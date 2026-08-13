@@ -509,6 +509,10 @@ export const IPC = {
   // Read the current clipboard image as PNG ArrayBuffer (null if no image).
   // Called on demand after a screenshotDetected event — not polled.
   clipboardReadImage: "clipboard:read-image",
+  // Read the current clipboard TEXT (BET-704: onboarding pair-link
+  // clipboard prefill). Called on PairStep mount + window focus — never
+  // polled. Only main can touch the OS clipboard.
+  clipboardReadText: "clipboard:read-text",
   // Read an arbitrary local (Mac) file's raw bytes. Only main can touch the
   // OS filesystem — this is how the renderer gets bytes for a Desktop
   // screenshot detection (screenshotDetected source:"file") so it can then

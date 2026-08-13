@@ -29,6 +29,7 @@ import {
   normalizeServerUrl,
   prefillFromPairLink,
 } from "../shared/setupLogic";
+import { detectPairClipboard } from "../shared/pairPayload";
 import { PairingCodeInput } from "./PairingCodeInput";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
@@ -74,6 +75,54 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
   // empty shell.
   const showSshPicker = hasSshInstaller && !prefill;
 
+  // Clipboard pair-link detection (BET-704): a user who received a pairing
+  // link elsewhere (chat message, terminal copy) shouldn't have to retype
+  // it. Checked on mount AND on window focus while this step is shown — no
+  // polling/intervals. A hit renders a dismissible banner; "Use it" routes
+  // through the SAME pendingPairLink mechanism the OS deep-link handler
+  // uses (App.tsx's onPairLink → setPendingPairLink → prefillFromPairLink),
+  // so there is exactly one prefill code path. The user still clicks
+  // Connect — this never auto-claims.
+  const lastClipboardRef = useRef<string | null>(null);
+  const [clipboardHit, setClipboardHit] = useState<string | null>(null);
+
+  useEffect(() => {
+    const preload = getMantaPreload();
+    if (!preload) return;
+
+    const check = () => {
+      void (async () => {
+        let text: string;
+        try {
+          text = await preload.readClipboardText();
+        } catch {
+          return; // clipboard read failed — silently no banner
+        }
+        const trimmed = (text ?? "").trim();
+        if (!trimmed || trimmed === lastClipboardRef.current) return;
+        if (!detectPairClipboard(trimmed, PAIR_PREFILL_SCHEME)) return;
+        setClipboardHit(trimmed);
+      })();
+    };
+
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
+  }, []);
+
+  const dismissClipboardHit = () => {
+    lastClipboardRef.current = clipboardHit;
+    setClipboardHit(null);
+  };
+
+  const useClipboardHit = () => {
+    if (!clipboardHit) return;
+    lastClipboardRef.current = clipboardHit;
+    useStore.getState().setPendingPairLink(clipboardHit);
+    setClipboardHit(null);
+    setDisclosureOpen(true);
+  };
+
   return (
     <div>
       <h2 className="text-display font-semibold tracking-tight text-text mb-2">
@@ -97,8 +146,39 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
       >
         {disclosureOpen ? "Hide" : "Pair to an existing box"}
       </button>
+      {clipboardHit && (
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-sm border border-border bg-bg-soft px-3 py-2 text-body text-text">
+          <span>Pairing link detected</span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={useClipboardHit}
+              className="text-body font-medium text-accent hover:underline"
+            >
+              Use it
+            </button>
+            <button
+              type="button"
+              onClick={dismissClipboardHit}
+              aria-label="Dismiss"
+              className="text-text-faint hover:text-text-muted"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       {disclosureOpen && (
-        <ManualPairForm prefill={prefill} onPaired={onPaired} />
+        // Keyed on pendingPairLink so a clipboard "Use it" click prefills a
+        // manual form that is ALREADY open (a fresh mount is the only way
+        // this component's useState-seeded fields pick up a new prefill —
+        // the same mechanism the deep-link path already relies on, just
+        // made to also work when the form was open before the link arrived).
+        <ManualPairForm
+          key={pendingPairLink ?? "no-prefill"}
+          prefill={prefill}
+          onPaired={onPaired}
+        />
       )}
     </div>
   );
