@@ -2563,19 +2563,28 @@ function overflowFor(it: StatusItem, containerWidth: number): boolean {
 // descending by priority; render left-to-right" would put the ⋯ menu (100)
 // left of the context pill (60) — a visual change, and a direct conflict
 // between the two requirements. Criterion #1 is the DoD, so this preserves the
-// registry's construction order (today: context, artifacts, menu). Priority is
-// therefore ONLY the overflow-sacrifice order (which items the cut drops as the
-// pane narrows), not a reordering of the bar. If the descending-order rule is
-// ever made authoritative, flip the loop below to sort by priority descending.
+// registry's construction order (today: context, artifacts, menu) rather than
+// re-sorting by priority. Priority is therefore ONLY the overflow-sacrifice
+// order (which items the cut drops as the pane narrows), not a reordering of
+// the bar. Equal-priority ties are still broken deterministically by stable id
+// sort (the spec's Tests section requires it); Array.prototype.sort is stable,
+// so leaving differing-priority pairs in construction order while id-sorting
+// only the tied runs is safe. If the descending-order rule is ever made
+// authoritative instead, swap the tie comparator below for a full priority
+// sort.
 export function selectStatusItems(
   items: StatusItem[],
   containerWidth: number,
   hiddenIds: string[],
 ): { visible: StatusItem[]; overflow: StatusItem[] } {
   const hidden = new Set(hiddenIds);
+  const ordered = [...items].sort((a, b) => {
+    if (a.priority === b.priority) return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    return 0; // different priorities keep their construction (today's) order
+  });
   const visible: StatusItem[] = [];
   const overflow: StatusItem[] = [];
-  for (const it of items) {
+  for (const it of ordered) {
     if (hidden.has(it.id)) continue;
     (overflowFor(it, containerWidth) ? overflow : visible).push(it);
   }

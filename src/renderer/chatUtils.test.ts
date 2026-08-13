@@ -3371,6 +3371,23 @@ describe("selectStatusItems", () => {
     expect(r.overflow).toEqual([]);
   });
 
+  it("breaks equal-priority ties by stable id sort", () => {
+    // Same priority, deliberately out of id order — must come back id-sorted,
+    // regardless of the order they were pushed into the registry.
+    const tied = [s("z", 60), s("b", 60), s("a", 60)];
+    const r = selectStatusItems(tied, 900, []);
+    expect(r.visible.map((i) => i.id)).toEqual(["a", "b", "z"]);
+    expect(r.overflow).toEqual([]);
+  });
+
+  it("id-sorts tied items within the overflow too", () => {
+    // Two equal-priority (60) items both cut at 400px — id-ordered in overflow.
+    const tied = [s("z", 60), s("a", 60)];
+    const r = selectStatusItems(tied, 400, []);
+    expect(r.visible).toEqual([]);
+    expect(r.overflow.map((i) => i.id)).toEqual(["a", "z"]);
+  });
+
   it("handles an empty registry", () => {
     const r = selectStatusItems([], 400, []);
     expect(r.visible).toEqual([]);
