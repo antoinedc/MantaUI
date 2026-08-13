@@ -18,6 +18,7 @@ function snap(
   return {
     provider,
     providerIDs: [provider],
+    fetchedAt: 0,
     windows: windows.map((w) => ({ kind: w.kind, label: w.label, pct: w.pct, resetsAt: w.resetsAt })),
   };
 }

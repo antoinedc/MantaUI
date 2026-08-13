@@ -86,7 +86,7 @@ export function shouldFireUsageAlert(
 export function shouldWarnStaleCache(
   fireAt: number,
   now: number,
-  cacheTtl: "5m" | "1h" | string,
+  cacheTtl: "5m" | "1h",
 ): boolean {
   return fireAt - now > selectCacheTtlMs(cacheTtl);
 }

@@ -354,7 +354,7 @@ function AppInner() {
     fireAt: number;
     sessionID: string;
   } | null>(null);
-  const cacheTtl = useStore((s) => s.config?.cacheTtl);
+  const cacheTtl = useStore((s) => s.cacheTtl);
 
   useEffect(() => {
     // Bootstrap (BET-678). The first paint is INSTANT — read from the persisted

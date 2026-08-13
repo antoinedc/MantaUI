@@ -136,7 +136,7 @@ test("minuteKey is stable per-minute local key", () => {
 // ----------------------------------------------------------------------------
 
 test("cronForInstant renders M H D MO * from a local date", () => {
-  assert.equal(cronForInstant(localDate(2026, 8, 18, 9, 1)), "1 9 18 8 *");
+  assert.equal(cronForInstant(localDate(2026, 8, 18, 9, 1)), "01 09 18 8 *");
 });
 
 test("cronForInstant handles a December date (month off-by-one)", () => {

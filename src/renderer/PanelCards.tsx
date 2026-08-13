@@ -69,7 +69,7 @@ export const ScheduledTasksCard = memo(function ScheduledTasksCard({
             return (
               <div key={j.id} className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <div className="text-text truncate flex items-center gap-1.5" title={j.prompt}>
+                  <div className="text-text truncate flex items-center gap-2" title={j.prompt}>
                     {j.kind === "notify" && (
                       <Bell size={12} aria-hidden="true" className="shrink-0 text-text-faint" />
                     )}
