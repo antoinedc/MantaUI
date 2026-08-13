@@ -67,6 +67,9 @@ struct ComposerView: View {
     @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
     @State private var micMode: VoiceMode = .dictate
+    /// High-water flag for a press whose permission prompt is still resolving —
+    /// lets `micPress` re-check the finger is still down after the await.
+    @State private var micPressActive = false
     /// Auto-dismiss task for the currently shown hint — tied to the hint's own
     /// identity so a new hint cancels and restarts the 4 s timer.
     @State private var hintDismissTask: Task<Void, Never>?
@@ -664,13 +667,21 @@ struct ComposerView: View {
 
     private func micPress() {
         guard micAvailable, recorder.phase != .recording, recorder.phase != .processing else { return }
+        // onChanged fires repeatedly during the permission await — one Task only.
+        guard !micPressActive else { return }
+        micPressActive = true
         Task {
             let granted = await recorder.requestPermission()
             guard granted else {
+                micPressActive = false
                 recorder.fail("Microphone permission needed")
                 hintState("Microphone permission is required")
                 return
             }
+            // The finger may have lifted while the permission prompt was up —
+            // starting now would record with no press and wedge the phase guard
+            // (desktop parity: "cancel checked AFTER getUserMedia resolves").
+            guard micPressActive else { return }
             micMode = .dictate
             recorder.start()
         }
@@ -682,6 +693,7 @@ struct ComposerView: View {
     }
 
     private func micRelease() {
+        micPressActive = false
         guard recorder.phase != .processing else { return }
         guard let data = recorder.stop() else {
             // Too short — treat as an accidental tap, not an error (§ desktop
