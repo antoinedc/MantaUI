@@ -7,10 +7,10 @@
 // helpers in ./pairPanel.ts (repo pattern: chatUtils.ts). This component only
 // mints via the existing `auth:pair` RPC channel and renders.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AuthPairResult } from "../shared/types";
 import { PairingQR, PairingCountdown } from "./PairingQR";
-import { shouldRefreshPairCode } from "./pairPanel";
+import { resolveQrServerOverride, shouldRefreshPairCode } from "./pairPanel";
 
 // 1s tick drives the live countdown + re-evaluates expiry so the code
 // auto-rotates the moment it elapses while the panel stays open (§6.4). The
@@ -59,6 +59,24 @@ export function AddPhonePanel() {
     }
   }, [tick, pairing, mint]);
 
+  // BET-703 (tailnet box): when this desktop's configured server URL differs
+  // from the box's derived public hostname AND is a private/tailnet address,
+  // the scanned QR must carry `server=` so the phone claims against the real
+  // listener instead of a non-existent public host. Computed here (where the
+  // mint result feeds the QR) via the pure `resolveQrServerOverride` helper;
+  // the configured URL is read via the existing `manta_server` localStorage
+  // key — same accessor the transport layer and store overlay use.
+  const qrServerUrl = useMemo(() => {
+    if (!pairing?.ok) return undefined;
+    let configured: string | undefined;
+    try {
+      configured = localStorage.getItem("manta_server") ?? undefined;
+    } catch {
+      configured = undefined; // localStorage unavailable — omit override
+    }
+    return resolveQrServerOverride(pairing.boxId, configured);
+  }, [pairing]);
+
   return (
     <div className="space-y-4">
       <div className="text-body text-text-faint">
@@ -77,12 +95,17 @@ export function AddPhonePanel() {
               <PairingQR
                 boxId={pairing.boxId}
                 pairingCode={pairing.pairingCode}
+                serverUrl={qrServerUrl}
               />
             </div>
             <div className="flex-1 space-y-2">
               <div className="text-body">
                 <span className="text-text-muted">Code:</span>{" "}
                 <span className="font-mono text-text">{pairing.pairingCode}</span>
+              </div>
+              <div className="text-body">
+                <span className="text-text-muted">Box ID:</span>{" "}
+                <span className="font-mono text-text break-all">{pairing.boxId}</span>
               </div>
               <PairingCountdown expiry={new Date(pairing.expiresAt)} />
             </div>
@@ -100,8 +123,9 @@ export function AddPhonePanel() {
       )}
 
       <div className="text-body text-text-faint">
-        Prefer to type it? Enter the {pairing?.ok ? "six digits above" : "six-digit code"} on
-        your phone instead of scanning.
+        {pairing?.ok
+          ? "Prefer to type it? Enter the six digits and the box ID above on your phone instead of scanning."
+          : "Prefer to type it? Enter the six-digit code on your phone instead of scanning."}
       </div>
     </div>
   );

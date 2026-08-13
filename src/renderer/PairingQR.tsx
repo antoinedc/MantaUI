@@ -1,38 +1,31 @@
 // PairingQR — renders a QR code image for mobile device pairing.
 //
-// The QR encodes the CANONICAL box-form `<scheme>://pair?box=<boxId>&code=<6-digit>`
-// payload produced by the SHARED `buildPairPayload` helper
-// (src/shared/pairPayload.ts). BET-237 removed the deprecated
-// serverUrl / id forms — `parsePairPayload` rejects anything other than
-// `box=<boxId>&code=<6-digit>`. The canonical form is the SAME shape `manta
-// pair` prints + the install heredoc + the deep-link handler in
-// MobileApp.tsx parses.
+// The QR encodes the UNIVERSAL-LINK https form produced by the SHARED
+// `buildUniversalPairLink` helper (src/shared/pairPayload.ts):
+//   https://app.mantaui.com/m?box=<boxId>&code=<code>[&server=<url>]
+// A camera scan of a universal link opens a URL even when the app is NOT yet
+// installed (the OS resolves it and hands off to the App Store / app once the
+// associated domains resolve) — scanning a custom `manta://` scheme did
+// nothing without the app (BET-703). `buildUniversalPairLink` shares the
+// single `UNIVERSAL_LINK_HOST` with the iOS parser, and is deliberately NOT
+// parameterized by channel (universal links have one registered host).
+//
+// The optional `serverUrl` prop (BET-703) lets a tailnet / macOS box (no
+// public hostname) ship a QR that carries its private listener — see
+// `resolveQrServerOverride` in pairPanel.ts, which the AddPhonePanel feeds.
+// The caller passes the desktop's configured server URL in; when it equals
+// the box's derived public hostname, `serverUrl` is omitted (today's
+// behavior).
 //
 // We use the `qrcode` npm package to generate a data URL, then render it as
 // an <img> tag. The data URL is memoized so we don't regenerate on every
 // render (QR generation is CPU-bound).
 //
-// This is a desktop-only feature (BET-80). The mobile app consumes the same
-// URL scheme but generates the QR on the desktop side.
-//
-// BET-373 (channel-aware wire format): the QR uses THIS channel's URL scheme
-// (`channelConfig(__MANTA_CHANNEL__).urlScheme`, the same source the main
-// process uses to register `setAsDefaultProtocolClient(...)` and to build
-// `PAIR_PREFIX`). A staging desktop scans a QR with `manta-staging://…` so
-// the OS routes the open back to staging, not to whichever channel got
-// registered last for `manta://`. `__MANTA_CHANNEL__` is baked into the
-// renderer at build time (electron.vite.config.ts renderer `define`).
+// This is a desktop-only feature (BET-80). The mobile app generates the QR on
+// the desktop side but consumes the same URL scheme.
 
 import { useEffect, useMemo, useState } from "react";
-import { buildPairPayload } from "../shared/pairPayload";
-import { channelConfig } from "../shared/channel.mjs";
-
-// Channel-aware scheme for the QR prefix. The baked `__MANTA_CHANNEL__`
-// comes from the renderer `define` (electron.vite.config.ts); channelConfig
-// does the same unknown-id → prod fallback the main process relies on, so a
-// stale/garbage baked value still produces a usable scheme rather than
-// throwing at render time.
-const PAIR_SCHEME = channelConfig(__MANTA_CHANNEL__).urlScheme;
+import { buildUniversalPairLink } from "../shared/pairPayload";
 
 // Lazy-load qrcode so the renderer doesn't pay the bundle cost if this
 // component is never rendered (Settings is a modal, only open on demand).
@@ -44,20 +37,21 @@ async function loadQrCode() {
 export function PairingQR({
   boxId,
   pairingCode,
+  serverUrl,
 }: {
   boxId: string;
   pairingCode: string;
+  serverUrl?: string;
 }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const url = useMemo(() => {
-    // Canonical box-form payload — shared with the install heredoc, `manta pair`
-    // output, and the mobile deep-link parser. Single source: pairPayload.ts.
-    // BET-373: `PAIR_SCHEME` keys the QR to this channel's OS-registered URL
-    // scheme so the OS routes the open back to the channel that scanned it.
-    return buildPairPayload({ boxId, code: pairingCode }, PAIR_SCHEME);
-  }, [boxId, pairingCode]);
+    // Universal-link https form — the QR is what gets scanned by a camera, so
+    // it must open a URL whether or not the app is installed. Single source:
+    // pairPayload.ts. No channel scheme: universal links have one host.
+    return buildUniversalPairLink({ boxId, code: pairingCode, serverUrl });
+  }, [boxId, pairingCode, serverUrl]);
 
   useEffect(() => {
     let cancelled = false;

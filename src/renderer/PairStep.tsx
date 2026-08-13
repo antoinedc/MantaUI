@@ -231,7 +231,10 @@ function ManualPairForm({
             htmlFor="pair-box-id"
             className="text-label font-medium text-text-muted"
           >
-            Box ID
+            Box ID{" "}
+            <span className="font-normal text-text-faint">
+              (optional if Host set)
+            </span>
           </label>
           <input
             id="pair-box-id"

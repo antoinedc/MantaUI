@@ -4,7 +4,43 @@ import {
   shouldRefreshPairCode,
   msUntilRefresh,
   isValidManualPairCode,
+  resolveQrServerOverride,
 } from "./pairPanel";
+import { boxDirectUrl } from "../shared/transport.mjs";
+
+const BOX = "7f3a9c1e0b8d4a62f1c9e5b7d0a4f8c2"; // 32 hex
+
+describe("resolveQrServerOverride (BET-703)", () => {
+  it("omits the override when the configured URL equals the box's public hostname", () => {
+    expect(resolveQrServerOverride(BOX, boxDirectUrl(BOX))).toBeUndefined();
+  });
+
+  it("omits the override when no configured URL is present", () => {
+    expect(resolveQrServerOverride(BOX, undefined)).toBeUndefined();
+    expect(resolveQrServerOverride(BOX, null)).toBeUndefined();
+    expect(resolveQrServerOverride(BOX, "")).toBeUndefined();
+  });
+
+  it("carries a private/tailnet URL that differs from the public hostname", () => {
+    expect(resolveQrServerOverride(BOX, "http://100.64.1.5:8787")).toBe(
+      "http://100.64.1.5:8787",
+    );
+    expect(resolveQrServerOverride(BOX, "https://mybox.ts.net")).toBe(
+      "https://mybox.ts.net",
+    );
+  });
+
+  it("omits a custom PUBLIC domain that differs from the public hostname", () => {
+    // The iOS parser refuses non-private server= by design (crafted-link
+    // guard) — the QR must not include a public override it would reject.
+    expect(resolveQrServerOverride(BOX, "https://box.example.com")).toBeUndefined();
+  });
+
+  it("omits a malformed configured URL", () => {
+    expect(resolveQrServerOverride(BOX, "100.64.1.5:8787")).toBeUndefined();
+    expect(resolveQrServerOverride(BOX, "ftp://100.x.y.z")).toBeUndefined();
+  });
+});
 
 describe("isPairCodeExpired", () => {
   it("is alive before expiry", () => {

@@ -212,3 +212,36 @@ export function buildPairPayload(p: PairPayload, scheme: string = "manta"): stri
   }
   return base;
 }
+
+/**
+ * The accepted host for the Manta universal (https) pairing link. Universal
+ * links have ONE registered host — there is deliberately no per-channel
+ * variant (BET-703). Reused here so `buildUniversalPairLink` and the Swift
+ * parser share the literal even though they live in different repos.
+ */
+export const UNIVERSAL_LINK_HOST = "app.mantaui.com";
+
+/**
+ * Build the deferred-deeplink https form of a pairing payload:
+ *   https://<UNIVERSAL_LINK_HOST>/m?box=<url-encoded box_id>&code=<code>[&server=<url-encoded serverUrl>]
+ *
+ * This is what a camera scan of a QR opens when the Manta app is NOT yet
+ * installed — the OS resolves the universal link and hands off to the App
+ * Store / app (BET-703). The path is `/m` (the Swift parser accepts both
+ * `/m` and `/m/`), and the host is the single `UNIVERSAL_LINK_HOST` — never
+ * parameterized by channel, unlike the custom-scheme `buildPairPayload`.
+ *
+ * BET-336: when the payload carries a `serverUrl` (Tailscale / tailnet
+ * path, a box with no public hostname), a `server=<url-encoded serverUrl>`
+ * query param is appended so the receiving device claims against the
+ * private/tailnet listener instead of the derived public hostname. As with
+ * `buildPairPayload`, callers only feed server URLs that already passed
+ * `isPrivateServerUrl`, so we do NOT re-validate here (thin encoder).
+ */
+export function buildUniversalPairLink(p: PairPayload): string {
+  let base = `https://${UNIVERSAL_LINK_HOST}/m?box=${encodeURIComponent(p.boxId)}&code=${p.code}`;
+  if (p.serverUrl) {
+    base += `&server=${encodeURIComponent(p.serverUrl)}`;
+  }
+  return base;
+}

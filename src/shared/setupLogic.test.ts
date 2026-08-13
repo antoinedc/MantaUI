@@ -85,6 +85,53 @@ describe("canConnectSetup", () => {
       }),
     ).toBe(false);
   });
+
+  // BET-703 (2-field tailnet manual pairing): a valid serverUrl + 6-digit
+  // code is sufficient on its own — the Box ID becomes OPTIONAL because the
+  // claim can run against the explicit URL and backfill box_id from the
+  // response.
+  it("enables Connect with a valid serverUrl + code and NO box id (BET-703)", () => {
+    expect(
+      canConnectSetup({ ...base, boxId: "", code: "123456", serverUrl: TAILNET }),
+    ).toBe(true);
+  });
+
+  it("trims a whitespace-only box id out — still connectable with a serverUrl (BET-703)", () => {
+    expect(
+      canConnectSetup({
+        ...base,
+        boxId: "   ",
+        code: "123456",
+        serverUrl: TAILNET,
+      }),
+    ).toBe(true);
+  });
+
+  it("still requires a box id when no serverUrl is present (BET-703)", () => {
+    expect(canConnectSetup({ ...base, boxId: "", code: "123456" })).toBe(false);
+    expect(
+      canConnectSetup({ ...base, boxId: " ", code: "123456", serverUrl: "" }),
+    ).toBe(false);
+  });
+
+  it("still blocks when an empty box id meets an INVALID serverUrl (BET-703)", () => {
+    expect(
+      canConnectSetup({
+        ...base,
+        boxId: "",
+        code: "123456",
+        serverUrl: "100.64.1.5:8787",
+      }),
+    ).toBe(false);
+    expect(
+      canConnectSetup({
+        ...base,
+        boxId: BAD_BOX,
+        code: "123456",
+        serverUrl: "ftp://nope",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("buildSetupClaimInput", () => {
