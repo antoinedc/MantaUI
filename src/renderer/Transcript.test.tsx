@@ -173,15 +173,13 @@ describe("Transcript entry motion", () => {
     // Prose is NOT exempt from the motion anymore — every part of a live
     // message (streaming text included) pops with the same framer-motion
     // entry, so the AI reply reads like the prompt. The container plays once
-    // on mount; the `.manta-streaming` class still supplies the trailing
-    // caret. Settling the turn must not retro-add a second pop.
+    // on mount. Settling the turn must not retro-add a second pop.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, msg("a_new", "assistant", "writing")];
     render(h, streaming, true);
     expect(partsIn(h)).toBe(1);
-    expect(h.container.querySelectorAll(".manta-streaming").length).toBe(1);
 
     // Frozen at mount: settling the turn must not replay the pop.
     render(h, streaming, false);

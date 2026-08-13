@@ -80,16 +80,6 @@ html, body, #root {
 }
 .xterm-cursor-layer { outline: none; }
 
-/* Terminal-style blinking cursor for the chat running indicator. Hard on/off
-   (step-start), not a smooth fade — matches a real tty cursor. */
-@keyframes blink-cursor {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-.blink-cursor {
-  animation: blink-cursor 1s step-start infinite;
-}
-
 /* Onboarding step transition — fade + slide up, keyed remount per step
    (Onboarding.tsx). Mirrors the mockup's fadeSlideIn. */
 @keyframes onboardingFadeSlideIn {
@@ -135,31 +125,6 @@ html, body, #root {
 @media (prefers-reduced-motion: reduce) {
   .manta-loader-ring-out,
   .manta-loader-ring-in { animation: none; }
-}
-
-/* Streaming assistant text — trailing caret only (BET-649, M527).
-   Entry motion for chat messages now lives in framer-motion
-   (`src/renderer/chatMotion.ts`, applied by MessageBubble / AssistantPart), so
-   the per-block and per-card CSS slide-ins are gone. What remains here is the
-   trailing caret that marks the ONE message currently being written: a thin
-   accent block after the last block's last line, drawn with ::after on the
-   last child so it sits INLINE at the end of the text — a sibling element
-   would break onto its own line after a block-level <p>. Nothing in the
-   settled transcript carries a caret, and the entry animation itself is
-   reduced-motion-handled by the app-root MotionConfig reducedMotion="user". */
-.manta-streaming > *:last-child::after {
-  content: "";
-  display: inline-block;
-  width: 0.45em;
-  height: 1em;
-  margin-left: 2px;
-  vertical-align: -0.15em;
-  border-radius: 1px;
-  background: var(--accent);
-  animation: blink-cursor 1s step-start infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .manta-streaming > *:last-child::after { animation: none; }
 }
 
 /* Artifacts tab switch (links/images/files). The SELECTED highlight is a

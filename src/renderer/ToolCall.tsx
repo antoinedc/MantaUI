@@ -55,15 +55,10 @@ export function formatFileDiff(additions: number, deletions: number): React.Reac
 export const AssistantPart = memo(function AssistantPart({
   part,
   showThinking,
-  streaming = false,
   entering = false,
 }: {
   part: OpencodePart;
   showThinking: boolean;
-  // True ONLY for the text part currently being written (last part of the last
-  // assistant message while the turn runs). Carries the trailing caret; a
-  // settled transcript never shows one.
-  streaming?: boolean;
   // True when the parent message ARRIVED while the user was watching, so this
   // part pops in as it appears. Every part of a live message does the SAME
   // animation (MESSAGE_IN) — a streaming text reply pops like the prompt,
@@ -72,7 +67,7 @@ export const AssistantPart = memo(function AssistantPart({
   // still (`initial={false}` → nothing moves).
   entering?: boolean;
 }) {
-  const body = renderAssistantPart(part, showThinking, streaming);
+  const body = renderAssistantPart(part, showThinking);
   if (body == null) return null;
   // The motion goes on an ALWAYS-PRESENT wrapper rather than the part's own
   // root because the roots are shared primitives (ToolCard, OutputWell) that
@@ -97,7 +92,6 @@ export const AssistantPart = memo(function AssistantPart({
 function renderAssistantPart(
   part: OpencodePart,
   showThinking: boolean,
-  streaming: boolean,
 ): React.ReactElement | null {
   if (part.type === "text") {
     const text = (part.text ?? "").replace(/^\n+|\n+$/g, "");
@@ -105,11 +99,7 @@ function renderAssistantPart(
     // Per the spec (.amsg) the assistant text is plain paragraphs at the
     // reading size with no leading gutter — the old `●` bullet column is gone
     // (BET-637), so the markdown body sits flush with the reading column.
-    return (
-      <div className={`break-words text-text${streaming ? " manta-streaming" : ""}`}>
-        {renderMarkdown(text)}
-      </div>
-    );
+    return <div className="break-words text-text">{renderMarkdown(text)}</div>;
   }
 
   if (part.type === "reasoning") {

@@ -248,7 +248,6 @@ export const MessageRow = memo(function MessageRow({
   verbSeedId,
   truncation,
   commandInfo,
-  streaming = false,
   entering = false,
 }: {
   msg: OpencodeMessage;
@@ -275,11 +274,6 @@ export const MessageRow = memo(function MessageRow({
   // message, the row shows a collapsed `/name args` pill with an expand
   // chevron instead of the full expanded template body.
   commandInfo: { name: string; arguments: string } | null;
-  // True ONLY for the last assistant message while the turn is running — the
-  // message currently being written. Drives the per-block fade-in and the
-  // trailing caret on its final text part (BET-649). Primitive prop, so the
-  // MessageRow memo chain is untouched.
-  streaming?: boolean;
   // True when this message ARRIVED while the user was watching, as opposed to
   // being part of the transcript they loaded (transcript-motion). Decided once
   // in Transcript by `updateEntryMotion` and sticky for the row's whole life —
@@ -413,14 +407,11 @@ export const MessageRow = memo(function MessageRow({
 
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
-      {visibleParts.map((p, i) => (
+      {visibleParts.map((p) => (
         <AssistantPart
           key={p.id}
           part={p}
           showThinking={showThinking}
-          // Only the LAST part of the message being written streams — an
-          // earlier part is finished even while the turn continues.
-          streaming={streaming && i === visibleParts.length - 1}
           // Slide this part in only when the whole message is new to the user.
           // A loaded transcript passes `entering=false`, so history is still.
           entering={entering}

@@ -1,8 +1,8 @@
 // M527.chatMotion — the single entry animation for chat message appearance.
 //
-// There used to be three separate hand-rolled CSS keyframe animations
-// (manta-bubble-in for the prompt, manta-part-in for cards, manta-streaming
-// for per-block streamed text) plus a data-* gate. They were consolidated into
+// There used to be separate hand-rolled CSS keyframe animations
+// (manta-bubble-in for the prompt, manta-part-in for cards) plus a data-*
+// gate. They were consolidated into
 // ONE framer-motion animation, "variant A": every assistant reply, tool card
 // and user prompt that arrives while the user is watching performs the same
 // short rise with a slight scale overshoot (spring physics), so message

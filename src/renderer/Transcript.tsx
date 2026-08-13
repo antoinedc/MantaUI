@@ -396,8 +396,6 @@ export function Transcript({
     onRejectQuestion,
   };
 
-  const lastId = messages.length > 0 ? messages[messages.length - 1].info.id : null;
-
   // Anchor the initial view to the newest turn. A chat transcript opens at the
   // tail. `initialTopMostItemIndex: "LAST"` would do this declaratively, but
   // that prop renders zero rows under react-virtuoso's VirtuosoMockContext
@@ -488,8 +486,6 @@ export function Transcript({
                 // but the user must not — skip rendering the row entirely so it
                 // never appears as a right-aligned user bubble.
                 if (isBackgroundJobCompletionTurn(m)) return null;
-                const isLastInTranscript =
-                  m.info.id === lastId && m.info.role === "assistant";
                 // cmdInfo comes from `userCommandInfo` (memoized at panel
                 // scope on [messages, commandByMessageId, commands]).
                 // O(1) Map lookup here means MessageRow can be React.memo'd
@@ -507,9 +503,6 @@ export function Transcript({
                     verbSeedId={turnInfo.get(m.info.id)?.verbSeedId ?? null}
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
-                    // The message being written right now: last in the
-                    // transcript, assistant, and the turn still running.
-                    streaming={isLastInTranscript && running}
                     entering={entryMotion.entering.has(m.info.id)}
                   />
                 );

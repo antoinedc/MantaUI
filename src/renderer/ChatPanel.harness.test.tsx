@@ -8,7 +8,7 @@
 // (Transcript / Composer / hook extraction) verifiable rather than blind —
 // if any extraction breaks the mount or the event wiring, a test here fails.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
@@ -31,6 +31,57 @@ const PROPS = {
   cwd: "/home/dev/projects/x",
   isActive: true,
 };
+
+// react-virtuoso mock (BET-802) — one test needs to OBSERVE every
+// `scrollToIndex` call the panel makes, but Virtuoso recreates its imperative
+// handle object on every render, so a handle spied after mount goes stale the
+// moment the submit re-render lands. Instead of reaching into internals, we
+// wrap the REAL `<Virtuoso>` (delegating all rendering so the other harness
+// tests are untouched) and, in a layout effect that runs after Virtuoso sets
+// ref.current but before passiv ive effects (where ChatPanel's post-commit
+// force-tail scroll lives), route every `scrollToIndex` on the current handle
+// through a module-scope observer the test installs. Layout effects flush
+// bottom-up, so the child Virtuoso's handle exists before this wrapper runs.
+vi.mock("react-virtuoso", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-virtuoso")>();
+  const React = await import("react");
+  const { forwardRef: fwd, useLayoutEffect: layout, useRef: ref } = React;
+
+  // Registry the BET-802 test reads/writes. `observer` receives every
+  // scrollToIndex call; `container` is where the panel is mounted, so the
+  // observer can capture the transcript text at the moment of the call.
+  (globalThis as { __virtuosoScrollObserver?: unknown }).__virtuosoScrollObserver = null;
+  (globalThis as { __virtuosoContainer?: unknown }).__virtuosoContainer = null;
+
+  const Virtuoso = fwd(function Virtuoso(props: Record<string, unknown>, forwarded: unknown) {
+    const mountedRef = ref<boolean>(false);
+    layout(() => {
+      // `forwarded` is the panel's virtuosoRef; Virtuoso (child, rendered
+      // below) sets forwarded.current to a fresh handle during its own layout
+      // effect, which flushes before this one.
+      const handle = (forwarded as { current?: { scrollToIndex?: unknown } } | null)?.current;
+      if (handle && typeof handle.scrollToIndex === "function") {
+        const base = (handle.scrollToIndex as (...a: unknown[]) => unknown).bind(handle);
+        (handle as { scrollToIndex: (...a: unknown[]) => unknown }).scrollToIndex =
+          (...args: unknown[]) => {
+            const container = (globalThis as any).__virtuosoContainer as HTMLElement | null;
+            const observer = (globalThis as any).__virtuosoScrollObserver as
+              | ((args: unknown[], text: string) => void)
+              | null;
+            if (observer) observer(args, container?.textContent ?? "");
+            return base(...args);
+          };
+      }
+      mountedRef.current = true;
+    });
+    return React.createElement(
+      actual.Virtuoso,
+      { ...(props as Record<string, unknown>), ref: forwarded } as never,
+    );
+  });
+
+  return { ...actual, Virtuoso };
+});
 
 describe("ChatPanel render harness", () => {
   let bus: MockEventBus;
@@ -652,6 +703,81 @@ describe("ChatPanel composer submit", () => {
     await h.flush();
     // useInputHistory swapped the empty draft for the last user prompt.
     expect(textarea.value).toBe("previous prompt");
+  });
+
+  it("scrolls the transcript to the tail only after the optimistic message is committed (BET-802)", async () => {
+    // Capture every scrollToIndex the panel fires, together with the
+    // transcript text at the instant of the call, via the react-virtuoso mock
+    // defined at the top of this file (Virtuoso recreates its handle on every
+    // render, so an instance-level spy goes stale the moment submit commits).
+    const calls: Array<{ args: unknown[]; text: string }> = [];
+    (globalThis as any).__virtuosoScrollObserver = (args: unknown[], text: string) => {
+      calls.push({ args, text });
+    };
+    (globalThis as any).__virtuosoContainer = null;
+
+    // Seed one transcript row so the message-list branch (and thus the
+    // Virtuoso handle) is mounted before we submit; an empty initial fetch
+    // would render only the welcome state and no Virtuoso at all.
+    const transcript = [
+      {
+        info: {
+          id: "msg_a1",
+          sessionID: "ses_test",
+          role: "assistant" as const,
+          time: { created: 1, completed: 2 },
+        },
+        parts: [
+          { type: "text", id: "prt_a1", messageID: "msg_a1", text: "ready" },
+        ],
+      },
+    ];
+    ({ api } = installMockApi({
+      opencodeMessages: () => Promise.resolve(transcript),
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    (globalThis as any).__virtuosoContainer = h.container;
+    const before = calls.length;
+
+    const textarea = h.container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      typeInto(textarea, "please scroll to me");
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    // The optimistic user message committed into the DOM…
+    expect(h.text()).toContain("please scroll to me");
+    // …and at least one force-pin to "LAST" fired for it (the submit
+    // force-pin), at a moment when that very message was already rendered.
+    // If submit scrolled inline against the stale list, the "LAST" call would
+    // capture a transcript without the new message — the exact BET-802 bug.
+    const scrollsAfterSubmit = calls.slice(before);
+    const lastScrolled = scrollsAfterSubmit.some(
+      (c) => (c.args[0] as { index?: unknown } | undefined)?.index === "LAST",
+    );
+    const lastEndScrolled = scrollsAfterSubmit.some(
+      (c) => (c.args[0] as { index?: unknown; align?: unknown } | undefined)?.index === "LAST"
+        && (c.args[0] as { index?: unknown; align?: unknown } | undefined)?.align === "end",
+    );
+    const hadMessageWhenLastScrolled = scrollsAfterSubmit.some(
+      (c) =>
+        (c.args[0] as { index?: unknown } | undefined)?.index === "LAST"
+        && c.text.includes("please scroll to me"),
+    );
+    expect(lastScrolled).toBe(true);
+    expect(lastEndScrolled).toBe(true);
+    expect(hadMessageWhenLastScrolled).toBe(true);
+
+    (globalThis as any).__virtuosoScrollObserver = null;
+    (globalThis as any).__virtuosoContainer = null;
   });
 });
 
