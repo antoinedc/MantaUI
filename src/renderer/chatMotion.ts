@@ -28,6 +28,13 @@ import type { MotionProps } from "framer-motion";
 
 type EntryMotionProps = Pick<MotionProps, "initial" | "animate" | "transition">;
 
+// The motion scale (audit D1): three durations, ONE easing. Every in-app
+// transition picks a token; ad-hoc durations/curves are a regression.
+export const MOTION_EASE = [0.22, 1, 0.36, 1] as const;      // the existing chat-entry ease
+export const MOTION_FAST = 0.12;   // menus, palette, backdrops
+export const MOTION_BASE = 0.2;    // modals, cards, toasts
+export const MOTION_SLOW = 0.3;    // message entry, panel slides, onboarding
+
 /**
  * The "smooth appear": a short rise (translateY 12px) with a cross-fade, on a
  * non-overshooting cubic-bezier ease. Applied identically to the user bubble,
@@ -46,7 +53,7 @@ type EntryMotionProps = Pick<MotionProps, "initial" | "animate" | "transition">;
 export const MESSAGE_IN_ENTER: EntryMotionProps = {
   initial: { opacity: 0, y: 12 },
   animate: { opacity: 1, y: 0 },
-  transition: { type: "tween", duration: 0.3, ease: [0.22, 1, 0.36, 1] },
+  transition: { type: "tween", duration: MOTION_SLOW, ease: MOTION_EASE },
 };
 
 /**

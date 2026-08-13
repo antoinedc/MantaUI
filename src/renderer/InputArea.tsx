@@ -485,7 +485,7 @@ export function InputArea({
             "inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
-              : "text-text-quiet hover:text-text-muted")
+              : "text-text-muted hover:text-text-muted")
           }
           title={
             chatAutoAllow

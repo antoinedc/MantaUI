@@ -20,6 +20,7 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import type { ReactNode } from "react";
+import { MOTION_BASE, MOTION_EASE } from "../chatMotion";
 
 export type CardMountProps = {
   /** Whether the card is currently visible. */
@@ -38,7 +39,7 @@ export function CardMount({ show, k, children }: CardMountProps) {
           initial={{ height: 0, opacity: 0 }}
           animate={{ height: "auto", opacity: 1 }}
           exit={{ height: 0, opacity: 0 }}
-          transition={{ duration: 0.22, ease: [0.25, 0.1, 0.25, 1] }}
+          transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
           style={{ overflow: "hidden" }}
         >
           {children}

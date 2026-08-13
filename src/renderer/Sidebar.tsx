@@ -561,7 +561,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         >
           <button
             onClick={() => setPaletteOpen(true)}
-            className="text-text-muted hover:text-text text-base leading-none"
+            className="text-text-muted hover:text-text text-prose leading-none"
             title={`Search sessions (${MOD_KEY}K)`}
             aria-label="Search sessions"
           >
@@ -569,7 +569,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           </button>
           <button
             onClick={onNewProject}
-            className="text-text-muted hover:text-text text-lg leading-none"
+            className="text-text-muted hover:text-text text-title leading-none"
             title={`New project (${MOD_KEY}N)`}
           >
             +
@@ -842,8 +842,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               for blocking states only. */}
           {updateAvailable && (
             <span
-              className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
-              style={{ backgroundColor: "var(--accent)" }}
+              className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-accent"
               title="An update is ready to install — see Settings → General → About"
               aria-label="Update available"
             />

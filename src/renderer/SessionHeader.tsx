@@ -334,7 +334,7 @@ function ContextPill({
         <div
           role="dialog"
           aria-label="Context usage"
-          className="manta-ctx-popover absolute right-0 top-full mt-1 z-30 w-[340px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
+          className="manta-ctx-popover manta-menu-in absolute right-0 top-full mt-1 z-30 w-[340px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
         >
           {/* Headline — the percentage leads, the absolute counts qualify it.
               Baseline-aligned so the 15px metric and the 12px mono counts sit

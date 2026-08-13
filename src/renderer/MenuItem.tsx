@@ -180,6 +180,7 @@ export function Dropdown({
       role={role}
       className={
         `${hook ? `${hook} ` : ""}` +
+        `manta-menu-in ` +
         `${DROPDOWN_SURFACE} ${DROPDOWN_WIDTH[width]} ${DROPDOWN_PLACEMENT[placement]} ${DROPDOWN_ALIGN[align]}`
       }
     >

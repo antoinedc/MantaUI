@@ -84,29 +84,23 @@ export function UpdateBar({
     // exactly `px-3` everywhere else.
     <div className="shrink-0 bg-accent/10 border-b border-accent/30 pl-3 pr-[calc(var(--sp-3)+var(--titlebar-inset-right))] py-2 text-meta text-text flex items-center gap-2">
       <span className="flex-1 truncate">{statusLabel}</span>
-      {busy ? (
+      {busy || progress ? (
         <div
-          className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden"
+          className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden relative"
           role="progressbar"
           aria-label={busyLabel}
+          aria-valuenow={progress ? progress.step : undefined}
+          aria-valuemin={progress ? 1 : undefined}
+          aria-valuemax={progress ? progress.total : undefined}
         >
-          <div
-            className="h-full bg-accent animate-pulse"
-            style={{ width: progress ? `${(progress.step / progress.total) * 100}%` : "55%" }}
-          />
-        </div>
-      ) : progress ? (
-        <div
-          className="shrink-0 w-32 h-1.5 rounded-full bg-accent/20 overflow-hidden"
-          role="progressbar"
-          aria-valuenow={progress.step}
-          aria-valuemin={1}
-          aria-valuemax={progress.total}
-        >
-          <div
-            className="h-full bg-accent transition-all"
-            style={{ width: `${(progress.step / progress.total) * 100}%` }}
-          />
+          {progress ? (
+            <div
+              className="h-full bg-accent"
+              style={{ width: `${(progress.step / progress.total) * 100}%` }}
+            />
+          ) : (
+            <div className="absolute h-full manta-sweep rounded-full bg-accent" />
+          )}
         </div>
       ) : (
         <>

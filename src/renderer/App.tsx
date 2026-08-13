@@ -1298,8 +1298,7 @@ function AppInner() {
                 title="The box's tmux is unreachable — showing the last known session list."
               >
                 <span
-                  className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{ backgroundColor: "#f59e0b" }}
+                  className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-warn"
                   aria-hidden="true"
                 />
                 last known state
