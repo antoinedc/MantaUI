@@ -809,8 +809,9 @@ export const httpApi: Api = {
   onAgentFileReady: (cb) => on<AgentFileReady>("agentFile", cb),
   // "Pull to downloads" on a device = trigger a browser download of the
   // server-local file. We point an <a download> at /api/download and let the
-  // WebView/browser save it (the server deletes the source on success — the
-  // one-shot mailbox). Returns "" so the ChatPanel toast knows there's no
+  // WebView/browser save it (the download is NON-destructive — the source
+  // stays in ~/.manta-outbox/ until the TTL sweep, so a retry after failure is
+  // always safe). Returns "" so the ChatPanel toast knows there's no
   // local path to "Reveal" (a desktop-only affordance) and just dismisses.
   agentPullFile: async (remotePath) => {
     try {
