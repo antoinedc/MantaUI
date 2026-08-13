@@ -144,6 +144,14 @@ private struct ChatScreenContent: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
+    /// Owned by the VIEW, never by the store: `ListDataSource` keeps an
+    /// append-only change log that `TiledView` replays from index 0 whenever
+    /// it meets a data source it has not seen. A store-owned one is mutated
+    /// long before (and across more than one) view creation, so the replay
+    /// runs against an already-final snapshot and desyncs the collection
+    /// view — the invalid-batch-updates crash. View-owned, the log and the
+    /// replay cursor are born together and the replay is always coherent.
+    @State private var dataSource = ListDataSource<TranscriptRow>()
     /// Whether the transcript has been scrolled up far enough that the round
     /// "scroll to bottom" control (rendered in ComposerView's model-selection
     /// row) should be shown. Driven purely by scroll geometry; it does not
@@ -776,7 +784,7 @@ private struct ChatScreenContent: View {
         // replaces the hand-rolled ScrollView + LazyVStack + geometry/keyboard/
         // landing machinery that was the source of the device-only blank-on-
         // open, snap, and disappear-on-scroll bugs.
-        TiledView(dataSource: store.dataSource, scrollPosition: $scrollPosition) { row in
+        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         // Reserves the floating header's height. The header is an overlay and
@@ -840,6 +848,9 @@ private struct ChatScreenContent: View {
         // erases the type to `some View`, the compiler no longer sees it.
         .onTiledScrollGeometryChange { geometry in
             showScrollToBottom = geometry.pointsFromBottom > Self.scrollToBottomThreshold
+        }
+        .onChange(of: store.rows, initial: true) { _, rows in
+            dataSource.apply(rows)
         }
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
@@ -967,6 +978,14 @@ struct ChatSubagentScreen: View {
         autoScrollsToBottomOnAppend: true,
         scrollsToBottomOnReplace: true
     )
+    /// Owned by the VIEW, never by the store: `ListDataSource` keeps an
+    /// append-only change log that `TiledView` replays from index 0 whenever
+    /// it meets a data source it has not seen. A store-owned one is mutated
+    /// long before (and across more than one) view creation, so the replay
+    /// runs against an already-final snapshot and desyncs the collection
+    /// view — the invalid-batch-updates crash. View-owned, the log and the
+    /// replay cursor are born together and the replay is always coherent.
+    @State private var dataSource = ListDataSource<TranscriptRow>()
 
     /// Measured height of the subagent's own header, so the conversation rests
     /// below it. The header floats as an overlay (reserving nothing itself), so
@@ -974,7 +993,7 @@ struct ChatSubagentScreen: View {
     @State private var headerHeight: CGFloat = 0
 
     var body: some View {
-        TiledView(dataSource: store.dataSource, scrollPosition: $scrollPosition) { row in
+        TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
         .headerContent(.header {
@@ -989,6 +1008,9 @@ struct ChatSubagentScreen: View {
         .typingIndicator(.indicator(isVisible: store.running) {
             RunningIndicator(store: store)
         })
+        .onChange(of: store.rows, initial: true) { _, rows in
+            dataSource.apply(rows)
+        }
         .overlay(alignment: .top) {
             SubagentHeader(
                 title: title,
