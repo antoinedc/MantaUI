@@ -22,6 +22,8 @@ import type { OpencodeAgent, OpencodeCommand } from "../../shared/types";
 import {
   filterCommands,
   dedupeAgainstBuiltins,
+  MANTA_BUILTIN_COMMANDS,
+  MANTA_BUILTIN_NAMES,
 } from "../chatUtils";
 import type {
   TypeaheadState,
@@ -29,16 +31,8 @@ import type {
   AgentMention,
 } from "../chatShared";
 
-// manta-local slash commands. These are handled in the renderer (not forwarded
-// to opencode's /command endpoint) because opencode doesn't ship equivalents
-// — they're terminal-TUI conventions users expect to "just work".
-const MANTA_BUILTIN_COMMANDS = [
-  { name: "clear", description: "Start a fresh chat in this window" },
-  { name: "fork", description: "Copy this session's history into a new window" },
-  { name: "compact", description: "Summarize to free context" },
-  { name: "help", description: "Show available commands" },
-] as const;
-const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
+// manta-local slash commands are defined once in chatUtils.ts (ChatPanel
+// executes them, useTypeahead autocompletes them).
 
 export type Typeahead = {
   // Popup state — null when closed.

@@ -198,15 +198,13 @@ function AppInner() {
   const [searchOpen, setSearchOpen] = useState(false);
   // Activate a tmux window locally AND on the box (so the PTY follows). Shared
   // by ⌥⌘↑↓, ⌘1..9, the voice switch-window handler, and the ⌘F cross-
-  // conversation jump.
+  // conversation jump. Implemented by the store's activateWindow action.
+  const activateWindow = useStore((s) => s.activateWindow);
   const jumpToWindow = useCallback(
     (tmuxSession: string, windowIndex: number) => {
-      setActive(tmuxSession, windowIndex);
-      window.api
-        .tmuxSelectWindow({ sessionName: tmuxSession, windowIndex })
-        .catch(() => {});
+      void activateWindow(tmuxSession, windowIndex).catch(() => {});
     },
-    [setActive],
+    [activateWindow],
   );
   // Section the Settings modal lands on when the `manta-open-settings` bridge
   // fires (e.g. "Manage models…" → Models). The modal re-targets to it on

@@ -12,8 +12,6 @@
 //     commandByMessageId, sendError, messageQueue, drainAbortRef
 //   - The drain effect ([running, messageQueue] → submit queued prompt)
 //   - The abort callback
-//   - The replyPermission / replyQuestion / rejectQuestion callbacks
-//
 // Dependencies injected via params:
 //   - setMessages (from useTranscriptState)
 //   - scheduleRefetch / spliceMessage / etc. (from useTranscriptState)
@@ -140,10 +138,6 @@ export type SseBus = {
   refreshBranch: (cwd: string) => void;
   submit: () => void;
   submitRef: React.RefObject<(textOverride?: string) => void>;
-  abort: () => void;
-  replyPermission: (id: string, reply: "once" | "always" | "reject") => void;
-  replyQuestion: (q: QuestionRequest, answers: string[][]) => void;
-  rejectQuestion: (q: QuestionRequest) => void;
   // Best-effort cleanup for any question(s) blocking an aborted turn — see
   // BET-116. Owned here (not ChatPanel) because this hook owns `questions`
   // state; exposed so ChatPanel's own user-facing abort path can call the
@@ -321,12 +315,6 @@ export function useSseBus(params: {
     useStore.getState().setChatAttention(sessionId, null);
   }, [sessionId]);
 
-  const abort = useCallback(() => {
-    void window.api.opencodeAbort(sessionId)
-      .catch(() => { /* non-fatal */ })
-      .then(() => rejectAllPendingQuestions());
-  }, [sessionId, rejectAllPendingQuestions]);
-
   // Open the Settings → AI → Subscriptions card from outside ChatPanel's
   // component tree (BET-316). Follows the `manta-open-schedules` /
   // `-secrets` / `-webhooks` precedent from useSessionResources.ts: the
@@ -364,31 +352,6 @@ export function useSseBus(params: {
       }
     } catch { /* non-fatal */ }
   }, [sessionId]);
-
-  const replyPermission = useCallback(
-    (id: string, reply: "once" | "always" | "reject") => {
-      void window.api.opencodePermissionReply?.(id, reply, sessionId);
-    },
-    [sessionId],
-  );
-
-  const replyQuestion = useCallback(
-    (q: QuestionRequest, answers: string[][]) => {
-      if (!q.requestId) return;
-      void window.api.opencodeQuestionReply?.(q.requestId, answers, q.sessionID);
-    },
-    [sessionId],
-  );
-
-  const rejectQuestion = useCallback(
-    (q: QuestionRequest) => {
-      // Signature is opencodeQuestionReject(requestId, sessionId?) and the
-      // reply/reject API accepts ONLY the `que_…` requestId, not the callID.
-      if (!q.requestId) return;
-      void window.api.opencodeQuestionReject?.(q.requestId, q.sessionID);
-    },
-    [],
-  );
 
   // SSE effect
   useEffect(() => {
@@ -887,10 +850,6 @@ export function useSseBus(params: {
     drainAbortRef,
     submit,
     submitRef,
-    abort,
-    replyPermission,
-    replyQuestion,
-    rejectQuestion,
     rejectAllPendingQuestions,
     refreshPermissions,
     refreshQuestions,
