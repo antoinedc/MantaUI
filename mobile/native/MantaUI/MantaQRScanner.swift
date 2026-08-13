@@ -162,7 +162,7 @@ struct MantaQRScannerSheet: View {
                 HStack {
                     Spacer()
                     Button("Cancel") { dismiss() }
-                        .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
+                        .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.onAccent)
                         .padding(.horizontal, Metrics.spacing.sp4)
                         .padding(.vertical, Metrics.spacing.sp2)
@@ -172,7 +172,7 @@ struct MantaQRScannerSheet: View {
                 Spacer()
                 if model.permissionDenied {
                     Text("Camera access is off — enter the code by hand instead.")
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx2)
                         .padding(Metrics.spacing.sp4)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -186,7 +186,7 @@ struct MantaQRScannerSheet: View {
                         .accessibilityIdentifier("scanner-permission-hint")
                 } else if model.nonMantaHint {
                     Text("Not a Manta pairing code")
-                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.tx1)
                         .padding(.horizontal, Metrics.spacing.sp4)
                         .padding(.vertical, Metrics.spacing.sp3)

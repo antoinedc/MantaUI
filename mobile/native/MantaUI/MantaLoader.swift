@@ -87,7 +87,7 @@ struct MantaLoader: View {
 
             if let caption {
                 Text(caption)
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx4)
                     .accessibilityLabel(caption)
             }

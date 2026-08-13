@@ -43,10 +43,10 @@ struct RunningIndicator: View {
         HStack(spacing: Metrics.spacing.sp2) {
             MantaLoader(tokens: tokens, size: .inline)
             Text("\(verb)…")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx1)
             Text("(\(SessionTimerFormat.liveElapsed(elapsed)))")
-                .font(.system(size: Metrics.type.small, design: .monospaced))
+                .font(.manta(size: Metrics.type.small, design: .monospaced))
                 .foregroundColor(tokens.tx4)
             Spacer(minLength: 0)
         }

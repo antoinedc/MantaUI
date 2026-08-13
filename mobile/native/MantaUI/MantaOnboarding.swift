@@ -278,7 +278,7 @@ private struct MantaPrimaryButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
+                .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
                 .foregroundColor(tokens.onAccent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, Metrics.spacing.sp3)
@@ -298,7 +298,7 @@ private struct MantaTextButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                 .foregroundColor(tokens.accentTx)
         }
         .buttonStyle(.plain)
@@ -343,7 +343,7 @@ struct MantaManualEntryView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: Metrics.type.body))
                         Text("Scan QR code")
-                            .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                            .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     }
                     .foregroundColor(tokens.onAccent)
                     .frame(maxWidth: .infinity)
@@ -355,7 +355,7 @@ struct MantaManualEntryView: View {
                 OTPField(value: $flow.code, placeholder: "000000", tokens: tokens)
                     .accessibilityIdentifier("onboarding-otp")
                 TextField("Box ID (32 hex)", text: $flow.boxId)
-                    .font(.system(size: Metrics.type.body, design: .monospaced))
+                    .font(.manta(size: Metrics.type.body, design: .monospaced))
                     .textFieldStyle(.plain)
                     .padding(Metrics.spacing.sp3)
                     .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
@@ -365,13 +365,13 @@ struct MantaManualEntryView: View {
                     .accessibilityIdentifier("onboarding-box-id")
                 Button(action: { withAnimation { flow.showAdvanced.toggle() } }) {
                     Text(flow.showAdvanced ? "Hide server URL" : "My box isn't reachable from the internet")
-                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .foregroundColor(tokens.accentTx)
                 }
                 .buttonStyle(.plain)
                 if flow.showAdvanced {
                     TextField("https://100.64.0.9:8787", text: $flow.serverURL)
-                        .font(.system(size: Metrics.type.small, design: .monospaced))
+                        .font(.manta(size: Metrics.type.small, design: .monospaced))
                         .textFieldStyle(.plain)
                         .padding(Metrics.spacing.sp3)
                         .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
@@ -382,7 +382,7 @@ struct MantaManualEntryView: View {
                 }
                 if let error = flow.manualError {
                     Text(error)
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.danger)
                         .accessibilityIdentifier("onboarding-error")
                 }
@@ -400,10 +400,10 @@ struct MantaManualEntryView: View {
     private func header(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             Text(title)
-                .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                 .foregroundColor(tokens.tx1)
             Text(subtitle)
-                .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                 .foregroundColor(tokens.tx3)
                 .lineSpacing(pointsForLineHeight(Metrics.type.body))
         }
@@ -427,10 +427,10 @@ struct MantaLinkingView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Linking")
-                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("A couple of seconds.")
-                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx3)
             }
             MantaCard(tokens: tokens) {
@@ -441,7 +441,7 @@ struct MantaLinkingView: View {
                                 .fill(index <= flow.activeLinkingStage ? tokens.accent : tokens.tx4)
                                 .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
                             Text(stage)
-                                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                                 .foregroundColor(index <= flow.activeLinkingStage ? tokens.tx1 : tokens.tx4)
                         }
                         .accessibilityIdentifier("linking-stage-\(index)")
@@ -455,7 +455,7 @@ struct MantaLinkingView: View {
                 Spacer()
             }
             Text("Credentials stay on this phone and on your box.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
             Spacer(minLength: 0)
         }
@@ -476,17 +476,17 @@ struct MantaFailureView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text(content.heading)
-                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text(content.subtitle)
-                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx3)
                     .accessibilityIdentifier("onboarding-failure-subtitle")
             }
             if let card = content.card {
                 MantaCard(tokens: tokens) {
                     Text(card)
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx2)
                         .accessibilityIdentifier("onboarding-failure-card")
                 }
@@ -556,10 +556,10 @@ struct MantaNotificationsView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Know when it needs you")
-                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("Agents stop for permission, ask questions, and finish while you're somewhere else. This is the point of having Manta on your phone.")
-                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx3)
             }
             MantaCard(tokens: tokens) {
@@ -584,7 +584,7 @@ struct MantaNotificationsView: View {
                 .foregroundColor(tint)
                 .frame(width: Metrics.spacing.sp6, height: Metrics.spacing.sp6)
             Text(text)
-                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                 .foregroundColor(tokens.tx1)
             Spacer(minLength: 0)
         }
@@ -652,15 +652,15 @@ struct MantaOnboardingRoot: View {
                 .frame(width: Metrics.spacing.sp8, height: Metrics.spacing.sp8)
                 .overlay(
                     Text("M")
-                        .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
+                        .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.onAccent)
                 )
             VStack(alignment: .leading, spacing: Metrics.spacing.spPx) {
                 Text("Pair your phone")
-                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("Connect this device to your box.")
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx4)
             }
         }
@@ -685,10 +685,10 @@ struct MantaSwitchBoxSheet: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Switch box?")
-                    .font(.system(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                 Text("A Manta pairing link arrived while you're connected to another box. Switching re-pairs this phone to the new one.")
-                    .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx3)
             }
             MantaCard(tokens: tokens) {
@@ -715,11 +715,11 @@ struct MantaSwitchBoxSheet: View {
     private func hostRow(label: String, host: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp3) {
             Text(label)
-                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                 .foregroundColor(tokens.tx4)
             Spacer(minLength: Metrics.spacing.sp4)
             Text(host)
-                .font(.system(size: Metrics.type.small, design: .monospaced))
+                .font(.manta(size: Metrics.type.small, design: .monospaced))
                 .foregroundColor(tokens.tx1)
                 .multilineTextAlignment(.trailing)
                 .lineLimit(2)
@@ -739,7 +739,7 @@ private struct OTPField: View {
 
     var body: some View {
         TextField(placeholder, text: $value)
-            .font(.system(size: Metrics.type.otp, weight: mantaFontWeight(Metrics.type.medium), design: .monospaced))
+            .font(.manta(size: Metrics.type.otp, weight: mantaFontWeight(Metrics.type.medium), design: .monospaced))
             .keyboardType(.numberPad)
             .multilineTextAlignment(.center)
             .tracking(Metrics.spacing.sp2)

@@ -27,9 +27,9 @@ struct UserBand: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+            .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
             .foregroundColor(tokens.tx1)
-            .lineSpacing(pointsFor(multiplier: 1.5, size: Metrics.type.body))
+            .lineSpacing(pointsFor(multiplier: 1.5, size: MantaDynamicType.scaled(Metrics.type.body)))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Metrics.spacing.sp3)
@@ -70,21 +70,21 @@ struct MantaProse: View {
 
     var body: some View {
         MarkdownView(text)
-            .font(.system(size: Metrics.type.body), for: .body)
-            .font(.system(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
-            .font(.system(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
-            .font(.system(size: Metrics.type.body + 1, weight: .semibold), for: .h3)
-            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h4)
-            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h5)
-            .font(.system(size: Metrics.type.body, weight: .semibold), for: .h6)
-            .font(.system(size: Metrics.type.xs, design: .monospaced), for: .codeBlock)
+            .font(.manta(size: Metrics.type.body), for: .body)
+            .font(.manta(size: Metrics.type.body + 4, weight: .semibold), for: .h1)
+            .font(.manta(size: Metrics.type.body + 2, weight: .semibold), for: .h2)
+            .font(.manta(size: Metrics.type.body + 1, weight: .semibold), for: .h3)
+            .font(.manta(size: Metrics.type.body, weight: .semibold), for: .h4)
+            .font(.manta(size: Metrics.type.body, weight: .semibold), for: .h5)
+            .font(.manta(size: Metrics.type.body, weight: .semibold), for: .h6)
+            .font(.manta(size: Metrics.type.xs, design: .monospaced), for: .codeBlock)
             // Tables run at the small size, not body — on a phone column a
             // body-size table wraps every cell into a tower. Header gets the
             // semibold weight like desktop's th.
-            .font(.system(size: Metrics.type.small, weight: .semibold), for: .tableHeader)
-            .font(.system(size: Metrics.type.small), for: .tableBody)
+            .font(.manta(size: Metrics.type.small, weight: .semibold), for: .tableHeader)
+            .font(.manta(size: Metrics.type.small), for: .tableBody)
             .foregroundColor(tokens.tx1)
-            .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: Metrics.type.body))
+            .lineSpacing(pointsFor(multiplier: Metrics.type.proseLineHeight, size: MantaDynamicType.scaled(Metrics.type.body)))
             .tint(tokens.accent, for: .link)
             // Inline code: the library renders `code` spans as tint-colored
             // text on tint@10% background (MarkdownView 3.0.0 exposes no
@@ -258,19 +258,19 @@ struct StepRowView: View {
                     // group read as ragged. It truncates rather than wraps, and
                     // never shrinks below its share of the row.
                     Text(step.verb)
-                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                         .foregroundColor(tokens.tx2)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .layoutPriority(1)
                     Text(step.target)
-                        .font(.system(size: Metrics.type.xs, design: .monospaced))
+                        .font(.manta(size: Metrics.type.xs, design: .monospaced))
                         .foregroundColor(tokens.tx4)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
                     Text(step.duration)
-                        .font(.system(size: Metrics.type.twoXS))
+                        .font(.manta(size: Metrics.type.twoXS))
                         .foregroundColor(tokens.tx4)
                 }
                 .padding(.vertical, Metrics.type.stepRowY)
@@ -281,7 +281,7 @@ struct StepRowView: View {
 
             if revealed, let output = step.output {
                 Text(output)
-                    .font(.system(size: Metrics.type.xs, design: .monospaced))
+                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -344,7 +344,7 @@ struct StepGroupView: View {
                         // mono — no separate glyph, no extra size literal.
                         Text(summary)
                             .lineLimit(1)
-                            .font(.system(size: Metrics.type.xs, design: .monospaced))
+                            .font(.manta(size: Metrics.type.xs, design: .monospaced))
                             .foregroundColor(tokens.tx4)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, Metrics.type.stepRowY)
@@ -549,7 +549,7 @@ struct TimestampGutterLabel: View {
 
     var body: some View {
         Text(ChatClock.time(date))
-            .font(.system(size: Metrics.type.twoXS))
+            .font(.manta(size: Metrics.type.twoXS))
             .foregroundColor(tokens.tx4)
             .monospacedDigit()
             .lineLimit(1)
@@ -594,7 +594,7 @@ struct LoadEarlierRow: View {
                     ProgressView()
                 } else {
                     Text("Load earlier messages")
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx3)
                 }
             }
@@ -623,16 +623,16 @@ struct SubagentRowView: View {
                     .fill(tokens.accentSoft)
                     .frame(width: Metrics.spacing.sp4, height: Metrics.spacing.sp4)
                 Text(agent.taskName)
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(agent.statusText)
-                    .font(.system(size: Metrics.type.twoXS))
+                    .font(.manta(size: Metrics.type.twoXS))
                     .foregroundColor(tokens.tx4)
                 Text("›")
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx4)
             }
             .padding(.vertical, Metrics.type.stepRowY)
@@ -693,7 +693,7 @@ struct SubagentHeader: View {
         HStack(spacing: Metrics.spacing.sp2) {
             Button(action: onBack) {
                 Text("‹")
-                    .font(.system(size: Metrics.type.body))
+                    .font(.manta(size: Metrics.type.body))
                     .foregroundColor(tokens.accent)
                     .padding(Metrics.spacing.sp2)
                     .contentShape(Rectangle())
@@ -705,12 +705,12 @@ struct SubagentHeader: View {
 
             VStack(spacing: Metrics.spacing.spPx) {
                 Text(title)
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(subtitle)
-                    .font(.system(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
+                    .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
                     .foregroundColor(tokens.tx4)
                     .lineLimit(1)
                     .truncationMode(.tail)

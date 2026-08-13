@@ -59,7 +59,7 @@ struct SettingsScreen: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                         .foregroundColor(tokens.accent)
-                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .font(.manta(size: Metrics.type.body, weight: .semibold))
                 }
             }
             .overlay(alignment: .bottom) { undoToast }
@@ -73,10 +73,10 @@ struct SettingsScreen: View {
     private var searchField: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
             TextField("Find a setting…", text: $query)
-                .font(.system(size: Metrics.type.body))
+                .font(.manta(size: Metrics.type.body))
                 .foregroundColor(tokens.tx1)
                 .autocorrectionDisabled()
             if !query.isEmpty {
@@ -84,7 +84,7 @@ struct SettingsScreen: View {
                     query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: Metrics.type.small))
+                        .font(.manta(size: Metrics.type.small))
                         .foregroundColor(tokens.tx4)
                 }
             }
@@ -102,13 +102,13 @@ struct SettingsScreen: View {
         let hits = SettingsSchema.search(query)
         return VStack(alignment: .leading, spacing: 0) {
             Text(hits.count == 1 ? "1 match" : "\(hits.count) matches")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.vertical, Metrics.spacing.sp2)
             if hits.isEmpty {
                 Text("No settings match. Try another term.")
-                    .font(.system(size: Metrics.type.body))
+                    .font(.manta(size: Metrics.type.body))
                     .foregroundColor(tokens.tx3)
                     .padding(.horizontal, Metrics.spacing.sp3)
                     .padding(.vertical, Metrics.spacing.sp2)
@@ -116,7 +116,7 @@ struct SettingsScreen: View {
                 ForEach(hits) { entry in
                     VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                         Text(sectionLabel(entry.section))
-                            .font(.system(size: Metrics.type.twoXS))
+                            .font(.manta(size: Metrics.type.twoXS))
                             .foregroundColor(tokens.tx4)
                             .textCase(.uppercase)
                         field(for: entry)
@@ -148,7 +148,7 @@ struct SettingsScreen: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Metrics.spacing.sp2) {
                 Text(section.label)
-                    .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                    .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
                     .foregroundColor(tokens.tx2)
                     .textCase(.uppercase)
                 if store.sectionModified(section.id) {
@@ -163,7 +163,7 @@ struct SettingsScreen: View {
                         store.resetSection(section.id)
                     } label: {
                         Label("Reset", systemImage: "arrow.counterclockwise")
-                            .font(.system(size: Metrics.type.twoXS))
+                            .font(.manta(size: Metrics.type.twoXS))
                             .labelStyle(.titleAndIcon)
                             .foregroundColor(tokens.tx3)
                     }
@@ -176,7 +176,7 @@ struct SettingsScreen: View {
 
             if entries.isEmpty {
                 Text("No settings in this section yet.")
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx3)
                     .padding(.horizontal, Metrics.spacing.sp3)
             } else {
@@ -184,7 +184,7 @@ struct SettingsScreen: View {
                     field(for: entry)
                     if entry.help.isEmpty == false, entry.control != .toggle {
                         Text(entry.help)
-                            .font(.system(size: Metrics.type.small))
+                            .font(.manta(size: Metrics.type.small))
                             .foregroundColor(tokens.tx3)
                             .padding(.horizontal, Metrics.spacing.sp3)
                     }
@@ -227,7 +227,7 @@ struct SettingsScreen: View {
         let current = store.current(entry)
         HStack {
             Text(entry.label)
-                .font(.system(size: Metrics.type.body, weight: .medium))
+                .font(.manta(size: Metrics.type.body, weight: .medium))
                 .foregroundColor(tokens.tx1)
             Spacer()
             Toggle("", isOn: Binding(
@@ -245,7 +245,7 @@ struct SettingsScreen: View {
     private func segmentedRow(_ entry: SettingEntry) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             Text(entry.label)
-                .font(.system(size: Metrics.type.body, weight: .medium))
+                .font(.manta(size: Metrics.type.body, weight: .medium))
                 .foregroundColor(tokens.tx1)
             let current = store.current(entry)
             HStack(spacing: Metrics.spacing.sp2) {
@@ -255,7 +255,7 @@ struct SettingsScreen: View {
                         store.commit(entry, .string(option.value))
                     } label: {
                         Text(option.label)
-                            .font(.system(size: Metrics.type.small))
+                            .font(.manta(size: Metrics.type.small))
                             .foregroundColor(selected ? tokens.onAccent : tokens.tx2)
                             .padding(.horizontal, Metrics.spacing.sp3)
                             .padding(.vertical, Metrics.spacing.sp2)
@@ -308,11 +308,11 @@ struct SettingsScreen: View {
     private func labelRow(_ entry: SettingEntry) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             Text(entry.label)
-                .font(.system(size: Metrics.type.body, weight: .medium))
+                .font(.manta(size: Metrics.type.body, weight: .medium))
                 .foregroundColor(tokens.tx1)
             if entry.help.isEmpty == false {
                 Text(entry.help)
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx3)
             }
         }
@@ -325,17 +325,17 @@ struct SettingsScreen: View {
     private var resetAllFooter: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             Text("Reset all settings")
-                .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
                 .foregroundColor(tokens.tx2)
                 .textCase(.uppercase)
             Text("Restore every setting to its default. This does not remove your box pairing or projects.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
             Button {
                 confirmReset = true
             } label: {
                 Text("Reset all settings…")
-                    .font(.system(size: Metrics.type.small, weight: .semibold))
+                    .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.danger)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Metrics.spacing.sp3)
@@ -357,10 +357,10 @@ struct SettingsScreen: View {
                 .font(.system(size: Metrics.type.display))
                 .foregroundColor(tokens.warn)
             Text("Reset all settings?")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Text("Every setting will return to its default. Your box pairing and projects are not affected. You can undo this right after.")
-                .font(.system(size: Metrics.type.small))
+                .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
                 .multilineTextAlignment(.center)
             Button {
@@ -368,7 +368,7 @@ struct SettingsScreen: View {
                 store.resetAll()
             } label: {
                 Text("Reset")
-                    .font(.system(size: Metrics.type.small, weight: .semibold))
+                    .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.onAccent)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, Metrics.spacing.sp3)
@@ -378,7 +378,7 @@ struct SettingsScreen: View {
                 confirmReset = false
             } label: {
                 Text("Cancel")
-                    .font(.system(size: Metrics.type.small, weight: .medium))
+                    .font(.manta(size: Metrics.type.small, weight: .medium))
                     .foregroundColor(tokens.tx2)
                     .padding(Metrics.spacing.sp2)
             }
@@ -392,13 +392,13 @@ struct SettingsScreen: View {
         if let message = store.undoMessage {
             HStack(spacing: Metrics.spacing.sp2) {
                 Text(message)
-                    .font(.system(size: Metrics.type.small))
+                    .font(.manta(size: Metrics.type.small))
                     .foregroundColor(tokens.tx1)
                 Spacer()
                 Button("Undo") {
                     store.undoLastReset()
                 }
-                .font(.system(size: Metrics.type.small, weight: .semibold))
+                .font(.manta(size: Metrics.type.small, weight: .semibold))
                 .foregroundColor(tokens.accent)
             }
             .padding(.horizontal, Metrics.spacing.sp3)
@@ -433,7 +433,7 @@ private struct CommitField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             Text(entry.label)
-                .font(.system(size: Metrics.type.body, weight: .medium))
+                .font(.manta(size: Metrics.type.body, weight: .medium))
                 .foregroundColor(tokens.tx1)
             Group {
                 if secure {
@@ -442,7 +442,7 @@ private struct CommitField: View {
                     TextField(entry.placeholder ?? "", text: $draft)
                 }
             }
-            .font(.system(size: Metrics.type.body))
+            .font(.manta(size: Metrics.type.body))
             .foregroundColor(tokens.tx1)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
@@ -464,7 +464,7 @@ private struct CommitField: View {
             }
             if let savedAt {
                 Text("Saved \(savedAt.formatted(date: .omitted, time: .standard))")
-                    .font(.system(size: Metrics.type.twoXS))
+                    .font(.manta(size: Metrics.type.twoXS))
                     .foregroundColor(tokens.ok)
             }
         }

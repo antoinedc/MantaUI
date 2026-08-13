@@ -156,7 +156,7 @@ struct ComposerView: View {
     /// measured in. Taken from the font itself rather than guessed, so it
     /// tracks a type-scale change.
     private var lineHeight: CGFloat {
-        UIFont.systemFont(ofSize: Metrics.type.body).lineHeight
+        MantaDynamicType.scaled(UIFont.systemFont(ofSize: Metrics.type.body).lineHeight)
     }
 
     /// The editor's measured height for a given number of text lines.
@@ -266,14 +266,14 @@ struct ComposerView: View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
                 Text("Message…")
-                    .font(.system(size: Metrics.type.body))
+                    .font(.manta(size: Metrics.type.body))
                     .foregroundColor(tokens.tx4)
                     .padding(.top, 8)
                     .padding(.leading, 5)
                     .allowsHitTesting(false)
             }
             TextEditor(text: $text)
-                .font(.system(size: Metrics.type.body))
+                .font(.manta(size: Metrics.type.body))
                 .foregroundColor(tokens.tx1)
                 .scrollContentBackground(.hidden)
                 .frame(minHeight: lineHeight + Metrics.spacing.sp2,
@@ -340,7 +340,7 @@ struct ComposerView: View {
             }
             if !attachments.isEmpty { chipsRow }
             TextEditor(text: $text)
-                .font(.system(size: Metrics.type.body))
+                .font(.manta(size: Metrics.type.body))
                 .foregroundColor(tokens.tx1)
                 .scrollContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -380,13 +380,13 @@ struct ComposerView: View {
                     .font(.system(size: Metrics.type.xs, weight: .medium))
                 if modelStore.loaded {
                     Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
-                        .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                         .lineLimit(1)
                     if let variant = modelStore.variant, !variant.isEmpty {
                         Text("·")
-                            .font(.system(size: Metrics.type.small))
+                            .font(.manta(size: Metrics.type.small))
                         Text(variant.capitalized)
-                            .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                            .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                             .lineLimit(1)
                     }
                 } else {
@@ -587,7 +587,7 @@ struct ComposerView: View {
                                 .foregroundColor(tokens.accentTx)
                         }
                         Text(ChatVoice.chipLabel(forFilename: attachment.filename))
-                            .font(.system(size: Metrics.type.twoXS))
+                            .font(.manta(size: Metrics.type.twoXS))
                             .foregroundColor(tokens.accentTx)
                         Button {
                             attachments.removeAll { $0.id == attachment.id }
@@ -888,7 +888,7 @@ struct ComposerView: View {
             withAnimation { showHint = false }
         } label: {
             Text(text)
-                .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
                 .foregroundColor(tokens.accentTx)
                 .lineLimit(1)
                 .truncationMode(.tail)
