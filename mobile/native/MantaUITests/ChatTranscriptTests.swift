@@ -161,7 +161,7 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(step.verb, "Ran")
         XCTAssertEqual(step.target, "multica issue get BET-520")
         XCTAssertEqual(step.duration, "0.4s")
-        XCTAssertEqual(step.status, .done)
+        XCTAssertEqual(step.status, .completed)
         XCTAssertEqual(step.output, "Blocked")
     }
 
@@ -437,5 +437,78 @@ final class ChatTranscriptTests: XCTestCase {
         let rows = uniqueTranscriptRows(blocks)
         XCTAssertEqual(rows.map(\.id), blocks.map(\.stableScrollID),
                        "non-colliding blocks must keep their content-stable ids unchanged")
+    }
+
+    // MARK: - Step disclosure (BET-823)
+
+    func testStepDisclosureStateDefaults() {
+        // A running tool tails its output; a live approval/failure past the
+        // turn never auto-collapses; a completed or pending step reads collapsed.
+        XCTAssertTrue(StepDisclosure.expanded(status: .running, userToggled: nil))
+        XCTAssertTrue(StepDisclosure.expanded(status: .awaitingApproval, userToggled: nil))
+        XCTAssertTrue(StepDisclosure.expanded(status: .error, userToggled: nil))
+        XCTAssertTrue(StepDisclosure.expanded(status: .denied, userToggled: nil))
+        XCTAssertFalse(StepDisclosure.expanded(status: .completed, userToggled: nil))
+        XCTAssertFalse(StepDisclosure.expanded(status: .pending, userToggled: nil))
+    }
+
+    func testStepDisclosureUserIntentWins() {
+        // A row the user opened stays open even when its state would collapse it.
+        XCTAssertTrue(StepDisclosure.expanded(status: .completed, userToggled: true))
+        XCTAssertTrue(StepDisclosure.expanded(status: .pending, userToggled: true))
+        // A row the user closed stays closed even when its state would expand it.
+        XCTAssertFalse(StepDisclosure.expanded(status: .running, userToggled: false))
+        XCTAssertFalse(StepDisclosure.expanded(status: .error, userToggled: false))
+        XCTAssertFalse(StepDisclosure.expanded(status: .awaitingApproval, userToggled: false))
+    }
+
+    // MARK: - Live tools merged into the transcript (BET-823)
+
+    func testLiveToolAppendsToLastStepsGroup() {
+        let canonical = [message(id: "m1", role: "assistant", parts: [
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
+        ])]
+        let blocks = ChatTranscriptMapper.blocks(from: canonical)
+        let live = [LiveTool(idx: "t2", callID: "toolu_2", name: "read", presentationHint: "Read a.ts", status: "running")]
+        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        guard case .steps(.rows(let rows)) = merged[0], rows.count == 2,
+              case .step(let step) = rows[0], case .step(let liveStep) = rows[1] else {
+            return XCTFail("expected both steps in one group")
+        }
+        XCTAssertEqual(step.status, .completed)
+        XCTAssertEqual(liveStep.id, "toolu_2", "the live step is keyed by its callID")
+        XCTAssertEqual(liveStep.status, .running)
+        XCTAssertEqual(liveStep.verb, "Read")
+        XCTAssertEqual(liveStep.target, "Read a.ts")
+    }
+
+    func testLiveToolSkipsWhenCanonicalCounterpartExists() {
+        // A live tool whose callID the transcript already owns must not be
+        // appended a second time — the canonical step takes over in place.
+        let canonical = [message(id: "m1", role: "assistant", parts: [
+            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
+        ])]
+        let blocks = ChatTranscriptMapper.blocks(from: canonical)
+        let live = [LiveTool(idx: "t1", callID: "t1", name: "bash", presentationHint: nil, status: "running")]
+        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        guard case .steps(.rows(let rows)) = merged[0] else {
+            return XCTFail("expected a steps group")
+        }
+        XCTAssertEqual(rows.count, 1, "the canonical step owns the row; no duplicate live row")
+    }
+
+    func testLiveToolCreatesGroupWhenNoStepsExist() {
+        let blocks = ChatTranscriptMapper.blocks(from: [])
+        let live = [LiveTool(idx: "t1", callID: "toolu_1", name: "bash", presentationHint: nil, status: "running")]
+        let merged = ChatTranscriptMapper.appendingLiveTools(live, to: blocks)
+        guard case .steps(.rows(let rows)) = merged.last else {
+            return XCTFail("expected a steps group to be created at the tail")
+        }
+        XCTAssertEqual(rows.count, 1)
+    }
+
+    func testAppendingLiveToolsIsANoOpWhenEmpty() {
+        let blocks = ChatTranscriptMapper.blocks(from: [])
+        XCTAssertTrue(ChatTranscriptMapper.appendingLiveTools([], to: blocks).isEmpty)
     }
 }

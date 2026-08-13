@@ -44,6 +44,8 @@ extension TranscriptBlock {
         case .prose(let text, let at):
             return "p\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
         case .steps(let content): return "s" + content.rows.map(\.id).joined(separator: "|")
+        case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
+        case .queuedPrompt(let text): return "q\(text.hashValue)"
         }
     }
 }
@@ -149,6 +151,43 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
         StepGroupView(content: content, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
+    case .notice(let text, let kind):
+        SystemNoticeView(text: text, kind: kind, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+    case .queuedPrompt(let text):
+        // A ghost, dimmed user bubble — the message will land here once the
+        // current turn ends, so it renders a preview of where that will be.
+        UserBand(text: text, tokens: tokens)
+            .opacity(0.45)
+            .padding(.bottom, Metrics.spacing.sp4)
+    }
+}
+
+/// A system notice (session error / truncation) inline at the end of the turn
+/// it belongs to. It scrolls WITH that turn — replacing the pinned notice row
+/// that used to float above the composer and detach from the turn.
+struct SystemNoticeView: View {
+    let text: String
+    let kind: SystemNotice
+    let tokens: Tokens
+
+    var body: some View {
+        let color = kind == .error ? tokens.danger : tokens.warn
+        HStack(spacing: Metrics.spacing.sp2) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: Metrics.type.xs, weight: .semibold))
+                .foregroundColor(color)
+            Text(text)
+                .font(.manta(size: Metrics.type.xs))
+                .foregroundColor(color)
+                .lineLimit(3)
+            Spacer(minLength: 0)
+        }
+        .padding(Metrics.spacing.sp2)
+        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("system-notice")
     }
 }
 

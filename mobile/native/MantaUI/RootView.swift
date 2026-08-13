@@ -92,7 +92,7 @@ struct RootView: View {
             .user("check bet-520 and see if it's blocked correctly", at: nil),
             .prose("Checking its metadata and the blocker chain.", at: nil),
             .steps(.rows([
-                .step(ToolStep(id: "fixture-ran-1", verb: "Ran", target: "multica issue get BET-520", duration: "0.4s", status: .done, output: nil)),
+                .step(ToolStep(id: "fixture-ran-1", verb: "Ran", target: "multica issue get BET-520", duration: "0.4s", status: .completed, output: nil)),
             ])),
             .prose("Blocked correctly — waiting_on names both PoC issues. Now fanning out to audit the three sweeps.", at: nil),
             .steps(.rows([
@@ -104,9 +104,9 @@ struct RootView: View {
             .steps(.rollup(
                 summary: "▸ 4 steps · read 3 files, 1 search",
                 rows: [
-                    .step(ToolStep(id: "fixture-read-1", verb: "Read", target: "pr-body.md", duration: "0.2s", status: .done, output: nil)),
-                    .step(ToolStep(id: "fixture-read-2", verb: "Read", target: "src/main/auth.ts", duration: "0.2s", status: .done, output: nil)),
-                    .step(ToolStep(id: "fixture-read-3", verb: "Read", target: "src/renderer/mobile/setupLogic.ts", duration: "0.2s", status: .done, output: nil)),
+                    .step(ToolStep(id: "fixture-read-1", verb: "Read", target: "pr-body.md", duration: "0.2s", status: .completed, output: nil)),
+                    .step(ToolStep(id: "fixture-read-2", verb: "Read", target: "src/main/auth.ts", duration: "0.2s", status: .completed, output: nil)),
+                    .step(ToolStep(id: "fixture-read-3", verb: "Read", target: "src/renderer/mobile/setupLogic.ts", duration: "0.2s", status: .completed, output: nil)),
                     .step(ToolStep(id: "fixture-search-1", verb: "Search", target: "gh pr view 429 --json files", duration: "0.9s", status: .running, output: nil)),
                 ]
             )),
@@ -119,7 +119,7 @@ struct RootView: View {
         [
             .prose("Reading the close-on-merge workflow and its CI posture.", at: nil),
             .steps(.rows([
-                .step(ToolStep(id: "fixture-read-clm", verb: "Read", target: "multica-close-on-merge.yml", duration: "0.3s", status: .done, output: nil)),
+                .step(ToolStep(id: "fixture-read-clm", verb: "Read", target: "multica-close-on-merge.yml", duration: "0.3s", status: .completed, output: nil)),
                 .step(ToolStep(id: "fixture-ran-sweep", verb: "Ran", target: "node scripts/multica-unblock.mjs --dry-run", duration: "1.8s", status: .running, output: nil)),
             ])),
             .prose("The sweep flips a blocked issue to todo the moment its blockers clear.", at: nil),
