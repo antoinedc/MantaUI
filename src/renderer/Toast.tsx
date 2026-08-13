@@ -66,6 +66,15 @@ export type ToastProps = {
   onDismiss: (id: string) => void;
 };
 
+// Shared compact banner action pill (Toast / UpdateBar / ReconnectingBanner).
+// Intentionally SMALLER than the 32px Button primitive — the three banner bars
+// render a slim text pill inside an ~24px-high strip, so they stay hand-rolled
+// (BET-727 §7). One source of truth for the three copies that used to drift
+// (ReconnectingBanner was missing the focus ring). Carries the standard
+// focus-visible ring.
+export const BANNER_BTN =
+  "shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
 export function Toast({ toast, onDismiss }: ToastProps) {
   const ttl = toastTtl(toast);
   useEffect(() => {
@@ -86,7 +95,7 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         <button
           onClick={toast.action.onClick}
           disabled={toast.action.disabled}
-          className="shrink-0 rounded-xs bg-accent/20 px-2 py-px text-accent hover:bg-accent/30 font-medium disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+          className={BANNER_BTN}
         >
           {toast.action.label}
         </button>
