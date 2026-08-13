@@ -1313,17 +1313,22 @@ export function parseProviderApiKey(rawFileText, providerId) {
  * returning `""` — NEVER throws, so a caller can `await` this
  * unconditionally. The parse itself is `parseProviderApiKey` above.
  *
+ * The file-read function is injectable (`readFile`), defaulting to the real
+ * `readFileSync`, so tests can drive the missing-file / unparseable cases
+ * with a fake reader and never touch a real auth store on a live box.
+ *
  * SECURITY: this resolves a LIVE credential. It must never log, echo, or
  * return the key anywhere but to its direct caller, and a caller must never
  * fold it into an error message.
  *
  * @param {string} providerId
+ * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
  * @returns {Promise<string>}
  */
-export async function readProviderApiKey(providerId) {
+export async function readProviderApiKey(providerId, { readFile = readFileSync } = {}) {
   let raw;
   try {
-    raw = readFileSync(opencodeAuthPath(), "utf-8");
+    raw = readFile(opencodeAuthPath(), "utf-8");
   } catch {
     return "";
   }

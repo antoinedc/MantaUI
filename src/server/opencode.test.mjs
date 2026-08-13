@@ -37,6 +37,7 @@ import {
   listModels,
   claudeCliStatus,
   parseProviderApiKey,
+  readProviderApiKey,
   opencodeAuthPath,
 } from "./opencode.mjs";
 import { homedir } from "node:os";
@@ -58,8 +59,7 @@ test("parseSseFrame returns null for comments/keepalive", () => {
 // ---------------------------------------------------------------------------
 // parseProviderApiKey (BET-737) — pure parse of opencode's own auth store,
 // same split as parseCredentials/readCredsSnapshot. Never touches a real
-// file; readProviderApiKey (the IO wrapper) is intentionally NOT unit-tested
-// here, mirroring readCredsSnapshot's own convention.
+// file.
 // ---------------------------------------------------------------------------
 
 test("parseProviderApiKey extracts the key from an api-type entry", () => {
@@ -96,6 +96,43 @@ test("parseProviderApiKey never echoes the key into an exception (it doesn't thr
   assert.equal(parseProviderApiKey("null", "kimi-for-coding"), "");
   assert.equal(parseProviderApiKey("[]", "kimi-for-coding"), "");
   assert.equal(parseProviderApiKey('"just a string"', "kimi-for-coding"), "");
+});
+
+// readProviderApiKey (BET-740) — the IO wrapper around parseProviderApiKey,
+// driven with an INJECTED reader so no case here can touch a real auth store
+// on the live box. Missing file / unparseable bytes / absent provider / oauth
+// entry all degrade to "" (never throw); a valid api entry returns the key.
+const readVia = (text) => readProviderApiKey("kimi-for-coding", {
+  readFile: () => text,
+});
+
+test("readProviderApiKey returns \"\" when the auth store file is missing (reader throws)", async () => {
+  assert.equal(
+    await readProviderApiKey("kimi-for-coding", { readFile: () => { throw new Error("ENOENT"); } }),
+    "",
+  );
+});
+
+test("readProviderApiKey returns \"\" for unparseable JSON", async () => {
+  assert.equal(await readVia("not json{"), "");
+});
+
+test("readProviderApiKey returns \"\" for a provider with no entry", async () => {
+  assert.equal(await readVia(JSON.stringify({ anthropic: { type: "oauth", access: "x" } })), "");
+});
+
+test("readProviderApiKey returns \"\" for an oauth-type entry (no `key` field)", async () => {
+  assert.equal(
+    await readVia(JSON.stringify({ "kimi-for-coding": { type: "oauth", access: "x", refresh: "y" } })),
+    "",
+  );
+});
+
+test("readProviderApiKey returns the key for a valid api-type entry", async () => {
+  assert.equal(
+    await readVia(JSON.stringify({ "kimi-for-coding": { type: "api", key: "kimi-provider-key" } })),
+    "kimi-provider-key",
+  );
 });
 
 // opencodeAuthPath (review cycle 2 Nit): mirrors messageSearch.mjs's
