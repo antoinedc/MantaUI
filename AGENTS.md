@@ -905,21 +905,23 @@ result is delivered back as a separate later message when the job finishes.
 Same "MantaUI tools" pattern as schedule/serve-page/peers/notify/secrets
 (`docs/manta-tools-scheduler.md`). Key facts:
 
-**TERMINOLOGY — "subagent" means two different things, and conflating them
-sends you to the wrong half of the codebase.** Both are colloquially "a
-subagent"; only the second one is this section.
+**TERMINOLOGY — "subagent" means three different things, and conflating them
+sends you to the wrong half of the codebase.** All three are colloquially "a
+subagent"; only the third one is this section.
 
 | Term | Started by | Surface | Owns |
 |---|---|---|---|
-| **inline subagent** | the `task` tool | the TRANSCRIPT — collapsed card, expand for the child's turns (see "Subagent rendering") | nothing: no tmux window, no worktree, no branch, and **no sidebar row, ever** |
-| **background job**, a.k.a. **delegated subagent** | the `delegate` tool | the SIDEBAR RAIL — nested under the session that started it | its own opencode session, tmux window, git worktree + branch |
+| **inline subagent** | the `task` tool (foreground) | the TRANSCRIPT — collapsed card, expand for the child's turns (see "Subagent rendering") | nothing: no tmux window, no worktree, no branch, and **no sidebar row, ever** |
+| **backgrounded subagent** | the `task` tool with `background: true` | a nested SIDEBAR ROW under the session that started it | its own opencode session + tmux window, but **no worktree** |
+| **background job**, a.k.a. **delegated subagent** | the `delegate` tool | a nested SIDEBAR ROW under the session that started it | its own opencode session, tmux window, git worktree + branch |
 
-The two coexist deliberately (the model picks per task) and nothing about one
-implies the other. So "delegated subagents don't show in the rail" is a bug
-report about THIS section, while "subagents don't show in the rail" is very
-likely someone looking for inline `task` children, which are working as
-designed. When writing user-facing copy prefer **"background job"** for the
-delegated kind — the rail row, branch and worktree all belong to it.
+All three coexist deliberately (the model picks per task) and nothing about
+one implies the other. So "delegated subagents don't show in the rail" is a
+bug report about THIS section, while "subagents don't show in the rail" is
+very likely someone looking for inline `task` children (working as designed)
+or a backgrounded subagent — both are now ordinary rail rows, the difference
+is the worktree. When writing user-facing copy prefer **"background job"** for
+the `delegate` kind — the rail row, branch and worktree all belong to it.
 
 - **Global opencode tool**, `docs/opencode-tools/delegate.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to

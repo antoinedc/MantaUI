@@ -228,51 +228,49 @@ the log tail.
 
 ## MantaUI background delegation
 
-You have `delegate`, `delegate_list`, and `delegate_stop` tools for running
-work in a BACKGROUND opencode session so the main conversation is NOT
-blocked. Use `delegate({ prompt, model? })` to start a job; it returns
-immediately and the job runs in its own session + git worktree. When the
-job finishes, its result arrives on its own as a separate later message —
-you do NOT have the result when `delegate` returns, so never report or
-guess the job's findings before that message lands.
+You have three ways to farm out work, and the axis that separates the last
+two is **file isolation**, not duration:
 
-**Background vs. blocking — choose deliberately.** Reach for `delegate`
-when the work is long-running, independent, and you do NOT need its answer
-to continue your current reply — research, a broad refactor, an
-investigation, a test-suite run-and-fix. Use the ordinary built-in `task`
-tool instead when you need the answer before you can carry on (e.g.
-finding where something lives so you can then edit it). Both delegation
-modes coexist; you pick. Every background job costs a full extra model
-session, so do not fan out speculatively — and never start a background
-job from inside another background job.
+| Situation | Right tool |
+|---|---|
+| You need the answer before you can continue your current reply | `task` (foreground — the default) |
+| Long and independent, and it will **not** edit files — research, a broad read, an investigation | `task` with `background: true` |
+| Long and independent, and it **will edit files** | `delegate` — the only one that gets its own git worktree and branch |
 
-**The job starts with NO knowledge of this conversation.** Put everything
-it needs in the prompt: the goal, the relevant files/paths, constraints,
-and what "done" looks like. It works in its own git worktree and commits
-to its own branch; it never pushes, merges, or touches this checkout.
+Both background modes return immediately and surface the same way in the
+app — a nested row in the sidebar under the parent session. The isolation
+point is why `delegate` still exists: a backgrounded subagent runs in the
+parent's working directory, so two of them editing the same files will
+collide. `delegate` is the isolated one; a backgrounded `task` shares the
+parent's directory.
 
-- `delegate({ prompt: string, model?: string })` → starts a background
-  job. `model` is a free-text model id passed straight through; omit it to
-  use the box's default. Returns immediately with the job's name + id and
-  a reminder that the result is NOT available yet.
+**You do NOT have a result when a background call returns.** Never report or
+guess a job's findings before its completion message lands. Do not poll —
+opencode's own instruction text says it: "DO NOT sleep, poll for progress,
+ask the task for status, or duplicate this task's work." `delegate_list` is
+for answering "what's running?", not for waiting. To see what a running
+`delegate` job is actually doing, use `peers_inspect` on that session.
+
+- `delegate({ prompt: string, model?: string })` → starts an isolated job
+  in its own session, git worktree and branch. Returns immediately with
+  the job's name + id and a reminder that the result is NOT available yet.
 - `delegate_list({})` → lists this session's background jobs (id, name,
-  status, branch, worktree, activity, timestamps). Use it to answer a
-  user's "what's running?" question — NOT to wait for a job to finish.
-- `delegate_stop({ id })` → stops a running job (aborts its session,
-  marks it `stopped`); the window + worktree are kept.
+  status, branch, worktree, activity, timestamps).
+- `delegate_stop({ id })` → stops a running job (aborts its session, marks
+  it `stopped`); the window + worktree are kept.
 
-**Do NOT poll.** Completion arrives as a later message on its own; calling
-`delegate_list` in a loop to "wait" is waste. To see what a running job is
-actually doing, use `peers_inspect` on that session — background jobs are
-ordinary sibling sessions, so `peers_inspect` already covers inspection
-and there is intentionally no separate status/inspect tool here.
+**Every background job costs a full extra model session**, so do not fan
+out speculatively — and never start a background job from inside another
+background job.
 
-**Cap of five concurrent jobs** box-wide. A sixth is refused with a clear
-error — do not retry; either wait for one to finish or do the work
-yourself.
+**Cap of five concurrent `delegate` jobs** box-wide. A sixth is refused
+with a clear error — do not retry; either wait for one to finish or do the
+work yourself.
 
-Jobs appear in the sidebar as ordinary sessions (their own window), so you
-can watch them the same way you watch any session.
+**A `delegate` job starts with NO knowledge of this conversation.** Put
+everything it needs in the prompt: the goal, the relevant files/paths,
+constraints, and what "done" looks like. It never pushes, merges, or
+touches this checkout.
 
 **Install/update is a COPY, never a symlink.** Copy
 `docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`
