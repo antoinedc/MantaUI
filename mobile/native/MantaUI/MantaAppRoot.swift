@@ -104,6 +104,7 @@ struct MantaAppRoot: View {
         // which is precisely the "kill and restart and they're back" symptom.
         .onChange(of: scenePhase) { phase in
             guard phase == .active, paired else { return }
+            MantaPushService.applyRegistrationState()
             store.resume()
             Task { await sessionStore.refresh() }
         }

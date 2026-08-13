@@ -195,7 +195,13 @@ enum MantaPushService {
             return
         }
         Task {
-            try? await client.registerApnsToken(token)
+            // 3 attempts, 5s then 30s apart — a box that is down longer gets the
+            // token on the next foreground (applyRegistrationState re-runs there).
+            for delay in [0.0, 5.0, 30.0] {
+                if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                if (try? await client.registerApnsToken(token)) != nil { return }
+            }
+            NSLog("[push] APNs token registration failed after 3 attempts")
         }
     }
 }
@@ -208,9 +214,4 @@ enum MantaPushService {
 private final class NotificationCompletionHandler: @unchecked Sendable {
     let run: () -> Void
     init(_ run: @escaping () -> Void) { self.run = run }
-}
-        Task {
-            try? await client.registerApnsToken(token)
-        }
-    }
 }
