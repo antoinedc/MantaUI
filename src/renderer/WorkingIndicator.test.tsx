@@ -64,4 +64,12 @@ describe("WorkingIndicator", () => {
     h = mount(<WorkingIndicator running={false} liveTurn={null} />);
     expect(h!.container.querySelector(".manta-working-indicator")).toBeNull();
   });
+
+  it("owns no vertical margin — the tail container's gap does the spacing", () => {
+    h = mount(<WorkingIndicator running liveTurn={makeLiveTurn()} />);
+    const row = h!.container.querySelector(".manta-working-indicator") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.style.marginTop).toBe("");
+    expect(row.style.marginBottom).toBe("");
+  });
 });
