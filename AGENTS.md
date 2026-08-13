@@ -1374,8 +1374,10 @@ rather than corrupting other keys. The default registry
 (`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
-Display-only: drives the stale-cache pill threshold in ChatPanel's
-footer. MantaUI does NOT set the real `cache_control.ttl` on Anthropic
+Display-only: drives the stale-cache threshold on the SessionHeader context
+pill (a stale cache tints that pill warn and shows a Clear-session block in
+its popover — there is no separate cache pill; see the "Stale prompt-cache"
+section below). MantaUI does NOT set the real `cache_control.ttl` on Anthropic
 requests — opencode does — so this setting must match what opencode is
 configured to send.
 
@@ -1400,8 +1402,9 @@ configured to send.
   basics (`session.idle/status/error/compacted`, `message.part.*`, `permission.*`,
   `question.*`):
   - `session.next.step.ended` — live token/cost snapshot. `stepTokens` state
-    is preferred over the transcript-scraped `latestTokens` so the footer
-    ctx bar updates between tool calls, not just on re-fetch. `properties.
+    is preferred over the transcript-scraped `latestTokens` so the
+    SessionHeader context pill updates between tool calls, not just on
+    re-fetch. `properties.
     finish` is classified via `classifyFinish()` into `"output-cap" |
     "context-wall" | "tool-cutoff" | null` (covers Anthropic `max_tokens` /
     `model_context_window_exceeded`, OpenAI `length`, Gemini `MAX_TOKENS`).
@@ -1421,7 +1424,8 @@ configured to send.
   - `todo.updated` — `liveTodos` state, preferred over transcript-scraped
     `activeTodos`. Lets the `ActiveTodos` card flip items between
     in_progress/completed live.
-  - `vcs.branch.updated` — keeps the footer's branch indicator current
+  - `vcs.branch.updated` — keeps the branch chip in SessionHeader's left
+    group current
     when opencode itself notices a change (rare in practice: its watcher
     misses terminal-side `git checkout`s — see the `/vcs` note above for
     why we don't rely on this event). The handler is still wired because
@@ -1476,6 +1480,13 @@ When adding a new live-event consumer in ChatPanel, follow the same shape:
 `liveX ?? transcript-derived` selector. Don't try to mutate messages
 in-place — the canonical refetch will overwrite you.
 
+**ContextBar — lives in the SessionHeader (`SessionHeader.tsx`, the row at
+the top of the pane), not the composer footer.** What AGENTS.md calls the
+"context bar" is the context pill at the right of the session header: a mini
+segmented bar inside the pill plus a larger segmented bar + full breakdown in
+its click-to-open popover. The stale-cache warning is part of that same pill
+(see below), not a separate element.
+
 **ContextBar denominator is the active model's real `limit.context`**, not
 a hardcoded 200k. `resolveContextLimit(activeModel)` reads
 `model.limit.context` (Opus 4.7 = 1M, Sonnet 4 = 200k) so the bar reflects
@@ -1491,16 +1502,22 @@ window). Earlier code used `input + cache.read` and under-counted on
 cache-warming turns. Math + per-segment widths live in
 `computeContextBreakdown()` in `chatUtils.ts` (tested). The bar is
 SEGMENTED: fresh-input slice in the stage color, cache.write slice in
-amber (`#f59e0b`), cache.read slice in teal (`#0ea5a4`). Mobile CSS hides
-the bar on `span[class*="w-24"]` — don't rename that class without
-updating `mobile.css`.
+amber (`#f59e0b`), cache.read slice in teal (`#0ea5a4`). (The older mobile-CSS
+hiding of the bar via a `span[class*="w-24"]` selector is gone — that
+`mobile.css` and the class were retired with BET-559/578; nothing hides the
+bar today.)
 
-**Stale prompt-cache pill — "/clear to save Nk tokens"** in the footer.
-Anthropic's prompt cache has a sliding TTL (5m default, 1h opt-in via
-`cache_control.ttl`). When the session has been idle past the TTL, the
-next user message re-bills the entire cached prefix as
-`cache_creation_input_tokens` (full rate + 25% for 5m, 2× for 1h). The
-pill surfaces this in the ContextBar component (`ChatPanel.tsx`) when:
+**Stale prompt-cache — a warn-toned context pill plus a block in its
+popover.** There is no separate cache pill in the composer footer any more;
+staleness is surfaced entirely by the SessionHeader context pill (BET-415
+moved it into the header with the rest of session state). Anthropic's prompt
+cache has a sliding TTL (5m default, 1h opt-in via `cache_control.ttl`).
+When the session has been idle past the TTL, the next user message re-bills
+the entire cached prefix as `cache_creation_input_tokens` (full rate + 25%
+for 5m, 2× for 1h). The SessionHeader `ContextPill` (`SessionHeader.tsx`)
+renders when stale by flipping its pill tone from neutral to `warn` and, in
+the popover, showing a "cache went stale … clearing saves Nk tokens" block
+with a **Clear session** button. The warn state matches when:
 `!running && idleMs >= ttlMs && cachedTokens >= STALE_CACHE_MIN_TOKENS`
 (5k). The TTL is **NOT set by MantaUI** — opencode picks the
 `cache_control.ttl` value when it builds each Anthropic request. MantaUI only
@@ -1514,6 +1531,19 @@ are pure + tested in `chatUtils.ts`. ChatPanel runs a 10s
 cachedTokens >= min`) to re-evaluate the predicate over time without
 remounting; same pattern as the RunningIndicator's 1s elapsed-time tick
 but coarser since staleness is a 5-min / 1-hr scale.
+
+**Composer meta row — what it actually owns today.** The composer
+(`InputArea.tsx`) below the session header owns COMPOSING only. Its meta
+footer row holds: the model picker (model + effort + fast-toggle, inside
+`ModelPicker`), the mic and attach buttons (input-mode affordances), and on
+the right the usage dial (`UsageDial`) plus the ⏰ schedules / 🔑 secrets /
+🪝 webhooks `SessionToolbar` buttons, with a transient voice/running status
+string ("transcribing… · esc cancels" / "recording · ⏎ send · ctrl+m stop ·
+esc cancel" / "esc · interrupt") appearing while voice or a turn is active.
+A trust toggle ("Permissions on — click to bypass" / "Bypassing permissions")
+sits on its own row beneath the footer. Status that describes the SESSION
+(branch, context pill, stale-cache warning, fork/compact/clear/delete) lives
+in the SessionHeader, not here — BET-415's organising split.
 
 **Buffered text-delta streaming.** opencode emits `message.part.delta`
 events ~character-by-character for text/reasoning parts. The naive
