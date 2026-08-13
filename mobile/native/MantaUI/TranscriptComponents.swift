@@ -737,70 +737,24 @@ struct SubagentRowView: View {
 struct SubagentScreen: View {
     let agent: SubagentSession
     let tokens: Tokens
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 0) {
-            SubagentHeader(
-                title: agent.taskName,
-                subtitle: agent.subtitle,
-                onBack: { dismiss() },
-                tokens: tokens
-            )
-            ScrollView {
-                TranscriptView(blocks: agent.transcript, tokens: tokens)
-            }
+        ScrollView {
+            TranscriptView(blocks: agent.transcript, tokens: tokens)
         }
         .background(tokens.canvas.ignoresSafeArea())
-        .navigationBarBackButtonHidden(true)
-        .toolbar(.hidden, for: .navigationBar)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("subagent-scene")
-    }
-}
-
-// The child's two-line centred header (§8): task name (600 `tx1`, ellipsised)
-// with the `subagent · …` status as a 500 `tx4` subtitle beneath, and a back
-// chevron on the leading edge. No trailing affordance — the child is read-only.
-struct SubagentHeader: View {
-    let title: String
-    let subtitle: String
-    let onBack: () -> Void
-    let tokens: Tokens
-
-    var body: some View {
-        HStack(spacing: Metrics.spacing.sp2) {
-            Button(action: onBack) {
-                Text("‹")
-                    .font(.manta(size: Metrics.type.body))
-                    .foregroundColor(tokens.accent)
-                    .padding(Metrics.spacing.sp2)
-                    .contentShape(Rectangle())
-                    .accessibilityIdentifier("subagent-back")
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 0)
-
-            VStack(spacing: Metrics.spacing.spPx) {
-                Text(title)
-                    .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
-                    .foregroundColor(tokens.tx1)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(subtitle)
-                    .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
+        .navigationTitle(agent.taskName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .subtitle) {
+                Text(agent.subtitle)
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
                     .foregroundColor(tokens.tx4)
                     .lineLimit(1)
-                    .truncationMode(.tail)
             }
-
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp2)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("subagent-header")
+        .accessibilityIdentifier("subagent-scene")
     }
 }
 

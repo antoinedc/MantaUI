@@ -63,6 +63,24 @@ enum BranchFreshnessPolicy {
     }
 }
 
+/// Head-first truncation for a branch label (BET-821). The TAIL of a branch
+/// name is what distinguishes it (`…/BET-781-very-long`, never the front), so
+/// when the name no longer fits it is the leading namespace that gets dropped.
+/// Extracted at file scope so the rule is unit-testable without a SwiftUI
+/// hierarchy, mirroring `BranchFreshnessPolicy`.
+enum BranchLabel {
+    /// Shorten `branch` to at most `maxChars`, keeping the distinguishing tail
+    /// and gaining a leading ellipsis. Returns the branch unchanged when it
+    /// already fits, and the empty string unchanged.
+    static func display(_ branch: String, maxChars: Int = 28) -> String {
+        guard !branch.isEmpty else { return "" }
+        if branch.count <= maxChars { return branch }
+        // Reserve one character for the leading ellipsis; keep the tail.
+        let keep = max(1, maxChars - 1)
+        return "…" + branch.suffix(keep)
+    }
+}
+
 /// The BET-627 overflow-sheet items that present a card of their own.
 ///
 /// Attaching is NOT one of them: the composer carries its own paperclip, so a
@@ -124,6 +142,8 @@ private struct ChatScreenContent: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var sessionStore: SessionListStore
     @State private var showOverflow = false
+    /// Presents the title menu's "Session info" summary.
+    @State private var showingSessionInfo = false
     @State private var branch: String?
     /// The session's working directory relative to the project root, shown
     /// alongside the branch capsule (BET-747).
@@ -208,11 +228,29 @@ private struct ChatScreenContent: View {
         // the permission poll, which `start()`'s run-once guard would then
         // refuse to restart.
         content
-            .toolbar(.hidden, for: .navigationBar)
-            .navigationBarBackButtonHidden(true)
-            // Hiding the bar also kills the left-edge interactive pop gesture;
-            // this re-arms it so sliding back returns to the session list.
-            .background(EdgeSwipeRestorer())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .subtitle) { subtitleChip }
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showOverflow = true } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .accessibilityLabel("Session actions")
+                }
+            }
+            // Tap the title to reach the session's actions (BET-821). Nothing
+            // new here: each lands on an existing surface.
+            .toolbarTitleMenu {
+                Button("Copy path") { copySessionPath() }
+                Button("Session info") { showingSessionInfo = true }
+                Button("Open terminal") { Task { await openTerminal() } }
+            }
+            .alert("Session info", isPresented: $showingSessionInfo) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(sessionInfoText)
+            }
             .onAppear {
                 // Three independent fetches, all started together: the
                 // transcript, the model list (previously not fetched until the
@@ -390,31 +428,13 @@ private struct ChatScreenContent: View {
                 )
             }
         }
-        // The header is an OVERLAY so the transcript runs full-bleed and the
-        // conversation scrolls under the floating buttons — that is the whole
-        // point of floating them.
-        //
-        // It was previously an inset for a real reason: as an overlay nothing
-        // reserved its space, so the first rows sat under it and were clipped
-        // AT REST, not just mid-scroll. That failure is why the transcript now
-        // carries its own top inset (see `transcript`) — the space is reserved
-        // by the scroll content instead of by the header, which is what lets
-        // rows pass beneath the glass while still coming to rest below it.
-        // Top scrim UNDER the header buttons (declared first, so it draws
-        // below them). The chat screen hides the navigation bar, so it gets
-        // none of the system's own scroll-edge treatment — which is what the
-        // session list has and why its top edge reads cleanly. Without this
-        // the transcript runs straight under the clock and the battery.
-        .overlay(alignment: .top) {
-            Scrim(edge: .top, tokens: tokens)
-                .frame(height: Self.headerReservedHeight + Metrics.spacing.sp6)
-        }
-        .overlay(alignment: .top) { header }
+        // The identity moved into the system navigation bar (BET-821): the bar
+        // supplies its own scroll-edge effect and reserves its own space, so the
+        // transcript no longer needs a hand-rolled top scrim or a reserved
+        // header height.
         // Offline must not read as "the model is quiet": a slim banner pinned
-        // just below the floating header, declared AFTER the header so it draws
-        // on top of it. It offsets by the exact height the transcript reserves
-        // (`headerReservedHeight`) plus a gap, so it never overlaps the two
-        // header buttons. It disappears on its own when `degraded` flips false.
+        // just below the navigation bar. It disappears on its own when
+        // `degraded` flips false.
         .overlay(alignment: .top) {
             if store.degraded {
                 Text("Connection lost — reconnecting…")
@@ -423,7 +443,7 @@ private struct ChatScreenContent: View {
                     .padding(.horizontal, Metrics.spacing.sp3)
                     .padding(.vertical, Metrics.spacing.sp1)
                     .background(tokens.danger.opacity(0.12), in: Capsule())
-                    .padding(.top, Self.headerReservedHeight + Metrics.spacing.sp2)
+                    .padding(.top, Metrics.spacing.sp2)
                     .transition(.opacity)
                     .accessibilityIdentifier("connection-banner")
             }
@@ -565,36 +585,50 @@ private struct ChatScreenContent: View {
         return (cwd as NSString).lastPathComponent
     }
 
-    /// The branch + relative path shown in the transcript header capsule, or nil
-    /// when there is no branch (non-git cwd, detached HEAD, unreachable box).
+    /// The branch + relative path shown in the navigation bar's subtitle chip,
+    /// or nil when there is no branch (non-git cwd, detached HEAD, unreachable
+    /// box) — in which case the chip renders nothing at all.
     private var branchCapsuleInfo: (name: String, path: String?)? {
         guard let branch, !branch.isEmpty else { return nil }
         return (branch, branchRelPath)
     }
 
-    /// A small non-interactive capsule: branch name + working-directory relative
-    /// path, styled from `Tokens`/`Metrics` (no hardcoded colors), matching the
-    /// ctx pill's informational treatment.
+    /// The system navigation bar's subtitle chip (BET-821): the branch name and
+    /// relative working-directory path once a branch is known. Renders NOTHING
+    /// when there is no branch (non-git cwd, detached HEAD, unreachable box) so
+    /// the inline title stands alone rather than showing a dead glyph.
     @ViewBuilder
-    private func branchCapsule(_ info: (name: String, path: String?)) -> some View {
-        HStack(spacing: Metrics.spacing.sp1) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: Metrics.type.xs, weight: .semibold))
-            Text("⎇ \(info.name)")
+    private var subtitleChip: some View {
+        if let info = branchCapsuleInfo {
+            let path = info.path.flatMap { $0.isEmpty ? nil : $0 }
+            Label(path.map { "\(info.name) · \($0)" } ?? info.name,
+                  systemImage: "arrow.triangle.branch")
+                .labelStyle(.titleAndIcon)
                 .font(.manta(size: Metrics.type.xs, weight: .semibold))
-            if let path = info.path, !path.isEmpty {
-                Text(path)
-                    .font(.manta(size: Metrics.type.xs))
-                    .foregroundColor(tokens.tx2)
-            }
+                .foregroundColor(tokens.tx4)
+                .lineLimit(1)
         }
-        .foregroundColor(tokens.tx2)
-        .lineLimit(1)
-        .padding(.horizontal, Metrics.spacing.sp2)
-        .padding(.vertical, Metrics.spacing.sp1)
-        .background(.ultraThinMaterial, in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Branch \(info.name) in \(info.path ?? "project directory")")
+    }
+
+    /// Title-menu "Copy path": copy the session's working directory to the
+    /// pasteboard. Nothing to copy (window not resolved yet) reports through the
+    /// same action-hint channel as every other session action.
+    private func copySessionPath() {
+        guard let cwd = sessionWindow?.cwd, !cwd.isEmpty else {
+            store.actionHint = "Path unavailable yet"
+            return
+        }
+        UIPasteboard.general.string = cwd
+        store.actionHint = "Path copied"
+    }
+
+    /// Title-menu "Session info": a compact summary of the session's identity —
+    /// the exact data the screen already holds (title + branch + cwd).
+    private var sessionInfoText: String {
+        var lines = [title]
+        if let branch, !branch.isEmpty { lines.append("Branch: \(branch)") }
+        if let cwd = sessionWindow?.cwd, !cwd.isEmpty { lines.append("Path: \(cwd)") }
+        return lines.joined(separator: "\n")
     }
 
     /// Clear = a fresh opencode session in the SAME window. Stay on the screen
@@ -680,103 +714,6 @@ private struct ChatScreenContent: View {
         }
     }
 
-    // MARK: - Header (§8)
-
-    /// Two floating glass circles over the transcript — nothing else.
-    ///
-    /// The title and subtitle were removed: the session name is already the row
-    /// you tapped to get here, so repeating it costs a whole bar of vertical
-    /// space to say something the user just read. Without it there is no
-    /// content to seat, so the bar itself goes too — the buttons float directly
-    /// on the transcript and the conversation scrolls beneath them.
-    ///
-    /// Each button carries its own glass circle, so the material is
-    /// per-control rather than one edge-to-edge sheet.
-    private var header: some View {
-        // Liquid Glass, the iOS 26 system material — the same treatment the
-        // session list's search capsule uses, rather than the flat
-        // `.ultraThinMaterial` disc these carried before. A GlassEffectContainer
-        // groups the two so the system can relate them as one piece of chrome
-        // instead of two unrelated blurs.
-        GlassEffectContainer(spacing: Metrics.spacing.sp2) {
-            HStack(spacing: Metrics.spacing.sp2) {
-                // The system's own glass BUTTON style, NOT a plain button with
-                // `.glassEffect` layered over its label. The layered form
-                // renders correctly and then eats the touch — the button looks
-                // right and does nothing, which is exactly what happened to the
-                // ⋯ menu here. SessionListView's `+` carries the same note; it
-                // learned this first.
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: Metrics.type.body, weight: .semibold))
-                        .foregroundColor(tokens.tx1)
-                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                }
-                .buttonStyle(.glass)
-                .clipShape(.circle)
-                .accessibilityLabel("Back to sessions")
-
-                Spacer(minLength: 0)
-
-                // Context percent pill — a centred, non-interactive capsule that
-                // appears once the box reports context stats for this session.
-                // It deliberately keeps the header at its two glass CONTROL
-                // buttons (BET-627) plus this informational element; a plain
-                // material capsule (not `.glassEffect` on a Text, which the
-                // header buttons' note warns can eat touches) is the approved
-                // non-interactive treatment.
-                if let ctx = store.context {
-                    Text("\(Int(ctx.pct.rounded()))% ctx")
-                        .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                        .foregroundColor(ctxColor(ctx.pct))
-                        .padding(.horizontal, Metrics.spacing.sp2)
-                        .frame(height: Metrics.type.chatHeaderBtn)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .accessibilityLabel("Context \(Int(ctx.pct.rounded())) percent used")
-                }
-
-                Spacer(minLength: 0)
-
-                // Trailing 38×38 glass button (§8) — the overflow sheet, which is
-                // where every session action lives (DECISIONS.md:667-670).
-                Button {
-                    showOverflow = true
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: Metrics.type.body, weight: .semibold))
-                        .foregroundColor(tokens.tx1)
-                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                }
-                .buttonStyle(.glass)
-                .clipShape(.circle)
-                .accessibilityLabel("Session actions")
-            }
-        }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp2)
-    }
-
-    /// Same stage thresholds as the desktop ctx bar: calm → warn at 70 → hot at
-    /// 90. `tokens` has no `warning` token, so the mid stage uses `warn` (the
-    /// amber the todos card uses).
-    private func ctxColor(_ pct: Double) -> Color {
-        if pct >= 90 { return tokens.danger }
-        if pct >= 70 { return tokens.warn }
-        return tokens.tx2
-    }
-
-    // MARK: - Transcript (BET-481 container; anchor + landing corrected)
-
-    /// Space the transcript reserves for the floating header: the 38pt button
-    /// plus the header's own vertical padding on both sides. Derived from the
-    /// same tokens the header lays itself out with, so retuning the button size
-    /// or the padding moves both together instead of leaving a magic number
-    /// here to drift out of sync.
-    private static let headerReservedHeight =
-        Metrics.type.chatHeaderBtn + Metrics.spacing.sp2 * 2
-
     private var transcript: some View {
         // MessagingUI's TiledView owns the whole scroll layer: smooth
         // bottom-follow on append/replace, keyboard + safe-area insets, and
@@ -787,19 +724,9 @@ private struct ChatScreenContent: View {
         TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
-        // Reserves the floating header's height. The header is an overlay and
-        // reserves nothing itself, so the conversation must rest below it. The
-        // live branch capsule (BET-747) sits at the top of the header area,
-        // above the reserved button space, so the branch stays visible while
-        // reading the current conversation and scrolls with the transcript.
-        .headerContent(.header {
-            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                if let info = branchCapsuleInfo {
-                    branchCapsule(info)
-                }
-                Color.clear.frame(height: Self.headerReservedHeight)
-            }
-        })
+        // The identity moved into the system navigation bar, which reserves its
+        // own space for the subtitle — so the transcript needs no top
+        // `.headerContent` inset of its own; the bar's safe area supplies it.
         // Older messages load as you reach the top; TiledView's virtual layout
         // inserts them without a scroll jump.
         .prependLoader(.loader(
@@ -969,7 +896,6 @@ struct ChatSubagentScreen: View {
     let subtitle: String
     @ObservedObject var store: ChatSessionStore
     let tokens: Tokens
-    @Environment(\.dismiss) private var dismiss
 
     /// Drives MessagingUI's `TiledView` scroll layer for the child transcript:
     /// stays on the newest message as the child streams, and stops following
@@ -987,18 +913,10 @@ struct ChatSubagentScreen: View {
     /// replay cursor are born together and the replay is always coherent.
     @State private var dataSource = ListDataSource<TranscriptRow>()
 
-    /// Measured height of the subagent's own header, so the conversation rests
-    /// below it. The header floats as an overlay (reserving nothing itself), so
-    /// `.headerContent` reserves its space the same way the parent's does.
-    @State private var headerHeight: CGFloat = 0
-
     var body: some View {
         TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
-        .headerContent(.header {
-            Color.clear.frame(height: headerHeight)
-        })
         .prependLoader(.loader(
             perform: { store.loadEarlier() },
             isProcessing: store.loadingEarlier
@@ -1011,23 +929,17 @@ struct ChatSubagentScreen: View {
         .onChange(of: store.rows, initial: true) { _, rows in
             dataSource.apply(rows)
         }
-        .overlay(alignment: .top) {
-            SubagentHeader(
-                title: title,
-                subtitle: subtitle,
-                onBack: { dismiss() },
-                tokens: tokens
-            )
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.size.height
-            } action: { height in
-                headerHeight = height
+        .background(tokens.canvas.ignoresSafeArea())
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .subtitle) {
+                Text(subtitle)
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+                    .lineLimit(1)
             }
         }
-        .background(tokens.canvas.ignoresSafeArea())
-        .navigationBarBackButtonHidden(true)
-        .toolbar(.hidden, for: .navigationBar)
-        .background(EdgeSwipeRestorer())
         .onAppear { store.start() }
         .onDisappear { store.stop() }
         .accessibilityElement(children: .contain)
