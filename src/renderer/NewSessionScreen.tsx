@@ -104,6 +104,19 @@ export function deriveProjectName(cwd: string): string {
   return parts[parts.length - 1] || "project";
 }
 
+// Numeric de-dup on top of deriveProjectName: returns the base name if free,
+// else the first free `base-2`, `base-3`, … against the `taken` set (the
+// existing project session names). THE one naming helper for a session name —
+// shared by every path that creates a project (the repo-probe batch, the
+// draft composer submit, and the worktree fan-out), so a twin never lands with
+// the same tmux session name. Exported for testing (pure).
+export function uniqueSessionName(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base}-${i}`)) i++;
+  return `${base}-${i}`;
+}
+
 // A readable, largely-unique window name derived from the first word of the
 // typed prompt (e.g. "Deploy the billing service" → "deploy"). This avoids the
 // old constant "worktree"/"session" that produced a sidebar full of identical
@@ -245,16 +258,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       else next.delete(path);
       return next;
     });
-  };
-
-  // Numeric de-dup on top of deriveProjectName — the same scheme the fan-out
-  // submit already uses. Extracted so the new zero-state batch and the fan-out
-  // share one naming rule.
-  const uniqueSessionName = (base: string, taken: Set<string>) => {
-    if (!taken.has(base)) return base;
-    let i = 2;
-    while (taken.has(`${base}-${i}`)) i++;
-    return `${base}-${i}`;
   };
 
   // Land on the given created session: setActive + box-side select-window +
@@ -491,14 +494,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       const dir = worktreePath ?? draft.cwd;
       const newProject = isNewProject;
       const sessionName = newProject
-        ? (() => {
-            const base = deriveProjectName(draft.cwd);
-            const taken = new Set(existingProjects.map((p) => p.tmuxSession));
-            if (!taken.has(base)) return base;
-            let i = 2;
-            while (taken.has(`${base}-${i}`)) i++;
-            return `${base}-${i}`;
-          })()
+        ? uniqueSessionName(
+            deriveProjectName(draft.cwd),
+            new Set(existingProjects.map((p) => p.tmuxSession)),
+          )
         : projectName!;
 
       const created = newProject
@@ -561,14 +560,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     setSending(true);
     setError(null);
     try {
-      const sessionName = (() => {
-        const base = deriveProjectName(baseCwd);
-        const taken = new Set(existingProjects.map((p) => p.tmuxSession));
-        if (!taken.has(base)) return base;
-        let i = 2;
-        while (taken.has(`${base}-${i}`)) i++;
-        return `${base}-${i}`;
-      })();
+      const sessionName = uniqueSessionName(
+        deriveProjectName(baseCwd),
+        new Set(existingProjects.map((p) => p.tmuxSession)),
+      );
 
       const [first, ...rest] = wts;
       const created = await window.api.tmuxNewSession({

@@ -21,7 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
-import { NewSessionScreen } from "./NewSessionScreen";
+import { NewSessionScreen, uniqueSessionName } from "./NewSessionScreen";
 import type { NewSessionDraft } from "./store";
 
 // The two methods that live ONLY on httpApi and are therefore absent from
@@ -107,5 +107,20 @@ describe("NewSessionScreen mount against an unpaired window.api", () => {
     // The guard must not have silently disabled the happy path.
     expect(api.calls.opencodeModels?.length ?? 0).toBe(1);
     expect(api.calls.opencodeDefaultModel?.length ?? 0).toBe(1);
+  });
+});
+
+// BET-787: the numeric session-name de-dup is ONE shared helper — every path
+// that creates a project (repo-probe batch, composer submit, worktree fan-out)
+// must go through it, or two projects can land with the same tmux session
+// name. Pin it here so the duplication can't silently re-split.
+describe("uniqueSessionName", () => {
+  it("returns the base name when it is free", () => {
+    expect(uniqueSessionName("repo", new Set(["server", "other"]))).toBe("repo");
+  });
+
+  it("appends -2, -3, … until a free name is found", () => {
+    expect(uniqueSessionName("repo", new Set(["repo"]))).toBe("repo-2");
+    expect(uniqueSessionName("repo", new Set(["repo", "repo-2", "repo-3"]))).toBe("repo-4");
   });
 });
