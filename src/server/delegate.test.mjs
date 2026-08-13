@@ -16,6 +16,7 @@ import {
   createApprovalState,
   MAX_RUNNING_JOBS,
   createDelegateEngine,
+  adoptSubagentJob,
 } from "./delegate.mjs";
 
 // ----------------------------------------------------------------------------
@@ -512,6 +513,161 @@ test("observeEvent ignores events for untracked sessions", async () => {
   const sawBusy = new Map();
   await observeEvent({ type: "session.idle", properties: { sessionID: "other" } }, h.deps, sawBusy);
   assert.equal(h.jobs[0].status, "running");
+});
+
+// ----------------------------------------------------------------------------
+// BET-721: background subagent → delegate job adoption
+// ----------------------------------------------------------------------------
+
+function adoptHarness(initialJobs = []) {
+  const h = harness(initialJobs);
+  const newWindowCalls = [];
+  let gitAddWorktree = 0;
+  h.deps.listProjects = async () => [
+    { tmuxSession: "proj", windows: [{ index: 0, opencodeSessionId: "ses_parent", paneCurrentPath: "/repo" }] },
+  ];
+  h.deps.newWindow = async (input) => {
+    newWindowCalls.push(input);
+    return {
+      sessionId: input.existingSessionId ?? `ses_created_${newWindowCalls.length}`,
+      windowIndex: 3,
+      projects: [],
+    };
+  };
+  h.deps.gitAddWorktree = async () => {
+    gitAddWorktree += 1;
+    throw new Error("adoptSubagentJob must never create a worktree");
+  };
+  h.newWindowCalls = newWindowCalls;
+  Object.defineProperty(h, "gitAddWorktreeCalls", {
+    get: () => gitAddWorktree,
+    enumerable: true,
+  });
+  return h;
+}
+
+const ADOPT_INPUT = {
+  parentSessionID: "ses_parent",
+  parentDirectory: "/repo",
+  childSessionID: "ses_child",
+  name: "explore",
+  prompt: "go explore",
+  model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+};
+
+test("adoptSubagentJob adopts a window with existingSessionId, no worktree, origin subagent", async () => {
+  const a = adoptHarness();
+  const res = await adoptSubagentJob(ADOPT_INPUT, a.deps);
+  assert.equal(res.ok, true);
+  assert.equal(a.newWindowCalls.length, 1);
+  assert.equal(a.newWindowCalls[0].existingSessionId, "ses_child");
+  assert.equal(a.gitAddWorktreeCalls, 0, "no worktree is created");
+  const stored = a.jobs[0];
+  assert.equal(stored.childSessionID, "ses_child");
+  assert.equal(stored.worktree, null);
+  assert.equal(stored.branch, null);
+  assert.equal(stored.baseSha, null);
+  assert.equal(stored.origin, "subagent");
+  assert.equal(stored.status, "running");
+});
+
+test("adoptSubagentJob never delivers the opening prompt", async () => {
+  const a = adoptHarness();
+  await adoptSubagentJob(ADOPT_INPUT, a.deps);
+  assert.equal(a.delivered.length, 0);
+});
+
+test("adoptSubagentJob is idempotent for the same childSessionID", async () => {
+  const a = adoptHarness();
+  const first = await adoptSubagentJob(ADOPT_INPUT, a.deps);
+  assert.equal(first.ok, true);
+  const second = await adoptSubagentJob(ADOPT_INPUT, a.deps);
+  assert.equal(second.ok, true);
+  assert.equal(second.alreadyAdopted, true);
+  assert.equal(a.newWindowCalls.length, 1, "newWindow called only once");
+  assert.equal(a.jobs.length, 1);
+});
+
+test("adoptSubagentJob ignores the running cap and the no-nesting rule", async () => {
+  const atCap = adoptHarness(Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => runningJob(i)));
+  const resCap = await adoptSubagentJob(
+    { ...ADOPT_INPUT, childSessionID: "ses_capchild" },
+    atCap.deps,
+  );
+  assert.equal(resCap.ok, true, "adopts even at the running cap");
+  assert.equal(
+    atCap.jobs.filter((j) => j.status === "running").length,
+    MAX_RUNNING_JOBS + 1,
+  );
+
+  // Parent is itself a running job's child → startJob would refuse nesting, but adoption allows it.
+  const nestedParent = runningJob(0).childSessionID; // e.g. "child0"
+  const nested = adoptHarness([runningJob(0)]);
+  nested.deps.listProjects = async () => [
+    { tmuxSession: "proj", windows: [{ index: 0, opencodeSessionId: nestedParent, paneCurrentPath: "/repo" }] },
+  ];
+  const resNested = await adoptSubagentJob(
+    { ...ADOPT_INPUT, parentSessionID: nestedParent, childSessionID: "ses_nestedchild" },
+    nested.deps,
+  );
+  assert.equal(resNested.ok, true, "adopts even when the parent is a running job's child");
+});
+
+function backgroundPart(overrides = {}) {
+  return {
+    type: "tool",
+    tool: "task",
+    state: {
+      status: "running",
+      input: { subagent_type: "explore", description: "go explore", prompt: "go explore" },
+      metadata: { sessionId: "ses_child", background: true },
+    },
+    ...overrides,
+  };
+}
+
+test("observeEvent adopts a running background:true subagent from a message.part.updated", async () => {
+  const a = adoptHarness();
+  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart() } };
+  await observeEvent(evt, a.deps, new Map());
+  assert.equal(a.jobs.length, 1);
+  assert.equal(a.jobs[0].childSessionID, "ses_child");
+  assert.equal(a.jobs[0].origin, "subagent");
+  assert.equal(a.jobs[0].status, "running");
+  assert.equal(a.newWindowCalls[0].existingSessionId, "ses_child");
+});
+
+test("observeEvent adopts nothing when background is absent from the part", async () => {
+  const a = adoptHarness();
+  const part = backgroundPart();
+  delete part.state.metadata.background;
+  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part } };
+  await observeEvent(evt, a.deps, new Map());
+  assert.equal(a.jobs.length, 0);
+  assert.equal(a.newWindowCalls.length, 0);
+});
+
+test("observeEvent adopts nothing for a completed background task", async () => {
+  const a = adoptHarness();
+  const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart({ state: { ...backgroundPart().state, status: "completed" } }) } };
+  await observeEvent(evt, a.deps, new Map());
+  assert.equal(a.jobs.length, 0);
+  assert.equal(a.newWindowCalls.length, 0);
+});
+
+test("finishJob does not deliver for origin subagent, but still does for delegate and legacy", async () => {
+  const sub = harness([{ ...runningObserverJob(), id: "sub", worktree: null, origin: "subagent" }]);
+  await finishJob(sub.jobs[0], "done", null, sub.deps, new Map());
+  assert.equal(sub.delivered.length, 0, "opencode already injects the <task> result for adopted subagents");
+
+  for (const job of [
+    { ...runningObserverJob(), id: "del", worktree: null, origin: "delegate" },
+    { ...runningObserverJob(), id: "legacy", worktree: null }, // no origin field (pre-change record)
+  ]) {
+    const h = harness([job]);
+    await finishJob(h.jobs[0], "done", null, h.deps, new Map());
+    assert.equal(h.delivered.length, 1, `delivers for ${job.id}`);
+  }
 });
 
 // ----------------------------------------------------------------------------

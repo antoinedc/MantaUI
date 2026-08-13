@@ -704,6 +704,7 @@ export function extractSubagentInfo(part) {
     title: typeof state.title === "string" ? state.title : null,
     output: typeof state.output === "string" ? state.output : null,
     truncated: meta.truncated === true,
+    background: meta.background === true,
     durationMs,
     model,
   };

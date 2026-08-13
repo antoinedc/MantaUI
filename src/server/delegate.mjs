@@ -34,6 +34,7 @@ import {
   summarizeTranscript,
   describeChatActivity,
 } from "./peers.mjs";
+import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -248,6 +249,116 @@ export async function getJob(id, { load = loadJobs } = {}) {
 // {ok:false, error} — never leave a half-created job.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// registerJob — the shared "window + record + publish" half of startJob
+// (formerly steps 6 and 7). Registers an existing-or-new opencode session into
+// a chat-mode tmux window and persists the record. `existingSessionId` adopts
+// an already-running session (the backgrounded-subagent path); undefined
+// creates a fresh one (the delegate path). The ONLY place that builds a job
+// record or calls newWindow. On a window-creation throw it undoes the worktree
+// (best-effort) and returns {ok:false, error}.
+// ---------------------------------------------------------------------------
+
+async function registerJob(
+  {
+    parentSessionID,
+    parentDirectory,
+    name,
+    prompt,
+    model,
+    cwd,
+    worktree,
+    branch,
+    baseSha,
+    existingSessionId,
+    origin,
+    permission,
+  },
+  deps = {},
+) {
+  const {
+    load = loadJobs,
+    save = saveJobs,
+    publish,
+    newWindow,
+    listProjects,
+    gitRemoveWorktree,
+    oc,
+    now = () => Date.now(),
+  } = deps;
+
+  let childSessionID = null;
+  let tmuxSession = null;
+  let windowIndex = null;
+  try {
+    const owner = resolveOwner(await listProjects(), parentSessionID);
+    if (!owner) {
+      throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
+    }
+    tmuxSession = owner.tmuxSession;
+    const created = await newWindow({
+      sessionName: tmuxSession,
+      windowName: name,
+      cwd,
+      chatMode: true,
+      existingSessionId,
+      worktreePath: worktree,
+      oc,
+      permission,
+    });
+    childSessionID = created.sessionId ?? existingSessionId ?? null;
+    windowIndex = created.windowIndex ?? null;
+    if (!childSessionID) {
+      throw new Error("could not read the new window's opencode session id");
+    }
+  } catch (e) {
+    // Undo the worktree in reverse (best-effort) — mirrors the old startJob
+    // rollback on a window-creation throw.
+    if (worktree && gitRemoveWorktree) {
+      try {
+        await gitRemoveWorktree({ path: worktree, force: false });
+      } catch {
+        /* best-effort cleanup; the start failure is the headline error */
+      }
+    }
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+
+  // Persist the record with status "running", startedAt = now.
+  const id = genId();
+  const job = {
+    id,
+    name,
+    prompt,
+    model: model ?? null,
+    parentSessionID,
+    parentDirectory,
+    childSessionID,
+    tmuxSession,
+    windowIndex,
+    worktree,
+    branch,
+    baseSha,
+    origin,
+    status: "running",
+    activity: null,
+    createdAt: now(),
+    startedAt: now(),
+    finishedAt: null,
+    result: null,
+    error: null,
+    filesChanged: null,
+  };
+  {
+    const jobs = await load();
+    jobs.push(job);
+    await save(jobs);
+  }
+  publish?.({ kind: "delegate.updated", payload: { id, status: "running" } });
+
+  return { ok: true, job };
+}
+
 /**
  * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string}} input
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
@@ -256,14 +367,9 @@ export async function getJob(id, { load = loadJobs } = {}) {
 export async function startJob(input, deps = {}) {
   const {
     load = loadJobs,
-    save = saveJobs,
-    publish,
     deliver,
-    listProjects,
-    newWindow,
     gitAddWorktree,
     gitRun,
-    now = () => Date.now(),
   } = deps;
 
   const prompt = String(input?.prompt ?? "");
@@ -329,87 +435,30 @@ export async function startJob(input, deps = {}) {
     }
   }
 
-  // 6. Create the window. Because chatMode is true, newWindow already creates
-  //    the opencode session and stamps @manta-session-id; read the new
-  //    window's opencodeSessionId back out of the returned project list —
-  //    that is childSessionID. On throw, undo step 4 (remove the worktree)
-  //    and return {ok:false, error}.
-  let childSessionID = null;
-  let tmuxSession = null;
-  let windowIndex = null;
-  try {
-    const owner = resolveOwner(await listProjects(), parentSessionID);
-    if (!owner) {
-      throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
-    }
-    tmuxSession = owner.tmuxSession;
-    // 6b. The create returns the new window's identity (sessionId +
-    // windowIndex) directly — no need to re-locate it by name from the
-    // refreshed listing (which could catch a same-named sibling window).
-    const created = await newWindow({
-      sessionName: tmuxSession,
-      windowName: name,
+  // 6+7. Register the window + record + publish.
+  const reg = await registerJob(
+    {
+      parentSessionID,
+      parentDirectory,
+      name,
+      prompt,
+      model: input?.model,
       cwd,
-      chatMode: true,
-      worktreePath: worktree,
-      oc: deps.oc,
+      worktree,
+      branch,
+      baseSha,
+      existingSessionId: undefined,
+      origin: "delegate",
       permission: input?.permission,
-    });
-    const owner2 = resolveOwner(created.projects, parentSessionID);
-    childSessionID = created.sessionId ?? null;
-    windowIndex = created.windowIndex ?? null;
-    void owner2;
-    // Sanity: if we somehow failed to resolve the child session id, abort.
-    if (!childSessionID) {
-      throw new Error("could not read the new window's opencode session id");
-    }
-  } catch (e) {
-    // Undo step 4 in reverse: remove the worktree (force:false, best-effort).
-    if (worktree && deps.gitRemoveWorktree) {
-      try {
-        await deps.gitRemoveWorktree({ path: worktree, force: false });
-      } catch {
-        /* best-effort cleanup; the start failure is the headline error */
-      }
-    }
-    return { ok: false, error: String(e?.message ?? e) };
-  }
-
-  // 7. Persist the record with status "running", startedAt = now.
-  const id = genId();
-  const job = {
-    id,
-    name,
-    prompt,
-    model: input?.model ?? null,
-    parentSessionID,
-    parentDirectory,
-    childSessionID,
-    tmuxSession,
-    windowIndex,
-    worktree,
-    branch,
-    baseSha,
-    status: "running",
-    activity: null,
-    createdAt: now(),
-    startedAt: now(),
-    finishedAt: null,
-    result: null,
-    error: null,
-    filesChanged: null,
-  };
-  {
-    const jobs = await load();
-    jobs.push(job);
-    await save(jobs);
-  }
-  publish?.({ kind: "delegate.updated", payload: { id, status: "running" } });
+    },
+    deps,
+  );
+  if (!reg.ok) return reg;
 
   // 8. Send the opening prompt via the shared delivery module's deliver.
   try {
     await deliver({
-      sessionId: childSessionID,
+      sessionId: reg.job.childSessionID,
       text: buildJobPrompt({ prompt, worktree, branch }),
     });
   } catch (e) {
@@ -419,7 +468,64 @@ export async function startJob(input, deps = {}) {
     console.warn("[delegate] opening prompt delivery failed:", e?.message ?? e);
   }
 
-  return { ok: true, job };
+  return { ok: true, job: reg.job };
+}
+
+// ---------------------------------------------------------------------------
+// adoptSubagentJob — promote an opencode background subagent into a delegate
+// job record (BET-721). opencode has ALREADY started the child session (the
+// parent's `task` tool ran with background:true), so this entry point adopts
+// that session into the store + a window rather than creating anything. The
+// detecting event fires repeatedly as the tool part updates, so adoption must
+// be idempotent.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {{parentSessionID:string, parentDirectory:string, childSessionID:string,
+ *          name:string, prompt:string, model?:object}} input
+ * @param {object} deps injected I/O (load/save/publish/newWindow/listProjects)
+ * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string}>}
+ */
+export async function adoptSubagentJob(
+  { parentSessionID, parentDirectory, childSessionID, name, prompt, model },
+  deps = {},
+) {
+  const { load = loadJobs } = deps;
+
+  if (!parentSessionID || !parentDirectory || !childSessionID) {
+    return { ok: false, error: "parentSessionID, parentDirectory and childSessionID are required" };
+  }
+
+  // Idempotent — the detecting event fires repeatedly as the tool part updates.
+  {
+    const jobs = await load();
+    const exists = jobs.find((j) => j.childSessionID === childSessionID);
+    if (exists) {
+      return { ok: true, alreadyAdopted: true };
+    }
+  }
+
+  // We deliberately do NOT enforce MAX_RUNNING_JOBS and do NOT enforce the
+  // no-nesting rule: opencode has already started this subagent, so refusing
+  // to record it would only make it invisible — the exact bug this fixes.
+  // We also do NOT create a worktree (the session is adopted, not created)
+  // and do NOT call deliver() — opencode already sent the child its prompt.
+  return registerJob(
+    {
+      parentSessionID,
+      parentDirectory,
+      name,
+      prompt,
+      model,
+      cwd: parentDirectory,
+      worktree: null,
+      branch: null,
+      baseSha: null,
+      existingSessionId: childSessionID,
+      origin: "subagent",
+    },
+    deps,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +547,46 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
   if (typeof sid !== "string" || !sid) return;
   const { load = loadJobs } = deps;
   const jobs = await load();
+
+  // BET-721: passively adopt a background subagent into the job store so it
+  // appears as a nested sidebar row. Detection is passive (events never carry
+  // `background:true` unless the capability is on) and must never throw into
+  // the pump.
+  if (evt.type === "message.part.updated") {
+    try {
+      const info = extractSubagentInfo(evt?.properties?.part);
+      if (
+        info &&
+        info.background === true &&
+        (info.status === "running" || info.status === "pending")
+      ) {
+        const projects = deps.listProjects ? await deps.listProjects() : [];
+        const owner = resolveOwner(projects, evt?.properties?.sessionID);
+        if (!owner) {
+          console.warn(
+            "[delegate] could not resolve the owning window to adopt background subagent:",
+            evt?.properties?.sessionID,
+          );
+          return;
+        }
+        await adoptSubagentJob(
+          {
+            parentSessionID: evt?.properties?.sessionID,
+            parentDirectory: owner.cwd,
+            childSessionID: info.childSessionId,
+            name: info.description || info.agent,
+            prompt: info.prompt,
+            model: info.model,
+          },
+          deps,
+        );
+        return;
+      }
+    } catch (e) {
+      console.warn("[delegate] background-subagent adoption failed:", e?.message ?? e);
+    }
+  }
+
   const job = jobs.find((j) => j.childSessionID === sid && j.status === "running");
   if (!job) {
     // Not a tracked background job — but still keep the sawBusy flag honest so
@@ -622,7 +768,12 @@ export async function finishJob(job, status, error, deps = {}, sawBusy) {
   // Deliver the completion message to the parent session (deferred until idle
   // by the shared delivery engine). Swallow a failure — the job is terminal
   // regardless.
-  if (deliver && job.parentSessionID) {
+  //
+  // BET-721: skip the deliver for adopted subagents — opencode ALREADY injects
+  // the <task ...> result into the parent when the child finishes, so
+  // delivering ours too would report the same job twice. A missing `origin`
+  // (records written before this change) means `delegate` and still delivers.
+  if (deliver && job.parentSessionID && job.origin !== "subagent") {
     try {
       await deliver({
         sessionId: job.parentSessionID,
