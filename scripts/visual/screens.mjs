@@ -386,10 +386,14 @@ export const SCREENS = [
     final: ".manta-folder-picker",
     snapshot: ".manta-folder-picker",
     actions: async (page) => {
-      // Click the folder chip to open the picker…
+      // Open the picker via the zero-state "Browse for a folder…" button.
+      // The old "Home" folder chip only renders in the composer (existing-
+      // project) branch; ?state=empty has zero projects so the screen is in
+      // new-project zero-state, whose opener is this button (BET-663 reorder
+      // put the demo on that path). See NewSessionScreen.tsx setPickerOpen.
       await page
         .locator('[data-screen="welcome"]')
-        .getByRole("button", { name: "Home" })
+        .getByRole("button", { name: "Browse for a folder…" })
         .click();
       await page.waitForSelector(".manta-folder-picker", { state: "visible" });
       // …then click one folder row. The empty-state path is literally "~",
