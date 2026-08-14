@@ -71,6 +71,15 @@ export function repoKey(repo: {
   repo: string;
 }): string;
 
+// The inverse of `repoKey`: split a `host/owner/repo` key back into its forge
+// identity. Returns `{ kind, host, owner, repo }` (owner is the full
+// `group/subgroup` path for GitLab) or `null` for a non-string, a key with
+// fewer than three segments, or a host that is not a known forge. Used by the
+// forge reads to address an explicit cross-repo inbox PR (BET-850).
+export function repoKeyParts(
+  key: unknown,
+): { kind: ForgeKind; host: string; owner: string; repo: string } | null;
+
 // Normalise a forge's raw PR/MR state into the shared `PullRequestState`.
 // Handles GitLab `opened`/`locked` and GitHub merged-as-closed. Throws on an
 // unknown raw state.

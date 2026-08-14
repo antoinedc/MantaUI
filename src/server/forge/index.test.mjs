@@ -479,6 +479,51 @@ test("forgeDiffForCwd: no open PR → no_pr (not an error)", async () => {
   assert.deepEqual(r.threads, []);
 });
 
+test("forgeDiffForCwd: explicit { repoKey, number } addresses the PR directly (BET-850)", async () => {
+  // No git deps at all — the explicit inbox target must not touch cwd/git.
+  const getAdapter = (kind, token) => {
+    assert.equal(kind, "github");
+    assert.equal(token, "t");
+    return diffAdapter({
+      diff: "@@ -1 +1 @@\n+cross repo\n",
+      threads: [{ id: "9", path: "z.ts", line: 2, side: "RIGHT", resolved: false, comments: [] }],
+      headSha: "def",
+    });
+  };
+  const r = await forgeDiffForCwd(
+    { repoKey: "github.com/acme/widget", number: 42 },
+    { resolveToken: async (host) => ({ token: "t", source: "cli" }), getAdapter },
+  );
+  assert.equal(r.error, null);
+  assert.equal(r.diff, "@@ -1 +1 @@\n+cross repo\n");
+  assert.equal(r.threads.length, 1);
+  assert.equal(r.headSha, "def");
+});
+
+test("forgeDiffForCwd: explicit target with no token → not_connected", async () => {
+  const r = await forgeDiffForCwd(
+    { repoKey: "github.com/acme/widget", number: 42 },
+    { resolveToken: async () => null, getAdapter: () => diffAdapter() },
+  );
+  assert.deepEqual(r.error, "not_connected");
+});
+
+test("forgeDiffForCwd: explicit target with an unknown host → no_forge", async () => {
+  const r = await forgeDiffForCwd(
+    { repoKey: "example.com/acme/widget", number: 42 },
+    { resolveToken: async () => ({ token: "t", source: "cli" }), getAdapter: () => diffAdapter() },
+  );
+  assert.deepEqual(r.error, "no_forge");
+});
+
+test("forgeDiffForCwd: explicit target with an invalid number → no_pr", async () => {
+  const r = await forgeDiffForCwd(
+    { repoKey: "github.com/acme/widget", number: 0 },
+    { resolveToken: async () => ({ token: "t", source: "cli" }), getAdapter: () => diffAdapter() },
+  );
+  assert.deepEqual(r.error, "no_pr");
+});
+
 // ---- Box-buffered draft review (BET-793) ------------------------------------
 
 // A draft-op test kit: injectable git/forge deps plus an in-memory stand-in
@@ -629,6 +674,26 @@ test("draftSubmitForCwd: no buffered comments → nothing to submit", async () =
   const r = await draftSubmitForCwd("/repo", {}, k);
   assert.equal(r.ok, false);
   assert.equal(r.error, "nothing to submit");
+});
+
+test("draft ops: explicit { repoKey, number } builds/serves the draft for that PR (BET-850)", async () => {
+  const k = draftKit({ headSha: "abc" });
+  const add = await draftCommentForCwd(
+    { repoKey: "github.com/acme/widget", number: 42 },
+    { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "cross-repo note" } },
+    k,
+  );
+  assert.equal(add.ok, true);
+  assert.equal(add.draft.comments.length, 1);
+
+  const get = await draftGetForCwd({ repoKey: "github.com/acme/widget", number: 42 }, k);
+  assert.equal(get.error, null);
+  assert.equal(get.draft.comments[0].body, "cross-repo note");
+  assert.equal(get.draft.repoKey, "github.com/acme/widget");
+
+  // The draft is stored under the target repoKey + number, not a session cwd.
+  const stored = await getDraft("github.com/acme/widget", 42, k);
+  assert.equal(stored.comments.length, 1);
 });
 
 test("draft ops resolve no_forge / not_connected like the other write ops", async () => {
