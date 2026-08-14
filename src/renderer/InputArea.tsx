@@ -51,13 +51,6 @@ export { TypeaheadPopup } from "./ComposerParts";
 // AttachmentStrip is no longer re-exported — it is now rendered INSIDE the
 // composer box (BET-416 §B), so Composer no longer imports it.
 
-// Empty-state suggestion chips (manta-forge S9). Shown only while the composer
-// is empty; each chip FILLS the input (setInput) — it never auto-submits, so a
-// stray click can't spend a turn without consent. The spec's fresh-box variant
-// seeds "Set up this box for development — install dependencies and check the
-// tests run." as well; the default set below matches the landed mockup.
-const SUGGESTION_CHIPS = ["Explain this codebase", "What's the test setup?"] as const;
-
 // Measure the caret's VISUAL row within a textarea, accounting for soft wrap.
 // Render a hidden mirror <div> that copies the textarea's box + text styling,
 // place a marker span at the caret offset, and compare the marker's top against
@@ -493,32 +486,6 @@ export function InputArea({
           )}
         </button>
         </div>
-        )}
-        {/* Empty-state suggestion chips (manta-forge S9). A chip only FILLS the
-            input (setInput) — it never sends — so clicking one is always
-            recoverable. Hidden the moment the field has any text, a take is
-            recording, or a turn is running (the running state already shows
-            "Queue a message…"). */}
-        {!input.trim() && !takeActive && !running && (
-          <div className="flex flex-wrap items-center gap-2">
-            {SUGGESTION_CHIPS.map((label) => (
-              <button
-                key={label}
-                type="button"
-                onClick={() => {
-                  setInput(label);
-                  inputRef.current?.focus();
-                }}
-                className={
-                  "inline-flex items-center rounded-md border border-border-subtle " +
-                  "bg-bg-soft px-3 py-[5px] text-[12px] leading-none text-text-muted " +
-                  "transition-colors hover:border-border-strong hover:text-text"
-                }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
         )}
       </div>
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
