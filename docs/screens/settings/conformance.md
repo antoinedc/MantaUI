@@ -4,7 +4,15 @@ App vs `docs/screens/settings/mockup.html`, from `npm run visual:compare setting
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (f3a92f6)
+Last reviewed: 2026-08-14 (bd38d73a)
+
+## Re-record (BET-813)
+
+Baselines re-recorded with `npm run visual:update` after the deferred re-record
+(BET-662 cancelled, BET-768 composer change) landed. The Settings Appearance
+region now renders the landed Theme rework (a "System follows your OS appearance…"
+sub-line; the Theme group label moved); pixel + aria baselines refreshed to the
+current build. No registry or conformance-mechanism changes.
 
 ## Open divergences
 

@@ -1,34 +1,34 @@
 - complementary "Artifacts":
   - text: ""
   - button "Search artifacts"
-  - button "Close artifacts panel"
   - tablist "Artifact kind":
     - tab "Links 4"
     - tab "Images 6" [selected]
     - tab "Files 5"
+    - tab "Review"
   - text: /Tue \d+ Nov/
   - button "Open export-preview.png"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button "Open api-docs-diff.png"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button /Open Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png/
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button /Open Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png/
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - text: /Mon \d+ Nov/
   - button "Open cohort-grid.png"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button /Open Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png/
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"

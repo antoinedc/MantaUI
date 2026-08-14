@@ -4,11 +4,20 @@ App vs `docs/screens/welcome/mockup.html`, from `npm run visual:compare welcome`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-03 (2fd71be)
+Last reviewed: 2026-08-14 (bd38d73a)
 
 ## Open divergences
 
 - None.
+
+## Re-record (BET-813)
+
+Baselines re-recorded with `npm run visual:update` after the deferred re-record
+(BET-662 cancelled, BET-768 composer change) landed. The welcome screen now
+renders the landed empty-repositories state ("Let's get some code on this box" /
+Clone from GitHub / Browse for a folder) rather than the older desktop new-session
+composer; the pixel + aria baselines were refreshed to the current build. No
+registry or conformance-mechanism changes.
 
 ## Accepted divergences
 

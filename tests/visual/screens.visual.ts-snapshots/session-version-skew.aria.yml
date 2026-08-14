@@ -3,11 +3,18 @@
   - button "Search sessions"
   - button "+"
   - tree "Sessions":
+    - treeitem "infra + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Deploy new billing service Pin" [selected]:
+      - text: ""
+      - button "Pin"
     - treeitem "ethernal + Close project" [expanded]:
       - text: ""
       - button "+"
       - button "Close project"
-    - treeitem "Add CSV export Pin" [selected]:
+    - treeitem "Add CSV export Pin":
       - text: ""
       - button "Pin"
     - treeitem /Refactor auth middleware [\d,.]+[bkmBKM]+ Pin/:
@@ -26,23 +33,44 @@
     - treeitem "Build pipeline Pin":
       - text: ""
       - button "Pin"
-    - treeitem "infra + Close project" [expanded]:
-      - text: ""
-      - button "+"
-      - button "Close project"
-    - treeitem "Deploy new billing service Pin":
-      - text: ""
-      - button "Pin"
   - button "Settings…"
 - main:
   - text: This app is out of date and may not work correctly — please update.
   - button "Update"
-  - text: ethernal / Add CSV export feat/orders-csv-export
+  - text: infra / Deploy new billing service feat/orders-csv-export
+  - button "7%"
   - button "Show artifacts"
   - button "Session actions"
-  - text: ✻ Welcome. Type a message below to start.
+  - text: /q3-revenue\.csv brand-guidelines\.pdf Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png here's the RFC https:\/\/datatracker\.ietf\.org\/doc\/html\/rfc4180 — the quoting rules are what always breaks naive parsers File cohort-analysis\.csv · text\/csv File export-preview\.png · image\/png File api-docs-diff\.png · image\/png Both are up — the split view keeps the transcript readable at narrow widths:/
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/artifacts-panel
+  - text: and
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/composer-v2":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/composer-v2
+  - text: /\. File retention-report\.pdf · application\/pdf File migration-notes\.md · text\/markdown File cohort-grid\.png · image\/png File Screenshot \d+-\d+-\d+ at \d+\.\d+\.\d+\.png · image\/png Three densities side by side — compact is the one that survives at 1280px:/
+  - link "https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density":
+    - /url: https://9f3b1d4c8e7a2b5d0c6e4f7a3b9d2c1e.boxes.mantaui.com/pages/sidebar-density
+  - text: . Todo 2/5
+  - button "Dismiss todo list"
+  - text: "/Add \\/api\\/v1\\/orders\\/export\\.csv endpoint Test with \\d+-row synthetic dataset Update API docs Inspect existing \\/orders route \\+ filter parser Confirm streaming response helper signature Column order Which CSV column ordering should `\\/export\\.csv` use\\? Match the JSON shape/"
+  - radio "Match the JSON shape"
+  - text: Customer-friendly
+  - radio "Customer-friendly"
+  - text: Custom (specify in notes)
+  - radio "Custom (specify in notes)"
+  - textbox "Or type your own answer…"
+  - separator
+  - button "Submit" [disabled]
+  - button "Dismiss"
+  - text: Run a shell command? bash
+  - button "Allow once"
+  - button "Always allow alembic upgrade *"
+  - button "Reject"
+  - status
   - textbox "Reply, or describe the next task…"
-  - button "Send message"
+  - button "Send message" [disabled]
+  - button "Explain this codebase"
+  - button "What's the test setup?"
   - button "Opus 4.7"
   - button "High"
   - button "Fast mode" [disabled]
@@ -51,3 +79,4 @@
   - button "secrets"
   - button "webhooks"
   - button "Permissions on — click to bypass"
+- complementary "Artifacts"

@@ -1,35 +1,35 @@
 - complementary "Artifacts":
   - text: ""
   - button "Search artifacts"
-  - button "Close artifacts panel"
   - tablist "Artifact kind":
     - tab "Links 4"
     - tab "Images 6"
     - tab "Files 5" [selected]
+    - tab "Review"
   - text: /Tue \d+ Nov/
   - button "Open file"
-  - button /cohort-analysis\.csv \d+ KB · generated/
+  - button /cohort-analysis\.csv \d+ KB/
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button "Open file"
   - button "q3-revenue.csv 1.2 MB · you sent this"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button "Open file"
   - button "brand-guidelines.pdf 4.8 MB · you sent this"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - text: /Mon \d+ Nov/
   - button "Open file"
-  - button "retention-report.pdf 1.1 MB · generated"
+  - button "retention-report.pdf 1.1 MB"
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"
   - button "Open file"
-  - button /migration-notes\.md \d+ KB · generated/
+  - button /migration-notes\.md \d+ KB/
   - button "Attach to message"
   - button "Download"
-  - button "Jump to message" [disabled]
+  - button "Jump to message"

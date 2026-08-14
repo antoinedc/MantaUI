@@ -4,7 +4,16 @@ App vs `docs/screens/artifacts/mockup.html`, from `npm run visual:compare artifa
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-05 (f3f5dce)
+Last reviewed: 2026-08-14 (bd38d73a)
+
+## Re-record (BET-813)
+
+Baselines re-recorded with `npm run visual:update` after the deferred re-record
+(BET-662 cancelled, BET-768 composer change) landed. BET-663 reordered the demo
+fixture so `?demo&desktop` opens directly on the transcript-bearing `infra`
+session; the artifact rows drive into that session and their baselines were
+refreshed to the current build (including the landed Review tab and the enabled
+"Jump to message" action). No registry, crop-region or capture-harness changes.
 
 ## Artifacts panel shell + empty Links tab (BET-659)
 
