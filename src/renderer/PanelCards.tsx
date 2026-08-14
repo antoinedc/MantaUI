@@ -16,7 +16,6 @@ import type {
   DelegateApproval,
   DelegateApprovalTool,
   DelegateJob,
-  ForgePullRequestResult,
   ScheduledJob,
   SecretMeta,
   SecretScope,
@@ -25,7 +24,7 @@ import type {
 import { Button } from "./Button";
 import { Chip } from "./Chip";
 import { Field } from "./Field";
-import { canMerge, describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
+import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
@@ -694,113 +693,6 @@ export const ShipConfirmCard = memo(function ShipConfirmCard({
       <div className="text-text-faint text-label mt-1">
         Never auto-submitted — nothing is pushed or opened until you confirm here.
       </div>
-    </div>
-  );
-});
-
-// ForgeCard — the session's forge surface. When the repo has a pull request it
-// shows its state + a Merge control gated by canMerge (with a visible reason),
-// and surfaces the distinguished merge-failure kind. When there is none and the
-// box is connected, it offers the Ship action that opens the ShipConfirmCard.
-export const ForgeCard = memo(function ForgeCard({
-  result,
-  loading,
-  shipOpen,
-  busy,
-  mergeError,
-  onShip,
-  onMerge,
-}: {
-  result?: ForgePullRequestResult | null;
-  loading: boolean;
-  shipOpen: boolean;
-  busy: boolean;
-  mergeError: string | null;
-  onShip: () => void;
-  onMerge: () => void;
-}) {
-  const pr = result?.pr ?? null;
-  const rollup = result?.rollup ?? "none";
-  const merge = canMerge({
-    rollup,
-    unresolvedThreads: pr?.unresolvedThreads ?? 0,
-    mergeable: pr?.mergeable ?? null,
-  });
-  const rollupColor =
-    rollup === "green" ? "var(--ok)" : rollup === "red" ? "var(--danger)" : rollup === "yellow" ? "var(--warn)" : "var(--tx3)";
-  return (
-    <div
-      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
-      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
-    >
-      <div className="flex items-center gap-2 mb-1">
-        <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
-          <GitPullRequest size={16} aria-hidden="true" />
-        </span>
-        {loading ? (
-          <span className="text-text-faint">Checking GitHub…</span>
-        ) : pr ? (
-          <>
-            <span className="text-text truncate" title={pr.title}>
-              #{pr.number} {pr.title}
-            </span>
-            <MetaBadge title="The normalised PR state">{pr.state}</MetaBadge>
-            {/* Traffic-light for checks; null = not mergeable (reason below). */}
-            <span
-              className="inline-flex items-center gap-1 text-text-faint"
-              title={`Checks: ${rollup}`}
-            >
-              <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: rollupColor }} />
-              <span className="font-mono text-label">{result?.checks?.length ?? 0}</span>
-            </span>
-          </>
-        ) : (
-          <span className="text-text-faint">No open pull request on this branch</span>
-        )}
-      </div>
-
-      {pr ? (
-        <>
-          {/* Can I merge? Disabled with a visible reason; green rollup + no
-              threads + mergeable true are ALL required. */}
-          <div className="text-text-faint text-label mb-1">
-            {merge.can
-              ? "Ready to merge — checks green, threads resolved."
-              : `Can't merge yet — ${merge.reason}.`}
-          </div>
-          {!merge.can && pr.mergeBlockedReason && (
-            <div className="text-text-faint text-label mb-1">
-              GitHub: {pr.mergeBlockedReason}
-            </div>
-          )}
-          {mergeError && (
-            <div className="text-danger break-words mb-1">
-              {mergeError}
-            </div>
-          )}
-          <div className="flex items-center gap-2">
-            <Button
-              tone="primary"
-              disabled={!merge.can || busy}
-              onClick={onMerge}
-              title={merge.can ? "Merge this pull request" : merge.reason ?? "not mergeable"}
-            >
-              {busy ? "Merging…" : "Merge"}
-            </Button>
-            <span className="text-text-faint text-label">
-              {pr.headRef} → {pr.baseRef}
-            </span>
-          </div>
-        </>
-      ) : (
-        shipOpen === false && !loading && (
-          <div className="flex items-center gap-2">
-            <Button tone="ghost" onClick={onShip} title="Push the current branch and open a pull request">
-              Ship as pull request
-            </Button>
-          </div>
-        )
-      )}
     </div>
   );
 });

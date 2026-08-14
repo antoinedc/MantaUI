@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppConfig, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -3042,6 +3042,27 @@ export function describeMergeFailure(kind: string | null | undefined): string {
   }
 }
 
+/**
+ * The single decision for how the session-header branch chip renders and
+ * whether it opens a popover (the ONE git surface, BET-867). `"none"` means the
+ * plain, non-interactive `Tag` — either there is no branch, or the forge is not
+ * connected for this cwd (a scratch dir with no forge must stay byte-identical
+ * to a non-forge session). `"no-pr"` opens the popover in its Draft PR / Create
+ * PR state; `"pr"` opens it in the merge surface state.
+ */
+export function branchPanelState({
+  pr,
+  forgeConnected,
+  branch,
+}: {
+  pr: PullRequest | null;
+  forgeConnected: boolean;
+  branch: string | null;
+}): "none" | "no-pr" | "pr" {
+  if (!branch || !forgeConnected) return "none";
+  return pr ? "pr" : "no-pr";
+}
+
 // ---- Forge review pane (BET-792) -------------------------------------------
 
 // The line anchor a comment may attach to, in the forge-neutral shape the spec
@@ -3160,56 +3181,6 @@ export function buildVoiceNoteMap(
   }
   return map;
 }
-
-// BET-852: the stored session-link PR ref (`projects[].link.pr`) is the source
-// of truth for "what PR is this session shipping" — recorded the moment
-// `shipPullRequest` opens a PR (onPrOpened → linkPullRequest). Reading it off
-// the AppConfig the box serves lets the branch chip show the linked PR number
-// immediately (and even when the 15s forge poll has not resolved), instead of
-// depending on the live `forgePullRequest` lookup alone. Returns the stored
-// PR number when the session has a saved link slot; null otherwise (a PR
-// opened outside the app, or before the first ship), which is the fall-back
-// to live-lookup territory.
-export function linkedPrNumber(
-  config: Pick<AppConfig, "projects"> | null | undefined,
-  tmuxSession: string | null,
-): number | null {
-  if (!config || !tmuxSession) return null;
-  const proj = (config.projects ?? []).find((p) => p.tmuxSession === tmuxSession);
-  const pr = proj?.link?.pr;
-  return pr && Number.isInteger(pr.number) && pr.number > 0 ? pr.number : null;
-}
-
-// BET-852: resolve the PR object the branch chip should render. Prefers the
-// stored link's number when the session has one (per the issue, the stored
-// link wins); otherwise preserves today's live-lookup behavior unchanged.
-// When the live poll has already resolved the SAME PR we keep its full
-// details (title/state/checks panel); when it has not resolved yet we render
-// a minimal card so `#N` appears immediately from the stored link rather than
-// waiting for the poll.
-export function preferLinkedPr(
-  live: PullRequest | null,
-  linkedNumber: number | null,
-): PullRequest | null {
-  if (linkedNumber == null) return live;
-  if (live) return live.number === linkedNumber ? live : { ...live, number: linkedNumber };
-  return {
-    number: linkedNumber,
-    title: "",
-    body: "",
-    url: "",
-    state: "open",
-    draft: false,
-    headRef: "",
-    baseRef: "",
-    headSha: "",
-    author: "",
-    reviewers: [],
-    mergeable: null,
-    mergeBlockedReason: null,
-    unresolvedThreads: 0,
-  };
-};
 
 // ---------------------------------------------------------------------------
 // App-control bus dispatcher (BET-840/841).

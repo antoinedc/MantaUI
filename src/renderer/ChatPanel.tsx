@@ -23,7 +23,6 @@ import type {
   DelegateApproval,
   DelegateApprovalTool,
   ForgeCheckRun,
-  ForgePullRequestResult,
   OpencodeModel,
   ProgressRecord,
   PullRequest,
@@ -54,8 +53,6 @@ import {
   type StaleCacheResult,
   type PendingScrollWin,
   isApprovalCoveredByAlways,
-  linkedPrNumber,
-  preferLinkedPr,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
   parseModelRef,
@@ -83,7 +80,7 @@ import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { BlockedProgressCard, CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
-import { DelegateApprovalCard, ForgeCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, ShipConfirmCard, WebhooksCard } from "./PanelCards";
+import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, ShipConfirmCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
@@ -238,34 +235,17 @@ export function ChatPanel({
   const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
   const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
 
-  // BET-794: forge ship + merge for this session. The server resolves cwd →
+  // BET-794/867: forge ship + merge for this session. The server resolves cwd →
   // repo → token box-side (a forge token never reaches the renderer). The
-  // ForgeCard shows the current PR + merge gate, or a Ship entry; the
-  // ShipConfirmCard is the mandatory human gate before anything is pushed or
-  // opened. Never auto-submitted.
-  const [forgeResult, setForgeResult] = useState<ForgePullRequestResult | null>(null);
-  const [forgeLoading, setForgeLoading] = useState(false);
-  const [forgeConnected, setForgeConnected] = useState(false);
+  // branch chip's popover is the merge surface (BET-867); the ShipConfirmCard
+  // is the mandatory human gate before a Draft PR is pushed/opened, and Create
+  // PR ships inline (BET-867 owner-approved departure) — never auto-submitted.
   const [shipOpen, setShipOpen] = useState(false);
   const [shipProposal, setShipProposal] = useState<{ head: string; base: string; fileCount: number; title: string; body: string } | null>(null);
   const [shipBusy, setShipBusy] = useState(false);
   const [shipError, setShipError] = useState<string | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
-  // BET-852: the stored session-link PR number (`projects[].link.pr`), read off
-  // the box config. The branch chip prefers it over the (15s) live forge lookup
-  // when present — so a freshly-shipped PR's number appears immediately and
-  // independently of the poll resolving. Refreshed on session change and after
-  // a ship/merge writes the link.
-  const [linkedPr, setLinkedPr] = useState<number | null>(null);
-  const refreshLinkedPr = useCallback(async () => {
-    try {
-      const cfg = await window.api.configGet();
-      setLinkedPr(linkedPrNumber(cfg, tmuxSession));
-    } catch {
-      /* non-fatal — fall back to the live lookup */
-    }
-  }, [tmuxSession]);
 
   // BET-418 §D: detect whether THIS session is a background job's child. A
   // job session is read-only (no composer, no cards, no model picker/fork/
@@ -510,95 +490,6 @@ export function ChatPanel({
     return () => { cancelled = true; clearInterval(t); };
   }, [sessionId, chatAutoAllowApproval, isActive]);
 
-  // BET-794: poll the forge read path for this session's cwd (the PR + its CI
-  // rollup) while the panel is active. 15s cadence keeps the merge gate fresh
-  // without hammering the forge; a per-session poll mirrors the approval poll.
-  useEffect(() => {
-    if (!isActive || !cwd) return;
-    setForgeLoading(true);
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const res = await window.api.forgePullRequest({ cwd });
-        if (cancelled) return;
-        setForgeResult(res);
-        // connected = the box resolved the repo AND a token (error null).
-        setForgeConnected(res.error === null);
-      } catch {
-        /* non-fatal — the card just stays on its last known state */
-      } finally {
-        if (!cancelled) setForgeLoading(false);
-      }
-    };
-    void load();
-    const t = setInterval(load, 15000);
-    return () => { cancelled = true; clearInterval(t); };
-  }, [cwd, isActive]);
-
-  // Open the ship confirm card — the always-on human gate. Loads the preview
-  // (head/base/fileCount) first so the card shows real facts before anything
-  // is pushed. Nothing is pushed or opened until the user confirms (confirmShip).
-  const openShip = useCallback(async () => {
-    setShipError(null);
-    setShipOpen(true);
-    if (!cwd) return;
-    try {
-      const prev = await window.api.forgeShipPreview({ cwd });
-      if (prev.ok) {
-        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title ?? "", body: prev.body ?? "" });
-      } else {
-        setShipProposal(null);
-        setShipError(prev.error);
-      }
-    } catch (e) {
-      setShipProposal(null);
-      setShipError(e instanceof Error ? e.message : "could not prepare the pull request");
-    }
-  }, [cwd]);
-
-  // Confirm → push + create. Only ever called from the ShipConfirmCard.
-  const confirmShip = useCallback(async (input: { title: string; body: string; draft: boolean }) => {
-    if (!cwd) return;
-    setShipBusy(true);
-    setShipError(null);
-    try {
-      const res = await window.api.forgeShip({ cwd, ...input });
-      if (res.ok) {
-        setShipOpen(false);
-        setShipProposal(null);
-        void refreshLinkedPr();
-        void window.api.forgePullRequest({ cwd }).then((r) => setForgeResult(r)).catch(() => {});
-      } else {
-        setShipError(res.error);
-      }
-    } catch (e) {
-      setShipError(e instanceof Error ? e.message : "ship failed");
-    } finally {
-      setShipBusy(false);
-    }
-  }, [cwd, refreshLinkedPr]);
-
-  // Merge the shown PR, ALWAYS with the head SHA the user approved.
-  const doMerge = useCallback(async () => {
-    const pr = forgeResult?.pr;
-    if (!pr || !cwd) return;
-    setMergeBusy(true);
-    setMergeError(null);
-    try {
-      const res = await window.api.forgeMerge({ cwd, number: pr.number, method: "merge", sha: pr.headSha });
-      if (res.ok) {
-        void refreshLinkedPr();
-        void window.api.forgePullRequest({ cwd }).then((r) => setForgeResult(r)).catch(() => {});
-      } else {
-        setMergeError(describeMergeFailure(res.kind));
-      }
-    } catch (e) {
-      setMergeError(e instanceof Error ? e.message : "merge failed");
-    } finally {
-      setMergeBusy(false);
-    }
-  }, [cwd, forgeResult, refreshLinkedPr]);
-
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
   const [error, setError] = useState<string | null>(null);
@@ -699,12 +590,88 @@ export function ChatPanel({
       // non-fatal — the forge read path is best-effort; keep last-known.
     }
   }, []);
-  // Resolve which PR the branch chip renders: the stored link's number when
-  // present, else today's live `forgePullRequest` result (the 15s poll).
-  const displayPr = useMemo(
-    () => preferLinkedPr(forge.pr, linkedPr),
-    [forge.pr, linkedPr],
-  );
+
+  // Fetch the ship preview once (the branch popover's no-PR state shows
+  // Base / Changes). Click-only surface ⇒ fetched on popover open, never
+  // polled, and not re-fetched if already loaded for this cwd.
+  const ensureShipPreview = useCallback(async () => {
+    if (!cwd || shipProposal) return;
+    try {
+      const prev = await window.api.forgeShipPreview({ cwd });
+      if (prev.ok) {
+        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title ?? "", body: prev.body ?? "" });
+      } else {
+        setShipProposal(null);
+        setShipError(prev.error);
+      }
+    } catch (e) {
+      setShipProposal(null);
+      setShipError(e instanceof Error ? e.message : "could not prepare the pull request");
+    }
+  }, [cwd, shipProposal]);
+
+  // Confirm → push + create. Only ever called from the ShipConfirmCard or the
+  // inline Create PR handler. On success it refreshes the PR (the branch
+  // popover swaps in place to the PR state).
+  const confirmShip = useCallback(async (input: { title: string; body: string; draft: boolean }) => {
+    if (!cwd) return;
+    setShipBusy(true);
+    setShipError(null);
+    try {
+      const res = await window.api.forgeShip({ cwd, ...input });
+      if (res.ok) {
+        setShipOpen(false);
+        setShipProposal(null);
+        void refreshForge(cwd);
+      } else {
+        setShipError(res.error);
+      }
+    } catch (e) {
+      setShipError(e instanceof Error ? e.message : "ship failed");
+    } finally {
+      setShipBusy(false);
+    }
+  }, [cwd, refreshForge]);
+
+  // Create PR — the inline, no-form path (BET-867 owner-approved departure
+  // from BET-794's mandatory-confirm rule). A human clicking a button labelled
+  // `Create PR` is the explicit confirm. Ships the same title/body the Draft
+  // card would have shown, as a real (non-draft) PR. One code path: both this
+  // and Draft PR… end in confirmShip.
+  const createPr = useCallback(() => {
+    if (!shipProposal) return;
+    void confirmShip({ title: shipProposal.title, body: shipProposal.body, draft: false });
+  }, [shipProposal, confirmShip]);
+
+  // Open the ship confirm card — the always-on human gate for Draft PR….
+  // Loads the preview (head/base/fileCount) so the card shows real facts; if
+  // the preview is already loaded it must not re-fetch. Nothing is pushed or
+  // opened until the user confirms (confirmShip).
+  const openShip = useCallback(() => {
+    setShipError(null);
+    setShipOpen(true);
+    void ensureShipPreview();
+  }, [ensureShipPreview]);
+
+  // Merge the shown PR, ALWAYS with the head SHA the user approved.
+  const doMerge = useCallback(async () => {
+    const pr = forge.pr;
+    if (!pr || !cwd) return;
+    setMergeBusy(true);
+    setMergeError(null);
+    try {
+      const res = await window.api.forgeMerge({ cwd, number: pr.number, method: "merge", sha: pr.headSha });
+      if (res.ok) {
+        void refreshForge(cwd);
+      } else {
+        setMergeError(describeMergeFailure(res.kind));
+      }
+    } catch (e) {
+      setMergeError(e instanceof Error ? e.message : "merge failed");
+    } finally {
+      setMergeBusy(false);
+    }
+  }, [cwd, forge.pr, refreshForge]);
 
   // BET-789: dismiss the "Connect GitHub…" offer permanently, per-box. Mirror
   // of AppConfig.forgeConnectOfferDismissed, written through the generic
@@ -732,14 +699,6 @@ export function ChatPanel({
     }, 5000);
     return () => clearInterval(branchPoll);
   }, [cwd, refreshBranch, isActive, refreshForge]);
-
-  // BET-852: refresh the stored session-link PR number on entry (and when the
-  // session changes). Gated on isActive like the other session reads — a
-  // hidden panel doesn't re-read config. Written again by ship/merge below.
-  useEffect(() => {
-    if (!isActive || !tmuxSession) return;
-    void refreshLinkedPr();
-  }, [refreshLinkedPr, isActive, tmuxSession]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -2283,7 +2242,6 @@ export function ChatPanel({
     schedules: { order: 3, label: "⏰ schedule" },
     secrets: { order: 2, label: "🔑 secret" },
     webhooks: { order: 1, label: "🪝 webhook" },
-    forge: { order: 0, label: "⛨ git" },
   };
   // Monotonic first-seen arrival counter for blocking cards (BET-783 reviewer
   // Block). Records each blocking ask's true interleaved arrival across
@@ -2397,22 +2355,6 @@ export function ChatPanel({
           ))}
         </div>
       </MeasureColumn>));
-    // BET-794: the forge surface — the current PR + merge gate, or the Ship
-    // entry that opens the [SH1] confirm card. Shown while a forge is
-    // resolved for this cwd (connected) or still being checked; hidden for a
-    // scratch dir with no forge.
-    if (forgeConnected || forgeLoading) list.push(amb("forge",
-      <div className="shrink-0 px-4 pt-2 pb-2">
-        <ForgeCard
-          result={forgeResult}
-          loading={forgeLoading}
-          shipOpen={shipOpen}
-          busy={shipBusy || mergeBusy}
-          mergeError={mergeError}
-          onShip={() => void openShip()}
-          onMerge={() => void doMerge()}
-        />
-      </div>));
     if (!jobOwnership) {
       if (openPanel === "schedules") list.push(amb("schedules",
         <div className="shrink-0 px-4 pt-2 pb-2">
@@ -2468,7 +2410,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipOpen, shipProposal, shipBusy, shipError, confirmShip, forgeConnected, forgeLoading, forgeResult, mergeError, openShip, doMerge, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipOpen, shipProposal, shipBusy, shipError, confirmShip, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -2556,7 +2498,7 @@ export function ChatPanel({
         artifactsOpen={artifactsOpen}
         onToggleArtifacts={onToggleArtifacts}
         hiddenStatusItems={hiddenStatusItems}
-        pr={displayPr}
+        pr={forge.pr}
         checks={forge.checks}
         checksRollup={forge.rollup}
         forgeConnected={forge.connected}
@@ -2565,6 +2507,16 @@ export function ChatPanel({
         onOpenExternal={(url) => void window.api.openExternal(url)}
         onFillComposer={updateInputWithHistoryReset}
         onDismissForgeConnect={dismissForgeConnect}
+        onMerge={() => void doMerge()}
+        mergeBusy={mergeBusy}
+        mergeError={mergeError}
+        shipBusy={shipBusy}
+        shipError={shipError}
+        shipBase={shipProposal?.base ?? null}
+        shipFileCount={shipProposal?.fileCount ?? null}
+        onDraftPr={() => void openShip()}
+        onCreatePr={() => void createPr()}
+        onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
       <Transcript
