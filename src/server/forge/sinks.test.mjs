@@ -35,7 +35,7 @@ test("forge sink: two reports produce one comment id (update, not append)", asyn
       comments.push(created);
       return { data: { id: 41 } };
     },
-    updateComment: async (_r, id, b) => {
+    updateComment: async (_r, _n, id, b) => {
       updated = { id, body: b };
       const ix = comments.findIndex((c) => c.id === id);
       if (ix >= 0) comments[ix] = { ...comments[ix], body: b };

@@ -667,13 +667,17 @@ export function createGithubAdapter(request, requestWrite, requestText = request
 
     /**
      * PATCH /repos/{o}/{r}/issues/comments/{id} — update an existing plain
-     * comment in place (the "update" half of ensure-comment-by-topic).
+     * comment in place (the "update" half of ensure-comment-by-topic). `number`
+     * is accepted (and IGNORED) to match GitLab, whose MR notes are iid-scoped —
+     * the one shared comment-write contract is `(repo, number, commentId, body)`,
+     * and GitHub's issue-comment ids are global so it drops `number`.
      * @param {{ owner: string, repo: string }} repo
+     * @param {number} _number unused on GitHub (comment ids are global)
      * @param {any} commentId
      * @param {string} body
      * @returns {Promise<{ data: { id: any }, stale: boolean }>}
      */
-    async updateIssueComment(repo, commentId, body) {
+    async updateIssueComment(repo, _number, commentId, body) {
       if (!requestWrite) throw new Error("write transport not available");
       const url = `${API}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
       const { data } = await requestWrite(url, { method: "PATCH", body: { body } });

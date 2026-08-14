@@ -62,7 +62,7 @@ export function planForgeComment(comments, { topic, text }) {
  * @param {string} input.text  the live checklist text
  * @param {(repo, number) => Promise<{data: Array<{id: any, body: string}>}>} input.listComments
  * @param {(repo, number, body: string) => Promise<{data: {id?: any}}>} input.createComment
- * @param {(repo, commentId, body: string) => Promise<unknown>} input.updateComment
+ * @param {(repo, number, commentId, body: string) => Promise<unknown>} input.updateComment
  * @returns {Promise<{ok: true, updated: boolean, id: any}>}
  */
 export async function ensureCommentByTopic({
@@ -80,7 +80,10 @@ export async function ensureCommentByTopic({
     const created = await createComment(repo, number, plan.body);
     return { ok: true, updated: false, id: created?.data?.id ?? null };
   }
-  await updateComment(repo, plan.id, plan.body);
+  // updateComment carries `number` because GitLab's MR notes are iid-scoped:
+  // GitHub addresses a note by a global id but GitLab needs both the MR iid and
+  // the note id. The contract is `(repo, number, commentId, body)` on both.
+  await updateComment(repo, number, plan.id, plan.body);
   return { ok: true, updated: true, id: plan.id };
 }
 

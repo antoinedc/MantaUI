@@ -366,6 +366,38 @@ test("getDiff assembles the diff from /changes and normalises discussions into t
   assert.equal(data.threads[1].resolved, true);
 });
 
+// ---- Progress sink comment methods (iid-scoped on GitLab) ------------------
+
+test("comment methods address GitLab MR notes iid-scoped; update matches the shared 4-arg contract", async () => {
+  const base = projectBase(REPO);
+  const write = fakeWrite({
+    [`${base}/merge_requests/42/notes/77`]: { id: 77 },
+  });
+  const adapter = createGitlabAdapter(
+    fakeRequest({
+      [`${base}/merge_requests/42/notes`]: [{ id: 7, body: "old" }],
+    }),
+    write,
+  );
+
+  const listed = await adapter.listIssueComments(REPO, 42);
+  assert.equal(listed.data.length, 1);
+  assert.equal(listed.data[0].id, 7);
+
+  await adapter.createIssueComment(REPO, 42, "hello");
+  const createWrite = write.calls.find((c) => c.url === `${base}/merge_requests/42/notes` && c.method === "POST");
+  assert.ok(createWrite, "createIssueComment POSTs to the MR notes endpoint");
+  assert.equal(createWrite.body.body, "hello");
+
+  // The sink calls updateComment(repo, number, commentId, body) — the unified
+  // shared contract — which on GitLab must reach /merge_requests/{iid}/notes/{id}.
+  await adapter.updateIssueComment(REPO, 42, 77, "updated");
+  const updateWrite = write.calls.find((c) => c.url === `${base}/merge_requests/42/notes/77`);
+  assert.ok(updateWrite, "updateIssueComment PUTs to the iid-scoped note endpoint");
+  assert.equal(updateWrite.method, "PUT");
+  assert.equal(updateWrite.body.body, "updated");
+});
+
 // ---- Mismatch #4: issues and MRs are disjoint ------------------------------
 
 test("listIssues maps iid → number with no PR filtering (GitLab issues are disjoint)", async () => {
