@@ -487,18 +487,9 @@ test("isRedelivery / isEventFiltered pure semantics", () => {
 });
 
 test("deliverWebhook returns 429 when rate-limited, never sends", async () => {
-  let sent = 0;
-  const res = await deliverWebhook(
-    { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
-    {
-      load: async () => [fakeHook({ unsigned: true })],
-      save: async () => {},
-      sendPrompt: async () => { sent++; },
-      take: () => false,
-    },
-  );
+  const { res, sent } = await deliverToBusySession({ take: () => false });
   assert.equal(res.status, 429);
-  assert.equal(sent, 0);
+  assert.equal(sent(), 0);
 });
 
 test("deliverWebhook happy path sends the formatted turn and stamps metadata", async () => {
@@ -538,49 +529,51 @@ test("deliverWebhook on an unsigned hook skips signature verification", async ()
   assert.equal(sent, 1);
 });
 
-test("deliverWebhook defers (202) on a busy session instead of draining", async () => {
+// The busy session is the fixture for every defer/rate-limit case — the
+// envelope is identical, only the session deps under test differ.
+async function deliverToBusySession(deps) {
   let sent = 0;
-  let queued = null;
   const res = await deliverWebhook(
     { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
     {
       load: async () => [fakeHook({ unsigned: true })],
       save: async () => {},
       sendPrompt: async () => { sent++; },
-      isBusy: () => true,
-      enqueue: (sid, text) => { queued = { sid, text }; },
+      ...deps,
     },
   );
+  return { res, sent: () => sent };
+}
+
+test("deliverWebhook defers (202) on a busy session instead of draining", async () => {
+  let queued = null;
+  const { res, sent } = await deliverToBusySession({
+    isBusy: () => true,
+    enqueue: (sid, text) => { queued = { sid, text }; },
+  });
   assert.equal(res.status, 202);
   assert.equal(res.queued, true);
-  assert.equal(sent, 0); // did NOT send / abort the in-flight turn
+  assert.equal(sent(), 0); // did NOT send / abort the in-flight turn
   assert.equal(queued.sid, "ses_1");
   assert.match(queued.text, /Inbound webhook/);
 });
 
 test("deliverWebhook surfaces a defer-queue-full rejection as 429, not 202 (BET-772)", async () => {
-  let sent = 0;
   let enqueueCalls = 0;
-  const res = await deliverWebhook(
-    { token: "a".repeat(32), rawBody: "{}", signatureHeader: "" },
-    {
-      load: async () => [fakeHook({ unsigned: true })],
-      save: async () => {},
-      sendPrompt: async () => { sent++; },
-      isBusy: () => true,
-      enqueue: async () => {
-        enqueueCalls++;
-        // The shared engine rejects when the session's pending queue is full.
-        return { delivered: false, queued: false, rejected: true };
-      },
+  const { res, sent } = await deliverToBusySession({
+    isBusy: () => true,
+    enqueue: async () => {
+      enqueueCalls++;
+      // The shared engine rejects when the session's pending queue is full.
+      return { delivered: false, queued: false, rejected: true };
     },
-  );
+  });
   // The sender must NOT be told "queued, will be delivered" for a dropped
   // prompt — surface it as a non-202 so the sender knows the delivery failed.
   assert.equal(res.status, 429);
   assert.equal(res.queued, undefined);
   assert.equal(res.ok, false);
   assert.equal(res.error, "queue full");
-  assert.equal(sent, 0); // it was deferred-and-rejected, never sent now
+  assert.equal(sent(), 0); // it was deferred-and-rejected, never sent now
   assert.equal(enqueueCalls, 1);
 });
