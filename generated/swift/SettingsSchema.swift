@@ -57,7 +57,6 @@ enum SettingsSchema {
         SettingSection(id: "models", label: "Models", group: "SETUP"),
         SettingSection(id: "sessions", label: "Sessions", group: "AGENT"),
         SettingSection(id: "files", label: "Files", group: "AGENT"),
-        SettingSection(id: "extensions", label: "Extensions", group: "AGENT"),
         SettingSection(id: "voice", label: "Voice", group: "AGENT"),
     ]
 
@@ -171,20 +170,6 @@ enum SettingsSchema {
             defaultBool: nil,
             defaultNumber: 168,
             options: [SettingOption(value: "24", label: "24 hours"), SettingOption(value: "168", label: "7 days"), SettingOption(value: "0", label: "Never (keep)")],
-            commitOnBlur: false,
-            placeholder: nil,
-        ),
-        SettingEntry(
-            id: "forgeRulesEnabled",
-            section: "extensions",
-            label: "Run forge rules",
-            help: "Lets the box register per-repo forge webhooks (GitHub → your box) and ingest them. Rules are AI-authored, live on the box at ~/.manta/forge-rules/, and never travel with a repository. Off by default.",
-            control: SettingControl.toggle,
-            configKey: "forgeRulesEnabled",
-            defaultString: nil,
-            defaultBool: false,
-            defaultNumber: nil,
-            options: nil,
             commitOnBlur: false,
             placeholder: nil,
         ),

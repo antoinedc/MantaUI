@@ -136,7 +136,7 @@ test("forgeStatus: reports connected/login and NEVER leaks the token", async () 
     resolveToken: async () => ({ token: TOKEN, source: "cli" }),
     detectCli: async () => ({ installed: true, authenticated: true, login: "octocat" }),
   });
-  assert.deepEqual(status, { connected: true, login: "octocat", kind: "github" });
+  assert.deepEqual(status, { connected: true, login: "octocat", kind: "github", source: "cli" });
   const serialised = JSON.stringify(status);
   assert.ok(!serialised.includes(TOKEN), "the resolved token must never cross forge:status output");
 });

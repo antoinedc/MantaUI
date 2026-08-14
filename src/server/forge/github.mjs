@@ -325,7 +325,12 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ number: number, title: string, body: string, url: string, state: string, closed: boolean }>, stale: boolean }>}
      */
     async listIssues(repo, filter = {}) {
-      const url = `${API}${issuePath(repo)}/issues${qs({ state: filter.state ?? "open" })}`;
+      const url = `${API}${issuePath(repo)}/issues${qs({
+        state: filter.state ?? "open",
+        ...(filter.labels !== undefined
+          ? { labels: Array.isArray(filter.labels) ? filter.labels.join(",") : filter.labels }
+          : {}),
+      })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       const issues = raw
@@ -511,6 +516,51 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         threads = normalizeReviewThreads(commentsRes.data);
       }
       return { data: { diff, threads, headSha }, stale };
+    },
+
+    /**
+     * GET /repos/{o}/{r}/issues/{n}/comments — the plain (issue) comments on a
+     * PR or issue, reduced to {id, body}. The forge progress sink reads these
+     * to find its topic marker before upserting.
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @returns {Promise<{ data: Array<{ id: any, body: string }>, stale: boolean }>}
+     */
+    async listIssueComments(repo, number) {
+      const url = `${API}${issuePath(repo)}/issues/${number}/comments`;
+      const { data, stale } = await request(url);
+      const raw = Array.isArray(data) ? data : [];
+      return { data: raw.map((c) => ({ id: c?.id ?? null, body: c?.body ?? "" })), stale };
+    },
+
+    /**
+     * POST /repos/{o}/{r}/issues/{n}/comments — create a plain comment on a PR
+     * or issue.
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {string} body
+     * @returns {Promise<{ data: { id: any }, stale: boolean }>}
+     */
+    async createIssueComment(repo, number, body) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}${issuePath(repo)}/issues/${number}/comments`;
+      const { data } = await requestWrite(url, { method: "POST", body: { body } });
+      return { data: { id: data?.id ?? null }, stale: false };
+    },
+
+    /**
+     * PATCH /repos/{o}/{r}/issues/comments/{id} — update an existing plain
+     * comment in place (the "update" half of ensure-comment-by-topic).
+     * @param {{ owner: string, repo: string }} repo
+     * @param {any} commentId
+     * @param {string} body
+     * @returns {Promise<{ data: { id: any }, stale: boolean }>}
+     */
+    async updateIssueComment(repo, commentId, body) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
+      const { data } = await requestWrite(url, { method: "PATCH", body: { body } });
+      return { data: { id: data?.id ?? null }, stale: false };
     },
   };
 }

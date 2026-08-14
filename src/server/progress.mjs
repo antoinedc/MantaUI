@@ -128,10 +128,16 @@ export async function saveRecords(records, path = STORE_PATH) {
  * `progress.updated` on the bus on every change. Unknown sink names are
  * ignored with a warning (a model asking for a not-yet-implemented sink must
  * not break its own turn).
+ *
+ * `sinks` is a map of sink-name → handler invoked with `{record, sessionID}`
+ * for every sink the report names (BET-798 wires `forge` and `push` here).
+ * A named sink with no handler is ignored with a warning. Sink failures never
+ * fail the report (progress is ambient; a wedged forge write must not break
+ * the turn).
  */
 export async function reportProgress(
   input,
-  { load = loadRecords, save = saveRecords, publish, now = () => Date.now() } = {},
+  { load = loadRecords, save = saveRecords, publish, now = () => Date.now(), sinks = {} } = {},
 ) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return { ok: false, error: "body must be an object" };
@@ -149,8 +155,15 @@ export async function reportProgress(
   publish?.({ kind: "progress.updated", payload: { sessionID } });
   if (Array.isArray(input.sinks)) {
     for (const s of input.sinks) {
-      if (s !== "ui") {
-        console.warn(`[progress] ignoring unknown sink "${s}" (only "ui" is implemented)`);
+      const handler = sinks[s];
+      if (typeof handler === "function") {
+        try {
+          await handler({ record: merged.record, sessionID });
+        } catch (e) {
+          console.warn(`[progress] sink "${s}" failed:`, e?.message ?? e);
+        }
+      } else if (s !== "ui") {
+        console.warn(`[progress] ignoring unknown sink "${s}"`);
       }
     }
   }

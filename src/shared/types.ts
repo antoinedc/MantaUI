@@ -381,10 +381,30 @@ export type ForgeCheckRun = {
 // forge:status result — presence + identity ONLY, never a token. `connected`
 // is true when the box can resolve a forge token (gh CLI or a stored secret);
 // `login` is the non-secret gh login when available; `kind` is the forge the
-// resolved token authenticates to ("github" — the only adapter today).
+// resolved token authenticates to ("github" — the only adapter today);
+// `source` is the §3.3 ladder rung the box's credential came from
+// ("cli" | "env" | "stored") so Settings can say where the token came from.
 export type ForgeStatusResult =
-  | { connected: true; login: string | null; kind: "github" }
+  | {
+      connected: true;
+      login: string | null;
+      kind: "github";
+      source: "cli" | "env" | "stored" | null;
+    }
   | { connected: false };
+
+// forge:rules-list result — one row per repo with a box-side rules file,
+// INCLUDING invalid ones (a rules file that silently fails to load is worse
+// than one that loudly refuses). `error` is the validator's message verbatim.
+export type ForgeRuleRow = {
+  repoKey: string;
+  valid: boolean;
+  error?: string;
+  ruleCount?: number;
+};
+
+// forge:disconnect result — clears the box-side forge credential cache.
+export type ForgeDisconnectResult = { ok: boolean };
 
 // forge:pull-request result — the normalised PR + its CI for a session cwd.
 // `pr` is null (not an error) when the repo has no open PR. `rollup` is the
@@ -795,6 +815,10 @@ export const IPC = {
   forgeShip: "forge:ship",
   forgeShipPreview: "forge:ship-preview",
   forgeMerge: "forge:merge",
+
+  // BET-798: rules registry + disconnect (Settings [G1]).
+  forgeRulesList: "forge:rules-list",
+  forgeDisconnect: "forge:disconnect",
 
   // BET-793: box-buffered draft review. All three are box-side only — the box
   // owns the draft (§3.4①), so a forge token never reaches the renderer.
