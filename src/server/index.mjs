@@ -65,7 +65,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -91,6 +91,7 @@ import {
   listHooks,
   deleteHook,
   createRateLimiter,
+  findForgeHook,
 } from "./webhooks.mjs";
 import { putRegistry as pluginsPutRegistry, getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import {
@@ -99,6 +100,14 @@ import {
   saveRules as forgeSaveRules,
   forgeIngest,
 } from "./forgeRules.mjs";
+import { createRulesEngine } from "./forge/rules.mjs";
+import { createForgePoller, pollIssueLabels } from "./forge/poller.mjs";
+import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
+import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
+import { getAdapter } from "./forge/index.mjs";
+import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
+import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
+import { detectForge as detectForgeUrl } from "../shared/forge.mjs";
 import {
   ensureAuth,
   createAuthEngine,
@@ -290,19 +299,28 @@ const { stop: stopCapSweeper } = startCapSweeper({
 // the schedule poller. The engine owns the per-token rate limiter and delegates
 // busy-tracking + the defer-until-idle queue to the shared prompt-delivery
 // engine. See src/server/webhooks.mjs + docs.
+// The rules engine (BET-798) is built after the delegate engine it dispatches
+// through (created further down); the webhook-engine closure references it by
+// the `let` binding, so it is always the live single instance at delivery time.
+let forgeRulesEngine = null;
+
 const webhookEngine = createWebhookEngine({
   sendPrompt: (args) => oc.sendPrompt(args),
   delivery: promptDelivery,
   publish: (evt) => bus.publish(evt),
   // Forge hooks route to the forge ingest path instead of waking a session.
-  // Ingest verifies + dedupes + filters (all in webhooks.mjs) then RECORDS the
-  // event — this issue does NOT act on events (the rules engine is the next
-  // issue). With the global toggle off, nothing routes (no forge hooks exist
-  // anyway — registration is gated; this check is belt-and-suspenders).
+  // Ingest verifies + dedupes + filters (all in webhooks.mjs), RECORDS every
+  // verified delivery to the box-side event log, then — when the rules engine
+  // is live — dispatches through it (the pay-off: an event can start an agent
+  // in its own worktree). With the global toggle off nothing routes (no forge
+  // hooks exist anyway — registration is gated; this check is
+  // belt-and-suspenders).
   forgeIngest: async (args) => {
     const cfg = await local.configGet();
     if (cfg?.forgeRulesEnabled !== true) return null;
-    return forgeIngest(args);
+    const rec = await forgeIngest(args);
+    if (forgeRulesEngine) await forgeRulesEngine.handleEvent(args);
+    return rec;
   },
 });
 
@@ -350,6 +368,179 @@ const { stop: stopDelegateActivityPoller } = delegateEngine.startActivityPoller(
 // guard, timer.unref()).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopProgressSweeper } = startProgressSweeper({ publish: (evt) => bus.publish(evt) });
+
+// ---- rules engine + polling fallback + progress sinks (BET-798) ----------
+//
+// The rules engine is pure composition: matched rule in, existing engine
+// called. Nothing is spun up here that does not already exist:
+//   - delegate → the EXISTING delegate engine (delegateEngine.startJob).
+//   - notify   → the EXISTING notification router (push.fireNotify).
+//   - inbox    → invalidate the inbox cache.
+// The engine is OFF by default (forgeRulesEnabled, read live from config).
+//
+// The box's own forge identity (its gh login) is used to ignore self-caused
+// events; resolved lazily once. When it cannot be resolved, self-filtering is
+// simply off (the cap + fork guards still hold).
+let forgeSelf = null;
+local
+  .detectForgeCli()
+  .then((cli) => {
+    if (cli?.login) forgeSelf = cli.login;
+  })
+  .catch(() => {});
+const forgeRefusalLog = new (class {
+  // A plain box-side refusal record; never a queue. Appended to the same
+  // box-side events log forge ingest already writes.
+  append(entry) {
+    console.warn(`[forge-rules] refusal: ${entry?.reason ?? ""} (${entry?.repoKey ?? "?"})`);
+  }
+})();
+const forgePollSeen = new Map(); // repoKey -> Set of seen issue identities (poller de-dup)
+
+forgeRulesEngine = createRulesEngine({
+  enabled: async () => (await local.configGet())?.forgeRulesEnabled === true,
+  startDelegate: async ({ prompt, repoKey, event, rule }) => {
+    // Resolve a parent directory to branch the worktree off. The session-link
+    // primitive (spec §3.4⑥) is not yet shipped, so the parent is sourced from
+    // a documented box-side forge checkout when one exists; otherwise the job
+    // is refused (recorded below) rather than guessed at. This keeps a real
+    // rule storm bounded to the delegate engine's five-job cap with clean
+    // refusals — never queued.
+    const cwd = await resolveForgeParentDirectory(repoKey);
+    if (!cwd) {
+      return {
+        ok: false,
+        error: "no local forge checkout to branch the job worktree off (session-link primitive not yet shipped)",
+      };
+    }
+    const permission = delegateBuildPermissionRuleset([
+      { permission: "bash", pattern: "**" },
+      { permission: "write", pattern: "**" },
+      { permission: "edit", pattern: "**" },
+      { permission: "webfetch", pattern: "**" },
+    ]);
+    return delegateEngine.startJob({
+      prompt,
+      parentSessionID: "forge", // synthetic parent channel; real parent arrives with the link primitive
+      parentDirectory: cwd,
+      permission,
+    });
+  },
+  notify: async ({ message, event }) =>
+    push.fireNotify({
+      message: message ?? "Forge event",
+      title: event?.type ?? "Forge",
+      urgent: false,
+    }),
+  invalidateInbox: async ({ repoKey }) => {
+    // The inbox cache is invalidated on the bus; the engine never logs or
+    // wakes a session for an inbox verb.
+    bus.publish({ kind: "forge.inbox.invalidated", payload: { repoKey } });
+  },
+  recordRefusal: (entry) => forgeRefusalLog.append(entry),
+  self: () => forgeSelf,
+});
+
+// The polling fallback — a required peer for boxes with no public ingress
+// (Tailscale-only / macOS) and for forges that kill failing webhooks. Reuses
+// startPoller (via createForgePoller) and the forge request layer's ETag/304;
+// never polls a repo that has a working webhook.
+const { stop: stopForgePoller } = createForgePoller({
+  intervalMs: 60_000,
+  listRepos: async () => {
+    const cfg = await local.configGet();
+    if (cfg?.forgeRulesEnabled !== true) return [];
+    const rows = await forgeListRules();
+    const out = [];
+    for (const row of rows) {
+      if (!row.valid) continue; // invalid rules never dispatch (listed in Settings)
+      const parts = forgeParseRepoKey(row.repoKey);
+      if (!parts) continue;
+      const hook = await findForgeHook(row.repoKey).catch(() => null);
+      const labeled = parseForgeRules(row.yaml ?? "").rules?.on?.["issue.labeled"];
+      out.push({
+        repoKey: row.repoKey,
+        parts,
+        label: typeof labeled?.label === "string" ? labeled.label : null,
+        webhookRegistered: !!hook, // never both: a working webhook wins
+      });
+    }
+    return out;
+  },
+  pollRepo: async (repo) => {
+    if (!repo.label) return { events: [] }; // only issue.labeled is polled today
+    const tok = await forgeResolveToken(repo.parts.host).catch(() => null);
+    if (!tok) return { events: [] };
+    const adapter = getAdapter("github", tok.token);
+    let seen = forgePollSeen.get(repo.repoKey);
+    if (!seen) forgePollSeen.set(repo.repoKey, (seen = new Set()));
+    const { events } = await pollIssueLabels(
+      { repo: { owner: repo.parts.owner, repo: repo.parts.repo }, label: repo.label, listIssues: (r, f) => adapter.listIssues(r, f) },
+      { seen },
+    );
+    return { events: events.map((e) => ({ ...e, repoKey: repo.repoKey })) };
+  },
+  handleEvent: (ev) => forgeRulesEngine.handleEvent(ev),
+});
+
+// Resolve a parent directory to branch a forge-triggered job's worktree off.
+// A documented box-side convention: a directory at ~/.manta/forge-checkouts/<repo>
+// when it exists (otherwise the job is refused). This is the concrete seam the
+// session-link primitive will replace.
+async function resolveForgeParentDirectory(repoKey) {
+  const parts = forgeParseRepoKey(repoKey);
+  if (!parts) return null;
+  try {
+    const { stat } = await import("node:fs/promises");
+    const dir = join(
+      homedir(),
+      ".manta",
+      "forge-checkouts",
+      `${parts.host}-${parts.owner}-${parts.repo}`.replace(/\//g, "_"),
+    );
+    await stat(dir);
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve the PR a forge progress sink should comment on, for a job's child
+// session. Walks job worktree → origin → open PR on the branch, and returns
+// the adapter + repo + number when one exists. The session-link primitive
+// (spec §3.4⑥) that names the target outright is a later issue; until then the
+// sink targets a job's OWN PR, and returns null (no-op) for everything else.
+async function resolveForgeSinkTarget(childSessionID) {
+  try {
+    const { jobs } = await delegateEngine.listJobs();
+    const job = jobs?.find((j) => j.childSessionID === childSessionID && j.worktree);
+    if (!job?.worktree) return null;
+    const origin = await local.gitRemoteOrigin(job.worktree);
+    const forge = origin ? detectForgeUrl(origin) : null;
+    if (!forge || forge.kind !== "github") return null;
+    const tok = await forgeResolveToken(forge.host).catch(() => null);
+    if (!tok) return null;
+    const adapter = getAdapter(forge.kind, tok.token);
+    const repo = { owner: forge.owner, repo: forge.repo };
+    const { data } = await adapter.listPullRequests(repo, { state: "open" });
+    const prs = Array.isArray(data) ? data : [];
+    const branch = await gitBranchFor(job.worktree);
+    const pr = branch ? prs.find((p) => p.headRef === branch) : undefined;
+    if (!pr?.number) return null;
+    return { adapter, repo, number: pr.number };
+  } catch {
+    return null;
+  }
+}
+
+async function gitBranchFor(cwd) {
+  try {
+    const { stdout } = await run("git", ["-C", cwd, "branch", "--show-current"]);
+    return (stdout ?? "").trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 // Single-box auth gate (M1, job zero). Every request must carry the box_token
 // as `Authorization: Bearer <token>` except the pairing handshake (/auth/*) and
@@ -1956,6 +2147,35 @@ const handleRequest = async (req, res) => {
         const body = await readJsonBody(req);
         const result = await reportProgress(body || {}, {
           publish: (evt) => bus.publish(evt),
+          // BET-798: the forge + push progress sinks. `push` is fully wired;
+          // `forge` resolves the job's own PR when one exists (the session-link
+          // primitive that names the target is a later issue) and no-ops
+          // otherwise — a sink failure never fails the report.
+          sinks: {
+            push: async ({ record, sessionID }) => {
+              const action = pushSinkAction(record);
+              if (!action) return;
+              await push.fireNotify({
+                message: action.message,
+                title: action.title,
+                urgent: action.urgent,
+                sessionID,
+              });
+            },
+            forge: async ({ record, sessionID }) => {
+              const target = await resolveForgeSinkTarget(sessionID);
+              if (!target) return;
+              await ensureCommentByTopic({
+                repo: target.repo,
+                number: target.number,
+                topic: sessionID,
+                text: record.label || record.detail || record.state || "Progress update",
+                listComments: (r, n) => target.adapter.listIssueComments(r, n),
+                createComment: (r, n, b) => target.adapter.createIssueComment(r, n, b),
+                updateComment: (r, id, b) => target.adapter.updateIssueComment(r, id, b),
+              });
+            },
+          },
         });
         if (!result.ok) {
           respondJson(res, 400, { error: result.error });

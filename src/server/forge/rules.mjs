@@ -176,7 +176,7 @@ export function normalizeEvent({ event, payload } = {}) {
  * the tests need no live tmux, opencode or network.
  *
  * @param {object} deps
- * @param {() => boolean} [deps.enabled] — true only when forgeRulesEnabled (default off).
+ * @param {() => boolean | Promise<boolean>} [deps.enabled] — true only when forgeRulesEnabled (default off). May be async.
  * @param {(repoKey: string) => Promise<{ok: boolean, yaml?: string}>} [deps.loadRules]
  *   Load a repo's rules source (default reads the box-side registry).
  * @param {(event: any, rules: any) => any} [deps.match] — matchRule.
@@ -189,8 +189,8 @@ export function normalizeEvent({ event, payload } = {}) {
  *   Invalidate the inbox cache so the item appears.
  * @param {(input: {repoKey: string, event: any, rule: any, reason: string}) => Promise<unknown>} [deps.recordRefusal]
  *   Persist a refusal (cap reached, fork, …) — never a queue.
- * @param {string|null} [deps.self] — the box's own forge identity; events
- *   whose actor matches are ignored (self-caused).
+ * @param {string | (() => string|null) | null} [deps.self] — the box's own forge
+ *   identity (string or a lazy resolver); events whose actor matches are ignored.
  * @returns {{ handleEvent: (input: {hook: any, headers: any, event: string, payload: any}) => Promise<any>, dispatchEvent: (repoKey: string, event: any) => Promise<any> }}
  */
 export function createRulesEngine({
@@ -204,7 +204,7 @@ export function createRulesEngine({
   self = null,
 } = {}) {
   async function handleEvent({ hook, headers, event, payload } = {}) {
-    if (!enabled()) return { handled: false, reason: "disabled" };
+    if (!(await enabled())) return { handled: false, reason: "disabled" };
     const repoKey = hook?.repoKey ?? null;
     if (!repoKey) return { handled: false, reason: "no repo" };
 
@@ -225,6 +225,7 @@ export function createRulesEngine({
    * @returns {Promise<{handled: boolean, reason?: string, error?: string|null, verb?: string}>}
    */
   async function dispatchEvent(repoKey, ev) {
+    if (!(await enabled())) return { handled: false, reason: "disabled" };
     const loaded = await loadRules(repoKey);
     if (!loaded?.ok) return { handled: false, reason: "no rules" };
     const parsed = parseRules(loaded.yaml ?? "");
@@ -236,8 +237,11 @@ export function createRulesEngine({
       return { handled: false, reason: "fork" };
     }
 
-    // Guard: ignore self-caused events (the box's own actor).
-    if (self != null && typeof ev.actor === "string" && ev.actor === self) {
+    // Guard: ignore self-caused events (the box's own actor). `self` may be a
+    // string (a fixed identity) or a zero-arg function resolved lazily.
+    let selfActor = self;
+    if (typeof selfActor === "function") selfActor = selfActor();
+    if (selfActor != null && typeof ev.actor === "string" && ev.actor === selfActor) {
       return { handled: false, reason: "self-caused" };
     }
 
