@@ -4,12 +4,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createForgePoller, pollIssueLabels } from "./poller.mjs";
+import { createForgePoller, pollChecksFailed, pollIssueLabels, pollReviewRequested } from "./poller.mjs";
 
 const repo = { owner: "anomalyco", repo: "manta" };
 
 function issue(number, title, url = `https://github.com/anomalyco/manta/issues/${number}`) {
   return { number, title, url };
+}
+
+function pr(number, title, { headRef = "feat", headSha = `sha${number}`, mergeBlockedReason = null } = {}) {
+  return {
+    number,
+    title,
+    url: `https://github.com/anomalyco/manta/pull/${number}`,
+    headRef,
+    headSha,
+    mergeBlockedReason,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +59,88 @@ test("pollIssueLabels: a changed list (new ETag) dispatches only the new issue",
   const res = await pollIssueLabels({ repo, label: "manta", listIssues: changed }, { seen });
   assert.equal(res.events.length, 1);
   assert.equal(res.events[0].title, "B");
+});
+
+// ---------------------------------------------------------------------------
+// pollChecksFailed — PRs whose CI is red emit checks.failed, with the same
+// ETag/`seen`-set de-dup so a 304 does not re-dispatch.
+// ---------------------------------------------------------------------------
+
+test("pollChecksFailed emits checks.failed for PRs whose CI rollup is red", async () => {
+  const listPullRequests = async () => ({ data: [pr(1, "A", { headRef: "feat/a" }), pr(2, "B", { headRef: "feat/b" })] });
+  const getChecks = async (_r, sha) => ({ data: [{ name: "ci", status: "completed", conclusion: sha === "sha1" ? "failure" : "success" }] });
+  const { events } = await pollChecksFailed({ repo, listPullRequests, getChecks });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "checks.failed");
+  assert.equal(events[0].branch, "feat/a");
+  assert.equal(events[0].title, "A");
+});
+
+test("pollChecksFailed: a still-red list (a 304) does NOT re-dispatch", async () => {
+  const listPullRequests = async () => ({ data: [pr(1, "A")] });
+  const getChecks = async () => ({ data: [{ name: "ci", status: "completed", conclusion: "failure" }] });
+  const seen = new Set();
+  const first = await pollChecksFailed({ repo, listPullRequests, getChecks }, { seen });
+  assert.equal(first.events.length, 1);
+  const second = await pollChecksFailed({ repo, listPullRequests, getChecks }, { seen });
+  assert.equal(second.events.length, 0);
+});
+
+test("pollChecksFailed: a PR that goes freshly red dispatches, a green one never does", async () => {
+  const seen = new Set();
+  const green = async () => ({ data: [{ name: "ci", status: "completed", conclusion: "success" }] });
+  const red = async () => ({ data: [{ name: "ci", status: "completed", conclusion: "failure" }] });
+  // First poll: green — no failure event.
+  let res = await pollChecksFailed(
+    { repo, listPullRequests: async () => ({ data: [pr(1, "A")] }), getChecks: green },
+    { seen },
+  );
+  assert.equal(res.events.length, 0);
+  // Now the same PR fails — the check changed, so it dispatches once.
+  res = await pollChecksFailed(
+    { repo, listPullRequests: async () => ({ data: [pr(1, "A")] }), getChecks: red },
+    { seen },
+  );
+  assert.equal(res.events.length, 1);
+  // Unchanged red list — suppressed.
+  res = await pollChecksFailed(
+    { repo, listPullRequests: async () => ({ data: [pr(1, "A")] }), getChecks: red },
+    { seen },
+  );
+  assert.equal(res.events.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// pollReviewRequested — PRs blocked on review emit review.requested, with the
+// same ETag/`seen`-set de-dup.
+// ---------------------------------------------------------------------------
+
+test("pollReviewRequested emits review.requested for PRs blocked on review", async () => {
+  const listPullRequests = async () => ({
+    data: [
+      pr(1, "A", { headRef: "feat/a", mergeBlockedReason: "review required" }),
+      pr(2, "B", { headRef: "feat/b", mergeBlockedReason: "checks failing" }),
+      pr(3, "C", { headRef: "feat/c", mergeBlockedReason: "review required" }),
+    ],
+  });
+  const { events } = await pollReviewRequested({ repo, listPullRequests });
+  assert.equal(events.length, 2);
+  assert.deepEqual(
+    events.map((e) => ({ type: e.type, branch: e.branch, title: e.title })),
+    [
+      { type: "review.requested", branch: "feat/a", title: "A" },
+      { type: "review.requested", branch: "feat/c", title: "C" },
+    ],
+  );
+});
+
+test("pollReviewRequested: an unchanged list (a 304) does NOT re-dispatch", async () => {
+  const listPullRequests = async () => ({ data: [pr(1, "A", { mergeBlockedReason: "review required" })] });
+  const seen = new Set();
+  const first = await pollReviewRequested({ repo, listPullRequests }, { seen });
+  assert.equal(first.events.length, 1);
+  const second = await pollReviewRequested({ repo, listPullRequests }, { seen });
+  assert.equal(second.events.length, 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -102,7 +102,12 @@ import {
   forgeIngest,
 } from "./forgeRules.mjs";
 import { createRulesEngine } from "./forge/rules.mjs";
-import { createForgePoller, pollIssueLabels } from "./forge/poller.mjs";
+import {
+  createForgePoller,
+  pollChecksFailed,
+  pollIssueLabels,
+  pollReviewRequested,
+} from "./forge/poller.mjs";
 import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
 import { getAdapter } from "./forge/index.mjs";
@@ -396,7 +401,7 @@ const forgeRefusalLog = new (class {
     console.warn(`[forge-rules] refusal: ${entry?.reason ?? ""} (${entry?.repoKey ?? "?"})`);
   }
 })();
-const forgePollSeen = new Map(); // repoKey -> Set of seen issue identities (poller de-dup)
+const forgePollSeen = new Map(); // repoKey -> { issues, checks, reviews } seen-sets (poller de-dup)
 
 forgeRulesEngine = createRulesEngine({
   enabled: async () => (await local.configGet())?.forgeRulesEnabled === true,
@@ -458,27 +463,51 @@ const { stop: stopForgePoller } = createForgePoller({
       const parts = forgeParseRepoKey(row.repoKey);
       if (!parts) continue;
       const hook = await findForgeHook(row.repoKey).catch(() => null);
-      const labeled = parseForgeRules(row.yaml ?? "").rules?.on?.["issue.labeled"];
+      const rulesOn = parseForgeRules(row.yaml ?? "").rules?.on ?? {};
+      const labeled = rulesOn["issue.labeled"];
       out.push({
         repoKey: row.repoKey,
         parts,
         label: typeof labeled?.label === "string" ? labeled.label : null,
+        pollChecksFailed: !!rulesOn["checks.failed"],
+        pollReviewRequested: !!rulesOn["review.requested"],
         webhookRegistered: !!hook, // never both: a working webhook wins
       });
     }
     return out;
   },
   pollRepo: async (repo) => {
-    if (!repo.label) return { events: [] }; // only issue.labeled is polled today
     const tok = await forgeResolveToken(repo.parts.host).catch(() => null);
     if (!tok) return { events: [] };
     const adapter = getAdapter("github", tok.token);
-    let seen = forgePollSeen.get(repo.repoKey);
-    if (!seen) forgePollSeen.set(repo.repoKey, (seen = new Set()));
-    const { events } = await pollIssueLabels(
-      { repo: { owner: repo.parts.owner, repo: repo.parts.repo }, label: repo.label, listIssues: (r, f) => adapter.listIssues(r, f) },
-      { seen },
-    );
+    const prRepo = { owner: repo.parts.owner, repo: repo.parts.repo };
+    let state = forgePollSeen.get(repo.repoKey);
+    if (!state) {
+      state = { issues: new Set(), checks: new Set(), reviews: new Set() };
+      forgePollSeen.set(repo.repoKey, state);
+    }
+    const events = [];
+    if (repo.label) {
+      const { events: ev } = await pollIssueLabels(
+        { repo: prRepo, label: repo.label, listIssues: (r, f) => adapter.listIssues(r, f) },
+        { seen: state.issues },
+      );
+      events.push(...ev);
+    }
+    if (repo.pollChecksFailed) {
+      const { events: ev } = await pollChecksFailed(
+        { repo: prRepo, listPullRequests: (r, f) => adapter.listPullRequests(r, f), getChecks: (r, sha) => adapter.getChecks(r, sha) },
+        { seen: state.checks },
+      );
+      events.push(...ev);
+    }
+    if (repo.pollReviewRequested) {
+      const { events: ev } = await pollReviewRequested(
+        { repo: prRepo, listPullRequests: (r, f) => adapter.listPullRequests(r, f) },
+        { seen: state.reviews },
+      );
+      events.push(...ev);
+    }
     return { events: events.map((e) => ({ ...e, repoKey: repo.repoKey })) };
   },
   handleEvent: (ev) => forgeRulesEngine.handleEvent(ev),
