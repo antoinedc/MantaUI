@@ -359,6 +359,38 @@ test("session.status busy emits a running frame with a non-null since", () => {
   assert.equal(ev.payload.since, 42_000, "stamped from the injectable now()");
 });
 
+test("snapshotBusy replays a running frame for a currently-busy session only (BET-913)", () => {
+  const { interp } = make(42_000);
+  // Nothing busy yet -> no replay events.
+  assert.deepEqual(interp.snapshotBusy(), []);
+  // Start a turn; the replay carries the frame the busy->idle edge never
+  // re-emits, with the ORIGINAL since so the timer survives a fresh process.
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  const snap = interp.snapshotBusy();
+  assert.equal(snap.length, 1);
+  assert.equal(snap[0].kind, "stream");
+  assert.equal(snap[0].sub, "running");
+  assert.equal(snap[0].sessionId, SID);
+  assert.equal(snap[0].payload.running, true);
+  assert.equal(snap[0].payload.since, 42_000, "original idle->busy stamp, not reconnect time");
+  assert.equal(snap[0].payload.type, "busy", "last status type preserved additively");
+  // An idle session leaves nothing to replay.
+  interp.interpret({ type: "session.idle", properties: { sessionID: SID } });
+  assert.deepEqual(interp.snapshotBusy(), []);
+});
+
+test("snapshotBusy ignores sessions that were never marked running", () => {
+  const { interp } = make();
+  interp.interpret({
+    type: "message.part.delta",
+    properties: { sessionID: SID, messageID: "m", part: { id: "p", type: "text", text: "hi" } },
+  });
+  assert.deepEqual(interp.snapshotBusy(), []);
+});
+
 test("a second busy while already running emits the SAME since (clock not restarted)", () => {
   let clock = 100_000;
   const events = [];

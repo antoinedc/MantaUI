@@ -3,9 +3,24 @@
 
 export function createBus() {
   const subs = new Set();
+  // Optional state replay. `setSnapshot(fn)` registers a provider that returns
+  // the current-state events to emit to each NEW subscriber on connect. The
+  // bus itself is a pure forwarder (no retained history); this is the one
+  // deliberate exception so a (re)connecting client recovers edge-only state.
+  let snapshot = () => [];
   return {
-    subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
+    subscribe(fn) {
+      subs.add(fn);
+      // Replay current state to the newly (re)connected consumer. Edge-only
+      // frames like `stream.running` never re-fire on their own, so a client
+      // that connects mid-turn would never learn a session is already busy —
+      // this is exactly the force-quit + relaunch case, where the turn timer
+      // must survive a fresh process.
+      for (const evt of snapshot()) { try { fn(evt); } catch {} }
+      return () => subs.delete(fn);
+    },
     publish(evt) { for (const fn of subs) { try { fn(evt); } catch {} } },
+    setSnapshot(fn) { snapshot = fn; },
   };
 }
 
