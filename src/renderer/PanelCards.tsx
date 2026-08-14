@@ -22,8 +22,6 @@ import type {
   WebhookMeta,
 } from "../shared/types";
 import { Button } from "./Button";
-import { Chip } from "./Chip";
-import { Field } from "./Field";
 import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 
@@ -615,10 +613,10 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
 // ===== Forge ship + merge (BET-794) =====
 
 // ShipConfirmCard — the [SH1] human gate. Always shown before anything is
-// pushed or opened; never auto-submitted. Reads top-down: a context line, an
-// editable title, an editable body, then the actions (primary "Open pull
-// request", a Draft toggle, ghost Cancel). Order matters: one submit action
-// with a modifier, not two submit actions.
+// pushed or opened; never auto-submitted. Reads top-down: a context line, the
+// resolved title as plain text, then the actions (primary "Create pull
+// request", ghost Cancel). The title/body are edited on GitHub seconds later;
+// this card's only job is the confirm.
 export const ShipConfirmCard = memo(function ShipConfirmCard({
   proposal,
   busy,
@@ -629,20 +627,9 @@ export const ShipConfirmCard = memo(function ShipConfirmCard({
   proposal: { head: string; base: string; fileCount: number; title?: string; body?: string };
   busy: boolean;
   error: string | null;
-  onApprove: (input: { title: string; body: string; draft: boolean }) => void;
+  onApprove: () => void;
   onDecline: () => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [draft, setDraft] = useState(true);
-  useEffect(() => {
-    // Seed the editable fields from the server / agent draft (design §4.5
-    // step 1 — honouring the repo's PR template); the user can still edit them.
-    setTitle(proposal?.title ?? "");
-    setBody(proposal?.body ?? "");
-    setDraft(true);
-  }, [proposal?.head, proposal?.title, proposal?.body]);
-  const canSubmit = title.trim().length > 0 && !busy;
   return (
     <div
       className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
@@ -658,40 +645,17 @@ export const ShipConfirmCard = memo(function ShipConfirmCard({
           {proposal.fileCount} file{proposal.fileCount === 1 ? "" : "s"}
         </span>
       </div>
-      <div className="flex flex-col gap-2">
-        <Field
-          ariaLabel="Pull request title"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Pull request title"
-          mono={false}
-          disabled={busy}
-        />
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Describe the change…"
-          spellCheck={false}
-          disabled={busy}
-          rows={3}
-          aria-label="Pull request body"
-          className="w-full bg-bg-soft border border-border-strong rounded-md text-meta text-text-muted px-4 py-3 focus:outline-none focus:border-accent resize-y"
-        />
+      <div className="truncate text-meta font-medium text-text" title={proposal.title}>
+        {proposal.title || "Untitled pull request"}
       </div>
       {error && <div className="text-danger break-words mt-1">{error}</div>}
       <div className="flex items-center gap-2 mt-2">
-        <Button tone="primary" disabled={!canSubmit} onClick={() => onApprove({ title, body, draft })}>
-          {busy ? "Opening…" : "Open pull request"}
+        <Button tone="primary" disabled={busy} onClick={onApprove}>
+          {busy ? "Creating…" : "Create pull request"}
         </Button>
-        <Chip on={draft} onClick={() => setDraft((d) => !d)} title="Toggle draft mode">
-          Draft
-        </Chip>
         <Button tone="ghost" onClick={onDecline} disabled={busy}>
           Cancel
         </Button>
-      </div>
-      <div className="text-text-faint text-label mt-1">
-        Never auto-submitted — nothing is pushed or opened until you confirm here.
       </div>
     </div>
   );

@@ -3099,6 +3099,35 @@ export function branchPanelState({
   return pr ? "pr" : "no-pr";
 }
 
+/**
+ * The ship gate for the forge surface (BET-892): whether a "Create pull
+ * request" action even makes sense for the current branch, evaluated in this
+ * order — first match wins.
+ *
+ *  1. `has-pr`    — a PR is already open on this branch.
+ *  2. `detached`  — no branch (detached HEAD / non-git cwd).
+ *  3. `on-base`   — sitting on the repo default branch (no PR to open).
+ *  4. `no-commits`— no commits ahead of origin/<base> (nothing to ship).
+ *  5. `ready`     — ship away.
+ *
+ * `aheadCount === null` means "unknown" and falls through to `ready` (the API
+ * call is the backstop); `base === null` skips rule 3 only.
+ */
+export type ShipState = "on-base" | "detached" | "no-commits" | "ready" | "has-pr";
+
+export function resolveShipState(input: {
+  branch: string | null;
+  base: string | null;
+  aheadCount: number | null;
+  hasPr: boolean;
+}): ShipState {
+  if (input.hasPr) return "has-pr";
+  if (!input.branch) return "detached";
+  if (input.branch === input.base) return "on-base";
+  if (input.aheadCount === 0) return "no-commits";
+  return "ready";
+}
+
 // ---- Forge review pane (BET-792) -------------------------------------------
 
 // The line anchor a comment may attach to, in the forge-neutral shape the spec

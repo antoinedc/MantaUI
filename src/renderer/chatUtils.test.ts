@@ -105,6 +105,7 @@ import {
   homeRelativePath,
   planHighlightRanges,
   canMerge,
+  resolveShipState,
   describeMergeFailure,
   commentableLines,
   cloneErrorKind,
@@ -3918,6 +3919,46 @@ describe("failuresToAgentPrompt", () => {
 
   it("no failing checks → empty body", () => {
     expect(failuresToAgentPrompt([])).toBe("");
+  });
+});
+
+describe("resolveShipState", () => {
+  const base = { branch: "feat/x", base: "main", aheadCount: 3, hasPr: false };
+
+  it("has-pr wins even when branch === base", () => {
+    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 0, hasPr: true })).toBe(
+      "has-pr",
+    );
+  });
+
+  it("detached when no branch", () => {
+    expect(resolveShipState({ branch: null, base: "main", aheadCount: 3, hasPr: false })).toBe(
+      "detached",
+    );
+  });
+
+  it("on-base when the branch is the default branch", () => {
+    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 3, hasPr: false })).toBe(
+      "on-base",
+    );
+  });
+
+  it("no-commits when aheadCount is 0", () => {
+    expect(resolveShipState({ ...base, aheadCount: 0 })).toBe("no-commits");
+  });
+
+  it("ready by default", () => {
+    expect(resolveShipState(base)).toBe("ready");
+  });
+
+  it("aheadCount null (unknown) falls through to ready", () => {
+    expect(resolveShipState({ ...base, aheadCount: null })).toBe("ready");
+  });
+
+  it("base null skips the on-base rule only", () => {
+    expect(resolveShipState({ branch: "main", base: null, aheadCount: 3, hasPr: false })).toBe(
+      "ready",
+    );
   });
 });
 

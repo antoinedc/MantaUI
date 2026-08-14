@@ -568,7 +568,10 @@ export function ChatPanel({
     pr: PullRequest | null;
     checks: ForgeCheckRun[];
     rollup: CheckRollup;
-  }>({ connected: false, kind: null, pr: null, checks: [], rollup: "none" });
+    branch: string | null;
+    base: string | null;
+    aheadCount: number | null;
+  }>({ connected: false, kind: null, pr: null, checks: [], rollup: "none", branch: null, base: null, aheadCount: null });
   const refreshForge = useCallback(async (cwdArg: string) => {
     try {
       const [status, prResult] = await Promise.all([
@@ -586,6 +589,9 @@ export function ChatPanel({
         pr: prResult.pr,
         checks: prResult.checks ?? [],
         rollup: prResult.rollup ?? "none",
+        branch: prResult.branch ?? null,
+        base: prResult.base ?? null,
+        aheadCount: prResult.aheadCount ?? null,
       });
     } catch {
       // non-fatal — the forge read path is best-effort; keep last-known.
@@ -613,18 +619,22 @@ export function ChatPanel({
     }
   }, [cwd, shipProposal]);
 
-  // Confirm → push + create. Only ever called from the ShipConfirmCard or the
-  // inline Create PR handler. On success it refreshes the PR (the branch
-  // popover swaps in place to the PR state).
-  const confirmShip = useCallback(async (input: { title: string; body: string; draft: boolean }) => {
+  // Confirm → push + create. Only reached after the human confirms the
+  // ShipConfirmCard. The title/body come from shipProposal (the box's preview,
+  // already resolved — no arg this time, the form is gone). On success it opens
+  // the PR in the browser and refreshes the PR (the branch popover swaps in
+  // place to the PR state).
+  const confirmShip = useCallback(async () => {
     if (!cwd) return;
+    const { title, body } = shipProposal ?? { title: "", body: "" };
     setShipBusy(true);
     setShipError(null);
     try {
-      const res = await window.api.forgeShip({ cwd, ...input });
+      const res = await window.api.forgeShip({ cwd, title, body });
       if (res.ok) {
         setShipOpen(false);
         setShipProposal(null);
+        if (res.url) void window.api.openExternal(res.url);
         void refreshForge(cwd);
       } else {
         setShipError(res.error);
@@ -634,19 +644,9 @@ export function ChatPanel({
     } finally {
       setShipBusy(false);
     }
-  }, [cwd, refreshForge]);
+  }, [cwd, shipProposal, refreshForge]);
 
-  // Create PR — the inline, no-form path (BET-867 owner-approved departure
-  // from BET-794's mandatory-confirm rule). A human clicking a button labelled
-  // `Create PR` is the explicit confirm. Ships the same title/body the Draft
-  // card would have shown, as a real (non-draft) PR. One code path: both this
-  // and Draft PR… end in confirmShip.
-  const createPr = useCallback(() => {
-    if (!shipProposal) return;
-    void confirmShip({ title: shipProposal.title, body: shipProposal.body, draft: false });
-  }, [shipProposal, confirmShip]);
-
-  // Open the ship confirm card — the always-on human gate for Draft PR….
+  // Open the ship confirm card — the single human gate for creating a PR.
   // Loads the preview (head/base/fileCount) so the card shows real facts; if
   // the preview is already loaded it must not re-fetch. Nothing is pushed or
   // opened until the user confirms (confirmShip).
@@ -2520,8 +2520,9 @@ export function ChatPanel({
         shipError={shipError}
         shipBase={shipProposal?.base ?? null}
         shipFileCount={shipProposal?.fileCount ?? null}
-        onDraftPr={() => void openShip()}
-        onCreatePr={() => void createPr()}
+        base={forge.base}
+        aheadCount={forge.aheadCount}
+        onCreatePr={() => void openShip()}
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
