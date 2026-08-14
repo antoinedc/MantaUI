@@ -359,6 +359,15 @@ final class MantaAPIClient: Sendable {
         try await call("serve-page:list", args: [], as: [ServedPageMeta].self) ?? []
     }
 
+    /// `usage:list` — the box's cached subscription-plan snapshots (BET-824).
+    /// Per-provider `UsageWindow[]` for the plan the box polls itself (the 5-
+    /// hour `session` + 7-day `weekly` windows). The box refreshes its own
+    /// snapshot on its 3-minute poll; the chat re-reads this channel on its
+    /// own 60s cadence.
+    func usageList() async throws -> [UsageSnapshot] {
+        try await call("usage:list", args: [], as: [UsageSnapshot].self) ?? []
+    }
+
     /// Fetch a file's bytes via `GET {serverURL}/api/peek?path=<box path>` with
     /// the bearer token. The box resolves `~` and path-traversal-guards the
     /// result to the home dir, so it serves BOTH transcript file parts (the

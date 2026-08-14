@@ -274,6 +274,17 @@ struct OpencodeModel: Codable, Equatable, Sendable {
     var status: String?
     var enabled: Bool?
     var variants: [Variant]?
+    /// The model's provider-declared limits. `context` is the model's own
+    /// context window (Opus 4.7 reports 1M, Sonnet 200k) — the denominator the
+    /// context meter must use, never a hardcoded 200k.
+    var limit: ModelLimit? = nil
+}
+
+/// The model's advertised limits from `opencode:models` (`limit: { context }`).
+struct ModelLimit: Codable, Equatable, Sendable {
+    /// Context window in tokens. Absent early / for models the provider
+    /// doesn't annotate — callers fall back, never assume a value.
+    var context: Double?
 }
 
 /// `{ providerID, modelID }` — the minimal selection sent with a prompt and
@@ -375,4 +386,35 @@ struct ServedPageMeta: Codable, Equatable, Sendable {
     var expiresAt: Double?
     var createdAt: Double
     var sessionID: String?
+}
+
+// MARK: - Plan usage (BET-824)
+
+// Mirrors src/server/usage.mjs (the `usage:list` RPC): per-provider snapshots
+// of subscription-plan windows. `UsageWindow.kind` is open ("session" =
+// rolling 5-hour, "weekly" = 7-day), `pct` is 0-100 and always present,
+// `resetsAt` is epoch MILLISECONDS. These are wire DTOs only; the band /
+// window-selection / reset-format decision logic lives in `UsageMeters`
+// (pure, tested).
+
+/// One plan window (e.g. the rolling 5-hour or the 7-day) for a provider.
+struct UsageWindow: Codable, Equatable, Sendable {
+    var kind: String
+    var label: String? = nil
+    var pct: Double
+    var used: Double? = nil
+    var limit: Double? = nil
+    /// Epoch milliseconds of the reset.
+    var resetsAt: Double? = nil
+    var binding: Bool? = nil
+}
+
+/// One provider's full `usage:list` snapshot.
+struct UsageSnapshot: Codable, Equatable, Sendable {
+    var provider: String? = nil
+    var providerIDs: [String]? = nil
+    var planLabel: String? = nil
+    var windows: [UsageWindow]
+    /// Epoch ms of the successful fetch — the "Updated X ago" stamp.
+    var fetchedAt: Double? = nil
 }

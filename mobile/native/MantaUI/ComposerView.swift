@@ -42,6 +42,14 @@ struct ComposerView: View {
     let api: MantaAPIClient
     @ObservedObject var store: ChatSessionStore
     @ObservedObject var modelStore: ChatModelStore
+    /// The plan-usage snapshot set (BET-824). The composer's band-coloured dot
+    /// reads the 5-hour session window from it; the ring is the dot's only
+    /// content — no percentage, no label.
+    @ObservedObject var usageStore: UsageStore
+    /// Tapped → the parent presents the usage sheet. Presented from the parent
+    /// (not here) because ComposerView already presents the model sheet, and
+    /// SwiftUI honours only one presentation per view on some versions.
+    var onShowUsage: (() -> Void)? = nil
     /// Whether the transcript is scrolled up far enough that the round
     /// "scroll to bottom" control — in the model-selection row — should show.
     var showScrollToBottom: Bool = false
@@ -278,16 +286,59 @@ struct ComposerView: View {
     /// line. The jump-to-bottom control lives above the composer, not here.
     private var controlRow: some View {
         HStack(spacing: Metrics.spacing.sp2) {
-            // Model + attach sit close together; attach hugs the model label.
-            HStack(spacing: Metrics.spacing.sp1) {
+            // Model + dot + attach sit close together; the dot hugs the model
+            // label. Final order `[modelPill] [dot] [attach]` — the dot is
+            // always present (textless), between the label and the paperclip.
+            HStack(spacing: 0) {
                 modelPill
-                attachButton
+                usageDot
             }
+            attachButton
             Spacer(minLength: 0)
             if micAvailable {
                 micButton
             }
             sendButton
+        }
+    }
+
+    // MARK: - Plan-usage dot (BET-824)
+
+    /// The bare band-coloured ring beside the model name. Colour only — no
+    /// number, no label, ever. It tracks the 5-hour `session` window, always
+    /// (a dot that silently switched windows would force a tap to know what
+    /// the colour meant). Absent when there is no session window (`.absent`);
+    /// a hollow muted ring when the value is unknown.
+    @ViewBuilder
+    private var usageDot: some View {
+        switch meterReading {
+        case .absent:
+            EmptyView()
+        case .known, .unknown:
+            Button { onShowUsage?() } label: {
+                MeterRing(color: dotColor, diameter: 13, lineWidth: 2.5)
+            }
+            .buttonStyle(.plain)
+            // 44pt tap target around the 13pt ring — colour-only costs no
+            // width and survives accessibility type sizes.
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Plan usage")
+            .accessibilityIdentifier("usage-dot")
+        }
+    }
+
+    /// The dot's severity: the band of the session window when known, a muted
+    /// hollow ring when unknown. Never a confident green for "don't know".
+    private var meterReading: MeterReading {
+        guard let session = UsageMeters.sessionWindow(usageStore.snapshots) else { return .absent }
+        return .known(pct: session.pct)
+    }
+
+    private var dotColor: Color {
+        switch meterReading {
+        case .known(let pct): return MeterRing.tint(UsageMeters.band(pct), tokens)
+        case .unknown, .absent: return tokens.tx4
         }
     }
 
