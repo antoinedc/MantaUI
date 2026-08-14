@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
 import {
   elapsedCurrent,
   elapsedPause,
+  elapsedReset,
   elapsedResume,
-  elapsedStart,
   isTooShort,
   nearLimitAt,
 } from "./voice";
@@ -55,14 +55,14 @@ describe("peak reduction over a synthetic buffer", () => {
 
 describe("elapsed maths across a pause/resume cycle", () => {
   it("tracks a linear recording with no pauses", () => {
-    const s = elapsedStart();
+    const s = elapsedResume(elapsedReset(), 0); // take begins at t=0
     expect(elapsedCurrent(s, 0)).toBe(0);
     expect(elapsedCurrent(s, 1000)).toBe(1000);
     expect(elapsedCurrent(s, 3500)).toBe(3500);
   });
 
   it("freezes while paused and excludes the paused span after resume", () => {
-    let s = elapsedStart(); // t=0 take starts
+    let s = elapsedResume(elapsedReset(), 0); // t=0 take starts
     expect(elapsedCurrent(s, 2000)).toBe(2000); // 2s live
 
     s = elapsedPause(s, 2000); // pause at t=2s
@@ -74,10 +74,10 @@ describe("elapsed maths across a pause/resume cycle", () => {
   });
 
   it("supports multiple pause/resume cycles summing only live segments", () => {
-    let s = elapsedStart();
-    s = elapsedPause(s, 1000); // ran 1s
+    let s = elapsedResume(elapsedReset(), 0);
+    s = elapsedPause(s, 1000); // ran 1s -> accum 1000
     s = elapsedResume(s, 2000); // paused 1s
-    s = elapsedPause(s, 2500); // ran 0.5s -> accum 1.5s
+    s = elapsedPause(s, 2500); // ran 0.5s -> accum 1500
     expect(elapsedCurrent(s, 9000)).toBe(1500); // paused: frozen
     s = elapsedResume(s, 9000);
     expect(elapsedCurrent(s, 9500)).toBe(2000); // resumed 0.5s

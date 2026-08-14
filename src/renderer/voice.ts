@@ -75,7 +75,7 @@ const RECORDER_TIMESLICE_MS = 250;
 // accumMs + live segment.
 export type ElapsedState = { accumMs: number; segStartAt: number | null };
 
-export function elapsedStart(): ElapsedState {
+export function elapsedReset(): ElapsedState {
   return { accumMs: 0, segStartAt: null };
 }
 
@@ -183,7 +183,7 @@ export function useVoiceRecorder({
   const storedPeaksRef = useRef<number[]>([]);
 
   // Elapsed bookkeeping (excludes paused time).
-  const elapsedRef = useRef<ElapsedState>(elapsedStart());
+  const elapsedRef = useRef<ElapsedState>(elapsedReset());
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -312,7 +312,7 @@ export function useVoiceRecorder({
       endedRef.current = false;
       storedPeaksRef.current = [];
       liveWindowRef.current = new Float32Array(VOICE_LIVE_WINDOW_BARS);
-      elapsedRef.current = elapsedStart();
+      elapsedRef.current = elapsedReset();
 
       const mime = pickRecorderMime();
       mimeRef.current = mime;
