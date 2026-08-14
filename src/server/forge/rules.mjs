@@ -60,6 +60,26 @@ export function substitutePrompt(prompt, { url, title } = {}) {
     .replace(/\{\{title\}\}/g, title ?? "");
 }
 
+// Map a normalised forge event to a session-link ref (spec §3.4⑥, BET-844).
+// A delegate verb carries this on the job's session record so the progress
+// sink addresses the TRIGGERING issue or pull request instead of the stopgap's
+// "the job's own PR" guess. Pure:
+//   - issue.labeled → the linked issue ({ issue: { repoKey, number } })
+//   - review.requested → the linked PR ({ pr: { repoKey, number } })
+//   - checks.failed has no issue/PR number in its payload → null (the sink
+//     then no-ops: there is no distinct target, which is correct).
+// `repoKey` is the forged `host/owner/repo` identity already resolved by the
+// caller; the number is parsed from the event's canonical html_url.
+export function eventLinkRef(repoKey, event) {
+  const url = event?.url;
+  if (typeof url !== "string" || typeof repoKey !== "string") return null;
+  const issue = url.match(/\/issues\/(\d+)/);
+  if (issue) return { issue: { repoKey, number: Number(issue[1]) } };
+  const pr = url.match(/\/pull\/(\d+)/) ?? url.match(/\/merge_requests\/(\d+)/);
+  if (pr) return { pr: { repoKey, number: Number(pr[1]) } };
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Guard + normalisation (pure) — raw GitHub delivery → forge event
 // ---------------------------------------------------------------------------

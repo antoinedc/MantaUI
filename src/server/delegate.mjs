@@ -248,6 +248,31 @@ export function resolveOwner(projects, sessionID) {
   return null;
 }
 
+// Resolve the real parent for a forge-triggered delegate job (BET-844, spec
+// §3.4⑥). A forge event has no user session to inherit from, so the job's
+// window must land in the tmux project on this box that OWNS the repo checkout
+// being branched off. Returns { parentSessionID, tmuxSession } — the opencode
+// session id to place the job window under, plus the owning project — or null
+// when no tracked project wraps that directory. Pure.
+export function resolveForgeOwner(projects, parentDirectory) {
+  if (!Array.isArray(projects) || typeof parentDirectory !== "string" || !parentDirectory) return null;
+  for (const p of projects) {
+    const windows = p.windows || [];
+    const ownsDir =
+      (typeof p.defaultCwd === "string" && p.defaultCwd === parentDirectory) ||
+      windows.some(
+        (w) =>
+          typeof w?.paneCurrentPath === "string" &&
+          (w.paneCurrentPath === parentDirectory || w.paneCurrentPath.startsWith(parentDirectory + "/")),
+      );
+    if (!ownsDir) continue;
+    const win = windows.find((w) => w?.opencodeSessionId) ?? windows[0];
+    if (!win?.opencodeSessionId) return null;
+    return { parentSessionID: win.opencodeSessionId, tmuxSession: p.tmuxSession };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // List / get
 // ---------------------------------------------------------------------------
@@ -307,6 +332,7 @@ async function registerJob(
     existingSessionId,
     origin,
     permission,
+    link,
   },
   deps = {},
 ) {
@@ -374,6 +400,13 @@ async function registerJob(
     branch,
     baseSha,
     origin,
+    // Session-link primitive (§3.4⑥, BET-847/844): the at-most-one issue + one
+    // pull request this job's session is about. Stored on the job's own session
+    // record in the shared `{ issue?, pr? }` shape so the forge progress sink
+    // (and future notification/inbox readers) address the linked issue or PR —
+    // the triggering issue — with no per-feature plumbing. A forge-triggered
+    // delegate sets this at dispatch; a user delegate leaves it null.
+    link: link ?? null,
     status: "running",
     activity: null,
     createdAt: now(),
@@ -394,7 +427,11 @@ async function registerJob(
 }
 
 /**
- * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string}} input
+ * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string,
+ *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
+ *        `link` (BET-844) — the optional session link (at most one issue + one
+ *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
+ *        progress sink addresses the linked issue/PR. Stored on the job record.
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
  *        newWindow/gitAddWorktree/gitRun/oc listMessages/now)
  */
@@ -486,6 +523,7 @@ export async function startJob(input, deps = {}) {
         existingSessionId: undefined,
         origin: "delegate",
         permission: input?.permission,
+        link: input?.link,
       },
       deps,
     );
