@@ -46,7 +46,7 @@ final class ModelRecentsTests: XCTestCase {
         let list = ModelRecents.record(low, into: [])
         let list2 = ModelRecents.record(high, into: list)
         XCTAssertEqual(list2.count, 2)
-        XCTAssertEqual(list2.map(\.variant).sorted(), ["high", "low"])
+        XCTAssertEqual(list2.map { $0.variant ?? "" }.sorted(), ["high", "low"])
     }
 
     func testSameModelDifferentFastIsDistinct() {
@@ -66,7 +66,7 @@ final class ModelRecentsTests: XCTestCase {
         list = ModelRecents.record(b, into: list)
         // Re-picking A brings it back to front, keeping B.
         list = ModelRecents.record(a, into: list)
-        XCTAssertEqual(list.map(\.variant), ["high", "max"])
+        XCTAssertEqual(list.map { $0.variant ?? "" }, ["high", "max"])
     }
 
     // MARK: - label
