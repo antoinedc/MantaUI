@@ -589,13 +589,13 @@ export type ForgeInboxResult = {
 // ----- Forge write path (BET-794) -----
 
 // forge:ship input — push the current branch then (only after the renderer's
-// human confirm card) open a pull request. `base` defaults to "main". PRs are
-// always created as real (non-draft) pull requests (BET-892).
+// human confirm card) open a pull request. The PR base is the forge-resolved
+// repo default branch — callers never supply one. PRs are always created as
+// real (non-draft) pull requests (BET-892).
 export type ForgeShipInput = {
   cwd: string;
   title: string;
   body?: string;
-  base?: string;
 };
 
 export type ForgeShipResult =

@@ -494,10 +494,18 @@ test("getDefaultBranch maps the repo's default_branch", async () => {
   assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), "develop");
 });
 
-test("getDefaultBranch falls back to main when the field is absent", async () => {
+test("getDefaultBranch returns null when the field is absent", async () => {
   const url = "https://api.github.com/repos/acme/widget";
   const adapter = createGithubAdapter(fakeRequest({ [url]: { full_name: "acme/widget" } }));
-  assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), "main");
+  assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), null);
+});
+
+test("getDefaultBranch returns null when the request fails", async () => {
+  const throwing = async () => {
+    throw new Error("rate limited");
+  };
+  const adapter = createGithubAdapter(throwing);
+  assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), null);
 });
 
 // ---- Work inbox (BET-795) --------------------------------------------------
