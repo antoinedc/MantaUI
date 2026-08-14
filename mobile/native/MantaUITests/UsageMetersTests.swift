@@ -4,10 +4,9 @@ import XCTest
 // ===========================================================================
 // BET-824 — pure decisions of the plan + context meters (UsageMeters). No view,
 // no HTTP, no box. Tests every boundary exactly: 69.9/70/89.9/90, `unknown`
-// never banding to `ok` (contextStripVisible / band never fed unknown),
-// `absent` hiding the dot (sessionWindow nil), a snapshot holding only a
-// weekly window, `formatReset` under and over 24h, and `alwaysShow` overriding
-// the 70% gate.
+// never banding to `ok` (band never fed unknown), `absent` hiding the dot
+// (sessionWindow nil), a snapshot holding only a weekly window, and
+// `formatReset` under and over 24h.
 // ===========================================================================
 
 final class UsageMetersTests: XCTestCase {
@@ -35,33 +34,6 @@ final class UsageMetersTests: XCTestCase {
     func testBand90AndAboveIsDanger() {
         XCTAssertEqual(UsageMeters.band(90), .danger)
         XCTAssertEqual(UsageMeters.band(100), .danger)
-    }
-
-    // MARK: - contextStripVisible (70% gate + alwaysShow override)
-
-    func testStripHiddenBelow70() {
-        XCTAssertEqual(UsageMeters.contextStripVisible(.known(pct: 69.9), alwaysShow: false), false)
-    }
-
-    func testAlwaysShowOverrides70Gate() {
-        XCTAssertEqual(UsageMeters.contextStripVisible(.known(pct: 69.9), alwaysShow: true), true)
-    }
-
-    func testStripShownAt70() {
-        XCTAssertEqual(UsageMeters.contextStripVisible(.known(pct: 70), alwaysShow: false), true)
-        XCTAssertEqual(UsageMeters.contextStripVisible(.known(pct: 89.9), alwaysShow: false), true)
-        XCTAssertEqual(UsageMeters.contextStripVisible(.known(pct: 90), alwaysShow: false), true)
-    }
-
-    /// `unknown` never reads as a confident meter, even when alwaysShow is on —
-    /// a "we don't know" must not look like a healthy 0%.
-    func testUnknownNeverShownEvenWithAlwaysShow() {
-        XCTAssertEqual(UsageMeters.contextStripVisible(.unknown, alwaysShow: true), false)
-        XCTAssertEqual(UsageMeters.contextStripVisible(.unknown, alwaysShow: false), false)
-    }
-
-    func testAbsentNeverShown() {
-        XCTAssertEqual(UsageMeters.contextStripVisible(.absent, alwaysShow: true), false)
     }
 
     // MARK: - sessionWindow (the dot's 5-hour window)

@@ -8,8 +8,8 @@ import Foundation
 // much of the subscription is spent) beside the model name. Both band at
 // Anthropic's published breakpoints (70 / 90) — never invent others.
 //
-// This file holds ONLY the decisions (band, which window, strip visibility,
-// banner gate, reset format) so they are unit-testable with plain values and
+// This file holds ONLY the decisions (band, which window, banner gate, reset
+// format) so they are unit-testable with plain values and
 // no SwiftUI hierarchy, mirroring `BranchFreshnessPolicy` in ChatScreen.swift.
 // The three non-numeric states matter here:
 //   .known   — a definitive percentage
@@ -47,21 +47,6 @@ enum UsageMeters {
         if pct >= 90 { return .danger }
         if pct >= 70 { return .warn }
         return .ok
-    }
-
-    /// Whether the context strip renders for a reading. Below 70% it is
-    /// absent (no reserved height, no layout shift). `alwaysShow` (the
-    /// desktop's `alwaysShowUsage` config, honoured on iOS by BET-824) pins
-    /// it open below 70% — but only for a KNOWN reading: a null value still
-    /// hides, because a confident meter for "we don't know" is the exact
-    /// small lie this design forbids.
-    static func contextStripVisible(_ reading: MeterReading, alwaysShow: Bool) -> Bool {
-        switch reading {
-        case .known(let pct):
-            return pct >= 70 || alwaysShow
-        case .unknown, .absent:
-            return false
-        }
     }
 
     /// The 5-hour session window across all snapshots, or nil. `nil` is the

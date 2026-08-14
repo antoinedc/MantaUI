@@ -145,8 +145,6 @@ private struct ChatScreenContent: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var sessionStore: SessionListStore
     @State private var showOverflow = false
-    /// Presents the title menu's "Session info" summary.
-    @State private var showingSessionInfo = false
     /// Context sheet — opened by tapping the context strip.
     @State private var showContextSheet = false
     /// Usage sheet — opened by tapping the composer's usage dot, or the weekly
@@ -242,6 +240,8 @@ private struct ChatScreenContent: View {
         content
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+            .toolbarBackground(tokens.canvas, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .subtitle) { subtitleChip }
                 ToolbarItem(placement: .primaryAction) {
@@ -250,18 +250,6 @@ private struct ChatScreenContent: View {
                     }
                     .accessibilityLabel("Session actions")
                 }
-            }
-            // Tap the title to reach the session's actions (BET-821). Nothing
-            // new here: each lands on an existing surface.
-            .toolbarTitleMenu {
-                Button("Copy path") { copySessionPath() }
-                Button("Session info") { showingSessionInfo = true }
-                Button("Open terminal") { Task { await openTerminal() } }
-            }
-            .alert("Session info", isPresented: $showingSessionInfo) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(sessionInfoText)
             }
             .onAppear {
                 // Three independent fetches, all started together: the
@@ -633,27 +621,6 @@ private struct ChatScreenContent: View {
         }
     }
 
-    /// Title-menu "Copy path": copy the session's working directory to the
-    /// pasteboard. Nothing to copy (window not resolved yet) reports through the
-    /// same action-hint channel as every other session action.
-    private func copySessionPath() {
-        guard let cwd = sessionWindow?.cwd, !cwd.isEmpty else {
-            store.actionHint = "Path unavailable yet"
-            return
-        }
-        UIPasteboard.general.string = cwd
-        store.actionHint = "Path copied"
-    }
-
-    /// Title-menu "Session info": a compact summary of the session's identity —
-    /// the exact data the screen already holds (title + branch + cwd).
-    private var sessionInfoText: String {
-        var lines = [title]
-        if let branch, !branch.isEmpty { lines.append("Branch: \(branch)") }
-        if let cwd = sessionWindow?.cwd, !cwd.isEmpty { lines.append("Path: \(cwd)") }
-        return lines.joined(separator: "\n")
-    }
-
     /// Clear = a fresh opencode session in the SAME window. Stay on the screen
     /// and re-point it at the new id; the transcript comes back empty because
     /// the session really is new.
@@ -806,9 +773,8 @@ private struct ChatScreenContent: View {
         // navigation bar. `safeAreaBar(edge: .top)` insets the scroll view's
         // safe area AND extends the scroll-edge effect, so the transcript
         // scrolls correctly beneath it — no toolbar item, no hand-rolled
-        // overlay. The strip is absent entirely below 70% (no reserved height,
-        // so appearing costs no layout shift); it animates in above the
-        // transcript.
+        // overlay. It renders whenever the reading is known (see `contextStrip`)
+        // and animates in above the transcript.
         .safeAreaBar(edge: .top) {
             contextStrip
         }
@@ -861,19 +827,6 @@ private struct ChatScreenContent: View {
         ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
     }
 
-    /// The desktop's `alwaysShowUsage`, honoured on iOS: when true the strip
-    /// stays open below 70%. Read through the existing settings store — no new
-    /// config channel.
-    private var alwaysShowUsage: Bool {
-        guard let entry = SettingsSchema.entries.first(where: { $0.id == "alwaysShowUsage" }),
-              case .bool(let on) = settingsStore.current(entry) else { return false }
-        return on
-    }
-
-    private var contextStripVisible: Bool {
-        UsageMeters.contextStripVisible(contextMeterReading, alwaysShow: alwaysShowUsage)
-    }
-
     /// The band colour for the current context reading (strip + sheet).
     private var contextBandColor: Color {
         if case .known(let pct) = contextMeterReading {
@@ -884,14 +837,17 @@ private struct ChatScreenContent: View {
 
     /// Full-width, one-tap strip directly under the navigation bar: the word
     /// "Context", a linear meter filling the remaining width, the percentage,
-    /// a chevron. Absent below 70% (no reserved height, no layout shift) and
-    /// animates in above the transcript via `safeAreaBar`. A `Gauge`, not a
-    /// `ProgressView` — the HIG treats progress indicators as transient, and
-    /// this one never disappears (until it genuinely drops), so it reads as a
-    /// persistent meter and VoiceOver announces it so.
+    /// a chevron. Always rendered for a KNOWN reading, because a meter that
+    /// hides itself is a meter the user cannot find — the desktop's session
+    /// header pill is always visible, and iOS matches it. It animates in above
+    /// the transcript via `safeAreaBar`, and renders nothing while the reading
+    /// is unknown (never a fabricated 0%). A `Gauge`, not a `ProgressView` —
+    /// the HIG treats progress indicators as transient, and this one never
+    /// disappears once the reading is known, so it reads as a persistent meter
+    /// and VoiceOver announces it so.
     @ViewBuilder
     private var contextStrip: some View {
-        if contextStripVisible, case .known(let pct) = contextMeterReading {
+        if case .known(let pct) = contextMeterReading {
             Button { showContextSheet = true } label: {
                 HStack(spacing: Metrics.spacing.sp2) {
                     Text("Context")
@@ -1119,6 +1075,8 @@ struct ChatSubagentScreen: View {
         .background(tokens.canvas.ignoresSafeArea())
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+        .toolbarBackground(tokens.canvas, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .subtitle) {
                 Text(subtitle)
