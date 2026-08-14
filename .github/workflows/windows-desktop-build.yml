@@ -12,31 +12,33 @@
 #   dist/desktop/latest.yml                   — the electron-updater feed file
 #
 # WHERE IT GOES
-#   Tag push → a GitHub Release on that tag, with the .exe attached. That is
-#   the download link you hand a tester. Marked PRERELEASE, deliberately: the
-#   installer is unsigned, and it must not present itself as the project's
-#   latest official release.
+#   A `win-v*` / `win-staging-v*` tag push publishes to TWO destinations:
+#
+#     1. A GitHub Release on that tag, with the .exe attached — the per-version
+#        archive a tester uses to get a specific historical build. Marked
+#        PRERELEASE, deliberately: the installer is unsigned, and it must not
+#        present itself as the project's latest official release.
+#     2. mantaui.com (over scp to the prod box):
+#          installer  → https://mantaui.com/downloads/Manta-latest-x64.exe
+#                        (stable canonical name, refreshed to the highest
+#                        version present; staging:
+#                        /staging/downloads/Manta-Staging-latest-x64.exe)
+#          update feed → https://mantaui.com/updates/latest.yml  (staging:
+#                        /staging/updates/latest.yml)
+#        This second destination is what gives the website's "Download for
+#        Windows" button and Windows auto-update a stable URL to point at —
+#        the versioned Release files can't serve either (a fixed `/releases/
+#        latest` name doesn't survive the version in the filename).
 #   Manual dispatch → the workflow ARTIFACT only (a dispatch has no tag, so
-#   there is no release to attach to).
+#   there is no release to attach to and no web publish happens).
 #
-#   The repo is PRIVATE, so a release asset needs a GitHub account with access
-#   to download. That is fine for internal testing and is the whole reason
-#   this is a Release rather than the public website.
-#
-# WHAT IS STILL NOT PUBLISHED, ON PURPOSE
-#   Nothing reaches mantaui.com: no download-page link, and `latest.yml` is
-#   never uploaded to https://mantaui.com/updates/, so a Windows build's
-#   auto-update check 404s (src/main/autoUpdate.ts only console.warns, so this
-#   is invisible to the user — they simply never get an update, and you re-send
-#   a release link instead). Both are blocked on code signing: an unsigned
-#   installer trips SmartScreen for every visitor, which is worse than not
-#   offering Windows at all. When an OV/EV certificate exists, add a publish
-#   job modelled on server-tarball-deploy.yml's (scp to
-#   /var/www/mantaui/{downloads,updates}, then verify the URL is 200 and
-#   sha-matches) — and only then link it from the website.
-#
-#   `latest.yml` is still built here, and its absence fails the job, so the
-#   feed is complete the day that happens.
+# TRUST MODEL — the repo is PUBLIC (antoinedc/MantaUI), so the GitHub Release
+#   assets are already open to the world; the web publish just gives them a
+#   second, stable home. The installer and feed are still UNSIGNED: Windows
+#   SmartScreen warns on first run ("More info → Run anyway"). That trade is
+#   deliberate — an honest click-through warning beats offering Windows users
+#   nothing at all. Code signing is separate work with its own certificate
+#   procurement.
 #
 # BUILD HOST
 #   GitHub-hosted `windows-latest`. The repo's own runner is Linux, and
@@ -79,6 +81,13 @@ concurrency:
   group: windows-desktop-build
   cancel-in-progress: false
 
+env:
+  # Web-publish auth/host, shared by the publish + verify steps — same
+  # workflow-level contract as the other deploy workflows
+  # (website-deploy.yml, gateway-deploy.yml, server-tarball-deploy.yml).
+  PROD_HOST: root@91.107.196.2
+  SSH_KEY: /tmp/prod_key
+
 permissions:
   # write is required to create the Release and upload the installer to it.
   contents: write
@@ -111,6 +120,12 @@ jobs:
       # `win-staging-v*` tag is a staging release; `win-v*` is prod. This
       # mirrors the mac workflow's MANTA_CHANNEL contract so the two platforms
       # describe a release the same way.
+      #
+      # The same step also resolves the WEB PUBLISH destinations, mirroring the
+      # mac workflow's MANTA_DOWNLOADS_DIR / MANTA_FEED_DIR / MANTA_LATEST_DMG
+      # contract (minus the DMG→EXE swap), so the two platforms describe a
+      # release the same way. releaseHost comes from the ONE per-channel table
+      # (src/shared/channel.mjs) — never hardcode a second copy of mantaui.com.
       - name: Resolve channel
         id: channel
         shell: bash
@@ -130,7 +145,49 @@ jobs:
           case "$CHANNEL" in prod|staging) ;; *) echo "::error::bad channel '$CHANNEL'"; exit 1 ;; esac
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "MANTA_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+
+          # Destinations are FILESYSTEM paths on the prod box — they stay
+          # hardcoded here by channel, not in channel.mjs (same rule as the
+          # other deploy workflows' webroot/releases_dir).
+          if [ "$CHANNEL" = "staging" ]; then
+            downloads="/var/www/mantaui/staging/downloads"
+            feed="/var/www/mantaui/staging/updates"
+            latest="Manta-Staging-latest-x64.exe"
+          else
+            downloads="/var/www/mantaui/downloads"
+            feed="/var/www/mantaui/updates"
+            latest="Manta-latest-x64.exe"
+          fi
+          # releaseHost is the ONE source of the canonical URL — resolves to
+          # https://mantaui.com (prod) or https://mantaui.com/staging.
+          site="$(node -e 'import("./src/shared/channel.mjs").then(m => process.stdout.write(m.channelConfig(process.argv[1]).releaseHost))' "$CHANNEL")"
+          if [ -z "$site" ]; then
+            echo "::error::could not resolve releaseHost for channel=${CHANNEL}"
+            exit 1
+          fi
+          echo "MANTA_DOWNLOADS_DIR=$downloads" >> "$GITHUB_ENV"
+          echo "MANTA_FEED_DIR=$feed" >> "$GITHUB_ENV"
+          echo "MANTA_LATEST_EXE=$latest" >> "$GITHUB_ENV"
+          echo "MANTA_SITE=$site" >> "$GITHUB_ENV"
           echo "Building the $CHANNEL channel"
+          echo "▸ web publish: downloads=$downloads feed=$feed latest=$latest site=$site"
+
+      # HARD GUARD: a staging run that silently writes into the prod webroot
+      # is the only genuinely dangerous failure mode here, and it must be
+      # impossible rather than unlikely. Same guard contract as the other
+      # deploy workflows — any divergence is a reviewer Block.
+      - name: Guard — staging destination must contain /staging/
+        run: |
+          set -euo pipefail
+          if [ "$MANTA_CHANNEL" = "staging" ]; then
+            case "$MANTA_DOWNLOADS_DIR" in */staging/*) ;; *)
+              echo "::error::channel=staging but MANTA_DOWNLOADS_DIR='$MANTA_DOWNLOADS_DIR' does not contain /staging/"; exit 1 ;;
+            esac
+            case "$MANTA_FEED_DIR" in */staging/*) ;; *)
+              echo "::error::channel=staging but MANTA_FEED_DIR='$MANTA_FEED_DIR' does not contain /staging/"; exit 1 ;;
+            esac
+          fi
+          echo "✓ guard passed (channel=$MANTA_CHANNEL)"
 
       # MANTA_CHANNEL is read by electron.vite.config.ts and baked in as
       # __MANTA_CHANNEL__, which is what decides the app's URL scheme
@@ -223,3 +280,96 @@ jobs:
             exit 1
           fi
           gh release view "$TAG" --json url --jq .url
+
+      # Tag pushes only — same gate as the GitHub Release step above. The
+      # Release is now the per-version archive; this is the SECOND destination:
+      # the stable installer + update feed that mantaui.com and Windows
+      # auto-update point at. A key-less run (fork, or PROD_SSH_KEY not set)
+      # skips the publish with a clear log line but keeps every artifact this
+      # job built — exactly like the mac workflow. Destinations + releaseHost
+      # come from env exported by the Resolve channel step (see the guard).
+      - name: Publish the installer + feed to the web host
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$PROD_SSH_KEY" ]; then
+            echo "No PROD_SSH_KEY — skipping web publish. GitHub Release + artifacts still produced."
+            exit 0
+          fi
+
+          printf '%s\n' "$PROD_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          ssh-keygen -y -f "$SSH_KEY" >/dev/null  # fail red on a malformed key
+
+          SSH="ssh -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+          SCP="scp -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+          echo "▸ Ensuring $MANTA_DOWNLOADS_DIR + $MANTA_FEED_DIR exist"
+          $SSH "$PROD_HOST" "mkdir -p $MANTA_DOWNLOADS_DIR $MANTA_FEED_DIR"
+
+          # Electron-updater resolves the filename in latest.yml relative to the
+          # FEED, so the versioned .exe has to sit next to it. The downloads
+          # copy is the website button target.
+          echo "▸ Uploading latest.yml + versioned .exe to the feed"
+          $SCP dist/desktop/latest.yml "$PROD_HOST:$MANTA_FEED_DIR/latest.yml"
+          $SCP dist/desktop/*.exe "$PROD_HOST:$MANTA_FEED_DIR/"
+          echo "▸ Uploading versioned .exe to the downloads dir"
+          $SCP dist/desktop/*.exe "$PROD_HOST:$MANTA_DOWNLOADS_DIR/"
+
+          # Refresh the canonical copy to the HIGHEST version present.
+          # `sort -V | tail -1`, never `ls | head -1` — alphabetical order once
+          # served 0.0.1 for weeks after 0.0.4 shipped (the mac workflow carries
+          # the same warning after it actually happened), so the download link
+          # silently pointed at the oldest build.
+          echo "▸ Refreshing canonical copy $MANTA_LATEST_EXE (highest version)"
+          $SSH "$PROD_HOST" "cd $MANTA_DOWNLOADS_DIR && latest=\$(ls -1 Manta-UI-*-x64.exe | sort -V | tail -1) && cp -f \"\$latest\" $MANTA_LATEST_EXE && echo \"✓ canonical copy: \$latest → $MANTA_LATEST_EXE\""
+
+      # Prove the files are really live rather than trusting the scp: 200 on
+      # the canonical installer + the feed, and the sha256 of the bytes served
+      # must equal the sha256 of the .exe this job just built. Mismatch or
+      # non-200 exits 1. `curl -sL` — the canonical name is a plain file, but a
+      # redirect must not be silently accepted as success. The key-presence
+      # check lives INSIDE the step body (never `secrets` in `if:` — that is
+      # invalid GitHub Actions syntax and actionlint-red): a key-less run
+      # published nothing, so verify skips instead of failing on URLs that
+      # were intentionally never written.
+      - name: Verify installer + feed are live
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$PROD_SSH_KEY" ]; then
+            echo "No PROD_SSH_KEY — skipping verify (nothing was published)."
+            exit 0
+          fi
+          fail=0
+          built_exe=$(ls -1 dist/desktop/Manta-UI-*-x64.exe | sort -V | tail -1)
+
+          code=$(curl -sL -o /dev/null -w "%{http_code}" "$MANTA_SITE/downloads/$MANTA_LATEST_EXE" || echo 000)
+          live=$(curl -sL "$MANTA_SITE/downloads/$MANTA_LATEST_EXE" | sha256sum | cut -d' ' -f1)
+          want=$(sha256sum "$built_exe" | cut -d' ' -f1)
+          if [ "$code" = "200" ] && [ "$live" = "$want" ]; then
+            echo "✓ $MANTA_SITE/downloads/$MANTA_LATEST_EXE → HTTP $code, sha256 matches built exe"
+          else
+            echo "::error::$MANTA_SITE/downloads/$MANTA_LATEST_EXE → HTTP $code (live=$live want=$want)"
+            fail=1
+          fi
+
+          feed_code=$(curl -sL -o /dev/null -w "%{http_code}" "$MANTA_SITE/updates/latest.yml" || echo 000)
+          if [ "$feed_code" = "200" ]; then
+            echo "✓ $MANTA_SITE/updates/latest.yml → HTTP $feed_code"
+          else
+            echo "::error::$MANTA_SITE/updates/latest.yml → HTTP $feed_code (expected 200)"
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::Web publish verification failed."
+            exit 1
+          fi
+          echo "All web publish checks passed."
