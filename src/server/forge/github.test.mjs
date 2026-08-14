@@ -293,7 +293,7 @@ function diffAdapter() {
   const pull = `https://api.github.com/repos/acme/widget/pulls/42`;
   const json = {
     [pull]: { number: 42, title: "t", html_url: "u", state: "open", merged: false, draft: false, head: { ref: "x", sha: "abc123" }, base: { ref: "main", sha: "d" }, user: { login: "octocat" } },
-    [`${pull}/comments`]: REVIEW_COMMENTS,
+    [`${pull}/comments?per_page=100&page=1`]: REVIEW_COMMENTS,
   };
   const jsonReq = async (url) => ({ data: json[url], stale: false });
   const textReq = async (url) => (url === pull ? { data: DIFF_TEXT, stale: false } : { data: "", stale: false });
@@ -327,6 +327,28 @@ test("a file-level comment (no line) normalises to a thread with a null line, an
   assert.equal(file.startLine, null);
   assert.equal(file.path, "src/forge.mjs");
   assert.equal(file.comments[0].body, "file-level note");
+});
+
+test("getDiff accumulates review-comment threads spanning multiple pages", async () => {
+  const pull = `https://api.github.com/repos/acme/widget/pulls/42`;
+  const comment = (id, path, line) => ({
+    id, path, line, side: "RIGHT", user: { login: "ada" }, body: `body ${id}`,
+    created_at: "2026-08-01T10:00:00Z", in_reply_to_id: null, resolved: false,
+  });
+  const page1 = Array.from({ length: 100 }, (_, i) => comment(1000 + i, "a.ts", i + 1));
+  const page2 = Array.from({ length: 37 }, (_, i) => comment(2000 + i, "b.ts", i + 1));
+  const json = {
+    [pull]: { number: 42, title: "t", html_url: "u", state: "open", merged: false, draft: false, head: { ref: "x", sha: "abc123" }, base: { ref: "main", sha: "d" }, user: { login: "octocat" } },
+    [`${pull}/comments?per_page=100&page=1`]: page1,
+    [`${pull}/comments?per_page=100&page=2`]: page2,
+  };
+  const jsonReq = async (url) => ({ data: json[url], stale: false });
+  const textReq = async (url) => (url === pull ? { data: DIFF_TEXT, stale: false } : { data: "", stale: false });
+  const adapter = createGithubAdapter(jsonReq, undefined, textReq);
+  const { data } = await adapter.getDiff(REPO, 42);
+  assert.equal(data.threads.length, 137, "threads from both pages are normalised together");
+  assert.ok(data.threads.some((t) => t.id === "1000" && t.path === "a.ts"), "first page present");
+  assert.ok(data.threads.some((t) => t.id === "2000" && t.path === "b.ts"), "second page present");
 });
 
 // ---- Review writes (BET-793): submitReview + replyToThread ------------------
