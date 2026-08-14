@@ -1,12 +1,4 @@
-- heading "What's up next?" [level=1]
-- paragraph: Start a session on any folder your box can see.
-- button "Home"
-- button "no branch"
-- checkbox "Create in a fresh git worktree"
-- text: worktree
-- textbox "Describe a task or ask a question"
-- button "Start a session" [disabled]
-- button "Auto"
-- button "High"
-- button "Attach a file" [disabled]
-- button "Dictate" [disabled]
+- heading "Let's get some code on this box" [level=1]
+- paragraph: No repositories found. Clone one from GitHub, or point Manta at a folder.
+- button "Clone from GitHub…"
+- button "Browse for a folder…"

@@ -3,6 +3,13 @@
   - button "Search sessions"
   - button "+"
   - tree "Sessions":
+    - treeitem "infra + Close project" [expanded]:
+      - text: ""
+      - button "+"
+      - button "Close project"
+    - treeitem "Deploy new billing service Pin" [selected]:
+      - text: ""
+      - button "Pin"
     - treeitem "ethernal + Close project" [expanded]:
       - text: ""
       - button "+"
@@ -24,13 +31,6 @@
       - text: ""
       - button "Pin"
     - treeitem "Build pipeline Pin":
-      - text: ""
-      - button "Pin"
-    - treeitem "infra + Close project" [expanded]:
-      - text: ""
-      - button "+"
-      - button "Close project"
-    - treeitem "Deploy new billing service Pin" [selected]:
       - text: ""
       - button "Pin"
   - button "Settings…"
@@ -61,8 +61,11 @@
   - button "Allow once"
   - button "Always allow alembic upgrade *"
   - button "Reject"
+  - status
   - textbox "Reply, or describe the next task…"
-  - button "Send message"
+  - button "Send message" [disabled]
+  - button "Explain this codebase"
+  - button "What's the test setup?"
   - button "Opus 4.7"
   - button "High"
   - button "Fast mode" [disabled]
@@ -71,3 +74,4 @@
   - button "secrets"
   - button "webhooks"
   - button "Permissions on — click to bypass"
+- complementary "Artifacts"

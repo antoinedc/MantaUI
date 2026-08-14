@@ -1,13 +1,14 @@
 - tabpanel "Extensions":
-  - text: Plugins
+  - text: Plugins Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta.
   - checkbox "Run plugins on this machine"
-  - text: Run plugins on this machine Lets the AI trigger the plugins below — each is a YAML file on this machine; the AI can also create and edit them when this is on. Takes effect after restarting Manta. Loading…
+  - text: Loading…
   - button "Open plugins folder"
-  - text: Skill registries Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.
+  - text: Forge GitHub Not connected — authenticate the gh CLI on this box to register forge webhooks.
+  - checkbox "Let forge rules start agents on this box"
+  - text: Let forge rules start agents on this box Loading… Skill registries Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.
   - code: https://example.com/manta-skills-extra.json
   - button "Remove registry URL"
   - textbox "https://example.com/skills"
   - button "Add" [disabled]
-  - text: CLI launch options Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown. Claude Code
+  - text: CLI launch options Flags used when launching an AI CLI (e.g. Claude Code) directly in a session's terminal. Only CLIs detected on this box are shown. Claude Code Skip all permission prompts
   - checkbox "Skip all permission prompts" [checked]
-  - text: Skip all permission prompts
