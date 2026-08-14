@@ -15,6 +15,40 @@ test("bus delivers published events to subscribers and stops after unsubscribe",
   assert.equal(got.length, 1);
 });
 
+test("bus replays the registered snapshot to a new subscriber (state recovery on connect)", () => {
+  const bus = createBus();
+  bus.setSnapshot(() => [
+    { kind: "stream", sub: "running", sessionId: "ses_1", payload: { running: true, since: 1234 } },
+  ]);
+  const got = [];
+  const off = bus.subscribe((e) => got.push(e));
+  assert.equal(got.length, 1, "snapshot events reach the new subscriber immediately");
+  assert.equal(got[0].sub, "running");
+  assert.equal(got[0].payload.since, 1234);
+  // A second subscriber gets its own replay.
+  const got2 = [];
+  bus.subscribe((e) => got2.push(e));
+  assert.equal(got2.length, 1);
+  // Live events still flow after the snapshot replay.
+  bus.publish({ kind: "stream", sub: "flush", sessionId: "ses_1", payload: {} });
+  assert.equal(got.filter((e) => e.sub === "flush").length, 1);
+  off();
+});
+
+test("bus replays only the snapshot registered at subscribe time", () => {
+  const bus = createBus();
+  // No snapshot set yet -> new subscriber gets nothing replayed.
+  const got = [];
+  bus.subscribe((e) => got.push(e));
+  assert.equal(got.length, 0);
+  bus.setSnapshot(() => [
+    { kind: "stream", sub: "running", sessionId: "ses_1", payload: { running: true, since: 99 } },
+  ]);
+  const got2 = [];
+  bus.subscribe((e) => got2.push(e));
+  assert.equal(got2.length, 1, "subsequent subscriber replays the now-registered snapshot");
+});
+
 // ---------------------------------------------------------------------------
 // attachEventsWs heartbeat (BET-115 fix A, server side)
 //

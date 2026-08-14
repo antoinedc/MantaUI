@@ -88,6 +88,7 @@ function newSessionState() {
     cachedTokens: 0,
     running: false,
     runningSince: null,        // epoch ms when the running turn started (idle->busy edge)
+    runningType: null,         // last session.status type ("busy"|"working"|"retry"|null); preserved for the connect-time snapshot replay
     todos: null,               // liveTodos (todo.updated) ; null = not seen
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
@@ -454,6 +455,7 @@ export function createStreamInterpreter({
         // pre-S1b renderer semantics) — the box is the single source of truth,
         // so it must report the same value the renderer's raw handler does.
         setRunning(st, type === "busy" || type === "working" || type === "retry");
+        st.runningType = type ?? null;
         // `type` is ADDITIVE, not the indicator: `running` stays the single
         // source of truth for the running boolean, while `type` carries the
         // raw "busy" | "working" | "retry" (or null) so a thin client (iOS)
@@ -561,6 +563,29 @@ export function createStreamInterpreter({
   return {
     interpret,
     getState: (sid) => sessions.get(sid),
+    // Replay events for sessions that are currently running, for the bus's
+    // connect-time snapshot (BET-913). The `running` frame is emitted only on
+    // the idle->busy EDGE, so a client that (re)connects mid-turn never saw
+    // it — this reconstructs it (with the original `since`, so the turn timer
+    // survives a force-quit + relaunch). Empty when nothing is busy.
+    snapshotBusy() {
+      const out = [];
+      for (const [sid, st] of sessions) {
+        if (st.running && st.runningSince != null) {
+          out.push({
+            kind: "stream",
+            sub: "running",
+            sessionId: sid,
+            payload: {
+              running: true,
+              type: st.runningType ?? null,
+              since: st.runningSince,
+            },
+          });
+        }
+      }
+      return out;
+    },
     sessions,
   };
 }
