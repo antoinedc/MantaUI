@@ -52,7 +52,7 @@ enum ModelRecents {
         }?.name ?? choice.modelID
         var parts = [name]
         if let variant = choice.variant, !variant.isEmpty {
-            parts.append(variant.capitalized)
+            parts.append(ChatModel.effortLabel(variant))
         }
         if choice.fast { parts.append("⚡") }
         return parts.joined(separator: " · ")
