@@ -187,6 +187,17 @@ const OPEN_PR = {
   unresolvedThreads: 0,
 };
 
+// Shared git/forge deps for the branch-matching pullRequestForCwd cases — the
+// prs list is the only thing that differs per test.
+function branchPrDeps(prs) {
+  return {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () => fakeAdapter({ prs }),
+  };
+}
+
 test("pullRequestForCwd: repo with no known forge → no_forge (not an error)", async () => {
   const r = await pullRequestForCwd("/repo", {
     gitRemoteOrigin: async () => null, // not a git repo
@@ -240,18 +251,10 @@ test("pullRequestForCwd: no open PR → well-formed empty result, not an error",
 });
 
 test("pullRequestForCwd: open PRs exist but none on this branch → no PR", async () => {
-  const r = await pullRequestForCwd("/repo", {
-    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
-    currentBranch: async () => "feature/x",
-    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
-    getAdapter: () =>
-      fakeAdapter({
-        prs: [
-          { ...OPEN_PR, number: 1, headRef: "topic/a" },
-          { ...OPEN_PR, number: 2, headRef: "topic/b" },
-        ],
-      }),
-  });
+  const r = await pullRequestForCwd("/repo", branchPrDeps([
+    { ...OPEN_PR, number: 1, headRef: "topic/a" },
+    { ...OPEN_PR, number: 2, headRef: "topic/b" },
+  ]));
   assert.equal(r.pr, null);
   assert.equal(r.error, null);
   assert.equal(r.rollup, "none");
@@ -272,18 +275,10 @@ test("pullRequestForCwd: detached HEAD / unknown branch → no PR", async () => 
 });
 
 test("pullRequestForCwd: the match is exact, not positional", async () => {
-  const r = await pullRequestForCwd("/repo", {
-    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
-    currentBranch: async () => "feature/x",
-    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
-    getAdapter: () =>
-      fakeAdapter({
-        prs: [
-          { ...OPEN_PR, number: 1, headRef: "other" },
-          { ...OPEN_PR, number: 42, headRef: "feature/x" },
-        ],
-      }),
-  });
+  const r = await pullRequestForCwd("/repo", branchPrDeps([
+    { ...OPEN_PR, number: 1, headRef: "other" },
+    { ...OPEN_PR, number: 42, headRef: "feature/x" },
+  ]));
   assert.equal(r.error, null);
   assert.equal(r.pr.number, 42, "returns the branch-matching PR, not the first open PR");
   assert.equal(r.pr.headRef, "feature/x");
@@ -481,13 +476,19 @@ test("shipPreview uses the forge-resolved default branch for base and the diff r
   );
 });
 
-test("shipPullRequest passes the forge-resolved base to createPullRequest", async () => {
-  const created = [];
-  const adapter = {
+// A github adapter spy whose createPullRequest records each input (so tests can
+// assert on the base/head/body ship wrote); merge is a happy-path stub.
+function createSpyAdapter(created) {
+  return {
     kind: "github",
     createPullRequest: async (_repo, input) => { created.push(input); return { data: { ...OPEN_PR, number: 77 }, stale: false }; },
     merge: async () => ({ data: { merged: true }, stale: false }),
   };
+}
+
+test("shipPullRequest passes the forge-resolved base to createPullRequest", async () => {
+  const created = [];
+  const adapter = createSpyAdapter(created);
   const r = await shipPullRequest("/repo", { title: "t", body: "B" }, {
     ...SHIP_DEPS,
     getAdapter: () => adapter,
@@ -500,11 +501,7 @@ test("shipPullRequest passes the forge-resolved base to createPullRequest", asyn
 
 test("shipPullRequest: an explicit base input still wins over the resolved one", async () => {
   const created = [];
-  const adapter = {
-    kind: "github",
-    createPullRequest: async (_repo, input) => { created.push(input); return { data: { ...OPEN_PR, number: 77 }, stale: false }; },
-    merge: async () => ({ data: { merged: true }, stale: false }),
-  };
+  const adapter = createSpyAdapter(created);
   const r = await shipPullRequest("/repo", { title: "t", body: "B", base: "trunk" }, {
     ...SHIP_DEPS,
     getAdapter: () => adapter,
