@@ -96,6 +96,8 @@ import {
   selectStatusItems,
   checksChipDescriptor,
   countsForChecks,
+  checkTone,
+  orderChecks,
   branchChipLabel,
   shouldOfferForgeConnect,
   failuresToAgentPrompt,
@@ -3819,6 +3821,72 @@ describe("planHighlightRanges", () => {
 });
 
 // ===== checksChipDescriptor / branchChipLabel / shouldOfferForgeConnect (BET-789) =====
+
+describe("checkTone", () => {
+  const run = (over: Partial<{ status: string; conclusion: string }>) => ({
+    name: "c",
+    ...over,
+  });
+
+  it("no conclusion → running (still pending)", () => {
+    expect(checkTone(run({}))).toBe("running");
+  });
+
+  it("status queued → running", () => {
+    expect(checkTone(run({ status: "queued" }))).toBe("running");
+  });
+
+  it("status in_progress → running", () => {
+    expect(checkTone(run({ status: "in_progress" }))).toBe("running");
+  });
+
+  it("conclusion success → ok", () => {
+    expect(checkTone(run({ conclusion: "success" }))).toBe("ok");
+  });
+
+  it("conclusion failure / cancelled / timed_out → error", () => {
+    expect(checkTone(run({ conclusion: "failure" }))).toBe("error");
+    expect(checkTone(run({ conclusion: "cancelled" }))).toBe("error");
+    expect(checkTone(run({ conclusion: "timed_out" }))).toBe("error");
+  });
+});
+
+describe("orderChecks", () => {
+  it("mixed list comes back failed → running → passed", () => {
+    const checks = [
+      { name: "p1", conclusion: "success" },
+      { name: "f1", conclusion: "failure" },
+      { name: "r1", status: "in_progress" },
+      { name: "p2", conclusion: "success" },
+      { name: "f2", conclusion: "cancelled" },
+    ];
+    expect(orderChecks(checks).map((c) => c.name)).toEqual([
+      "f1",
+      "f2",
+      "r1",
+      "p1",
+      "p2",
+    ]);
+  });
+
+  it("two checks in the same bucket keep their input order (stable)", () => {
+    const checks = [
+      { name: "a", conclusion: "success" },
+      { name: "b", conclusion: "success" },
+    ];
+    expect(orderChecks(checks).map((c) => c.name)).toEqual(["a", "b"]);
+  });
+
+  it("empty list → empty, and does not mutate its input", () => {
+    const checks = [
+      { name: "a", conclusion: "success" },
+      { name: "b", conclusion: "failure" },
+    ];
+    const before = [...checks];
+    expect(orderChecks([])).toEqual([]);
+    expect(checks).toEqual(before);
+  });
+});
 
 describe("countsForChecks", () => {
   it("buckets success / other-conclusion / pending into passed / failed / running", () => {

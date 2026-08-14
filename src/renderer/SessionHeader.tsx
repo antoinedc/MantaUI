@@ -25,6 +25,8 @@ import {
   selectStatusItems,
   checksChipDescriptor,
   countsForChecks,
+  checkTone,
+  orderChecks,
   shouldOfferForgeConnect,
   failuresToAgentPrompt,
   branchPanelState,
@@ -45,7 +47,7 @@ import { Tag } from "./Tag";
 import { Chip } from "./Chip";
 import { StatusDot } from "./StatusDot";
 import { Callout } from "./Callout";
-import { ForgeMark } from "./ForgeMark";
+import { ForgeMark, hasForgeMark } from "./ForgeMark";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
 import { ConfirmModal } from "./ConfirmModal";
@@ -296,6 +298,7 @@ export function SessionHeader({
           descriptor={checksDesc}
           checks={checks ?? []}
           pr={pr ?? null}
+          forgeKind={forgeKind ?? null}
           onOpenExternal={onOpenExternal}
           onFillComposer={onFillComposer}
         />
@@ -1299,8 +1302,9 @@ function BranchPanel({
 // The checks chip is the ONE new status item (§4.3): colour AND glyph, never
 // colour alone — `✓ 7`, `✗ 2 failed`, `◐ 3 running`. Its tone + priority are
 // a function of state (see checksChipDescriptor). It opens on CLICK (never
-// hover — it carries a link + an action), and its popover lists failing checks
-// first, then a `+ N passed` collapse row.
+// hover — it carries a link + an action), and its popover lists EVERY check in
+// one flat list — the dot carries the state and `orderChecks` carries the
+// failed → running → passed grouping, each name a link to its own log (BET-926).
 const CHECK_TONE_CLASS: Record<ChecksChipTone, string> = {
   ok: "border-ok/40 bg-ok-bg text-ok",
   warn: "border-warn/40 bg-warn-bg text-warn",
@@ -1311,12 +1315,14 @@ function ChecksChip({
   descriptor,
   checks,
   pr,
+  forgeKind,
   onOpenExternal,
   onFillComposer,
 }: {
   descriptor: { label: string; tone: ChecksChipTone; priority: number };
   checks: ForgeCheckRun[];
   pr: PullRequest | null;
+  forgeKind?: string | null;
   onOpenExternal?: (url: string) => void;
   onFillComposer?: (text: string) => void;
 }) {
@@ -1334,6 +1340,12 @@ function ChecksChip({
         aria-label={label}
         className={`manta-checks-chip inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-full border px-2 font-mono text-[11px] font-medium leading-none ${CHECK_TONE_CLASS[descriptor.tone]}`}
       >
+        {hasForgeMark(forgeKind) && (
+          <>
+            <ForgeMark kind={forgeKind} size={11} />
+            <span className="h-[11px] w-px bg-current opacity-40" aria-hidden="true" />
+          </>
+        )}
         <span>{descriptor.label}</span>
       </button>
       <Popover
@@ -1348,6 +1360,7 @@ function ChecksChip({
         <ChecksPanel
           checks={checks}
           pr={pr}
+          forgeKind={forgeKind}
           onOpenExternal={onOpenExternal}
           onFillComposer={onFillComposer}
         />
@@ -1357,21 +1370,30 @@ function ChecksChip({
 }
 
 function CheckRow({
-  name,
-  meta,
-  tone,
+  check,
+  onOpenExternal,
 }: {
-  name: string;
-  meta: string;
-  tone: "ok" | "running" | "error" | "idle";
+  check: ForgeCheckRun;
+  onOpenExternal?: (url: string) => void;
 }) {
+  // The dropped status label lives on as the tooltip — it is the only place the
+  // failure/cancelled/timed-out distinction survives (decision 6).
+  const detail = check.conclusion ?? check.status ?? "";
   return (
-    <div className="flex items-center gap-2 rounded-md px-2 py-2 text-[13px] text-text-muted hover:bg-fill-hover">
-      <StatusDot tone={tone} />
-      <span className="min-w-0 flex-1 truncate font-medium text-text">{name}</span>
-      {meta && (
-        <span className="shrink-0 font-mono text-[11.5px] font-medium text-text-quiet">
-          {meta}
+    <div className="flex items-center gap-2 rounded-md px-2 py-2 text-label text-text-muted hover:bg-fill-hover">
+      <StatusDot tone={checkTone(check)} />
+      {check.url && onOpenExternal ? (
+        <button
+          type="button"
+          title={detail}
+          onClick={() => onOpenExternal(check.url!)}
+          className="min-w-0 flex-1 truncate text-left font-medium text-text hover:underline"
+        >
+          {check.name}
+        </button>
+      ) : (
+        <span title={detail} className="min-w-0 flex-1 truncate font-medium text-text">
+          {check.name}
         </span>
       )}
     </div>
@@ -1381,38 +1403,40 @@ function CheckRow({
 function ChecksPanel({
   checks,
   pr,
+  forgeKind,
   onOpenExternal,
   onFillComposer,
 }: {
   checks: ForgeCheckRun[];
   pr: PullRequest | null;
+  forgeKind?: string | null;
   onOpenExternal?: (url: string) => void;
   onFillComposer?: (text: string) => void;
 }) {
-  const failed = checks.filter((c) => {
-    const done = c.conclusion;
-    return done && done !== "success" && c.status !== "in_progress" && c.status !== "queued";
-  });
-  const running = checks.filter((c) => {
-    const done = c.conclusion;
-    return !done || c.status === "in_progress" || c.status === "queued";
-  });
-  const passed = checks.filter((c) => c.conclusion === "success");
+  const ordered = orderChecks(checks);
   const prompt = failuresToAgentPrompt(checks);
   const logUrl =
-    failed.find((c) => c.url)?.url ??
+    ordered.find((c) => checkTone(c) === "error" && c.url)?.url ??
     checks.find((c) => c.url)?.url ??
     pr?.url;
   return (
     <div className="p-2">
+      <div className="mb-1 flex items-center gap-2 border-b border-border-subtle px-2 pb-2">
+        {hasForgeMark(forgeKind) && (
+          <>
+            <ForgeMark kind={forgeKind} size={13} />
+            <span className="h-[11px] w-px bg-border" aria-hidden="true" />
+          </>
+        )}
+        <span className="text-meta font-semibold text-text">Checks</span>
+        <span className="ml-auto font-mono text-[11px] font-medium text-text-quiet">
+          {checks.length}
+        </span>
+      </div>
       <div className="max-h-[260px] overflow-y-auto">
-        {failed.map((c) => (
-          <CheckRow key={c.name} tone="error" name={c.name} meta={c.conclusion ?? "failed"} />
+        {ordered.map((c) => (
+          <CheckRow key={c.name} check={c} onOpenExternal={onOpenExternal} />
         ))}
-        {running.map((c) => (
-          <CheckRow key={c.name} tone="running" name={c.name} meta="running" />
-        ))}
-        {passed.length > 0 && <CheckRow tone="idle" name={`+ ${passed.length} passed`} meta="" />}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle px-1 pt-2">
         {prompt && onFillComposer && (

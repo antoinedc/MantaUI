@@ -2768,6 +2768,29 @@ export function selectStatusItems(
 // per-state descriptor, the PR-suffixed branch label, and the connect-offer
 // decision. All computed from props alone — no DOM, no channels, no network.
 
+/** One check's traffic-light state — THE single classifier. A check with no
+ * conclusion yet (queued / in progress / pending) is "running". Everything that
+ * finished on something other than success is "error".
+ *
+ * `countsForChecks`, `failuresToAgentPrompt` and the checks popover all read
+ * this, so the three can never drift on what "failed" means (they were three
+ * hand-written copies before). The return values are deliberately StatusDot's
+ * tone names, so the popover row needs no mapping table. */
+export function checkTone(c: ForgeCheckRun): "ok" | "running" | "error" {
+  const done = c.conclusion;
+  if (!done || c.status === "queued" || c.status === "in_progress") return "running";
+  return done === "success" ? "ok" : "error";
+}
+
+/** Every check in display order: failed, then running, then passed. The popover
+ * lists ALL of them — the dot carries the state and this order carries the
+ * grouping, so there are no headings and no per-row status label. `sort` is
+ * stable, so within a bucket the forge's own order survives. */
+export function orderChecks(checks: ForgeCheckRun[]): ForgeCheckRun[] {
+  const rank = { error: 0, running: 1, ok: 2 } as const;
+  return [...checks].sort((a, b) => rank[checkTone(a)] - rank[checkTone(b)]);
+}
+
 /** Count a check list into the three traffic-light buckets. A check with no
  * conclusion yet (still queued / in progress / pending) is "running". */
 export function countsForChecks(checks: ForgeCheckRun[]): {
@@ -2779,9 +2802,9 @@ export function countsForChecks(checks: ForgeCheckRun[]): {
   let failed = 0;
   let running = 0;
   for (const c of checks) {
-    const done = c.conclusion;
-    if (!done || c.status === "queued" || c.status === "in_progress") running++;
-    else if (done === "success") passed++;
+    const tone = checkTone(c);
+    if (tone === "running") running++;
+    else if (tone === "ok") passed++;
     else failed++;
   }
   return { passed, failed, running };
@@ -2845,10 +2868,7 @@ export function shouldOfferForgeConnect({
  * (plus its log URL) so the agent can act without the user transcribing. This
  * FILLS the composer; it does not submit. */
 export function failuresToAgentPrompt(checks: ForgeCheckRun[]): string {
-  const failed = checks.filter((c) => {
-    const done = c.conclusion;
-    return done && done !== "success" && c.status !== "in_progress" && c.status !== "queued";
-  });
+  const failed = checks.filter((c) => checkTone(c) === "error");
   if (failed.length === 0) return "";
   const lines = failed.map((c) => `- ${c.name}${c.url ? ` (${c.url})` : ""}`);
   return `Checks are failing on this pull request:\n${lines.join("\n")}\n\nPlease investigate and fix them.`;
