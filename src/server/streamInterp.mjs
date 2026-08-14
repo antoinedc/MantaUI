@@ -563,12 +563,22 @@ export function createStreamInterpreter({
   return {
     interpret,
     getState: (sid) => sessions.get(sid),
-    // Replay events for sessions that are currently running, for the bus's
-    // connect-time snapshot (BET-913). The `running` frame is emitted only on
-    // the idle->busy EDGE, so a client that (re)connects mid-turn never saw
-    // it — this reconstructs it (with the original `since`, so the turn timer
-    // survives a force-quit + relaunch). Empty when nothing is busy.
-    snapshotBusy() {
+    // Replay current edge-only state for the bus's connect-time snapshot
+    // (BET-913 + BET-916). These frames are emitted only on an EDGE — their
+    // current value is never re-sent on its own — so a client that
+    // (re)connects mid-state never sees them: the `running` frame fires only
+    // on the idle->busy edge (the turn timer survives a force-quit +
+    // relaunch only if this is reconstructed with the ORIGINAL `since`), and
+    // `questions` / `permissions` frames fire only as `question.*` /
+    // `permission.*` events arrive. A fresh /events subscription therefore
+    // recovers the still-pending interactive cards too. Each is replayed with
+    // exactly the same envelope the live path emits, so a reconnecting client
+    // needs no change. Empty when there is nothing to replay.
+    //
+    // Replayed independently of one another and of `st.running`: a pending
+    // question/permission blocks the turn but never sets `running`, so gating
+    // on `running` would skip exactly the sessions that need the replay.
+    snapshotState() {
       const out = [];
       for (const [sid, st] of sessions) {
         if (st.running && st.runningSince != null) {
@@ -581,6 +591,22 @@ export function createStreamInterpreter({
               type: st.runningType ?? null,
               since: st.runningSince,
             },
+          });
+        }
+        if (st.questions.length > 0) {
+          out.push({
+            kind: "stream",
+            sub: "questions",
+            sessionId: sid,
+            payload: { questions: st.questions },
+          });
+        }
+        if (st.permissions.length > 0) {
+          out.push({
+            kind: "stream",
+            sub: "permissions",
+            sessionId: sid,
+            payload: { permissions: st.permissions },
           });
         }
       }

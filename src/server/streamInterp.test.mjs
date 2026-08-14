@@ -359,17 +359,17 @@ test("session.status busy emits a running frame with a non-null since", () => {
   assert.equal(ev.payload.since, 42_000, "stamped from the injectable now()");
 });
 
-test("snapshotBusy replays a running frame for a currently-busy session only (BET-913)", () => {
+test("snapshotState replays a running frame for a currently-busy session only (BET-913)", () => {
   const { interp } = make(42_000);
   // Nothing busy yet -> no replay events.
-  assert.deepEqual(interp.snapshotBusy(), []);
+  assert.deepEqual(interp.snapshotState(), []);
   // Start a turn; the replay carries the frame the busy->idle edge never
   // re-emits, with the ORIGINAL since so the timer survives a fresh process.
   interp.interpret({
     type: "session.status",
     properties: { sessionID: SID, status: { type: "busy" } },
   });
-  const snap = interp.snapshotBusy();
+  const snap = interp.snapshotState();
   assert.equal(snap.length, 1);
   assert.equal(snap[0].kind, "stream");
   assert.equal(snap[0].sub, "running");
@@ -379,16 +379,104 @@ test("snapshotBusy replays a running frame for a currently-busy session only (BE
   assert.equal(snap[0].payload.type, "busy", "last status type preserved additively");
   // An idle session leaves nothing to replay.
   interp.interpret({ type: "session.idle", properties: { sessionID: SID } });
-  assert.deepEqual(interp.snapshotBusy(), []);
+  assert.deepEqual(interp.snapshotState(), []);
 });
 
-test("snapshotBusy ignores sessions that were never marked running", () => {
+test("snapshotState ignores sessions that were never marked running", () => {
   const { interp } = make();
   interp.interpret({
     type: "message.part.delta",
     properties: { sessionID: SID, messageID: "m", part: { id: "p", type: "text", text: "hi" } },
   });
-  assert.deepEqual(interp.snapshotBusy(), []);
+  assert.deepEqual(interp.snapshotState(), []);
+});
+
+// BET-916 — sibling of BET-913: pending questions/permissions are edge-only too
+// (`question.*` / `permission.*` frames fire only as events arrive), so a fresh
+// /events subscription would drop the still-pending interactive card. The
+// snapshot replays them regardless of `running` — a pending question/blocks a
+// turn without ever setting `running`, so gating on `running` would skip them.
+
+test("snapshotState replays a pending questions frame independent of running (BET-916)", () => {
+  const { interp } = make();
+  interp.interpret({
+    type: "question.asked",
+    properties: {
+      sessionID: SID,
+      id: "que_1",
+      tool: { messageID: "m", callID: "call_1" },
+      questions: [{ text: "Option one?" }],
+    },
+  });
+  // The live path never set `running` for this session — the snapshot must
+  // still replay the question, or a reconnecting client is blocked but
+  // unanswerable on the box.
+  assert.equal(interp.getState(SID).running, false, "question doesn't set running");
+  const snap = interp.snapshotState();
+  const q = snap.find((e) => e.sub === "questions");
+  assert.ok(q, "a questions frame is replayed");
+  assert.equal(q.kind, "stream");
+  assert.equal(q.sessionId, SID);
+  assert.equal(q.payload.questions.length, 1);
+  assert.equal(q.payload.questions[0].id, "call_1", "real request id survives for answering");
+});
+
+test("snapshotState replays a pending permissions frame independent of running (BET-916)", () => {
+  const { interp } = make();
+  interp.interpret({
+    type: "permission.asked",
+    properties: { sessionID: SID, id: "perm_1", prompt: "Allow reading ~/secrets.json?" },
+  });
+  assert.equal(interp.getState(SID).running, false, "permission doesn't set running");
+  const snap = interp.snapshotState();
+  const p = snap.find((e) => e.sub === "permissions");
+  assert.ok(p, "a permissions frame is replayed");
+  assert.equal(p.kind, "stream");
+  assert.equal(p.sessionId, SID);
+  assert.equal(p.payload.permissions.length, 1);
+  assert.equal(p.payload.permissions[0].id, "perm_1", "real request id survives for answering");
+});
+
+test("snapshotState does not replay resolved/empty questions or permissions", () => {
+  const { interp } = make();
+  interp.interpret({
+    type: "question.asked",
+    properties: {
+      sessionID: SID,
+      id: "que_1",
+      tool: { messageID: "m", callID: "call_1" },
+      questions: [{ text: "?" }],
+    },
+  });
+  interp.interpret({
+    type: "question.replied",
+    properties: { sessionID: SID, id: "que_1" },
+  });
+  assert.equal(interp.getState(SID).questions.length, 0);
+  assert.deepEqual(interp.snapshotState(), [], "nothing pending, nothing replayed");
+});
+
+test("snapshotState replays running + questions + permissions together, each with its own frame", () => {
+  const { interp } = make(42_000);
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  interp.interpret({
+    type: "question.asked",
+    properties: {
+      sessionID: SID,
+      id: "que_1",
+      tool: { messageID: "m", callID: "call_1" },
+      questions: [{ text: "?" }],
+    },
+  });
+  interp.interpret({
+    type: "permission.asked",
+    properties: { sessionID: SID, id: "perm_1", prompt: "p" },
+  });
+  const subs = interp.snapshotState().map((e) => e.sub).sort();
+  assert.deepEqual(subs, ["permissions", "questions", "running"]);
 });
 
 test("a second busy while already running emits the SAME since (clock not restarted)", () => {

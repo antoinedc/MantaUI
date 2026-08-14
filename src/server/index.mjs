@@ -186,11 +186,13 @@ const streamInterp = createStreamInterpreter({
   publish: (evt) => bus.publish(evt),
   contextLimitFor,
 });
-// BET-913: when a client (re)connects mid-turn, replay the current busy state
-// so edge-only frames like `running` aren't lost — this is what lets the iOs
-// turn timer survive a force-quit + relaunch. `snapshotBusy()` returns events
-// for sessions already running; the bus replays them to each new subscriber.
-bus.setSnapshot(() => streamInterp.snapshotBusy());
+// BET-913 + BET-916: when a client (re)connects mid-state, replay the current
+// edge-only state so frames that only fire on an edge aren't lost — `running`
+// (lets the iOS turn timer survive a force-quit + relaunch) plus pending
+// `questions` / `permissions` (lets a pending interactive card reappear and
+// stay answerable on a thin client). `snapshotState()` returns these events;
+// the bus replays them to each new subscriber.
+bus.setSnapshot(() => streamInterp.snapshotState());
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a

@@ -12,10 +12,12 @@ export function createBus() {
     subscribe(fn) {
       subs.add(fn);
       // Replay current state to the newly (re)connected consumer. Edge-only
-      // frames like `stream.running` never re-fire on their own, so a client
-      // that connects mid-turn would never learn a session is already busy —
-      // this is exactly the force-quit + relaunch case, where the turn timer
-      // must survive a fresh process.
+      // frames — `stream.running`, and the pending `stream.questions` /
+      // `stream.permissions` (BET-916) — never re-fire on their own, so a
+      // client that connects mid-state would never learn a session is already
+      // busy or already blocked on an interactive card. This is exactly the
+      // force-quit + relaunch case, where those recoverable states must
+      // survive a fresh process.
       for (const evt of snapshot()) { try { fn(evt); } catch {} }
       return () => subs.delete(fn);
     },
