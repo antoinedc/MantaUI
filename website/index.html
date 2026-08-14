@@ -8,11 +8,251 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/site.css">
-<style>/* Page-specific styles. Shared tokens, reset, nav, footer base, and
-   prefers-reduced-motion live in /site.css. */
+<style>/* ==================================================================
+   PAGE-SCOPED COMPONENTS. Put this block in website/index.html's
+   inline <style>, replacing the block that is there today.
+   ================================================================== */
 
-/* The remaining homepage sections (nav, FAQ, footer) are styled entirely by
-   /site.css. Page-specific rules for the rebuilt homepage land here. */
+.aw{border:1px solid var(--navy-700);border-radius:11px;overflow:hidden;background:var(--surface-app);
+  box-shadow:0 30px 70px rgba(2,4,12,.62);display:flex;flex-direction:column;font-size:12px;line-height:1.55}
+.aw .body{align-items:stretch}
+.aw .chrome{height:30px;background:var(--surface-inset);border-bottom:1px solid var(--navy-800);
+  display:flex;align-items:center;gap:6px;padding:0 12px;flex:none}
+.aw .chrome i{width:9px;height:9px;border-radius:50%;background:var(--navy-600);display:block}
+.aw .chrome .t{margin-left:10px;font-size:11px;color:var(--slate-500);font-weight:600}
+.aw .body{display:flex;flex:1;min-height:0}
+
+/* --- sidebar --- */
+.aw .sb{width:206px;flex:none;background:var(--surface-inset);border-right:1px solid var(--navy-800);
+  display:flex;flex-direction:column;min-height:0}
+.aw .sb.narrow{width:162px}
+.aw .sbh{display:flex;align-items:center;gap:8px;padding:11px 12px 7px;font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--navy-500);font-weight:700}
+.aw .sbh .sp{margin-left:auto;display:flex;gap:9px;color:var(--navy-500);font-size:11px}
+.aw .grp{padding:9px 12px 3px;font-size:9px;letter-spacing:.12em;color:var(--navy-500);font-weight:700;
+  display:flex;align-items:center;gap:5px}
+.aw .grp::before{content:"";width:0;height:0;border-left:3.5px solid currentColor;
+  border-top:2.5px solid transparent;border-bottom:2.5px solid transparent;transform:rotate(90deg)}
+.aw .ses{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:11.5px;color:var(--text-tertiary);
+  border-left:2px solid transparent}
+.aw .ses .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aw .ses .tm{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-500);flex:none}
+.aw .ses.on{background:var(--fill-subtle);color:var(--text-secondary);border-left-color:var(--blue-500);font-weight:600}
+.aw .ses.att{background:color-mix(in srgb,var(--amber-500) 11%,transparent)}
+.aw .dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--navy-600)}
+.aw .dot.run{background:var(--cyan-400);box-shadow:0 0 7px var(--cyan-400)}
+.aw .dot.att{background:var(--amber-500);box-shadow:0 0 7px var(--amber-500)}
+.aw .dot.ok{background:var(--green-500)}
+.aw .sbf{margin-top:auto;padding:9px 12px;border-top:1px solid var(--navy-800);font-size:11px;color:var(--slate-500)}
+
+/* --- main --- */
+.aw .main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.aw .hdr{height:36px;flex:none;border-bottom:1px solid var(--navy-800);display:flex;align-items:center;
+  gap:9px;padding:0 12px;white-space:nowrap;overflow:hidden}
+.aw .crumb{font-size:11.5px;color:var(--slate-300);overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.aw .chip{font-family:var(--font-mono);font-size:9.5px;background:var(--fill-subtle);border:1px solid var(--navy-700);
+  border-radius:5px;padding:2px 7px;color:var(--blue-300);flex:none}
+.aw .ctx{margin-left:auto;display:flex;align-items:center;gap:6px;flex:none}
+.aw .ctxbar{width:46px;height:4px;border-radius:2px;background:var(--surface-inset);display:flex;overflow:hidden}
+.aw .ctxbar b{display:block;height:100%}
+.aw .ctxpc{font-family:var(--font-mono);font-size:9.5px;color:var(--slate-400)}
+.aw .hicon{color:var(--slate-500);font-size:12px}
+
+.aw .tr{flex:1;padding:12px 14px;min-height:0;display:flex;flex-direction:column;gap:8px}
+.aw .um{border-left:2px solid var(--blue-300);background:var(--fill-subtle);border-radius:0 6px 6px 0;
+  padding:7px 10px;color:var(--slate-300);font-size:11.5px}
+.aw .am{color:var(--text-tertiary);font-size:11.5px}
+.aw .am b{color:var(--text-secondary);font-weight:600}
+.aw code{font-family:var(--font-mono);font-size:10.5px;color:var(--cyan-300)}
+.aw .tool{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:10.5px;color:var(--slate-300)}
+.aw .tool .meta{color:var(--slate-500);font-family:var(--font-sans);font-size:10.5px}
+.aw .add{color:var(--green-500)}.aw .del{color:var(--red-500)}
+.aw .sub{margin-left:13px;padding-left:9px;border-left:1px solid var(--navy-700);font-family:var(--font-mono);
+  font-size:10px;color:var(--slate-500);line-height:1.7}
+
+/* gutter diff */
+.aw .diff{background:var(--surface-inset);border:1px solid var(--navy-800);border-radius:6px;overflow:hidden;
+  font-family:var(--font-mono);font-size:10px;line-height:1.75}
+.aw .diff .ln{display:flex}
+.aw .diff .ln .g{width:26px;flex:none;text-align:right;padding-right:7px;color:var(--navy-500);
+  background:var(--surface-inset);user-select:none}
+.aw .diff .ln .s{width:11px;flex:none;text-align:center;color:var(--slate-500)}
+.aw .diff .ln .c{padding-right:8px;white-space:pre;overflow:hidden;color:var(--text-tertiary)}
+.aw .diff .ln.p{background:color-mix(in srgb,var(--green-500) 12%,transparent)}
+.aw .diff .ln.p .s,.aw .diff .ln.p .c{color:var(--green-500)}
+.aw .diff .ln.m{background:color-mix(in srgb,var(--red-500) 12%,transparent)}
+.aw .diff .ln.m .s,.aw .diff .ln.m .c{color:var(--red-500)}
+.aw .kw{color:var(--blue-300)}.aw .str{color:var(--amber-500)}.aw .cm{color:var(--slate-500)}
+
+/* pinned cards */
+.aw .card{background:var(--surface-panel);border:1px solid var(--navy-700);border-radius:8px;padding:9px 11px;flex:none}
+.aw .card .ct{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-primary);font-weight:700}
+.aw .card .cs{font-family:var(--font-mono);font-size:10px;color:var(--slate-400);margin:2px 0 0 22px}
+.aw .badgeico{width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+  font-size:9px;font-weight:800;flex:none}
+.aw .row{display:flex;gap:6px;align-items:center;margin-top:8px;margin-left:22px}
+.aw .b{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:5px;white-space:nowrap}
+.aw .b.pri{background:var(--blue-500);color:var(--slate-50)}
+.aw .b.sec{background:var(--fill-subtle);border:1px solid var(--navy-700);color:var(--slate-300);font-weight:600}
+.aw .b.dang{color:var(--red-500);margin-left:auto;font-weight:600}
+.aw .todo{border:1px solid var(--navy-700);border-radius:8px;overflow:hidden;flex:none}
+.aw .todo .th{display:flex;align-items:center;padding:6px 10px;background:var(--fill-subtle);
+  font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--slate-500);font-weight:700}
+.aw .todo .ti{display:flex;align-items:center;gap:7px;padding:4px 10px;font-size:11px;color:var(--text-tertiary)}
+.aw .todo .ti.done{color:var(--slate-500);text-decoration:line-through;text-decoration-color:var(--navy-500)}
+.aw .todo .ti.now{color:var(--text-secondary);font-weight:600}
+.aw .ck{width:11px;height:11px;border-radius:50%;border:1.5px solid var(--navy-500);flex:none}
+.aw .ck.done{border-color:var(--green-500);background:var(--green-500)}
+.aw .ck.now{border-color:var(--cyan-400);box-shadow:inset 0 0 0 2px var(--surface-app),0 0 0 1px var(--cyan-400)}
+
+/* composer */
+.aw .comp{flex:none;padding:0 14px 11px}
+.aw .box{border:1px solid var(--blue-500);border-radius:8px;padding:8px 11px;display:flex;align-items:center;
+  background:var(--surface-app);color:var(--slate-500);font-size:11.5px}
+.aw .send{margin-left:auto;width:20px;height:20px;border-radius:5px;background:var(--fill-subtle);
+  display:flex;align-items:center;justify-content:center;color:var(--slate-400);font-size:10px}
+.aw .meta{display:flex;align-items:center;gap:7px;margin-top:8px}
+.aw .mp{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:3px 9px;
+  border-radius:6px;border:1px solid var(--navy-700);color:var(--slate-300)}
+.aw .mp.b{color:var(--blue-300)}
+.aw .mi{color:var(--slate-500);font-size:11px}
+.aw .perm{margin-top:7px;font-size:10.5px;color:var(--slate-500);display:flex;align-items:center;gap:6px}
+
+/* terminal pane */
+.aw .term{background:var(--surface-inset);border-top:1px solid var(--navy-800);font-family:var(--font-mono);
+  font-size:10px;line-height:1.75;padding:9px 13px;color:var(--slate-400);flex:none}
+.aw .term .p{color:var(--green-500)}
+.aw .term .d{color:var(--blue-300)}
+
+
+.ob{border:1px solid var(--navy-700);border-radius:11px;background:var(--surface-app);overflow:hidden;
+  box-shadow:0 24px 56px rgba(2,4,12,.62)}
+.ob .obh{padding:16px 20px 13px;border-bottom:1px solid var(--navy-800)}
+.ob .obh h4{font-size:16px;color:var(--text-primary);font-weight:700;margin:0}
+.ob .obh p{font-size:11.5px;color:var(--slate-400);margin-top:4px}
+.ob .hostrow{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid var(--navy-850);
+  font-size:12px;color:var(--slate-300)}
+.ob .hostrow.sel{background:var(--fill-subtle)}
+.ob .radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--navy-500);flex:none}
+.ob .radio.on{border-color:var(--blue-500);box-shadow:inset 0 0 0 3px var(--surface-app),0 0 0 1px var(--blue-500);
+  background:var(--blue-500)}
+.ob .hostrow .sub{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--slate-500)}
+.ob .obf{padding:13px 20px;display:flex;align-items:center;gap:10px}
+
+.code6{display:flex;gap:7px}
+.code6 span{width:34px;height:44px;border:1px solid var(--navy-700);border-radius:7px;background:var(--surface-inset);
+  display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:19px;
+  font-weight:700;color:var(--text-primary)}
+.code6 span.a{border-color:var(--blue-500);box-shadow:0 0 0 2px color-mix(in srgb,var(--blue-500) 22%,transparent)}
+
+.notif{background:var(--surface-panel);border:1px solid var(--navy-700);border-radius:12px;padding:11px 13px;
+  display:flex;gap:10px;align-items:flex-start;box-shadow:0 14px 34px rgba(2,4,12,.62)}
+.notif .ic{width:26px;height:26px;border-radius:7px;background:var(--gradient-brand);flex:none}
+.notif .t{font-size:11.5px;color:var(--text-primary);font-weight:700}
+.notif .b{font-size:11px;color:var(--text-tertiary);margin-top:1px}
+.notif .w{margin-left:auto;font-size:10px;color:var(--slate-500);flex:none}
+
+.joblist{border:1px solid var(--navy-700);border-radius:10px;overflow:hidden;background:var(--surface-sunken)}
+.joblist .jh{padding:9px 13px;border-bottom:1px solid var(--navy-800);font-size:9.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--slate-500);font-weight:700;display:flex}
+.joblist .jr{display:flex;align-items:center;gap:9px;padding:9px 13px;border-bottom:1px solid var(--navy-850);
+  font-size:11.5px}
+.joblist .jr:last-child{border-bottom:0}
+.joblist .jb{font-family:var(--font-mono);font-size:10.5px;color:var(--slate-300)}
+.joblist .jm{margin-left:auto;font-size:10.5px;color:var(--slate-500);display:flex;gap:9px;align-items:center}
+
+.chain{display:flex;flex-direction:column;gap:8px}
+.chain .arrow{text-align:center;color:var(--navy-500);font-size:12px;line-height:1}
+.chain .node{background:var(--surface-sunken);border:1px solid var(--navy-700);border-radius:10px;padding:11px 13px}
+.chain .node.hi{border-color:color-mix(in srgb,var(--cyan-400) 45%,transparent)}
+.chain .node .nt{font-size:11.5px;color:var(--text-primary);font-weight:700;display:flex;align-items:center;gap:8px}
+.chain .node .nb{font-size:10.5px;color:var(--slate-500);margin-top:3px;font-family:var(--font-mono)}
+.chain .node .tag{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-500)}
+
+.bareframe{border:1px solid var(--border-default);border-radius:12px;overflow:hidden;background:var(--surface-app);
+  margin:0}
+.bareframe .vp{overflow:hidden;position:relative}
+
+/* stage layout in the document */
+.stage{display:grid;grid-template-columns:330px 1fr;gap:30px;align-items:start;padding:34px 0;
+  border-top:1px solid var(--border-subtle)}
+.stage:first-of-type{border-top:0}
+.stage .num{font-family:var(--font-mono);font-size:13px;color:var(--cyan-400);font-weight:700}
+.stage h3{font-size:23px;color:var(--text-primary);font-weight:800;letter-spacing:-.02em;margin:6px 0 0}
+.stage .promise{font-size:15px;color:var(--text-secondary);margin-top:10px}
+.stage .proves{margin-top:16px;padding-top:14px;border-top:1px solid var(--border-subtle)}
+.stage .proves dt{font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--text-tertiary);margin-top:11px}
+.stage .proves dd{font-size:13px;color:var(--text-secondary);margin-top:3px}
+@media(max-width:1000px){.stage{grid-template-columns:1fr}}
+
+/* unified feature grid in the document */
+.featgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:24px}
+@media(max-width:1000px){.featgrid{grid-template-columns:1fr}}
+
+
+/* --- Layout 1: clustered rule grid --- */
+.fl{border-top:1px solid var(--border-subtle)}
+.flband{display:grid;grid-template-columns:13rem repeat(4,1fr);border-bottom:1px solid var(--border-subtle)}
+.fllab{padding:30px 24px 30px 0;border-right:1px solid var(--border-subtle)}
+.fllab .e{font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--slate-500)}
+.fllab .p{font-size:13px;color:var(--slate-500);margin-top:8px;line-height:1.5;opacity:.8}
+.flcell{padding:30px 26px;border-right:1px solid var(--border-subtle)}
+.flcell:last-child{border-right:0}
+.flcell .n{font-family:var(--font-mono);font-size:11px;color:var(--navy-500)}
+.flcell .t{font-size:15px;font-weight:600;color:var(--text-secondary);margin-top:11px;letter-spacing:-.01em}
+.flcell .d{font-size:13px;color:var(--slate-400);margin-top:5px;line-height:1.55}
+.flcell.acc{box-shadow:inset 2px 0 0 var(--cyan-400)}
+.flcell .chip{display:inline-block;margin-top:11px;font-family:var(--font-mono);font-size:10.5px;
+  color:var(--cyan-400);background:color-mix(in srgb,var(--cyan-400) 10%,transparent);
+  border-radius:4px;padding:3px 8px}
+
+/* --- Layout 2: clustered bento tiles --- */
+.bt{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:16px}
+.btc{border-radius:14px;background:var(--tile-fill);box-shadow:inset 0 0 0 1px var(--tile-line);
+  overflow:hidden;display:flex;flex-direction:column;min-height:184px}
+.btc .g{flex:1;padding:16px 15px 0;display:flex;align-items:center;justify-content:center;min-height:92px}
+.btc .x{padding:0 15px 16px}
+.btc .t{font-size:14.5px;font-weight:650;color:var(--text-secondary);letter-spacing:-.005em}
+.btc .d{font-size:12px;color:var(--slate-400);margin-top:4px;line-height:1.5}
+.glyph{display:flex;gap:5px;align-items:center;justify-content:center;flex-wrap:wrap}
+.gchip{font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary);background:var(--surface-inset);
+  border-radius:5px;padding:5px 9px;box-shadow:inset 0 0 0 1px var(--tile-line)}
+.gbar{height:8px;border-radius:3px;background:var(--navy-500);opacity:.45}
+
+
+/* --- hero layout --- */
+.hero-grid{display:grid;grid-template-columns:1fr 1.06fr;gap:46px;align-items:center}
+@media(max-width:900px){.hero-grid{grid-template-columns:1fr;gap:34px}}
+h1{font-size:clamp(34px,4.6vw,50px);line-height:1.05;letter-spacing:-.035em;color:var(--text-primary);font-weight:800}
+h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{font-size:18px;color:var(--slate-300);line-height:1.55;margin-top:20px}
+.sub b{color:var(--text-primary)}
+.btn-lg{height:52px;padding:0 28px;font-size:16px}
+.dl-note{margin-top:11px;font-size:13.5px;color:var(--slate-400)}
+.rail{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:44px;padding-top:28px;
+  border-top:1px solid var(--border-subtle)}
+@media(max-width:900px){.rail{grid-template-columns:1fr 1fr}}
+.rl{border-top:2px solid var(--border-default);padding-top:12px}
+.rl.on{border-top-color:var(--cyan-400)}
+.rl .rn{font-family:var(--font-mono);font-size:11px;color:var(--slate-500);font-weight:700}
+.rl.on .rn{color:var(--cyan-400)}
+.rl .rt{font-size:14.5px;color:var(--text-primary);font-weight:700;margin-top:2px}
+.rl .rd{font-size:11.5px;color:var(--slate-400);margin-top:4px;line-height:1.5}
+.trust{display:flex;gap:14px;justify-content:center;font-size:12.5px;color:var(--slate-500);
+  flex-wrap:wrap;max-width:920px;margin:30px auto 0}
+.trust b{color:var(--slate-300);font-weight:600}
+.glow{position:absolute;inset:0;background:radial-gradient(700px 300px at 50% 0,rgba(46,107,255,.28),transparent 70%);
+  pointer-events:none}
+
+/* --- stage sections --- */
+.stage-head{display:flex;align-items:baseline;gap:16px;margin-bottom:14px}
+.stage-head .sn{font-family:var(--font-mono);font-size:15px;color:var(--cyan-400);font-weight:700}
+.stage-head h2{font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary)}
+.stage-lede{color:var(--text-tertiary);font-size:16.5px;max-width:720px;margin-bottom:34px}
+
+/* download cards (section 9) — page-specific, restored from the pre-BET-903 homepage */
+.card{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:22px}
 </style>
 
 <!-- BEGIN:head-meta -->
@@ -144,6 +384,189 @@
   </div>
 </header>
 
+
+
+<section class="hero" style="padding-top:56px;padding-bottom:0">
+  <div class="glow"></div>
+  <div class="wrap" style="position:relative">
+    <div class="hero-grid">
+      <div>
+        <h1>Your agents keep working<br><span class="grad">after you close the laptop</span></h1>
+        <p class="sub">Manta is a desktop app for Claude, Codex and Kimi running in real tmux on a Linux box or Mac
+          <b>you own</b>. Start a task at your desk, approve it from your phone, come back to finished work.</p>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:28px">
+          <a class="btn btn-primary btn-lg" href="/downloads/Manta-latest.dmg">Download for macOS</a>
+          <a class="btn btn-ghost btn-lg" href="#download">Windows</a>
+        </div>
+        <p class="dl-note">Free and open source. macOS 13+ Apple Silicon, 96 MB. Version 1.0.14.</p>
+      </div>
+      <div>
+<div class="aw">
+  <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
+  <div class="body">
+    
+<div class="sb narrow">
+  <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+  
+    <div class="grp">INFRA</div>
+    
+      <div class="ses on">
+        <span class="dot run"></span><span class="nm">Deploy billing service</span>
+        <span class="tm">4m</span>
+      </div>
+      <div class="ses att">
+        <span class="dot att"></span><span class="nm">Fix red CI on main</span>
+        <span class="tm" style="color:var(--amber-500);font-weight:800">!</span>
+      </div>
+    <div class="grp">ETHERNAL</div>
+    
+      <div class="ses">
+        <span class="dot run"></span><span class="nm">Add CSV export</span>
+        <span class="tm">2m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Refactor auth middleware</span>
+        <span class="tm">14m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Investigate 500s in /orders</span>
+        <span class="tm">1h</span>
+      </div>
+    <div class="grp">MARKETING</div>
+    
+      <div class="ses">
+        <span class="dot ok"></span><span class="nm">Landing page copy</span>
+        <span class="tm">now</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Build pipeline</span>
+        <span class="tm">3h</span>
+      </div>
+  <div class="sbf">Settings</div>
+</div>
+    <div class="main">
+      
+<div class="hdr">
+  <span class="crumb">Deploy billing service</span>
+  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
+  <span class="ctx">
+    <span class="ctxbar">
+      <b style="width:44%;background:var(--blue-500)"></b>
+      <b style="width:16%;background:var(--amber-500)"></b>
+      <b style="width:22%;background:var(--cyan-400)"></b>
+    </span>
+    <span class="ctxpc">38%</span>
+    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
+  </span>
+</div>
+      <div class="tr"><div class="um">Add a <code>/export.csv</code> endpoint that streams the result set as CSV.</div><div class="tool"><span class="dot ok"></span>Read(app/routes/orders.py)</div>
+    <div class="sub">Read 23 lines</div><div class="tool"><span class="dot ok"></span>Edit(app/routes/orders.py)
+    <span class="meta"><span class="add">+38</span> <span class="del">-4</span></span></div>
+<div class="diff">
+  <div class="ln m"><span class="g">11</span><span class="s">-</span><span class="c">async def list_orders(status: str | None = None):</span></div>
+  <div class="ln p"><span class="g">11</span><span class="s">+</span><span class="c">async def list_orders(</span></div>
+  <div class="ln p"><span class="g">12</span><span class="s">+</span><span class="c">    status: str | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">13</span><span class="s">+</span><span class="c">    created_after: datetime | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">14</span><span class="s">+</span><span class="c">) -> list[dict]:</span></div>
+  <div class="ln"><span class="g">15</span><span class="s"></span><span class="c">    query = Order.query(session)</span></div>
+  <div class="ln"><span class="g">16</span><span class="s"></span><span class="c">    <span class="kw">if</span> status: query = query.filter(Order.status == status)</span></div>
+  <div class="ln p"><span class="g">17</span><span class="s">+</span><span class="c"><span class="kw">    return</span> [o.to_dict() <span class="kw">for</span> o <span class="kw">in</span> (<span class="kw">await</span> query.all())]</span></div>
+</div><div class="tool"><span class="dot run"></span>Bash(pytest tests/test_orders.py)
+    <span class="meta">running 12s</span></div>
+    <div class="sub">collected 24 items<br>tests/test_orders.py .......</div></div>
+      <div style="padding:0 14px 9px">
+<div class="card">
+  <div class="ct"><span class="badgeico" style="background:color-mix(in srgb,var(--amber-500) 16%,transparent);
+    border:1px solid color-mix(in srgb,var(--amber-500) 38%,transparent);color:var(--amber-500)">!</span>
+    Run a shell command?</div>
+  <div class="cs">alembic upgrade head</div>
+  <div class="row">
+    <span class="b pri">Allow once</span>
+    <span class="b sec">Always allow <span style="opacity:.65">alembic upgrade *</span></span>
+    <span class="b dang">Reject</span>
+  </div>
+</div></div>
+      
+<div class="comp">
+  <div class="box">Reply, or describe the next task<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
+  <div class="meta">
+    <span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span>
+    <span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M11.5 7.2 7 11.7a2.6 2.6 0 0 1-3.7-3.7l5-5a1.8 1.8 0 0 1 2.5 2.5l-5 5a.9.9 0 0 1-1.3-1.3l4.4-4.4"/></svg></span>
+    <span style="margin-left:auto;display:flex;gap:10px"><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="5.4" cy="8" r="2.6"/><path d="M8 8h6M12 8v2.2M10.2 8v1.6"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M4.5 12.4a2.6 2.6 0 1 0 0-5.2M4.5 7.2V4.6A2.2 2.2 0 0 1 6.7 2.4h2M11.5 12.4h-3"/></svg></span></span>
+  </div>
+  <div class="perm"><span>Permissions on, click to bypass</span></div>
+</div>
+      
+    </div>
+  </div>
+</div></div>
+    </div>
+    <div class="rail">
+      <div class="rl"><div class="rn">1.0</div><div class="rt">Install</div>
+        <div class="rd">Pick a machine. It sets itself up.</div></div>
+      <div class="rl"><div class="rn">2.0</div><div class="rt">Run</div>
+        <div class="rd">Chat sessions and real terminals.</div></div>
+      <div class="rl"><div class="rn">3.0</div><div class="rt">Leave</div>
+        <div class="rd">Close the lid. It carries on.</div></div>
+      <div class="rl on"><div class="rn">4.0</div><div class="rt">Automate</div>
+        <div class="rd">Work that starts without you.</div></div>
+      <div class="rl"><div class="rn">5.0</div><div class="rt">Delegate</div>
+        <div class="rd">Several agents, no collisions.</div></div>
+    </div>
+    <div class="trust">
+      <span><b>Open source</b>, MIT licensed</span>
+      <span><b>No account</b>, no telemetry</span>
+      <span><b>Your own Claude, Codex or Kimi plan</b></span>
+      <span>Sessions live on <b>your box</b></span>
+    </div>
+  </div>
+</section>
+
+<section class="sunk">
+  <div class="wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:52px;align-items:center">
+    <div>
+      <span class="eyebrow">The problem</span>
+      <h2 style="font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin-top:12px">
+        Your laptop sleeps.<br><i style="color:var(--slate-300)">Your agent shouldn't.</i></h2>
+      <p class="sub" style="font-size:16.5px">A task runs for an hour and stops five minutes in to ask permission.
+        A build goes red at three in the morning. The thing you asked for finishes at seven and you are not at your desk.</p>
+      <p class="sub" style="font-size:16.5px;margin-top:12px">The box is awake for all of it, so the agent can be
+        <b>started by an event</b> and not only by you.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="chain"><div class="node"><div class="nt">A build fails on main<span class="tag">03:14</span></div>
+        <div class="nb" style="color:var(--red-500)">nobody is awake</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node hi"><div class="nt">Your rule starts an agent<span class="tag">03:14</span></div>
+        <div class="nb">in its own branch</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node"><div class="nt">A draft pull request opens<span class="tag">03:21</span></div>
+        <div class="nb" style="color:var(--green-500)">+18 -3, tests green</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node"><div class="nt">Your phone tells you<span class="tag">07:02</span></div>
+        <div class="nb">over breakfast</div></div></div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ 9. FAQ ============ -->
 <section>
   <div class="wrap">
@@ -162,6 +585,35 @@
       <div class="q"><h3>Which agents does it work with?</h3><p>Claude Code and opencode today. Anything that runs in a terminal works in terminal mode, and the chat panel is built on opencode.</p></div>
       <div class="q"><h3>Is this an alternative to Conductor or Orca?</h3><p>It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.</p></div>
     </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrap">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:18px">
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">macOS</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">Manta-latest.dmg</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Apple Silicon, macOS 13 and up.<br>Signed and notarised.</p>
+        <a class="btn btn-primary" style="width:100%;justify-content:center;margin-top:14px" href="/downloads/Manta-latest.dmg">Download</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">Windows</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">Manta-UI-x64.exe</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Windows 10 and 11, 64-bit.<br>Standard installer.</p>
+        <a class="btn btn-primary" style="width:100%;justify-content:center;margin-top:14px" href="https://github.com/antoinedc/MantaUI/releases">Download</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">Your box</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">install.sh</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Linux or a spare Mac.<br>The app can do this for you.</p>
+        <a class="btn btn-ghost" style="width:100%;justify-content:center;margin-top:14px" href="/llms-install.md">One command</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">iPhone</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">TestFlight</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Native app. Pairs with the<br>six digits the desktop shows.</p></div>
+    </div>
+  </div>
+</section>
+<section class="band">
+  <div class="wrap">
+    <h2>Go to bed. It will be done.</h2>
+    <p>Free, open source, and it runs on hardware you already own.</p>
+    <a class="btn btn-primary btn-lg" href="/downloads/Manta-latest.dmg">Download for macOS</a>
   </div>
 </section>
 

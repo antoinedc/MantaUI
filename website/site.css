@@ -21,6 +21,8 @@
   --radius-md:8px;--radius-lg:12px;--radius-xl:16px;--radius-full:999px;
   --ease-out:cubic-bezier(0.22,1,0.36,1);
   --content-max:1120px;
+  --tile-fill:rgba(255,255,255,.035);
+  --tile-line:rgba(255,255,255,.055);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
