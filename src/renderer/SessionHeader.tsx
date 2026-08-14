@@ -988,22 +988,10 @@ function SessionMenu({
 // BET-789's [C2]: the no-PR branch now opens a popover where it previously
 // stayed a plain non-interactive Tag; a scratch dir with no forge keeps the
 // Tag unchanged (branchPanelState == "none").
-function BranchChip({
-  branch,
-  pr,
-  checksRollup,
-  mergeBusy,
-  mergeError,
-  onMerge,
-  shipBusy,
-  shipError,
-  shipBase,
-  shipFileCount,
-  onDraftPr,
-  onCreatePr,
-  onEnsureShipPreview,
-  onOpenExternal,
-}: {
+//
+// The panel props are shared by BranchChip and BranchPanel (the chip passes
+// them straight through) — one type, no parallel re-declaration.
+type BranchPanelProps = {
   branch: string;
   pr: PullRequest | null;
   checksRollup: CheckRollup;
@@ -1016,9 +1004,14 @@ function BranchChip({
   shipFileCount: number | null;
   onDraftPr?: () => void;
   onCreatePr?: () => void;
-  onEnsureShipPreview?: () => void;
   onOpenExternal?: (url: string) => void;
-}) {
+};
+
+function BranchChip({
+  onEnsureShipPreview,
+  ...panelProps
+}: BranchPanelProps & { onEnsureShipPreview?: () => void }) {
+  const { branch, pr } = panelProps;
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const label = pr
@@ -1064,21 +1057,7 @@ function BranchChip({
         hook="manta-branch-popover"
         surfaceClassName="w-[360px]"
       >
-        <BranchPanel
-          branch={branch}
-          pr={pr}
-          checksRollup={checksRollup}
-          mergeBusy={mergeBusy}
-          mergeError={mergeError}
-          onMerge={onMerge}
-          shipBusy={shipBusy}
-          shipError={shipError}
-          shipBase={shipBase}
-          shipFileCount={shipFileCount}
-          onDraftPr={onDraftPr}
-          onCreatePr={onCreatePr}
-          onOpenExternal={onOpenExternal}
-        />
+        <BranchPanel {...panelProps} />
       </Popover>
     </>
   );
@@ -1127,21 +1106,7 @@ function BranchPanel({
   onDraftPr,
   onCreatePr,
   onOpenExternal,
-}: {
-  branch: string;
-  pr: PullRequest | null;
-  checksRollup: CheckRollup;
-  mergeBusy: boolean;
-  mergeError: string | null;
-  onMerge?: () => void;
-  shipBusy: boolean;
-  shipError: string | null;
-  shipBase: string | null;
-  shipFileCount: number | null;
-  onDraftPr?: () => void;
-  onCreatePr?: () => void;
-  onOpenExternal?: (url: string) => void;
-}) {
+}: BranchPanelProps) {
   if (!pr) {
     // No pull request on this branch [F2] — the Draft PR… / Create PR offer.
     return (
