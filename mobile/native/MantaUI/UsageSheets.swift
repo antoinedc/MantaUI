@@ -84,16 +84,30 @@ struct ContextSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-            header
-            segmentedMeter
-            if cache?.isStale == true {
-                staleLine
+        // A List, not a VStack: the list supplies the card backgrounds, the
+        // insets and the platform text sizes. A fixed-height detent around a
+        // centred VStack splits the leftover height into dead space above and
+        // below the content.
+        NavigationStack {
+            List {
+                Section(footer: staleLine) {
+                    header
+                    segmentedMeter
+                }
+                Section {
+                    actionRow("Compact conversation", systemImage: "arrow.triangle.2.circlepath", onTap: onCompact)
+                    actionRow("Start a fresh session", systemImage: "plus.circle", onTap: onClear)
+                }
             }
-            actions
+            .listStyle(.insetGrouped)
+            .navigationTitle("Context")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp4)
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
     }
@@ -109,8 +123,8 @@ struct ContextSheet: View {
             }
             .foregroundColor(bandColor)
             Text("\(UsageMeters.formatTokens(context.totalInput)) of \(UsageMeters.formatTokens(limit)) · \(modelName)")
-                .font(.manta(size: Metrics.type.xs))
-                .foregroundColor(tokens.tx4)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
@@ -139,8 +153,8 @@ struct ContextSheet: View {
                 legend("cached", UsageMeters.formatTokens(context.cacheRead), color: tokens.info)
                 Spacer(minLength: 0)
             }
-            .font(.manta(size: Metrics.type.twoXS))
-            .foregroundColor(tokens.tx4)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -164,50 +178,24 @@ struct ContextSheet: View {
     }
 
     /// "Idle 1h 12m — the cache has gone cold. Clearing now saves re-billing
-    /// 584k tokens." — driven by idleMs + staleTokens.
+    /// 584k tokens." — driven by idleMs + staleTokens. The warn colour IS the
+    /// warning, so it is kept; the font is the platform's footnote.
     @ViewBuilder
     private var staleLine: some View {
         if let cache, cache.isStale {
             Text("Idle \(idleText(cache.idleMs)) — the cache has gone cold. Clearing now saves re-billing \(UsageMeters.formatTokens(cache.staleTokens)) tokens.")
-                .font(.manta(size: Metrics.type.xs))
+                .font(.footnote)
                 .foregroundColor(tokens.warn)
         }
     }
 
-    /// The two remedies: compact the conversation, or start a fresh session.
-    /// Both wire to existing session plumbing — nothing new.
-    private var actions: some View {
-        VStack(spacing: 0) {
-            actionRow("Compact conversation", systemImage: "arrow.triangle.2.circlepath", onTap: onCompact)
-            Divider()
-            actionRow("Start a fresh session", systemImage: "plus.circle", onTap: onClear)
-        }
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.lg))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.lg)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
-    }
-
+    /// A plain row in the list's action section: compact the conversation, or
+    /// start a fresh session. Both wire to existing session plumbing — nothing
+    /// new. The list styles the row and the system tints the label.
     private func actionRow(_ title: String, systemImage: String, onTap: @escaping () -> Void) -> some View {
         Button(action: { dismiss(); onTap() }) {
-            HStack(spacing: Metrics.spacing.sp2) {
-                Image(systemName: systemImage)
-                    .font(.system(size: Metrics.type.small, weight: .semibold))
-                    .foregroundColor(tokens.accentTx)
-                Text(title)
-                    .font(.manta(size: Metrics.type.small, weight: .semibold))
-                    .foregroundColor(tokens.tx1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: Metrics.type.xs))
-                    .foregroundColor(tokens.tx4)
-            }
-            .padding(.horizontal, Metrics.spacing.sp3)
-            .padding(.vertical, Metrics.spacing.sp3)
-            .contentShape(Rectangle())
+            Label(title, systemImage: systemImage)
         }
-        .buttonStyle(.plain)
     }
 
     private func idleText(_ ms: Double) -> String {
@@ -231,35 +219,32 @@ struct UsageSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-            HStack {
-                Text("Claude plan")
-                    .font(.manta(size: Metrics.type.body, weight: .bold))
-                    .foregroundColor(tokens.tx1)
-                Spacer(minLength: 0)
-                Button("Done") { dismiss() }
-                    .font(.manta(size: Metrics.type.small, weight: .semibold))
-                    .foregroundColor(tokens.accentTx)
+        // A List, not a VStack: the list supplies the card backgrounds, the
+        // insets and the platform text sizes. A fixed-height detent around a
+        // centred VStack splits the leftover height into dead space above and
+        // below the content.
+        NavigationStack {
+            List {
+                Section(footer: Text("Updated \(updatedAgo) · the dot tracks the 5-hour window.")) {
+                    if let session = UsageMeters.sessionWindow(snapshots) {
+                        UsageWindowRow(window: session, name: "Session", caption: "5-hour window", tokens: tokens)
+                    }
+                    if let weekly = UsageMeters.weeklyWindow(snapshots) {
+                        UsageWindowRow(window: weekly, name: "Weekly", caption: "7-day window", tokens: tokens)
+                    }
+                }
             }
-            .padding(.bottom, Metrics.spacing.sp1)
-            if let session = UsageMeters.sessionWindow(snapshots) {
-                UsageWindowRow(window: session, name: "Session", caption: "5-hour window", tokens: tokens)
+            .listStyle(.insetGrouped)
+            .navigationTitle("Claude plan")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
-            if let weekly = UsageMeters.weeklyWindow(snapshots) {
-                UsageWindowRow(window: weekly, name: "Weekly", caption: "7-day window", tokens: tokens)
-            }
-            footer
         }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp4)
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
-    }
-
-    private var footer: some View {
-        Text("Updated \(updatedAgo) · the dot tracks the 5-hour window.")
-            .font(.manta(size: Metrics.type.twoXS))
-            .foregroundColor(tokens.tx4)
     }
 
     /// "2m ago" from `lastFetch`; "just now" when missing or fresh.
@@ -272,7 +257,8 @@ struct UsageSheet: View {
 }
 
 /// One window row in the usage sheet: band ring, name, window-length caption,
-/// percentage, meter, and the reset countdown/date.
+/// percentage, meter, and the reset countdown/date. The list draws the row's
+/// surface, so there is no hand-rolled card here.
 private struct UsageWindowRow: View {
     let window: UsageWindow
     let name: String
@@ -286,14 +272,13 @@ private struct UsageWindowRow: View {
             HStack(spacing: Metrics.spacing.sp1) {
                 MeterRing(pct: window.pct, color: tint, diameter: 11, lineWidth: 2.5, track: tokens.borderSubtle)
                 Text(name)
-                    .font(.manta(size: Metrics.type.small, weight: .semibold))
-                    .foregroundColor(tokens.tx1)
+                    .font(.body)
                 Text(caption)
-                    .font(.manta(size: Metrics.type.twoXS))
-                    .foregroundColor(tokens.tx4)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Text("\(Int(window.pct.rounded()))%")
-                    .font(.manta(size: Metrics.type.small, weight: .bold))
+                    .font(.body.weight(.semibold))
                     .foregroundColor(tint)
             }
             Gauge(value: window.pct, in: 0...100) { EmptyView() }
@@ -302,15 +287,9 @@ private struct UsageWindowRow: View {
                 .frame(height: 5)
             if let resetsAt = window.resetsAt {
                 Text("resets \(UsageMeters.formatReset(Date(timeIntervalSince1970: resetsAt / 1000), now: Date()))")
-                    .font(.manta(size: Metrics.type.twoXS))
-                    .foregroundColor(tokens.tx4)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(Metrics.spacing.sp3)
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
     }
 }
