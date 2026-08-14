@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -1592,6 +1592,42 @@ export function isBackgroundJobCompletionTurn(msg: {
     .join("\n")
     .trimStart();
   return text.startsWith("[background job \"");
+}
+
+// Which of an ASSISTANT message's parts actually render in the transcript.
+// The single source of truth for "does this assistant row draw anything":
+// text parts must be non-synthetic, non-ignored and non-empty; the
+// `step-start` / `step-finish` markers are never drawn; `todowrite` /
+// `todo_write` tool parts are suppressed (the checklist renders once as the
+// ActiveTodos card at the tail of the transcript, not inlined per turn).
+// Everything else renders. Pure — shared by MessageRow (rendering) and
+// isRenderableMessage (list filtering).
+export function visibleAssistantParts(msg: OpencodeMessage): OpencodePart[] {
+  return msg.parts.filter((p) => {
+    if (p.type === "text") return !p.synthetic && !p.ignored && (p.text ?? "").length > 0;
+    if (p.type === "step-start" || p.type === "step-finish") return false;
+    if (p.type === "tool") {
+      const tool = String((p as Record<string, unknown>).tool ?? "");
+      if (tool === "todowrite" || tool === "todo_write") return false;
+    }
+    return true;
+  });
+}
+
+// Single source of truth for "does this transcript row render anything".
+// A row that renders nothing must not be handed to Virtuoso as a data item —
+// else it allocates a slot and measures it at zero height, poisoning its
+// item-size cache and producing `Zero-sized element` errors, scroll jitter
+// and wrong `scrollToIndex` landings (BET-874). Pure + tested.
+export function isRenderableMessage(msg: OpencodeMessage): boolean {
+  if (isBackgroundJobCompletionTurn(msg)) return false;
+  if (msg.info.role === "user") {
+    return (
+      concatUserMessageText(msg).length > 0 ||
+      msg.parts.some((p) => p.type === "file")
+    );
+  }
+  return visibleAssistantParts(msg).length > 0;
 }
 
 // ===== Sidebar redesign (BET-414) =====

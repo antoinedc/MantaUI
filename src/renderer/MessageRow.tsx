@@ -22,9 +22,11 @@ import {
   formatDuration,
   formatTokens,
   formatHiddenTodosSummary,
+  isRenderableMessage,
   selectVisibleTodos,
   summarizeTodoProgress,
   todoStatusOf,
+  visibleAssistantParts,
   type TodoStatus,
   type TruncationKind,
 } from "./chatUtils";
@@ -297,6 +299,11 @@ export const MessageRow = memo(function MessageRow({
   // the MessageRow memo chain is untouched.
   entering?: boolean;
 }) {
+  // A row that renders nothing must never be drawn — MessageRow is rendered
+  // both inside Virtuoso (whose data is pre-filtered by Transcript, so this is
+  // a no-op there) and OUTSIDE it (TaskCard renders the child transcript with
+  // a plain .map), so the guard lives here on the shared predicate.
+  if (!isRenderableMessage(msg)) return null;
   const isUser = msg.info.role === "user";
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
@@ -353,7 +360,6 @@ export const MessageRow = memo(function MessageRow({
   if (isUser) {
     const text = concatUserMessageText(msg);
     const fileParts = msg.parts.filter((p) => p.type === "file");
-    if (!text && fileParts.length === 0) return null;
     return stampedRow(
       <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
         {fileParts.length > 0 && (
@@ -408,16 +414,7 @@ export const MessageRow = memo(function MessageRow({
   // the latest checklist already renders once as the ActiveTodos card at the
   // tail of the transcript, so inlining each call too would repeat the same
   // list for every turn that touches todos.
-  const visibleParts = msg.parts.filter((p) => {
-    if (p.type === "text") return !p.synthetic && !p.ignored && (p.text ?? "").length > 0;
-    if (p.type === "step-start" || p.type === "step-finish") return false;
-    if (p.type === "tool") {
-      const tool = String((p as Record<string, unknown>).tool ?? "");
-      if (tool === "todowrite" || tool === "todo_write") return false;
-    }
-    return true;
-  });
-  if (visibleParts.length === 0) return null;
+  const visibleParts = visibleAssistantParts(msg);
 
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>

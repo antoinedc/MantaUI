@@ -214,6 +214,35 @@ describe("Transcript virtualization (react-virtuoso)", () => {
     expect(rows).toBeLessThan(many.length);
     h.unmount();
   });
+
+  it("skips a row whose only parts are todowrite (BET-874)", () => {
+    // A turn that only updated the checklist must not occupy a Virtuoso slot
+    // (a zero-height item poisons the size cache). The surrounding rows still
+    // render; the todowrite-only row renders nothing and gets no data id.
+    const todoOnly = {
+      info: {
+        id: "todo-1",
+        sessionID: "s1",
+        role: "assistant",
+        time: { created: 1_700_000_000_000 },
+      },
+      parts: [
+        { id: "todo-1-p0", messageID: "todo-1", type: "tool", tool: "todowrite" },
+      ],
+    } as unknown as OpencodeMessage;
+    const h = mount(
+      <Transcript
+        {...props([msg("u1", "user", "before"), todoOnly, msg("u2", "user", "after")])}
+      />,
+    );
+    const ids = Array.from(h.container.querySelectorAll("[data-message-id]")).map(
+      (el) => el.getAttribute("data-message-id"),
+    );
+    expect(ids).toContain("u1");
+    expect(ids).toContain("u2");
+    expect(ids).not.toContain("todo-1");
+    h.unmount();
+  });
 });
 
 describe("TranscriptList padding pass-through (BET-691)", () => {

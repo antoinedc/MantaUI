@@ -18,7 +18,7 @@
 // provider VALUE is memoized by ChatPanel (`taskContextValue`) for keystroke
 // stability, so passing it through as a prop keeps that identity intact.
 
-import { forwardRef, useEffect, useState } from "react";
+import { forwardRef, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue, presentVerbFor } from "./chatShared";
@@ -35,7 +35,7 @@ import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
 import {
   createEntryMotionState,
-  isBackgroundJobCompletionTurn,
+  isRenderableMessage,
   updateEntryMotion,
   formatDuration,
   type EntryMotionState,
@@ -394,6 +394,16 @@ export function Transcript({
     isActive,
   );
 
+  // BET-874: Virtuoso must never be handed a row that renders nothing — a
+  // zero-height item poisons its size cache (scroll jitter, wrong extents,
+  // bad scrollToIndex). Filter the list ONCE so every delivered item is one
+  // that MessageRow actually draws. `isRenderableMessage` is the single source
+  // of truth, shared with MessageRow's own guard.
+  const visibleMessages = useMemo(
+    () => messages.filter(isRenderableMessage),
+    [messages],
+  );
+
   // Load earlier (tail → full history) via Virtuoso's firstItemIndex. Prepending
   // is Virtual's anchor-preservation mechanism: lowering firstItemIndex by the
   // number of prepended rows keeps the user's scroll position without any
@@ -407,7 +417,12 @@ export function Transcript({
       .opencodeMessages(sessionId, {})
       .then((newMessages: OpencodeMessage[]) => {
         loadedAllRef.current = true;
-        const prepended = newMessages.length - messages.length;
+        // Anchor the scroll shift on VISIBLE rows: prepended rows that render
+        // nothing must not count toward the firstItemIndex shift, or the
+        // anchor is off by the number of hidden prepended rows (BET-874).
+        const prepended =
+          newMessages.filter(isRenderableMessage).length -
+          visibleMessages.length;
         // Same state-update batch (React 18 auto-batches in promise callbacks):
         // the data and the firstItemIndex shift must land together so Virtuoso
         // treats the new rows as pre-pended, not appended.
@@ -443,7 +458,7 @@ export function Transcript({
   // additionally bottom-aligns content shorter than the viewport. Fires only on
   // the 0→non-empty (or clear→repopulate) transition; refetches and load-earlier
   // prepends are handled by followOutput / firstItemIndex.
-  const hasMessages = messages.length > 0;
+  const hasMessages = visibleMessages.length > 0;
   useEffect(() => {
     if (!hasMessages) return;
     virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
@@ -515,16 +530,10 @@ export function Transcript({
               // `marginBottom` is safe (it is outside the scroller box) and is
               // the gap between the transcript and the composer.
               style={{ marginBottom: "var(--sp-2)" }}
-              data={messages}
+              data={visibleMessages}
               context={virtuosoContext}
               computeItemKey={(_, m) => m.info.id}
               itemContent={(_, m) => {
-                // BET-418 §C: a background job's completion report is injected
-                // as a fake user turn whose first line is the machine marker
-                // `[background job "<name>" <status>]`. The model still sees it,
-                // but the user must not — skip rendering the row entirely so it
-                // never appears as a right-aligned user bubble.
-                if (isBackgroundJobCompletionTurn(m)) return null;
                 // cmdInfo comes from `userCommandInfo` (memoized at panel
                 // scope on [messages, commandByMessageId, commands]).
                 // O(1) Map lookup here means MessageRow can be React.memo'd
