@@ -11,18 +11,38 @@ import SwiftUI
 // no action).
 // ===========================================================================
 
-/// The bare band-coloured ring used by the composer dot, the usage-sheet rows
-/// and the weekly banner. 13pt / 2.5pt stroke by default; colour only — no
-/// percentage, no label, ever.
+/// The partially-filled band-coloured ring used by the composer dot, the
+/// usage-sheet rows and the weekly banner. 13pt / 2.5pt stroke by default;
+/// the filled fraction matches the meter's percentage drawn over a muted
+/// track. Colour + fraction only — no number, no label, ever.
 struct MeterRing: View {
+    /// 0-100. Clamped: a provider can report over 100.
+    let pct: Double
     let color: Color
     var diameter: CGFloat = 13
     var lineWidth: CGFloat = 2.5
+    /// The muted full-circle track drawn underneath the filled fraction.
+    let track: Color
 
     var body: some View {
-        Circle()
-            .stroke(color, lineWidth: lineWidth)
+        let clamped = Self.clamp(pct)
+        // At/over 100 the fraction would be a full ring identical to 99% —
+        // so it becomes a solid disc instead. That state must be unmistakable.
+        if Self.isFull(clamped) {
+            Circle()
+                .fill(color)
+                .frame(width: diameter, height: diameter)
+        } else {
+            ZStack {
+                Circle()
+                    .stroke(track, lineWidth: lineWidth)
+                Circle()
+                    .trim(from: 0, to: clamped / 100)
+                    .stroke(color, lineWidth: lineWidth)
+                    .rotationEffect(.degrees(-90))
+            }
             .frame(width: diameter, height: diameter)
+        }
     }
 
     static func tint(_ band: MeterBand, _ tokens: Tokens) -> Color {
@@ -31,6 +51,17 @@ struct MeterRing: View {
         case .warn: return tokens.warn
         case .danger: return tokens.danger
         }
+    }
+
+    /// Clamp a 0-100 percentage (providers can report over 100).
+    static func clamp(_ pct: Double) -> Double {
+        min(max(pct, 0), 100)
+    }
+
+    /// Whether the (already-clamped) percentage is at/over 100 — the
+    /// solid-disc state. Pure so the ≥100 boundary is unit-testable.
+    static func isFull(_ pct: Double) -> Bool {
+        pct >= 100
     }
 }
 
@@ -253,7 +284,7 @@ private struct UsageWindowRow: View {
         let tint = MeterRing.tint(band, tokens)
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             HStack(spacing: Metrics.spacing.sp1) {
-                MeterRing(color: tint, diameter: 11, lineWidth: 2.5)
+                MeterRing(pct: window.pct, color: tint, diameter: 11, lineWidth: 2.5, track: tokens.borderSubtle)
                 Text(name)
                     .font(.manta(size: Metrics.type.small, weight: .semibold))
                     .foregroundColor(tokens.tx1)

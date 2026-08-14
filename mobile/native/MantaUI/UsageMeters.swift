@@ -11,38 +11,25 @@ import Foundation
 // This file holds ONLY the decisions (band, which window, banner gate, reset
 // format) so they are unit-testable with plain values and
 // no SwiftUI hierarchy, mirroring `BranchFreshnessPolicy` in ChatScreen.swift.
-// The three non-numeric states matter here:
-//   .known   — a definitive percentage
-//   .unknown — the upstream value is nil early in a session and again after a
-//              compaction. Renders as a hollow ring / hidden strip; never a
-//              confident 0%.
-//   .absent  — no usage object at all (not a subscriber, or pre-first-
-//              response). Hides the dot entirely.
+// Missing values are expressed with Swift optionals rather than a bespoke
+// enum: a nil session window hides the dot; a nil context percentage hides
+// the context strip. A missing value renders nothing — never a confident 0%.
 // ===========================================================================
 
 /// The severity band of a meter reading, from a percentage at the 70/90
-/// breakpoints. `unknown`/`absent` never band to `ok` — a missing value is
-/// not a confident green.
+/// breakpoints. A gate must never band a missing value — see `band` below.
 enum MeterBand: Equatable {
     case ok
     case warn
     case danger
 }
 
-/// A meter's non-numeric source of truth.
-enum MeterReading: Equatable {
-    case known(pct: Double)
-    case unknown
-    case absent
-}
-
 /// Pure decisions behind the two meters.
 enum UsageMeters {
 
     /// Band a 0-100 percentage at Anthropic's published breakpoints: < 70
-    /// green, 70–89 amber, ≥ 90 red. Callers pass an already-`known` value;
-    /// a gate must never feed `.unknown`/`.absent` here (they would read as
-    /// `ok` and lie).
+    /// green, 70–89 amber, ≥ 90 red. Callers pass only a real percentage; a
+    /// missing value must render nothing upstream, never a confident `ok`.
     static func band(_ pct: Double) -> MeterBand {
         if pct >= 90 { return .danger }
         if pct >= 70 { return .warn }
@@ -50,7 +37,7 @@ enum UsageMeters {
     }
 
     /// The 5-hour session window across all snapshots, or nil. `nil` is the
-    /// signal that hides the usage dot (`.absent`) — e.g. a snapshot set
+    /// signal that hides the usage dot — e.g. a snapshot set
     /// holding only a weekly window.
     static func sessionWindow(_ snapshots: [UsageSnapshot]) -> UsageWindow? {
         first(whereKind: "session", in: snapshots)

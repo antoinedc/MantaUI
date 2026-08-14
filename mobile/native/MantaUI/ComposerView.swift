@@ -304,22 +304,24 @@ struct ComposerView: View {
 
     // MARK: - Plan-usage dot (BET-824)
 
-    /// The bare band-coloured ring beside the model name. Colour only — no
-    /// number, no label, ever. It tracks the 5-hour `session` window, always
-    /// (a dot that silently switched windows would force a tap to know what
-    /// the colour meant). Absent when there is no session window (`.absent`);
-    /// a hollow muted ring when the value is unknown.
+    /// The band-coloured ring beside the model name, filled clockwise from
+    /// 12 o'clock to the session window's percentage (a solid disc at/over
+    /// 100). Colour + fraction only — no number, no label, ever. It tracks
+    /// the 5-hour `session` window, always (a dot that silently switched
+    /// windows would force a tap to know what the colour meant). Hidden when
+    /// there is no session window.
     @ViewBuilder
     private var usageDot: some View {
-        switch meterReading {
-        case .absent:
-            EmptyView()
-        case .known, .unknown:
+        if let window = UsageMeters.sessionWindow(usageStore.snapshots) {
             Button { onShowUsage?() } label: {
-                MeterRing(color: dotColor, diameter: 13, lineWidth: 2.5)
+                MeterRing(pct: window.pct,
+                          color: MeterRing.tint(UsageMeters.band(window.pct), tokens),
+                          diameter: 13,
+                          lineWidth: 2.5,
+                          track: tokens.borderSubtle)
             }
             .buttonStyle(.plain)
-            // 44pt tap target around the 13pt ring — colour-only costs no
+            // 44pt tap target around the 13pt ring — colour+fill costs no
             // width and survives accessibility type sizes.
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
@@ -327,22 +329,6 @@ struct ComposerView: View {
             .accessibilityIdentifier("usage-dot")
         }
     }
-
-    /// The dot's severity: the band of the session window when known, a muted
-    /// hollow ring when unknown. Never a confident green for "don't know".
-    private var meterReading: MeterReading {
-        guard let session = UsageMeters.sessionWindow(usageStore.snapshots) else { return .absent }
-        return .known(pct: session.pct)
-    }
-
-    private var dotColor: Color {
-        switch meterReading {
-        case .known(let pct): return MeterRing.tint(UsageMeters.band(pct), tokens)
-        case .unknown, .absent: return tokens.tx4
-        }
-    }
-
-
 
     /// Accent while a background refetch is in flight, and never while a turn
     /// runs — the two states must not share an indicator (BET-630 D1).
