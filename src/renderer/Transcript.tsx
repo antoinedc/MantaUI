@@ -18,7 +18,7 @@
 // provider VALUE is memoized by ChatPanel (`taskContextValue`) for keystroke
 // stability, so passing it through as a prop keeps that identity intact.
 
-import { forwardRef, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue, presentVerbFor } from "./chatShared";
@@ -38,6 +38,8 @@ import {
   isRenderableMessage,
   updateEntryMotion,
   formatDuration,
+  scrollElementToTail,
+  classifyFollowOnScroll,
   type EntryMotionState,
   type LiveTurn,
   workingIndicatorLabel,
@@ -344,7 +346,14 @@ export type TranscriptProps = {
   onRetryVoiceNote: (noteId: string) => void;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
-  onAtBottomChange: (atBottom: boolean) => void;
+  // The Virtuoso scroll container, published upward so ChatPanel's
+  // scrollToTail can address the real bottom (Footer included).
+  scrollerElRef: React.MutableRefObject<HTMLElement | null>;
+  // Whether the transcript is following the tail. Read (never written) by the
+  // growth handler; ChatPanel owns it. See setFollowing there.
+  followingRef: React.MutableRefObject<boolean>;
+  // Called with the new follow state when a scroll event decides one.
+  onFollowingChange: (following: boolean) => void;
   // The shared entry-motion state (owned by ChatPanel, registered to here and
   // to useTranscriptState's reconcile path). Using the parent's ref keeps the
   // reconcile registration and the render fold on the SAME state object.
@@ -374,7 +383,9 @@ export function Transcript({
   onRetryVoiceNote,
   onReplyQuestion,
   onRejectQuestion,
-  onAtBottomChange,
+  scrollerElRef,
+  followingRef,
+  onFollowingChange,
   motionStateRef,
 }: TranscriptProps) {
   // Entry motion (transcript-motion). A message that arrives while the user is
@@ -464,6 +475,33 @@ export function Transcript({
     virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasMessages]);
+
+  // The transcript's ONLY auto-follow. `totalListHeightChanged` fires whenever
+  // the scrollable content changes height for ANY reason — a new message row,
+  // a tool card growing as its output streams, the Footer's working indicator
+  // animating open (Virtuoso's totalListHeight sums header + footer + list, so
+  // one signal covers all of it). This replaces `followOutput`, which fired
+  // only on item-COUNT changes and therefore missed every one of those.
+  const stickToTail = useCallback(() => {
+    if (!followingRef.current) return;
+    scrollElementToTail(scrollerElRef.current);
+  }, [followingRef, scrollerElRef]);
+
+  // The user's intent, and the only thing that can stop the follow. Content
+  // growth fires no scroll event, so it cannot reach this listener — which is
+  // exactly why the transcript can no longer detach on its own.
+  useEffect(() => {
+    const el = scrollerElRef.current;
+    if (!el) return;
+    let prevScrollTop = el.scrollTop;
+    const onScroll = () => {
+      const next = classifyFollowOnScroll(el, prevScrollTop);
+      prevScrollTop = el.scrollTop;
+      if (next !== null) onFollowingChange(next);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [hasMessages, onFollowingChange, scrollerElRef]);
 
   return (
     // Wrap in reducedMotion="user" so framer-motion disables every chat entry
@@ -560,9 +598,10 @@ export function Transcript({
                   />
                 );
               }}
-              followOutput={(isAtBottom) => (isAtBottom ? "smooth" : false)}
-              atBottomStateChange={onAtBottomChange}
-              atBottomThreshold={8}
+              scrollerRef={(el) => {
+                scrollerElRef.current = el as HTMLElement | null;
+              }}
+              totalListHeightChanged={stickToTail}
               firstItemIndex={firstItemIndex}
               alignToBottom
               increaseViewportBy={{ top: 600, bottom: 200 }}

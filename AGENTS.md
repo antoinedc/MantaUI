@@ -1227,65 +1227,33 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   event in `attachCustomKeyEventHandler`, call `preventDefault()` to kill
   the textarea side, and manually `ptyWrite("\x1b\r")` — the same sequence
   iTerm2's `/terminal-setup` sends. Don't drop the `preventDefault()`.
-- **Chat transcript pin-to-bottom — pre-commit pin state derived from the
-  live DOM in a layout effect, not from event-cached state (v4).** Four
-  designs in this saga, each fixing the previous one's bug:
+- **Chat transcript pin-to-bottom — one explicit "following" state, not
+  derived from the live scroll position (BET-933).** BET-679 moved the
+  transcript to react-virtuoso; the v1–v4 hand-rolled machinery
+  (`pinnedToBottom`, `prevScrollHeight`, `wasAtBottomBeforeCommit`,
+  `classifyScrollForPin`) is gone. This issue removed Virtuoso's
+  `followOutput` / `atBottomStateChange` / `atBottomThreshold` because
+  `followOutput` reacts only to item-COUNT changes and therefore missed
+  every height change (tool cards as their output streams, streaming text,
+  the Footer's working indicator), silently detaching the transcript
+  mid-turn with no user input — and staying detached for the rest of the
+  turn.
 
-  - v1 (pre-631b03e): 80px symmetric threshold. 30px scroll-up left
-    pin=true, next delta snapped.
-  - v2 (631b03e): 8px re-pin + wheel/touch/key intent un-pin. Missed
-    scrollbar-handle drag (no wheel/touch/key event) and got snapped on
-    every `session.status` busy/idle oscillation by a `running` edge
-    effect.
-  - v3 (f1b7341): single 8px symmetric threshold + one `scroll` listener.
-    Right idea, wrong substrate — `scroll` events are async (rAF-batched),
-    but `setMessages` → render → effect is sync in the same task. So mid-
-    streaming wheel-up was eaten: the delta's effect read the STALE
-    pin=true (last scroll event), snapped to bottom, THEN the queued
-    scroll event for the wheel-up dispatched against the post-snap
-    position and re-affirmed pin=true. User's scroll silently erased.
-  - v4 (current): the post-commit stick decision reads the live DOM in a
-    `useLayoutEffect` (synchronous post-commit, pre-paint) and computes
-    pre-commit distance from a tracked `prevScrollHeight` ref:
+  The replacement is one explicit follow state owned by ChatPanel
+  (`followingRef` + its render mirror), turned OFF only by a scroll gesture
+  that moves UP (`classifyFollowOnScroll`, threshold in
+  `FOLLOW_THRESHOLD_PX`), and one auto-follow trigger
+  (`totalListHeightChanged` → `scrollElementToTail`). Content growth fires
+  no scroll event, so it can never flip the state.
 
-      prevDist = max(0, prevScrollHeight - scrollTop - clientHeight)
+  **State the invariant plainly, because five generations of this code have
+  now got it wrong: never derive "should we follow" from "is the scroller
+  at the bottom". Content growing under the user changes the latter and
+  must not change the former.**
 
-    `scrollTop` is preserved by the browser when content is appended, so
-    this is the user's true pre-commit position. No event timing. No
-    stale ref. The pure helper is `wasAtBottomBeforeCommit()` in
-    `chatUtils.ts` (tested with explicit v3-regression cases).
-
-  The `scroll` listener still updates `pinnedToBottom.current` via
-  `classifyScrollForPin()` as a back-channel for callers OUTSIDE the
-  messages commit (the RunningIndicator `atBottom` prop, the isActive
-  re-pin effect). `resizeInput` does NOT use the cached boolean — it
-  reads the live DOM via `classifyScrollForPin` for the same staleness
-  reason. **Do NOT re-introduce a messages-effect that reads
-  `pinnedToBottom.current` instead of `wasAtBottomBeforeCommit`** — that
-  is the v3 regression.
-
-  Trade-off baked in: scrolls of < 8px (single-pixel jiggles) stay pinned
-  and get snapped on the next delta. Intentional — most wheel detents are
-  40-100px, a sub-8px scroll is almost certainly accidental, and
-  re-engaging follow by scrolling to the bottom is trivial.
-
-  **Force-pin paths are limited and explicit**: `submit()` sets
-  `pinnedToBottom.current = true` AND resets `prevScrollHeight.current =
-  0` just before its optimistic `setMessages`. The reset matters —
-  `wasAtBottomBeforeCommit` returns true unconditionally when
-  `prevScrollHeight=0` (first-commit branch), which forces the stick even
-  if the user had scrolled into history before submitting. That's it.
-  Queue drains route through the same `submit()` path so they inherit
-  this force-pin for free. The old `running` false→true edge effect is
-  gone — it fired on every busy/idle oscillation and yanked the viewport
-  mid-turn. **Do NOT reintroduce a `running`-derived force-pin.**
-
-  Also gone: asymmetric hysteresis with a dead-zone (re-introduces v1's
-  bug — the dead zone PRESERVES prior state); wheel/touch/key intent
-  listeners (load-bearing only for v2's missing un-pin path; v4 doesn't
-  need them); the v3 `[messages, liveTodos]` regular effect that read
-  `pinnedToBottom.current` (replaced by the `useLayoutEffect` that reads
-  `wasAtBottomBeforeCommit`).
+  Note the tail scroll is `scrollTop = scrollHeight`, not
+  `scrollToIndex({ index: "LAST" })`, because the Footer renders below the
+  last item.
 
 ## New-project dialog (`Sidebar.tsx`)
 

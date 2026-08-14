@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
-import { Clock, X } from "lucide-react";
+import { ArrowDown, Clock, X } from "lucide-react";
 import type {
   AvailableLauncher,
   CheckRollup,
@@ -53,6 +53,7 @@ import {
   type StaleCacheResult,
   type PendingScrollWin,
   isApprovalCoveredByAlways,
+  scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
   parseModelRef,
@@ -346,7 +347,26 @@ export function ChatPanel({
   // and the deep-link jumps — plus a live at-bottom flag (the replacement for
   // the deleted `pinnedToBottom` ref) fed by Virtuoso's atBottomStateChange.
   const virtuosoRef = useRef<VirtuosoHandle>(null);
-  const atBottomRef = useRef(true);
+  // Whether the transcript is following the tail. The REF is the source of
+  // truth (imperative readers — resizeInput, the re-activation effect, the
+  // growth handler in Transcript — must not wait for a render); the state is
+  // its render mirror, needed only so the jump-to-latest button can appear.
+  // The equality guard is load-bearing: a scroll fires this on every event and
+  // an unguarded setState would re-render the panel on every scroll frame.
+  //
+  // This deliberately does NOT track "is the scroller at the bottom". Content
+  // growing under the user must not detach them — see the header comment on
+  // classifyFollowOnScroll.
+  const followingRef = useRef(true);
+  const [following, setFollowingState] = useState(true);
+  const setFollowing = useCallback((v: boolean) => {
+    if (followingRef.current === v) return;
+    followingRef.current = v;
+    setFollowingState(v);
+  }, []);
+  // The Virtuoso scroll container, captured by Transcript via Virtuoso's
+  // `scrollerRef` prop. Same ownership pattern as loadedAllRef / motionStateRef.
+  const scrollerElRef = useRef<HTMLElement | null>(null);
   // Set by submit(), consumed by the force-tail effect below. Submit cannot
   // scroll inline: the optimistic row it just queued is not committed yet, so
   // `index: "LAST"` would resolve to the PREVIOUS last message.
@@ -356,19 +376,16 @@ export function ChatPanel({
   // cancelled before starting a new one, and cleared in the session-change
   // cleanup so a wait can't fire against a transcript the user has left.
   const messageFlashCancelRef = useRef<(() => void) | null>(null);
-  const onAtBottomChange = useCallback((atBottom: boolean) => {
-    atBottomRef.current = atBottom;
-  }, []);
   // The ONE way this panel scrolls the transcript to its tail. Every caller
   // goes through here: submit's force-pin, the question-card reveal, the
-  // composer-resize rescue and the re-activation re-pin. `atBottomRef` is set
-  // eagerly rather than waiting for Virtuoso's async atBottomStateChange, so
-  // the followOutput gate and resizeInput's rescue agree with the scroll we
-  // just asked for.
-  const scrollToTail = useCallback((behavior: "auto" | "smooth" = "auto") => {
-    atBottomRef.current = true;
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior });
-  }, []);
+  // composer-resize rescue, the re-activation re-pin and the jump-to-latest
+  // button. The follow state is set eagerly here rather than waiting for any
+  // async signal, so the growth handler and the rescues agree with the scroll
+  // we just asked for.
+  const scrollToTail = useCallback(() => {
+    setFollowing(true);
+    scrollElementToTail(scrollerElRef.current);
+  }, [setFollowing]);
   // Mirror of `messages` for event listeners (deep-link jumps) that need the
   // current list without re-registering on every message update.
   const messagesRef = useRef(messages);
@@ -751,7 +768,7 @@ export function ChatPanel({
         if (questions.length > 0) {
           // The question cards live in the transcript's footer; scroll the last
           // row into view so the footer (with the cards) is revealed.
-          scrollToTail("smooth");
+          scrollToTail();
           wantQuestionScroll.current = false;
         }
       }
@@ -856,23 +873,22 @@ export function ChatPanel({
   // start: questions arrive via the async fetch after this panel mounts).
   useEffect(() => {
     if (wantQuestionScroll.current && questions.length > 0) {
-      scrollToTail("smooth");
+      scrollToTail();
       wantQuestionScroll.current = false;
     }
   }, [questions, scrollToTail]);
 
-  // Textarea auto-resize up to a 6-line cap. After resizing, if the scroll
-  // container is at the bottom we re-scroll so the input growing pushes the
-  // chat content up rather than sliding over it. Follows Virtuoso's live
-  // at-bottom flag (fed by atBottomStateChange) — the replacement for the
-  // deleted pin refs.
+  // Textarea auto-resize up to a 6-line cap. After resizing, if the transcript
+  // is following the tail we re-scroll so the input growing pushes the chat
+  // content up rather than sliding over it. Follows the panel's follow state
+  // — the replacement for the deleted pin refs.
   const resizeInput = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
     const cap = 6 * 20;
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
-    if (atBottomRef.current) {
+    if (followingRef.current) {
       scrollToTail();
     }
   }, [scrollToTail]);
@@ -914,14 +930,14 @@ export function ChatPanel({
   // GOTCHA (inherited from the pin machinery): while App.tsx hides an inactive
   // panel with `display:none`, the scroller has no layout. New messages keep
   // accumulating while hidden, and on re-activation the user should be back at
-  // the tail if they were there when the panel was deactivated. `atBottomRef`
-  // retains its last value across the hidden window (hidden panels fire no
-  // at-bottom change), so gating on it reproduces the old "was at bottom when
-  // deactivated" rule. Virtuoso owns the scroll position now, so a single
-  // scrollToIndex on reactivation is all that's needed.
+  // the tail if they were there when the panel was deactivated. The panel's
+  // follow state retains its last value across the hidden window (hidden
+  // panels fire no scroll events), so gating on it reproduces the old "was at
+  // bottom when deactivated" rule; a single tail scroll on reactivation is
+  // all that's needed.
   useEffect(() => {
     if (!isActive) return;
-    if (!atBottomRef.current) return;
+    if (!followingRef.current) return;
     scrollToTail();
   }, [isActive, scrollToTail]);
 
@@ -2525,37 +2541,56 @@ export function ChatPanel({
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
-      <VoicePlaybackProvider active={isActive}>
-        <Transcript
-          messages={messages}
-          virtuosoRef={virtuosoRef}
-          sessionId={sessionId}
-          setMessages={setMessages}
-          loadedAllRef={loadedAllRef}
-          taskContextValue={taskContextValue}
-          showThinking={showThinking}
-          running={running}
-          liveTurn={liveTurn}
-          progress={liveProgress}
-          isActive={isActive}
-          activeTodos={activeTodos}
-          onDismissTodos={dismissTodos}
-          // BET-418 §D: a job session is read-only — never show its (anyway
-          // impossible) question cards. Defensive: a job's pre-flight ruleset
-          // means it never generates asks.
-          questions={jobOwnership ? [] : questions}
-          turnInfo={turnInfo}
-          finishByMessageId={finishByMessageId}
-          userCommandInfo={userCommandInfo}
-          voiceNoteByMessageId={voiceNoteByMessageId}
-          pendingVoiceNote={pendingVoiceNote}
-          onRetryVoiceNote={retryVoiceNote}
-          onReplyQuestion={replyQuestion}
-          onRejectQuestion={rejectQuestion}
-          onAtBottomChange={onAtBottomChange}
-          motionStateRef={motionStateRef}
-        />
-      </VoicePlaybackProvider>
+      {/* The transcript region owns its own positioning context so the
+          jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above
+          the card stack and the composer, both of which change height. */}
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <VoicePlaybackProvider active={isActive}>
+          <Transcript
+            messages={messages}
+            virtuosoRef={virtuosoRef}
+            sessionId={sessionId}
+            setMessages={setMessages}
+            loadedAllRef={loadedAllRef}
+            taskContextValue={taskContextValue}
+            showThinking={showThinking}
+            running={running}
+            liveTurn={liveTurn}
+            progress={liveProgress}
+            isActive={isActive}
+            activeTodos={activeTodos}
+            onDismissTodos={dismissTodos}
+            // BET-418 §D: a job session is read-only — never show its (anyway
+            // impossible) question cards. Defensive: a job's pre-flight ruleset
+            // means it never generates asks.
+            questions={jobOwnership ? [] : questions}
+            turnInfo={turnInfo}
+            finishByMessageId={finishByMessageId}
+            userCommandInfo={userCommandInfo}
+            voiceNoteByMessageId={voiceNoteByMessageId}
+            pendingVoiceNote={pendingVoiceNote}
+            onRetryVoiceNote={retryVoiceNote}
+            onReplyQuestion={replyQuestion}
+            onRejectQuestion={rejectQuestion}
+            scrollerElRef={scrollerElRef}
+            followingRef={followingRef}
+            onFollowingChange={setFollowing}
+            motionStateRef={motionStateRef}
+          />
+        </VoicePlaybackProvider>
+        <button
+          type="button"
+          className="manta-jump-latest"
+          data-shown={!following}
+          aria-hidden={following}
+          tabIndex={following ? -1 : 0}
+          aria-label="Jump to latest"
+          title="Jump to latest"
+          onClick={scrollToTail}
+        >
+          <ArrowDown size={16} aria-hidden />
+        </button>
+      </div>
 
       {/* Pinned card stack above the composer (BET-783): blocking always
           above ambient, at most one blocking expanded, at most two ambient
