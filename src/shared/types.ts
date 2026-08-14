@@ -628,14 +628,17 @@ export type ForgeMergeResult =
 
 // A box-buffered draft review comment. The anchor is forge-neutral — the same
 // `{ path, line, side }` the review pane's diff gutter uses, plus `startLine`
-// for a multi-line highlight. `side` is the renderer's "new"|"old"; the adapter
-// maps it onto the forge's word ("RIGHT"/"LEFT" on GitHub). `body` is the typed
+// for a multi-line highlight. `side` is the renderer's "new"|"old"|"both":
+// adapted → new, removed → old, unchanged context line → both (the renderer's
+// gutter emits "both" for a line present in both versions, so GitLab can
+// position it with both `new_line` and `old_line` — BET-856). The adapter maps
+// it onto the forge's word ("RIGHT"/"LEFT" on GitHub). `body` is the typed
 // comment text. The old GitHub `position` field is deliberately never used.
 export type ForgeDraftComment = {
   id: string;
   path: string;
   line: number;
-  side: "new" | "old";
+  side: "new" | "old" | "both";
   startLine?: number | null;
   body: string;
 };
@@ -674,7 +677,7 @@ export type ForgeDraftCommentInput = {
     id?: string;
     path?: string;
     line?: number;
-    side?: "new" | "old";
+    side?: "new" | "old" | "both";
     startLine?: number | null;
     body?: string;
   };

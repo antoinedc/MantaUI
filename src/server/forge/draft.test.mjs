@@ -83,6 +83,19 @@ test("normalizeAnchor rejects an invalid or missing anchor", () => {
   assert.equal(normalizeAnchor(null), null);
 });
 
+test("normalizeAnchor accepts and preserves the 'both' (unchanged line) side (BET-856)", async () => {
+  assert.deepEqual(normalizeAnchor({ path: "a", line: 3, side: "both" }), { path: "a", line: 3, side: "both" });
+  assert.deepEqual(normalizeAnchor({ path: "a", line: 3, side: "both", startLine: 1 }), {
+    path: "a", line: 3, side: "both", startLine: 1,
+  });
+  // A draft comment anchored on an unchanged line is stored with its side intact —
+  // never coerced to "new", which would misplace it as a pure addition on GitLab.
+  const m = memStore();
+  const r = await putComment(REPO, 1, "sha", { path: "a.ts", line: 7, side: "both", body: "unchanged line" }, m);
+  assert.equal(r.ok, true);
+  assert.equal(r.draft.comments[0].side, "both");
+});
+
 test("two drafts for different PRs do not collide", async () => {
   const m = memStore();
   await putComment(REPO, 1, "sha", { path: "a.ts", line: 1, side: "new", body: "one" }, m);

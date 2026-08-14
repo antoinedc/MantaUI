@@ -41,12 +41,17 @@ const STORE_PATH = statePath("forge-drafts.json");
 // verdict yet). No second enum is defined anywhere (issue §Hygiene).
 const VERDICTS = new Set(["approved", "changes_requested", "commented"]);
 
-// A forge-neutral review-comment anchor. `side` is the renderer's "new"|"old"
-// (the adapter maps it onto the forge's word — GitHub "RIGHT"/"LEFT"). `line`
-// is required; `startLine` is the multi-line highlight start (optional). The
-// old GitHub `position` field (offset from the hunk header) is retired — never
-// built on.
-const SIDES = new Set(["new", "old"]);
+// A forge-neutral review-comment anchor. `side` is the renderer's
+// "new"|"old"|"both" (the adapter maps it onto the forge's word — GitHub
+// "RIGHT"/"LEFT"; GitLab's position uses `new_line`/`old_line`/both).
+// `"both"` is an UNCHANGED line (present in both versions): GitLab positions
+// it with BOTH `new_line` and `old_line`, so a draft anchored `"both"` must be
+// able to say so rather than being coerced to `"new"` (which would misplace it
+// as a pure addition). Adapted lines → `"new"`, removed → `"old"`, unchanged
+// context lines → `"both"` (BET-856). `line` is required; `startLine` is the
+// multi-line highlight start (optional). The old GitHub `position` field
+// (offset from the hunk header) is retired — never built on.
+const SIDES = new Set(["new", "old", "both"]);
 
 export async function loadDrafts(path = STORE_PATH) {
   const parsed = readJsonSync(path, {});

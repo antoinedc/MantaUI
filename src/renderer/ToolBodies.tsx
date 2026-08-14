@@ -433,7 +433,10 @@ export function UnifiedDiff({
       sign = " ";
       body = line.slice(1);
       ln = newLine;
-      anchor = { path, line: newLine, side: "new" };
+      // An unchanged context line exists in BOTH versions — GitLab positions it
+      // with both `new_line` and `old_line`, so the anchor is "both" (BET-856),
+      // not "new" (which would misplace it as a pure addition on GitLab).
+      anchor = { path, line: newLine, side: "both" };
       newLine++;
       oldLine++;
     }
