@@ -112,8 +112,7 @@ import {
   progressAttentionKind,
   concatUserMessageText,
   buildVoiceNoteMap,
-  linkedPrNumber,
-  preferLinkedPr,
+  branchPanelState,
   dispatchAppControl,
   sortInbox,
   inboxReasonLabel,
@@ -2173,7 +2172,7 @@ describe("isBackgroundJobCompletionTurn", () => {
 
 // ===== BET-414 sidebar helpers =====
 
-import type { Project, PermissionRequest, SessionLink } from "../shared/types";
+import type { Project, PermissionRequest } from "../shared/types";
 
 function mkProject(
   tmuxSession: string,
@@ -4234,39 +4233,12 @@ describe("cloneErrorKind", () => {
   });
 });
 
-describe("linkedPrNumber (BET-852)", () => {
-  const cfg = (link?: SessionLink | null) => ({
-    projects: [{ tmuxSession: "ethernal", defaultCwd: "/p", link }],
-  });
-
-  it("returns the stored PR number when the session has a link.pr slot", () => {
-    expect(linkedPrNumber(cfg({ pr: { repoKey: "x/y", number: 412 } }), "ethernal")).toBe(412);
-  });
-
-  it("returns null when there is no link or no pr slot", () => {
-    expect(linkedPrNumber(cfg({ issue: { repoKey: "x/y", number: 9 } }), "ethernal")).toBe(null);
-    expect(linkedPrNumber(cfg(undefined), "ethernal")).toBe(null);
-    expect(linkedPrNumber(cfg(null), "ethernal")).toBe(null);
-    expect(linkedPrNumber(undefined, "ethernal")).toBe(null);
-    expect(linkedPrNumber(cfg({ pr: { repoKey: "x/y", number: 412 } }), null)).toBe(null);
-  });
-
-  it("only matches the session's own project (by tmuxSession)", () => {
-    expect(linkedPrNumber(cfg({ pr: { repoKey: "x/y", number: 412 } }), "marketing")).toBe(null);
-  });
-
-  it("rejects a non-positive / non-integer stored number defensively", () => {
-    const bad = { pr: { repoKey: "x/y", number: 0 } };
-    expect(linkedPrNumber(cfg(bad), "ethernal")).toBe(null);
-  });
-});
-
-describe("preferLinkedPr (BET-852)", () => {
-  const live = (number: number) => ({
-    number,
+describe("branchPanelState (BET-867)", () => {
+  const pr = {
+    number: 412,
     title: "T",
     body: "",
-    url: "https://github.com/x/y/pull/" + number,
+    url: "",
     state: "open" as const,
     draft: false,
     headRef: "h",
@@ -4277,31 +4249,23 @@ describe("preferLinkedPr (BET-852)", () => {
     mergeable: null,
     mergeBlockedReason: null,
     unresolvedThreads: 0,
+  };
+
+  it("no branch → none (plain non-interactive Tag)", () => {
+    expect(branchPanelState({ pr, forgeConnected: true, branch: null })).toBe("none");
+    expect(branchPanelState({ pr, forgeConnected: true, branch: "" })).toBe("none");
   });
 
-  it("preserves the live lookup unchanged when there is no stored link", () => {
-    const l = live(412);
-    expect(preferLinkedPr(l, null)).toBe(l);
-    expect(preferLinkedPr(null, null)).toBe(null);
+  it("branch but forge not connected → none", () => {
+    expect(branchPanelState({ pr, forgeConnected: false, branch: "feat/x" })).toBe("none");
   });
 
-  it("keeps full live details when the live PR is the stored PR", () => {
-    const l = live(412);
-    expect(preferLinkedPr(l, 412)).toBe(l);
+  it("branch + connected + no PR → no-pr", () => {
+    expect(branchPanelState({ pr: null, forgeConnected: true, branch: "feat/x" })).toBe("no-pr");
   });
 
-  it("prefers the stored link number over a differing live PR number", () => {
-    const out = preferLinkedPr(live(410), 412);
-    expect(out?.number).toBe(412);
-    expect(out?.title).toBe("T");
-  });
-
-  it("renders a minimal card from the stored number when the poll has not resolved", () => {
-    const out = preferLinkedPr(null, 412);
-    expect(out).not.toBeNull();
-    expect(out!.number).toBe(412);
-    expect(out!.url).toBe("");
-    expect(out!.reviewers).toEqual([]);
+  it("branch + connected + PR → pr", () => {
+    expect(branchPanelState({ pr, forgeConnected: true, branch: "feat/x" })).toBe("pr");
   });
 });
 

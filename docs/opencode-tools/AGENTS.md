@@ -343,7 +343,10 @@ everything it needs in the prompt: the goal, the relevant files/paths,
 constraints, and what "done" looks like. It commits to its own branch in its
 isolated worktree, and it **may open a draft pull request** for that branch —
 but it must **never merge**, never force-push, and must not touch any other
-checkout.
+checkout. (BET-867: a human clicking `Create PR` in the app is an explicit
+confirm — a *non-draft* pull request is allowed that way. The **never merge**
+prohibition is absolute and unweakened; nothing here gives an agent a path to
+create a PR, only the human-facing app is confirmed by the human's click.)
 
 **Install/update is a COPY, never a symlink.** Copy
 `docs/opencode-tools/delegate.ts` to `~/.config/opencode/tools/delegate.ts`

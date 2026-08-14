@@ -17,7 +17,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, ExternalLink } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -27,6 +27,8 @@ import {
   countsForChecks,
   shouldOfferForgeConnect,
   failuresToAgentPrompt,
+  branchPanelState,
+  canMerge,
   type ChecksChipTone,
   type ContextBreakdown,
   type StaleCacheResult,
@@ -93,6 +95,16 @@ export function SessionHeader({
   onOpenExternal,
   onFillComposer,
   onDismissForgeConnect,
+  onMerge,
+  mergeBusy,
+  mergeError,
+  shipBusy,
+  shipError,
+  shipBase,
+  shipFileCount,
+  onDraftPr,
+  onCreatePr,
+  onEnsureShipPreview,
 }: {
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
@@ -149,6 +161,22 @@ export function SessionHeader({
   onOpenExternal?: (url: string) => void;
   onFillComposer?: (text: string) => void;
   onDismissForgeConnect?: () => void;
+  // BET-867: the branch chip's popover is the ONE git surface. Merge + ship
+  // live here now (the pinned forge card is deleted), so ChatPanel threads the
+  // ship/merge state + handlers down. All optional so non-forge callers / tests
+  // stay byte-identical.
+  onMerge?: () => void;
+  mergeBusy?: boolean;
+  mergeError?: string | null;
+  shipBusy?: boolean;
+  shipError?: string | null;
+  // The ship preview's base branch + file count (fetched once when the no-PR
+  // popover opens). null while the preview is still loading → rows render "—".
+  shipBase?: string | null;
+  shipFileCount?: number | null;
+  onDraftPr?: () => void;
+  onCreatePr?: () => void;
+  onEnsureShipPreview?: () => void;
 }) {
   const { pct, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -182,6 +210,15 @@ export function SessionHeader({
     connected: forgeConnected ?? false,
     forgeKind: forgeKind ?? null,
     dismissed: forgeConnectOfferDismissed ?? false,
+  });
+
+  // BET-867: the one decision driving the branch chip — plain non-interactive
+  // Tag (no branch / no forge) vs. the interactive branch popover in its
+  // no-PR or PR state.
+  const branchState = branchPanelState({
+    pr: pr ?? null,
+    forgeConnected: forgeConnected ?? false,
+    branch,
   });
 
   // ===== Status-item registry (BET-782) =====
@@ -325,22 +362,37 @@ export function SessionHeader({
       )}
 
       {/* Branch chip — session state, at the `sm` tag density so it reads as
-            metadata beside the breadcrumb rather than as a control. When an
-            open PR rides the branch, the chip becomes interactive and opens the
-            PR popover [C7] (the PR is an ATRIBUTE of the branch, not a peer of
-            it — no second PR chip, §4.3). No PR → byte-identical to today [C2]. */}
-      {branch &&
-        (pr ? (
-          <BranchChip branch={branch} pr={pr} onOpenExternal={onOpenExternal} />
-        ) : (
-          <Tag
-            size="sm"
-            icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
-            title={`Current branch: ${branch}`}
-          >
+            metadata beside the breadcrumb rather than as a control. When the
+            forge is connected the chip opens the ONE git surface — the branch
+            popover [BET-867] — carrying either the PR (merge surface) or the
+            Draft PR / Create PR offer; a scratch dir with no forge keeps the
+            plain non-interactive Tag (byte-identical to today). */}
+      {branchState !== "none" ? (
+        <BranchChip
+          branch={branch ?? ""}
+          pr={pr ?? null}
+          checksRollup={checksRollup ?? "none"}
+          mergeBusy={mergeBusy ?? false}
+          mergeError={mergeError ?? null}
+          onMerge={onMerge}
+          shipBusy={shipBusy ?? false}
+          shipError={shipError ?? null}
+          shipBase={shipBase ?? null}
+          shipFileCount={shipFileCount ?? null}
+          onDraftPr={onDraftPr}
+          onCreatePr={onCreatePr}
+          onEnsureShipPreview={onEnsureShipPreview}
+          onOpenExternal={onOpenExternal}
+        />
+      ) : branch ? (
+        <Tag
+          size="sm"
+          icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
+          title={`Current branch: ${branch}`}
+        >
             <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
           </Tag>
-        ))}
+        ) : null}
 
       {/* Right group — the registry's visible items + the overflow trigger.
             Order preserves today's wide-width visual (context, artifacts,
@@ -925,26 +977,51 @@ function SessionMenu({
 // (BET-865) — Popover owns all of that. Each chip keeps its own trigger button
 // chrome; the portalled panel exists only while open.
 
-// ===== Branch + PR popover chip (BET-789 [C3] [C7]) =====
+// ===== Branch + PR popover chip (BET-789 [C3] [C7] → BET-867) =====
 //
-// The PR rides the branch chip — it is an attribute of the branch, not a peer
-// of it. `⎇ feat/forge-seam` becomes `⎇ feat/forge-seam · #412` and, with a PR
-// present, opens a popover carrying the PR's title, state, head→base refs,
-// reviewers, unresolved-thread count and — the payload of this feature — the
-// mergeability REASON (never "can't merge" alone, §4.3). Without a PR the
-// branch renders as the plain non-interactive Tag (byte-identical to today).
-function BranchChip({
-  branch,
-  pr,
-  onOpenExternal,
-}: {
+// The branch chip is the ONE git surface: the PR rides the branch (an
+// attribute, not a peer — no second PR chip). With the forge connected it
+// opens the branch popover in two states — the branch has a PR ([F1]: title,
+// state, refs, reviewers, threads, mergeability + Merge / Review changes /
+// open-on-forge), or it does not ([F2]: Base / Changes from the ship preview
+// + Draft PR… / Create PR). BET-867 is an owner-approved departure from
+// BET-789's [C2]: the no-PR branch now opens a popover where it previously
+// stayed a plain non-interactive Tag; a scratch dir with no forge keeps the
+// Tag unchanged (branchPanelState == "none").
+//
+// The panel props are shared by BranchChip and BranchPanel (the chip passes
+// them straight through) — one type, no parallel re-declaration.
+type BranchPanelProps = {
   branch: string;
-  pr: PullRequest;
+  pr: PullRequest | null;
+  checksRollup: CheckRollup;
+  mergeBusy: boolean;
+  mergeError: string | null;
+  onMerge?: () => void;
+  shipBusy: boolean;
+  shipError: string | null;
+  shipBase: string | null;
+  shipFileCount: number | null;
+  onDraftPr?: () => void;
+  onCreatePr?: () => void;
   onOpenExternal?: (url: string) => void;
-}) {
+};
+
+function BranchChip({
+  onEnsureShipPreview,
+  ...panelProps
+}: BranchPanelProps & { onEnsureShipPreview?: () => void }) {
+  const { branch, pr } = panelProps;
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const label = `Pull request #${pr.number}: ${pr.title}`;
+  const label = pr
+    ? `Pull request #${pr.number}: ${pr.title}`
+    : `Current branch: ${branch}`;
+  // The no-PR state shows the ship preview (Base / Changes); fetch it once
+  // when the popover opens — click-only surface, never polled.
+  useEffect(() => {
+    if (open && !pr) onEnsureShipPreview?.();
+  }, [open, pr, onEnsureShipPreview]);
   return (
     <>
       {/* The chip sits in the header's drag region (the left group), so the
@@ -963,10 +1040,11 @@ function BranchChip({
         <Tag
           size="sm"
           icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
-          title={`Current branch: ${branch} — pull request #${pr.number}`}
+          title={label}
         >
           <span className="shrink-0 truncate max-w-[200px]">
-            {branch} · #{pr.number}
+            {branch}
+            {pr ? ` · #${pr.number}` : ""}
           </span>
         </Tag>
       </button>
@@ -979,7 +1057,7 @@ function BranchChip({
         hook="manta-branch-popover"
         surfaceClassName="w-[360px]"
       >
-        <BranchPanel pr={pr} onOpenExternal={onOpenExternal} />
+        <BranchPanel {...panelProps} />
       </Popover>
     </>
   );
@@ -1011,13 +1089,68 @@ function PanelRow({
   );
 }
 
+// The branch popover's single surface, branching on `pr` presence (BET-867).
+// PR present → the merge surface [F1]; no PR → the Draft PR… / Create PR
+// offer [F2][F3][F4]. PanelRow is reused verbatim for both states' rows.
 function BranchPanel({
+  branch,
   pr,
+  checksRollup,
+  mergeBusy,
+  mergeError,
+  onMerge,
+  shipBusy,
+  shipError,
+  shipBase,
+  shipFileCount,
+  onDraftPr,
+  onCreatePr,
   onOpenExternal,
-}: {
-  pr: PullRequest;
-  onOpenExternal?: (url: string) => void;
-}) {
+}: BranchPanelProps) {
+  if (!pr) {
+    // No pull request on this branch [F2] — the Draft PR… / Create PR offer.
+    return (
+      <div className="p-3">
+        <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
+          {branch}
+        </div>
+        {shipError ? (
+          <div className="mb-2 break-words text-xs text-danger">{shipError}</div>
+        ) : (
+          <div className="mb-2 text-xs text-text-faint">
+            {shipBusy ? "Opening pull request…" : "No pull request on this branch"}
+          </div>
+        )}
+        <div className="flex flex-col">
+          <PanelRow label="Base" value={shipBase ?? "—"} />
+          <PanelRow
+            label="Changes"
+            value={
+              shipFileCount != null
+                ? `${shipFileCount} file${shipFileCount === 1 ? "" : "s"}`
+                : "—"
+            }
+          />
+        </div>
+        <div className="mt-3 flex flex-nowrap items-center gap-2">
+          <Button tone="primary" disabled={shipBusy} onClick={onDraftPr}>
+            Draft PR…
+          </Button>
+          <Button tone="default" disabled={shipBusy} onClick={onCreatePr}>
+            {shipBusy ? "Creating…" : "Create PR"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  // PR present — the merge surface [F1]. The merge gate is the existing
+  // canMerge: green rollup + no unresolved threads + mergeable true are ALL
+  // required (BET-867, do not re-derive).
+  const merge = canMerge({
+    rollup: checksRollup,
+    unresolvedThreads: pr.unresolvedThreads,
+    mergeable: pr.mergeable,
+  });
   // mergeBlockedReason is the payload — "checks failing", "conflicts",
   // "review required", "draft" — displayed in danger. Only when there is no
   // reason does it fall back to a status the forge itself reports.
@@ -1042,12 +1175,23 @@ function BranchPanel({
         <PanelRow label="Unresolved threads" value={String(pr.unresolvedThreads)} />
         <PanelRow label="Mergeable" value={mergeable.text} valueClass={mergeable.className} />
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {/* "Review changes" is inert in BET-789 — a later issue wires it. */}
+      {mergeError && (
+        <div className="mt-1 break-words text-xs text-danger">{mergeError}</div>
+      )}
+      <div className="mt-3 flex flex-nowrap items-center gap-2">
+        <Button
+          tone="primary"
+          disabled={!merge.can || mergeBusy}
+          onClick={onMerge}
+          title={merge.can ? "Merge this pull request" : merge.reason ?? "not mergeable"}
+        >
+          {mergeBusy ? "Merging…" : "Merge"}
+        </Button>
+        {/* "Review changes" is inert in BET-867 — BET-869 wires it. */}
         <Button tone="default">Review changes</Button>
         {onOpenExternal && (
-          <Button tone="default" onClick={() => onOpenExternal(pr.url)}>
-            Open on GitHub ↗
+          <Button tone="ghost" title="Open on GitHub" onClick={() => onOpenExternal(pr.url)}>
+            <ExternalLink size={14} aria-hidden="true" />
           </Button>
         )}
       </div>
