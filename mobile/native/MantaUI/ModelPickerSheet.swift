@@ -381,8 +381,8 @@ struct ModelChip: View {
     let title: String
     let selected: Bool
     let tokens: Tokens
-    let action: () -> Void
     var accessibilityIdentifier: String?
+    let action: () -> Void
 
     var body: some View {
         Button(action: action) {
