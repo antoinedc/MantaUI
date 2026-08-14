@@ -290,9 +290,10 @@ export function invalidateToken(host) {
 //      this on receipt) so the user pastes rather than retypes on a phone.
 
 // The public OAuth client_id for the device grant. The device flow needs NO
-// secret — a client_id is public. Supply the real product id at deploy (BET-849);
-// the mechanics below are client-id-agnostic and fully injectable.
-export const DEVICE_CLIENT_ID = "Iv1.0000000000000000";
+// secret — a client_id is public; the mechanics below are client-id-agnostic
+// and fully injectable. This is the real Manta product id (BET-849) — verified
+// accepted by `github.com/login/device/code` — so the flow runs for real users.
+export const DEVICE_CLIENT_ID = "Ov23liJP5kpodIqrcc3F";
 
 // A placeholder id has NEVER been registered with GitHub, so a start against it
 // would categorically dead-end at /login/device/code. The flow is GUARDED: a
