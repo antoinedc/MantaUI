@@ -476,6 +476,441 @@ MantaMantaUI
         [How it works](/claude-code-remote)
         [GitHub](https://github.com/antoinedc/MantaUI)
 
+        # Your agents keep working after you close the laptop
+
+        Manta is a desktop app for Claude, Codex and Kimi running in real tmux on a Linux box or Mac you own. Start a task at your desk, approve it from your phone, come back to finished work.
+
+          [Download for macOS](/downloads/Manta-latest.dmg)
+          [Download for Windows](/downloads/Manta-latest-x64.exe)
+
+        Free and open source.
+
+  Manta UI
+
+  Workspace+
+
+    INFRA
+
+        Deploy billing service
+        4m
+
+        Fix red CI on main
+        !
+
+    ETHERNAL
+
+        Add CSV export
+        2m
+
+        Refactor auth middleware
+        14m
+
+        Investigate 500s in /orders
+        1h
+
+    MARKETING
+
+        Landing page copy
+        now
+
+        Build pipeline
+        3h
+
+  Settings
+
+  Deploy billing service
+   feat/orders-csv
+
+    38%
+
+      Add a `/export.csv` endpoint that streams the result set as CSV.Read(app/routes/orders.py)
+    Read 23 linesEdit(app/routes/orders.py)
+    +38 -4
+
+  11-async def list_orders(status: str | None = None):
+  11+async def list_orders(
+  12+    status: str | None = Query(default=None),
+  13+    created_after: datetime | None = Query(default=None),
+  14+) -> list[dict]:
+  15    query = Order.query(session)
+  16    if status: query = query.filter(Order.status == status)
+  17+    return [o.to_dict() for o in (await query.all())]
+Bash(pytest tests/test_orders.py)
+    running 12s
+    collected 24 items tests/test_orders.py .......
+
+  !
+    Run a shell command?
+  alembic upgrade head
+
+    Allow once
+    Always allow alembic upgrade *
+    Reject
+
+  Reply, or describe the next task
+
+    Opus 4.7 &#9662;High &#9662;
+
+  Permissions on, click to bypass
+
+      1.0Install
+        Pick a machine. It sets itself up.
+      2.0Run
+        Chat sessions and real terminals.
+      3.0Leave
+        Close the lid. It carries on.
+      4.0Design
+        Ask for a page. Get a URL.
+      5.0Automate
+        Work that starts without you.
+
+      Open source, MIT licensed
+      No account, no telemetry
+      Your own Claude, Codex or Kimi plan
+      Sessions live on your box
+
+      The problem
+      ## Three subscriptions, ten tmux windows, and it all dies with the lid.
+
+      None of that is your agent&#8217;s fault. It is where the agent is running: a laptop that sleeps, that you close, that you carry away from your desk.
+
+      Move it to a machine that is always on and every one of these stops being your problem.
+
+      Keeping track of sessions is your jobevery day
+        tmux ls &middot; which window &middot; which branch &middot; reattach &middot; scroll back
+      The lid closes and the agent stops18:40
+        forty minutes of work gone, because you had a train to catch
+      It asked you something an hour ago+1h04
+        idle on one permission prompt &middot; nothing told you
+      Three subscriptions, three windows&times;3
+        claude &middot; codex &middot; kimi &mdash; three histories you cannot search
+
+    1.0## Install
+
+    The desktop app installs everything on the machine you choose, over SSH, and pairs itself. No terminal, no keys to copy, no tunnel to configure.
+
+    #### Where should your agents run?
+
+      Manta found these in your SSH config. It installs everything itself, nothing to type on the far end.
+
+      hetzner-box  Ubuntu 24.04, always on
+      157.90.224.92
+
+      mac-mini  macOS, Apple Siliconlocal network
+
+      Another machinehost or IP
+
+      Install and pair
+      Takes about 90 seconds
+
+       runtime installed node 24, no system packages touched
+       manta-server running 127.0.0.1:8787
+       reachable over HTTPS certificate issued
+       waiting for a device&#8230;
+
+      Pairing code
+
+        419207
+      Type it on your phone to add it too. Expires in 5 minutes.
+
+    2.0## Run
+
+    A readable transcript, the diff inline, one tap to approve a command, and an actual tmux terminal underneath when you want one.
+
+  Manta UI
+
+  Workspace+
+
+    INFRA
+
+        Deploy billing service
+        4m
+
+        Fix red CI on main
+        !
+
+    ETHERNAL
+
+        Add CSV export
+        2m
+
+        Refactor auth middleware
+        14m
+
+        Investigate 500s in /orders
+        1h
+
+    MARKETING
+
+        Landing page copy
+        now
+
+        Build pipeline
+        3h
+
+  Settings
+
+  infra / Deploy billing service
+   feat/orders-csv
+
+    38%
+
+      Add a `/export.csv` endpoint that streams the result set as CSV, header row
+    first. Use the streaming helper so we don't hold 100k rows in memory.Read(app/routes/orders.py)
+    Read 23 linesEdit(app/routes/orders.py)
+    +38 -4
+
+  11-async def list_orders(status: str | None = None):
+  11+async def list_orders(
+  12+    status: str | None = Query(default=None),
+  13+    created_after: datetime | None = Query(default=None),
+  14+) -> list[dict]:
+  15    query = Order.query(session)
+  16    if status: query = query.filter(Order.status == status)
+  17+    return [o.to_dict() for o in (await query.all())]
+Bash(pytest tests/test_orders.py)
+    running 12s
+    collected 24 items tests/test_orders.py .......
+
+  Reply, or describe the next task
+
+    Opus 4.7 &#9662;High &#9662;
+
+  Permissions on, click to bypass
+
+    3.0## Leave
+
+    Shut the laptop and the work does not stop, because it was never running there. When the agent needs you, the notification finds whichever device you are actually using.
+
+      Manta UI (disconnected)
+
+  Workspace+
+
+    INFRA
+
+        Deploy billing service
+        4m
+
+        Fix red CI on main
+        !
+
+    ETHERNAL
+
+        Add CSV export
+        2m
+
+        Refactor auth middleware
+        14m
+
+        Investigate 500s in /orders
+        1h
+
+    MARKETING
+
+        Landing page copy
+        now
+
+        Build pipeline
+        3h
+
+  Settings
+
+  Deploy billing service
+   feat/orders-csv
+
+    38%
+
+          Laptop asleep
+
+      Meanwhile, on the box
+
+      Still running3 sessions
+      infra / Deploy billing service
+        step 4 of 618m
+      ethernal / Add CSV export
+        running tests6m
+      marketing / Landing page copy
+        done, waiting for you
+
+The same session on the MantaUI iPhone app
+
+      The same session, on the phone. It tells you when it needs you.
+
+    4.0## Design
+
+    Ask for a mockup and you get a link, not a file. The agent writes the page on your box, serves it from your own hostname over HTTPS and hands back a URL. Open it on your phone, send it to whoever needs to look at it, then ask for the next revision &mdash; the same link updates.
+
+    Manta UI
+
+        Workspace+
+        ETHERNAL
+        Pricing page ideas1m
+        Add CSV export2m
+        MARKETING
+        Landing page copy3h
+        Settings
+
+          Pricing page ideas
+           main
+
+          Three-tier pricing page, dark, same palette as the app. Show it to me.
+          Built it and put it on your box. I would push the third tier &mdash; it is the only one
+            with the annual discount.
+          serve_page(pricing-v3)1.2s
+
+            &#8599;
+              Your page is live
+            a3f9&hellip;ea650.boxes.mantaui.com/pages/pricing-v3
+
+              Open
+              Copy link
+
+          Make the middle tier the highlighted one
+
+        a3f9&hellip;ea650.boxes.mantaui.com/pages/pricing-v3
+
+        EthernalProduct   Docs   Pricing
+        #### Simple pricing. No surprises.
+
+          Start free. Move up when the team does.
+
+          Solo$0/mo
+            - 1 workspace
+- Community support
+- 7-day history
+
+            Get started
+          Team$24/mo
+            - Unlimited workspaces
+- Shared secrets
+- 90-day history
+
+            Choose Team
+          Scale$79/mo
+            - SSO and audit log
+- Priority support
+- 2 months free yearly
+
+            Talk to us
+
+      Same link, each time you ask:
+      v1v2
+      v3
+
+    It lives on your box
+      Written to your machine and served from the hostname it already holds a certificate for. No third-party host, no account, nothing to deploy.
+
+    Sandboxed, and it expires
+      A page the model wrote is served in a sandbox, so it cannot read your session. It disappears after a day unless you ask for longer.
+
+    5.0## Automate
+
+    An agent can be woken by something happening: a labelled issue, a failed build, a time of day. It works in its own branch and leaves you a pull request.
+
+    Nobody is at the keyboard03:14
+      checks.failed on main
+    &#8595;
+    Your rule decides what happenson your box
+      when CI fails on my branch &#8594; start an agent
+    &#8595;
+    An agent starts in its own copy of the repo
+       manta/fix-orders-csv-flake
+        +18 -3 in 2 files, 6m 41s
+    &#8595;
+    A draft pull request is waiting03:21
+      #412 opened, tests green
+    &#8595;
+
+      infra / Fix red CI on main
+        Done. Draft PR #412 is waiting for review.07:02
+    You were asleep for all of it.
+
+      ### On a timer, too
+
+      Ask once, in plain English.
+
+        Scheduled3
+        every 5 min
+          check the deploy, tell me if it goes red
+          in 2m
+        weekdays 9:00
+          summarise what changed overnight
+          tomorrow
+        Sundays 18:00
+          run the dependency audit
+          in 4d
+
+      ### And it can drive your Mac
+
+      Ask from your phone. Xcode, your simulators and your signing certificates do the work at home.
+
+         build and launch MantaUI on Antoine&#8217;s MacBook Pro
+         xcodebuild&#8230;  48s
+         boot simulator&#8230;  6s
+         the app is open on the simulator
+
+      ## Everything else it does
+
+      It behaves like a machine that is yours and always on, because that is what it is.
+
+        Yours alone
+        No account, no middleman, and nothing of yours anywhere else.
+
+            your box
+            &#215;
+            anyone else
+          Self-HostedRuns on your box. No account, no telemetry, no middleman.
+
+            claude&#10003; your plan
+            codex&#10003; your plan
+            kimi&#10003; your plan
+
+          Bring Your Own PlanThe subscription you already pay for. Nothing resold.
+
+            ~/.manta-secrets/gh_pat
+            ghp_xxxxxxxxxxxx
+          Secret StoreThe agent is handed a file path, never the value.
+
+            win 1win 2win 3
+          Native TerminalsReal tmux sessions. Attach in the app, or SSH in.
+
+        Runs without you
+        The box is awake, so work can start when you are not there.
+
+            issue labeled
+            &#8595;
+            draft PR
+          WebhooksLabel a GitHub issue and an agent picks it up.
+
+            */5 * * * *0 9 * * 1-5
+          Native SchedulerEvery weekday at nine, what changed overnight.
+
+            &#9106; fix-csv-flake&#9106; bump-deps&#9106; backfill-tests
+          Native WorktreesEach job gets its own branch and its own worktree.
+
+            ios-mantauiplugin
+            xcodebuild&#10003; done
+            simctl boot&#8599; on phone
+
+          Mac PluginsXcode, simulators and certificates, driven from your phone.
+
+        Wherever you are
+        It reaches whichever device you happen to be holding.
+
+              Manta
+              Needs you
+            now
+          Push NotificationsDesktop at your desk, phone when you are not.
+
+            AllowReject
+          One-Tap ApprovalsRead the change, allow or reject in one tap.
+
+            &ldquo;allow it&rdquo;
+          Voice SupportDictate a reply, or just say allow.
+
+            screenshot.png &#8593;report.csv &#8595;
+          Artifacts ManagementDrop a screenshot in. Generated files come back.
+
       FAQ
       ## Questions people actually ask
 
@@ -512,6 +947,31 @@ Claude Code and opencode today. Anything that runs in a terminal works in termin
       ### Is this an alternative to Conductor or Orca?
 
 It overlaps with both, on a different bet. They run agents on your Mac and give you a window onto them. Manta runs agents on a box you own and gives every device the same window, so the work outlives whatever you are holding.
+
+      macOS
+        Manta-latest.dmg
+        Apple Silicon, macOS 13 and up. Signed and notarised.
+
+        [Download](/downloads/Manta-latest.dmg)
+      Windows
+        Manta-latest-x64.exe
+        Windows 10 and 11, 64-bit. Not signed yet, so Windows asks you to confirm.
+
+        [Download](/downloads/Manta-latest-x64.exe)
+      Your box
+        install.sh
+        Linux or a spare Mac. The app can do this for you.
+
+        [One command](/llms-install.md)
+      iPhone
+        TestFlight
+        Native app. Pairs with the six digits the desktop shows.
+
+    ## Go to bed. It will be done.
+
+    Free, open source, and it runs on hardware you already own.
+
+    [Download for macOS](/downloads/Manta-latest.dmg)
 
         MantaMantaUI
         Self-hosted coding agents you can reach from anywhere.
@@ -1091,7 +1551,7 @@ MantaMantaUI
           Approve a command from your phoneOne tapNo
           Tells you when the agent is blockedPush to the right deviceNo
           Remote accessDetected and set upConductor Cloud (beta, Pro, GitHub-only, 10-workspace cap)
-          PlatformsLinux or macOS box, macOS desktop, iPhone app, browsermacOS only. not available for Windows or Linux yet. conductor.build/docs
+          PlatformsLinux or macOS box, macOS and Windows desktop, iPhone app, browsermacOS only. not available for Windows or Linux yet. conductor.build/docs
           Permissions modelExplicit permission cards, yolo opt-inAgents run without sandboxing
           SandboxingCommands ask firstWorkspace isolation is development isolation, not a security boundary
           Diff review / inline annotationNoYes, with inline comments back to the agent
@@ -1267,7 +1727,7 @@ MantaMantaUI
 
       ## Verdict
 
-        - Pick OrcaIf you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop. Orca is the more mature IDE today, and the only one of the two with a Windows or Linux desktop.
+        - Pick OrcaIf you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop. Orca is the more mature IDE today, and the only one of the two with a Linux desktop.
 
         - Pick MantaIf your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.
 
@@ -1293,7 +1753,7 @@ MantaMantaUI
           Diff review / inline annotationNoYes
           Built-in code editorTerminal + chat onlyMonaco with Design Mode
           Agent runtimes supported2 (Claude Code, opencode)34
-          Desktop OS coveragemacOS desktop (box runs on Linux or macOS)macOS, Windows, Linux
+          Desktop OS coveragemacOS and Windows desktop, iPhone app (box runs on Linux or macOS)macOS, Windows, Linux
           Git worktree per sessionYesYes
           Real tmux underneathYes, you can SSH inNo
           Agent scheduling, webhooks, secretsYesNo
@@ -1316,7 +1776,7 @@ MantaMantaUI
 
       - ›Diff review and inline annotation. Orca's PR/merge tail and inline comments back to the agent are the strongest part of the product. Manta has none of it.
 
-      - ›Cross-platform desktop. macOS, Windows and Linux. The Manta desktop is macOS only today; the box itself runs on Linux or macOS.
+      - ›A Linux desktop. Orca ships one; Manta does not. Manta's desktop is macOS and Windows, and the box itself runs on Linux or macOS.
 
       - ›Maturity. 29.6k GitHub stars, YC-backed, widely deployed. Manta is new and ships less surface.
 
@@ -1389,7 +1849,7 @@ Yes, on a macOS box. They use different ports and different tmux sessions, so th
 
       ### Why is Orca so much more mature?
 
-Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.
+Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.
 
       ### Which one should I pick if my work runs locally?
 

@@ -2354,11 +2354,23 @@ Codemagic; use its REST API. `x-auth-token: <CODEMAGIC_API_KEY>` on every call.
 ### Distributing to testers (App Store Connect, human step)
 
 Internal testing (fast, no review, ≤100 testers): ASC → MantaUI → TestFlight →
-answer the build's **export-compliance** question (app uses only standard HTTPS
-→ exempt; make permanent with `ITSAppUsesNonExemptEncryption=false` in
-Info.plist), then add testers under Users and Access + assign to the Internal
-group. External testing (≤10,000, email or public link) requires a one-time
-Beta App Review of the first build.
+add testers under Users and Access + assign to the Internal group. External
+testing (≤10,000, email or public link) requires a one-time Beta App Review of
+the first build.
+
+**Export compliance is answered in the binary and must stay that way.**
+`ITSAppUsesNonExemptEncryption=false` is set in
+`mobile/native/MantaUI/Info.plist` (the app speaks only standard HTTPS/TLS,
+which is exempt). Without that key the failure is misleading in a specific way
+that cost a debugging session on 2026-08-14: **every build script goes green,
+the `.ipa` uploads AND finishes processing, and only the post-build "App Store
+Connect distribution" task fails** with `422 The build is missing export
+compliance` — so the Codemagic run reads `status: finished` and its
+`buildActions` are all `success`. The failure lives ONLY in
+`build.appStoreConnectTasks[].status`, which is the field to check when a build
+looks green but nothing reaches testers. Answering the question by hand in the
+ASC UI is not a substitute: the automated TestFlight submission runs seconds
+after processing, long before a human sees it.
 
 ### Versioning
 
