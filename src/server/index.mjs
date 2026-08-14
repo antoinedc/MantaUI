@@ -93,6 +93,7 @@ import {
   deleteHook,
   createRateLimiter,
   findForgeHook,
+  listForgeHooks,
 } from "./webhooks.mjs";
 import { putRegistry as pluginsPutRegistry, getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import {
@@ -104,6 +105,7 @@ import {
 import { createRulesEngine, eventLinkRef } from "./forge/rules.mjs";
 import {
   createForgePoller,
+  repoPollPlan,
   pollChecksFailed,
   pollIssueLabels,
   pollReviewRequested,
@@ -112,6 +114,8 @@ import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
 import { getAdapter } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
+import { detectForgeWithHosts } from "./forge/selfhost.mjs";
+import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { detectForge as detectForgeUrl } from "../shared/forge.mjs";
 import { sessionLink as readSessionLink } from "../shared/sessionLink.mjs";
@@ -473,29 +477,29 @@ const { stop: stopForgePoller } = createForgePoller({
     const cfg = await local.configGet();
     if (cfg?.forgeRulesEnabled !== true) return [];
     const rows = await forgeListRules();
+    const hostKinds = cfg?.forgeHosts ?? [];
     const out = [];
     for (const row of rows) {
       if (!row.valid) continue; // invalid rules never dispatch (listed in Settings)
-      const parts = forgeParseRepoKey(row.repoKey);
-      if (!parts) continue;
-      const hook = await findForgeHook(row.repoKey).catch(() => null);
-      const rulesOn = parseForgeRules(row.yaml ?? "").rules?.on ?? {};
-      const labeled = rulesOn["issue.labeled"];
-      out.push({
-        repoKey: row.repoKey,
-        parts,
-        label: typeof labeled?.label === "string" ? labeled.label : null,
-        pollChecksFailed: !!rulesOn["checks.failed"],
-        pollReviewRequested: !!rulesOn["review.requested"],
-        webhookRegistered: !!hook, // never both: a working webhook wins
-      });
+      // Provider-aware poll plan (BET-855): a GitLab hook is stored under
+      // `provider: "gitlab"`, so webhookRegistered must be resolved with the
+      // repo's forge kind or the poller would poll a repo that has a working
+      // webhook — violating "never both: a working webhook wins".
+      const plan = await repoPollPlan(
+        { repoKey: row.repoKey, yaml: row.yaml ?? "", hostKinds, findHook: findForgeHook },
+        { parse: parseForgeRules },
+      );
+      if (!plan) continue;
+      out.push(plan);
     }
     return out;
   },
   pollRepo: async (repo) => {
     const tok = await forgeResolveToken(repo.parts.host).catch(() => null);
     if (!tok) return { events: [] };
-    const adapter = getAdapter("github", tok.token);
+    // Use the repo's forge kind, not a hardcoded github adapter — a GitLab repo
+    // on a box that cannot register webhooks is polled against the GitLab API.
+    const adapter = getAdapter(repo.kind ?? "github", tok.token);
     const prRepo = { owner: repo.parts.owner, repo: repo.parts.repo };
     let state = forgePollSeen.get(repo.repoKey);
     if (!state) {
@@ -527,6 +531,40 @@ const { stop: stopForgePoller } = createForgePoller({
     return { events: events.map((e) => ({ ...e, repoKey: repo.repoKey })) };
   },
   handleEvent: (ev) => forgeRulesEngine.handleEvent(ev),
+});
+
+// The forge hook health check (BET-855) — the production caller for the
+// re-enable capability in forge/webhook.mjs. GitLab permanently disables a
+// failing webhook with no automatic recovery, so a periodic pass iterates the
+// persisted forge-hook store, resolves each GitLab host's token, and re-enables
+// (`PUT {active:true}`) any hook GitLab disabled. Same startPoller cadence as
+// the forge poller above; does nothing while the forge-rules toggle is off (no
+// gitlab hooks exist then anyway). Github hooks are skipped — GitHub never
+// auto-disables. 15 min: a box that sleeps at night falls a few checks behind
+// but re-arms promptly on wake, far below GitLab's permanent-disable threshold.
+const FORGE_HEALTH_INTERVAL_MS = 15 * 60_000;
+// eslint-disable-next-line no-unused-vars
+const { stop: stopForgeHealthCheck } = startForgeHealthCheck({
+  intervalMs: FORGE_HEALTH_INTERVAL_MS,
+  listHooks: async () => {
+    const cfg = await local.configGet();
+    if (cfg?.forgeRulesEnabled !== true) return [];
+    return (await listForgeHooks().catch(() => []))
+      .map((h) => {
+        const parts = forgeParseRepoKey(h.repoKey);
+        if (!parts) return null;
+        return {
+          kind: h.provider ?? "github",
+          host: parts.host,
+          owner: parts.owner,
+          repo: parts.repo,
+          hookId: h.hookId,
+        };
+      })
+      .filter(Boolean);
+  },
+  resolveToken: async (host) => ((await forgeResolveToken(host).catch(() => null))?.token) ?? null,
+  checkHook: healthCheckRepoHook,
 });
 
 // Resolve a parent directory to branch a forge-triggered job's worktree off.

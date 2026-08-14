@@ -28,6 +28,9 @@
 
 import { rollupChecks } from "../../shared/forge.mjs";
 import { startPoller } from "../startPoller.mjs";
+import { parseRepoKey } from "../forgeRules.mjs";
+import { parseRules as parseForgeRules } from "../../shared/forgeRules.mjs";
+import { detectForgeWithHosts } from "./selfhost.mjs";
 
 /**
  * Build the polling loop. `pollRepo` is the injected per-repo unit (the shape
@@ -82,6 +85,50 @@ export function createForgePoller({
   }
 
   return startPoller(tick, { intervalMs, label: "forge-poller" });
+}
+
+/**
+ * Resolve the poll plan for one rules row: which poll units it subscribes to,
+ * the repo's forge kind, and whether it ALREADY has a working webhook. Pure of
+ * I/O (the store lookup is injected). This is the "never both" gate made
+ * provider-aware (BET-855): a GitLab hook is stored under `provider: "gitlab"`,
+ * so the github-scoped default find would miss it and the poller would wrongly
+ * poll a repo that has a working webhook. `findHook(repoKey, {provider})` is
+ * how the caller (index.mjs) reaches the forge-hook store.
+ *
+ * @param {object} input
+ * @param {string} input.repoKey   canonical "host/owner/repo"
+ * @param {string} [input.yaml]    the raw rules source (for the `on:` blocks)
+ * @param {Array<{host: string, kind: string}>} [input.hostKinds] user-configured forgeHosts mapping
+ * @param {(repoKey: string, opts: {provider: string}) => Promise<object|null>} input.findHook
+ * @param {object} [deps]
+ * @param {typeof parseForgeRules} [deps.parse]
+ * @param {typeof detectForgeWithHosts} [deps.detect]
+ * @returns {Promise<object|null>} the repo poll plan, or null for an invalid key
+ */
+export async function repoPollPlan(
+  { repoKey, yaml, hostKinds = [], findHook },
+  { parse = parseForgeRules, detect = detectForgeWithHosts } = {},
+) {
+  const parts = parseRepoKey(repoKey);
+  if (!parts) return null;
+  // Same kind derivation as saveRules (BET-855): known host OR the user's
+  // forgeHosts mapping. A GitLab repo is keyed under provider "gitlab" so its
+  // registered hook is never missed by the github-scoped default.
+  const forgeId = detect(`https://${parts.host}/${parts.owner}/${parts.repo}`, hostKinds);
+  const kind = forgeId?.kind ?? "github";
+  const hook = await findHook(repoKey, { provider: kind });
+  const rulesOn = parse(yaml ?? "").rules?.on ?? {};
+  const labeled = rulesOn["issue.labeled"];
+  return {
+    repoKey,
+    parts,
+    kind,
+    label: typeof labeled?.label === "string" ? labeled.label : null,
+    pollChecksFailed: !!rulesOn["checks.failed"],
+    pollReviewRequested: !!rulesOn["review.requested"],
+    webhookRegistered: !!hook,
+  };
 }
 
 // The identity used to de-duplicate a polled issue event, so a 304 / an

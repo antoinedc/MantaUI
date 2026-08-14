@@ -16,6 +16,8 @@ import {
   deliveryUrl,
   createHook,
   upsertForgeHook,
+  findForgeHook,
+  listForgeHooks,
   listHooks,
   deleteHook,
   deliverWebhook,
@@ -239,6 +241,102 @@ test("upsertForgeHook persists a github hook and refreshes it on re-save", async
     assert.equal(second.events.length, 2);
     const all = await loadHooks(path);
     assert.equal(all.filter((h) => h.repoKey === "github.com/o/r").length, 1);
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
+test("upsertForgeHook persists a gitlab provider + the remote hookId (BET-855)", async () => {
+  const path = tmpStore();
+  const load = () => loadHooks(path);
+  const save = (h) => saveHooks(h, path);
+  try {
+    const hook = await upsertForgeHook(
+      {
+        repoKey: "gitlab.com/grp/r",
+        provider: "gitlab",
+        label: "gitlab.com/grp/r",
+        token: "b".repeat(32),
+        secret: "s1",
+        hookId: 42,
+        events: ["issues"],
+      },
+      { load, save },
+    );
+    assert.equal(hook.provider, "gitlab");
+    assert.equal(hook.hookId, 42, "the remote hookId is persisted for the health check");
+
+    // Same provider+repo refresh keeps the hookId even when not re-supplied.
+    const refreshed = await upsertForgeHook(
+      {
+        repoKey: "gitlab.com/grp/r",
+        provider: "gitlab",
+        label: "gitlab.com/grp/r",
+        token: "c".repeat(32),
+        secret: "s2",
+        events: ["issues"],
+      },
+      { load, save },
+    );
+    assert.equal(refreshed.hookId, 42, "re-save preserves the previously stored hookId");
+    const all = await loadHooks(path);
+    assert.equal(all.filter((h) => h.provider === "gitlab" && h.repoKey === "gitlab.com/grp/r").length, 1);
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
+test("findForgeHook is provider-scoped — a gitlab repo does not collide with a github one (BET-855)", async () => {
+  const path = tmpStore();
+  const load = () => loadHooks(path);
+  const save = (h) => saveHooks(h, path);
+  try {
+    // Same owner/repo under different providers — distinct records.
+    await upsertForgeHook(
+      { repoKey: "x.com/o/r", provider: "github", label: "g", token: "a".repeat(32), secret: "s", events: [] },
+      { load, save },
+    );
+    await upsertForgeHook(
+      { repoKey: "x.com/o/r", provider: "gitlab", label: "l", token: "b".repeat(32), secret: "t", hookId: 7, events: [] },
+      { load, save },
+    );
+    const githubHook = await findForgeHook("x.com/o/r", { provider: "github", load });
+    const gitlabHook = await findForgeHook("x.com/o/r", { provider: "gitlab", load });
+    assert.notEqual(githubHook, null);
+    assert.notEqual(gitlabHook, null);
+    assert.equal(githubHook.secret, "s");
+    assert.equal(gitlabHook.secret, "t");
+    assert.equal(gitlabHook.hookId, 7);
+    assert.equal(githubHook.hookId, null);
+    // Legacy callers (no provider arg) default to github — unchanged.
+    assert.equal((await findForgeHook("x.com/o/r", { load })).secret, "s");
+  } finally {
+    await rm(path, { force: true });
+  }
+});
+
+test("listForgeHooks returns only forge records with their hookId (BET-855)", async () => {
+  const path = tmpStore();
+  const load = () => loadHooks(path);
+  const save = (h) => saveHooks(h, path);
+  try {
+    await createHook(
+      { label: "manta hook", sessionID: "ses_1" },
+      { load, save },
+    );
+    await upsertForgeHook(
+      { repoKey: "g.com/o/r", provider: "github", label: "g", token: "a".repeat(32), secret: "s", events: [] },
+      { load, save },
+    );
+    await upsertForgeHook(
+      { repoKey: "gitlab.com/o/r", provider: "gitlab", label: "l", token: "b".repeat(32), secret: "t", hookId: 3, events: [] },
+      { load, save },
+    );
+    const all = await listForgeHooks({ load });
+    assert.equal(all.length, 2);
+    assert.ok(all.every((h) => h.provider !== "manta"), "manta hooks are excluded");
+    const gl = all.find((h) => h.provider === "gitlab");
+    assert.equal(gl.hookId, 3);
   } finally {
     await rm(path, { force: true });
   }

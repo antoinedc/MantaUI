@@ -382,25 +382,30 @@ export function genDeliveryToken() {
 }
 
 // Create or refresh a forge (provider !== "manta") webhook record keyed by
-// repoKey. The token + secret are SUPPLIED here (unlike createHook, which mints
-// its own) because the GitHub hook URL and its HMAC secret are fixed up front
-// by the registration flow and MUST match the stored record. Reuses an
-// existing record for the same repo so re-save refreshes secret/events rather
-// than accumulating duplicate hooks. Returns the stored hook.
+// repoKey + provider. The token + secret are SUPPLIED here (unlike createHook,
+// which mints its own) because the forge hook URL and its HMAC secret are fixed
+// up front by the registration flow and MUST match the stored record. Reuses
+// an existing record for the same provider+repo so re-save refreshes
+// secret/events rather than accumulating duplicate hooks. `provider` defaults
+// to github (so pre-BET-855 callers are unchanged); `hookId` persists the
+// remote id the forge assigned — the handle the health check needs to target a
+// specific hook to re-enable it (GitLab disables failing hooks). Returns the
+// stored hook.
 export async function upsertForgeHook(
-  { repoKey, label, token, secret, events, now = () => Date.now() },
+  { repoKey, provider = "github", label, token, secret, hookId = null, events, now = () => Date.now() },
   { load = loadHooks, save = saveHooks } = {},
 ) {
   const hooks = await load();
-  const idx = hooks.findIndex((h) => h.provider === "github" && h.repoKey === repoKey);
+  const idx = hooks.findIndex((h) => h.provider === provider && h.repoKey === repoKey);
   const existing = idx >= 0 ? hooks[idx] : null;
   const url = deliveryUrl(token);
   const hook = {
     id: existing?.id ?? genId(),
     token,
     secret,
-    provider: "github",
+    provider,
     repoKey,
+    hookId: hookId ?? existing?.hookId ?? null,
     unsigned: false,
     label,
     instructions: "",
@@ -419,13 +424,23 @@ export async function upsertForgeHook(
   return hook;
 }
 
-// Read the full forge hook record (INCLUDING its secret) for a repoKey, or
-// null. Used by the registration flow to reuse an existing hook's token/secret
-// when re-saving rules for the same repo. `toMeta` never returns the secret;
+// Read the full forge hook record (INCLUDING its secret) for a repoKey +
+// provider, or null. Used by the registration flow to reuse an existing hook's
+// token/secret when re-saving rules for the same repo. `provider` defaults to
+// github so existing callers are unchanged. `toMeta` never returns the secret;
 // this is the box-side forge path only.
-export async function findForgeHook(repoKey, { load = loadHooks } = {}) {
+export async function findForgeHook(repoKey, { provider = "github", load = loadHooks } = {}) {
   const hooks = await load();
-  return hooks.find((h) => h.provider === "github" && h.repoKey === repoKey) ?? null;
+  return hooks.find((h) => h.provider === provider && h.repoKey === repoKey) ?? null;
+}
+
+// List the box's forge hook records (INCLUDING their remote hookId + secret).
+// The health-check pass (forge/webhook.mjs startForgeHealthCheck) iterates
+// these to re-enable disabled GitLab hooks. Box-side forge path only — never
+// the renderer (which gets metadata via listHooks/toMeta instead).
+export async function listForgeHooks({ providers = ["github", "gitlab"], load = loadHooks } = {}) {
+  const hooks = await load();
+  return hooks.filter((h) => providers.includes(h.provider));
 }
 
 export async function deleteHook(id, { load = loadHooks, save = saveHooks, publish } = {}) {
