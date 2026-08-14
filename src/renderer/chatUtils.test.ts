@@ -59,6 +59,8 @@ import {
   isJobRow,
   formatJobSummary,
   isBackgroundJobCompletionTurn,
+  visibleAssistantParts,
+  isRenderableMessage,
   windowPinId,
   parsePinId,
   resolvePin,
@@ -2167,6 +2169,100 @@ describe("isBackgroundJobCompletionTurn", () => {
         parts: [{ type: "text", text: '[background job "x" done]', synthetic: true, id: "p1" }],
       }),
     ).toBe(false);
+  });
+});
+
+// ===== visibleAssistantParts / isRenderableMessage (BET-874) =====
+
+function assistantMsg(parts: Array<Record<string, unknown>>): OpencodeMessage {
+  return { info: { role: "assistant", id: "ma", sessionID: "s1" }, parts } as unknown as OpencodeMessage;
+}
+
+describe("visibleAssistantParts", () => {
+  it("keeps a real text part", () => {
+    const parts = visibleAssistantParts(
+      assistantMsg([{ type: "text", text: "hello", id: "p1" }]),
+    );
+    expect(parts).toHaveLength(1);
+  });
+
+  it("drops step-start/step-finish and todowrite tool parts", () => {
+    const parts = visibleAssistantParts(
+      assistantMsg([
+        { type: "step-start", id: "p1" },
+        { type: "tool", tool: "todowrite", id: "p2" },
+        { type: "step-finish", id: "p3" },
+      ]),
+    );
+    expect(parts).toHaveLength(0);
+  });
+
+  it("drops empty, synthetic and ignored text parts", () => {
+    const parts = visibleAssistantParts(
+      assistantMsg([
+        { type: "text", text: "", id: "p1" },
+        { type: "text", text: "skip", synthetic: true, id: "p2" },
+        { type: "text", text: "skip", ignored: true, id: "p3" },
+        { type: "tool", tool: "bash", id: "p4" },
+      ]),
+    );
+    expect(parts.map((p) => p.id)).toEqual(["p4"]);
+  });
+});
+
+describe("isRenderableMessage", () => {
+  const userMsg = (text: string, extra?: Array<Record<string, unknown>>): OpencodeMessage =>
+    ({ info: { role: "user", id: "m1", sessionID: "s1" }, parts: [{ type: "text", text, id: "p1" }, ...(extra ?? [])] }) as unknown as OpencodeMessage;
+
+  it("false for a background-job completion turn", () => {
+    expect(
+      isRenderableMessage(
+        userMsg('[background job "x" done]\nresult'),
+      ),
+    ).toBe(false);
+  });
+
+  it("true for a user message with text", () => {
+    expect(isRenderableMessage(userMsg("hello there"))).toBe(true);
+  });
+
+  it("true for a user message with only a file part", () => {
+    expect(isRenderableMessage(userMsg("", [{ type: "file", id: "f1" }]))).toBe(
+      true,
+    );
+  });
+
+  it("false for a user message with neither text nor a file part", () => {
+    expect(isRenderableMessage(userMsg(""))).toBe(false);
+  });
+
+  it("false for an assistant message with only step-start/step-finish", () => {
+    expect(
+      isRenderableMessage(
+        assistantMsg([
+          { type: "step-start", id: "p1" },
+          { type: "step-finish", id: "p2" },
+        ]),
+      ),
+    ).toBe(false);
+  });
+
+  it("false for an assistant message with only a todowrite tool part", () => {
+    expect(
+      isRenderableMessage(assistantMsg([{ type: "tool", tool: "todowrite", id: "p1" }])),
+    ).toBe(false);
+  });
+
+  it("true for an assistant message with a text part", () => {
+    expect(
+      isRenderableMessage(assistantMsg([{ type: "text", text: "result", id: "p1" }])),
+    ).toBe(true);
+  });
+
+  it("true for an assistant message whose only parts are a non-todo tool call", () => {
+    expect(
+      isRenderableMessage(assistantMsg([{ type: "tool", tool: "bash", id: "p1" }])),
+    ).toBe(true);
   });
 });
 
