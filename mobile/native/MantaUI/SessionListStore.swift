@@ -63,14 +63,10 @@ final class SessionListStore: ObservableObject {
     @Published private(set) var hapticsEnabled = true
     /// pinID -> pending delete being held within its 5 s undo window.
     @Published private(set) var pendingDeletes: [String: PendingDelete] = [:]
-    /// opencodeSessionID -> when its turn started running (drives the §7.1
-    /// timer slot while running).
-    @Published private(set) var runningSince: [String: Date] = [:]
 
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
     private let eventStore: MantaEventStore
-    private var cancellables: Set<AnyCancellable> = []
     private var attentionSessions: Set<String> = []
     private var modelLabels: [String: String] = [:]
     /// opencodeSessionID → the model-authored progress label for a working turn
@@ -92,26 +88,12 @@ final class SessionListStore: ObservableObject {
             self?.trackAttention(frame: frame)
             self?.trackProgress(frame: frame)
         }
-        eventStore.$sessionStates
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.trackRunning(now: Date()) }
-            .store(in: &cancellables)
     }
 
-    private func trackRunning(now: Date) {
-        var changed = false
-        for (sid, state) in eventStore.sessionStates {
-            if state.running == true {
-                if runningSince[sid] == nil {
-                    runningSince[sid] = now
-                    changed = true
-                }
-            } else if runningSince[sid] != nil {
-                runningSince.removeValue(forKey: sid)
-                changed = true
-            }
-        }
-        if changed { objectWillChange.send() }
+    /// When this window's running turn started, as reported by the box.
+    func runningStart(for window: MantaWindow) -> Date? {
+        guard let sid = window.opencodeSessionId else { return nil }
+        return eventStore.sessionStates[sid]?.runningSince
     }
 
     /// Re-fetch the list (pull-to-refresh / foreground / reconnect / after
@@ -438,7 +420,6 @@ final class SessionListStore: ObservableObject {
         loadError = nil
         loadedOnce = false
         pendingDeletes = [:]
-        runningSince = [:]
         attentionSessions = []
         modelLabels = [:]
         pinnedWindows = []

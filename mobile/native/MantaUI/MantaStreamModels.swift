@@ -157,12 +157,14 @@ struct StreamFlushPayload: Codable, Equatable, Sendable {
 /// `sub: "running"` — derived from `session.status` (busy/tworking/retry).
 struct StreamRunningPayload: Codable, Equatable, Sendable {
     var running: Bool
+    var since: Double?          // epoch ms; absent on an older box
 }
 
 /// `sub: "turnComplete"` — emitted by `message.updated`/`session.idle`.
 struct StreamTurnCompletePayload: Codable, Equatable, Sendable {
     var complete: Bool
     var running: Bool
+    var since: Double?
 }
 
 /// `sub: "truncation"` — classifyFinish result, box-classified.
