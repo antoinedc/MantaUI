@@ -42,9 +42,10 @@ test("saveRules registers the webhook with the resolved §3.3 token", async () =
 
   assert.equal(res.ok, true);
   assert.equal(res.webhook.registered, true);
-  assert.equal(hookArgs.githubToken, "ghp_box");
+  assert.equal(hookArgs.token, "ghp_box");
   assert.equal(hookArgs.host, "github.com");
   assert.equal(hookArgs.owner, "acme");
+  assert.equal(hookArgs.kind, "github", "a github.com repo registers as github");
 });
 
 test("saveRules fails registration loudly when no token resolves (rules still saved)", async () => {
@@ -81,7 +82,7 @@ test("saveRules passes the forge.token override, not the resolver", async () => 
 
   assert.equal(res.ok, true);
   assert.equal(res.webhook.registered, true);
-  assert.equal(hookArgs.githubToken, "ghp_override");
+  assert.equal(hookArgs.token, "ghp_override");
 });
 
 test("saveRules reports webhook errors without throwing", async () => {
