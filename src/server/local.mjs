@@ -511,13 +511,15 @@ export function spawnGitLong(
 // network-git path). `onProgress(line)` streams raw output; errors reject with
 // a message embedding git's stderr (same shape as run()'s rejection).
 export function gitPush(
-  { cwd, branch, setUpstream = false, onProgress } = {},
+  { cwd, branch, remote = "origin", setUpstream = false, onProgress } = {},
   { timeoutMs = GIT_NET_TIMEOUT_MS, spawn = nodeSpawn } = {},
 ) {
+  const args = ["push", ...(setUpstream ? ["-u"] : [])];
+  if (branch) args.push(remote, branch);
   return spawnGitLong(
     {
       cwd,
-      args: ["push", ...(setUpstream ? ["-u"] : []), ...(branch ? [branch] : [])],
+      args,
       onProgress,
       timeoutMs,
       spawn,
