@@ -457,7 +457,6 @@ export type ForgeShipPreviewInput = { cwd: string };
 export type ForgeShipPreviewResult =
   | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }
   | { ok: false; error: string };
-
 // forge:merge input — ALWAYS passes the head SHA the user approved so the API
 // cannot merge a commit that landed after the reviewed diff (issue §4).
 export type ForgeMergeInput = {
@@ -479,6 +478,81 @@ export type ForgeMergeFailureKind =
 export type ForgeMergeResult =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; error: string; kind: ForgeMergeFailureKind | null };
+
+// ----- Forge draft review (BET-793) -----
+
+// A box-buffered draft review comment. The anchor is forge-neutral — the same
+// `{ path, line, side }` the review pane's diff gutter uses, plus `startLine`
+// for a multi-line highlight. `side` is the renderer's "new"|"old"; the adapter
+// maps it onto the forge's word ("RIGHT"/"LEFT" on GitHub). `body` is the typed
+// comment text. The old GitHub `position` field is deliberately never used.
+export type ForgeDraftComment = {
+  id: string;
+  path: string;
+  line: number;
+  side: "new" | "old";
+  startLine?: number | null;
+  body: string;
+};
+
+// The box-buffered draft for one PR (spec §3.4①). `verdict` is the pending
+// review verdict — the shared ReviewVerdict subset a draft can hold, null until
+// chosen. `stale` is true when the PR head moved past the SHA the draft anchored
+// to: the content is KEPT (never discarded), the renderer warns.
+export type ForgeDraft = {
+  key: string;
+  repoKey: string;
+  number: number;
+  headSha: string;
+  verdict: "approved" | "changes_requested" | "commented" | null;
+  body: string;
+  comments: ForgeDraftComment[];
+  stale: boolean;
+  updatedAt: number;
+};
+
+// forge:draft-get result — the current draft for a session's PR (null when none).
+export type ForgeDraftGetResult = {
+  draft: ForgeDraft | null;
+  error: "no_forge" | "not_connected" | "no_pr" | null;
+};
+
+// forge:draft-comment input — `op` selects add / edit / delete of one comment
+// or set-verdict on the draft. `comment` carries the anchor + body for
+// add/edit, and the comment id for edit/delete. Fields are intentionally loose
+// (optional) — which subset is required depends on `op`, and the box validates
+// the payload per op rather than encoding it in the transport type.
+export type ForgeDraftCommentInput = {
+  cwd: string;
+  op: "add" | "edit" | "delete" | "set-verdict";
+  comment?: {
+    id?: string;
+    path?: string;
+    line?: number;
+    side?: "new" | "old";
+    startLine?: number | null;
+    body?: string;
+  };
+  verdict?: "approved" | "changes_requested" | "commented" | null;
+  body?: string;
+};
+
+export type ForgeDraftCommentResult =
+  | { ok: true; draft: ForgeDraft }
+  | { ok: false; error: string };
+
+// forge:draft-submit input + result. Submitting flushes the WHOLE draft as one
+// review; the draft is cleared only on success. A failed submit returns a typed
+// `kind` (e.g. "http_422") and leaves the draft intact.
+export type ForgeDraftSubmitInput = {
+  cwd: string;
+  verdict?: "approved" | "changes_requested" | "commented" | null;
+  body?: string;
+};
+
+export type ForgeDraftSubmitResult =
+  | { ok: true }
+  | { ok: false; error: string; kind?: string | null };
 
 
 // ----- IPC inputs -----
@@ -721,6 +795,15 @@ export const IPC = {
   forgeShip: "forge:ship",
   forgeShipPreview: "forge:ship-preview",
   forgeMerge: "forge:merge",
+
+  // BET-793: box-buffered draft review. All three are box-side only — the box
+  // owns the draft (§3.4①), so a forge token never reaches the renderer.
+  // forge:draft-get reads the current draft; forge:draft-comment mutates a
+  // comment (add/edit/delete) or sets the verdict; forge:draft-submit flushes
+  // the whole draft as ONE review, clearing it only on success.
+  forgeDraftGet: "forge:draft-get",
+  forgeDraftComment: "forge:draft-comment",
+  forgeDraftSubmit: "forge:draft-submit",
 
   // Remote tmux config management
   tmuxConfigStatus: "tmux:config-status",

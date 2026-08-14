@@ -15,8 +15,12 @@ import {
   shipPreview,
   humanizeBranch,
   mergePullRequest,
+  draftGetForCwd,
+  draftCommentForCwd,
+  draftSubmitForCwd,
   ForgeRateLimitedError,
 } from "./index.mjs";
+import { getDraft, putComment } from "./draft.mjs";
 
 const URL = "https://api.github.com/repos/acme/widget/pulls?state=open";
 
@@ -428,4 +432,156 @@ test("forgeDiffForCwd: no open PR → no_pr (not an error)", async () => {
   });
   assert.deepEqual(r.error, "no_pr");
   assert.deepEqual(r.threads, []);
+});
+
+// ---- Box-buffered draft review (BET-793) ------------------------------------
+
+// A draft-op test kit: injectable git/forge deps plus an in-memory stand-in
+// for the durable draft store (deep-copy load/save). `headSha` is what the
+// adapter's getPullRequest reports as the PR's CURRENT head.
+function draftKit({ prs = [OPEN_PR], headSha = "abc", adapter } = {}) {
+  let store = [];
+  const events = [];
+  const deps = {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () =>
+      adapter ?? {
+        kind: "github",
+        listPullRequests: async () => ({ data: prs, stale: false }),
+        getPullRequest: async () => ({ data: { ...OPEN_PR, headSha }, stale: false }),
+        submitReview: async () => ({ data: {}, stale: false }),
+      },
+    async load() {
+      return JSON.parse(JSON.stringify(store));
+    },
+    async save(d) {
+      store = JSON.parse(JSON.stringify(d));
+    },
+    publish() {
+      events.push(1);
+    },
+    snapshot: () => JSON.parse(JSON.stringify(store)),
+    events,
+  };
+  return deps;
+}
+
+const DRAFT_REPO_KEY = "github.com/acme/widget";
+
+test("draftGetForCwd: head SHA moved → draft marked stale, comments kept", async () => {
+  const k = draftKit({ headSha: "newhead" });
+  await putComment(DRAFT_REPO_KEY, 42, "oldhead", { path: "a.ts", line: 1, side: "new", body: "precious" }, k);
+  const r = await draftGetForCwd("/repo", k);
+  assert.equal(r.error, null);
+  assert.equal(r.draft.stale, true, "head moved → stale flag set");
+  assert.equal(r.draft.comments.length, 1, "content is never discarded");
+  assert.equal(r.draft.comments[0].body, "precious");
+  assert.ok(k.events.length >= 1, "the staleness write publishes");
+});
+
+test("draftGetForCwd: head unchanged → draft returned fresh (not stale)", async () => {
+  const k = draftKit({ headSha: "abc" });
+  await putComment(DRAFT_REPO_KEY, 42, "abc", { path: "a.ts", line: 1, side: "new", body: "fresh" }, k);
+  const r = await draftGetForCwd("/repo", k);
+  assert.equal(r.draft.stale, false);
+  assert.equal(r.draft.comments[0].body, "fresh");
+});
+
+test("draftCommentForCwd: add + set-verdict persist box-side", async () => {
+  const k = draftKit();
+  const add = await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "note" } }, k);
+  assert.equal(add.ok, true);
+  assert.equal(add.draft.comments.length, 1);
+
+  const v = await draftCommentForCwd("/repo", { op: "set-verdict", verdict: "approved" }, k);
+  assert.equal(v.ok, true);
+  assert.equal(v.draft.verdict, "approved");
+  assert.equal(v.draft.comments.length, 1, "set-verdict does not touch comments");
+
+  const bad = await draftCommentForCwd("/repo", { op: "frobnicate" }, k);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error.includes("unknown op"), true);
+});
+
+test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with correct anchors, then clears", async () => {
+  let submitted = null;
+  const adapter = {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+    submitReview: async (repo, n, input) => {
+      submitted = { repo, n, input };
+      return { data: {}, stale: false };
+    },
+  };
+  const k = draftKit({ adapter });
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "old", body: "c2" } }, k);
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" } }, k);
+
+  const r = await draftSubmitForCwd("/repo", { verdict: "approved" }, k);
+  assert.equal(r.ok, true);
+  assert.equal(submitted.repo.owner, "acme");
+  assert.equal(submitted.n, 42);
+  assert.equal(submitted.input.verdict, "approved");
+  assert.equal(submitted.input.comments.length, 3, "all three comments in one review");
+  assert.equal(submitted.input.headSha, "abc");
+  // The demo adapter receives the forge-NEUTRAL anchors (path/line/side/startLine);
+  // the adapter maps new/old → RIGHT/LEFT via toGithubAnchor (covered in github.test.mjs).
+  const multi = submitted.input.comments.find((c) => c.path === "b.ts");
+  assert.equal(multi.line, 5);
+  assert.equal(multi.side, "new");
+  assert.equal(multi.startLine, 3);
+  assert.equal(submitted.input.comments.find((c) => c.path === "a.ts" && c.line === 2).side, "old");
+
+  assert.equal(await getDraft(DRAFT_REPO_KEY, 42, k), null, "draft cleared on SUCCESS");
+});
+
+test("draftSubmitForCwd: a failed submit returns a typed error and leaves the draft intact", async () => {
+  const adapter = {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+    submitReview: async () => {
+      const e = new Error("review failed");
+      e.kind = "http_422";
+      throw e;
+    },
+  };
+  const k = draftKit({ adapter });
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "c2" } }, k);
+
+  const r = await draftSubmitForCwd("/repo", {}, k);
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "http_422");
+  const after = await getDraft(DRAFT_REPO_KEY, 42, k);
+  assert.equal(after.comments.length, 2, "nothing is lost on a failed submit");
+  assert.equal(after.comments[0].body, "c1");
+  assert.equal(after.comments[1].body, "c2");
+});
+
+test("draftSubmitForCwd: no buffered comments → nothing to submit", async () => {
+  const k = draftKit();
+  const r = await draftSubmitForCwd("/repo", {}, k);
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "nothing to submit");
+});
+
+test("draft ops resolve no_forge / not_connected like the other write ops", async () => {
+  const rNo = await draftGetForCwd("/repo", {
+    gitRemoteOrigin: async () => null,
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () => ({}),
+  });
+  assert.equal(rNo.error, "no_forge");
+
+  const rTok = await draftSubmitForCwd("/repo", {}, {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    resolveToken: async () => null,
+    getAdapter: () => ({}),
+  });
+  assert.equal(rTok.error, "not_connected");
 });

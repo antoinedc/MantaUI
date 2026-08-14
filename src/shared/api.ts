@@ -47,6 +47,11 @@ import type {
   ForgeShipPreviewResult,
   ForgeMergeInput,
   ForgeMergeResult,
+  ForgeDraftGetResult,
+  ForgeDraftCommentInput,
+  ForgeDraftCommentResult,
+  ForgeDraftSubmitInput,
+  ForgeDraftSubmitResult,
   ProviderEndpoint,
   DiscoverResult,
   ProviderInput,
@@ -190,6 +195,15 @@ export interface Api {
   forgeShip(input: ForgeShipInput): Promise<ForgeShipResult>;
   forgeShipPreview(input: ForgeShipPreviewInput): Promise<ForgeShipPreviewResult>;
   forgeMerge(input: ForgeMergeInput): Promise<ForgeMergeResult>;
+
+  // BET-793: box-buffered draft review (box-side only — a forge token never
+  // reaches the renderer; the box owns the draft, spec §3.4①). draftGet reads
+  // the current draft; draftComment mutates a comment (add/edit/delete) or sets
+  // the verdict; draftSubmit flushes the whole draft as ONE review, clearing it
+  // only on success.
+  forgeDraftGet(input: { cwd: string }): Promise<ForgeDraftGetResult>;
+  forgeDraftComment(input: ForgeDraftCommentInput): Promise<ForgeDraftCommentResult>;
+  forgeDraftSubmit(input: ForgeDraftSubmitInput): Promise<ForgeDraftSubmitResult>;
 
   tmuxConfigStatus(): Promise<TmuxConfigStatus>;
   tmuxSetupConfig(): Promise<TmuxConfigStatus>;

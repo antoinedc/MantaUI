@@ -1,41 +1,43 @@
-// BET-792 — the review pane (READ HALF).
+// BET-793 — the review pane (WRITE half on top of BET-792's read half).
 //
-// Fetches a session's linked-PR diff (`window.api.forgeDiff({ cwd })`), renders
-// it with the comment gutter via the SAME `UnifiedDiff` the tool output uses,
-// and shows incoming forge threads + your own drafts as inline notes IN the
-// diff (never a sidebar, never a popover — faithfulness check 1).
+// BET-792 built the read half: fetch a session's linked-PR diff
+// (`window.api.forgeDiff({ cwd })`), render it with the comment gutter via the
+// SAME `UnifiedDiff` the tool output uses, and show incoming forge threads IN
+// the diff. This issue adds the write half (spec §3.4①) — the box-buffered
+// draft review.
 //
-// The write half is a separate issue, so the only destination a draft note has
-// here is "Send to agent", which appends the note's text to the main composer
-// via the `manta-forge-comment` window event (ChatPanel fills its input; it
-// does not send). "Add to review" / comment POST / resolve arrive with the
-// write half.
+// THE PORTABILITY DECISION. The box owns the draft. Comments accumulate in
+// durable box state (`forge:draft-*` RPC channels → src/server/forge/draft.mjs)
+// and "submit" flushes them in ONE review. GitHub's native pending-review is an
+// optimisation we may not use, NOT the architecture — which is why the pending
+// bar renders identically regardless of forge.
 //
-// Anchor shape is forge-neutral `{ line, side, startLine }` (spec §3.4③); the
-// adapter's three-SHA GitLab position object is its problem, not ours.
+// Two destinations per composed note: "Send to agent" (the visually primary
+// accent — the fastest path from seeing a problem to it being fixed) and
+// "Add to review" (buffer box-side). The pending bar sums the buffered comments
+// with the verdict actions (Approve / Request changes / Comment) and a Submit
+// that flushes everything as one review. If the branch head moved past what we
+// anchored to, the draft is marked stale (kept, never discarded — the warning
+// below) and the bar warns instead of dropping the user's writing.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ForgeThread } from "../shared/types";
+import type { ForgeDraft, ForgeThread } from "../shared/types";
 import type { CommentableLine } from "./chatUtils";
-import { Pill } from "./Pill";
+import { Button } from "./Button";
 import { Chip } from "./Chip";
 import { Callout } from "./Callout";
+import { StatusDot } from "./StatusDot";
+import { Pill } from "./Pill";
 import { UnifiedDiff, type UnifiedDiffGutter, type UnifiedDiffNote } from "./ToolBodies";
 
-// ---- Draft comment (this issue's only forge-write-adjacent object) ---------
-
-type DraftComment = {
-  key: string;
-  anchor: CommentableLine;
-  body: string;
-  sentToAgent: boolean;
-};
+const REVIEW_VERDICTS = [
+  { value: "approved", label: "Approve" },
+  { value: "changes_requested", label: "Request changes" },
+  { value: "commented", label: "Comment" },
+] as const;
 
 // Map a GitHub thread anchor onto the forge-neutral `{ path, line, side }` the
 // diff gutters use (spec §3.4③). GitHub "RIGHT" → new side, "LEFT" → old side.
-// `path` is carried so the note anchors to the RIGHT file in the merged
-// multi-file diff stream. A file-level comment (no line) returns null → the
-// note is placed at the file top.
 function threadAnchor(t: ForgeThread): CommentableLine | null {
   if (t.line == null) return null;
   return { path: t.path ?? "", line: t.line, side: t.side === "LEFT" ? "old" : "new" };
@@ -56,13 +58,11 @@ function diffHeader(diff: string): { label: string; plus: number; minus: number 
   return { label: label || "review", plus, minus };
 }
 
-// The note-inline block (a colleague's thread or your draft) that sits between
-// diff lines. This IS the `Callout` primitive at its `note` size — the spec's
-// `.note-inline` (§4.5②): a 2px accent left bar on an accent-bg surface,
-// indented under the diff's code region. It is the SAME advisory-box primitive,
-// not a second callout, so the note family cannot drift. The attribution line
-// (§4.5②) is emphasised; the status line is mono `--tx4`.
-//
+// The note-inline block (a colleague's thread, a buffered draft note, or the
+// composer) that sits between diff lines. This IS the `Callout` primitive at its
+// `note` size — the spec's `.note-inline` (§4.5②): a 2px accent left bar on an
+// accent-bg surface, indented under the diff's code region. The attribution
+// line is emphasised; the status line is mono `--tx4`.
 function NoteInline({
   attribution,
   body,
@@ -79,9 +79,7 @@ function NoteInline({
       <Callout tone="info" size="note">
         <div className="font-semibold text-text">{attribution}</div>
         <div className="mt-px whitespace-pre-wrap break-words leading-[1.55]">{body}</div>
-        {action && (
-          <div className="mt-2 flex items-center gap-[6px]">{action}</div>
-        )}
+        {action && <div className="mt-2 flex items-center gap-[6px]">{action}</div>}
         {status && (
           <div className="mt-[6px] font-mono text-[11.5px] text-text-quiet">{status}</div>
         )}
@@ -90,25 +88,27 @@ function NoteInline({
   );
 }
 
-export function ReviewPane({
-  sessionId,
-  cwd,
-}: {
-  sessionId: string;
-  cwd: string;
-}) {
+export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string }) {
   const [diff, setDiff] = useState<string>("");
   const [threads, setThreads] = useState<ForgeThread[]>([]);
   const [error, setError] = useState<"no_forge" | "not_connected" | "no_pr" | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // The box-buffered draft (BET-793). null = no draft yet on the box.
+  const [draft, setDraft] = useState<ForgeDraft | null>(null);
+
   const [composing, setComposing] = useState<CommentableLine | null>(null);
   const [draftText, setDraftText] = useState<string>("");
-  const [drafts, setDrafts] = useState<DraftComment[]>([]);
-  const draftIdRef = useRef(0);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Fetch the PR diff for the session's cwd. Re-runs when the cwd changes
-  // (session switch). No interval — the read half refetches on reopen.
+  // Renderer-local "routed to agent" flags keyed by buffered comment id. The
+  // forge never sees this — it only lands in the chat composer. Not a draft
+  // field, so the box store stays forge-shaped.
+  const sentRef = useRef<Set<string>>(new Set());
+  const [, forceRender] = useState(0);
+
+  // Fetch the PR diff + the box-owned draft for the session's cwd. Re-runs
+  // when the cwd changes (session switch). No interval — refetch on reopen.
   useEffect(() => {
     if (!cwd) {
       setLoading(false);
@@ -119,7 +119,9 @@ export function ReviewPane({
     setLoading(true);
     setComposing(null);
     setDraftText("");
-    setDrafts([]);
+    setDraft(null);
+    sentRef.current = new Set();
+
     window.api
       .forgeDiff({ cwd })
       .then((res) => {
@@ -134,10 +136,84 @@ export function ReviewPane({
         setError("no_forge");
         setLoading(false);
       });
+
+    window.api
+      .forgeDraftGet({ cwd })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.draft) setDraft(res.draft);
+      })
+      .catch(() => {
+        // A draft read failure must not blank the diff. Best-effort empty.
+      });
+
     return () => {
       cancelled = true;
     };
   }, [cwd, sessionId]);
+
+  // ---- Composer / draft mutations (all box-side) --------------------------
+
+  const addToReview = useCallback(async () => {
+    if (!composing) return;
+    const body = draftText.trim();
+    if (!body) return;
+    const res = await window.api.forgeDraftComment({
+      cwd,
+      op: "add",
+      comment: { path: composing.path, line: composing.line, side: composing.side, body },
+    });
+    if (res.ok) setDraft(res.draft);
+    setComposing(null);
+    setDraftText("");
+  }, [cwd, composing, draftText]);
+
+  const sendToAgent = useCallback(
+    (text: string, commentId?: string) => {
+      const t = text.trim();
+      if (!t) return;
+      window.dispatchEvent(
+        new CustomEvent("manta-forge-comment", { detail: { sessionId, text: t } }),
+      );
+      if (commentId) {
+        sentRef.current.add(commentId);
+        forceRender((n) => n + 1);
+      }
+    },
+    [sessionId],
+  );
+
+  const removeComment = useCallback(
+    async (commentId: string) => {
+      const res = await window.api.forgeDraftComment({ cwd, op: "delete", comment: { id: commentId } });
+      if (res.ok) setDraft(res.draft);
+    },
+    [cwd],
+  );
+
+  const setVerdict = useCallback(
+    async (verdict: ForgeDraft["verdict"]) => {
+      const res = await window.api.forgeDraftComment({ cwd, op: "set-verdict", verdict });
+      if (res.ok) setDraft(res.draft);
+    },
+    [cwd],
+  );
+
+  const submit = useCallback(async () => {
+    if (!draft || draft.comments.length === 0 || submitting) return;
+    setSubmitting(true);
+    try {
+      const res = await window.api.forgeDraftSubmit({ cwd, verdict: draft.verdict ?? undefined });
+      if (res.ok) {
+        setDraft(null);
+        sentRef.current = new Set();
+      }
+      // A failed submit returns { ok:false } and leaves the draft intact
+      // (box-side) — the pending bar stays so nothing is lost.
+    } finally {
+      setSubmitting(false);
+    }
+  }, [cwd, draft, submitting]);
 
   const { label, plus, minus } = useMemo(() => diffHeader(diff), [diff]);
 
@@ -150,34 +226,6 @@ export function ReviewPane({
       },
     }),
     [],
-  );
-
-  const submitDraft = useCallback(() => {
-    if (!composing) return;
-    const body = draftText.trim();
-    if (!body) return;
-    setDrafts((prev) => [
-      ...prev,
-      { key: `draft-${++draftIdRef.current}`, anchor: composing, body, sentToAgent: false },
-    ]);
-    setComposing(null);
-    setDraftText("");
-  }, [composing, draftText]);
-
-  const sendDraftToAgent = useCallback(
-    (key: string) => {
-      const d = drafts.find((x) => x.key === key);
-      if (!d) return;
-      window.dispatchEvent(
-        new CustomEvent("manta-forge-comment", {
-          detail: { sessionId, text: d.body },
-        }),
-      );
-      setDrafts((prev) =>
-        prev.map((x) => (x.key === key ? { ...x, sentToAgent: true } : x)),
-      );
-    },
-    [drafts, sessionId],
   );
 
   const notes = useMemo<UnifiedDiffNote[]>(() => {
@@ -211,32 +259,41 @@ export function ReviewPane({
       });
     }
 
-    // Your own drafts — the same surface, "You · draft", with the one
-    // destination this issue wires ("Send to agent").
-    for (const d of drafts) {
+    // Your own box-buffered draft comments — "You · draft", with the two
+    // destinations the design wants: "Send to agent" (accent — primary) and
+    // "Remove" to un-buffer before submit. A note routed to agent but still
+    // buffered reads "↳ attached to composer · not yet published".
+    for (const c of draft?.comments ?? []) {
+      const sent = sentRef.current.has(c.id);
       out.push({
-        key: d.key,
-        anchor: d.anchor,
+        key: `draft-${c.id}`,
+        anchor: { path: c.path, line: c.line, side: c.side },
         node: (
           <NoteInline
             attribution={<>You · draft</>}
-            body={d.body}
+            body={c.body}
             action={
-              d.sentToAgent ? null : (
-                <Chip on onClick={() => sendDraftToAgent(d.key)}>
-                  Send to agent
-                </Chip>
-              )
+              <>
+                {sent ? null : (
+                  <Chip on onClick={() => sendToAgent(c.body, c.id)}>
+                    Send to agent
+                  </Chip>
+                )}
+                <Button tone="ghost" onClick={() => removeComment(c.id)}>
+                  Remove
+                </Button>
+              </>
             }
-            status={
-              d.sentToAgent ? <>&#8627; attached to composer · not yet published</> : undefined
-            }
+            status={sent ? <>&#8627; attached to composer · not yet published</> : undefined}
           />
         ),
       });
     }
 
-    // The inline composer opened by the gutter `+`, anchored at its line.
+    // The inline composer opened by the gutter `+`, anchored at its line — two
+    // destinations, one gesture: "Send to agent" (accent, primary) and "Add to
+    // review" (plain). Sending routes to the chat composer; adding buffers the
+    // note box-side for the pending review.
     if (composing) {
       out.push({
         key: "composer",
@@ -250,7 +307,7 @@ export function ReviewPane({
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  submitDraft();
+                  addToReview();
                 } else if (e.key === "Escape") {
                   e.preventDefault();
                   setComposing(null);
@@ -262,23 +319,21 @@ export function ReviewPane({
               className="w-full resize-none rounded-xs border border-border-strong bg-bg px-2 py-1 font-mono text-meta text-text outline-none placeholder:text-text-faint focus:border-accent"
             />
             <div className="mt-2 flex items-center gap-[6px]">
-              <button
-                type="button"
-                onClick={submitDraft}
-                className="rounded-xs bg-accent-solid px-2 py-1 text-meta font-medium text-on-accent hover:opacity-90"
-              >
-                Add note
-              </button>
-              <button
-                type="button"
+              <Chip on onClick={() => sendToAgent(draftText)}>
+                Send to agent
+              </Chip>
+              <Button tone="default" onClick={addToReview}>
+                Add to review
+              </Button>
+              <Button
+                tone="ghost"
                 onClick={() => {
                   setComposing(null);
                   setDraftText("");
                 }}
-                className="rounded-xs px-2 py-1 text-meta text-text-muted hover:bg-fill-hover hover:text-text"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         ),
@@ -286,10 +341,50 @@ export function ReviewPane({
     }
 
     return out;
-  }, [threads, drafts, composing, draftText, submitDraft, sendDraftToAgent]);
+  }, [threads, draft, composing, draftText, addToReview, sendToAgent, removeComment]);
+
+  const draftCount = draft?.comments.length ?? 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* [R2] The pending bar — one row above the diff. Runs only when there is
+          something buffered (never at zero) and renders identically regardless
+          of forge, which is the visible payoff of the box-side buffer. */}
+      {draftCount > 0 && (
+        <div className="px-3 pb-1 pt-2">
+          {draft?.stale && (
+            <div className="mb-2">
+              <Callout tone="warn" size="note">
+                The branch moved since you wrote these comments — the line
+                anchors may be out of date. Your comments are kept; review them
+                before submitting.
+              </Callout>
+            </div>
+          )}
+          <div className="flex items-center gap-[9px] text-[13px] text-text-muted">
+            <StatusDot tone="warn" />
+            <span>
+              <b className="text-text">{draftCount === 1 ? "1 comment" : `${draftCount} comments`}</b>{" "}
+              not yet published
+            </span>
+            <span className="ml-auto flex items-center gap-[6px]">
+              {REVIEW_VERDICTS.map((v) => (
+                <Button
+                  key={v.value}
+                  tone={draft?.verdict === v.value ? "primary" : "default"}
+                  onClick={() => setVerdict(v.value)}
+                >
+                  {v.label}
+                </Button>
+              ))}
+              <Button tone="primary" disabled={submitting} onClick={submit}>
+                {submitting ? "Submitting…" : "Submit"}
+              </Button>
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* File header — the mockup's real `.mhead`: path + the +/− pill. */}
       <div className="flex items-center gap-2 px-3 pb-1 pt-2">
         <span className="min-w-0 truncate font-mono text-[11.5px] font-semibold text-text-muted">
@@ -317,13 +412,7 @@ export function ReviewPane({
           <div className="px-3 py-6 text-meta text-text-faint">No diff.</div>
         ) : (
           <div className="py-2">
-            <UnifiedDiff
-              text={diff}
-              bare
-              showHunks
-              gutter={gutter}
-              notes={notes}
-            />
+            <UnifiedDiff text={diff} bare showHunks gutter={gutter} notes={notes} />
           </div>
         )}
       </div>

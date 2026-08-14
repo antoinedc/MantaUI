@@ -217,9 +217,36 @@ function normalizeReviewThreads(raw) {
   return threads;
 }
 
+// Map the shared ReviewVerdict draft-action to GitHub's `event`. null (a plain
+// "post the comments, no verdict") → COMMENT, the neutral publish event.
+function verdictToEvent(verdict) {
+  if (verdict === "approved") return "APPROVE";
+  if (verdict === "changes_requested") return "REQUEST_CHANGES";
+  return "COMMENT";
+}
+
+// Map a forge-neutral DraftComment onto a GitHub review-comment payload.
+// Anchoring uses `path` + `line` + `side` (LEFT/RIGHT) plus `start_line` +
+// `start_side` for the multi-line highlight, plus `commit_id` (the reviewed
+// head SHA). The old `position` field (offset from the hunk header) is being
+// retired and is deliberately never emitted.
+function toGithubAnchor(c, headSha) {
+  const a = {
+    path: c.path,
+    line: c.line,
+    side: c.side === "old" ? "LEFT" : "RIGHT",
+    body: c.body,
+  };
+  if (c.startLine != null) {
+    a.start_line = c.startLine;
+    a.start_side = a.side;
+  }
+  if (headSha) a.commit_id = headSha;
+  return a;
+}
+
 /**
  * Create a GitHub adapter bound to an injected `request(url)`.
- *
  * `request` is provided by the index.mjs request layer and returns
  * `{ data, stale }` — data is the raw parsed JSON body (or a cached value on
  * ETag 304 / rate-limit cooling), stale is true when the value came from
@@ -391,6 +418,60 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         }
         throw err;
       }
+      return { data, stale: false };
+    },
+
+    // ---- Review writes (BET-793) ------------------------------------------
+    //
+    // The box-buffered draft review flushes as ONE submitReview call. This is
+    // precisely why the buffer lives on the box: there is NO REST endpoint to
+    // add a comment to an existing pending review — the entire comments[] array
+    // must be passed at creation. One batched review is well inside the rate
+    // limit (mutations cost 5 points each); thirty individual comment POSTs are
+    // not. `replyToThread` is the one genuinely per-thread write (a reply to an
+    // existing incoming thread — there is no batching concept for those).
+
+    /**
+     * POST /repos/{o}/{r}/pulls/{n}/reviews — submit the box-buffered draft as
+     * ONE review carrying every buffered comment in the same call (the whole
+     * point of the box-side buffer). `verdict` maps to the review `event`
+     * (null → COMMENT). Anchors are built with `toGithubAnchor`.
+     *
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {{ verdict?: "approved" | "changes_requested" | "commented" | null,
+     *           body?: string,
+     *           comments?: Array<{ path: string, line: number, side: string, startLine?: number | null, body: string }>,
+     *           headSha?: string }} [input]
+     * @returns {Promise<{ data: any, stale: boolean }>}
+     */
+    async submitReview(repo, number, { verdict = null, body = "", comments = [], headSha = "" } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}${issuePath(repo)}/pulls/${number}/reviews`;
+      const payload = { event: verdictToEvent(verdict), body };
+      if (Array.isArray(comments) && comments.length > 0) {
+        payload.comments = comments.map((c) => toGithubAnchor(c, headSha));
+      }
+      const { data } = await requestWrite(url, { method: "POST", body: payload });
+      return { data, stale: false };
+    },
+
+    /**
+     * POST /repos/{o}/{r}/pulls/{n}/comments/{id}/replies — reply to an
+     * incoming thread. The one per-thread write; a reply anchors to the parent
+     * comment, so only the body + reviewed commit are needed.
+     *
+     * @param {{ owner: string, repo: string }} repo
+     * @param {number} number
+     * @param {{ threadId: string, body: string, headSha?: string }} input
+     * @returns {Promise<{ data: any, stale: boolean }>}
+     */
+    async replyToThread(repo, number, { threadId, body, headSha = "" } = {}) {
+      if (!requestWrite) throw new Error("write transport not available");
+      const url = `${API}${issuePath(repo)}/pulls/${number}/comments/${threadId}/replies`;
+      const payload = { body: String(body ?? "").trim() };
+      if (headSha) payload.commit_id = headSha;
+      const { data } = await requestWrite(url, { method: "POST", body: payload });
       return { data, stale: false };
     },
 
