@@ -452,6 +452,6 @@ export async function pollDeviceGrant(
   const stored = await storeToken(raw.access_token);
   if (!stored.ok) throw new Error(stored.error || "couldn't store the token");
   ACTIVE_GRANTS.delete(grantId);
-  invalidateToken(CLI_HOST);
+  invalidateToken(GITHUB_CLI_HOST);
   return { status: "done" };
 }
