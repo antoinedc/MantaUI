@@ -107,6 +107,27 @@ html, body, #root {
   .manta-recording { animation: none; border-color: var(--danger); }
 }
 
+/* Paused take — same rule as .manta-recording: border colour only, never the
+   fill, but solid --warn and NO animation. */
+.manta-recording-paused {
+  border-color: var(--warn);
+}
+
+/* The recording state dot's own pulse (BET-836): opacity 1 -> 0.25 -> 1,
+   1.4 s ease-in-out, infinite. Suppressed under reduced-motion — the dot is
+   decorative (the waveform + timer carry the live signal). Paused applies no
+   animation. */
+@keyframes manta-recording-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+.manta-recording-dot {
+  animation: manta-recording-dot-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-recording-dot { animation: none; }
+}
+
 /* MantaLoader — the two counter-rotating arcs (src/renderer/MantaLoader.tsx).
    Speeds are the native client's, verbatim: 0.9s clockwise outer, 1.4s
    anticlockwise inner. The mismatched periods are what stop the pair reading

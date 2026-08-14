@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Mic, Shield, Square } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
-import type { VoicePhase } from "./voice";
+import type { Voice } from "./hooks/useVoice";
 import {
   arrowDownNavigatesHistory,
   arrowUpNavigatesHistory,
@@ -33,45 +33,23 @@ import {
 import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
-import { AttachButton, AttachmentStrip, MicButton, SessionToolbar, PendingScreenshotStrip, VOICE_SHORTCUT_LABEL } from "./ComposerParts";
+import {
+  AttachButton,
+  AttachmentStrip,
+  MicButton,
+  RecordingRow,
+  SendFilled,
+  SessionToolbar,
+  PendingScreenshotStrip,
+} from "./ComposerParts";
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
+import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
 export { TypeaheadPopup } from "./ComposerParts";
 // AttachmentStrip is no longer re-exported — it is now rendered INSIDE the
 // composer box (BET-416 §B), so Composer no longer imports it.
-
-/**
- * The send glyph: lucide's paper plane as a SOLID shape.
- *
- * Not `<Send fill="currentColor"/>` — lucide's Send is two paths, the plane
- * body plus a separate diagonal line for the fold. Filling the component fills
- * the body but leaves that second path a stroke, so a hairline crease cuts
- * across the solid plane. Dropping it is what "filled send" means, and the
- * component API gives no way to render one path of two, so the body is inlined
- * here (the same inline-SVG escape hatch CopyButton uses).
- *
- * The path is lucide-react v1.28.0's `send` body, verbatim; the light stroke on
- * top of the fill is what keeps a 14px solid shape from looking eroded at its
- * points.
- */
-function SendFilled({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width={size}
-      height={size}
-      fill="currentColor"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
-    </svg>
-  );
-}
 
 // Measure the caret's VISUAL row within a textarea, accounting for soft wrap.
 // Render a hidden mirror <div> that copies the textarea's box + text styling,
@@ -164,13 +142,7 @@ export function InputArea({
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
-  voiceEnabled,
-  voicePhase,
-  voiceRecording,
-  voiceProcessing,
-  startVoice,
-  stopVoice,
-  cancelVoice,
+  voice,
   models,
   modelOverride,
   defaultModel,
@@ -220,13 +192,10 @@ export function InputArea({
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
-  voiceEnabled: boolean;
-  voicePhase: VoicePhase;
-  voiceRecording: boolean;
-  voiceProcessing: boolean;
-  startVoice: () => void;
-  stopVoice: () => void;
-  cancelVoice: () => void;
+  // The whole voice hook result (BET-836): the recording session state
+  // (phase/elapsedMs/nearLimit/liveWindowRef), the actions (start/pause/
+  // resume/send/discard), the discard-arm state, and the a11y announcements.
+  voice: Voice;
   // tokens / staleCache / branch / activeModel moved to SessionHeader
   // (BET-415). The composer owns only composing controls now.
   models: OpencodeModel[] | null;
@@ -254,7 +223,28 @@ export function InputArea({
   onQueuePop: () => void;
   onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
 }) {
+  const { voiceEnabled, voiceRecording, voiceProcessing, voiceAnnouncement } =
+    voice;
+  const {
+    phase: voicePhase,
+    elapsedMs,
+    nearLimit,
+    lastError,
+    liveWindowRef,
+    start: voiceStart,
+    pause: voicePause,
+    resume: voiceResume,
+    send: voiceSend,
+    stop: voiceStop,
+    cancel: voiceCancel,
+    requestDiscard,
+    discardArmed,
+  } = voice.voiceRecorder;
   const voiceActive = voiceRecording || voiceProcessing;
+  // A take is active — swap the textarea row for the recording row. Includes
+  // "requesting" (mic permission) so the box's footprint is stable from the
+  // instant recording starts.
+  const takeActive = voiceRecording;
   // Detect mobile shell (touch device using the no-window.api branch with
   // MobileApp + .mobile-body wrapper). MicButton is only rendered there;
   // on desktop the keyboard shortcut (CmdOrCtrl+Shift+M / Enter / Esc) drives voice.
@@ -300,9 +290,9 @@ export function InputArea({
       {voiceEnabled && isMobileShell && (
         <MicButton
           phase={voicePhase}
-          onStart={startVoice}
-          onStop={stopVoice}
-          onCancel={cancelVoice}
+          onStart={voiceStart}
+          onStop={voiceStop}
+          onCancel={voiceCancel}
           busy={voiceProcessing}
           floating
         />
@@ -336,11 +326,13 @@ export function InputArea({
           // every card on the screen, so the composer looked outlined rather
           // than contained. Definition now comes from the fill + --shadow-sm;
           // focus-within still paints the accent border.
-          (voiceActive
-            ? "manta-recording"
-            : refreshing
-              ? "border-accent"
-              : "border-border-subtle")
+          (voicePhase === "paused"
+            ? "manta-recording-paused"
+            : voiceRecording
+              ? "manta-recording"
+              : refreshing
+                ? "border-accent"
+                : "border-border-subtle")
         }
         // Route every non-control click in the box to the message field. This
         // is what makes the composer focusable on Windows, where a click could
@@ -356,6 +348,15 @@ export function InputArea({
           if (document.activeElement !== el) el.focus();
         }}
       >
+        {/* A11y (BET-836): one polite region for the recording lifecycle
+            announcements; a separate assertive region for mic errors. The
+            timer is deliberately NOT in any live region. */}
+        <span className="sr-only" role="status" aria-live="polite">
+          {voiceAnnouncement}
+        </span>
+        <span className="sr-only" aria-live="assertive">
+          {lastError ?? ""}
+        </span>
         {/* Attachment chips live INSIDE the box, above the text line (BET-416
             §B). They are part of the message being composed, so they share
             the box; context chips (folder / branch) sit ABOVE the box in the
@@ -363,6 +364,21 @@ export function InputArea({
         {attachments.length > 0 && (
           <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
         )}
+        {/* The inner input row swaps for the recording row while a take is
+            active (BET-836). The outer box and its padding are untouched, so
+            the composer never changes height. */}
+        {takeActive ? (
+          <RecordingRow
+            phase={voicePhase}
+            elapsedMs={elapsedMs}
+            liveWindowRef={liveWindowRef}
+            discardArmed={discardArmed}
+            onDiscard={requestDiscard}
+            onPause={voicePause}
+            onResume={voiceResume}
+            onSend={voiceSend}
+          />
+        ) : (
         <div className="flex items-start gap-2">
         <textarea
           ref={inputRef}
@@ -470,6 +486,7 @@ export function InputArea({
           )}
         </button>
         </div>
+        )}
       </div>
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
           transient status on the right. Branch + context pill moved to the
@@ -497,10 +514,12 @@ export function InputArea({
               {voiceEnabled && (
                 <MicButton
                   phase={voicePhase}
-                  onStart={startVoice}
-                  onStop={stopVoice}
-                  onCancel={cancelVoice}
+                  onStart={voiceStart}
+                  onStop={voiceStop}
+                  onCancel={voiceCancel}
+                  onSend={voiceSend}
                   busy={voiceProcessing}
+                  toggled
                 />
               )}
               <AttachButton onFiles={onAttachFiles} />
@@ -520,11 +539,33 @@ export function InputArea({
           />
           {(voiceActive || running) && (
             <span className="text-meta text-text-faint">
-              {voiceActive
-                ? voiceProcessing
-                  ? "transcribing… · esc cancels"
-                  : <span className="inline-flex items-center gap-1"><Mic size={14} aria-hidden="true" />recording · ⏎ send · {VOICE_SHORTCUT_LABEL} stop · space pause · esc cancel</span>
-                : "esc · interrupt"}
+              {voiceProcessing ? (
+                "transcribing… · esc cancels"
+              ) : voicePhase === "paused" ? (
+                <span className="inline-flex items-center gap-1">
+                  <Mic size={14} aria-hidden="true" />
+                  paused · space resume · ⏎ send
+                  {nearLimit && (
+                    <span className="text-warn">
+                      {" "}
+                      · {Math.max(0, Math.ceil((VOICE_MAX_DURATION_MS - elapsedMs) / 1000))}s left
+                    </span>
+                  )}
+                </span>
+              ) : voiceRecording ? (
+                <span className="inline-flex items-center gap-1">
+                  <Mic size={14} aria-hidden="true" />
+                  recording · ⏎ send · space pause · esc discard
+                  {nearLimit && (
+                    <span className="text-warn">
+                      {" "}
+                      · {Math.max(0, Math.ceil((VOICE_MAX_DURATION_MS - elapsedMs) / 1000))}s left
+                    </span>
+                  )}
+                </span>
+              ) : (
+                "esc · interrupt"
+              )}
             </span>
           )}
         </span>

@@ -6,16 +6,153 @@
 // and the press-and-hold mic button. InputArea.tsx composes them.
 
 import { useRef } from "react";
-import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip } from "lucide-react";
+import { Clock, Key, Webhook, X, Mic, Loader2, Paperclip, Trash2, Pause, Play } from "lucide-react";
 import type { VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import type { PendingScreenshot } from "./store";
 import { IconButton } from "./IconButton";
 import { IS_MAC } from "./platform";
+import { VoiceWaveform } from "./VoiceWaveform";
+import { formatClock, VOICE_TAP_HOLD_MS } from "../shared/waveform.mjs";
 // BET-726 Task 1: same scrollIntoView idiom the ⌘K / ⌘F palettes and the
 // model/effort menus use (PaletteShell.tsx) — keeps the keyboard-selected
 // @-file row visible when it moves past the popup's scroll fold.
 import { useSelectedIntoView } from "./PaletteShell";
+
+/**
+ * The send glyph: lucide's paper plane as a SOLID shape.
+ *
+ * Not `<Send fill="currentColor"/>` — lucide's Send is two paths, the plane
+ * body plus a separate diagonal line for the fold. Filling the component fills
+ * the body but leaves that second path a stroke, so a hairline crease cuts
+ * across the solid plane. Dropping it is what "filled send" means, and the
+ * component API gives no way to render one path of two, so the body is inlined
+ * here (the same inline-SVG escape hatch CopyButton uses).
+ *
+ * The path is lucide-react v1.28.0's `send` body, verbatim; the light stroke on
+ * top of the fill is what keeps a 14px solid shape from looking eroded at its
+ * points.
+ */
+export function SendFilled({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" />
+    </svg>
+  );
+}
+
+// The chrome every icon button in the recording row shares — the EXISTING
+// send button's chrome, verbatim: 27px hit box, --r-sm radius, centred. The
+// recording row does not use IconButton (fixed 24/32px hit areas that don't
+// match this row and no className escape hatch by design).
+const recBtn =
+  "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
+  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
+// ===== Recording row (BET-836) =====
+//
+// Replaces the textarea + send row INSIDE the composer box while a take is
+// active (recording / paused). The box's outer element and its padding are
+// untouched, so the composer never changes height; only this inner row swaps.
+// The footer (model picker, mic, attach, usage dial, toolbar) stays visible
+// and interactive throughout.
+export function RecordingRow({
+  phase,
+  elapsedMs,
+  liveWindowRef,
+  discardArmed,
+  onDiscard,
+  onPause,
+  onResume,
+  onSend,
+}: {
+  phase: VoicePhase;
+  elapsedMs: number;
+  liveWindowRef: React.RefObject<Float32Array>;
+  discardArmed: boolean;
+  onDiscard: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onSend: () => void;
+}) {
+  const recording = phase === "recording" || phase === "requesting";
+  const paused = phase === "paused";
+  const wavePhase: "recording" | "paused" = paused ? "paused" : "recording";
+  return (
+    <div className="flex items-center gap-2">
+      {/* 1 · State dot — pulses while recording (CSS), static red when paused
+          is handled elsewhere; paused uses the warn treatment + no animation. */}
+      <span
+        aria-hidden="true"
+        className={
+          "w-2 h-2 rounded-full shrink-0 " +
+          (paused ? "bg-warn" : `bg-danger ${recording ? "manta-recording-dot" : ""}`)
+        }
+      />
+      {/* 2 · Timer — NOT inside a live region (per-second region floods SR). */}
+      <span
+        aria-hidden="true"
+        className={
+          "font-mono text-label tabular-nums shrink-0 w-10 " +
+          (paused ? "text-warn" : "text-danger")
+        }
+      >
+        {formatClock(elapsedMs)}
+      </span>
+      {/* 3 · Live waveform — reads the recorder's level window directly. */}
+      <VoiceWaveform phase={wavePhase} liveWindowRef={liveWindowRef} />
+      {/* 4 · Discard — arms above the confirm threshold. */}
+      <button
+        type="button"
+        onClick={onDiscard}
+        aria-label={discardArmed ? "Confirm discard" : "Discard recording"}
+        title={discardArmed ? "Discard? (tap again to confirm)" : "Discard recording"}
+        className={
+          `${recBtn} ${discardArmed ? "text-danger bg-danger-bg" : "text-danger hover:bg-danger-bg"}`
+        }
+      >
+        {discardArmed ? (
+          <span className="text-label leading-none">Discard?</span>
+        ) : (
+          <Trash2 size={14} aria-hidden="true" />
+        )}
+      </button>
+      {/* 5 · Pause / Resume. */}
+      <button
+        type="button"
+        onClick={paused ? onResume : onPause}
+        aria-label={paused ? "Resume recording" : "Pause recording"}
+        title={paused ? "Resume (space)" : "Pause (space)"}
+        className={`${recBtn} ${paused ? "" : "bg-accent-solid text-on-accent"}`}
+      >
+        {paused ? (
+          <Play size={12} aria-hidden="true" />
+        ) : (
+          <Pause size={12} aria-hidden="true" />
+        )}
+      </button>
+      {/* 6 · Send — stop + submit. */}
+      <button
+        type="button"
+        onClick={onSend}
+        aria-label="Send recording"
+        title="Send (Enter)"
+        className={`${recBtn} bg-accent-solid text-on-accent hover:bg-accent-solid/90`}
+      >
+        <SendFilled size={14} />
+      </button>
+    </div>
+  );
+}
 
 // Shared chrome for the composer's icon-row buttons (BET-620 change 6): the
 // three SessionToolbar resource buttons AND UsageDial's trigger (BET-738) —
@@ -343,6 +480,8 @@ export function MicButton({
   onCancel,
   busy = false,
   floating = false,
+  toggled = false,
+  onSend,
 }: {
   phase: VoicePhase;
   onStart: () => void;
@@ -354,6 +493,15 @@ export function MicButton({
   // above the composer). It is dictation-only, the same as the inline
   // button — transcription is always plain text into the composer.
   floating?: boolean;
+  // `toggled` = the recorder-composer gesture (BET-836): tap toggles
+  // recording on/off, hold is push-to-talk (stop + send on release). When
+  // false (default) the button is plain press-and-hold dictate — every
+  // release stops. The NewSessionScreen dictation mic and the mobile PTT FAB
+  // are the non-toggled consumers.
+  toggled?: boolean;
+  // Required for the toggled gesture — the "send" that a hold-release and a
+  // click-while-recording both resolve to. Falls back to onStop.
+  onSend?: () => void;
 }) {
   const recording = phase === "recording" || phase === "requesting";
 
@@ -368,6 +516,9 @@ export function MicButton({
   // never called → the recorder ran until the 60s maxDuration cap, silently.
   // A ref flips synchronously on pointerdown so release ALWAYS reaches stop.
   const pressActiveRef = useRef(false);
+  // When the press started — used by the toggled gesture to separate a tap
+  // (< VOICE_TAP_HOLD_MS) from a hold (push-to-talk).
+  const pressDownAtRef = useRef(0);
 
   // Pointer-based handlers — single code path for mouse + touch + pen so
   // we don't have to worry about emulated mouse events firing AFTER touch
@@ -376,6 +527,19 @@ export function MicButton({
     if (busy || pressActiveRef.current) return;
     e.preventDefault();
     pressActiveRef.current = true;
+    pressDownAtRef.current = performance.now();
+    if (toggled && (phase === "recording" || phase === "requesting" || phase === "paused")) {
+      // Already recording → stop and send. Same outcome as releasing a hold,
+      // so both gestures agree.
+      (onSend ?? onStop)();
+      // Capture so onPointerUp fires even if the cursor leaves the button.
+      try {
+        (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
+      } catch { /* not all browsers support pointer capture */ }
+      return;
+    }
+    // Idle → start recording immediately, on press — never on the threshold,
+    // else the first quarter-second of speech is swallowed.
     onStart();
     // Capture so onPointerUp fires even if the cursor leaves the button.
     try {
@@ -387,6 +551,16 @@ export function MicButton({
     if (!pressActiveRef.current) return;
     pressActiveRef.current = false;
     e.preventDefault();
+    if (toggled) {
+      const held = performance.now() - pressDownAtRef.current;
+      if (held < VOICE_TAP_HOLD_MS) {
+        // A tap → stay recording (toggled on). Nothing to stop.
+        return;
+      }
+      // Held past the threshold → push-to-talk → stop and send.
+      (onSend ?? onStop)();
+      return;
+    }
     // Always stop (not cancel) on a deliberate release — even if `phase` is
     // still "requesting" (the recorder hasn't been constructed yet). The
     // hook's stop() handles the requesting-window case: it records a
@@ -407,12 +581,16 @@ export function MicButton({
   const label = busy
     ? "transcribing…"
     : recording
-      ? floating
-        ? `release to insert · ${VOICE_SHORTCUT_LABEL}`
-        : `release · dictate · ${VOICE_SHORTCUT_LABEL}`
-      : floating
-        ? `hold to talk · ${VOICE_SHORTCUT_LABEL}`
-        : `hold to speak · ${VOICE_SHORTCUT_LABEL}`;
+      ? toggled
+        ? "recording — tap to send"
+        : floating
+          ? `release to insert · ${VOICE_SHORTCUT_LABEL}`
+          : `release · dictate · ${VOICE_SHORTCUT_LABEL}`
+      : toggled
+        ? "hold to talk · tap to record"
+        : floating
+          ? `hold to talk · ${VOICE_SHORTCUT_LABEL}`
+          : `hold to speak · ${VOICE_SHORTCUT_LABEL}`;
 
   // Floating PTT FAB: round bubble, bottom-right (positioned by the
   // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the

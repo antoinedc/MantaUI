@@ -158,7 +158,7 @@ export function useVoiceRecorder({
   onWarning,
 }: UseVoiceRecorderOptions) {
   const [phase, setPhase] = useState<VoicePhase>("idle");
-  const [elapsedSec, setElapsedSec] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const [nearLimit, setNearLimit] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
 
@@ -306,7 +306,7 @@ export function useVoiceRecorder({
       }
       setLastError(null);
       setNearLimit(false);
-      setElapsedSec(0);
+      setElapsedMs(0);
       cancelledRef.current = false;
       stopRequestedRef.current = false;
       endedRef.current = false;
@@ -518,7 +518,7 @@ export function useVoiceRecorder({
       // (or the near-limit flag) actually changes — floor() + useState bail-out.
       elapsedTimerRef.current = setInterval(() => {
         const ms = elapsedCurrent(elapsedRef.current, performance.now());
-        setElapsedSec(Math.floor(ms / 1000));
+        setElapsedMs(Math.round(ms));
         setNearLimit(nearLimitAt(ms));
         // Hard cap: behaves exactly as if the user hit send — the take is
         // kept, never dropped (recorder.stop() -> onstop -> onComplete).
@@ -561,7 +561,7 @@ export function useVoiceRecorder({
       elapsedRef.current,
       performance.now(),
     );
-    setElapsedSec(Math.floor(elapsedRef.current.accumMs / 1000));
+    setElapsedMs(Math.round(elapsedRef.current.accumMs));
     // Stop the sampling interval so the waveform freezes rather than filling
     // with silence.
     if (sampleTimerRef.current) {
@@ -627,7 +627,7 @@ export function useVoiceRecorder({
 
   return {
     phase,
-    elapsedSec,
+    elapsedMs,
     nearLimit,
     lastError,
     liveWindowRef,
