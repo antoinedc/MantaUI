@@ -92,8 +92,10 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(SessionTimerFormat.relative(0), "just now")
         XCTAssertEqual(SessionTimerFormat.relative(59), "just now")
         XCTAssertEqual(SessionTimerFormat.relative(60), "1m ago")
-        XCTAssertEqual(SessionTimerFormat.relative(90 * 60), "90m ago")
-        XCTAssertEqual(SessionTimerFormat.relative(25 * 60 * 60), "25h ago")
+        // The binding formatter uses COARSE buckets (m < 60, h < 24), so inputs
+        // that cross a threshold normalize down: 90 min → 1h, 25 h → 1d.
+        XCTAssertEqual(SessionTimerFormat.relative(90 * 60), "1h ago")
+        XCTAssertEqual(SessionTimerFormat.relative(25 * 60 * 60), "1d ago")
         XCTAssertEqual(SessionTimerFormat.relative(3 * 24 * 60 * 60), "3d ago")
     }
 
