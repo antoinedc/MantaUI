@@ -781,7 +781,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           return (
                             <JobChildRow
                               key={`job:${p.tmuxSession}:${childIdx}`}
-                              project={p}
                               window={childWin}
                               isActive={childActive}
                               status={statusFor(p.tmuxSession, childIdx)}
@@ -1182,7 +1181,6 @@ function WindowRow({
 // tree connector. Only running jobs (or the currently-viewed terminal job)
 // reach this component — the parent filters the rest.
 function JobChildRow({
-  project,
   window: w,
   isActive,
   status,
@@ -1192,7 +1190,6 @@ function JobChildRow({
   onClose,
   title,
 }: {
-  project: Project;
   window: TmuxWindow;
   isActive: boolean;
   status: WindowStatusUI | undefined;
