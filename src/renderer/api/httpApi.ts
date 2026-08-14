@@ -1074,6 +1074,9 @@ export const httpApi: Api = {
     rpc<DelegateJob[] | { jobs: DelegateJob[] }>(IPC.delegateList, sessionId).then(
       (r) => (Array.isArray(r) ? r : Array.isArray(r?.jobs) ? r.jobs : []),
     ),
+  // BET-795: the work inbox's "Delegate in background" — start a background
+  // job through the existing delegate engine (own worktree + window + rail).
+  delegateStart: (input) => rpc(IPC.delegateStart, input),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls

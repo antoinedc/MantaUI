@@ -86,7 +86,6 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   const activateWindow = useStore((s) => s.activateWindow);
   const setActive = useStore((s) => s.setActive);
   const setSeedPrompt = useStore((s) => s.setSeedPrompt);
-  const setAutoSubmitPrompt = useStore((s) => s.setAutoSubmitPrompt);
 
   const [items, setItems] = useState<ForgeInboxItem[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -150,10 +149,10 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
     if (sel >= rows.length) setSel(0);
   }, [rows.length, sel]);
 
-  // Create a session from an inbox item, reusing the ONE creation path. When
-  // `submit` is true the prompt is auto-submitted (delegate); otherwise it is
-  // seeded into the composer but NOT submitted (start a session).
-  const createSessionFromItem = async (item: ForgeInboxItem, submit: boolean) => {
+  // Create a session from an inbox item, reusing the ONE creation path. The
+  // prompt is seeded into the composer (setSeedPrompt) but NOT submitted —
+  // the user reviews + hits Enter ("start a session").
+  const createSessionFromItem = async (item: ForgeInboxItem) => {
     const path = repos[item.repoKey];
     if (!path) {
       setError(`No local checkout of ${repoName(item)} on this box to start a session in.`);
@@ -186,9 +185,44 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
       } else {
         setActive(name, 0);
       }
-      if (sessionId && item.seed) {
-        if (submit) setAutoSubmitPrompt({ sid: sessionId, text: item.seed });
-        else setSeedPrompt({ sid: sessionId, text: item.seed });
+      if (sessionId && item.seed) setSeedPrompt({ sid: sessionId, text: item.seed });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // "Delegate in background" — the same work as Start-a-session but routed
+  // through the EXISTING delegate engine (spec §3): it creates its own
+  // worktree + branch + nested rail row and runs the seeded prompt without the
+  // user watching. The parent is the active chat session the job nests under.
+  const delegateInBackground = async (item: ForgeInboxItem) => {
+    const path = repos[item.repoKey];
+    if (!path) {
+      setError(`No local checkout of ${repoName(item)} on this box to delegate in.`);
+      return;
+    }
+    const active = useStore.getState().activeSession();
+    const parentId = active
+      ? (useStore
+          .getState()
+          .projects.find((p) => p.tmuxSession === active.projectName)
+          ?.windows.find((w) => w.index === active.windowIndex)?.opencodeSessionId ?? null)
+      : null;
+    if (!parentId) {
+      setError("Open a chat session first — a background job nests under its parent session.");
+      return;
+    }
+    setError(null);
+    try {
+      const res = await window.api.delegateStart({
+        prompt: item.seed,
+        sessionID: parentId,
+        directory: path,
+      });
+      if (!res?.ok) {
+        setError(res?.error ?? "Couldn't start the background job.");
+        return;
       }
       onClose();
     } catch (e) {
@@ -196,8 +230,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const startSession = (item: ForgeInboxItem) => void createSessionFromItem(item, false);
-  const delegateInBackground = (item: ForgeInboxItem) => void createSessionFromItem(item, true);
+  const startSession = (item: ForgeInboxItem) => void createSessionFromItem(item);
   const openReview = (item: ForgeInboxItem) => {
     if (item.url) void window.api.openExternal(item.url);
   };

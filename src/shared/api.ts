@@ -48,6 +48,8 @@ import type {
   ForgeDisconnectResult,
   ForgeRuleRow,
   ForgeInboxResult,
+  DelegateStartInput,
+  DelegateStartResult,
   ForgeShipInput,
   ForgeShipResult,
   ForgeShipPreviewInput,
@@ -496,6 +498,7 @@ export interface Api {
   // worktree is refused with {ok:false, reason:"dirty"} and the record kept.
   // No create channel — jobs are started by the AI's `delegate` opencode tool.
   delegateList(sessionId?: string): Promise<DelegateJob[]>;
+  delegateStart(input: DelegateStartInput): Promise<DelegateStartResult>;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   // BET-418 §A pre-flight approval: the renderer polls pending approvals for

@@ -1302,6 +1302,7 @@ export const IPC = {
   // window + worktree (force:false — refuses a dirty worktree with
   // {ok:false, reason:"dirty"}) and drops the record.
   delegateList: "delegate:list", // (sessionId?) → DelegateJob[]
+  delegateStart: "delegate:start", // ({prompt, sessionID, directory, model?}) → { ok, error? } — BET-795 inbox Delegate in background
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
@@ -1656,6 +1657,20 @@ export type DelegateApproval = {
   tools: DelegateApprovalTool[];
   createdAt: number;
 };
+
+// BET-795: the work inbox's "Delegate in background" starts a background job
+// through the existing delegate engine. `sessionID` is the parent (active)
+// chat session the job nests under; `directory` is the repo the worktree is
+// created in; `prompt` is the seeded instruction. Mirrors the /api/delegate
+// POST body. Result is { ok } or { ok:false, error } (e.g. no parent session,
+// at the MAX_RUNNING_JOBS cap, or the caller isn't a chat session).
+export type DelegateStartInput = {
+  prompt: string;
+  sessionID: string;
+  directory: string;
+  model?: { providerID?: string; modelID?: string } | null;
+};
+export type DelegateStartResult = { ok: boolean; error?: string };
 
 // ----- Agent → laptop file push (outbox) -----
 
