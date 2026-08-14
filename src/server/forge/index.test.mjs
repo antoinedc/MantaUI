@@ -290,6 +290,29 @@ test("shipPullRequest: push failure surfaces a push-failed error, never creates"
   assert.ok(r.error.startsWith("push failed"));
 });
 
+test("shipPullRequest: onPrOpened is called with repoKey + number on a successful create", async () => {
+  let opened = null;
+  const created = { ...OPEN_PR, number: 91 };
+  const adapter = writeAdapter({ created });
+  const r = await shipPullRequest("/repo", { title: "t" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => adapter,
+    gitPush: async () => ({ stdout: "", stderr: "" }),
+    onPrOpened: async (arg) => { opened = arg; },
+  });
+  assert.equal(r.ok, true);
+  assert.deepEqual(opened, { cwd: "/repo", repoKey: "github.com/acme/widget", number: 91 });
+});
+
+test("shipPullRequest: a throwing onPrOpened never fails the ship", async () => {
+  const r = await shipPullRequest("/repo", { title: "t" }, {
+    ...SHIP_DEPS,
+    gitPush: async () => ({ stdout: "", stderr: "" }),
+    onPrOpened: async () => { throw new Error("link-store down"); },
+  });
+  assert.equal(r.ok, true);
+});
+
 test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure", async () => {
   let mergeInput = null;
   const adapter = {

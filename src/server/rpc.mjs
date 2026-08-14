@@ -274,6 +274,17 @@ export function buildHandlers({
     }
   }
 
+  // Resolve the tracked project (tmuxSession) whose persisted defaultCwd
+  // matches a cwd, for wiring a session link at a forge set-point (BET-847).
+  // Best-effort: null when the cwd isn't a tracked project's home dir.
+  async function projectNameForCwd(cwd) {
+    const c = typeof cwd === "string" ? cwd.trim() : "";
+    if (!c) return null;
+    const cfg = await local.configGet();
+    const proj = cfg.projects?.find((p) => (p.defaultCwd ?? "").trim() === c);
+    return proj?.tmuxSession ?? null;
+  }
+
   return {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
@@ -353,11 +364,26 @@ export function buildHandlers({
     // (push then create) ONLY after the renderer's human confirm card.
     // forge:merge merges with the head SHA the user approved, surfacing the
     // distinguished failure kind (sha_mismatch / cannot_merge / permission).
-    "forge:ship": (input) =>
-      shipPullRequest(
-        typeof input === "object" && input !== null ? input.cwd : "",
+    "forge:ship": async (input) => {
+      const cwd = typeof input === "object" && input !== null ? input.cwd : "";
+      const res = await shipPullRequest(
+        cwd,
         typeof input === "object" && input !== null ? input : {},
-      ),
+        {
+          // Session-link primitive (BET-847): a PR opened from this session's
+          // cwd records the PR link on the resolved project (best-effort; a
+          // cwd that isn't a tracked project's home is a no-op). Push the new
+          // config into syncState so subscribers get the link delta.
+          onPrOpened: async ({ repoKey, number }) => {
+            const name = cwd ? await projectNameForCwd(cwd) : null;
+            if (!name) return;
+            await local.linkSessionPullRequest(name, { repoKey, number });
+            syncState.applyConfig(await local.configGet());
+          },
+        },
+      );
+      return res;
+    },
     "forge:ship-preview": (input) =>
       shipPreview(typeof input === "object" && input !== null ? input.cwd : ""),
     "forge:merge": (input) =>
