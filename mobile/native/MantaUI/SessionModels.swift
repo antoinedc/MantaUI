@@ -116,15 +116,23 @@ struct SessionRowStatus: Equatable, Sendable {
     /// "Running integration tests"). Absent when the turn has no record, or
     /// when its state isn't `working`.
     var progressLabel: String? = nil
+    /// Last known activity for the session (opencode `time.updated`), for the
+    /// idle subtitle.
+    var lastActivity: Date? = nil
+    /// A tmux window with no opencode session — i.e. a terminal window.
+    var isTerminal: Bool = false
 }
 
 enum SessionRowSubtitle {
     /// §7.1a subtitle table — precedence: subagents, then the working progress
-    /// label, then running, then blocked, then (nil) idle. The subagent case
-    /// REPLACES the line. A model-authored progress label (BET-791) is more
-    /// informative than a bare "running" / "running · model", so it replaces
-    /// both when a working turn names its step.
-    static func text(for s: SessionRowStatus) -> String? {
+    /// label, then running, then blocked, then (idle) model + recency. The
+    /// subagent case REPLACES the line. A model-authored progress label
+    /// (BET-791) is more informative than a bare "running" / "running · model",
+    /// so it replaces both when a working turn names its step. The first four
+    /// branches are unchanged from the original table; only the idle tail is
+    /// new (BET-897): a terminal row says "terminal", otherwise the idle line
+    /// is "model · recency" when either is known.
+    static func text(for s: SessionRowStatus, now: Date) -> String? {
         if s.subagentsRunning > 0 {
             return "\(s.subagentsRunning) subagent" + (s.subagentsRunning == 1 ? "" : "s")
         }
@@ -140,7 +148,12 @@ enum SessionRowSubtitle {
         if s.attention {
             return "needs you"
         }
-        return nil
+        if s.isTerminal { return "terminal" }
+        let parts = [
+            s.modelLabel,
+            s.lastActivity.map { SessionTimerFormat.relative(now.timeIntervalSince($0)) },
+        ].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
@@ -157,18 +170,27 @@ enum SessionDotState: Sendable {
     }
 }
 
+/// Where a row sits inside its project card, which decides its rounded corners
+/// and whether it carries the hairline separator on its top edge (BET-897).
+enum SessionCardPosition: Sendable, Equatable {
+    case only, first, middle, last
+
+    static func at(index: Int, count: Int) -> SessionCardPosition {
+        if count <= 1 { return .only }
+        if index == 0 { return .first }
+        if index == count - 1 { return .last }
+        return .middle
+    }
+
+    var roundsTop: Bool { self == .only || self == .first }
+    var roundsBottom: Bool { self == .only || self == .last }
+    /// Every row except a group's first carries the hairline.
+    var showsSeparator: Bool { self == .middle || self == .last }
+}
+
 // MARK: - Timer / duration formatting (§7.1 timer slot, §7.3 confirm copy)
 
 enum SessionTimerFormat {
-    /// Compact elapsed line for the row's timer slot (11px mono, tabular).
-    static func elapsed(_ interval: TimeInterval) -> String {
-        let t = Int(interval)
-        if t < 60 { return "\(t)s" }
-        let m = t / 60
-        if m < 60 { return "\(m)m" }
-        return "\(m / 60)h"
-    }
-
     /// Friendly running-duration for the §7.3 running-delete confirm
     /// ("4 minutes", "36 seconds").
     static func runningDuration(_ interval: TimeInterval) -> String {
@@ -189,6 +211,18 @@ enum SessionTimerFormat {
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m \(s)s" }
         return "\(s)s"
+    }
+
+    /// Coarse recency for an idle row (BET-897). Interval-based on purpose — no
+    /// calendar, no locale, no "yesterday": pure and exactly testable.
+    static func relative(_ interval: TimeInterval) -> String {
+        let t = Int(max(0, interval))
+        if t < 60 { return "just now" }
+        let m = t / 60
+        if m < 60 { return "\(m)m ago" }
+        let h = m / 60
+        if h < 24 { return "\(h)h ago" }
+        return "\(h / 24)d ago"
     }
 }
 

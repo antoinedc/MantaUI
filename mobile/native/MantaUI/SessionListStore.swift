@@ -43,6 +43,13 @@ struct ServerSessionListMutations: SessionListMutationAPI {
     }
 }
 
+/// Lightweight per-session presentation metadata resolved from the opencode
+/// session list (BET-897): the friendly model label and last known activity.
+struct SessionMeta: Equatable, Sendable {
+    var modelLabel: String?
+    var lastActivity: Date?
+}
+
 @MainActor
 final class SessionListStore: ObservableObject {
 
@@ -68,7 +75,11 @@ final class SessionListStore: ObservableObject {
     private let mutations: SessionListMutationAPI
     private let eventStore: MantaEventStore
     private var attentionSessions: Set<String> = []
-    private var modelLabels: [String: String] = [:]
+    /// opencodeSessionID → lightweight per-session metadata resolved from the
+    /// opencode session list (BET-897). One dictionary replaces the old separate
+    /// `modelLabels` map and feeds both the running subtitle and the new idle
+    /// recency line without any extra fetch.
+    private var sessionMeta: [String: SessionMeta] = [:]
     /// opencodeSessionID → the model-authored progress label for a working turn
     /// (BET-791). Fed from `progress:get` on `progress.updated` frames + a
     /// backfill on refresh; drives the row subtitle via `rowStatus`.
@@ -119,7 +130,7 @@ final class SessionListStore: ObservableObject {
             projects = list
             loadedOnce = true
             loadError = nil
-            await refreshModels()
+            await refreshSessionMeta()
         } catch {
             // Keep whatever was already on screen — a failed fetch must never
             // blank a list we successfully loaded before.
@@ -151,15 +162,16 @@ final class SessionListStore: ObservableObject {
         loadError = nil
     }
 
-    private func refreshModels() async {
+    private func refreshSessionMeta() async {
         guard let sessions = try? await api.listSessions() else { return }
-        var labels: [String: String] = [:]
+        var meta: [String: SessionMeta] = [:]
         for s in sessions {
-            if let model = s.model {
-                labels[s.id] = ModelLabel.text(providerID: model.providerID, modelID: model.id)
-            }
+            meta[s.id] = SessionMeta(
+                modelLabel: s.model.map { ModelLabel.text(providerID: $0.providerID, modelID: $0.id) },
+                lastActivity: s.time?.updated.map { Date(timeIntervalSince1970: $0 / 1000) }
+            )
         }
-        modelLabels = labels
+        sessionMeta = meta
         // BET-791: backfill the working progress label for every session so
         // the subtitle is right even when the app (re)connected after a
         // progress_report but before any live `progress.updated` frame. The
@@ -187,9 +199,17 @@ final class SessionListStore: ObservableObject {
             running: running,
             attention: attentionSessions.contains(sid),
             subagentsRunning: subagents,
-            modelLabel: modelLabels[sid],
-            progressLabel: progressBySession[sid]
+            modelLabel: sessionMeta[sid]?.modelLabel,
+            progressLabel: progressBySession[sid],
+            lastActivity: sessionMeta[sid]?.lastActivity,
+            isTerminal: window.opencodeSessionId == nil
         )
+    }
+
+    /// How many of a project's windows are mid-turn (drives the group header
+    /// chip).
+    func runningCount(in project: MantaProject) -> Int {
+        project.windows.filter { rowStatus(for: $0).running }.count
     }
 
     /// Number of live child subagents for a session (box-published).
@@ -421,7 +441,8 @@ final class SessionListStore: ObservableObject {
         loadedOnce = false
         pendingDeletes = [:]
         attentionSessions = []
-        modelLabels = [:]
+        sessionMeta = [:]
+        progressBySession = [:]
         pinnedWindows = []
         hapticsEnabled = true
     }

@@ -134,8 +134,13 @@ struct SessionListView: View {
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
-        // The running rows' count-up ticks every second (BET-752 task 6).
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now = $0 }
+        // The running rows' count-up ticks every second (BET-752 task 6), but
+        // only while something is actually running — an all-idle list must not
+        // re-render every second (BET-897).
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { tick in
+            guard hasRunningRow else { return }
+            now = tick
+        }
         // Popping the last session off the stack lands us back on the list.
         // Two jobs on that transition:
         .onChange(of: path.count) { count in
@@ -216,24 +221,47 @@ struct SessionListView: View {
     // MARK: - List
 
     private var list: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(filteredProjects) { project in
-                    Section {
-                        groupHeader(project.tmuxSession)
-                        // Identity MUST be project-scoped. `MantaWindow.id` is
-                        // the tmux window index, which repeats across projects
-                        // (every project has a window 0), and a LazyVStack
-                        // keeps ONE flat identity space across the nested
-                        // ForEachs — so the second project's window 0 collided
-                        // with the first project's and rendered as a blank row.
-                        ForEach(project.windows.map { SessionRowKey(project: project.tmuxSession, window: $0) }) { entry in
-                            row(project: project, window: entry.window)
-                        }
+        List {
+            ForEach(filteredProjects) { project in
+                Section {
+                    ForEach(rowEntries(project)) { entry in
+                        row(project: project, entry: entry)
+                            .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
+                                                      bottom: 0, trailing: Metrics.spacing.sp3))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(
+                                SessionCardBackground(
+                                    position: entry.position,
+                                    open: openRow == entry.id,
+                                    tokens: tokens
+                                )
+                            )
                     }
+                } header: {
+                    groupHeader(project)
                 }
             }
-            .padding(.horizontal, Metrics.spacing.spPx)
+        }
+        .listStyle(.plain)
+        .listSectionSpacing(Metrics.spacing.sp6)
+        .scrollContentBackground(.hidden)
+        .background(tokens.canvas)
+        .environment(\.defaultMinListRowHeight, Metrics.type.listRowMinH)
+    }
+
+    private func rowEntries(_ project: MantaProject) -> [SessionRowEntry] {
+        let count = project.windows.count
+        return project.windows.enumerated().map { idx, window in
+            SessionRowEntry(project: project.tmuxSession, window: window,
+                            position: .at(index: idx, count: count))
+        }
+    }
+
+    /// True when any currently-filtered row is mid-turn. Gates the 1 s tick so
+    /// an all-idle list stops re-rendering every second (BET-897).
+    private var hasRunningRow: Bool {
+        filteredProjects.contains { project in
+            project.windows.contains { store.rowStatus(for: $0).running }
         }
     }
 
@@ -254,29 +282,53 @@ struct SessionListView: View {
     }
 
     @ViewBuilder
-    private func groupHeader(_ name: String) -> some View {
-        Text(titleCased(name))
-            .font(.manta(size: Metrics.type.body, weight: .semibold))
-            .kerning(Metrics.type.headingTracking * Metrics.type.body)
-            .foregroundColor(tokens.tx2)
-            .padding(.top, Metrics.type.listGroupAbove)
-            .padding(.bottom, Metrics.type.listGroupBelow)
-            .padding(.leading, Metrics.spacing.sp3)
-            .textCase(nil)
+    private func groupHeader(_ project: MantaProject) -> some View {
+        let running = store.runningCount(in: project)
+        HStack(spacing: Metrics.spacing.sp2) {
+            Text(titleCased(project.tmuxSession))
+                .font(.manta(size: Metrics.type.body, weight: .semibold))
+                .kerning(Metrics.type.headingTracking * Metrics.type.body)
+                .foregroundColor(tokens.tx2)
+            Spacer()
+            if running > 0 {
+                chip("\(running) running", fg: tokens.accentTx, bg: tokens.accentSoft)
+            }
+            chip("\(project.windows.count)", fg: tokens.tx4, bg: tokens.fill)
+        }
+        .padding(.top, Metrics.type.listGroupAbove)
+        .padding(.bottom, Metrics.type.listGroupBelow)
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.canvas)          // opaque: rows must not show through when pinned
+        .textCase(nil)
+        .listRowInsets(EdgeInsets())        // full-bleed, so the pinned background covers edge to edge
+        .listRowSeparator(.hidden)
     }
 
     @ViewBuilder
-    private func row(project: MantaProject, window: MantaWindow) -> some View {
+    private func chip(_ text: String, fg: Color, bg: Color) -> some View {
+        Text(text)
+            .font(.manta(size: Metrics.type.twoXS, weight: .medium))
+            .foregroundColor(fg)
+            .padding(.vertical, Metrics.spacing.sp1)
+            .padding(.horizontal, Metrics.spacing.sp2)
+            .background(bg, in: Capsule())
+    }
+
+    @ViewBuilder
+    private func row(project: MantaProject, entry: SessionRowEntry) -> some View {
+        let window = entry.window
         Button {
-            openRow = SessionRowKey(project: project.tmuxSession, window: window).id
+            openRow = SessionRowEntry.id(project: project.tmuxSession, windowIndex: window.index)
             path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
                 timer: timerText(window, now: now),
-                isActive: openRow == SessionRowKey(project: project.tmuxSession, window: window).id,
+                position: entry.position,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
+                now: now,
                 tokens: tokens
             )
         }
@@ -328,11 +380,11 @@ struct SessionListView: View {
         guard status.running, let since = store.runningStart(for: window) else {
             return nil
         }
-        return SessionTimerFormat.elapsed(now.timeIntervalSince(since))
+        return SessionTimerFormat.liveElapsed(now.timeIntervalSince(since))
     }
 
     private func subtitle(for window: MantaWindow) -> String {
-        SessionRowSubtitle.text(for: store.rowStatus(for: window)) ?? ""
+        SessionRowSubtitle.text(for: store.rowStatus(for: window), now: now) ?? ""
     }
 
     // MARK: - Delete (§7.3)
@@ -671,28 +723,58 @@ struct SessionListView: View {
 
 // MARK: - Row content (§7.1 slots)
 
-/// Project-scoped row identity for the session list. A tmux window index is
-/// only unique WITHIN its project, so it cannot be the identity of a row in a
-/// LazyVStack that renders every project in one flat identity space.
-private struct SessionRowKey: Identifiable {
+/// A row in the list: project-scoped identity (a tmux window index only unique
+/// WITHIN its project) plus where it sits in the project card. One type defines
+/// both the row's ForEach identity and the geometry that decides its rounded
+/// corners and hairline separator.
+private struct SessionRowEntry: Identifiable {
     let project: String
     let window: MantaWindow
-    var id: String { "\(project)#\(window.index)" }
+    let position: SessionCardPosition
+
+    var id: String { Self.id(project: project, windowIndex: window.index) }
+    static func id(project: String, windowIndex: Int) -> String { "\(project)#\(windowIndex)" }
+}
+
+/// The rounded card surface behind each project's rows: outer corners only, and
+/// a 3px accent bar + fill for the currently-open row. No border and no shadow —
+/// the `card`-vs-`canvas` contrast carries the card in both schemes.
+private struct SessionCardBackground: View {
+    let position: SessionCardPosition
+    let open: Bool
+    let tokens: Tokens
+
+    var body: some View {
+        let r = Metrics.type.listRowRadius
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: position.roundsTop ? r : 0,
+            bottomLeadingRadius: position.roundsBottom ? r : 0,
+            bottomTrailingRadius: position.roundsBottom ? r : 0,
+            topTrailingRadius: position.roundsTop ? r : 0
+        )
+        ZStack(alignment: .leading) {
+            tokens.card
+            if open {
+                tokens.fill
+                Rectangle().fill(tokens.accent).frame(width: Metrics.spacing.sp1)
+            }
+        }
+        .clipShape(shape)
+    }
 }
 
 private struct SessionRowContent: View {
     let window: MantaWindow
     let status: SessionRowStatus
     let timer: String?
-    let isActive: Bool
+    let position: SessionCardPosition
     let pinned: Bool
+    let now: Date
     let tokens: Tokens
 
     var body: some View {
         HStack(spacing: Metrics.spacing.sp3) {
-            Circle()
-                .fill(dotColor)
-                .frame(width: Metrics.spacing.sp2, height: Metrics.spacing.sp2)
+            SessionStatusDot(state: SessionDotState.forRow(status), tokens: tokens)
             VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                 HStack(spacing: Metrics.spacing.sp1) {
                     Text(window.name)
@@ -706,31 +788,83 @@ private struct SessionRowContent: View {
                             .foregroundColor(tokens.tx3)
                     }
                 }
-                if let subtitle = SessionRowSubtitle.text(for: status) {
+                if let subtitle = SessionRowSubtitle.text(for: status, now: now) {
                     Text(subtitle)
                         .font(.manta(size: Metrics.type.xs, weight: .medium))
-                        .foregroundColor(tokens.tx4)
+                        .foregroundColor(subtitleColor)
                         .lineLimit(1)
                 }
             }
             Spacer()
+            // Exactly one of the two, never both: the running timer pill, or
+            // the idle chevron.
             if let timer {
                 Text(timer)
                     .font(.manta(size: Metrics.type.twoXS, weight: .medium, design: .monospaced))
-                    .foregroundColor(tokens.tx4)
+                    .foregroundColor(tokens.accentTx)
                     .monospacedDigit()
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .padding(.horizontal, Metrics.spacing.sp2)
+                    .background(tokens.accentSoft, in: Capsule())
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp2)
         .frame(maxWidth: .infinity, minHeight: Metrics.type.listRowMinH, alignment: .leading)
-        .background(isActive ? AnyShapeStyle(tokens.fill) : AnyShapeStyle(Color.clear),
-                    in: RoundedRectangle(cornerRadius: Metrics.type.listRowRadius))
-        .padding(.bottom, Metrics.type.listRowMargin)
+        .overlay(alignment: .top) {
+            // Hairline on every row except the group's first, starting at the
+            // text column (sp8 = sp3 row padding + sp2 dot + sp3 slot gap).
+            if position.showsSeparator {
+                Rectangle()
+                    .fill(tokens.borderSubtle)
+                    .frame(height: Metrics.spacing.spPx)
+                    .padding(.leading, Metrics.spacing.sp8)
+            }
+        }
         .contentShape(Rectangle())
     }
 
-    private var dotColor: Color {
+    private var subtitleColor: Color {
         switch SessionDotState.forRow(status) {
+        case .running: return tokens.tx3
+        case .needsYou: return tokens.warn
+        case .idle: return tokens.tx4
+        }
+    }
+}
+
+/// §7.1 status dot: running → accent, needs-you → warn, idle → tx4. A running
+/// row additionally pulses a 1.5px accent ring (scaling + fading) unless the
+/// user has reduced motion on, in which case it renders as a plain accent dot.
+private struct SessionStatusDot: View {
+    let state: SessionDotState
+    let tokens: Tokens
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animating = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: Metrics.spacing.sp2, height: Metrics.spacing.sp2)
+            .overlay {
+                if state == .running && !reduceMotion {
+                    Circle()
+                        .strokeBorder(tokens.accent, lineWidth: 1.5)
+                        .scaleEffect(animating ? 2.5 : 1.2)
+                        .opacity(animating ? 0 : 0.55)
+                        .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false),
+                                   value: animating)
+                        .onAppear { animating = true }
+                }
+            }
+    }
+
+    private var color: Color {
+        switch state {
         case .running: return tokens.accent
         case .needsYou: return tokens.warn
         case .idle: return tokens.tx4
