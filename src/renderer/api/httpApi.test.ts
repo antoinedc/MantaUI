@@ -8,6 +8,7 @@ import {
   serverBase,
   httpApi,
   dispatchToListeners,
+  dispatchFrame,
 } from "./httpApi.js";
 
 // Mock browser APIs for tests that touch the WebSocket stream.
@@ -309,6 +310,73 @@ describe("onDesktopNotify", () => {
     unsub2();
   });
 });
+
+// ---------------------------------------------------------------------------
+// dispatchFrame demux — the frame dispatcher unwraps `.payload` for every kind
+// except `stream` (which delivers a derived `{sub, sessionId, payload}`). The
+// `sync` publisher conforms to the standard `{kind, payload}` envelope, so a
+// live sync delta must reach its listener as the inner `{gen, seq, changed}`
+// object — NOT `undefined` (BET-873 regression: the flat envelope used to make
+// `"resync" in delta` throw and drop every live delta).
+// ---------------------------------------------------------------------------
+
+describe("dispatchFrame demux", () => {
+  it("delivers a sync frame's inner {gen, seq, changed} object to an onSyncDelta listener (not undefined)", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onSyncDelta(cb);
+    try {
+      dispatchFrame(
+        JSON.stringify({
+          kind: "sync",
+          payload: { gen: "aabbccdd", seq: 3, changed: { projects: [] } },
+        }),
+      );
+      expect(cb).toHaveBeenCalledTimes(1);
+      const delta = cb.mock.calls[0][0];
+      expect(delta).not.toBeUndefined();
+      expect(delta).toEqual({ gen: "aabbccdd", seq: 3, changed: { projects: [] } });
+    } finally {
+      unsub();
+    }
+  });
+
+  it("delivers an ordinary flat-payload kind (status) as payload alone", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onStatusEvent(cb);
+    try {
+      const statuses = [{ session: "s1", running: false }];
+      dispatchFrame(JSON.stringify({ kind: "status", payload: statuses }));
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb.mock.calls[0][0]).toEqual(statuses);
+    } finally {
+      unsub();
+    }
+  });
+
+  it("delivers a stream frame as the derived {sub, sessionId, payload} object", () => {
+    const cb = vi.fn();
+    const unsub = httpApi.onStreamEvent(cb);
+    try {
+      dispatchFrame(
+        JSON.stringify({
+          kind: "stream",
+          sub: "message.part.delta",
+          sessionId: "ses_123",
+          payload: { type: "text", text: "hi" },
+        }),
+      );
+      expect(cb).toHaveBeenCalledTimes(1);
+      expect(cb.mock.calls[0][0]).toEqual({
+        sub: "message.part.delta",
+        sessionId: "ses_123",
+        payload: { type: "text", text: "hi" },
+      });
+    } finally {
+      unsub();
+    }
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // auto-update delegation — the stubs used to swallow the whole updater UX

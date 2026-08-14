@@ -479,8 +479,9 @@ const WATCHDOG_INTERVAL_MS = 15_000;
 // Dispatch one parsed {kind,payload} frame to its listeners. The frame is
 // byte-identical to the old SSE envelope, so this is unchanged from before the
 // controller refactor. Non-JSON / control frames are ignored (but still count
-// as liveness — see lastFrameAt above).
-function dispatchFrame(data: unknown) {
+// as liveness — see lastFrameAt above). Exported for the harness to pin the
+// demux (which `sync` relies on) — see httpApi.test.ts.
+export function dispatchFrame(data: unknown) {
   lastFrameAt = Date.now();
   try {
     const { kind, payload, sub, sessionId } = JSON.parse(data as string) as {
