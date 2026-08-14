@@ -595,7 +595,9 @@ export function ChatPanel({
   // Base / Changes). Click-only surface ⇒ fetched on popover open, never
   // polled, and not re-fetched if already loaded for this cwd.
   const ensureShipPreview = useCallback(async () => {
-    if (!cwd || shipProposal) return;
+    if (!cwd) return;
+    setShipError(null);
+    if (shipProposal) return;
     try {
       const prev = await window.api.forgeShipPreview({ cwd });
       if (prev.ok) {
