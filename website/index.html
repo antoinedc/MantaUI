@@ -233,12 +233,36 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 .rail{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:44px;padding-top:28px;
   border-top:1px solid var(--border-subtle)}
 @media(max-width:900px){.rail{grid-template-columns:1fr 1fr}}
-.rl{border-top:2px solid var(--border-default);padding-top:12px}
-.rl.on{border-top-color:var(--cyan-400)}
+.rl{position:relative;border-top:2px solid var(--border-default);padding-top:12px}
 .rl .rn{font-family:var(--font-mono);font-size:11px;color:var(--slate-500);font-weight:700}
-.rl.on .rn{color:var(--cyan-400)}
 .rl .rt{font-size:14.5px;color:var(--text-primary);font-weight:700;margin-top:2px}
 .rl .rd{font-size:11.5px;color:var(--slate-400);margin-top:4px;line-height:1.5}
+/* The rail walks 1.0 -> 5.0 and loops, with no JavaScript: five steps at 3.5s
+   each is a 17.5s cycle, so one step owns 20% of the timeline and the other
+   four are offset by animation-delay. The cyan bar grows left-to-right over
+   the step's dwell, so the rail reads as progress through a sequence rather
+   than as a slideshow. */
+.rl::after{content:"";position:absolute;top:-2px;left:0;height:2px;width:100%;
+  background:var(--cyan-400);transform:scaleX(0);transform-origin:left center;
+  animation:railFill 17.5s linear infinite}
+.rl .rn{animation:railNum 17.5s steps(1,end) infinite}
+.rl:nth-child(2)::after,.rl:nth-child(2) .rn{animation-delay:3.5s}
+.rl:nth-child(3)::after,.rl:nth-child(3) .rn{animation-delay:7s}
+.rl:nth-child(4)::after,.rl:nth-child(4) .rn{animation-delay:10.5s}
+.rl:nth-child(5)::after,.rl:nth-child(5) .rn{animation-delay:14s}
+@keyframes railFill{
+  0%{transform:scaleX(0);opacity:1}
+  17%{transform:scaleX(1);opacity:1}
+  20%{transform:scaleX(1);opacity:1}
+  24%{transform:scaleX(1);opacity:0}
+  25%,100%{transform:scaleX(0);opacity:0}
+}
+@keyframes railNum{0%,20%{color:var(--cyan-400)}20.01%,100%{color:var(--slate-500)}}
+@media(prefers-reduced-motion:reduce){
+  .rl::after,.rl .rn{animation:none}
+  .rl:first-child::after{transform:scaleX(1)}
+  .rl:first-child .rn{color:var(--cyan-400)}
+}
 .trust{display:flex;gap:14px;justify-content:center;font-size:12.5px;color:var(--slate-500);
   flex-wrap:wrap;max-width:920px;margin:30px auto 0}
 .trust b{color:var(--slate-300);font-weight:600}
@@ -262,6 +286,8 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 @media(max-width:900px){
   .hero-grid{grid-template-columns:minmax(0,1fr)}
   .hero-grid>*{min-width:0}
+  .sunk > .wrap[style*="display:grid"]{grid-template-columns:minmax(0,1fr) !important;gap:32px}
+  .sunk > .wrap[style*="display:grid"] > *{min-width:0}
 }
 @media(max-width:600px){
   #download .wrap>div{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
@@ -434,7 +460,7 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
           <a class="btn btn-primary btn-lg" href="/downloads/Manta-latest.dmg">Download for macOS</a>
           <a class="btn btn-ghost btn-lg" href="#download">Windows</a>
         </div>
-        <p class="dl-note">Free and open source. macOS 13+ Apple Silicon, 96 MB. Version 1.0.14.</p>
+        <p class="dl-note">Free and open source.</p>
       </div>
       <div>
 <div class="aw">
@@ -562,7 +588,7 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
         <div class="rd">Chat sessions and real terminals.</div></div>
       <div class="rl"><div class="rn">3.0</div><div class="rt">Leave</div>
         <div class="rd">Close the lid. It carries on.</div></div>
-      <div class="rl on"><div class="rn">4.0</div><div class="rt">Automate</div>
+      <div class="rl"><div class="rn">4.0</div><div class="rt">Automate</div>
         <div class="rd">Work that starts without you.</div></div>
       <div class="rl"><div class="rn">5.0</div><div class="rt">Delegate</div>
         <div class="rd">Several agents, no collisions.</div></div>
@@ -581,24 +607,21 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     <div>
       <span class="eyebrow">The problem</span>
       <h2 style="font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin-top:12px">
-        Your laptop sleeps.<br><i style="color:var(--slate-300)">Your agent shouldn't.</i></h2>
-      <p class="sub" style="font-size:16.5px">A task runs for an hour and stops five minutes in to ask permission.
-        A build goes red at three in the morning. The thing you asked for finishes at seven and you are not at your desk.</p>
-      <p class="sub" style="font-size:16.5px;margin-top:12px">The box is awake for all of it, so the agent can be
-        <b>started by an event</b> and not only by you.</p>
+        Three subscriptions, ten tmux windows,<br><i style="color:var(--slate-300)">and it all dies with the lid.</i></h2>
+      <p class="sub" style="font-size:16.5px">None of that is your agent&#8217;s fault. It is where the agent is
+        running: a laptop that sleeps, that you close, that you carry away from your desk.</p>
+      <p class="sub" style="font-size:16.5px;margin-top:12px">Move it to <b>a machine that is always on</b> and every
+        one of these stops being your problem.</p>
     </div>
-    <div style="display:flex;flex-direction:column;gap:8px">
-      <div class="chain"><div class="node"><div class="nt">A build fails on main<span class="tag">03:14</span></div>
-        <div class="nb" style="color:var(--red-500)">nobody is awake</div></div>
-      <div class="arrow">&#8595;</div>
-      <div class="node hi"><div class="nt">Your rule starts an agent<span class="tag">03:14</span></div>
-        <div class="nb">in its own branch</div></div>
-      <div class="arrow">&#8595;</div>
-      <div class="node"><div class="nt">A draft pull request opens<span class="tag">03:21</span></div>
-        <div class="nb" style="color:var(--green-500)">+18 -3, tests green</div></div>
-      <div class="arrow">&#8595;</div>
-      <div class="node"><div class="nt">Your phone tells you<span class="tag">07:02</span></div>
-        <div class="nb">over breakfast</div></div></div>
+    <div class="chain">
+      <div class="node"><div class="nt">Keeping track of sessions is your job<span class="tag">every day</span></div>
+        <div class="nb">tmux ls &middot; which window &middot; which branch &middot; reattach &middot; scroll back</div></div>
+      <div class="node"><div class="nt">The lid closes and the agent stops<span class="tag">18:40</span></div>
+        <div class="nb">forty minutes of work gone, because you had a train to catch</div></div>
+      <div class="node"><div class="nt">It asked you something an hour ago<span class="tag">+1h04</span></div>
+        <div class="nb">idle on one permission prompt &middot; nothing told you</div></div>
+      <div class="node"><div class="nt">Three subscriptions, three windows<span class="tag">&times;3</span></div>
+        <div class="nb">claude &middot; codex &middot; kimi &mdash; three histories you cannot search</div></div>
     </div>
   </div>
 </section>
