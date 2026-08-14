@@ -278,6 +278,18 @@ struct OpencodeModel: Codable, Equatable, Sendable {
     /// context window (Opus 4.7 reports 1M, Sonnet 200k) — the denominator the
     /// context meter must use, never a hardcoded 200k.
     var limit: ModelLimit? = nil
+    /// The model's declared input/output capabilities (`{tools, input, output}`
+    /// from the box's `getProviders()`/`listModels()`). `input` is the list of
+    /// accepted input modalities ("text", "image", ...) — whether the row shows
+    /// a "vision" glyph. Absent for providers that don't annotate it.
+    var capabilities: ModelCapabilities? = nil
+}
+
+/// The model's advertised capabilities from `opencode:models` (`capabilities`).
+struct ModelCapabilities: Codable, Equatable, Sendable {
+    var tools: Bool?
+    var input: [String]?
+    var output: [String]?
 }
 
 /// The model's advertised limits from `opencode:models` (`limit: { context }`).

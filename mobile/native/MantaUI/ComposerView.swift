@@ -459,44 +459,188 @@ struct ComposerView: View {
         .presentationDetents([.large])
     }
 
-    // MARK: - Model pill
+    // MARK: - Model pill → menu (BET-825)
 
+    /// The composer chip: a real control (a `Menu`) anchored on a filled
+    /// capsule. The capsule is ONE token — "✦ Opus 4.7 · High" plus a bolt when
+    /// fast — with a fill, so the resolved (model · effort · fast) triple reads
+    /// at a glance and the model name can never wrap. The menu holds the common
+    /// case (recents + inline effort + fast); the catalogue sheet is reached
+    /// only from "More Models…".
     private var modelPill: some View {
-        Button {
-            showModelPicker = true
+        Menu {
+            modelMenuContent
         } label: {
-            HStack(spacing: Metrics.spacing.sp1) {
+            chipLabel
+        }
+        .accessibilityLabel("Model")
+        .accessibilityIdentifier("model-picker")
+    }
+
+    /// The chip's single-line label: "✦ Opus 4.7 · High" + bolt when fast.
+    /// `.lineLimit(1)` + `.fixedSize(horizontal:)` is load-bearing — the model
+    /// name must never wrap at any Dynamic Type size.
+    private var chipLabel: some View {
+        HStack(spacing: Metrics.spacing.sp1) {
+            if modelStore.loaded {
                 Image(systemName: "sparkles")
                     .font(.system(size: Metrics.type.xs, weight: .medium))
-                if modelStore.loaded {
-                    Text(ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel))
-                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                        .lineLimit(1)
-                    if let variant = modelStore.variant, !variant.isEmpty {
-                        Text("·")
-                            .font(.manta(size: Metrics.type.small))
-                        Text(variant.capitalized)
-                            .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                            .lineLimit(1)
-                    }
-                } else {
-                    // Box-wide model list still arriving — show an explicit
-                    // loading state rather than a misleading "Default".
-                    ProgressView()
-                        .controlSize(.mini)
-                        .accessibilityLabel("Loading models")
+                Text(resolvedChipText)
+                    .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                if isFastActive {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: Metrics.type.xs, weight: .semibold))
+                }
+            } else {
+                // Box-wide model list still arriving — show an explicit
+                // loading state rather than a misleading "Default".
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityLabel("Loading models")
+            }
+        }
+        .foregroundColor(tokens.accentTx)
+        .padding(.vertical, Metrics.spacing.sp1)
+        .padding(.horizontal, Metrics.spacing.sp2)
+        .background(tokens.accentSoft, in: Capsule())
+        .lineLimit(1)
+    }
+
+    private var activeModel: OpencodeModel? {
+        ChatModel.activeModel(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+    }
+
+    private var isFastActive: Bool {
+        guard let active = activeModel else { return false }
+        return ChatModel.isFastModelID(active.id)
+    }
+
+    /// The chip's resolved triple as a single run: "Opus 4.7 · High" (the ⚡
+    /// is a separate bolt glyph). One run, never two — three axes with only
+    /// one visible is how a quota gets burned on max effort unnoticed.
+    private var resolvedChipText: String {
+        guard let model = activeModel else { return "Default" }
+        var parts = [model.name]
+        if let variant = modelStore.variant, !variant.isEmpty {
+            parts.append(variant.capitalized)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Tier 1 menu content
+
+    /// The menu: recents + Server default, inline effort + fast, then the
+    /// catalogue sheet. Order is HIG-driven (most-frequent first).
+    @ViewBuilder
+    private var modelMenuContent: some View {
+        // 1. Recents (most recent first) + the ever-present Server-default
+        //    escape. Each recent is a (model, effort, fast) triple.
+        if !modelStore.recents.isEmpty {
+            ForEach(modelStore.recents, id: \.self) { choice in
+                recentButton(choice)
+            }
+        }
+        Button(action: { modelStore.setOverride(nil) }) {
+            HStack {
+                Text("Server default")
+                Spacer()
+                if modelStore.override == nil { Image(systemName: "checkmark") }
+            }
+        }
+
+        // 3 + 4. Effort (inline segmented) and Fast mode. Omitted when the
+        //    active model offers neither — a model with no variants shows no
+        //    effort control anywhere.
+        if showEffortPicker || showFastToggle {
+            Divider()
+            if showEffortPicker {
+                effortPicker
+            }
+            if showFastToggle {
+                fastToggle
+            }
+            Divider()
+        } else {
+            Divider()
+        }
+
+        // 6. The catalogue sheet — the ellipsis (per HIG, it opens another view).
+        Button { showModelPicker = true } label: {
+            Label("More Models…", systemImage: "ellipsis")
+        }
+    }
+
+    private func recentButton(_ choice: ModelChoice) -> some View {
+        Button(action: { modelStore.apply(choice) }) {
+            HStack {
+                Text(ModelRecents.label(for: choice, models: modelStore.models))
+                    .lineLimit(1)
+                Spacer()
+                if modelStore.activeChoice == choice {
+                    Image(systemName: "checkmark")
                 }
             }
-            .foregroundColor(tokens.accentTx)
-            // Bare accent label, no pill fill: only Send carries a background
-            // in this row. No horizontal padding so the label sits flush at the
-            // box's left edge — the same distance from the border as Send is on
-            // the right. Vertical padding keeps a comfortable tap target.
-            .padding(.vertical, Metrics.spacing.sp1)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Model picker")
-        .accessibilityIdentifier("model-picker")
+    }
+
+    private var showEffortPicker: Bool {
+        !modelStore.activeVariants.isEmpty
+    }
+
+    private var fastToggleState: ChatModel.FastToggle {
+        ChatModel.fastToggle(models: modelStore.models, active: activeModel, variantId: modelStore.variant)
+    }
+
+    private var showFastToggle: Bool {
+        let fast = fastToggleState
+        return fast.available || fast.on
+    }
+
+    /// Inline segmented effort control — a segmented control shows the CURRENT
+    /// value without a second tap, which an effort submenu cannot. The "Default"
+    /// segment is the model's recommended level (no explicit variant).
+    private var effortPicker: some View {
+        let selection = Binding<String>(
+            get: { modelStore.variant ?? "" },
+            set: { newValue in
+                if newValue.isEmpty {
+                    modelStore.setVariant(nil)
+                } else {
+                    modelStore.setVariant(newValue)
+                }
+                modelStore.recordCurrentChoice()
+            }
+        )
+        return VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            Text("Effort")
+                .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.semibold)))
+                .foregroundColor(tokens.tx3)
+            Picker("Effort", selection: selection) {
+                Text("Default").tag("")
+                ForEach(modelStore.activeVariants, id: \.id) { variant in
+                    Text(variant.id.capitalized).tag(variant.id)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    /// Fast-mode toggle — a session-level flag, so it sits at the same level
+    /// as effort, never nested under it. Omitted when the model has no fast twin.
+    private var fastToggle: some View {
+        let fast = fastToggleState
+        return Toggle(isOn: Binding(
+            get: { fast.on },
+            set: { on in
+                modelStore.setFast(on)
+                modelStore.recordCurrentChoice()
+            }
+        )) {
+            Label("Fast mode", systemImage: fast.on ? "bolt.fill" : "bolt")
+        }
+        .disabled(!fast.available)
     }
 
     // MARK: - Scroll to bottom
