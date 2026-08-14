@@ -3,7 +3,7 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID_PLACEHOLDER } from "./auth.mjs";
+import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER } from "./auth.mjs";
 
 // The module-level auth cache persists across test cases in this file — clear
 // it before each so a cached github.com resolution from one test can't leak
@@ -294,4 +294,13 @@ test("device grant: placeholder client_id refuses to start (guard, BET-849)", as
     DeviceFlowNotConfiguredError,
   );
   assert.equal(fetched, false, "no GitHub call is made for a placeholder id");
+});
+
+test("device grant: the production default client_id is real, not the placeholder (BET-849)", async () => {
+  assert.notEqual(DEVICE_CLIENT_ID, DEVICE_CLIENT_ID_PLACEHOLDER);
+  assert.notEqual(DEVICE_CLIENT_ID, "");
+  const clock = makeClock();
+  const fetchFn = makeFetch(async () => ({ error: "authorization_pending" }));
+  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  assert.equal(started.pollInterval, 5, "the default id is unguarded — the device flow actually runs");
 });
