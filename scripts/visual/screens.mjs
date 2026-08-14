@@ -409,7 +409,11 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/folder-picker/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
+    // ?state=empty has zero projects, so the composer (which holds the model
+    // and effort picker triggers) never renders — same root cause as the Home
+    // chip re-point above. There are no popup triggers in this captured state,
+    // so the closed-surface set is empty.
+    surfacesClosed: [],
   },
   {
     // The ⋯ session menu is the only entry point for AI-CLI launcher modes
