@@ -55,16 +55,6 @@ html, body, #root {
   box-shadow: var(--shadow-sm), 0 0 0 3px var(--accent-bg);
 }
 
-/* BET-782: the session header is a container query. The pane's width is a
-   function of the sidebar + artifacts panel, NOT the viewport, so a viewport
-   breakpoint measures the wrong thing — the cut is driven by the container's
-   inline size. selectStatusItems (chatUtils) mirrors this with the same two
-   breakpoint constants (560 / 420); the container context here is what makes
-   the header a container-query surface rather than a media-query one. */
-.manta-session-header {
-  container: sessionheader / inline-size;
-}
-
 /* Trailing spacer inside any header row that reaches the top-right of the
    window. Zero-width off Windows. */
 .titlebar-inset-right {
