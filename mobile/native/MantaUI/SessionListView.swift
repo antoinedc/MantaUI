@@ -266,9 +266,9 @@ struct SessionListView: View {
     }
 
     private var filteredProjects: [MantaProject] {
-        guard !searchText.isEmpty else { return store.projects }
+        guard !searchText.isEmpty else { return sorted(store.projects) }
         let q = searchText.lowercased()
-        return store.projects.compactMap { p in
+        let matched = store.projects.compactMap { p -> MantaProject? in
             // A project-name match keeps the whole group. Matching window names
             // only meant typing the name of the project you were looking at
             // emptied the screen.
@@ -277,6 +277,17 @@ struct SessionListView: View {
             guard !kept.isEmpty else { return nil }
             var copy = p
             copy.windows = kept
+            return copy
+        }
+        return sorted(matched)
+    }
+
+    /// Pinned windows to the top of their project — the ONE place a project's
+    /// row order is decided, so every path through `filteredProjects` sorts.
+    private func sorted(_ projects: [MantaProject]) -> [MantaProject] {
+        projects.map { p in
+            var copy = p
+            copy.windows = SessionOrder.sorted(p.windows, project: p.tmuxSession, pinned: store.pinnedWindows)
             return copy
         }
     }

@@ -397,4 +397,34 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(stub.forkCalls, 1)
         XCTAssertNil(store.actionMessage)
     }
+
+    // MARK: - Pin ordering (BET-898)
+
+    private func windows(_ names: [String]) -> [MantaWindow] {
+        names.enumerated().map { i, name in
+            MantaWindow(index: i, name: name, active: false, paneCurrentPath: "", opencodeSessionId: nil, worktreePath: nil)
+        }
+    }
+
+    private func names(_ ws: [MantaWindow]) -> [String] { ws.map(\.name) }
+
+    func testPinOrderNoPinsReturnsArrayUnchanged() {
+        let ws = windows(["a", "b", "c"])
+        XCTAssertEqual(names(SessionOrder.sorted(ws, project: "proj", pinned: [])), ["a", "b", "c"])
+    }
+
+    func testPinOrderOnePinnedJumpsToFrontKeepsRestOrder() {
+        let ws = windows(["a", "b", "c", "d"])
+        XCTAssertEqual(names(SessionOrder.sorted(ws, project: "proj", pinned: [SessionPinID.window("proj", index: 2)])), ["c", "a", "b", "d"])
+    }
+
+    func testPinOrderSeveralPinnedKeepTheirOriginalRelativeOrder() {
+        let ws = windows(["a", "b", "c", "d", "e"])
+        XCTAssertEqual(names(SessionOrder.sorted(ws, project: "proj", pinned: [SessionPinID.window("proj", index: 3), SessionPinID.window("proj", index: 1)])), ["b", "d", "a", "c", "e"])
+    }
+
+    func testPinOrderOtherProjectPinDoesNotAffect() {
+        let ws = windows(["a", "b"])
+        XCTAssertEqual(names(SessionOrder.sorted(ws, project: "proj", pinned: [SessionPinID.window("other", index: 0)])), ["a", "b"])
+    }
 }
