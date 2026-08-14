@@ -91,7 +91,7 @@ export function useVoice(params: {
   const submitAfterTranscribeRef = useRef(false);
   // Transcription in flight — the recorder's own phases don't include
   // "processing" (that is our business now), so we track it here for the UI.
-  const [transcribing, setTranscribing] = useState(false);
+  const [transcribing] = useState(false);
 
   // Discard-with-confirmation state (BET-836). Under VOICE_CONFIRM_DISCARD_MS
   // the first discard discards immediately; at or above it the first discard
@@ -136,16 +136,23 @@ export function useVoice(params: {
   const voiceRecorder = useVoiceRecorder({
     onComplete: async (artifact: VoiceArtifact) => {
       // BET-837 send flow. One POST /api/voice stores the clip AND transcribes
-      // it. The pending row appears instantly (the composer returns to idle —
-      // it is never blocked on the network): the waveform is fully formed the
-      // moment the take ends, which is what makes the wait read as "almost
-      // done". On success the note is appended to voiceNotes, the pending row
-      // clears, and the transcript goes through the EXISTING submit() so slash
-      // handling, model resolution and attachments all behave normally.
+      // it. The pending row appears instantly so the COMPOSER returns to idle
+      // immediately — it is never blocked on the network. The waveform is fully
+      // formed the moment the take ends, which is what makes the wait read as
+      // "almost done". On success the note is appended to voiceNotes, the
+      // pending row clears, and the transcript goes through the EXISTING
+      // submit() so slash handling, model resolution and attachments all behave
+      // normally.
+      //
+      // NOTE on `transcribing`/`voiceProcessing`: deliberately NOT set here.
+      // Holding it (even true-then-false-in-finally) kept `busy` on the mic
+      // buttons across the whole upload+transcribe round trip, which is exactly
+      // the network block the pending row exists to eliminate. The pending row
+      // is the wait signal; the composer stays fully idle from the moment the
+      // take ends.
       const peaks = artifact.peaks;
       const durationMs = artifact.durationMs;
       setPendingVoiceNote({ peaks, durationMs });
-      setTranscribing(true);
       try {
         const buffer = await artifact.blob.arrayBuffer();
         const res = await window.api.voiceUploadNote({
@@ -190,8 +197,6 @@ export function useVoice(params: {
         setPendingVoiceNote(null);
         submitAfterTranscribeRef.current = false;
         setSendError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setTranscribing(false);
       }
     },
     onError: (e) => {
