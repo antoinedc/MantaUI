@@ -278,18 +278,31 @@ struct OpencodeModel: Codable, Equatable, Sendable {
     /// context window (Opus 4.7 reports 1M, Sonnet 200k) — the denominator the
     /// context meter must use, never a hardcoded 200k.
     var limit: ModelLimit? = nil
-    /// The model's declared input/output capabilities (`{tools, input, output}`
-    /// from the box's `getProviders()`/`listModels()`). `input` is the list of
-    /// accepted input modalities ("text", "image", ...) — whether the row shows
-    /// a "vision" glyph. Absent for providers that don't annotate it.
+    /// The model's declared capabilities from the box (the wire object also
+    /// carries `temperature`, `attachment`, `toolcall`, `output`,
+    /// `interleaved` — declared as our `ModelCapabilities` only reads what the
+    /// catalogue row renders). `input.image` is whether the row shows a
+    /// "vision" glyph. Absent for providers that don't annotate it.
     var capabilities: ModelCapabilities? = nil
 }
 
 /// The model's advertised capabilities from `opencode:models` (`capabilities`).
+///
+/// Declares ONLY the two facts the catalogue row renders. The wire object also
+/// carries `temperature`, `attachment`, `toolcall`, `output` and `interleaved`,
+/// and `interleaved` is a Bool on some models and an object on others — so
+/// declaring a field this app does not use is a decode failure waiting to
+/// happen. Unknown keys are ignored by the synthesized Decodable; a key that is
+/// present with the wrong TYPE throws and takes the whole model list with it,
+/// which is exactly how the catalogue silently came up empty.
 struct ModelCapabilities: Codable, Equatable, Sendable {
-    var tools: Bool?
-    var input: [String]?
-    var output: [String]?
+    /// Input modalities, an OBJECT of flags on the wire (`{"text":true,
+    /// "image":true,…}`) — never a list of strings.
+    struct Modalities: Codable, Equatable, Sendable {
+        var image: Bool?
+    }
+    var reasoning: Bool?
+    var input: Modalities?
 }
 
 /// The model's advertised limits from `opencode:models` (`limit: { context }`).

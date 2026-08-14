@@ -24,7 +24,6 @@ final class ChatModelStore: ObservableObject {
     @Published private(set) var models: [OpencodeModel] = []
     @Published private(set) var defaultModel: OpencodeModelID?
     @Published private(set) var override: OpencodeModelID?
-    @Published private(set) var loadFailed = false
     /// True once the shared catalog has its list (mirrored from the catalog).
     /// Drives the composer pill's loading state.
     @Published private(set) var loaded = false
@@ -47,13 +46,12 @@ final class ChatModelStore: ObservableObject {
         self.override = Self.loadOverride(for: sessionId)
         self.variant = UserDefaults.standard.string(forKey: Self.variantKey(for: sessionId))
 
-        // Seed + mirror the shared catalog so the box-wide list, default and
-        // failure state are published here (keeps every existing caller reading
+        // Seed + mirror the shared catalog so the box-wide list and default are
+        // published here (keeps every existing caller reading
         // `modelStore.models` unchanged). A clear rebuilds this store, but the
         // catalog is already loaded, so it seeds instantly — no refetch.
         self.models = catalog.models
         self.defaultModel = catalog.defaultModel
-        self.loadFailed = catalog.loadFailed
         self.loaded = catalog.loaded
         self.recents = ModelRecents.load()
         catalog.objectWillChange
@@ -65,7 +63,6 @@ final class ChatModelStore: ObservableObject {
     private func mirrorCatalog() {
         models = catalog.models
         defaultModel = catalog.defaultModel
-        loadFailed = catalog.loadFailed
         loaded = catalog.loaded
     }
 
