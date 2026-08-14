@@ -26,6 +26,7 @@
 // The poller produces the SAME normalised forge events the webhook ingest
 // does, and routes them through the SAME engine dispatchEvent — one path.
 
+import { rollupChecks } from "../../shared/forge.mjs";
 import { startPoller } from "../startPoller.mjs";
 
 /**
@@ -89,6 +90,13 @@ function issueIdentity(repo, number, label) {
   return `${repo.owner}/${repo.repo}#${number}:${label ?? ""}`;
 }
 
+// The identity used to de-duplicate a polled PR event (checks.failed /
+// review.requested). `kind` namespaces the set so a PR's failure and its
+// pending review are independent dispatch slots.
+function prIdentity(repo, number, kind) {
+  return `${repo.owner}/${repo.repo}#${number}:${kind}`;
+}
+
 /**
  * One concrete per-repo poll unit: fetch a repo's open issues carrying a
  * given label and emit a normalised `issue.labeled` event for each that has
@@ -118,6 +126,95 @@ export async function pollIssueLabels(
       label,
       ...(typeof issue.title === "string" ? { title: issue.title } : {}),
       url: issue.url,
+      fork: false,
+    });
+  }
+  return { events };
+}
+
+/**
+ * One concrete per-repo poll unit: fetch a repo's open PRs and emit a
+ * normalised `checks.failed` event for each whose CI rollup is red (a check
+ * with a failing conclusion). This is the poll fallback for a `checks.failed`
+ * rule on a box the webhook cannot reach. It mirrors `pollIssueLabels`'
+ * de-dup: the ETag/304 guarantee is supplied by the underlying fetch (getChecks
+ * returns the same data on a 304) and the `seen` set turns "still red, same
+ * list" into "zero events" — a 304 never re-dispatches a PR already failed.
+ * `rollup` is injectable so the test can stub the tri-state without the real
+ * check vocabulary.
+ *
+ * @param {{ repo: {owner: string, repo: string}, listPullRequests: (repo, filter) => Promise<{data: Array<any>}>, getChecks: (repo, sha) => Promise<{data: Array<any>}>, rollup?: (checks: Array<any>) => string }} deps
+ * @param {{ seen?: Set<string> }} [state]
+ * @returns {Promise<{events: Array<any>}>}
+ */
+export async function pollChecksFailed(
+  { repo, listPullRequests, getChecks, rollup = rollupChecks },
+  { seen = new Set() } = {},
+) {
+  const res = await listPullRequests(repo, { state: "open" });
+  const rows = Array.isArray(res?.data) ? res.data : [];
+  const events = [];
+  for (const pr of rows) {
+    if (typeof pr?.number !== "number" || typeof pr?.headSha !== "string" || !pr.headSha) continue;
+    let checks = [];
+    try {
+      const c = await getChecks(repo, pr.headSha);
+      checks = Array.isArray(c?.data) ? c.data : [];
+    } catch {
+      // Checks are best-effort — a PR whose CI is unreachable is skipped, not
+      // blanked out of the poll.
+      continue;
+    }
+    if (rollup(checks) !== "red") continue;
+    const id = prIdentity(repo, pr.number, "checks.failed");
+    if (seen.has(id)) continue; // 304 / no-change — must not re-dispatch
+    seen.add(id);
+    events.push({
+      type: "checks.failed",
+      ...(typeof pr.headRef === "string" && pr.headRef ? { branch: pr.headRef } : {}),
+      ...(typeof pr.title === "string" ? { title: pr.title } : {}),
+      ...(typeof pr.url === "string" ? { url: pr.url } : {}),
+      fork: false,
+    });
+  }
+  return { events };
+}
+
+/**
+ * One concrete per-repo poll unit: fetch a repo's open PRs and emit a
+ * normalised `review.requested` event for each that is waiting on a review —
+ * the poll fallback for a `review.requested` rule on a box the webhook cannot
+ * reach. The webhook fires once when a reviewer is added; a poll sees only a
+ * snapshot, so it proxies the same signal through the PR's merge-block state
+ * (a PR that is blocked on review is one whose review is still outstanding).
+ * Same ETag/`seen`-set de-dup as `pollIssueLabels` — once dispatched, a PR's
+ * pending review is not re-dispatched on the next unchanged poll.
+ *
+ * @param {{ repo: {owner: string, repo: string}, listPullRequests: (repo, filter) => Promise<{data: Array<any>}> }} deps
+ * @param {{ seen?: Set<string> }} [state]
+ * @returns {Promise<{events: Array<any>}>}
+ */
+export async function pollReviewRequested(
+  { repo, listPullRequests },
+  { seen = new Set() } = {},
+) {
+  const res = await listPullRequests(repo, { state: "open" });
+  const rows = Array.isArray(res?.data) ? res.data : [];
+  const events = [];
+  for (const pr of rows) {
+    if (typeof pr?.number !== "number") continue;
+    // `review required` is the normalised merge-block reason for a PR whose
+    // mergeable_state is `blocked` or `review_requested` — i.e. a review has
+    // been requested and has not yet satisfied the merge gate.
+    if (pr?.mergeBlockedReason !== "review required") continue;
+    const id = prIdentity(repo, pr.number, "review.requested");
+    if (seen.has(id)) continue; // 304 / no-change — must not re-dispatch
+    seen.add(id);
+    events.push({
+      type: "review.requested",
+      ...(typeof pr.headRef === "string" && pr.headRef ? { branch: pr.headRef } : {}),
+      ...(typeof pr.title === "string" ? { title: pr.title } : {}),
+      ...(typeof pr.url === "string" ? { url: pr.url } : {}),
       fork: false,
     });
   }
