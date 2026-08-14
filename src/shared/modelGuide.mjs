@@ -241,3 +241,74 @@ export function familyKey(modelID) {
   const entry = matchFamily(modelID);
   return entry ? entry.key : null;
 }
+
+// --- Model matching for app-control (the manta_switch_model tool) -----------
+//
+// Resolves a spoken/typed model query ("opus", "sonnet 4", "claude-haiku")
+// against a list of normalized opencode models (oc.listModels()). This is the
+// canonical fuzzy matcher — src/server/appControl.mjs uses it for the
+// switch-model action. Do not write a second match implementation anywhere.
+
+/**
+ * Match a fuzzy model query against a list of models. Exact id wins, then
+ * every token present in the id, then every token present in the name, then a
+ * providerID prefix.
+ *
+ * @param {string|null|undefined} query
+ * @param {Array<{id?: string, name?: string, providerID?: string}>} models
+ * @returns {object|null} the resolved model, or null when nothing matches.
+ */
+export function fuzzyMatchModel(query, models) {
+  const list = Array.isArray(models) ? models : [];
+  if (!query || !list.length) return null;
+  const q = String(query).toLowerCase().trim();
+  if (!q) return null;
+
+  const direct = list.find((m) => String(m?.id ?? "").toLowerCase() === q);
+  if (direct) return direct;
+
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+
+  for (const m of list) {
+    const id = String(m?.id ?? "").toLowerCase();
+    if (tokens.every((t) => id.includes(t))) return m;
+  }
+  for (const m of list) {
+    const name = String(m?.name ?? "").toLowerCase();
+    if (tokens.every((t) => name.includes(t))) return m;
+  }
+  for (const m of list) {
+    if (tokens[0] === String(m?.providerID ?? "").toLowerCase()) return m;
+  }
+  return null;
+}
+
+/**
+ * The closest candidates for an unmatched query, for a retry hint. Ranks
+ * models by how many query tokens appear in their id/name; returns the top
+ * `limit`. Exported so the switch-model no-match error can name candidates
+ * the model can retry with.
+ *
+ * @param {string|null|undefined} query
+ * @param {Array<{id?: string, name?: string, providerID?: string}>} models
+ * @param {number} [limit]
+ * @returns {Array<{providerID?: string, id?: string, name?: string}>}
+ */
+export function suggestModels(query, models, limit = 3) {
+  const list = Array.isArray(models) ? models : [];
+  if (!query || !list.length) return [];
+  const tokens = String(query).toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+  const scored = [];
+  for (const m of list) {
+    const haystack = `${String(m?.id ?? "")} ${String(m?.name ?? "")}`.toLowerCase();
+    let hits = 0;
+    for (const t of tokens) if (haystack.includes(t)) hits++;
+    if (hits > 0) scored.push({ m, hits });
+  }
+  return scored
+    .sort((a, b) => b.hits - a.hits)
+    .slice(0, limit)
+    .map(({ m }) => ({ providerID: m?.providerID, id: m?.id, name: m?.name }));
+}

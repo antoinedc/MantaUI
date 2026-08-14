@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { describeModel, familyKey } from "./modelGuide.mjs";
+import { describeModel, familyKey, fuzzyMatchModel, suggestModels } from "./modelGuide.mjs";
 
 describe("describeModel", () => {
   it("matches haiku family", () => {
@@ -198,5 +198,61 @@ describe("familyKey", () => {
   it("returns a non-null key for newly cataloged models so subagent naming stops falling back to slugs", () => {
     expect(familyKey("gpt-5.2-codex")).toBe("codex");
     expect(familyKey("k3")).toBe("k3");
+  });
+});
+
+const MODELS = [
+  { providerID: "anthropic", id: "claude-haiku-4", name: "Claude Haiku 4" },
+  { providerID: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+  { providerID: "anthropic", id: "claude-opus-4-7", name: "Claude Opus 4.7" },
+  { providerID: "openai", id: "gpt-4o", name: "GPT-4o" },
+  { providerID: "openai", id: "gpt-4o-mini", name: "GPT-4o mini" },
+];
+
+describe("fuzzyMatchModel", () => {
+  it("matches an exact model id", () => {
+    expect(fuzzyMatchModel("claude-opus-4-7", MODELS)?.id).toBe("claude-opus-4-7");
+  });
+
+  it("matches every token against a model id (queries like \"opus\")", () => {
+    expect(fuzzyMatchModel("opus", MODELS)?.id).toBe("claude-opus-4-7");
+  });
+
+  it("matches a multi-word query against a model name (\"gpt 4o mini\")", () => {
+    expect(fuzzyMatchModel("gpt 4o mini", MODELS)?.id).toBe("gpt-4o-mini");
+  });
+
+  it("is case-insensitive", () => {
+    expect(fuzzyMatchModel("SONNET", MODELS)?.id).toBe("claude-sonnet-4-6");
+  });
+
+  it("falls back to a providerID match for a bare provider name", () => {
+    expect(fuzzyMatchModel("openai", MODELS)?.providerID).toBe("openai");
+  });
+
+  it("returns null for no match or empty input", () => {
+    expect(fuzzyMatchModel("gpt-5", MODELS)).toBeNull();
+    expect(fuzzyMatchModel("", MODELS)).toBeNull();
+    expect(fuzzyMatchModel("opus", [])).toBeNull();
+    expect(fuzzyMatchModel(null as unknown as string, MODELS)).toBeNull();
+  });
+});
+
+describe("suggestModels", () => {
+  it("rates candidates whose id/name contain a query token", () => {
+    const s = suggestModels("4o", MODELS, 3);
+    expect(s.map((m) => m.id).sort()).toEqual(["gpt-4o", "gpt-4o-mini"]);
+    expect(s[0].providerID).toBe("openai");
+  });
+
+  it("respects the limit", () => {
+    // every model contains the "claude" token; limit 2 caps the result.
+    expect(suggestModels("claude", MODELS, 2).length).toBe(2);
+  });
+
+  it("returns empty for no overlap", () => {
+    expect(suggestModels("zzzz", MODELS)).toEqual([]);
+    expect(suggestModels("", MODELS)).toEqual([]);
+    expect(suggestModels(null as unknown as string, MODELS)).toEqual([]);
   });
 });

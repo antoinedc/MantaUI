@@ -984,6 +984,58 @@ and worktree all belong to it.
   assembly, buildJobPrompt/buildCompletionText, sweep retention, stop/delete
   — pure/IO-injected logic only, no live HTTP/tmux).
 
+## App control — MantaUI-native AI tool (`src/server/appControl.mjs`)
+
+The seventh **MantaUI-native opencode tool**: an opencode session can drive
+the app the user is looking at — switch the model for its chat session, rename
+the session in the sidebar, compact it, or list the sessions in its workspace.
+Same "MantaUI tools" pattern as the other six (`docs/manta-tools-scheduler.md`).
+This ticket is the server half + tool registrar; the sibling ticket (BET-841)
+consumes the bus envelopes in the renderer.
+
+- **Global opencode tool**, `docs/opencode-tools/manta-app.ts`, **COPIED** (not
+  symlinked — same `@opencode-ai/plugin` gotcha) to
+  `~/.config/opencode/tools/manta-app.ts`. Four exports → `manta_compact_session`,
+  `manta_switch_model`, `manta_rename_session`, `manta_list_sessions`. Guidance
+  appended to `~/.config/opencode/AGENTS.md`. **Install/update =
+  `systemctl --user restart opencode-serve`.**
+- **Thin registrar** — each `execute` POSTs `/api/app-control {action,
+  sessionID, directory, ...args}` (same box, no SSH hop) and returns promptly.
+  The `boxToken()` / `authHeaders()` helpers are copied verbatim (every `/api/*`
+  route is behind the bearer gate). Dispatch on `action`; unknown actions are
+  rejected by name with a message the model can act on, never a bare 500.
+- **Session resolution** — every action resolves the caller's window the way
+  `peers.mjs` does, via the shared `resolveWorkspace` (sessionID first, then a
+  `paneCurrentPath === directory` fallback). No second resolver. Pure logic,
+  injected I/O, no durable store — a live claim, computed per call.
+- **The four actions:**
+  - `compactSession` — calls the existing `oc.compactSession`. `{ok:true}`;
+    no bus event (opencode already emits `session.compacted` and the renderer
+    reacts).
+  - `switchModel({query})` — resolves the query against `oc.listModels()`
+    with the shared fuzzy matcher `fuzzyMatchModel` (moved to
+    `src/shared/modelGuide.mjs`; `suggestModels` powers the no-match error that
+    names the closest candidates for a retry). On a hit publishes `{action:
+    "switch-model", sessionId, providerID, modelID}`. **The model override is
+    renderer state** (per-session `localStorage`), so the server can't apply it
+    directly — the bus event is how it lands on the open ChatPanel.
+  - `renameSession({name})` — validates (1–40 chars, no `:` or control chars),
+    calls `tmux.renameWindow` (never shells out directly), publishes `{action:
+    "rename-session", sessionId, name}` so sidebars refresh without a poll.
+  - `listSessions` — read-only windows in the caller's workspace: name, index,
+    chat-mode flag, branch (best-effort), and whether it's the caller. No event.
+- **Bus** — ONE kind, `appControl`, with an `action` discriminator (not one
+  kind per action). Published through the existing bus in `index.mjs` as
+  `{kind:"appControl", payload}`; the renderer needs exactly one listener + one
+  switch. Payload is client-agnostic so the native client can adopt it later.
+- **Out of scope by design**: interrupt/abort of the current turn and
+  permission/question approval are NOT available through these tools — the
+  tool descriptions and guidance say so explicitly.
+- Tests: `src/server/appControl.test.mjs` (session resolution by id and
+  directory fallback, model fuzzy match + no-match candidate error, rename
+  validation accept/reject, unknown-action rejection, bus payload shape for
+  both publishing actions — pure/injected only, no live HTTP/tmux).
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
