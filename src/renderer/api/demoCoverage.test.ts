@@ -131,7 +131,11 @@ export const DEMO_UNIMPLEMENTED = [
   "uploadBuffer",
   "uploadFiles",
   "usageList",
+  "voiceFetchNote",
+  "voiceListNotes",
+  "voiceRetryNote",
   "voiceTranscribe",
+  "voiceUploadNote",
   "webhookDelete",
   "webhookList",
 ];

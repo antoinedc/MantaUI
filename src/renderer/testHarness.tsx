@@ -120,6 +120,7 @@ function defaultApiImpl(): Record<string, unknown> {
     // Voice / files — component may probe these on mount.
     getPathForFile: () => "",
     clipboardReadImage: () => Promise.resolve(null),
+    voiceListNotes: () => Promise.resolve([]),
   };
 }
 

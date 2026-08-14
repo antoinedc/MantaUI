@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
 import type { CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
+import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -3050,4 +3051,58 @@ export function commentableLines(diffText: string): CommentableLine[] {
     }
   }
   return result;
+}
+
+// The plain text of a USER message — its non-synthetic text parts concatenated
+// with newlines, trailing whitespace stripped. This is the single source for
+// "what text did the user send" and is shared by MessageRow (rendering) and
+// buildVoiceNoteMap (claiming a note to the message whose transcript it
+// matches). Keep it the same here and in MessageRow or the claim can diverge
+// from what the row displays.
+export function concatUserMessageText(msg: OpencodeMessage): string {
+  return msg.parts
+    .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
+    .map((p) => p.text ?? "")
+    .join("\n")
+    .replace(/\s+$/, "");
+}
+
+/**
+ * Build a user-message-id → voice-note map by matching each note's transcript
+ * to a user message whose concatenated text exactly equals it.
+ *
+ * Walk user messages OLDEST → NEWEST and notes OLDEST → NEWEST (the order the
+ * server lists them); claim the FIRST unclaimed user message whose text
+ * equals the note's transcript. Notes with an empty transcript are skipped.
+ * A given note and a given message are each claimed at most once.
+ *
+ * KNOWN, ACCEPTED LIMITATION: because a message's transcript is just text, if
+ * a user later TYPES a message identical to something they once dictated, it
+ * could inherit an old note's chip. The consequence is cosmetic (a playable
+ * chip next to the text) and the probability is negligible — do not build
+ * machinery to prevent it.
+ *
+ * @returns Map<messageId, VoiceNoteRecord>
+ */
+export function buildVoiceNoteMap(
+  messages: OpencodeMessage[] | null,
+  notes: VoiceNoteRecord[] | null,
+): Map<string, VoiceNoteRecord> {
+  const map = new Map<string, VoiceNoteRecord>();
+  if (!messages || !notes || notes.length === 0) return map;
+  const claimed = new Set<string>();
+  const users = messages.filter((m) => m.info.role === "user");
+  for (const note of notes) {
+    const transcript = note.transcript.trim();
+    if (!transcript) continue;
+    for (const m of users) {
+      if (claimed.has(m.info.id)) continue;
+      if (concatUserMessageText(m) === transcript) {
+        map.set(m.info.id, note);
+        claimed.add(m.info.id);
+        break;
+      }
+    }
+  }
+  return map;
 }

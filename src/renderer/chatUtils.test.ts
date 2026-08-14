@@ -108,9 +108,11 @@ import {
   type RepoRow,
   workingIndicatorLabel,
   progressAttentionKind,
+  concatUserMessageText,
+  buildVoiceNoteMap,
 } from "./chatUtils";
 
-import type { OpencodeModel, UsageSnapshot } from "../shared/types";
+import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
 
 
 
@@ -4042,5 +4044,132 @@ describe("progressAttentionKind (BET-791)", () => {
     expect(progressAttentionKind("failed")).toBeNull();
     expect(progressAttentionKind(null)).toBeNull();
     expect(progressAttentionKind(undefined)).toBeNull();
+  });
+});
+
+// ===== buildVoiceNoteMap (BET-837) =====
+
+function umsg(id: string, text: string): OpencodeMessage {
+  return {
+    info: { id, role: "user" } as OpencodeMessage["info"],
+    parts: [
+      {
+        id: `p-${id}`,
+        type: "text",
+        text,
+        synthetic: false,
+        ignored: false,
+      } as OpencodeMessage["parts"][number],
+    ],
+  } as OpencodeMessage;
+}
+
+function vnote(id: string, transcript: string, extra: Partial<VoiceNoteRecord> = {}): VoiceNoteRecord {
+  return {
+    id,
+    sessionId: "ses_1",
+    transcript,
+    mime: "audio/webm",
+    durationMs: 1000,
+    peaks: new Uint8Array([128, 64]),
+    createdAt: 0,
+    expiresAt: null,
+    audioAvailable: true,
+    ...extra,
+  };
+}
+
+describe("buildVoiceNoteMap (BET-837)", () => {
+  it("matches a note's transcript to the message whose text equals it", () => {
+    const messages = [umsg("m1", "hello world")];
+    const notes = [vnote("n1", "hello world")];
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m1")?.id).toBe("n1");
+    expect(map.size).toBe(1);
+  });
+
+  it("no match when the text differs", () => {
+    const messages = [umsg("m1", "hello world")];
+    const notes = [vnote("n1", "something else")];
+    expect(buildVoiceNoteMap(messages, notes).size).toBe(0);
+  });
+
+  it("claims in order: duplicate transcripts claimed oldest→newest by message", () => {
+    const messages = [
+      umsg("m1", "repeat"),
+      umsg("m2", "repeat"),
+      umsg("m3", "repeat"),
+    ];
+    const notes = [vnote("n1", "repeat"), vnote("n2", "repeat")];
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m1")?.id).toBe("n1");
+    expect(map.get("m2")?.id).toBe("n2");
+    expect(map.has("m3")).toBe(false);
+  });
+
+  it("claims the FIRST unclaimed user message, oldest→newest", () => {
+    const messages = [
+      umsg("m1", "a"),
+      umsg("m2", "b"),
+      umsg("m3", "c"),
+    ];
+    const notes = [vnote("n1", "c")]; // matches only the NEWEST message
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m3")?.id).toBe("n1");
+  });
+
+  it("skips notes with an empty transcript", () => {
+    const messages = [umsg("m1", "x")];
+    const notes = [vnote("n1", "   "), vnote("n2", "x")];
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m1")?.id).toBe("n2");
+  });
+
+  it("does not double-claim: a note is used once even if two messages match", () => {
+    const messages = [umsg("m1", "x"), umsg("m2", "x")];
+    const notes = [vnote("n1", "x")];
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m1")?.id).toBe("n1");
+    expect(map.has("m2")).toBe(false);
+    expect(map.size).toBe(1);
+  });
+
+  it("returns an empty map for an empty notes list", () => {
+    const messages = [umsg("m1", "hello")];
+    expect(buildVoiceNoteMap(messages, []).size).toBe(0);
+    expect(buildVoiceNoteMap(messages, null).size).toBe(0);
+    expect(buildVoiceNoteMap(null, [vnote("n1", "x")]).size).toBe(0);
+  });
+
+  it("assigns each note to the oldest unclaimed matching message (newest-first notes are matched in list order)", () => {
+    const messages = [umsg("m1", "first"), umsg("m2", "second")];
+    // Two notes matching different messages must not collide.
+    const notes = [vnote("n1", "second"), vnote("n2", "first")];
+    const map = buildVoiceNoteMap(messages, notes);
+    expect(map.get("m1")?.id).toBe("n2");
+    expect(map.get("m2")?.id).toBe("n1");
+  });
+
+  it("only claims USER messages", () => {
+    const assistant = {
+      info: { id: "a1", role: "assistant" } as OpencodeMessage["info"],
+      parts: [],
+    } as OpencodeMessage;
+    const messages = [umsg("m1", "hello"), assistant];
+    const notes = [vnote("n1", "hello")];
+    expect(buildVoiceNoteMap(messages, notes).get("m1")?.id).toBe("n1");
+  });
+
+  it("uses concatenated text parts (newline-joined), matching MessageRow text", () => {
+    const msg = {
+      info: { id: "m1", role: "user" } as OpencodeMessage["info"],
+      parts: [
+        { id: "p1", type: "text", text: "line one", synthetic: false, ignored: false } as OpencodeMessage["parts"][number],
+        { id: "p2", type: "text", text: "line two", synthetic: false, ignored: false } as OpencodeMessage["parts"][number],
+      ],
+    } as OpencodeMessage;
+    expect(concatUserMessageText(msg)).toBe("line one\nline two");
+    const map = buildVoiceNoteMap([msg], [vnote("n1", "line one\nline two")]);
+    expect(map.get("m1")?.id).toBe("n1");
   });
 });
