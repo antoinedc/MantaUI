@@ -174,6 +174,9 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [probeFailed, setProbeFailed] = useState(false);
   const [probeRepos, setProbeRepos] = useState<RepoHit[]>([]);
   const [cliStatus, setCliStatus] = useState<ForgeCliStatus | null>(null);
+  // The box's $HOME from the probe, used to render a no-remote repo under the
+  // home dir as `~/…` instead of the absolute path (describeRepoRow).
+  const [homeDir, setHomeDir] = useState<string | null>(null);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   // The user chose "Browse for a folder…" (or the picker returned a worktree
   // fan-out) → render today's full composer for that folder. This is how the
@@ -209,6 +212,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     setProbeFailed(false);
     setProbeRepos([]);
     setCliStatus(null);
+    setHomeDir(null);
     setBrowseChosen(false);
     setChecked(new Set());
     setRowPhase({});
@@ -224,6 +228,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           setProbePending(false);
           setProbeRepos(res?.repos ?? []);
           setCliStatus(res?.cli ?? null);
+          setHomeDir(res?.homeDir ?? null);
         })
         .catch(() => {
           if (cancelled) return;
@@ -995,7 +1000,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                           />
                         }
                         name={<span className="truncate">{r.name}</span>}
-                        secondary={<span className="truncate">{describeRepoRow(r)}</span>}
+                        secondary={<span className="truncate">{describeRepoRow(r, homeDir)}</span>}
                         trailing={
                           <span>
                             {r.lastCommitAt ? formatAge(Date.now() - r.lastCommitAt) : "—"}

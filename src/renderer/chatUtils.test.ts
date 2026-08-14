@@ -100,6 +100,7 @@ import {
   zeroStateMode,
   initialRepoSelection,
   describeRepoRow,
+  homeRelativePath,
   planHighlightRanges,
   canMerge,
   describeMergeFailure,
@@ -3639,6 +3640,36 @@ describe("describeRepoRow", () => {
         repoRow({ branch: "main", originUrl: null, path: "/home/u/scratch", repoKey: null, forge: null }),
       ),
     ).toBe("⎇ main · /home/u/scratch · no remote");
+  });
+
+  it("renders a no-remote repo under the home dir as ~/… per the mockup", () => {
+    expect(
+      describeRepoRow(
+        repoRow({ branch: "main", originUrl: null, path: "/home/u/scratch", repoKey: null, forge: null }),
+        "/home/u",
+      ),
+    ).toBe("⎇ main · ~/scratch · no remote");
+  });
+
+  it("leaves a path outside the home dir absolute even when homeDir is given", () => {
+    expect(
+      describeRepoRow(
+        repoRow({ branch: "main", originUrl: null, path: "/opt/other/scratch", repoKey: null, forge: null }),
+        "/home/u",
+      ),
+    ).toBe("⎇ main · /opt/other/scratch · no remote");
+  });
+
+  it("renders the home dir itself as ~", () => {
+    expect(homeRelativePath("/home/u", "/home/u")).toBe("~");
+  });
+
+  it("returns the raw path when no homeDir is available", () => {
+    expect(homeRelativePath("/home/u/scratch", null)).toBe("/home/u/scratch");
+  });
+
+  it("handles a trailing-slash homeDir", () => {
+    expect(homeRelativePath("/home/u/scratch", "/home/u/")).toBe("~/scratch");
   });
 });
 
