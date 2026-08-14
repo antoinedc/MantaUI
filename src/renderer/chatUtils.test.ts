@@ -3918,20 +3918,20 @@ describe("commentableLines", () => {
       "+ new",
       "  c",
     ].join("\n");
-    // a=10 (context), old=11 (removed), new=11 (added), c=12 (context)
+    // a=10 (context→both), old=11 (removed), new=11 (added), c=12 (context→both)
     expect(commentableLines(diff)).toEqual([
-      { path: "file.ts", line: 10, side: "new" },
+      { path: "file.ts", line: 10, side: "both" },
       { path: "file.ts", line: 11, side: "old" },
       { path: "file.ts", line: 11, side: "new" },
-      { path: "file.ts", line: 12, side: "new" },
+      { path: "file.ts", line: 12, side: "both" },
     ]);
   });
 
-  it("anchors a removed line on the old side and a context line on the new side", () => {
+  it("anchors a removed line on the old side and an unchanged context line on both sides", () => {
     const diff = ["--- a/x.ts", "+++ b/x.ts", "@@ -5 +5 @@", "- gone", "  kept"].join("\n");
     expect(commentableLines(diff)).toEqual([
       { path: "x.ts", line: 5, side: "old" },
-      { path: "x.ts", line: 5, side: "new" },
+      { path: "x.ts", line: 5, side: "both" },
     ]);
   });
 
@@ -3948,12 +3948,12 @@ describe("commentableLines", () => {
       "+ w",
     ].join("\n");
     expect(commentableLines(diff)).toEqual([
-      // first hunk: a=1 (context), b=2 (removed), c=2 (added)
-      { path: "file.ts", line: 1, side: "new" },
+      // first hunk: a=1 (context→both), b=2 (removed), c=2 (added)
+      { path: "file.ts", line: 1, side: "both" },
       { path: "file.ts", line: 2, side: "old" },
       { path: "file.ts", line: 2, side: "new" },
-      // second hunk: z=20 (context), w=21 (added)
-      { path: "file.ts", line: 20, side: "new" },
+      // second hunk: z=20 (context→both), w=21 (added)
+      { path: "file.ts", line: 20, side: "both" },
       { path: "file.ts", line: 21, side: "new" },
     ]);
   });

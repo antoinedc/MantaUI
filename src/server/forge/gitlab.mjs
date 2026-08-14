@@ -261,8 +261,9 @@ async function positionShas(base, headSha, request) {
  *
  * The `new_line`/`old_line` combination is the trap: an ADDED line sets
  * `new_line` only, a REMOVED line sets `old_line` only, and an UNCHANGED line
- * sets BOTH. `side` `"new"` → added; `"old"` → removed; anything else → both.
- * Pure and exported for tests.
+ * sets BOTH. `side` maps exactly: `"new"` → added; `"old"` → removed;
+ * `"both"` (an unchanged context line, emitted by the renderer's diff gutter —
+ * BET-856) → both. Pure and exported for tests.
  *
  * @param {{ base_sha?: string, start_sha?: string, head_sha?: string }} shas
  * @param {{ path: string, line: number, side?: string, startLine?: number | null }} a
