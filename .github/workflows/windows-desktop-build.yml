@@ -81,6 +81,13 @@ concurrency:
   group: windows-desktop-build
   cancel-in-progress: false
 
+env:
+  # Web-publish auth/host, shared by the publish + verify steps — same
+  # workflow-level contract as the other deploy workflows
+  # (website-deploy.yml, gateway-deploy.yml, server-tarball-deploy.yml).
+  PROD_HOST: root@91.107.196.2
+  SSH_KEY: /tmp/prod_key
+
 permissions:
   # write is required to create the Release and upload the installer to it.
   contents: write
@@ -324,14 +331,22 @@ jobs:
       # the canonical installer + the feed, and the sha256 of the bytes served
       # must equal the sha256 of the .exe this job just built. Mismatch or
       # non-200 exits 1. `curl -sL` — the canonical name is a plain file, but a
-      # redirect must not be silently accepted as success. Gated on the key
-      # being present: a key-less run published nothing, so verifying would
-      # only fail on URLs that were intentionally never written.
+      # redirect must not be silently accepted as success. The key-presence
+      # check lives INSIDE the step body (never `secrets` in `if:` — that is
+      # invalid GitHub Actions syntax and actionlint-red): a key-less run
+      # published nothing, so verify skips instead of failing on URLs that
+      # were intentionally never written.
       - name: Verify installer + feed are live
-        if: startsWith(github.ref, 'refs/tags/') && secrets.PROD_SSH_KEY != ''
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "$PROD_SSH_KEY" ]; then
+            echo "No PROD_SSH_KEY — skipping verify (nothing was published)."
+            exit 0
+          fi
           fail=0
           built_exe=$(ls -1 dist/desktop/Manta-UI-*-x64.exe | sort -V | tail -1)
 
