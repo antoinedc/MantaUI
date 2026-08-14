@@ -561,6 +561,42 @@ export function createGithubAdapter(request, requestWrite, requestText = request
       const url = `${API}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
       const { data } = await requestWrite(url, { method: "PATCH", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
+     * GET /user/repos — the repos the connected user can actually PUSH to,
+     * most-recently-pushed first. Filtering to write access is what keeps the
+     * clone picker usable: a read-only repo you cannot push to is noise here,
+     * so it is dropped (from `/user/repos`' per-repo `permissions.push`).
+     * Normalised to a forge-neutral shape; the renderer groups by `owner`.
+     *
+     * @returns {Promise<{ data: Array<object>, stale: boolean }>}
+     */
+    async listMyRepos() {
+      const url = `${API}/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member`;
+      const { data, stale } = await request(url);
+      return { data: pushableRepos(data), stale };
     },
   };
+}
+
+// normalizeRepo — pure mapping of a GitHub repository payload to the
+// forge-neutral clone-picker shape. Callers sort / group; this only maps.
+export function normalizeRepo(r) {
+  return {
+    name: r?.name ?? "",
+    fullName: r?.full_name ?? "",
+    owner: r?.owner?.login ?? "",
+    description: typeof r?.description === "string" ? r.description : null,
+    pushedAt: r?.pushed_at ? Date.parse(r.pushed_at) : null,
+    defaultBranch: r?.default_branch ?? "main",
+    cloneUrl: r?.clone_url ?? "",
+    url: r?.html_url ?? "",
+  };
+}
+
+// pushableRepos — drop read-only repos (permissions.push !== true) and map the
+// rest, most-recently-pushed first. Pure.
+export function pushableRepos(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter((r) => r?.permissions?.push === true)
+    .map(normalizeRepo)
+    .sort((a, b) => (b.pushedAt ?? 0) - (a.pushedAt ?? 0));
 }

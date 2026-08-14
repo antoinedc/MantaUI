@@ -58,6 +58,10 @@ import type {
   ForgeDraftCommentResult,
   ForgeDraftSubmitInput,
   ForgeDraftSubmitResult,
+  ForgeDeviceStartResult,
+  ForgeDevicePollResult,
+  ForgeRepoListResult,
+  ForgeCloneStatus,
   ProviderEndpoint,
   DiscoverResult,
   ProviderInput,
@@ -216,6 +220,20 @@ export interface Api {
   forgeDraftGet(input: { cwd: string }): Promise<ForgeDraftGetResult>;
   forgeDraftComment(input: ForgeDraftCommentInput): Promise<ForgeDraftCommentResult>;
   forgeDraftSubmit(input: ForgeDraftSubmitInput): Promise<ForgeDraftSubmitResult>;
+
+  // BET-796: fresh-box clone flow (box-side only — a forge token never leaves
+  // the box). deviceStart mints the GitHub device grant (RENDERER-SAFE: no
+  // device_code); devicePoll drives the countdown ([S5]); deviceCancel backs
+  // out to [S4]. repos lists the clone picker's push-to repos ([S6]);
+  // cloneStart starts a clone and returns an id to cloneStatus (determinate
+  // progress, [S7]) / cloneCancel.
+  forgeDeviceStart(): Promise<ForgeDeviceStartResult>;
+  forgeDevicePoll(input: { grantId: string }): Promise<ForgeDevicePollResult>;
+  forgeDeviceCancel(input: { grantId: string }): Promise<{ ok: boolean }>;
+  forgeRepos(): Promise<ForgeRepoListResult>;
+  forgeCloneStart(input: { url: string; dest: string; name: string }): Promise<{ id?: string; error?: string }>;
+  forgeCloneStatus(input: { id: string }): Promise<ForgeCloneStatus | null>;
+  forgeCloneCancel(input: { id: string }): Promise<{ cancelled: boolean }>;
 
   tmuxConfigStatus(): Promise<TmuxConfigStatus>;
   tmuxSetupConfig(): Promise<TmuxConfigStatus>;

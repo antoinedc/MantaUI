@@ -721,6 +721,15 @@ export const httpApi: Api = {
   forgeDraftComment: (input) => rpc(IPC.forgeDraftComment, input),
   forgeDraftSubmit: (input) => rpc(IPC.forgeDraftSubmit, input),
 
+  // -- forge clone flow (BET-796), box-side only --
+  forgeDeviceStart: () => rpc(IPC.forgeDeviceStart),
+  forgeDevicePoll: (input) => rpc(IPC.forgeDevicePoll, input),
+  forgeDeviceCancel: (input) => rpc(IPC.forgeDeviceCancel, input),
+  forgeRepos: () => rpc(IPC.forgeRepos),
+  forgeCloneStart: (input) => rpc(IPC.forgeCloneStart, input),
+  forgeCloneStatus: (input) => rpc(IPC.forgeCloneStatus, input),
+  forgeCloneCancel: (input) => rpc(IPC.forgeCloneCancel, input),
+
   // -- tmux config management --
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),

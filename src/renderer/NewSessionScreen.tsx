@@ -46,6 +46,7 @@ import { Checkbox } from "./Checkbox";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { ListRow } from "./ListRow";
 import { Skeleton } from "./Skeleton";
+import { CloneFromGitHub } from "./CloneFromGitHub";
 import { StatusDot } from "./StatusDot";
 import { worktreeName } from "./folderPicker";
 import { useVoiceRecorder } from "./voice";
@@ -188,6 +189,10 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // errors + retry) instead of the pre-setup list. On all-success we navigate
   // away immediately, so this view only lingers when at least one row failed.
   const [batchDone, setBatchDone] = useState(false);
+
+  // BET-796: whether the GitHub clone flow ([S5]-[S7]/[E2]/[E3]) is open in
+  // place of the zero-state content. Opened from "Clone from GitHub…".
+  const [cloneOpen, setCloneOpen] = useState(false);
 
   // All probe rows are local (they already exist on disk); a later forge issue
   // adds clone rows and those must land `local: false` via the same shape.
@@ -366,6 +371,54 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       onDone?.();
     }
   };
+
+  // BET-796: hand off from the GitHub clone flow. The clone component only
+  // produced directories on disk; creating the workspaces reuses the SAME batch
+  // creation as the repo probe (createRow) — one code path, no duplicate.
+  const setupCloned = async (paths: string[]) => {
+    const cloneRows: RepoRow[] = paths.map((p) => ({ path: p, local: true } as RepoRow));
+    if (cloneRows.length === 0) {
+      setCloneOpen(false);
+      return;
+    }
+    setSending(true);
+    setBatchDone(true);
+    setError(null);
+    createdRef.current = [];
+    errorPathsRef.current = new Set();
+    setRowPhase(Object.fromEntries(cloneRows.map((r) => [r.path, "queued"])));
+    setRowError({});
+    // Merge the now-local clones into the probe list so the [S8]-style results
+    // view shows per-row progress / retry just like probed repos.
+    setProbeRepos((prev) => [...prev, ...cloneRows]);
+    setCloneOpen(false);
+    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
+    for (const r of cloneRows) {
+      await createRow(r, taken, createdRef.current);
+    }
+    const created = createdRef.current;
+    setSending(false);
+    if (created.length > 0 && errorPathsRef.current.size === 0) {
+      await landIn(created[0]);
+    }
+  };
+
+  // The clone root [S6] proposes inline: `~/projects`, or the common parent of
+  // the repos the probe found when they share one. Editable inside the picker.
+  const proposedCloneRoot = useMemo(() => {
+    const dirs = probeRepos
+      .map((r) => (r.path?.includes("/") ? r.path.split("/").slice(0, -1).join("/") : ""))
+      .filter(Boolean);
+    if (dirs.length === 0) return "~/projects";
+    let common = dirs[0];
+    for (const d of dirs.slice(1)) {
+      while (common && !d.startsWith(common)) {
+        common = common.slice(0, common.lastIndexOf("/"));
+      }
+    }
+    return common && common !== "/" && !common.startsWith("/root") ? common : "~/projects";
+  }, [probeRepos]);
+
 
 
   // Model state — fetched on mount (same pattern as ChatPanel).
@@ -803,6 +856,15 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         </div>
         </>
         ) : (
+        cloneOpen ? (
+          <div className="flex justify-center">
+            <CloneFromGitHub
+              defaultRoot={proposedCloneRoot}
+              onCancel={() => setCloneOpen(false)}
+              onCloned={(paths) => void setupCloned(paths)}
+            />
+          </div>
+        ) : (
         <>
             {zeroState === "scanning" ? (
               <>
@@ -848,9 +910,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 <div className="flex justify-center gap-2 mt-4">
                   <Button
                     tone="primary"
-                    disabled
-                    title="Cloning from GitHub isn't available yet"
-                    onClick={() => {}}
+                    onClick={() => setCloneOpen(true)}
                   >
                     Clone from GitHub…
                   </Button>
@@ -969,9 +1029,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                       </Button>
                       <Button
                         tone="default"
-                        disabled
-                        title="Cloning from GitHub isn't available yet"
-                        onClick={() => {}}
+                        onClick={() => setCloneOpen(true)}
                       >
                         Clone from GitHub…
                       </Button>
@@ -981,7 +1039,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               </>
             )}
         </>
-        )}
+        ))}
 
         {error && (
           <Card danger>

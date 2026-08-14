@@ -488,38 +488,32 @@ export async function gitRemoteOrigin(cwd) {
   }
 }
 
-// gitPush — network git gets its OWN path (BET-794 §2).
+// Network git gets its OWN path (BET-794 §2, BET-796 §3).
 //
 // The shared `run()` helper in tmux.mjs kills at 10s, which is tuned for local
-// commands and WILL kill a real push (a genuinely large or slow push routinely
-// exceeds it). This stands alone with a 120s timeout and its own progress
-// handling. Do NOT raise the shared helper's timeout — that would silently
-// change every local git call in the server.
+// commands and WILL kill a real push or a cold clone (both routinely exceed
+// it). This ONE shared spawn helper (`spawnGitLong`) carries the long
+// timeout + streamed progress for every network-git operation — push (ship)
+// and clone (fresh-box) share it. Do NOT raise the shared helper's timeout —
+// that would silently change every local git call in the server.
 //
-// `onProgress(line)` receives incremental stdout/stderr lines as they arrive
-// (best-effort; a throwing callback is swallowed) so a caller can stream push
-// progress. Errors reject with a message embedding git's stderr (same shape
-// as run()'s rejection). Arguments are an argv array — never an interpolated
-// string.
-const GIT_PUSH_TIMEOUT_MS = 120_000;
+// `onProgress(chunk)` receives incremental stdout/stderr lines as they arrive
+// (best-effort; a throwing callback is swallowed). Arguments are an argv array
+// under a fixed `cwd` — never an interpolated shell string. `signal` aborts
+// the child (used by clone cancel).
+const GIT_NET_TIMEOUT_MS = 120_000;
 
-export function gitPush(
-  { cwd, branch, setUpstream = false, onProgress } = {},
-  { timeoutMs = GIT_PUSH_TIMEOUT_MS, spawn = nodeSpawn } = {},
+export function spawnGitLong(
+  { cwd, args, timeoutMs = GIT_NET_TIMEOUT_MS, spawn = nodeSpawn, onProgress, signal },
+  { errorPrefix = "git" } = {},
 ) {
   return new Promise((resolve, reject) => {
-    const args = [
-      "-C", cwd,
-      "push",
-      ...(setUpstream ? ["-u"] : []),
-      ...(branch ? [branch] : []),
-    ];
     let stdout = "";
     let stderr = "";
     let settled = false;
     let p;
     try {
-      p = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+      p = spawn("git", ["-C", cwd, ...args], { stdio: ["ignore", "pipe", "pipe"] });
     } catch (e) {
       reject(e);
       return;
@@ -527,36 +521,122 @@ export function gitPush(
     const timer = setTimeout(() => {
       try { p.kill("SIGKILL"); } catch { /* already gone */ }
       settled = true;
-      reject(new Error("git push timed out after 120s"));
+      reject(new Error(`${errorPrefix} timed out after ${Math.round(timeoutMs / 1000)}s`));
     }, timeoutMs);
     timer.unref();
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { p.kill("SIGKILL"); } catch { /* already gone */ }
+      const e = new Error("cancelled");
+      e.cancelled = true;
+      reject(e);
+    };
+    if (signal) {
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
     const finish = () => { if (!settled) { settled = true; clearTimeout(timer); } };
     const emit = (chunk) => {
       if (typeof onProgress !== "function") return;
       try { onProgress(chunk); } catch { /* progress is best-effort */ }
     };
-    p.stdout.on("data", (b) => {
-      const s = b.toString();
-      stdout += s;
-      emit(s);
-    });
-    p.stderr.on("data", (b) => {
-      const s = b.toString();
-      stderr += s;
-      emit(s);
-    });
+    p.stdout.on("data", (b) => { const s = b.toString(); stdout += s; emit(s); });
+    p.stderr.on("data", (b) => { const s = b.toString(); stderr += s; emit(s); });
     p.on("error", (e) => { finish(); reject(e); });
     p.on("close", (code) => {
       finish();
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
-        const e = new Error(`git push exited ${code}: ${stderr.trim() || stdout.trim()}`);
+        const e = new Error(`${errorPrefix} exited ${code}: ${stderr.trim() || stdout.trim()}`);
         e.status = code;
         reject(e);
       }
     });
   });
+}
+
+// gitPush — push a branch (BET-794). Reuses spawnGitLong (the one long-timeout
+// network-git path). `onProgress(line)` streams raw output; errors reject with
+// a message embedding git's stderr (same shape as run()'s rejection).
+export function gitPush(
+  { cwd, branch, setUpstream = false, onProgress } = {},
+  { timeoutMs = GIT_NET_TIMEOUT_MS, spawn = nodeSpawn } = {},
+) {
+  return spawnGitLong(
+    {
+      cwd,
+      args: ["push", ...(setUpstream ? ["-u"] : []), ...(branch ? [branch] : [])],
+      onProgress,
+      timeoutMs,
+      spawn,
+    },
+    { errorPrefix: "git push" },
+  );
+}
+
+// parseCloneProgress(line) → { percent, bytes } | null
+// Parse a `git clone --progress` stderr line for the determinate progress bar
+// (§4.3: git reports real byte counts against a known total — the ONE place a
+// determinate bar is correct). Only "Receiving objects" / "Checking out files"
+// lines are parsed; `remote:` lines that also contain `100%` must NOT fire an
+// early full bar, and lines with no percentage (e.g. "Cloning into 'x'...")
+// fall through to null. `bytes` is a best-effort parse of the transferred size.
+export function parseCloneProgress(line) {
+  if (typeof line !== "string") return null;
+  const m = /^\s*(?:Receiving objects|Checking out files):\s+(\d{1,3})%/.exec(line);
+  if (!m) return null;
+  const percent = Math.max(0, Math.min(100, parseInt(m[1], 10)));
+  const b = /\b([\d.]+)\s*(GiB|MiB|KiB|B)\b/.exec(line);
+  let bytes = 0;
+  if (b) {
+    const v = parseFloat(b[1]);
+    const unit = b[2];
+    const mult = unit === "GiB" ? 1024 ** 3 : unit === "MiB" ? 1024 ** 2 : unit === "KiB" ? 1024 : 1;
+    bytes = Math.round(v * mult);
+  }
+  return { percent, bytes };
+}
+
+// gitClone — clone a remote repo with real progress (BET-796 §3). Uses the
+// shared long-timeout spawn: a cold clone of a large repo is not fast, and the
+// shared 10s `run()` would kill it. `--progress` is asserted so stderr carries
+// the byte-count lines parseCloneProgress reads. `onProgress` receives a
+// `{ percent, bytes }` snapshot (the latest parseable state) as chunks arrive.
+// An optional `token` is injected as an HTTP extraheader (`git -c
+// http.extraheader`) so private-repo clones authenticate without the token
+// ever appearing in the displayed URL. Injected `spawn`/`parse` seam for tests.
+export async function gitClone(
+  { url, dest, onProgress, timeoutMs = GIT_NET_TIMEOUT_MS, signal, token } = {},
+  { spawn = nodeSpawn, parse = parseCloneProgress } = {},
+) {
+  let progress = { percent: 0, bytes: 0 };
+  const emit =
+    typeof onProgress === "function"
+      ? (chunk) => {
+          for (const line of String(chunk).split("\n")) {
+            const parsed = parse(line);
+            if (parsed) progress = parsed;
+          }
+          try { onProgress(progress); } catch { /* progress is best-effort */ }
+        }
+      : undefined;
+  const authArgs = token
+    ? ["-c", `http.extraheader=Authorization: Bearer ${token}`]
+    : [];
+  return spawnGitLong(
+    {
+      cwd: "/",
+      args: ["clone", "--progress", ...authArgs, url, ...(dest ? [dest] : [])],
+      onProgress: emit,
+      timeoutMs,
+      spawn,
+      signal,
+    },
+    { errorPrefix: "git clone" },
+  );
 }
 
 // Directories we never descend into during a scan (in addition to anything

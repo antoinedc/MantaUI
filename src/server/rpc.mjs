@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd } from "./forge/index.mjs";
+import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules } from "./forgeRules.mjs";
 import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
@@ -410,6 +410,22 @@ export function buildHandlers({
         typeof input === "object" && input !== null ? input.cwd : "",
         typeof input === "object" && input !== null ? input : {},
       ),
+
+    // BET-796: fresh-box clone flow. All box-side — a token never reaches the
+    // renderer. forge:device-start mints the GitHub device grant (returns a
+    // renderer-safe shape, NEVER device_code); forge:device-poll drives the
+    // countdown (returns {status:"pending"|"done"|"expired"}); forge:device-
+    // cancel backs out to [S4] with nothing changed. forge:repos lists the
+    // clone picker's push-to repos; forge:clone-{start,status,cancel} run a
+    // clone on the box with real progress.
+    "forge:device-start": () => forgeDeviceStart(),
+    "forge:device-poll": (input) => forgeDevicePoll(typeof input === "object" && input !== null ? input.grantId : input),
+    "forge:device-cancel": (input) => forgeDeviceCancel(typeof input === "object" && input !== null ? input.grantId : input),
+    "forge:repos": () => forgeListRepos(),
+    "forge:clone-start": (input) =>
+      forgeCloneStart(typeof input === "object" && input !== null ? input : {}),
+    "forge:clone-status": (input) => forgeCloneStatus(typeof input === "object" && input !== null ? input.id : input),
+    "forge:clone-cancel": (input) => forgeCloneCancel(typeof input === "object" && input !== null ? input.id : input),
 
     // preload: ipcRenderer.invoke(IPC.clipboardWriteText, text)  → args[0] = text (string)
     "clipboard:write-text": (text) => local.clipboardWriteText(text),

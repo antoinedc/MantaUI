@@ -2938,6 +2938,39 @@ export function describeRepoRow(repo: RepoHit): string {
   return branch;
 }
 
+// ===== Forge clone flow (BET-796) =====
+
+// The distinguished cause of a failed clone ([E3]). Only `permission` is
+// actionable by the user (token scope, or an org that hasn't approved the
+// token), so it must be named specifically; `disk` and `network` are
+// distinguished so the failure text can say which one occurred rather than a
+// generic "clone failed".
+export type CloneErrorKind = "permission" | "disk" | "network" | "unknown";
+
+/**
+ * Classify a `git clone` failure's stderr into an actionable kind. Order
+ * matters: the permission regex runs first because GitHub's "could not read
+ * Username" / "Repository not found" for a private repo reads like a generic
+ * error but is really an auth (scope) problem. Pure.
+ */
+export function cloneErrorKind(stderr: string): CloneErrorKind {
+  const s = String(stderr ?? "").toLowerCase();
+  if (
+    /permission to .* denied|permission denied|could not read (username|password)|authentication failed|not authorized|repository not found|\b403\b|check that you have the correct access rights/.test(s)
+  ) {
+    return "permission";
+  }
+  if (/no space left on device|disk (is )?full|insufficient|write error: no space|enosPC/.test(s)) {
+    return "disk";
+  }
+  if (
+    /could not resolve host|connection (timed out|refused|reset)|network is unreachable|failed to connect|unable to access|temporary failure in name resolution|ssl|tls/.test(s)
+  ) {
+    return "network";
+  }
+  return "unknown";
+}
+
 // ===== Forge merge gate (BET-794) =====
 
 /**

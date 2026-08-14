@@ -104,6 +104,7 @@ import {
   canMerge,
   describeMergeFailure,
   commentableLines,
+  cloneErrorKind,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -4170,6 +4171,29 @@ describe("buildVoiceNoteMap (BET-837)", () => {
     } as OpencodeMessage;
     expect(concatUserMessageText(msg)).toBe("line one\nline two");
     const map = buildVoiceNoteMap([msg], [vnote("n1", "line one\nline two")]);
-    expect(map.get("m1")?.id).toBe("n1");
+    expect(map.get("m1")?.id).toBe("n1");  });
+});
+
+describe("cloneErrorKind", () => {
+  it("classifies permission failures (the actionable one)", () => {
+    expect(cloneErrorKind("remote: Permission to acme/widget denied to octocat\nfatal: unable to access ...")).toBe("permission");
+    expect(cloneErrorKind("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toBe("permission");
+    expect(cloneErrorKind("remote: Repository not found.")).toBe("permission");
+  });
+
+  it("classifies disk failures", () => {
+    expect(cloneErrorKind("fatal: write error: No space left on device")).toBe("disk");
+    expect(cloneErrorKind("error: insufficient disk space")).toBe("disk");
+  });
+
+  it("classifies network failures", () => {
+    expect(cloneErrorKind("fatal: unable to access 'https://github.com/...': Could not resolve host: github.com")).toBe("network");
+    expect(cloneErrorKind("fatal: unable to access '...': Failed to connect to github.com port 443: Connection refused")).toBe("network");
+  });
+
+  it("returns unknown for anything else", () => {
+    expect(cloneErrorKind("fatal: some other git error")).toBe("unknown");
+    expect(cloneErrorKind("")).toBe("unknown");
+    expect(cloneErrorKind(undefined as unknown as string)).toBe("unknown");
   });
 });
