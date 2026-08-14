@@ -708,6 +708,10 @@ export const httpApi: Api = {
   forgeShipPreview: (input) => rpc(IPC.forgeShipPreview, input),
   forgeMerge: (input) => rpc(IPC.forgeMerge, input),
 
+  // -- forge rules registry + disconnect (BET-798, Settings [G1]) --
+  forgeRulesList: () => rpc(IPC.forgeRulesList),
+  forgeDisconnect: () => rpc(IPC.forgeDisconnect),
+
   // -- forge draft review (BET-793) --
   forgeDraftGet: (input) => rpc(IPC.forgeDraftGet, input),
   forgeDraftComment: (input) => rpc(IPC.forgeDraftComment, input),

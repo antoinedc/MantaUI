@@ -41,6 +41,8 @@ import type {
   ForgeStatusResult,
   ForgePullRequestResult,
   ForgeDiffResult,
+  ForgeDisconnectResult,
+  ForgeRuleRow,
   ForgeShipInput,
   ForgeShipResult,
   ForgeShipPreviewInput,
@@ -195,6 +197,12 @@ export interface Api {
   forgeShip(input: ForgeShipInput): Promise<ForgeShipResult>;
   forgeShipPreview(input: ForgeShipPreviewInput): Promise<ForgeShipPreviewResult>;
   forgeMerge(input: ForgeMergeInput): Promise<ForgeMergeResult>;
+
+  // BET-798: the box-side rules registry + disconnect (Settings [G1]). A forge
+  // token never reaches the renderer — the rules list is source + validity
+  // only; disconnect clears the box-side credential cache.
+  forgeRulesList(): Promise<ForgeRuleRow[]>;
+  forgeDisconnect(): Promise<ForgeDisconnectResult>;
 
   // BET-793: box-buffered draft review (box-side only — a forge token never
   // reaches the renderer; the box owns the draft, spec §3.4①). draftGet reads

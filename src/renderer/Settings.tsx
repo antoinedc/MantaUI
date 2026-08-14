@@ -16,6 +16,7 @@ import { ConfirmModal } from "./ConfirmModal";
 import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
 import { Toggle } from "./Toggle";
+import { StatusDot } from "./StatusDot";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -39,6 +40,8 @@ import {
 } from "./settingsShared";
 import type {
   PluginRegistryRow,
+  ForgeRuleRow,
+  ForgeStatusResult,
 } from "../shared/types";
 import {
   SETTINGS,
@@ -472,6 +475,57 @@ export function Settings({
     return () => { cancelled = true; clearInterval(timer); };
   }, [activeTab]);
 
+  // Forge integration (BET-798, mockup [G1]): the connected account + where
+  // the token came from + Disconnect, the one global "start agents" toggle
+  // (mirrors the plugins toggle — a checkbox, not a switch), and the repos
+  // with rules, each showing rule count + validity with invalid ones inline.
+  const [forgeRulesOn, setForgeRulesOn] = useState(false);
+  const [forgeStatus, setForgeStatus] = useState<ForgeStatusResult | null>(null);
+  const [forgeRules, setForgeRules] = useState<ForgeRuleRow[] | null>(null);
+  const [forgeRulesError, setForgeRulesError] = useState<string | null>(null);
+  useEffect(() => {
+    if (activeTab !== "extensions") return;
+    let cancelled = false;
+    const load = () => {
+      window.api.configGet().then((c) => { if (!cancelled) setForgeRulesOn(c.forgeRulesEnabled === true); }).catch(() => {});
+      window.api.forgeStatus().then((s) => { if (!cancelled) setForgeStatus(s); }).catch(() => {});
+      window.api.forgeRulesList()
+        .then((rows) => { if (!cancelled) { setForgeRules(rows); setForgeRulesError(null); } })
+        .catch((e) => { if (!cancelled) setForgeRulesError(e instanceof Error ? e.message : String(e)); });
+    };
+    load();
+    const timer = setInterval(load, 10_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [activeTab]);
+  const toggleForgeRules = async (on: boolean) => {
+    const prev = forgeRulesOn;
+    setForgeRulesOn(on);
+    try {
+      await window.api.configUpdate({ forgeRulesEnabled: on });
+      push({ id: `forge-${Date.now()}`, message: `Forge rules ${on ? "enabled" : "disabled"}.`, actions: [{ label: "Undo", onClick: () => { setForgeRulesOn(prev); void window.api.configUpdate({ forgeRulesEnabled: prev }).catch(() => {}); } }] });
+    } catch (e) {
+      setForgeRulesOn(prev);
+      push({ id: `err-forge-${Date.now()}`, message: errorDisclosure("Couldn't toggle forge rules.", e) });
+    }
+  };
+  const disconnectForge = async () => {
+    const prev = forgeStatus;
+    try {
+      const r = await window.api.forgeDisconnect();
+      if (r?.ok) setForgeStatus({ connected: false });
+      push({ id: `forge-dc-${Date.now()}`, message: "Disconnected the GitHub account on this box.", actions: [{ label: "Undo", onClick: () => setForgeStatus(prev) }] });
+    } catch (e) {
+      push({ id: `err-forge-dc-${Date.now()}`, message: errorDisclosure("Couldn't disconnect GitHub.", e) });
+    }
+  };
+  const sourceTextFor = (source: string | null | undefined): string => {
+    if (source === "cli") return "from the gh CLI on your box";
+    if (source === "env") return "from the MANTA_GITHUB_TOKEN env var";
+    if (source === "stored") return "signed in on this box";
+    return "connected";
+  };
+
+
   // Remove box — in-app confirm replaces window.confirm (BET-419 §D).
   const [removingBox, setRemovingBox] = useState(false);
   const [removeResult, setRemoveResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -745,6 +799,55 @@ export function Settings({
               </div>
             )}
             <button onClick={() => { const preload = getMantaPreload(); if (preload?.revealInFolder) void preload.revealInFolder("~/.manta/plugins"); }} className="text-body px-4 py-2 rounded-xs border border-border text-text-muted hover:text-text">Open plugins folder</button>
+          </GroupCard>
+          <GroupCard title="Forge">
+            {/* Connected account row: presence dot · GitHub · where the token
+                came from · Disconnect. Naming the token's provenance is the
+                point — "from the gh CLI on your box" reads as a courtesy, not
+                surveillance. */}
+            {forgeStatus?.connected ? (
+              <div className="flex items-center gap-2 py-2">
+                <StatusDot tone="ok" />
+                <span className="text-body font-medium text-text">GitHub</span>
+                <span className="text-body text-text-faint">{forgeStatus.login ? `@${forgeStatus.login} · ${sourceTextFor(forgeStatus.source)}` : sourceTextFor(forgeStatus.source)}</span>
+                <button onClick={() => void disconnectForge()} className="ml-auto text-label px-3 py-1 rounded-full border border-border text-text-muted hover:text-text">Disconnect</button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 py-2">
+                <StatusDot tone="idle" />
+                <span className="text-body font-medium text-text">GitHub</span>
+                <span className="text-body text-text-faint">Not connected — authenticate the gh CLI on this box to register forge webhooks.</span>
+              </div>
+            )}
+            {/* Divider — the mockup's border-top between connection and rules. */}
+            <div className="border-t border-border-subtle my-3" />
+            {/* The one global toggle, mirroring the plugins toggle (a checkbox,
+                not a switch). Gates dispatch, not the visibility of the list
+                below. */}
+            <div className="flex items-center gap-2 pb-1">
+              <Checkbox id="forge-rules-enabled" checked={forgeRulesOn} onChange={(v) => void toggleForgeRules(v)} ariaLabel="Let forge rules start agents on this box" />
+              <span className="text-body text-text-muted">Let forge rules start agents on this box</span>
+            </div>
+            {forgeRulesError ? (
+              <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the forge rules list.", forgeRulesError)}</div>
+            ) : forgeRules === null ? (
+              <div className="text-body text-text-faint">Loading…</div>
+            ) : forgeRules.length === 0 ? (
+              <div className="text-body text-text-faint">No forge rules yet. The AI authors them on the box with <code className="text-text-muted">forge_rules.save</code>; each is a YAML file at <code className="text-text-muted">~/.manta/forge-rules/</code>.</div>
+            ) : (
+              <div className="space-y-1">
+                {forgeRules.map((r) => (
+                  <div key={r.repoKey} className="flex items-center gap-2 py-2 hover:bg-fill rounded-xs">
+                    {r.valid ? <StatusDot tone="ok" /> : <StatusDot tone="error" />}
+                    <span className="text-body font-medium text-text">{r.repoKey}</span>
+                    {r.valid ? (
+                      <span className="text-body text-text-faint">{r.ruleCount ?? 0} rule{r.ruleCount === 1 ? "" : "s"}</span>
+                    ) : null}
+                    <span className={r.valid ? "ml-auto text-label font-mono text-text-quiet" : "ml-auto text-body text-danger break-all"}>{r.valid ? "valid" : r.error}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </GroupCard>
           <GroupCard title="Skill registries">
             <div className="text-body text-text-faint">Extra skill registry URLs fetched by opencode on startup. The default Manta registry is always included.</div>

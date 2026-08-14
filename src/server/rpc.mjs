@@ -30,6 +30,23 @@ import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd } from "./forge/index.mjs";
+import { listRules as forgeListRules } from "./forgeRules.mjs";
+import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
+import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
+
+const GH_HOST = "github.com";
+
+// The number of rules (event entries) in a repo's rules YAML — shown in
+// Settings [G1] so a valid repo reads "3 rules".
+function countForgeRules(yaml) {
+  try {
+    const parsed = parseForgeRules(String(yaml ?? ""));
+    if (!parsed.ok || !parsed.rules?.on) return 0;
+    return Object.keys(parsed.rules.on).length;
+  } catch {
+    return 0;
+  }
+}
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
 // path resolves identically. The script lives at <repoRoot>/scripts/
@@ -311,6 +328,25 @@ export function buildHandlers({
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
     "forge:diff": (input) =>
       forgeDiffForCwd(typeof input === "object" && input !== null ? input.cwd : input),
+
+    // BET-798: box-side rules registry reads + disconnect (the Settings [G1]
+    // surface). A forge token never reaches the renderer — list returns rule
+    // source + validity only, disconnect clears the box-side credential cache.
+    // preload: ipcRenderer.invoke(IPC.forgeRulesList)  → no args
+    "forge:rules-list": async () => {
+      const rows = await forgeListRules();
+      return rows.map((r) => ({
+        repoKey: r.repoKey,
+        valid: r.valid,
+        ...(r.valid && r.yaml ? { ruleCount: countForgeRules(r.yaml) } : {}),
+        ...(r.error ? { error: r.error } : {}),
+      }));
+    },
+    // preload: ipcRenderer.invoke(IPC.forgeDisconnect) → no args
+    "forge:disconnect": () => {
+      invalidateForgeToken(GH_HOST);
+      return { ok: true };
+    },
 
     // BET-794: forge write path. Both box-side — a forge token never reaches
     // the renderer; the server resolves it. forge:ship previews/creates a PR

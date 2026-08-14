@@ -258,17 +258,20 @@ const GH_HOST = "github.com";
 const EMPTY = Object.freeze({ pr: null, checks: [], rollup: "none", stale: false, error: null });
 
 /**
- * forge:status — `{ connected, login, kind } | { connected: false }`.
+ * forge:status — `{ connected, login, kind, source } | { connected: false }`.
  * `login` comes from `gh auth status` (a non-secret identity); `connected` is
- * whether a token resolves. A token NEVER appears in this result — the value
- * the caller is pointed at is only ever used to authenticate the fetch layer.
+ * whether a token resolves; `source` is the §3.3 ladder rung the box's token
+ * came from ("cli" | "env" | "stored") — surfaced in Settings so the UI can
+ * say *where* the credential came from. A token NEVER appears in this result —
+ * the value the caller is pointed at is only ever used to authenticate the
+ * fetch layer.
  *
  * @param {{ resolveToken?: typeof authResolveToken, detectCli?: () => Promise<{ installed: boolean, authenticated: boolean, login: string | null }> }} [deps]
  */
 export async function forgeStatus({ resolveToken = authResolveToken, detectCli = localDetectForgeCli } = {}) {
   const [cli, tok] = await Promise.all([detectCli(), resolveToken(GH_HOST)]);
   if (!tok) return { connected: false };
-  return { connected: true, login: cli?.login ?? null, kind: "github" };
+  return { connected: true, login: cli?.login ?? null, kind: "github", source: tok.source ?? null };
 }
 
 async function defaultGitRemoteOrigin(cwd) {
