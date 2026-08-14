@@ -105,6 +105,7 @@ import {
 import { createRulesEngine, eventLinkRef } from "./forge/rules.mjs";
 import {
   createForgePoller,
+  repoPollPlan,
   pollChecksFailed,
   pollIssueLabels,
   pollReviewRequested,
@@ -113,6 +114,7 @@ import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
 import { getAdapter } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
+import { detectForgeWithHosts } from "./forge/selfhost.mjs";
 import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { detectForge as detectForgeUrl } from "../shared/forge.mjs";
@@ -475,29 +477,29 @@ const { stop: stopForgePoller } = createForgePoller({
     const cfg = await local.configGet();
     if (cfg?.forgeRulesEnabled !== true) return [];
     const rows = await forgeListRules();
+    const hostKinds = cfg?.forgeHosts ?? [];
     const out = [];
     for (const row of rows) {
       if (!row.valid) continue; // invalid rules never dispatch (listed in Settings)
-      const parts = forgeParseRepoKey(row.repoKey);
-      if (!parts) continue;
-      const hook = await findForgeHook(row.repoKey).catch(() => null);
-      const rulesOn = parseForgeRules(row.yaml ?? "").rules?.on ?? {};
-      const labeled = rulesOn["issue.labeled"];
-      out.push({
-        repoKey: row.repoKey,
-        parts,
-        label: typeof labeled?.label === "string" ? labeled.label : null,
-        pollChecksFailed: !!rulesOn["checks.failed"],
-        pollReviewRequested: !!rulesOn["review.requested"],
-        webhookRegistered: !!hook, // never both: a working webhook wins
-      });
+      // Provider-aware poll plan (BET-855): a GitLab hook is stored under
+      // `provider: "gitlab"`, so webhookRegistered must be resolved with the
+      // repo's forge kind or the poller would poll a repo that has a working
+      // webhook — violating "never both: a working webhook wins".
+      const plan = await repoPollPlan(
+        { repoKey: row.repoKey, yaml: row.yaml ?? "", hostKinds, findHook: findForgeHook },
+        { parse: parseForgeRules },
+      );
+      if (!plan) continue;
+      out.push(plan);
     }
     return out;
   },
   pollRepo: async (repo) => {
     const tok = await forgeResolveToken(repo.parts.host).catch(() => null);
     if (!tok) return { events: [] };
-    const adapter = getAdapter("github", tok.token);
+    // Use the repo's forge kind, not a hardcoded github adapter — a GitLab repo
+    // on a box that cannot register webhooks is polled against the GitLab API.
+    const adapter = getAdapter(repo.kind ?? "github", tok.token);
     const prRepo = { owner: repo.parts.owner, repo: repo.parts.repo };
     let state = forgePollSeen.get(repo.repoKey);
     if (!state) {
