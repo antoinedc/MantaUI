@@ -84,8 +84,6 @@
   - status
   - textbox "Reply, or describe the next task…"
   - button "Send message" [disabled]
-  - button "Explain this codebase"
-  - button "What's the test setup?"
   - button "Opus 4.7"
   - button "High"
   - button "Fast mode" [disabled]
