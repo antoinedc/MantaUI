@@ -342,10 +342,11 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
     return el!;
   }
 
-  // The confirm's own action button lives inside the Modal's dialog panel —
-  // this only searches there, never the dropdown's menuitem rows.
+  // The confirm's own action button lives inside the Modal's dialog panel
+  // (portalled to document.body) — this only searches there, never the
+  // dropdown's menuitem rows.
   function confirmButtonByText(text: string): HTMLButtonElement {
-    const dialog = h!.container.querySelector('div[role="dialog"]') as HTMLElement;
+    const dialog = h!.docQuery('div[role="dialog"]') as HTMLElement;
     expect(dialog).toBeTruthy();
     const el = [...dialog.querySelectorAll("button")].find(
       (b) => b.textContent === text,
@@ -359,7 +360,7 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
     openMenuWith({ onDelete: () => deleted++ });
     act(() => menuItemByText("Delete session").click());
     expect(deleted).toBe(0);
-    expect(h!.text()).toContain("Delete this session?");
+    expect(h!.docText()).toContain("Delete this session?");
   });
 
   it("confirming Delete calls onDelete exactly once", () => {
@@ -383,7 +384,7 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
     openMenuWith({ onClear: () => cleared++ });
     act(() => menuItemByText("Clear session").click());
     expect(cleared).toBe(0);
-    expect(h!.text()).toContain("Clear this conversation?");
+    expect(h!.docText()).toContain("Clear this conversation?");
   });
 
   it("confirming Clear calls onClear exactly once", () => {
@@ -400,7 +401,7 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
       onDelete: () => {},
     });
     act(() => menuItemByText("Delete session").click());
-    expect(h!.text()).toContain("fix-onboarding");
+    expect(h!.docText()).toContain("fix-onboarding");
   });
 });
 
@@ -478,7 +479,7 @@ describe("SessionMenu — keyboard roving focus (BET-741)", () => {
     // (BET-724 §D7) — same activation path a click would take.
     press(menuEl(), "Enter");
     expect(deleted).toBe(0);
-    expect(h!.text()).toContain("Delete this session?");
+    expect(h!.docText()).toContain("Delete this session?");
   });
 
   it("Home/End rove focus to the first/last row", () => {

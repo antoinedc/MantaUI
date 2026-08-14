@@ -21,6 +21,7 @@
 // `useFocusTrap` hook (lifted from Settings' `useDialog`, BET-419 §C).
 
 import { motion, AnimatePresence } from "framer-motion";
+import { createPortal } from "react-dom";
 import { useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { useFocusTrap } from "./useFocusTrap";
 import { MOTION_BASE, MOTION_EASE, MOTION_FAST } from "./chatMotion";
@@ -79,7 +80,15 @@ export function Modal({
         }
       }
     : undefined;
-  return (
+  // Portal the whole chrome to document.body (BET-885): Modal's overlay is
+  // `position: fixed`, and a containment/stacks-transform declaration on any
+  // ANCESTOR (contain, transform, filter, backdrop-filter, perspective,
+  // container-type, will-change) silently turns that ancestor into the
+  // containing block / stacking context for the fixed overlay — rendering the
+  // dialog relative to an arbitrary DOM region (e.g. a 44px header strip)
+  // with dead buttons. Portal to body makes every such ancestor irrelevant,
+  // for every dialog, present and future.
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
@@ -107,6 +116,7 @@ export function Modal({
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

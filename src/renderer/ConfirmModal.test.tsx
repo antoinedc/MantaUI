@@ -18,7 +18,10 @@ describe("ConfirmModal", () => {
   });
 
   function buttons(harness: Harness): HTMLButtonElement[] {
-    return [...harness.container.querySelectorAll("button")] as HTMLButtonElement[];
+    // ConfirmModal renders through Modal's portal to document.body.
+    return [
+      ...harness.docQuery('div[role="dialog"]')!.querySelectorAll("button"),
+    ] as HTMLButtonElement[];
   }
 
   it("renders the title and body when open", () => {
@@ -32,8 +35,8 @@ describe("ConfirmModal", () => {
         onCancel={() => {}}
       />,
     );
-    expect(h.text()).toContain("Delete this session?");
-    expect(h.text()).toContain("This can't be undone.");
+    expect(h.docText()).toContain("Delete this session?");
+    expect(h.docText()).toContain("This can't be undone.");
   });
 
   it("renders nothing when closed", () => {
@@ -47,7 +50,7 @@ describe("ConfirmModal", () => {
         onCancel={() => {}}
       />,
     );
-    expect(h.text()).not.toContain("Delete this session?");
+    expect(h.docText()).not.toContain("Delete this session?");
   });
 
   it("Cancel fires onCancel, not onConfirm", () => {
@@ -103,7 +106,7 @@ describe("ConfirmModal", () => {
         onCancel={() => cancelled++}
       />,
     );
-    const dialog = h.container.querySelector('div[role="dialog"]')!;
+    const dialog = h.docQuery('div[role="dialog"]')!;
     dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(cancelled).toBe(1);
     expect(confirmed).toBe(0);

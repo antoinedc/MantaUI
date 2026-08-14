@@ -34,13 +34,14 @@ describe("Settings — Escape + nested-confirm ownership (BET-724 regression)", 
       getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
     });
 
+  // Settings' own full-screen dialog lives in `container`; the nested
+  // ConfirmModal renders through Modal's portal to document.body — so to see
+  // BOTH (and count them), query document.body (the container is its child).
   const dialogs = (): HTMLElement[] =>
-    [...h!.container.querySelectorAll<HTMLElement>('[role="dialog"]')];
+    [...document.body.querySelectorAll<HTMLElement>('[role="dialog"]')];
 
   const confirmDialog = (): HTMLElement | null =>
-    h!.container.querySelector<HTMLElement>(
-      `[role="dialog"][aria-label="${CONFIRM_LABEL}"]`,
-    );
+    h!.docQuery<HTMLElement>(`[role="dialog"][aria-label="${CONFIRM_LABEL}"]`);
 
   const clickResetConfirm = () => {
     const btn = [...h!.container.querySelectorAll("button")].find(

@@ -36,13 +36,15 @@ describe("Modal", () => {
   });
 
   function overlayEl(harness: Harness): HTMLElement {
-    const el = harness.container.firstElementChild as HTMLElement;
+    // Modal portals to document.body, so the overlay (the dialog's parent) is
+    // not inside `container`.
+    const el = harness.docQuery('div[role="dialog"]')!.parentElement as HTMLElement;
     expect(el.className).toBe(OVERLAY);
     return el;
   }
 
   function panelEl(harness: Harness): HTMLElement {
-    const el = harness.container.querySelector('div[role="dialog"]') as HTMLElement;
+    const el = harness.docQuery('div[role="dialog"]') as HTMLElement;
     expect(el).toBeTruthy();
     return el;
   }
@@ -105,27 +107,27 @@ describe("Modal", () => {
 
   it("renders children while open (default true)", () => {
     h = mount(<Modal label="L">content</Modal>);
-    expect(h.text()).toContain("content");
+    expect(h.docText()).toContain("content");
   });
 
   it("renders nothing when open is false", () => {
     h = mount(<Modal open={false} label="L">content</Modal>);
-    expect(h.text()).not.toContain("content");
-    expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
+    expect(h.docText()).not.toContain("content");
+    expect(h.docQuery('div[role="dialog"]')).toBeNull();
   });
 
   it("removes the dialog from the DOM after close + exit animation", async () => {
     // Modal stays MOUNTED while open; when `open` flips false, the exit
     // animation runs and AnimatePresence removes the chrome only afterwards.
     h = mount(<Modal label="L">content</Modal>);
-    expect(h.text()).toContain("content");
+    expect(h.docText()).toContain("content");
     h.rerender(<Modal open={false} label="L">content</Modal>);
     // Let the 0.18s exit run to completion; 400ms comfortably exceeds it.
     await act(async () => {
       await new Promise((r) => setTimeout(r, 400));
     });
-    expect(h.text()).not.toContain("content");
-    expect(h.container.querySelector('div[role="dialog"]')).toBeNull();
+    expect(h.docText()).not.toContain("content");
+    expect(h.docQuery('div[role="dialog"]')).toBeNull();
   });
 });
 
@@ -144,7 +146,7 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
         <button>ok</button>
       </Modal>,
     );
-    const btn = h.container.querySelector("button")!;
+    const btn = h.docQuery("button")!;
     act(() => {
       btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
@@ -157,14 +159,14 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
         <button>ok</button>
       </Modal>,
     );
-    const btn = h.container.querySelector("button")!;
+    const btn = h.docQuery("button")!;
     expect(() => {
       act(() => {
         btn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       });
     }).not.toThrow();
-    expect(h.text()).toContain("ok");
-    expect(h.container.querySelector('div[role="dialog"]')).toBeTruthy();
+    expect(h.docText()).toContain("ok");
+    expect(h.docQuery('div[role="dialog"]')).toBeTruthy();
   });
 
   it("focuses the first focusable element inside the panel on open", () => {
@@ -177,13 +179,13 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
         </div>
       </Modal>,
     );
-    const buttons = h.container.querySelectorAll("button");
+    const buttons = h.docQuery('div[role="dialog"]')!.querySelectorAll("button");
     expect(document.activeElement).toBe(buttons[0]);
   });
 
   it("falls back to focusing the panel itself (tabIndex=-1) when nothing inside is focusable", () => {
     h = mount(<Modal label="L">plain text</Modal>);
-    const panel = h.container.querySelector('div[role="dialog"]') as HTMLElement;
+    const panel = h.docQuery('div[role="dialog"]') as HTMLElement;
     expect(panel).toBeTruthy();
     expect(document.activeElement).toBe(panel);
     expect(panel.getAttribute("tabindex")).toBe("-1");
@@ -196,7 +198,7 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
         <button>second</button>
       </Modal>,
     );
-    const buttons = [...h.container.querySelectorAll("button")] as HTMLButtonElement[];
+    const buttons = [...h.docQuery('div[role="dialog"]')!.querySelectorAll("button")] as HTMLButtonElement[];
     buttons[1].focus();
     act(() => {
       buttons[1].dispatchEvent(
@@ -245,7 +247,7 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
         <input autoFocus placeholder="path" />
       </Modal>,
     );
-    const input = h.container.querySelector("input")!;
+    const input = h.docQuery("input")!;
     // Focus stayed on the autofocused input, NOT the earlier Close button.
     expect(document.activeElement).toBe(input);
 
