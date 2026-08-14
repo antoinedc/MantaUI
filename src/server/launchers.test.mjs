@@ -32,6 +32,15 @@ describe("binExists", () => {
 // ---------------------------------------------------------------------------
 
 describe("listAvailableLaunchers", () => {
+  // BET-872: the rpc `launchers:list` channel calls with NO arguments. The deps
+  // object must default, or this throws on a zero-arg caller. Only assert it
+  // resolves to an array — which binaries resolve depends on the box running
+  // the suite.
+  it("resolves to an array when called with no arguments (BET-872)", async () => {
+    const out = await listAvailableLaunchers();
+    assert.ok(Array.isArray(out));
+  });
+
   it("includes a launcher when its bin exists", async () => {
     const out = await listAvailableLaunchers({
       binExists: async (bin) => bin === "claude",
