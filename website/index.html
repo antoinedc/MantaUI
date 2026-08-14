@@ -253,6 +253,19 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 
 /* download cards (section 9) — page-specific, restored from the pre-BET-903 homepage */
 .card{background:var(--surface-card);border:1px solid var(--border-default);border-radius:var(--radius-lg);padding:22px}
+
+/* BET-904 AC#4 — no horizontal scrollbar at narrow widths. These are page-scoped
+   mobile-only rules: site.css stays locked to the two tokens (AC#2) and the desktop
+   layout above stays verbatim to the reference. The 1fr tracks default to auto
+   min-content, so the fixed-width app-window mockup (hero) and the four download
+   cards refuse to shrink below their intrinsic width at 390px. */
+@media(max-width:900px){
+  .hero-grid{grid-template-columns:minmax(0,1fr)}
+  .hero-grid>*{min-width:0}
+}
+@media(max-width:600px){
+  #download .wrap>div{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
+}
 </style>
 
 <!-- BEGIN:head-meta -->
