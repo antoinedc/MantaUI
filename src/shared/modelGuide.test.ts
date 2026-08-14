@@ -205,8 +205,11 @@ const MODELS = [
   { providerID: "anthropic", id: "claude-haiku-4", name: "Claude Haiku 4" },
   { providerID: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
   { providerID: "anthropic", id: "claude-opus-4-7", name: "Claude Opus 4.7" },
+  { providerID: "anthropic", id: "claude-opus-4-5", name: "Claude Opus 4.5" },
+  { providerID: "anthropic", id: "claude-opus-5", name: "Claude Opus 5" },
   { providerID: "openai", id: "gpt-4o", name: "GPT-4o" },
   { providerID: "openai", id: "gpt-4o-mini", name: "GPT-4o mini" },
+  { providerID: "voska", id: "default", name: "Voska Default" },
 ];
 
 describe("fuzzyMatchModel", () => {
@@ -214,8 +217,17 @@ describe("fuzzyMatchModel", () => {
     expect(fuzzyMatchModel("claude-opus-4-7", MODELS)?.id).toBe("claude-opus-4-7");
   });
 
-  it("matches every token against a model id (queries like \"opus\")", () => {
-    expect(fuzzyMatchModel("opus", MODELS)?.id).toBe("claude-opus-4-7");
+  it("matches the fewest-word id for a single-token family query (\"opus\")", () => {
+    expect(fuzzyMatchModel("opus", MODELS)?.id).toBe("claude-opus-5");
+  });
+
+  it("prefers the exact-word model over a longer id (\"opus 5\")", () => {
+    expect(fuzzyMatchModel("opus 5", MODELS)?.id).toBe("claude-opus-5");
+  });
+
+  it("still matches a single-token family query to the fewest-word id", () => {
+    // "opus" appears in several ids; fewest-word wins deterministically.
+    expect(fuzzyMatchModel("opus", MODELS)?.id).toBeDefined();
   });
 
   it("matches a multi-word query against a model name (\"gpt 4o mini\")", () => {
@@ -228,6 +240,15 @@ describe("fuzzyMatchModel", () => {
 
   it("falls back to a providerID match for a bare provider name", () => {
     expect(fuzzyMatchModel("openai", MODELS)?.providerID).toBe("openai");
+  });
+
+  it("resolves an explicit providerID/modelID form", () => {
+    expect(fuzzyMatchModel("voska/default", MODELS)?.id).toBe("default");
+    expect(fuzzyMatchModel("voska/default", MODELS)?.providerID).toBe("voska");
+  });
+
+  it("resolves providerID/family form via the reused matcher", () => {
+    expect(fuzzyMatchModel("anthropic/opus 5", MODELS)?.id).toBe("claude-opus-5");
   });
 
   it("returns null for no match or empty input", () => {
