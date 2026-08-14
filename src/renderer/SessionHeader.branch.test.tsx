@@ -107,6 +107,23 @@ describe("SessionHeader branch popover (BET-867)", () => {
     expect(text).not.toContain("Create pull request");
   });
 
+  it("unknown base → no PR surface (no Create pull request)", async () => {
+    h = mountSessionHeader({
+      branch: "feat/x",
+      forgeConnected: true,
+      pr: null,
+      base: null,
+      aheadCount: 3,
+      onCreatePr: vi.fn(),
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    const text = bodyText();
+    expect(text).toContain("Base branch unknown");
+    expect(text).not.toContain("Create pull request");
+  });
+
   it("no commits ahead of base → Nothing to ship, no button", async () => {
     h = mountSessionHeader({
       branch: "feat/forge-seam",

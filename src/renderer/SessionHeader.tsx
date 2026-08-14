@@ -29,6 +29,7 @@ import {
   failuresToAgentPrompt,
   branchPanelState,
   resolveShipState,
+  ShipState,
   canMerge,
   type ChecksChipTone,
   type ContextBreakdown,
@@ -1002,7 +1003,8 @@ function SessionMenu({
 // state, refs, reviewers, threads, mergeability + Merge / Review changes /
 // open-on-forge), or it does not ([F2]: the ship gate gated on branch state —
 // BET-892: Base / Changes + a single primary Create pull request when ready,
-// or "Nothing to ship" when there are no commits ahead of base). BET-867 is an
+// or "Nothing to ship" on the base branch, detached HEAD, unknown base, or no-
+// commits-ahead). BET-867 is an
 // owner-approved departure from BET-789's [C2]: the no-PR branch now opens a
 // popover where it previously stayed a plain non-interactive Tag; a scratch dir
 // with no forge keeps the Tag unchanged (branchPanelState == "none").
@@ -1113,8 +1115,17 @@ function PanelRow({
 // PR present → the merge surface [F1]; no PR → the ship gate (BET-892) gated
 // on branch state: a single primary "Create pull request" when there are
 // commits ahead of base, "Nothing to ship" when there aren't, and no PR
-// surface at all on the base branch / detached HEAD. PanelRow is reused
-// verbatim for both states' rows.
+// surface at all "on" the base branch, a detached HEAD, or an unknown base.
+// PanelRow is reused verbatim for both states' rows.
+
+// The three states where a pull request cannot exist for this branch: the
+// popover shows the branch and why, and offers no action.
+const NO_SHIP_COPY: Partial<Record<ShipState, string>> = {
+  "on-base": "On the base branch — nothing to ship.",
+  detached: "Detached HEAD — nothing to ship.",
+  unknown: "Base branch unknown — nothing to ship.",
+};
+
 function BranchPanel({
   branch,
   pr,
@@ -1133,20 +1144,18 @@ function BranchPanel({
   onReviewChanges,
 }: BranchPanelProps) {
   if (!pr) {
-    // No pull request on this branch — the ship gate. On the base branch or a
-    // detached HEAD there is no PR to open, so no PR surface renders at all.
+    // No pull request on this branch — the ship gate. On the base branch, a
+    // detached HEAD, or an unknown base there is no PR to open, so no PR
+    // surface renders at all.
     const shipState = resolveShipState({ branch, base, aheadCount, hasPr: false });
-    if (shipState === "on-base" || shipState === "detached") {
+    const noShip = NO_SHIP_COPY[shipState];
+    if (noShip) {
       return (
         <div className="p-3">
           <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
             {branch}
           </div>
-          <div className="text-xs text-text-faint">
-            {shipState === "on-base"
-              ? "On the base branch — nothing to ship."
-              : "Detached HEAD — nothing to ship."}
-          </div>
+          <div className="text-xs text-text-faint">{noShip}</div>
         </div>
       );
     }

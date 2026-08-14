@@ -3106,14 +3106,22 @@ export function branchPanelState({
  *
  *  1. `has-pr`    — a PR is already open on this branch.
  *  2. `detached`  — no branch (detached HEAD / non-git cwd).
- *  3. `on-base`   — sitting on the repo default branch (no PR to open).
- *  4. `no-commits`— no commits ahead of origin/<base> (nothing to ship).
- *  5. `ready`     — ship away.
+ *  3. `unknown`   — base branch unknown (cannot tell if on the default branch).
+ *  4. `on-base`   — sitting on the repo default branch (no PR to open).
+ *  5. `no-commits`— no commits ahead of origin/<base> (nothing to ship).
+ *  6. `ready`     — ship away.
  *
- * `aheadCount === null` means "unknown" and falls through to `ready` (the API
- * call is the backstop); `base === null` skips rule 3 only.
+ * One deliberate asymmetry — do not "fix" it:
+ * - `base === null` → `"unknown"`. The base is a *safety* fact: without it we
+ *   cannot tell whether the current branch is the default branch, and a PR
+ *   from a branch onto itself cannot exist. No base means no PR action.
+ * - `aheadCount === null` still falls through to `"ready"`. The commit count is
+ *   an *optimisation*, not a safety fact. It is legitimately unknown whenever
+ *   `origin/<base>` is not fetched locally (shallow clone, fresh worktree), and
+ *   hiding the action there would break a normal case for no safety gain — an
+ *   empty PR is refused by the forge with a clear message.
  */
-export type ShipState = "on-base" | "detached" | "no-commits" | "ready" | "has-pr";
+export type ShipState = "on-base" | "detached" | "unknown" | "no-commits" | "ready" | "has-pr";
 
 export function resolveShipState(input: {
   branch: string | null;
@@ -3123,6 +3131,7 @@ export function resolveShipState(input: {
 }): ShipState {
   if (input.hasPr) return "has-pr";
   if (!input.branch) return "detached";
+  if (!input.base) return "unknown";
   if (input.branch === input.base) return "on-base";
   if (input.aheadCount === 0) return "no-commits";
   return "ready";

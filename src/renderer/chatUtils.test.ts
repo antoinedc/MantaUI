@@ -3952,12 +3952,25 @@ describe("resolveShipState", () => {
   });
 
   it("aheadCount null (unknown) falls through to ready", () => {
+    // Pins the deliberate asymmetry (BET-915): the commit count is an
+    // optimisation, not a safety fact — leaving it unknown must NOT hide the
+    // action, unlike a null base.
     expect(resolveShipState({ ...base, aheadCount: null })).toBe("ready");
   });
 
-  it("base null skips the on-base rule only", () => {
+  it("base null → unknown", () => {
     expect(resolveShipState({ branch: "main", base: null, aheadCount: 3, hasPr: false })).toBe(
-      "ready",
+      "unknown",
+    );
+  });
+
+  it("has-pr wins over unknown", () => {
+    expect(resolveShipState({ branch: "x", base: null, aheadCount: 3, hasPr: true })).toBe("has-pr");
+  });
+
+  it("detached wins over unknown", () => {
+    expect(resolveShipState({ branch: null, base: null, aheadCount: 3, hasPr: false })).toBe(
+      "detached",
     );
   });
 });
