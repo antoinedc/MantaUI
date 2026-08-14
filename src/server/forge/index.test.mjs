@@ -603,7 +603,10 @@ test("forgeDiffForCwd: open PRs exist but none on this branch → no_pr, not the
     resolveToken: async () => ({ token: "t", source: "cli" }),
     getAdapter: () =>
       diffAdapter({
-        prs: [OPEN_PR, { ...OPEN_PR, number: 43, headRef: "other" }],
+        prs: [
+          { ...OPEN_PR, headRef: "topic/a" },
+          { ...OPEN_PR, number: 43, headRef: "other" },
+        ],
         diff: "@@ -1 +1 @@\n+someone elses PR\n",
       }),
   });
