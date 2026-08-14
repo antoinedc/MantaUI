@@ -1,25 +1,30 @@
-// ===== VoiceNote — the text-first voice-note bubble (BET-837) =====
+// ===== VoiceNote — the text-first voice-note bubble (BET-880) =====
 //
 // The rendered side of a stored voice note. A dictated message keeps its
-// transcript fully visible as normal text (text-first); below it a collapsed
-// `VoiceNoteChip` marks the row as spoken, and clicking it expands a
-// `VoicePlayer` with a DOM waveform (`VoiceBars`) + playback.
+// transcript fully visible as normal text (text-first); below it a single
+// always-visible player renders the waveform + playback.
+//
+// There is deliberately NO collapsed chip and NO expand/collapse state. The
+// earlier shape kept a chip AND appended a player below it on click, so two
+// controls both reading as "the player" stacked in the same column and the
+// first click cost the user a turn without playing anything. The player is now
+// the affordance: always visible, first click plays. Do not reintroduce a
+// collapsed variant.
 //
 // Component split:
-//   - VoiceBars   — static waveform, DOM not canvas. 40 bars is cheap, the
-//                   played/unplayed split and future seeking are trivial in
-//                   DOM, and it themes itself. The LIVE meter stays canvas
-//                   (VoiceWaveform) because it redraws 60×/s — do NOT unify
-//                   them; the two genuinely differ in rate and purpose.
-//   - VoiceNoteChip — the collapsed affordance (disc + duration, "expired"
-//                   when the audio has been swept). Optional `peaks` renders a
-//                   mini waveform, used by the pending row where the waveform
-//                   is fully formed instantly.
-//   - VoicePlayer — expanded: play/pause disc, VoiceBars, remaining time, and
-//                   a 1× → 1.5× → 2× speed cycle. Drives a single <audio> from
-//                   a fetched blob URL (never a `?token=` URL).
-//   - PendingVoiceRow — the not-yet-real row shown while a recording uploads +
-//                   transcribes; resolves into a normal user message on success.
+//   - VoiceBars        — static waveform, DOM not canvas. 40 bars is cheap,
+//                        the played/unplayed split and future seeking are
+//                        trivial in DOM, and it themes itself. The LIVE meter
+//                        stays canvas (VoiceWaveform) because it redraws
+//                        60×/s — do NOT unify them; the two genuinely differ
+//                        in rate and purpose.
+//   - VoicePlayerFrame — the presentational shell and the ONLY place the
+//                        player's chrome is described. No hooks, no fetching,
+//                        no <audio>: every visual is a prop, so the ready,
+//                        expired and pending states cannot drift apart.
+//   - VoicePlayer      — binds a stored note to playback and renders the frame.
+//   - PendingVoiceRow  — the not-yet-real row shown while a recording uploads +
+//                        transcribes; renders the same frame, non-interactive.
 
 import { memo, useEffect, useRef, useState } from "react";
 import { Pause, Play } from "lucide-react";
@@ -71,85 +76,97 @@ export const VoiceBars = memo(function VoiceBars({
   );
 });
 
-// ===== VoiceNoteChip — the collapsed affordance =====
+const SPEEDS = [1, 1.5, 2];
+
+// ===== VoicePlayerFrame — the presentational shell =====
 //
-// A pill marking a message as spoken: a filled disc holding a tiny
-// Play glyph, then the clock. Expired notes (audio swept, transcript kept)
-// render dimmed + dashed with a "· expired" suffix and are disabled — the chip
-// stays visible so the message keeps its identity as something spoken.
-export const VoiceNoteChip = memo(function VoiceNoteChip({
-  audioAvailable,
-  durationMs,
+// Fixed left-to-right order: disc, waveform, clock, speed. The three states are
+// expressed purely through props so there is exactly one set of chrome classes
+// and they cannot drift apart:
+//   ready   — onToggle + speed supplied.
+//   expired — `expired` set. Dashed + dimmed, muted disc, "· expired" suffix,
+//             no speed control, not interactive.
+//   pending — neither onToggle nor speed. Muted disc, not interactive.
+// The frame owns NO outer margin — vertical spacing belongs to the parent.
+export const VoicePlayerFrame = memo(function VoicePlayerFrame({
   peaks,
+  clockMs,
+  progress,
+  playing = false,
   onToggle,
+  speed,
+  onCycleSpeed,
+  expired = false,
 }: {
-  audioAvailable: boolean;
-  durationMs: number;
-  peaks?: Uint8Array;
+  peaks: Uint8Array;
+  /** Milliseconds on the clock: REMAINING while a clip is loaded, total otherwise. */
+  clockMs: number;
+  /** 0..1 played fraction; undefined = every bar neutral. */
+  progress?: number;
+  playing?: boolean;
+  /** Absent => non-interactive (pending / not-yet-fetched / expired). */
   onToggle?: () => void;
+  /** Both present => the speed control renders. */
+  speed?: number;
+  onCycleSpeed?: () => void;
+  expired?: boolean;
 }) {
-  const expired = !audioAvailable;
-  // Interactive only when the row is playable AND the caller wired a toggle.
-  // The pending row passes no onToggle → a non-interactive pill. Use <span>
-  // for that (not a disabled <button>) so nothing about it invites a click.
-  const inner = (
-    <>
-      <span
-        className={`w-5 h-5 rounded-full grid place-items-center shrink-0 ${
-          expired ? "bg-border-strong" : "bg-accent-solid text-on-accent"
-        }`}
-      >
-        <Play size={9} aria-hidden />
-      </span>
-      {peaks && peaks.length > 0 && <VoiceBars peaks={peaks} bars={14} />}
-      <span>{expired ? `${formatClock(durationMs)} · expired` : formatClock(durationMs)}</span>
-    </>
-  );
-  const base =
-    "inline-flex items-center gap-2 rounded-full border border-border bg-fill pl-1 pr-3 py-px mt-2 text-meta font-mono text-text-faint " +
-    (expired ? "opacity-50 border-dashed" : "hover:border-border-strong hover:text-text hover:bg-fill-hover transition-colors");
-  if (expired || !onToggle) {
-    return (
-      <span className={base} title={expired ? "Audio expired — transcript kept" : undefined}>
-        {inner}
-      </span>
-    );
-  }
+  const interactive = !expired && !!onToggle;
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      title="Replay voice note"
-      aria-label={`Play voice note, ${formatClock(durationMs)}`}
-      className={`${base} cursor-pointer`}
+    <div
+      className={
+        "flex items-center gap-3 rounded-md border border-border-subtle bg-bg-soft px-3 py-2 w-full max-w-[420px] " +
+        (expired ? "border-dashed opacity-50" : "")
+      }
+      title={expired ? "Audio expired — transcript kept" : undefined}
     >
-      {inner}
-    </button>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={!interactive}
+        aria-label={playing ? "Pause voice note" : `Play voice note, ${formatClock(clockMs)}`}
+        className={
+          "w-7 h-7 shrink-0 rounded-full grid place-items-center transition-opacity " +
+          (interactive
+            ? "bg-accent-solid text-on-accent hover:opacity-90 cursor-pointer"
+            : "bg-border-strong text-on-accent")
+        }
+      >
+        {playing ? <Pause size={12} aria-hidden /> : <Play size={12} aria-hidden />}
+      </button>
+      <VoiceBars peaks={peaks} progress={progress} />
+      <span className="text-meta font-mono text-text-quiet tabular-nums shrink-0">
+        {expired ? `${formatClock(clockMs)} · expired` : formatClock(clockMs)}
+      </span>
+      {speed != null && onCycleSpeed && (
+        <button
+          type="button"
+          onClick={onCycleSpeed}
+          aria-label={`Playback speed ${speed}×`}
+          className="text-micro font-mono text-text-faint border border-border rounded-full px-2 py-px shrink-0 hover:text-text hover:border-border-strong transition-colors cursor-pointer"
+        >
+          {speed}×
+        </button>
+      )}
+    </div>
   );
 });
 
-const SPEEDS = [1, 1.5, 2];
-
-// ===== VoicePlayer — expanded playback =====
+// ===== VoicePlayer — a stored note bound to playback =====
 //
-// Play/pause disc, the VoiceBars filling the row (played portion tinted by
-// `progress`), the remaining clock, and a speed control cycling 1× → 1.5× →
-// 2×. Drives ONE <audio> element from a fetched blob URL; `timeupdate` feeds
-// progress. Pauses and revokes the object URL on unmount or note change.
-export const VoicePlayer = memo(function VoicePlayer({
-  note,
-}: {
-  note: VoiceNoteRecord;
-}) {
+// Drives ONE <audio> from a fetched blob URL (never a `?token=` URL) and hands
+// the frame its visual state. An expired note skips the fetch entirely.
+export const VoicePlayer = memo(function VoicePlayer({ note }: { note: VoiceNoteRecord }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
   const [speedIdx, setSpeedIdx] = useState(0);
+  const audioAvailable = note.audioAvailable;
 
-  // Fetch audio → blob URL. Never a `?token=` URL (box token must not leak
-  // into a URL); the bearer header rides the fetch. Revoke on unmount/id change.
+  // CHANGE 1: skip the fetch for an expired note — it can only 404.
   useEffect(() => {
+    if (!audioAvailable) return;
     let cancelled = false;
     let objectUrl: string | null = null;
     window.api
@@ -161,7 +178,7 @@ export const VoicePlayer = memo(function VoicePlayer({
       })
       .catch(() => {
         // Audio swept/expired between the list and the tap — leave the row
-        // silent rather than throwing (the chip already reads as inactive).
+        // silent rather than throwing (the frame already reads as inactive).
       });
     return () => {
       cancelled = true;
@@ -169,21 +186,20 @@ export const VoicePlayer = memo(function VoicePlayer({
       setUrl(null);
       setPlaying(false);
     };
-  }, [note.id]);
+  }, [note.id, audioAvailable]);
 
-  const durationMs = note.durationMs > 0 ? note.durationMs : Math.round((audioRef.current?.duration ?? 0) * 1000);
+  const durationMs =
+    note.durationMs > 0 ? note.durationMs : Math.round((audioRef.current?.duration ?? 0) * 1000);
   const progress = durationMs > 0 ? Math.min(1, currentMs / durationMs) : 0;
   const remainingMs = Math.max(0, durationMs - currentMs);
 
   const toggle = () => {
     const a = audioRef.current;
     if (!a || !url) return;
-    if (playing) {
-      a.pause();
-    } else {
-      a.currentTime = a.currentTime || 0;
-      void a.play().catch(() => { /* autoplay block — ignore */ });
-    }
+    if (playing) a.pause();
+    // CHANGE 2: drop the `a.currentTime = a.currentTime || 0;` line — it
+    // assigns currentTime to itself and is a no-op.
+    else void a.play().catch(() => { /* autoplay block — ignore */ });
   };
 
   const cycleSpeed = () => {
@@ -192,29 +208,24 @@ export const VoicePlayer = memo(function VoicePlayer({
     if (audioRef.current) audioRef.current.playbackRate = SPEEDS[next];
   };
 
+  if (!audioAvailable) {
+    return <VoicePlayerFrame peaks={note.peaks} clockMs={note.durationMs} expired />;
+  }
+
   return (
-    <div className="flex items-center gap-3 rounded-md border border-border-subtle bg-bg-soft px-3 py-2 mt-2 min-w-0">
-      <button
-        type="button"
-        onClick={toggle}
-        disabled={!url}
-        aria-label={playing ? "Pause" : "Play"}
-        className="w-7 h-7 shrink-0 rounded-full bg-accent-solid text-on-accent grid place-items-center hover:opacity-90 disabled:opacity-40 transition-opacity"
-      >
-        {playing ? <Pause size={12} aria-hidden /> : <Play size={12} aria-hidden />}
-      </button>
-      <VoiceBars peaks={note.peaks} progress={progress} />
-      <span className="text-meta font-mono text-text-quiet tabular-nums shrink-0">
-        {formatClock(remainingMs)}
-      </span>
-      <button
-        type="button"
-        onClick={cycleSpeed}
-        className="text-micro font-mono text-text-faint border border-border rounded-full px-2 py-px shrink-0 hover:text-text hover:border-border-strong transition-colors"
-        aria-label={`Playback speed ${SPEEDS[speedIdx]}×`}
-      >
-        {SPEEDS[speedIdx]}×
-      </button>
+    <>
+      <VoicePlayerFrame
+        peaks={note.peaks}
+        clockMs={remainingMs}
+        progress={progress}
+        playing={playing}
+        // CHANGE 3: withholding onToggle until the blob has arrived replaces the
+        // old `disabled={!url}` — the disc reads as not-yet-ready instead of
+        // being a live button that silently does nothing.
+        onToggle={url ? toggle : undefined}
+        speed={SPEEDS[speedIdx]}
+        onCycleSpeed={cycleSpeed}
+      />
       <audio
         ref={audioRef}
         src={url ?? undefined}
@@ -224,7 +235,7 @@ export const VoicePlayer = memo(function VoicePlayer({
         onEnded={() => { setPlaying(false); setCurrentMs(durationMs); }}
         onLoadedMetadata={() => setCurrentMs(0)}
       />
-    </div>
+    </>
   );
 });
 
@@ -234,9 +245,9 @@ export const VoicePlayer = memo(function VoicePlayer({
 // uploads + transcribes. Right-aligned like a normal user message, but its
 // left rule is neutral (`border-border-strong`) instead of the accent so it
 // reads as pending, not-yet-real. Two shimmer bars stand in for the transcript
-// text, a non-interactive chip draws the already-captured waveform (which is
-// what makes the wait read as "almost done"), and a status line reports
-// progress — or the failure + a Retry against the returned note id.
+// text, a non-interactive player frame draws the already-captured waveform
+// (which is what makes the wait read as "almost done"), and a status line
+// reports progress — or the failure + a Retry against the returned note id.
 export const PendingVoiceRow = memo(function PendingVoiceRow({
   pending,
   onRetry,
@@ -253,11 +264,7 @@ export const PendingVoiceRow = memo(function PendingVoiceRow({
             <div className="manta-shimmer h-3 rounded-xs" style={{ width: "88%" }} />
             <div className="manta-shimmer h-3 rounded-xs" style={{ width: "54%" }} />
           </div>
-          <VoiceNoteChip
-            audioAvailable
-            durationMs={pending.durationMs}
-            peaks={pending.peaks}
-          />
+          <VoicePlayerFrame peaks={pending.peaks} clockMs={pending.durationMs} />
         </div>
         {pending.error && pending.noteId ? (
           <div className="flex items-center gap-2 text-label">
