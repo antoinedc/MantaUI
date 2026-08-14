@@ -25,6 +25,7 @@ import {
   ForgeRateLimitedError,
 } from "./index.mjs";
 import { getDraft, putComment } from "./draft.mjs";
+import { detectForgeWithHosts } from "./selfhost.mjs";
 
 const URL = "https://api.github.com/repos/acme/widget/pulls?state=open";
 
@@ -239,6 +240,23 @@ test("pullRequestForCwd: no open PR → well-formed empty result, not an error",
 test("getAdapter throws UnsupportedByForgeError for an unknown kind", async () => {
   const runtime = createForgeRuntime({ fetch: async () => json({}, 200, {}) });
   assert.throws(() => runtime.getAdapter("gitea", "t"), (e) => e.name === "UnsupportedByForgeError");
+});
+
+test("a configured self-hosted host routes through the box op with its apiBase", async () => {
+  let got = null;
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "git@git.example.com:acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "glpat_t", source: "cli" }),
+    detectForge: (origin) => detectForgeWithHosts(origin, [{ host: "git.example.com", kind: "gitlab" }]),
+    getAdapter: (kind, token, apiBase) => {
+      got = { kind, token, apiBase };
+      return fakeAdapter({ prs: [OPEN_PR] });
+    },
+  });
+  assert.equal(r.error, null);
+  assert.equal(r.pr.number, 42);
+  assert.deepEqual(got, { kind: "gitlab", token: "glpat_t", apiBase: "https://git.example.com/api/v4" });
 });
 
 // ---- Box-facing writes: shipPullRequest + mergePullRequest (BET-794) -------

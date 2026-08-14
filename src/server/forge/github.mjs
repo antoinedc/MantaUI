@@ -361,8 +361,10 @@ function toGithubAnchor(c, headSha) {
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} request
  * @param {(url: string, opts: { method: string, body?: any }) => Promise<{ data: any, stale: boolean }>} [requestWrite]
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} [requestText]
+ * @param {string} [apiBase] the API root; defaults to github.com. A self-hosted
+ *   instance serves `<host>/api/v3`.
  */
-export function createGithubAdapter(request, requestWrite, requestText = request) {
+export function createGithubAdapter(request, requestWrite, requestText = request, apiBase = API) {
   return {
     kind: "github",
 
@@ -373,7 +375,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: import("./index.mjs").PullRequestLike[], stale: boolean }>}
      */
     async listPullRequests(repo, filter = {}) {
-      const url = `${API}${issuePath(repo)}/pulls${qs({ state: filter.state ?? "open" })}`;
+      const url = `${apiBase}${issuePath(repo)}/pulls${qs({ state: filter.state ?? "open" })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((p) => normalizePr(p)), stale };
@@ -409,7 +411,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: import("./index.mjs").PullRequestLike, stale: boolean }>}
      */
     async getPullRequest(repo, number) {
-      const base = `${API}${issuePath(repo)}/pulls/${number}`;
+      const base = `${apiBase}${issuePath(repo)}/pulls/${number}`;
       const prRes = await request(base);
       const raw = prRes.data;
       let stale = prRes.stale;
@@ -442,7 +444,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ number: number, title: string, body: string, url: string, state: string, closed: boolean }>, stale: boolean }>}
      */
     async listIssues(repo, filter = {}) {
-      const url = `${API}${issuePath(repo)}/issues${qs({
+      const url = `${apiBase}${issuePath(repo)}/issues${qs({
         state: filter.state ?? "open",
         ...(filter.labels !== undefined
           ? { labels: Array.isArray(filter.labels) ? filter.labels.join(",") : filter.labels }
@@ -472,7 +474,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ name: string, status?: string, conclusion?: string, url?: string }>, stale: boolean }>}
      */
     async getChecks(repo, sha) {
-      const base = `${API}${issuePath(repo)}/commits/${sha}`;
+      const base = `${apiBase}${issuePath(repo)}/commits/${sha}`;
       let stale = false;
       let checks = [];
       try {
@@ -506,7 +508,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async createPullRequest(repo, { title, head, base, body = "", draft = false }) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${issuePath(repo)}/pulls`;
+      const url = `${apiBase}${issuePath(repo)}/pulls`;
       const { data } = await requestWrite(url, {
         method: "POST",
         body: { title, head, base, body, draft },
@@ -527,7 +529,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async merge(repo, number, { method = "merge", sha } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${issuePath(repo)}/pulls/${number}/merge`;
+      const url = `${apiBase}${issuePath(repo)}/pulls/${number}/merge`;
       let data;
       try {
         ({ data } = await requestWrite(url, {
@@ -569,7 +571,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async submitReview(repo, number, { verdict = null, body = "", comments = [], headSha = "" } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${issuePath(repo)}/pulls/${number}/reviews`;
+      const url = `${apiBase}${issuePath(repo)}/pulls/${number}/reviews`;
       const payload = { event: verdictToEvent(verdict), body };
       if (Array.isArray(comments) && comments.length > 0) {
         payload.comments = comments.map((c) => toGithubAnchor(c, headSha));
@@ -590,7 +592,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async replyToThread(repo, number, { threadId, body, headSha = "" } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${issuePath(repo)}/pulls/${number}/comments/${threadId}/replies`;
+      const url = `${apiBase}${issuePath(repo)}/pulls/${number}/comments/${threadId}/replies`;
       const payload = { body: String(body ?? "").trim() };
       if (headSha) payload.commit_id = headSha;
       const { data } = await requestWrite(url, { method: "POST", body: payload });
@@ -612,7 +614,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: { diff: string, threads: Array<any>, headSha: string }, stale: boolean }>}
      */
     async getDiff(repo, number) {
-      const pull = `${API}${issuePath(repo)}/pulls/${number}`;
+      const pull = `${apiBase}${issuePath(repo)}/pulls/${number}`;
       let stale = false;
       let headSha = "";
       let diff = "";
@@ -644,7 +646,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<{ id: any, body: string }>, stale: boolean }>}
      */
     async listIssueComments(repo, number) {
-      const url = `${API}${issuePath(repo)}/issues/${number}/comments`;
+      const url = `${apiBase}${issuePath(repo)}/issues/${number}/comments`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((c) => ({ id: c?.id ?? null, body: c?.body ?? "" })), stale };
@@ -660,22 +662,26 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      */
     async createIssueComment(repo, number, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${issuePath(repo)}/issues/${number}/comments`;
+      const url = `${apiBase}${issuePath(repo)}/issues/${number}/comments`;
       const { data } = await requestWrite(url, { method: "POST", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
     },
 
     /**
      * PATCH /repos/{o}/{r}/issues/comments/{id} — update an existing plain
-     * comment in place (the "update" half of ensure-comment-by-topic).
+     * comment in place (the "update" half of ensure-comment-by-topic). `number`
+     * is accepted (and IGNORED) to match GitLab, whose MR notes are iid-scoped —
+     * the one shared comment-write contract is `(repo, number, commentId, body)`,
+     * and GitHub's issue-comment ids are global so it drops `number`.
      * @param {{ owner: string, repo: string }} repo
+     * @param {number} _number unused on GitHub (comment ids are global)
      * @param {any} commentId
      * @param {string} body
      * @returns {Promise<{ data: { id: any }, stale: boolean }>}
      */
-    async updateIssueComment(repo, commentId, body) {
+    async updateIssueComment(repo, _number, commentId, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
+      const url = `${apiBase}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
       const { data } = await requestWrite(url, { method: "PATCH", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
     },
@@ -690,7 +696,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      * @returns {Promise<{ data: Array<object>, stale: boolean }>}
      */
     async listMyRepos() {
-      const url = `${API}/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member`;
+      const url = `${apiBase}/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member`;
       const { data, stale } = await request(url);
       return { data: pushableRepos(data), stale };
     },

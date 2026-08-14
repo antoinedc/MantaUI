@@ -66,43 +66,112 @@ export function verifySignature(secret, rawBody, header) {
   return timingSafeEqual(provided, expected);
 }
 
-// Signature header NAMES, per provider. GitHub signs with `X-Hub-Signature-256`
-// using the identical `sha256=<hex>` scheme MantaUI's own `X-Manta-Signature`
-// uses (BET-797). The GitLab adapter will add a THIRD scheme (Standard
-// Webhooks: a different header, base64, and an HMAC over `id.timestamp.body`)
-// — that arrives with the adapter and lives here as another provider row in
-// the per-provider header table, not as an if/else chain in deliverWebhook.
+// Signature header NAMES, per provider, for the providers that share the
+// `sha256=<hex>` HMAC scheme. GitHub signs with `X-Hub-Signature-256` using the
+// same scheme MantaUI's own `X-Manta-Signature` uses (BET-797), so a provider
+// can accept the same scheme in more than one header.
 const SIGNATURE_HEADERS = Object.freeze({
   manta: Object.freeze(["x-manta-signature"]),
   github: Object.freeze(["x-hub-signature-256", "x-manta-signature"]),
 });
 
-// Our webhook record providers. `manta` is the existing inbound hook; `github`
-// is a forge hook registered by the forge rules tool. Anything else is held to
-// be false rather than coerced (a typo shouldn't silently weaken verification).
-export const HOOK_PROVIDERS = ["manta", "github"];
+// How fresh a Standard-Webhooks timestamp must be (seconds). GitLab signs with
+// `webhook-timestamp`; a stale replay must not verify.
+const SW_FRESHNESS_S = 5 * 60;
 
 /**
- * Provider-aware signature resolution. Tries every header name the provider
- * accepts, in order, and returns true on the first that verifies. A provider
- * with the same scheme in two headers (GitHub accepts either of ours today)
- * keeps working when a forge sends its own header. Pure — reads only the plain
- * header map and the raw body. `unsigned` hooks skip this at the call site.
+ * GitLab signature verification — a THIRD scheme (BET-799). Recent GitLab
+ * implements Standard Webhooks: header `webhook-signature: v1,<base64>`,
+ * HMAC-SHA256 over `"{id}.{timestamp}.{rawBody}"`, with the key being the
+ * signing token (its `whsec_` prefix stripped, then base64-decoded). Older
+ * self-managed instances use the plain `X-Gitlab-Token` header. BOTH are tried,
+ * the signature preferred when present; the timestamp is validated for
+ * freshness. Pure. A bad/missing signature is a plain `false`.
  *
- * @param {"manta"|"github"} provider
+ * @param {string} secret the hook's signing secret
+ * @param {unknown} rawBody
+ * @param {Record<string, string|string[]|undefined>|undefined} headers lowercased header names
+ * @param {{ now?: () => number }} [opts]
+ */
+export function verifyGitlabSignature(secret, rawBody, headers, { now = () => Math.floor(Date.now() / 1000) } = {}) {
+  if (typeof secret !== "string" || !secret) return false;
+
+  // Older self-managed GitLab: the secret is echoed verbatim in `X-Gitlab-Token`.
+  const plain = headers?.["x-gitlab-token"];
+  if (typeof plain === "string" && plain) {
+    const a = Buffer.from(plain);
+    const b = Buffer.from(secret);
+    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+  }
+
+  // Standard Webhooks (preferred when present).
+  const sig = headers?.["webhook-signature"];
+  if (typeof sig !== "string") return false;
+  const m = /^v1,\s*([A-Za-z0-9+/=]+)$/.exec(sig.trim());
+  if (!m) return false;
+
+  const id = headers?.["webhook-id"];
+  const tsHeader = headers?.["webhook-timestamp"];
+  if (typeof id !== "string" || id === "" || typeof tsHeader !== "string" || tsHeader === "") return false;
+  const ts = Number(tsHeader);
+  if (!Number.isFinite(ts)) return false;
+  if (Math.abs(now() - ts) > SW_FRESHNESS_S) return false;
+
+  const keyRaw = secret.replace(/^whsec_/, "");
+  const key = Buffer.from(keyRaw, "base64");
+  const payload = `${id}.${ts}.${rawBody == null ? "" : rawBody}`;
+  const expected = createHmac("sha256", key).update(payload).digest("base64");
+  const provided = m[1];
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Our webhook record providers. `manta` is the existing inbound hook; `github`
+// and `gitlab` are forge hooks registered by the forge rules tool. Anything
+// else is held to be false rather than coerced (a typo shouldn't silently
+// weaken verification).
+export const HOOK_PROVIDERS = ["manta", "github", "gitlab"];
+
+// Per-provider verifier table (BET-799) — the dispatch point. Each provider's
+// signature scheme is its own pure function; a new provider is a row here, not
+// an if/else chain in deliverWebhook. Unknown providers fall back to the shared
+// sha256=hex scheme via the header table.
+const VERIFIERS = Object.freeze({
+  manta: verifyHmacProvider("manta"),
+  github: verifyHmacProvider("github"),
+  gitlab: verifyGitlabSignature,
+});
+
+function verifyHmacProvider(provider) {
+  return (secret, rawBody, headers) => {
+    const names = SIGNATURE_HEADERS[provider];
+    if (!names) return false;
+    for (const name of names) {
+      const value = headers?.[name];
+      if (typeof value === "string" && verifySignature(secret, rawBody, value)) {
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
+/**
+ * Provider-aware signature resolution — the per-provider verifier table. Each
+ * provider row is a closed function over its own scheme; GitLab dispatches to
+ * the Standard-Webhooks/X-Gitlab-Token verifier, GitHub/manta to the shared
+ * sha256=hex header table. `unsigned` hooks skip this at the call site. Pure.
+ *
+ * @param {"manta"|"github"|"gitlab"} provider
  * @param {string} secret
  * @param {unknown} rawBody
  * @param {Record<string, string|string[]|undefined>|undefined} headers lowercased header names
+ * @param {{ now?: () => number }} [opts]
  */
-export function resolveSignature(provider, secret, rawBody, headers) {
-  const names = SIGNATURE_HEADERS[provider] ?? SIGNATURE_HEADERS.manta;
-  for (const name of names) {
-    const value = headers?.[name];
-    if (typeof value === "string" && verifySignature(secret, rawBody, value)) {
-      return true;
-    }
-  }
-  return false;
+export function resolveSignature(provider, secret, rawBody, headers, opts = {}) {
+  const verify = VERIFIERS[provider] ?? VERIFIERS.manta;
+  return verify(secret, rawBody, headers, opts);
 }
 
 // GitHub's event-type header (`X-GitHub-Event`). GitHub sends a header per

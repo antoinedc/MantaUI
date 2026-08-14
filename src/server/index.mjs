@@ -2205,7 +2205,7 @@ const handleRequest = async (req, res) => {
                 text: record.label || record.detail || record.state || "Progress update",
                 listComments: (r, n) => target.adapter.listIssueComments(r, n),
                 createComment: (r, n, b) => target.adapter.createIssueComment(r, n, b),
-                updateComment: (r, id, b) => target.adapter.updateIssueComment(r, id, b),
+                updateComment: (r, n, id, b) => target.adapter.updateIssueComment(r, n, id, b),
               });
             },
           },

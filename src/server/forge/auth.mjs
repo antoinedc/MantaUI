@@ -35,13 +35,17 @@
 import { randomBytes } from "node:crypto";
 import { runLoginShell } from "../launchers.mjs";
 import { resolveSecret, loadSecrets, setSecret } from "../secrets.mjs";
+import { readFile as fsReadFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // How long a cached resolution is trusted before the CLI/secret is re-read.
 const TTL_MS = 60_000;
 
-// The CLI leg only exists for github.com (`gh auth token`). GitLab has its own
-// CLI but it arrives with the GitLab adapter.
-const CLI_HOST = "github.com";
+// The CLI legs, per host. GitHub: `gh auth token` through a login shell.
+// GitLab: glab persists its token in a config file (`~/.config/glab-cli/`).
+const GITHUB_CLI_HOST = "github.com";
+const GITLAB_CLI_HOST = "gitlab.com";
 
 // Per-host env var override (priority 1).
 const ENV_BY_HOST = Object.freeze({
@@ -61,15 +65,29 @@ const STORED_KEYS_BY_HOST = Object.freeze({
 // host -> { at, found, token?, source? }
 const CACHE = new Map();
 
+// Derive the env/secret key NAMESPACE for an arbitrary host. A self-hosted
+// host isn't in the fixed maps, so it gets a deterministic, host-derived name:
+// `git.example.com` → env `MANTA_GIT_EXAMPLE_COM_TOKEN`, secrets `[GIT_EXAMPLE_COM_TOKEN, forge.git.example.com.token]`.
+function hostKey(host) {
+  return String(host).replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+}
+
 function envToken(host, env) {
-  const key = ENV_BY_HOST[host];
+  const key = ENV_BY_HOST[host] ?? (host ? `MANTA_${hostKey(host)}_TOKEN` : null);
   if (!key) return null;
   const v = env?.[key];
   return typeof v === "string" && v ? v : null;
 }
 
+function storedTokenKeys(host) {
+  if (STORED_KEYS_BY_HOST[host]) return STORED_KEYS_BY_HOST[host];
+  if (!host) return null;
+  const k = hostKey(host);
+  return [`${k}_TOKEN`, `forge.${host}.token`];
+}
+
 async function cliToken(host, shell) {
-  if (host !== CLI_HOST) return null;
+  if (host !== GITHUB_CLI_HOST) return null;
   try {
     const { stdout } = await shell("gh auth token");
     const token = (stdout ?? "").trim();
@@ -80,8 +98,71 @@ async function cliToken(host, shell) {
   }
 }
 
+// glab (GitLab's CLI) has no `glab auth token` command; its credential lives in
+// a config file. Locate + parse the token for `host` without a YAML dependency:
+// find the `hosts:` block, then the entry whose host line equals `host`, then
+// the `token:` line indented under it. Tokens are read-only on the box — the
+// LADDER guard in resolveToken never lets one cross RPC. Injectable `readFile`
+// + `home` for tests.
+export async function gitlabCliToken(
+  host,
+  { readFile = fsReadFile, home = homedir() } = {},
+) {
+  if (host !== GITLAB_CLI_HOST) return null;
+  const paths = [
+    join(home, ".config", "glab-cli", "config.yml"),
+    join(home, ".config", "glab-cli", "config.yaml"),
+  ];
+  let text = "";
+  for (const p of paths) {
+    try {
+      text = await readFile(p, "utf-8");
+      break;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return parseGlabToken(text, host);
+}
+
+// Extract the token for `host` from raw glab config text. Pure + tested.
+export function parseGlabToken(text, host) {
+  if (typeof text !== "string") return null;
+  const lines = text.split("\n");
+  const hostsIdx = lines.findIndex((l) => /^\s*hosts\s*:\s*$/.test(l));
+  if (hostsIdx === -1) return null;
+  let inHostEntry = false;
+  let entryIndent = null;
+  for (let i = hostsIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const indent = line.match(/^\s*/)[0].length;
+    if (inHostEntry && indent <= entryIndent) {
+      // left the host entry (a sibling key outside `hosts:` or a new host)
+      inHostEntry = false;
+    }
+    if (!inHostEntry) {
+      const hostMatch = /^(\s*)(\S+)\s*:\s*$/.exec(line);
+      if (hostMatch && hostMatch[2] === host) {
+        inHostEntry = true;
+        entryIndent = hostMatch[1].length;
+        continue;
+      }
+      if (/^\s*\S+\s*:/.test(line) && /^\s*hosts\b/.test(line) === false) {
+        // an unrelated top-level key — nothing more inside hosts
+      }
+      continue;
+    }
+    const tokenMatch = /^(\s*)token\s*:\s*["']?([^\s"']+)["']?\s*$/.exec(line);
+    if (tokenMatch && tokenMatch[1].length > entryIndent) {
+      return tokenMatch[2];
+    }
+  }
+  return null;
+}
+
 function storedToken(host, loadSecretsFn) {
-  const keys = STORED_KEYS_BY_HOST[host];
+  const keys = storedTokenKeys(host);
   if (!keys || keys.length === 0) return null;
   try {
     const secrets = loadSecretsFn();
@@ -111,7 +192,7 @@ function storedToken(host, loadSecretsFn) {
  */
 export async function resolveToken(
   host,
-  { shell = runLoginShell, loadSecretsFn = loadSecrets, env = process.env, now = Date.now } = {},
+  { shell = runLoginShell, loadSecretsFn = loadSecrets, env = process.env, now = Date.now, readFile, home } = {},
 ) {
   if (typeof host !== "string" || !host) return null;
 
@@ -126,7 +207,10 @@ export async function resolveToken(
     return { token: envTok, source: "env" };
   }
 
-  const cli = await cliToken(host, shell);
+  const cli =
+    host === GITHUB_CLI_HOST
+      ? await cliToken(host, shell)
+      : await gitlabCliToken(host, { readFile, home });
   if (cli) {
     CACHE.set(host, { at: now(), found: true, token: cli, source: "cli" });
     return { token: cli, source: "cli" };
@@ -140,6 +224,30 @@ export async function resolveToken(
 
   CACHE.set(host, { at: now(), found: false });
   return null;
+}
+
+/**
+ * Rotate a GitLab OAuth token pair, persisting the NEW pair BEFORE the old is
+ * used again.
+ *
+ * The trap this exists for (BET-799 §Auth): GitLab rotates the refresh token on
+ * EVERY use, invalidating both old tokens. If a crash happens mid-refresh with
+ * the old pair already discarded, the rotation is unrecoverable. So the order is
+ * fixed and caller-enforced: `persistPair(newPair)` runs and settles BEFORE the
+ * caller makes any further authenticated request with the new access token.
+ *
+ * `refresh` is injected (network), `persistPair` is injectable (atomic secrets
+ * write). Returns the new pair on success; a failed persist propagates so the
+ * caller aborts rather than continue on a half-written pair.
+ *
+ * @param {() => Promise<{ access_token: string, refresh_token: string }>} refresh
+ * @param {(pair: { access_token: string, refresh_token: string }) => Promise<void>} persistPair
+ * @returns {Promise<{ access_token: string, refresh_token: string }>}
+ */
+export async function rotateOauthPair(refresh, persistPair) {
+  const next = await refresh();
+  await persistPair(next);
+  return next;
 }
 
 /**
@@ -358,6 +466,6 @@ export async function pollDeviceGrant(
   const stored = await storeToken(raw.access_token);
   if (!stored.ok) throw new Error(stored.error || "couldn't store the token");
   ACTIVE_GRANTS.delete(grantId);
-  invalidateToken(CLI_HOST);
+  invalidateToken(GITHUB_CLI_HOST);
   return { status: "done" };
 }

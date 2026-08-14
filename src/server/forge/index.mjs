@@ -27,13 +27,15 @@
 // cwd → origin → repo server-side, keeping the renderer ignorant of forge
 // identity).
 
-import { detectForge, rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
+import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
-import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
+import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
+import { detectForgeWithHosts } from "./selfhost.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
 import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
 import { createGithubAdapter, GithubRequestError, buildInboxQueries, mergeInboxSources } from "./github.mjs";
+import { createGitlabAdapter } from "./gitlab.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -78,7 +80,7 @@ function bucketOf(url) {
  *
  * @param {{ fetch?: typeof fetch, now?: () => number }} [opts]
  * @returns {{
- *   getJson: (url: string, opts: { token: string, ttl?: number }) => Promise<{ data: any, stale: boolean }>,
+ *   getJson: (url: string, opts: { token: string, tokenHeader?: string, accept?: string, ttl?: number }) => Promise<{ data: any, stale: boolean }>,
  * }}
  */
 export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } = {}) {
@@ -86,7 +88,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
   const inflight = new Map(); // url -> Promise
   const coolingUntil = new Map(); // bucketKey -> ms
 
-  async function getJson(url, { token, ttl } = {}) {
+  async function getJson(url, { token, tokenHeader, accept = "application/vnd.github+json", ttl } = {}) {
     const bucket = bucketOf(url);
     // Per-resource freshness override: the inbox's search bucket has its own,
     // much lower rate limit (spec §4.5④), so its values are held a full 60s —
@@ -115,7 +117,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     const inFlight = inflight.get(url);
     if (inFlight) return inFlight;
 
-    const job = fetchOne(url, token, bucket, url, "application/vnd.github+json", (res) => res.json(), etagStore, inflight, coolingUntil, fetch, now);
+    const job = fetchOne(url, token, tokenHeader, bucket, url, accept, (res) => res.json(), etagStore, inflight, coolingUntil, fetch, now);
     inflight.set(url, job);
     try {
       return await job;
@@ -129,7 +131,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
   // SAME URL are cached under separate keys (`text:` prefix) so one never
   // clobbers the other in the ETag store (the diff response is a different
   // representation of `/pulls/{n}` than the PR object).
-  async function getText(url, { token }) {
+  async function getText(url, { token, tokenHeader, accept = "application/vnd.github.diff" }) {
     const cacheKey = `text:${url}`;
     const bucket = bucketOf(url);
 
@@ -147,7 +149,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     const inFlight = inflight.get(cacheKey);
     if (inFlight) return inFlight;
 
-    const job = fetchOne(url, token, bucket, cacheKey, "application/vnd.github.diff", (res) => res.text(), etagStore, inflight, coolingUntil, fetch, now);
+    const job = fetchOne(url, token, tokenHeader, bucket, cacheKey, accept, (res) => res.text(), etagStore, inflight, coolingUntil, fetch, now);
     inflight.set(cacheKey, job);
     try {
       return await job;
@@ -160,7 +162,7 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
     getJson,
     getText,
     requestJson: (url, opts) =>
-      requestJsonImpl(url, { token: opts?.token, method: opts?.method, body: opts?.body }, fetch),
+      requestJsonImpl(url, { token: opts?.token, tokenHeader: opts?.tokenHeader, accept: opts?.accept, method: opts?.method, body: opts?.body }, fetch),
   };
 }
 
@@ -169,13 +171,13 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
 // GET path (issue §4). Returns `{ data, stale: false }` on 2xx; any non-2xx
 // throws GithubRequestError(status, url) so the adapter can map merge-status
 // codes to their distinguished failure kinds.
-async function requestJsonImpl(url, { token, method = "GET", body }, fetchImpl) {
+async function requestJsonImpl(url, { token, tokenHeader, method = "GET", body, accept = "application/vnd.github+json" }, fetchImpl) {
   const res = await fetchImpl(url, {
     method,
     headers: {
-      accept: "application/vnd.github+json",
+      accept,
       "user-agent": "manta-forge",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...authHeaders(token, tokenHeader),
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -185,12 +187,22 @@ async function requestJsonImpl(url, { token, method = "GET", body }, fetchImpl) 
   return { data, stale: false };
 }
 
-async function fetchOne(url, token, bucket, cacheKey, accept, parse, etagStore, inflight, coolingUntil, fetch, now) {
+// How a forge credential appears in an outgoing request. GitHub and OAuth use
+// `Authorization: Bearer`; GitLab personal access tokens use the `PRIVATE-TOKEN`
+// header (they also accept Bearer for OAuth tokens). `tokenHeader` is set
+// per-adapter-kind by the registry so the right scheme rides every call.
+function authHeaders(token, tokenHeader) {
+  if (!token) return {};
+  if (tokenHeader) return { [tokenHeader]: token };
+  return { authorization: `Bearer ${token}` };
+}
+
+async function fetchOne(url, token, tokenHeader, bucket, cacheKey, accept, parse, etagStore, inflight, coolingUntil, fetch, now) {
   const hit = etagStore.get(cacheKey);
   const headers = {
     accept,
     "user-agent": "manta-forge",
-    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...authHeaders(token, tokenHeader),
     ...(hit ? { "if-none-match": hit.etag } : {}),
   };
 
@@ -227,10 +239,19 @@ async function fetchOne(url, token, bucket, cacheKey, accept, parse, etagStore, 
 
 // ---- Registry -----------------------------------------------------------------
 
+// How each forge's credential is presented on the wire (spec §3.3). GitHub and
+// any OAuth token ride `Authorization: Bearer`; a GitLab personal access token
+// is a `PRIVATE-TOKEN` header. `apiAccept` is the JSON Accept header for that
+// forge's API.
+const AUTH_BY_KIND = Object.freeze({
+  github: Object.freeze({ tokenHeader: null, accept: "application/vnd.github+json" }),
+  gitlab: Object.freeze({ tokenHeader: "PRIVATE-TOKEN", accept: "application/vnd.gitlab+json" }),
+});
+
 // kind -> adapter factory. `create(adapterRequest)` returns the adapter; the
 // adapterRequest closure binds a per-call token to the SHARED request layer so
 // ETag/single-flight/cooling persist across calls and across token rotations.
-const ADAPTERS = Object.freeze({ github: createGithubAdapter });
+const ADAPTERS = Object.freeze({ github: createGithubAdapter, gitlab: createGitlabAdapter });
 
 /**
  * Create an isolated forge runtime with its own request layer — the test seam.
@@ -241,13 +262,20 @@ const ADAPTERS = Object.freeze({ github: createGithubAdapter });
 export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
   const requestLayer = createRequestLayer({ fetch });
   return {
-    getAdapter(kind, token) {
+    getAdapter(kind, token, apiBase) {
       const create = ADAPTERS[kind];
       if (!create) throw unsupportedByForge(kind, "read path");
-      const request = (url, opts) => requestLayer.getJson(url, { token, ttl: opts?.ttl });
-      const requestWrite = (url, opts) => requestLayer.requestJson(url, { token, ...opts });
-      const requestText = (url) => requestLayer.getText(url, { token });
-      return create(request, requestWrite, requestText);
+      const wire = AUTH_BY_KIND[kind] ?? AUTH_BY_KIND.github;
+      const request = (url, opts) =>
+        requestLayer.getJson(url, { token, tokenHeader: wire.tokenHeader, accept: wire.accept, ttl: opts?.ttl });
+      const requestWrite = (url, opts) =>
+        requestLayer.requestJson(url, { token, tokenHeader: wire.tokenHeader, accept: wire.accept, ...opts });
+      const requestText = (url) =>
+        requestLayer.getText(url, { token, tokenHeader: wire.tokenHeader, accept: wire.accept });
+      // apiBase is the per-host API root (github.com → api.github.com, a
+      // self-hosted GitLab → <host>/api/v4); omitted it defaults inside the
+      // adapter to its canonical hosted root.
+      return create(request, requestWrite, requestText, apiBase);
     },
     requestLayer,
   };
@@ -258,18 +286,44 @@ const defaultRuntime = createForgeRuntime();
 /**
  * `getAdapter(kind)` → the adapter for a forge, or throws UnsupportedByForgeError
  * for an unknown kind. The instance is bound to the shared request layer and a
- * per-call token.
+ * per-call token. `apiBase` is the per-host API root for self-hosted forges.
  * @param {"github"} kind
  * @param {string} token
+ * @param {string} [apiBase]
  */
-export function getAdapter(kind, token) {
-  return defaultRuntime.getAdapter(kind, token);
+export function getAdapter(kind, token, apiBase) {
+  return defaultRuntime.getAdapter(kind, token, apiBase);
 }
 
 // ---- Box-facing reads ----------------------------------------------------------
 
 const GH_HOST = "github.com";
 const EMPTY = Object.freeze({ pr: null, checks: [], rollup: "none", stale: false, error: null });
+
+// The forge kinds the box-facing reads/writes route through the seam. Adding a
+// kind here (with its adapter registered above) is what makes a forge render in
+// the session header / review pane; unknown kinds fall through to `no_forge`.
+const KNOWN_KINDS = new Set(["github", "gitlab"]);
+function isKnownKind(kind) {
+  return typeof kind === "string" && KNOWN_KINDS.has(kind);
+}
+
+// Default box-facing forge detection: the shared `detectForge` plus the
+// user-configured `forgeHosts` (AppConfig) mapping layered on top, so a
+// self-hosted GitHub/GitLab host a user has configured resolves to its kind
+// + apiBase while an unconfigured unknown host still falls through to null.
+// `getConfig` is injectable for tests; failures degrade to the known hosts.
+async function detectFromConfig(origin, { getConfig = localConfigGet } = {}) {
+  if (!origin) return null;
+  let hostKinds = [];
+  try {
+    const cfg = await getConfig();
+    hostKinds = Array.isArray(cfg?.forgeHosts) ? cfg.forgeHosts : [];
+  } catch {
+    /* config unreadable — known hosts still resolve */
+  }
+  return detectForgeWithHosts(origin, hostKinds);
+}
 
 /**
  * forge:status — `{ connected, login, kind, source } | { connected: false }`.
@@ -445,13 +499,14 @@ async function resolveForgeContext(cwd, deps) {
   const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
   const resolveToken = deps.resolveToken ?? authResolveToken;
   const getAdapterFn = deps.getAdapter ?? getAdapter;
+  const detectForge = deps.detectForge ?? detectFromConfig;
 
   const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
-  if (!forge || forge.kind !== "github") return { error: "no_forge" };
+  const forge = origin ? await detectForge(origin, deps) : null;
+  if (!forge || !isKnownKind(forge.kind)) return { error: "no_forge" };
   const tok = await resolveToken(forge.host);
   if (!tok) return { error: "not_connected" };
-  const adapter = getAdapterFn(forge.kind, tok.token);
+  const adapter = getAdapterFn(forge.kind, tok.token, forge.apiBase);
   const repo = { owner: forge.owner, repo: forge.repo };
   return { forge, repo, token: tok, adapter };
 }
@@ -1054,6 +1109,7 @@ export async function draftSubmitForCwd(cwd, input = {}, deps = {}) {
  *
  * @typedef {Object} ForgeAdapter
  * @property {"github" | "gitlab"} kind
+ * @property {((repo: { owner: string, repo: string }, number: number, input: { discussionId: string }) => Promise<{ data: any, stale: boolean }>)} [resolveThread] — OPTIONAL.
  * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listPullRequests
  * @property {(repo: { owner: string, repo: string }, number: number) => Promise<{ data: any, stale: boolean }>} getPullRequest
  * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listIssues

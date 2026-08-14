@@ -28,6 +28,8 @@ import {
 import { genDeliveryToken, upsertForgeHook, findForgeHook } from "./webhooks.mjs";
 import { ensureRepoHook } from "./forge/webhook.mjs";
 import { resolveToken as authResolveToken } from "./forge/auth.mjs";
+import { detectForgeWithHosts } from "./forge/selfhost.mjs";
+import { configGet as localConfigGet } from "./local.mjs";
 import { publicBaseUrl } from "./gatewayRegister.mjs";
 
 const RULES_ROOT = "forge-rules";
@@ -198,6 +200,7 @@ export async function saveRules(
     io = DEFAULT_IO,
     ensureHook = ensureRepoHook,
     reload = () => {},
+    getConfig = localConfigGet,
   } = {},
 ) {
   if (!enabled()) {
@@ -245,11 +248,18 @@ export async function saveRules(
       // re-saves; otherwise mint a fresh capability token for this repo.
       const existing = await findForgeHook(key);
       const deliveryToken = existing?.token ?? genDeliveryToken();
+      // Derive the forge kind (known host / user-configured forgeHosts mapping)
+      // so hook registration uses the right provider endpoint + auth, and so a
+      // GitLab repo never registers against the GitHub hooks endpoint.
+      const hostKinds = (await getConfig().catch(() => ({ forgeHosts: [] }))).forgeHosts ?? [];
+      const forgeId = detectForgeWithHosts(`https://${parts.host}/${parts.owner}/${parts.repo}`, hostKinds);
+      const kind = forgeId?.kind ?? "github";
       const res = await ensureHook({
+        kind,
         host: parts.host,
         owner: parts.owner,
         repo: parts.repo,
-        githubToken: token,
+        token,
         deliveryToken,
         publicBase: pub,
         events: eventsForRules(parsed.rules),
