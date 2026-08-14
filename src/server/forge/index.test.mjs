@@ -495,6 +495,26 @@ function draftKit({ prs = [OPEN_PR], headSha = "abc", adapter } = {}) {
   return deps;
 }
 
+// Shared draft-submit test adapter: the forge-read half (list/get the PR) is
+// identical for every submit test; only submitReview differs, so it is the one
+// injected argument.
+function submitAdapter(submitReview) {
+  return {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+    submitReview,
+  };
+}
+
+// Seed a draft with comments through the real draftCommentForCwd path, so the
+// multi-add setup never has to be written out per test.
+async function addComments(k, comments) {
+  for (const comment of comments) {
+    await draftCommentForCwd("/repo", { op: "add", comment }, k);
+  }
+}
+
 const DRAFT_REPO_KEY = "github.com/acme/widget";
 
 test("draftGetForCwd: head SHA moved → draft marked stale, comments kept", async () => {
@@ -534,19 +554,17 @@ test("draftCommentForCwd: add + set-verdict persist box-side", async () => {
 
 test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with correct anchors, then clears", async () => {
   let submitted = null;
-  const adapter = {
-    kind: "github",
-    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-    submitReview: async (repo, n, input) => {
+  const k = draftKit({
+    adapter: submitAdapter(async (repo, n, input) => {
       submitted = { repo, n, input };
       return { data: {}, stale: false };
-    },
-  };
-  const k = draftKit({ adapter });
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "old", body: "c2" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" } }, k);
+    }),
+  });
+  await addComments(k, [
+    { path: "a.ts", line: 1, side: "new", body: "c1" },
+    { path: "a.ts", line: 2, side: "old", body: "c2" },
+    { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" },
+  ]);
 
   const r = await draftSubmitForCwd("/repo", { verdict: "approved" }, k);
   assert.equal(r.ok, true);
@@ -567,19 +585,17 @@ test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with corre
 });
 
 test("draftSubmitForCwd: a failed submit returns a typed error and leaves the draft intact", async () => {
-  const adapter = {
-    kind: "github",
-    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-    submitReview: async () => {
+  const k = draftKit({
+    adapter: submitAdapter(async () => {
       const e = new Error("review failed");
       e.kind = "http_422";
       throw e;
-    },
-  };
-  const k = draftKit({ adapter });
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "c2" } }, k);
+    }),
+  });
+  await addComments(k, [
+    { path: "a.ts", line: 1, side: "new", body: "c1" },
+    { path: "a.ts", line: 2, side: "new", body: "c2" },
+  ]);
 
   const r = await draftSubmitForCwd("/repo", {}, k);
   assert.equal(r.ok, false);

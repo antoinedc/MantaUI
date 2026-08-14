@@ -434,6 +434,42 @@ async function defaultCurrentBranch(cwd) {
   }
 }
 
+// The shared cwd → origin → forge → token → adapter scaffold that every
+// cwd-scoped forge read/write resolves. pullRequestForCwd, resolveWriteContext
+// (and its write/draft consumers) and forgeDiffForCwd all did this by hand;
+// one helper is the single copy of the "detect the repo's forge, resolve a
+// token, bind the adapter to it" preamble. Returns `{ forge, repo, token,
+// adapter }` or `{ error: "no_forge" | "not_connected" }`. `currentBranch`
+// stays with the callers that need it (it is not part of the shared detect).
+async function resolveForgeContext(cwd, deps) {
+  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  const origin = await gitRemoteOrigin(cwd);
+  const forge = origin ? detectForge(origin) : null;
+  if (!forge || forge.kind !== "github") return { error: "no_forge" };
+  const tok = await resolveToken(forge.host);
+  if (!tok) return { error: "not_connected" };
+  const adapter = getAdapterFn(forge.kind, tok.token);
+  const repo = { owner: forge.owner, repo: forge.repo };
+  return { forge, repo, token: tok, adapter };
+}
+
+// List a repo's open PRs the way both cwd-scoped readers do, normalising the
+// rate-limit guard once. A rate-limited list is not an error — it yields an
+// empty list flagged `rateLimited` so the caller can serve a stale result
+// rather than blanking the panel. A real network/HTTP failure still throws.
+async function listOpenPrs(adapter, repo) {
+  try {
+    const res = await adapter.listPullRequests(repo, { state: "open" });
+    return { prs: Array.isArray(res.data) ? res.data : [], stale: Boolean(res.stale) };
+  } catch (err) {
+    if (err instanceof ForgeRateLimitedError) return { rateLimited: true, prs: [], stale: true };
+    throw err;
+  }
+}
+
 /**
  * forge:pull-request — resolve `cwd → origin → repo`, pick the open PR on the
  * current branch (falling back to the first open PR), and return the
@@ -449,35 +485,14 @@ async function defaultCurrentBranch(cwd) {
  *          getAdapter?: (kind: string, token: string) => any }} [deps]
  */
 export async function pullRequestForCwd(cwd, deps = {}) {
-  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-  const resolveToken = deps.resolveToken ?? authResolveToken;
-  const getAdapterFn = deps.getAdapter ?? getAdapter;
 
-  const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
-  if (!forge || forge.kind !== "github") {
-    return { ...EMPTY, error: "no_forge" };
-  }
+  const ctx = await resolveForgeContext(cwd, deps);
+  if (ctx.error) return { ...EMPTY, error: ctx.error };
+  const { adapter, repo } = ctx;
 
-  const tok = await resolveToken(forge.host);
-  if (!tok) return { ...EMPTY, error: "not_connected" };
-
-  const adapter = getAdapterFn(forge.kind, tok.token);
-  const repo = { owner: forge.owner, repo: forge.repo };
-
-  let prArr = [];
-  let stale = false;
-  try {
-    const res = await adapter.listPullRequests(repo, { state: "open" });
-    prArr = Array.isArray(res.data) ? res.data : [];
-    stale = res.stale;
-  } catch (err) {
-    if (err instanceof ForgeRateLimitedError) {
-      return { ...EMPTY, stale: true };
-    }
-    throw err;
-  }
+  const { prs: prArr, stale, rateLimited } = await listOpenPrs(adapter, repo);
+  if (rateLimited) return { ...EMPTY, stale: true };
 
   if (prArr.length === 0) return { ...EMPTY, stale };
 
@@ -624,18 +639,11 @@ export async function forgeInbox(deps = {}) {
 // token, head }` or a `{ error }` result. `head` is the current branch (the
 // thing we push and open a PR from).
 async function resolveWriteContext(cwd, deps, wantBranch = true) {
-  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-  const resolveToken = deps.resolveToken ?? authResolveToken;
-  const getAdapterFn = deps.getAdapter ?? getAdapter;
 
-  const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
-  if (!forge || forge.kind !== "github") return { error: "no_forge" };
-  const tok = await resolveToken(forge.host);
-  if (!tok) return { error: "not_connected" };
-  const adapter = getAdapterFn(forge.kind, tok.token);
-  const repo = { owner: forge.owner, repo: forge.repo };
+  const ctx = await resolveForgeContext(cwd, deps);
+  if (ctx.error) return { error: ctx.error };
+  const { forge, repo, adapter } = ctx;
   let head = null;
   if (wantBranch) {
     head = await currentBranch(cwd);
@@ -857,35 +865,15 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
  *          getAdapter?: (kind: string, token: string) => any }} [deps]
  */
 export async function forgeDiffForCwd(cwd, deps = {}) {
-  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-  const resolveToken = deps.resolveToken ?? authResolveToken;
-  const getAdapterFn = deps.getAdapter ?? getAdapter;
 
-  const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
-  if (!forge || forge.kind !== "github") {
-    return { diff: "", threads: [], headSha: "", error: "no_forge" };
-  }
+  const ctx = await resolveForgeContext(cwd, deps);
+  if (ctx.error) return { diff: "", threads: [], headSha: "", error: ctx.error };
+  const { adapter, repo } = ctx;
 
-  const tok = await resolveToken(forge.host);
-  if (!tok) return { diff: "", threads: [], headSha: "", error: "not_connected" };
+  const { prs: prArr, stale, rateLimited } = await listOpenPrs(adapter, repo);
+  if (rateLimited) return { diff: "", threads: [], headSha: "", error: null, stale: true };
 
-  const adapter = getAdapterFn(forge.kind, tok.token);
-  const repo = { owner: forge.owner, repo: forge.repo };
-
-  let prArr = [];
-  let stale = false;
-  try {
-    const res = await adapter.listPullRequests(repo, { state: "open" });
-    prArr = Array.isArray(res.data) ? res.data : [];
-    stale = res.stale;
-  } catch (err) {
-    if (err instanceof ForgeRateLimitedError) {
-      return { diff: "", threads: [], headSha: "", error: null, stale: true };
-    }
-    throw err;
-  }
   if (prArr.length === 0) return { diff: "", threads: [], headSha: "", error: "no_pr" };
 
   const branch = await currentBranch(cwd);
