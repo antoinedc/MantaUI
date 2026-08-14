@@ -30,7 +30,7 @@
 // not style children beyond reserving the gap. There is deliberately no size
 // prop: the spec has one chip size only.
 
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 
 const CHIP_BASE =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap " +
@@ -98,6 +98,8 @@ export function SplitChip({
   extraPressed,
   extraDisabled = false,
   loading = false,
+  leftBtnRef,
+  rightBtnRef,
 }: {
   /** Left-segment content (e.g. model name + an icon). */
   left: ReactNode;
@@ -181,6 +183,10 @@ export function SplitChip({
    * affordance taken away.
    */
   loading?: boolean;
+  /** Forwarded to the LEFT segment button (used as the model dropdown's anchor). */
+  leftBtnRef?: RefObject<HTMLButtonElement>;
+  /** Forwarded to the RIGHT segment button (used as the effort dropdown's anchor). */
+  rightBtnRef?: RefObject<HTMLButtonElement>;
 }) {
   const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
@@ -228,10 +234,10 @@ export function SplitChip({
       className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}
       aria-busy={loading || undefined}
     >
-      <button type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
+      <button ref={leftBtnRef} type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
         {left}
       </button>
-      <button type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox} {...rightAria}>
+      <button ref={rightBtnRef} type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox} {...rightAria}>
         {right}
       </button>
       {extra !== undefined && (

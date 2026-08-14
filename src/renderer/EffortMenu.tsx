@@ -14,6 +14,7 @@ import type { ModelSelection } from "./chatShared";
 import { Dropdown } from "./MenuItem";
 import { MenuOption } from "./MenuOption";
 import { titleCase } from "./chatUtils";
+import type { RefObject } from "react";
 
 const VARIANT_SUB: Record<string, string> = {
   default: "Let the model decide",
@@ -27,12 +28,16 @@ export function EffortMenu({
   activeVariantId,
   onSelect,
   onClose,
+  open,
+  anchorRef,
 }: {
   variants: Array<{ id: string }>;
   activeModel: OpencodeModel | null;
   activeVariantId?: string;
   onSelect: (m: ModelSelection) => void;
   onClose: () => void;
+  open: boolean;
+  anchorRef: RefObject<HTMLElement>;
 }) {
   const base = activeModel
     ? { providerID: activeModel.providerID, modelID: activeModel.id }
@@ -46,6 +51,9 @@ export function EffortMenu({
 
   return (
     <Dropdown
+      open={open}
+      onClose={onClose}
+      anchorRef={anchorRef}
       hook="manta-effort-dropdown"
       role="listbox"
       placement="above"

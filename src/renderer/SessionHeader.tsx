@@ -32,7 +32,6 @@ import {
   type StaleCacheResult,
   type StatusItem,
 } from "./chatUtils";
-import { useClickAway } from "./hooks/useClickAway";
 import type { SessionMode } from "./chatShared";
 import type { AvailableLauncher, CheckRollup, ForgeCheckRun, PullRequest } from "../shared/types";
 import { Button } from "./Button";
@@ -43,6 +42,7 @@ import { Chip } from "./Chip";
 import { StatusDot } from "./StatusDot";
 import { Callout } from "./Callout";
 import { Dropdown, MenuItem } from "./MenuItem";
+import { Popover } from "./Popover";
 import { ConfirmModal } from "./ConfirmModal";
 
 // Cache-segment colors for the header pill.
@@ -375,11 +375,11 @@ export function SessionHeader({
 // on ("a bare ⋯ is explicitly wrong — the count is the point").
 function StatusOverflow({ items }: { items: StatusItem[] }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useClickAway(rootRef, open, () => setOpen(false));
+  const triggerRef = useRef<HTMLButtonElement>(null);
   return (
-    <div ref={rootRef} className="relative shrink-0">
+    <>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
@@ -391,16 +391,21 @@ function StatusOverflow({ items }: { items: StatusItem[] }) {
         <MoreHorizontal size={16} aria-hidden="true" />
         <span className="text-meta font-semibold tabular-nums">+{items.length}</span>
       </button>
-      {open && (
-        <Dropdown hook="manta-status-overflow-dropdown">
-          {items.map((it) => (
-            <div key={it.id} className="px-1 py-1">
-              {it.render()}
-            </div>
-          ))}
-        </Dropdown>
-      )}
-    </div>
+      {/* Portalled via Dropdown → Popover, so this surface is never clipped by
+          the overflow menu that hosts these items at narrow pane widths. */}
+      <Dropdown
+        hook="manta-status-overflow-dropdown"
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+      >
+        {items.map((it) => (
+          <div key={it.id} className="px-1 py-1">
+            {it.render()}
+          </div>
+        ))}
+      </Dropdown>
+    </>
   );
 }
 
@@ -478,8 +483,7 @@ function ContextPill({
   onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useClickAway(rootRef, open, () => setOpen(false));
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const segColor = (kind: ContextBreakdown["segments"][number]["kind"]) => {
     if (kind === "fresh") return fill;
@@ -487,16 +491,10 @@ function ContextPill({
     return CACHE_READ_COLOR;
   };
 
-  // The trigger and the popover are SIBLINGS under a positioned wrapper, not
-  // parent and child. The popover used to be rendered INSIDE the trigger
-  // `<button>`, which put a `<button>` (Clear session) inside a `<button>` —
-  // invalid HTML that browsers repair by splitting the element, and the reason
-  // every interaction inside the panel needed a `stopPropagation` to stop the
-  // trigger's own onClick from closing the thing being clicked. Splitting them
-  // deletes both problems and the workarounds with them.
   return (
-    <div ref={rootRef} className="relative shrink-0">
+    <>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={
@@ -527,12 +525,15 @@ function ContextPill({
         </Pill>
       </button>
 
-      {open && (
-        <div
-          role="dialog"
-          aria-label="Context usage"
-          className="manta-ctx-popover manta-menu-in absolute right-0 top-full mt-1 z-30 w-[340px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
-        >
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+        role="dialog"
+        ariaLabel="Context usage"
+        hook="manta-ctx-popover"
+        surfaceClassName="w-[340px] p-4"
+      >
           {/* Headline — the percentage leads, the absolute counts qualify it.
               Baseline-aligned so the 15px metric and the 12px mono counts sit
               on one line rather than centring against each other. */}
@@ -615,9 +616,8 @@ function ContextPill({
               </div>
             </div>
           )}
-        </div>
-      )}
-    </div>
+      </Popover>
+    </>
   );
 }
 
@@ -689,8 +689,11 @@ function SessionMenu({
   // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
   // sidebar's inline delete confirm — previously both fired instantly.
   const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useClickAway(rootRef, open, () => setOpen(false));
+  // The trigger button is the anchor (positioning + Escape focus-restoration).
+  // The menu surface itself is portalled to <body> by Popover, so keyboard
+  // roving rests on a ref to that portalled surface, not the trigger.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   // WAI-ARIA menu-button pattern (BET-741): real DOM focus replaces the
   // BET-726 active-descendant stand-in (a role="button" can't carry one).
@@ -703,7 +706,7 @@ function SessionMenu({
 
   const menuRows = () =>
     Array.from(
-      rootRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [],
+      panelRef.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]') ?? [],
     );
 
   // Focus the row at `idx` (wrapping handled by the caller) and rove
@@ -718,17 +721,12 @@ function SessionMenu({
     focusedIndexRef.current = idx;
   };
 
-  const focusTrigger = () =>
-    rootRef.current
-      ?.querySelector<HTMLButtonElement>('button[aria-label="Session actions"]')
-      ?.focus();
-
   // On open, move focus into the menu surface and reset the roving tabIndex
   // so no stale row from a previous open is left tabbable. Focus lands on the
   // surface, not a row; the first arrow key then drops it onto a row.
   useEffect(() => {
     if (!open) return;
-    const menu = rootRef.current?.querySelector<HTMLElement>('[role="menu"]');
+    const menu = panelRef.current;
     menu?.querySelectorAll('button[role="menuitem"]').forEach((el) => {
       (el as HTMLButtonElement).tabIndex = -1;
     });
@@ -777,14 +775,8 @@ function SessionMenu({
         e.preventDefault();
         focused.click();
       }
-    } else if (e.key === "Escape") {
-      // Close and hand focus back to the trigger. useClickAway also closes on
-      // Escape (document keydown) but cannot restore focus — that's this
-      // branch's job.
-      e.preventDefault();
-      setOpen(false);
-      focusTrigger();
     }
+    // Escape is Popover's job now (closes + returns focus to the trigger).
   };
 
   const item = (
@@ -833,8 +825,9 @@ function SessionMenu({
   };
 
   return (
-    <div ref={rootRef} className="relative shrink-0" onKeyDown={onMenuKeyDown}>
+    <>
       <IconButton
+        buttonRef={triggerRef}
         icon={<MoreHorizontal />}
         label="Session actions"
         hook="manta-session-menu-trigger"
@@ -842,57 +835,62 @@ function SessionMenu({
         ariaHaspopup="menu"
         ariaExpanded={open}
       />
-      {open && (
-        <Dropdown hook="manta-session-menu-dropdown">
-          {hasMode && (
-            <>
-              <div className={`${GROUP_LABEL} pt-1`} role="presentation">
-                Mode
-              </div>
-              {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
-              {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
-              {availableLaunchers && availableLaunchers.length > 0 && (
-                <>
-                  <div className={`${GROUP_LABEL} pt-3`} role="presentation">
-                    AI-CLI
-                  </div>
-                  {availableLaunchers.map((l) =>
-                    modeItem(
-                      <Bot size={14} aria-hidden="true" />,
-                      l.label,
-                      `tui:${l.id}` as SessionMode,
-                    ),
-                  )}
-                </>
-              )}
-              <div className="my-1 border-t border-border-subtle" role="separator" />
-            </>
-          )}
+      <Dropdown
+        hook="manta-session-menu-dropdown"
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+        panelRef={panelRef}
+        onKeyDown={onMenuKeyDown}
+      >
+        {hasMode && (
+          <>
+            <div className={`${GROUP_LABEL} pt-1`} role="presentation">
+              Mode
+            </div>
+            {modeItem(<MessageSquare size={14} aria-hidden="true" />, "Chat", "chat")}
+            {modeItem(<Terminal size={14} aria-hidden="true" />, "Terminal", "terminal")}
+            {availableLaunchers && availableLaunchers.length > 0 && (
+              <>
+                <div className={`${GROUP_LABEL} pt-3`} role="presentation">
+                  AI-CLI
+                </div>
+                {availableLaunchers.map((l) =>
+                  modeItem(
+                    <Bot size={14} aria-hidden="true" />,
+                    l.label,
+                    `tui:${l.id}` as SessionMode,
+                  ),
+                )}
+              </>
+            )}
+            <div className="my-1 border-t border-border-subtle" role="separator" />
+          </>
+        )}
 
-          {item(
-            <GitFork size={14} aria-hidden="true" />,
-            "Fork session",
-            onFork,
-          )}
-          {item(
-            <Minimize2 size={14} aria-hidden="true" />,
-            "Compact context",
-            onCompact,
-          )}
-          {item(
-            <Eraser size={14} aria-hidden="true" />,
-            "Clear session",
-            () => setConfirm("clear"),
-          )}
-          <div className="my-1 border-t border-border-subtle" role="separator" />
-          {item(
-            <Trash2 size={14} aria-hidden="true" />,
-            "Delete session",
-            () => setConfirm("delete"),
-            true,
-          )}
-        </Dropdown>
-      )}
+        {item(
+          <GitFork size={14} aria-hidden="true" />,
+          "Fork session",
+          onFork,
+        )}
+        {item(
+          <Minimize2 size={14} aria-hidden="true" />,
+          "Compact context",
+          onCompact,
+        )}
+        {item(
+          <Eraser size={14} aria-hidden="true" />,
+          "Clear session",
+          () => setConfirm("clear"),
+        )}
+        <div className="my-1 border-t border-border-subtle" role="separator" />
+        {item(
+          <Trash2 size={14} aria-hidden="true" />,
+          "Delete session",
+          () => setConfirm("delete"),
+          true,
+        )}
+      </Dropdown>
       <ConfirmModal
         open={confirm === "delete"}
         title="Delete this session?"
@@ -915,73 +913,17 @@ function SessionMenu({
         }}
         onCancel={() => setConfirm(null)}
       />
-    </div>
+    </>
   );
 }
 
-// ===== Click-popover chip host (BET-789) =====
+// ===== Click-popover chips (BET-789) =====
 //
-// Shared trigger + popover shell for the interactive header chips (branch with
-// a PR, and the checks chip). Same sibling-under-positioned-wrapper contract
-// as ContextPill — trigger and panel are SIBLINGS, never parent/child (so the
-// trigger's click can't close the panel it opens, and no button-in-button).
-// `useClickAway` handles outside-click and Escape-close; Escape additionally
-// hands focus back to the trigger chip. The panel only mounts while open, so
-// no aria-hidden dance on a closed-but-present surface. This is the "surface
-// exists only while open, closes and restores focus" requirement (§8.4 — an
-// actionable hover card would fail it, so this is click-only).
-function PopoverChip({
-  trigger,
-  panel,
-  ariaLabel,
-  triggerClassName,
-}: {
-  trigger: React.ReactNode;
-  panel: React.ReactNode;
-  ariaLabel: string;
-  triggerClassName?: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  useClickAway(rootRef, open, () => setOpen(false));
-  return (
-    <div
-      ref={rootRef}
-      className="relative shrink-0"
-      style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-      onKeyDown={(e) => {
-        // useClickAway also closes on Escape (document-level); this branch is
-        // what additionally returns focus to the trigger (mirrors SessionMenu).
-        if (e.key === "Escape" && open) {
-          setOpen(false);
-          triggerRef.current?.focus();
-        }
-      }}
-    >
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        className={triggerClassName}
-      >
-        {trigger}
-      </button>
-      {open && (
-        <div
-          role="dialog"
-          aria-label={ariaLabel}
-          className="manta-ctx-popover manta-menu-in absolute right-0 top-full mt-1 z-30 w-[360px] rounded-lg border border-border bg-bg-soft shadow-md"
-        >
-          {panel}
-        </div>
-      )}
-    </div>
-  );
-}
+// The interactive header chips (branch with a PR, and the checks chip) are now
+// plain trigger buttons + a `Popover`: the shared PopoverChip shell that used
+// to own the wrapper, click-away, Escape-focus and the panel surface is gone
+// (BET-865) — Popover owns all of that. Each chip keeps its own trigger button
+// chrome; the portalled panel exists only while open.
 
 // ===== Branch + PR popover chip (BET-789 [C3] [C7]) =====
 //
@@ -1000,11 +942,24 @@ function BranchChip({
   pr: PullRequest;
   onOpenExternal?: (url: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const label = `Pull request #${pr.number}: ${pr.title}`;
   return (
-    <PopoverChip
-      ariaLabel={`Pull request #${pr.number}: ${pr.title}`}
-      triggerClassName="manta-branch-chip rounded-full p-0 border-0 bg-transparent transition-colors hover:bg-fill-hover"
-      trigger={
+    <>
+      {/* The chip sits in the header's drag region (the left group), so the
+          trigger opts OUT of it to stay clickable — the old PopoverChip
+          wrapper's no-drag, kept on the trigger now that the wrapper is gone. */}
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={label}
+        className="manta-branch-chip rounded-full p-0 border-0 bg-transparent transition-colors hover:bg-fill-hover"
+        style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+      >
         <Tag
           size="sm"
           icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
@@ -1014,9 +969,19 @@ function BranchChip({
             {branch} · #{pr.number}
           </span>
         </Tag>
-      }
-      panel={<BranchPanel pr={pr} onOpenExternal={onOpenExternal} />}
-    />
+      </button>
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+        role="dialog"
+        ariaLabel={label}
+        hook="manta-branch-popover"
+        surfaceClassName="w-[360px]"
+      >
+        <BranchPanel pr={pr} onOpenExternal={onOpenExternal} />
+      </Popover>
+    </>
   );
 }
 
@@ -1116,20 +1081,39 @@ function ChecksChip({
   onOpenExternal?: (url: string) => void;
   onFillComposer?: (text: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const label = `Checks: ${descriptor.label}`;
   return (
-    <PopoverChip
-      ariaLabel={`Checks: ${descriptor.label}`}
-      triggerClassName={`manta-checks-chip inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-full border px-2 font-mono text-[11px] font-medium leading-none ${CHECK_TONE_CLASS[descriptor.tone]}`}
-      trigger={<span>{descriptor.label}</span>}
-      panel={
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={label}
+        className={`manta-checks-chip inline-flex h-5 items-center gap-1 whitespace-nowrap rounded-full border px-2 font-mono text-[11px] font-medium leading-none ${CHECK_TONE_CLASS[descriptor.tone]}`}
+      >
+        <span>{descriptor.label}</span>
+      </button>
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+        role="dialog"
+        ariaLabel={label}
+        hook="manta-checks-popover"
+        surfaceClassName="w-[360px]"
+      >
         <ChecksPanel
           checks={checks}
           pr={pr}
           onOpenExternal={onOpenExternal}
           onFillComposer={onFillComposer}
         />
-      }
-    />
+      </Popover>
+    </>
   );
 }
 

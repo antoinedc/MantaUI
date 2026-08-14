@@ -302,7 +302,7 @@ describe("M527 primitive rules", () => {
     // never add a file to a row to make a red test green.
     const CHROME_OWNERS: Record<string, string[]> = {
       "bg-black/40": ["Modal.tsx", "PaletteShell.tsx"], // the modal overlay tint — Modal (centered dialog) and PaletteShell (top-anchored palette), the two sibling full-window overlay primitives
-      "shadow-lg": ["Modal.tsx", "MenuItem.tsx", "ArtifactPreview.tsx", "PaletteShell.tsx"], // the window-level floating surface (Modal) and the dropdown menu surface (Dropdown, BET-644) — two real owners, declared with their primitives; plus the preview overlay's centred card, another full-window floating surface whose shadow is mandated by its conformance mockup (`.pv` → `--shadow-lg`, BET-661); and the palette panel surface shared by the ⌘K/⌘F PaletteShell (the palette-pattern counterpart to Modal)
+      "shadow-lg": ["Modal.tsx", "Popover.tsx", "ArtifactPreview.tsx", "PaletteShell.tsx"], // the window-level floating surface (Modal) and the portalled anchored-surface (Popover, BET-865 — the single source of the menu/popover shadow, superseding Dropdown's copy in MenuItem.tsx); plus the preview overlay's centred card, another full-window floating surface whose shadow is mandated by its conformance mockup (`.pv` → `--shadow-lg`, BET-661); and the palette panel surface shared by the ⌘K/⌘F PaletteShell (the palette-pattern counterpart to Modal)
       "peer-focus-visible:outline-accent": ["Checkbox.tsx"], // checkbox focus ring (BET-589)
       "hover:brightness-110": ["Button.tsx"], // primary button hover brighten (BET-614)
       "h-[29px]": ["Chip.tsx"], // chip hit-area height — the one off-grid value both Chip + SplitChip carry (BET-615)

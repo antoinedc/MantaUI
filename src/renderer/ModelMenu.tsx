@@ -16,6 +16,7 @@ import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { Dropdown } from "./MenuItem";
 import { MenuOption } from "./MenuOption";
 import { Tag } from "./Tag";
+import type { RefObject } from "react";
 import {
   filterModelGroups,
   formatModelContextSize,
@@ -28,12 +29,16 @@ export function ModelMenu({
   defaultModel,
   onSelect,
   onClose,
+  open,
+  anchorRef,
 }: {
   groups: Array<[string, OpencodeModel[]]> | null;
   modelOverride: ModelSelection | null;
   defaultModel: { providerID: string; modelID: string } | null;
   onSelect: (m: ModelSelection | null) => void;
   onClose: () => void;
+  open: boolean;
+  anchorRef: RefObject<HTMLElement>;
 }) {
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(-1);
@@ -160,6 +165,9 @@ export function ModelMenu({
 
   return (
     <Dropdown
+      open={open}
+      onClose={onClose}
+      anchorRef={anchorRef}
       hook="manta-model-dropdown"
       role="listbox"
       placement="above"

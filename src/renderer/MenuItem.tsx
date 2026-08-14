@@ -10,9 +10,10 @@
 // row highlight corrected against the spec's `.mi` — see below):
 //   - dropdown surface: `--card`/`bg-bg-soft` (the proposal's `.dd` won C5
 //     over the old `--panel`/`bg-bg-elev` contract, for the whole menu
-//     family), `--border` edge, `--shadow-lg`, `--r-lg` (`rounded-lg`),
-//     max-h 460px, a flex column whose search/header/footer regions are fixed
-//     and whose body is the only scroller.
+//     family), `--border` edge, and the shared floating-surface shadow + `--r-lg`
+//     radius (both owned by the portalled Popover primitive, BET-865), max-h
+//     460px, a flex column whose search/header/footer regions are fixed and
+//     whose body is the only scroller.
 //   - item label 13px medium `--tx2` (`text-label font-medium text-text-muted`)
 //     brightening to `--tx1` on hover, padding `sp-2/sp-2` (`px-2 py-2`),
 //     `sp-3` icon gap, `--r-md` radius, hover fill `--fill-hover`, icon 14px.
@@ -40,8 +41,9 @@
 // as a real row. `danger` and `active` are explicit opt-ins carried as
 // variant names, not a bare escape hatch.
 
-import type { ReactElement, ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactElement, ReactNode, RefObject } from "react";
 import { cloneElement } from "react";
+import { Popover, type PopoverAlign, type PopoverPlacement } from "./Popover";
 
 type MenuItemVariant = "normal" | "danger" | "active";
 
@@ -113,24 +115,19 @@ export function MenuItem({
 // visual coverage registry keys on it). It is an IDENTITY hook, not a chrome
 // class: it has no styling and cannot shear the panel chrome, so it is not
 // the `className` escape hatch the epic forbids.
-type DropdownPlacement = "below" | "above";
-type DropdownAlign = "start" | "end";
+type DropdownPlacement = PopoverPlacement;
+type DropdownAlign = PopoverAlign;
 type DropdownWidth = "menu" | "wide" | "narrow";
 
-const DROPDOWN_SURFACE =
-  "absolute z-30 overflow-hidden flex flex-col max-h-[460px] rounded-lg border border-border bg-bg-soft shadow-lg";
+// What remains of the old surface after Popover owns the chrome: only the
+// layout it genuinely needs. The surface chrome (rounded-lg border border-border
+// bg-bg-soft + the shared shadow) now lives in POPOVER_SURFACE; the
+// position/z-index live in Popover's fixed positioning.
+const DROPDOWN_LAYOUT = "overflow-hidden flex flex-col max-h-[460px]";
 const DROPDOWN_WIDTH: Record<DropdownWidth, string> = {
   menu: "min-w-[11.25rem]",
   wide: "w-[340px]",
   narrow: "w-[250px]",
-};
-const DROPDOWN_PLACEMENT: Record<DropdownPlacement, string> = {
-  below: "top-full mt-1",
-  above: "bottom-full mb-1",
-};
-const DROPDOWN_ALIGN: Record<DropdownAlign, string> = {
-  start: "left-0",
-  end: "right-0",
 };
 const DROPDOWN_SEARCH =
   "flex items-center gap-2 h-[38px] px-3 border-b border-border-subtle flex-none";
@@ -139,6 +136,9 @@ const DROPDOWN_SCROLL = "overflow-y-auto p-2 min-h-0";
 const DROPDOWN_FOOTER = "border-t border-border-subtle p-2 flex-none";
 
 export function Dropdown({
+  open,
+  onClose,
+  anchorRef,
   hook,
   id,
   placement = "below",
@@ -148,8 +148,16 @@ export function Dropdown({
   search,
   header,
   footer,
+  panelRef,
+  onKeyDown,
   children,
 }: {
+  /** The open state — the caller owns it; `{open && …}` is no longer used. */
+  open: boolean;
+  /** Close the caller's open state (click-away / Escape / select). */
+  onClose: () => void;
+  /** The trigger element. Needed because the surface is now portalled. */
+  anchorRef: RefObject<HTMLElement>;
   /** Optional `manta-*` identity class for the call site (no styling). */
   hook?: string;
   /** Optional DOM id — still used by the model/effort listbox menus (rows
@@ -157,9 +165,9 @@ export function Dropdown({
    *  SessionHeader's ⋯ menu no longer passes one (BET-741 moved it to real
    *  DOM focus + roving tabIndex, which needs no descendant ids). */
   id?: string;
-  /** below (top-full, SessionHeader's menu) | above (bottom-full, composer). */
+  /** below (SessionHeader's menu) | above (composer). */
   placement?: DropdownPlacement;
-  /** start (left-0) | end (right-0, today's right-aligned default). */
+  /** start | end (today's right-aligned default). */
   align?: DropdownAlign;
   /** menu (11.25rem min) | wide (340px, model list) | narrow (250px, effort). */
   width?: DropdownWidth;
@@ -171,23 +179,31 @@ export function Dropdown({
   header?: ReactNode;
   /** Optional fixed footer region (e.g. a "Manage models…" action). */
   footer?: ReactNode;
+  /** Optional external ref to the portalled surface (forwarded to Popover). */
+  panelRef?: RefObject<HTMLDivElement>;
+  /** Keyboard nav for content inside the surface (forwarded to Popover). */
+  onKeyDown?: (e: ReactKeyboardEvent<HTMLDivElement>) => void;
   /** The scrolling body. */
   children?: ReactNode;
 }) {
   return (
-    <div
-      id={id}
+    <Popover
+      open={open}
+      onClose={onClose}
+      anchorRef={anchorRef}
+      placement={placement}
+      align={align}
       role={role}
-      className={
-        `${hook ? `${hook} ` : ""}` +
-        `manta-menu-in ` +
-        `${DROPDOWN_SURFACE} ${DROPDOWN_WIDTH[width]} ${DROPDOWN_PLACEMENT[placement]} ${DROPDOWN_ALIGN[align]}`
-      }
+      id={id}
+      hook={hook}
+      panelRef={panelRef}
+      onKeyDown={onKeyDown}
+      surfaceClassName={`${DROPDOWN_LAYOUT} ${DROPDOWN_WIDTH[width]}`}
     >
       {search && <div className={DROPDOWN_SEARCH}>{search}</div>}
       {header && <div className={DROPDOWN_HEADER}>{header}</div>}
       <div className={DROPDOWN_SCROLL}>{children}</div>
       {footer && <div className={DROPDOWN_FOOTER}>{footer}</div>}
-    </div>
+    </Popover>
   );
 }

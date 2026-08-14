@@ -23,7 +23,7 @@
 // are optional so the menu trigger keeps its role semantics without a class
 // escape hatch.
 
-import type { ReactElement } from "react";
+import type { ReactElement, RefObject } from "react";
 import { cloneElement } from "react";
 
 const CHROME_BASE =
@@ -47,6 +47,7 @@ export function IconButton({
   ariaExpanded,
   hook,
   disabled,
+  buttonRef,
 }: {
   /** Accessible name for the button (required — the icon is decorative). */
   label: string;
@@ -69,6 +70,9 @@ export function IconButton({
    * chrome, so it is not the `className` escape hatch the epic forbids.
    */
   hook?: string;
+  /** Forwards a ref to the underlying <button> (used as a popover anchor /
+   *  focus-restoration target, e.g. the session ⋯ menu's trigger, BET-865). */
+  buttonRef?: RefObject<HTMLButtonElement>;
 }) {
   const iconSize = 16;
   // Disabled-only classes are appended by the primitive itself (a disabled
@@ -78,6 +82,7 @@ export function IconButton({
   const className = `${hook ? `${hook} ` : ""}${CHROME_BASE} ${SIZE_CHROME[size]}${disabled ? ` ${disabledClasses}` : ""}`;
   return (
     <button
+      ref={buttonRef}
       type="button"
       disabled={disabled}
       onClick={onClick}
