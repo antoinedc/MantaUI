@@ -65,7 +65,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -423,6 +423,17 @@ forgeRulesEngine = createRulesEngine({
     // ISSUE, not a job-own-PR guess. checks.failed has no issue/PR number →
     // no link → the sink no-ops (no distinct target), which is correct.
     const link = eventLinkRef(repoKey, event);
+    // Resolve the real parent: the tmux project that owns this repo's checkout,
+    // so the job's window has a home (the stopgap's synthetic "forge" parent
+    // could never resolve an owner, so a forge delegate could not actually
+    // launch). Refused when no local project wraps the checkout.
+    const owner = resolveForgeOwner(await tmux.listProjects(), cwd);
+    if (!owner) {
+      return {
+        ok: false,
+        error: "no local project wraps this repo checkout to host the job window",
+      };
+    }
     const permission = delegateBuildPermissionRuleset([
       { permission: "bash", pattern: "**" },
       { permission: "write", pattern: "**" },
@@ -431,7 +442,7 @@ forgeRulesEngine = createRulesEngine({
     ]);
     return delegateEngine.startJob({
       prompt,
-      parentSessionID: "forge", // synthetic parent channel; real parent arrives with the link primitive
+      parentSessionID: owner.parentSessionID,
       parentDirectory: cwd,
       permission,
       link,

@@ -5,6 +5,7 @@ import {
   buildCompletionText,
   deriveName,
   resolveOwner,
+  resolveForgeOwner,
   startJob,
   observeEvent,
   finishJob,
@@ -170,6 +171,39 @@ test("deriveName falls back to a slug for symbol-heavy prompts", () => {
 // ----------------------------------------------------------------------------
 // resolveOwner helper
 // ----------------------------------------------------------------------------
+
+test("resolveForgeOwner finds the project that owns the repo checkout (BET-844)", () => {
+  const projects = [
+    { tmuxSession: "other", defaultCwd: "/other" },
+    {
+      tmuxSession: "forge-work",
+      defaultCwd: "/repo",
+      windows: [{ index: 1, name: "p", opencodeSessionId: "ses_parent", paneCurrentPath: "/repo" }],
+    },
+  ];
+  assert.deepEqual(resolveForgeOwner(projects, "/repo"), {
+    parentSessionID: "ses_parent",
+    tmuxSession: "forge-work",
+  });
+});
+
+test("resolveForgeOwner matches a window whose cwd is nested inside the checkout", () => {
+  const projects = [
+    {
+      tmuxSession: "repo-project",
+      defaultCwd: "/",
+      windows: [{ index: 2, name: "w", opencodeSessionId: "ses_par", paneCurrentPath: "/repo/sub" }],
+    },
+  ];
+  const owner = resolveForgeOwner(projects, "/repo");
+  assert.equal(owner.parentSessionID, "ses_par");
+  assert.equal(owner.tmuxSession, "repo-project");
+});
+
+test("resolveForgeOwner returns null when no project wraps the directory", () => {
+  assert.equal(resolveForgeOwner([{ tmuxSession: "a", defaultCwd: "/x", windows: [] }], "/repo"), null);
+  assert.equal(resolveForgeOwner([], "/repo"), null);
+});
 
 test("resolveOwner finds the tmux session owning a session id", () => {
   const projects = [
