@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import type { ReactElement } from "react";
-import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
+import { ChevronRight, ChevronDown, Plus, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
@@ -30,6 +30,7 @@ import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
 import { ConfirmModal } from "./ConfirmModal";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
+import { IconButton } from "./IconButton";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -571,21 +572,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             "flex items-center gap-1" + (IS_WINDOWS ? " titlebar-no-drag" : "")
           }
         >
-          <button
-            onClick={() => setPaletteOpen(true)}
-            className="text-text-muted hover:text-text text-prose leading-none"
+          <IconButton
+            icon={<Search />}
+            label="Search sessions"
             title={`Search sessions (${MOD_KEY}K)`}
-            aria-label="Search sessions"
-          >
-            <Search size={15} aria-hidden="true" />
-          </button>
-          <button
-            onClick={onNewProject}
-            className="text-text-muted hover:text-text text-title leading-none"
-            title={`New project (${MOD_KEY}N)`}
-          >
-            +
-          </button>
+            onClick={() => setPaletteOpen(true)}
+          />
         </div>
       </div>
 
@@ -597,6 +589,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         data-density="comfortable"
         onKeyDown={onRailKeyDown}
       >
+        <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts (BET draft model): in-memory composers for
             sessions that don't exist yet. Shown at the TOP of the rail, not
             nested under any project — a draft is a bare "new session" until it
@@ -720,7 +713,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 isProjectActive={isProjectActive}
                 focused={focusedKey === `group:${p.tmuxSession}`}
                 onToggle={() => toggleCollapse(p.tmuxSession)}
-                onNewSession={() => onNewSessionInProject(p.tmuxSession)}
                 onClose={() => setConfirmDeleteFor({ kind: "project", project: p.tmuxSession })}
                 renameTarget={renameTarget}
                 renameValue={renameValue}
@@ -803,14 +795,11 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     );
                   })}
 
-                  {p.windows.length === 0 && (
-                    <button
-                      onClick={() => onNewSessionInProject(p.tmuxSession)}
-                      className="block w-full text-left px-2 py-px text-meta text-text-faint hover:text-text"
-                    >
-                      + new session
-                    </button>
-                  )}
+                  <RailCreateRow
+                    label="New session"
+                    shortcut={`${MOD_KEY}T`}
+                    onClick={() => onNewSessionInProject(p.tmuxSession)}
+                  />
                 </div>
               )}
             </div>
@@ -1225,16 +1214,47 @@ function JobChildRow({
   );
 }
 
+// A full-width "create" row. Box metrics are copied from SessionRow's ROW_BASE
+// token-for-token so it sits flush in the rail; the 7px lead slot matches the
+// status dot's footprint, which is what aligns the label with session names.
+// Must render inside the rail's [data-density] ancestor to resolve --row-*.
+function RailCreateRow({
+  label,
+  shortcut,
+  onClick,
+}: {
+  label: string;
+  shortcut: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={`${label} (${shortcut})`}
+      className="group flex w-full items-center gap-2 rounded-md mb-1 min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] text-left transition-colors outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
+    >
+      <span className="flex w-[7px] shrink-0 items-center justify-center text-text-faint group-hover:text-text">
+        <Plus size={11} aria-hidden="true" />
+      </span>
+      <span className="flex-1 min-w-0 truncate text-label font-medium text-text-faint group-hover:text-text">
+        {label}
+      </span>
+      <span className="shrink-0 min-w-[20px] text-right font-mono tabular-nums text-micro text-text-quiet">
+        {shortcut}
+      </span>
+    </button>
+  );
+}
+
 // Workspace group header: chevron + name + collapse state. No colour dot, no
-// count. Project-level new-session (+) and close (X) are hover actions on the
-// header (NOT session rows, so the four-slot rule doesn't apply).
+// count. Project-level close (X) is a hover action on the header (NOT a session
+// row, so the four-slot rule doesn't apply).
 function GroupHeader({
   project: p,
   isCollapsed,
   isProjectActive,
   focused,
   onToggle,
-  onNewSession,
   onClose,
   renameTarget,
   renameValue,
@@ -1248,7 +1268,6 @@ function GroupHeader({
   isProjectActive: boolean;
   focused: boolean;
   onToggle: () => void;
-  onNewSession: () => void;
   onClose: () => void;
   renameTarget:
     | { kind: "project"; old: string }
@@ -1292,27 +1311,12 @@ function GroupHeader({
           {p.tmuxSession}
         </span>
       )}
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onNewSession();
-        }}
-        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-text leading-none"
-        title="New session in this project"
+      <span
+        className="opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+        onClick={(e) => e.stopPropagation()}
       >
-        +
-      </button>
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onClose();
-        }}
-        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
-        title="Close project"
-        aria-label="Close project"
-      >
-        <X size={14} aria-hidden="true" />
-      </button>
+        <IconButton icon={<X />} label="Close project" onClick={onClose} />
+      </span>
     </div>
   );
 }
