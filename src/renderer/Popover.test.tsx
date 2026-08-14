@@ -37,7 +37,7 @@ function TestPopover({
   );
 }
 
-function surface(h: Harness): HTMLElement {
+function surface(): HTMLElement {
   return document.body.querySelector('.manta-menu-in') as HTMLElement;
 }
 
@@ -54,7 +54,7 @@ describe("Popover — portalled dismissal (BET-865)", () => {
 
   it("renders the surface as a direct child of <body> (no ancestor can clip it)", () => {
     h = mount(<TestPopover open onClose={() => {}} />);
-    const el = surface(h);
+    const el = surface();
     expect(el).toBeTruthy();
     // Portalled to <body>, NOT nested inside the trigger's subtree / container.
     expect(el.parentElement).toBe(document.body);
@@ -70,7 +70,7 @@ describe("Popover — portalled dismissal (BET-865)", () => {
         <button type="button">Open on GitHub ↗</button>
       </TestPopover>,
     );
-    const inner = [...surface(h).querySelectorAll("button")].find((b) =>
+    const inner = [...surface().querySelectorAll("button")].find((b) =>
       b.textContent?.includes("Open on GitHub"),
     )!;
     expect(inner).toBeTruthy();
@@ -94,7 +94,7 @@ describe("Popover — portalled dismissal (BET-865)", () => {
 
   it("renders nothing when closed", () => {
     h = mount(<TestPopover open={false} onClose={() => {}} />);
-    expect(surface(h)).toBeFalsy();
+    expect(surface()).toBeFalsy();
   });
 });
 

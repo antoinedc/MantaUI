@@ -47,7 +47,7 @@ const bodyText = () => document.body.textContent ?? "";
 // The launcher button whose text begins with `label` (the icon renders no
 // text, the label text starts the button's text content). The menu (and its
 // buttons) are portalled to <body> by Popover, so this searches document.body.
-function launcherButton(h: Harness, label: string): HTMLButtonElement {
+function launcherButton(label: string): HTMLButtonElement {
   const btn = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
     (b) => b.textContent?.trim()?.startsWith(label),
   );
@@ -95,7 +95,7 @@ describe("SessionHeader session menu launcher entries (BET-467)", () => {
     await h!.flush();
     openMenu(h!);
 
-    act(() => launcherButton(h!, "Claude").click());
+    act(() => launcherButton("Claude").click());
     expect(changed).toBe("tui:claude");
   });
 
@@ -104,7 +104,7 @@ describe("SessionHeader session menu launcher entries (BET-467)", () => {
     await h!.flush();
     openMenu(h!);
 
-    const active = launcherButton(h!, "Claude");
+    const active = launcherButton("Claude");
     expect(active.textContent).toContain("✓");
   });
 
