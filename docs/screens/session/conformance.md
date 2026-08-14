@@ -4,7 +4,16 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-14 (bd38d73a)
+Last reviewed: 2026-08-14 (9c8e4a4)
+
+## Re-record (BET-864)
+
+`npm run visual:update` after removing the two composer empty-state
+suggestion chips that BET-815 added (BET-864). The `session` /
+`session-composer` baselines drop those chips; the composer's empty state now
+shows the placeholder only. No other composer, header or transcript geometry
+changed — the record's substance (the accepted divergences and open items
+below) is unaffected, only the baselines moved.
 
 ## Re-record (BET-813)
 
