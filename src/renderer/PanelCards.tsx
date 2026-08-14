@@ -11,7 +11,7 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useState } from "react";
-import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X, GitPullRequest } from "lucide-react";
+import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
@@ -21,7 +21,6 @@ import type {
   SecretScope,
   WebhookMeta,
 } from "../shared/types";
-import { Button } from "./Button";
 import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 
@@ -605,57 +604,6 @@ export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
             <Square size={12} aria-hidden="true" /> Stop
           </button>
         )}
-      </div>
-    </div>
-  );
-});
-
-// ===== Forge ship + merge (BET-794) =====
-
-// ShipConfirmCard — the [SH1] human gate. Always shown before anything is
-// pushed or opened; never auto-submitted. Reads top-down: a context line, the
-// resolved title as plain text, then the actions (primary "Create pull
-// request", ghost Cancel). The title/body are edited on GitHub seconds later;
-// this card's only job is the confirm.
-export const ShipConfirmCard = memo(function ShipConfirmCard({
-  proposal,
-  busy,
-  error,
-  onApprove,
-  onDecline,
-}: {
-  proposal: { head: string; base: string; fileCount: number; title?: string; body?: string };
-  busy: boolean;
-  error: string | null;
-  onApprove: () => void;
-  onDecline: () => void;
-}) {
-  return (
-    <div
-      className="rounded-sm border bg-bg-elev px-3 py-2 text-meta"
-      style={{ borderColor: "rgb(var(--accent-rgb) / 0.33)" }}
-    >
-      <div className="mb-2 flex items-center gap-2">
-        <span style={{ color: "var(--accent)" }} className="inline-flex items-center shrink-0">
-          <GitPullRequest size={15} aria-hidden="true" />
-        </span>
-        <span className="text-text-faint text-meta">
-          Open a pull request · {proposal.head}{" "}
-          <span style={{ color: "var(--accent)" }}>→</span> {proposal.base} ·{" "}
-          {proposal.fileCount} file{proposal.fileCount === 1 ? "" : "s"}
-        </span>
-      </div>
-      <div className="truncate text-meta font-medium text-text" title={proposal.title}>
-        {proposal.title || "Untitled pull request"}
-      </div>
-      {error && <div className="text-danger break-words mt-1">{error}</div>}
-      <div className="flex items-center gap-2 mt-2">
-        <Button tone="primary" disabled={busy} onClick={onApprove}>
-          {busy ? "Creating…" : "Create pull request"}
-        </Button>
-        <Button tone="ghost" onClick={onDecline} disabled={busy}>
-          Cancel
-        </Button>
       </div>
     </div>
   );

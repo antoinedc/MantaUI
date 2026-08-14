@@ -17,7 +17,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, ExternalLink } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2 } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -45,6 +45,7 @@ import { Tag } from "./Tag";
 import { Chip } from "./Chip";
 import { StatusDot } from "./StatusDot";
 import { Callout } from "./Callout";
+import { ForgeMark } from "./ForgeMark";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
 import { ConfirmModal } from "./ConfirmModal";
@@ -105,6 +106,8 @@ export function SessionHeader({
   shipError,
   shipBase,
   shipFileCount,
+  shipTitle,
+  justShipped,
   base,
   aheadCount,
   onCreatePr,
@@ -178,10 +181,18 @@ export function SessionHeader({
   mergeError?: string | null;
   shipBusy?: boolean;
   shipError?: string | null;
-  // The ship preview's base branch + file count (fetched once when the no-PR
-  // popover opens). null while the preview is still loading → rows render "—".
+  // The ship preview's default base branch + file count (fetched once when the
+  // no-PR popover opens). null while the preview is still loading → rows render
+  // "—".
   shipBase?: string | null;
   shipFileCount?: number | null;
+  // The ship preview's resolved PR title. NULL means the preview has not landed
+  // yet (the box drafts it with the session's model, out of band) — the popover
+  // shows a skeleton and holds the Create button disabled until it arrives.
+  shipTitle?: string | null;
+  // True for a few seconds after a PR is created from this popover, so the PR
+  // state can affirm what just happened instead of silently swapping.
+  justShipped?: boolean;
   // The ship gate (BET-892): the session's current branch, the repo default
   // base branch, and commits ahead — supplied by the forge:pull-request poll
   // (no second poll) so the popover can decide whether a Create-PR action is
@@ -395,6 +406,9 @@ export function SessionHeader({
           shipError={shipError ?? null}
           shipBase={shipBase ?? null}
           shipFileCount={shipFileCount ?? null}
+          shipTitle={shipTitle ?? null}
+          justShipped={justShipped ?? false}
+          forgeKind={forgeKind ?? null}
           base={base ?? null}
           aheadCount={aheadCount ?? null}
           onCreatePr={onCreatePr}
@@ -1022,6 +1036,9 @@ type BranchPanelProps = {
   shipError: string | null;
   shipBase: string | null;
   shipFileCount: number | null;
+  shipTitle: string | null;
+  justShipped: boolean;
+  forgeKind: string | null;
   base: string | null;
   aheadCount: number | null;
   onCreatePr?: () => void;
@@ -1072,7 +1089,9 @@ function BranchChip({
       </button>
       <Popover
         open={open}
-        onClose={() => setOpen(false)}
+        // BET-925: a click-away while a PR is being created would tear down the
+        // only surface reporting it. Held open until the write settles.
+        onClose={() => { if (!panelProps.shipBusy) setOpen(false); }}
         anchorRef={triggerRef}
         role="dialog"
         ariaLabel={label}
@@ -1137,6 +1156,9 @@ function BranchPanel({
   shipError,
   shipBase,
   shipFileCount,
+  shipTitle,
+  justShipped,
+  forgeKind,
   base,
   aheadCount,
   onCreatePr,
@@ -1170,31 +1192,45 @@ function BranchPanel({
           <div className="mb-2 text-xs text-text-faint">
             Nothing to ship — no commits ahead of {base}
           </div>
-        ) : (
-          <div className="mb-2 text-xs text-text-faint">
-            {shipBusy ? "Opening pull request…" : "Ready to open a pull request"}
-          </div>
-        )}
-        {shipState !== "no-commits" && (
+        ) : shipState === "ready" ? (
           <>
-            <div className="flex flex-col">
-              <PanelRow label="Base" value={shipBase ?? base ?? "—"} />
-              <PanelRow
-                label="Changes"
-                value={
-                  shipFileCount != null
-                    ? `${shipFileCount} file${shipFileCount === 1 ? "" : "s"}`
-                    : "—"
-                }
-              />
+            <div className="mb-2 text-xs text-text-faint">
+              {branch} <span className="text-accent-tx">→</span> {shipBase ?? base ?? "—"}
+              {shipFileCount != null
+                ? ` · ${shipFileCount} file${shipFileCount === 1 ? "" : "s"}`
+                : ""}
+            </div>
+            <div className="rounded-sm bg-fill p-2">
+              <div className="mb-1 font-mono text-[10px] uppercase tracking-[.08em] text-text-quiet">
+                Title
+              </div>
+              {shipTitle != null ? (
+                <div className="text-meta text-text">{shipTitle}</div>
+              ) : (
+                <>
+                  <div className="mb-1 h-[9px] rounded-xs bg-fill-hover animate-pulse" />
+                  <div className="h-[9px] w-12 rounded-xs bg-fill-hover animate-pulse" />
+                </>
+              )}
             </div>
             <div className="mt-3 flex flex-nowrap items-center gap-2">
-              <Button tone="primary" disabled={shipBusy} onClick={onCreatePr}>
-                {shipBusy ? "Creating…" : "Create pull request"}
+              <Button tone="primary" disabled={shipBusy || shipTitle == null} onClick={onCreatePr}>
+                {shipBusy ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" aria-hidden="true" /> Creating…
+                  </>
+                ) : (
+                  <>
+                    <ForgeMark kind={forgeKind} /> Create pull request
+                  </>
+                )}
               </Button>
+              {!shipBusy && shipTitle == null && !shipError && (
+                <span className="text-[11px] text-text-quiet">Drafting title…</span>
+              )}
             </div>
           </>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -1216,6 +1252,11 @@ function BranchPanel({
       : { text: "computing…", className: "text-text-faint" };
   return (
     <div className="p-3">
+      {justShipped && (
+        <div className="mb-2">
+          <Callout tone="ok">Opened #{pr.number}</Callout>
+        </div>
+      )}
       <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
         #{pr.number} {pr.title}
       </div>
@@ -1240,12 +1281,12 @@ function BranchPanel({
           onClick={onMerge}
           title={merge.can ? "Merge this pull request" : merge.reason ?? "not mergeable"}
         >
-          {mergeBusy ? "Merging…" : "Merge"}
+          {mergeBusy ? "Merging…" : (<><ForgeMark kind={forgeKind} /> Merge</>)}
         </Button>
         <Button tone="default" onClick={onReviewChanges}>Review changes</Button>
         {onOpenExternal && (
           <Button tone="ghost" title="Open on GitHub" onClick={() => onOpenExternal(pr.url)}>
-            <ExternalLink size={14} aria-hidden="true" />
+            <ForgeMark kind={forgeKind} />
           </Button>
         )}
       </div>
