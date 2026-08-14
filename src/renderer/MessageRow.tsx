@@ -299,12 +299,20 @@ export const MessageRow = memo(function MessageRow({
   // the MessageRow memo chain is untouched.
   entering?: boolean;
 }) {
+  const isUser = msg.info.role === "user";
+
   // A row that renders nothing must never be drawn — MessageRow is rendered
   // both inside Virtuoso (whose data is pre-filtered by Transcript, so this is
   // a no-op there) and OUTSIDE it (TaskCard renders the child transcript with
   // a plain .map), so the guard lives here on the shared predicate.
+  //
+  // Placed AFTER the useState on purpose (reviewer finding): a subagent
+  // transcript streams via debounced refetches, so a child message can grow
+  // from non-renderable to renderable across renders. A guard before the hook
+  // would flip the hook count and trip React's "Rendered more hooks than
+  // during the previous render". This return only ever happens after the
+  // identical-before-the-conditional hook, keeping hook order stable.
   if (!isRenderableMessage(msg)) return null;
-  const isUser = msg.info.role === "user";
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
