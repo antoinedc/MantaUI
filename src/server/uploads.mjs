@@ -21,6 +21,7 @@
 import { readdir, stat, rm, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { uploadRoot as defaultUploadRoot } from "../shared/paths.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const POLL_MS = 60 * 60 * 1000; // hourly
 const HOUR_MS = 3600_000;
@@ -144,23 +145,11 @@ export function startUploadCleanupPoller({ configGet, uploadRoot, intervalMs = P
   const root = uploadRoot ?? defaultUploadRoot();
 
   async function tick() {
-    try {
-      const cfg = await configGet();
-      const hours = Number(cfg?.uploadCleanupHours ?? 24);
-      const thresholdMs = hours > 0 ? hours * HOUR_MS : 0;
-      await sweepUploads({ root, thresholdMs });
-    } catch (e) {
-      console.warn("[uploads] cleanup tick failed:", e?.message ?? e);
-    }
+    const cfg = await configGet();
+    const hours = Number(cfg?.uploadCleanupHours ?? 24);
+    const thresholdMs = hours > 0 ? hours * HOUR_MS : 0;
+    await sweepUploads({ root, thresholdMs });
   }
 
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(tick, { intervalMs, label: "uploads" });
 }

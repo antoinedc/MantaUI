@@ -66,6 +66,7 @@
  */
 
 import { normalizeWindow } from "./usageAdapters/normalizeWindow.mjs";
+import { startPoller } from "./startPoller.mjs";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
@@ -239,12 +240,10 @@ let activePoller = null;
 export function startUsagePoller(bus, { intervalMs = POLL_MS } = {}) {
   const poller = createUsagePoller({ publish: (evt) => bus.publish(evt) });
   activePoller = poller;
-  void poller.tick();
-  const timer = setInterval(() => void poller.tick(), intervalMs);
-  timer.unref();
+  const p = startPoller(() => poller.tick(), { intervalMs, label: "usage" });
   return {
     stop() {
-      clearInterval(timer);
+      p.stop();
       poller.stop();
       if (activePoller === poller) activePoller = null;
     },

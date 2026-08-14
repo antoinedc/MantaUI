@@ -26,6 +26,7 @@ import { join, dirname } from "node:path";
 import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { statePath, voiceRoot } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { startPoller } from "./startPoller.mjs";
 import { transcribeAudio, filenameFor } from "../shared/groq.mjs";
 
 const STORE_PATH = statePath("voice-notes.json");
@@ -309,9 +310,6 @@ export function createVoiceSweep({
 
 export function startVoiceSweep({ intervalMs = CLEANUP_MS } = {}) {
   const { sweep } = createVoiceSweep();
-  // Run once immediately to clean up any leftover expired notes.
-  sweep();
-  const timer = setInterval(sweep, intervalMs);
-  timer.unref();
-  return { stop: () => clearInterval(timer), sweep };
+  const p = startPoller(sweep, { intervalMs, label: "voice-notes" });
+  return { stop: p.stop, sweep };
 }

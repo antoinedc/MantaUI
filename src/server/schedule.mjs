@@ -25,6 +25,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const STORE_PATH = statePath("schedule.json");
 
@@ -479,13 +480,5 @@ export function startSchedulePoller({ sendPrompt, fireNotify, publish } = {}, { 
     publish,
   });
 
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(tick, { intervalMs, label: "schedule" });
 }
