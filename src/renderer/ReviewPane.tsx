@@ -117,6 +117,11 @@ export function ReviewPane({
   const [draftText, setDraftText] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Reply-to-an-incoming-thread composer (for a colleague's thread on the diff).
+  // `replyingTo` is the target thread id; `replyText` is the draft reply body.
+  const [replyingTo, setReplyingTo] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState<string>("");
+
   // Renderer-local "routed to agent" flags keyed by buffered comment id. The
   // forge never sees this — it only lands in the chat composer. Not a draft
   // field, so the box store stays forge-shaped.
@@ -185,6 +190,19 @@ export function ReviewPane({
     setComposing(null);
     setDraftText("");
   }, [target, cwd, composing, draftText]);
+
+  // Reply to ONE existing incoming thread — posts immediately (never buffered
+  // in the draft), then refetches threads so the reply lands with the canonical
+  // read. The composer stays open on failure.
+  const postReply = useCallback(async (threadId: string, body: string) => {
+    if (!body.trim()) return;
+    const res = await window.api.forgeThreadReply({ ...ref, threadId, body });
+    if (!res.ok) return;
+    setReplyingTo(null);
+    setReplyText("");
+    const fresh = await window.api.forgeDiff(ref);
+    setThreads(Array.isArray(fresh.threads) ? fresh.threads : []);
+  }, [ref]);
 
   const sendToAgent = useCallback(
     (text: string, commentId?: string) => {
@@ -270,7 +288,56 @@ export function ReviewPane({
                     {c.body}
                   </div>
                 ))}
+                {replyingTo === t.id && (
+                  <div className="mt-2 rounded-r-[var(--r-sm)] border-l-2 border-accent bg-bg-elev px-[11px] py-2">
+                    <textarea
+                      autoFocus
+                      value={replyText}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          postReply(t.id, replyText);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          setReplyingTo(null);
+                          setReplyText("");
+                        }
+                      }}
+                      placeholder="Reply…"
+                      rows={2}
+                      className="w-full resize-none rounded-xs border border-border-strong bg-bg px-2 py-1 font-mono text-meta text-text outline-none placeholder:text-text-faint focus:border-accent"
+                    />
+                    <div className="mt-2 flex items-center gap-[6px]">
+                      <Button tone="default" onClick={() => postReply(t.id, replyText)}>
+                        Reply
+                      </Button>
+                      <Button
+                        tone="ghost"
+                        onClick={() => {
+                          setReplyingTo(null);
+                          setReplyText("");
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
+            }
+            action={
+              replyingTo !== t.id ? (
+                <Button
+                  tone="ghost"
+                  onClick={() => {
+                    setReplyingTo(t.id);
+                    setReplyText("");
+                  }}
+                >
+                  Reply
+                </Button>
+              ) : undefined
             }
           />
         ),
@@ -361,7 +428,7 @@ export function ReviewPane({
     }
 
     return out;
-  }, [threads, draft, composing, draftText, addToReview, sendToAgent, removeComment, canSend]);
+  }, [threads, draft, composing, draftText, addToReview, sendToAgent, removeComment, canSend, replyingTo, replyText, postReply]);
 
   const draftCount = draft?.comments.length ?? 0;
 

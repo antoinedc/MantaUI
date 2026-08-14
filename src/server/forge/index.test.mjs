@@ -19,6 +19,7 @@ import {
   draftGetForCwd,
   draftCommentForCwd,
   draftSubmitForCwd,
+  replyThreadForCwd,
   forgeInbox,
   seedPromptFor,
   INBOX_SEED_PROMPT,
@@ -613,6 +614,64 @@ test("draftCommentForCwd: add + set-verdict persist box-side", async () => {
   const bad = await draftCommentForCwd("/repo", { op: "frobnicate" }, k);
   assert.equal(bad.ok, false);
   assert.equal(bad.error.includes("unknown op"), true);
+});
+
+test("replyThreadForCwd: posts immediately with the resolved repo, PR number and headSha", async () => {
+  let called = null;
+  const k = draftKit({
+    headSha: "abc",
+    adapter: {
+      kind: "github",
+      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+      replyToThread: async (repo, n, input) => {
+        called = { repo, n, input };
+      },
+    },
+  });
+  const r = await replyThreadForCwd("/repo", { threadId: "t1", body: "thanks!" }, k);
+  assert.equal(r.ok, true);
+  assert.equal(called.repo.owner, "acme");
+  assert.equal(called.n, 42);
+  assert.equal(called.input.threadId, "t1");
+  assert.equal(called.input.body, "thanks!");
+  assert.equal(called.input.headSha, "abc");
+});
+
+test("replyThreadForCwd: empty threadId → error without calling the adapter", async () => {
+  let called = false;
+  const k = draftKit({
+    adapter: {
+      kind: "github",
+      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+      replyToThread: async () => {
+        called = true;
+      },
+    },
+  });
+  const r = await replyThreadForCwd("/repo", { threadId: "", body: "hi" }, k);
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "missing threadId");
+  assert.equal(called, false);
+});
+
+test("replyThreadForCwd: empty body → error without calling the adapter", async () => {
+  let called = false;
+  const k = draftKit({
+    adapter: {
+      kind: "github",
+      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+      replyToThread: async () => {
+        called = true;
+      },
+    },
+  });
+  const r = await replyThreadForCwd("/repo", { threadId: "t1", body: "   " }, k);
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "empty reply");
+  assert.equal(called, false);
 });
 
 test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with correct anchors, then clears", async () => {
