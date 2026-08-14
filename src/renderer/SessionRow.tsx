@@ -61,22 +61,30 @@ const ROW_SELECTED =
 const ROW_REST = "hover:bg-fill-hover";
 
 // Child (`.child`): 26px indent + the `left:13px` tree connectors. The
-// horizontal connector reuses ::before, the vertical uses ::after.
+// horizontal elbow stub is ::before, the vertical trunk is ::after. This is
+// the geometry EVERY child shares; only the ink (rest vs selected) and the
+// trunk's end (mid vs full row) vary, as the two pairs below.
+//
+// The trunk starts 4px ABOVE the row (`-top-1`, the exact negative of
+// ROW_BASE's `mb-1` gutter), so it closes the gap to whatever sits above it —
+// the parent row for the first child, the previous sibling for the rest.
 const ROW_CHILD =
   "pl-[26px] " +
   "before:absolute before:content-[''] before:left-[13px] before:top-1/2 " +
-  "before:h-px before:w-[7px] before:bg-border " +
-  "after:absolute after:content-[''] after:left-[13px] after:top-0 after:bottom-1/2 " +
-  "after:w-px after:bg-border";
+  "before:h-px before:w-[7px] " +
+  "after:absolute after:content-[''] after:left-[13px] after:-top-1 " +
+  "after:w-px";
 
-// Selected child: the connectors turn `--accent` (`.srow.child.on`), replacing
-// the normal row's marker.
-const ROW_CHILD_SELECTED =
-  "pl-[26px] " +
-  "before:absolute before:content-[''] before:left-[13px] before:top-1/2 " +
-  "before:h-px before:w-[7px] before:bg-accent " +
-  "after:absolute after:content-[''] after:left-[13px] after:top-0 after:bottom-1/2 " +
-  "after:w-px after:bg-accent";
+// Connector ink: --border at rest, --accent when the child is selected
+// (`.srow.child.on`), replacing the normal row's marker.
+const ROW_CHILD_INK = "before:bg-border after:bg-border";
+const ROW_CHILD_INK_SELECTED = "before:bg-accent after:bg-accent";
+
+// Trunk end. A child with a sibling below runs to its own bottom edge, where
+// that sibling's `-top-1` picks it up, so the tree reads as one unbroken line.
+// The LAST child stops at the elbow so the tree doesn't dangle past the group.
+const ROW_CHILD_TRUNK = "after:bottom-0";
+const ROW_CHILD_TRUNK_LAST = "after:bottom-1/2";
 
 // The 7px status dot. The base carries no background — the variant owns the
 // colour outright so two bg-* classes never fight over CSS source order. The
@@ -106,6 +114,7 @@ export function SessionRow({
   status,
   selected = false,
   child = false,
+  lastChild = false,
   name,
   age,
   ageStale = false,
@@ -124,6 +133,9 @@ export function SessionRow({
   selected?: boolean;
   /** `.child` — 26px indent + the `left:13px` tree connectors. */
   child?: boolean;
+  /** Last child in its group — the trunk stops at the elbow instead of
+   *  running on to the next sibling. Ignored unless `child`. */
+  lastChild?: boolean;
   /** The one-line name (`.t`). */
   name: ReactNode;
   /** The trailing age (`.age`). Empty in a reserved 20px slot when omitted. */
@@ -142,10 +154,13 @@ export function SessionRow({
   onClick?: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
+  const childChrome = [
+    ROW_CHILD,
+    selected ? ROW_CHILD_INK_SELECTED : ROW_CHILD_INK,
+    lastChild ? ROW_CHILD_TRUNK_LAST : ROW_CHILD_TRUNK,
+  ].join(" ");
   const row =
-    ROW_BASE +
-    " " +
-    (child ? (selected ? ROW_CHILD_SELECTED : ROW_CHILD) : selected ? ROW_SELECTED : ROW_REST);
+    ROW_BASE + " " + (child ? childChrome : selected ? ROW_SELECTED : ROW_REST);
   return (
     <div
       role="treeitem"

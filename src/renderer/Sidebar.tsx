@@ -790,7 +790,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                             killWorktreeDirtyAndClose(p.tmuxSession, w.index, wtPath, force)
                           }
                         />
-                        {kids.map((childIdx) => {
+                        {kids.map((childIdx, i) => {
                           const childWin = p.windows.find((x) => x.index === childIdx);
                           if (!childWin) return null;
                           const childActive = isProjectActive && activeWinIdx === childIdx;
@@ -802,6 +802,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                               isActive={childActive}
                               status={statusFor(p.tmuxSession, childIdx)}
                               focused={focusedKey === `job:${p.tmuxSession}:${childIdx}`}
+                              lastChild={i === kids.length - 1}
                               onActivate={() => activateWindow(p, childIdx)}
                               onClose={() =>
                                 setConfirmDeleteFor({
@@ -1138,6 +1139,7 @@ function JobChildRow({
   isActive,
   status,
   focused,
+  lastChild,
   onActivate,
   onClose,
   title,
@@ -1150,6 +1152,7 @@ function JobChildRow({
   isActive: boolean;
   status: WindowStatusUI | undefined;
   focused: boolean;
+  lastChild: boolean;
   onActivate: () => void;
   onClose: () => void;
   title: string;
@@ -1171,6 +1174,7 @@ function JobChildRow({
           statusTitle={dot.title}
           selected={isActive}
           child
+          lastChild={lastChild}
           name={w.name}
           age={age.text}
           ageStale={age.stale}

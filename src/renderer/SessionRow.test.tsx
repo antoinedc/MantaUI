@@ -135,6 +135,23 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(el.className).not.toContain("before:bg-border");
   });
 
+  it("a child's trunk spans the gutter, and only the last child stops at the elbow", () => {
+    h = mount(<SessionRow status="ok" name="mid" child />);
+    let el = h.container.firstElementChild as HTMLElement;
+    // Starts 4px above its own box — the exact negative of ROW_BASE's mb-1 —
+    // so it meets whatever sits above, and runs to its own bottom edge.
+    expect(el.className).toContain("after:-top-1");
+    expect(el.className).toContain("after:bottom-0");
+    expect(el.className).not.toContain("after:bottom-1/2");
+    h.unmount();
+
+    h = mount(<SessionRow status="ok" name="last" child lastChild />);
+    el = h.container.firstElementChild as HTMLElement;
+    expect(el.className).toContain("after:-top-1");
+    expect(el.className).toContain("after:bottom-1/2");
+    expect(el.className).not.toContain("after:bottom-0");
+  });
+
   it("a stale age is visibility-hidden at rest and reveals on row hover", () => {
     h = mount(<SessionRow status="default" name="x" age="2h" ageStale />);
     const el = h.container.firstElementChild as HTMLElement;
