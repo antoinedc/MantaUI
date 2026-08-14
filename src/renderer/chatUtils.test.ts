@@ -4269,6 +4269,8 @@ describe("preferLinkedPr (BET-852)", () => {
     expect(out!.number).toBe(412);
     expect(out!.url).toBe("");
     expect(out!.reviewers).toEqual([]);
+  });
+});
 
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {
