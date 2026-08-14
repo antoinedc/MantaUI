@@ -2375,9 +2375,20 @@ after processing, long before a human sees it.
 ### Versioning
 
 `MARKETING_VERSION` (CFBundleShortVersionString) lives in
-`project.pbxproj` (both Debug+Release). Bump it to ship a new TestFlight
-version; the auto-tag workflow keys off it. `CURRENT_PROJECT_VERSION` (build
-number) — Codemagic/ASC handle uniqueness. First shipped version: `1.0.1`.
+`mobile/native/project.yml` (the xcodegen source of truth; the pbxproj is
+derived from it). Bump it to ship a new TestFlight build; the auto-tag workflow
+keys off it. `CURRENT_PROJECT_VERSION` (build number) — Codemagic/ASC handle
+uniqueness. First shipped version: `1.0.1`.
+
+**The version line is CONTINUOUS across the Swift rewrite — do not reset it.**
+The Capacitor app shipped up to `1.0.16`; the native rewrite started its own
+`project.yml` at `0.1.0` and shipped `0.1.0`–`0.1.2`, which reads to a tester as
+the app going BACKWARDS (TestFlight sorts them below every build they already
+had, and the pre-release version list interleaves two unrelated trains). The
+line was rejoined at **`1.0.17`** on 2026-08-14. Anything numbered `0.x` is
+from that brief window — never bump into `0.x` again, and never "start fresh"
+on a rewrite: the users' install history is the thing being versioned, not the
+codebase's.
 
 ## Release & CD pipeline — TAG-DRIVEN, one manual step
 
