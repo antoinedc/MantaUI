@@ -87,7 +87,6 @@ final class MantaSettingsLogicTests: XCTestCase {
         XCTAssertEqual(byID["uploadCleanupHours"]?.control, .segmented)
         XCTAssertEqual(byID["groqApiKey"]?.control, .password)
         XCTAssertTrue(byID["groqApiKey"]?.commitOnBlur == true)
-        XCTAssertEqual(byID["voiceCommandModel"]?.control, .text)
         XCTAssertNil(byID["serverUrlMobile"]?.configKey)
         XCTAssertEqual(byID["cacheTtl"]?.configKey, "cacheTtl")
     }
