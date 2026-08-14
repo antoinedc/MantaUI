@@ -488,6 +488,13 @@ async function defaultCurrentBranch(cwd) {
   }
 }
 
+// Resolve the PR base default from the forge API (the single source of truth),
+// never from a local git ref. Injectable via `deps.getDefaultBranch` so tests
+// stay I/O-free.
+async function defaultGetDefaultBranch({ adapter, repo }) {
+  return adapter.getDefaultBranch(repo);
+}
+
 // The shared cwd → origin → forge → token → adapter scaffold that every
 // cwd-scoped forge read/write resolves. pullRequestForCwd, resolveWriteContext
 // (and its write/draft consumers) and forgeDiffForCwd all did this by hand;
@@ -760,16 +767,19 @@ export async function forgeInbox(deps = {}) {
 // thing we push and open a PR from).
 async function resolveWriteContext(cwd, deps, wantBranch = true) {
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const getDefaultBranch = deps.getDefaultBranch ?? defaultGetDefaultBranch;
 
   const ctx = await resolveForgeContext(cwd, deps);
   if (ctx.error) return { error: ctx.error };
   const { forge, repo, adapter } = ctx;
   let head = null;
+  let base = null;
   if (wantBranch) {
     head = await currentBranch(cwd);
     if (!head) return { error: "no_branch" };
+    base = await getDefaultBranch({ adapter, repo });
   }
-  return { forge, repo, adapter, head };
+  return { forge, repo, adapter, head, base };
 }
 
 /**
@@ -793,11 +803,12 @@ async function resolveWriteContext(cwd, deps, wantBranch = true) {
 export async function shipPreview(cwd, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
-  const base = deps.defaultBase ?? "main";
+  const base = ctx.base;
+  const runGit = deps.run ?? run;
 
   let files = [];
   try {
-    const { stdout } = await run("git", ["-C", cwd, "diff", "--name-only", `origin/${base}...${ctx.head}`, "--"]);
+    const { stdout } = await runGit("git", ["-C", cwd, "diff", "--name-only", `origin/${base}...${ctx.head}`, "--"]);
     files = String(stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   } catch {
     // origin/<base> may not exist locally yet — best-effort empty.
@@ -939,7 +950,7 @@ export async function shipPullRequest(cwd, { title, body = "", base, draft = fal
     const res = await ctx.adapter.createPullRequest(ctx.repo, {
       title,
       body,
-      base: base ?? "main",
+      base: base ?? ctx.base,
       head: ctx.head,
       draft: draft ?? false,
     });

@@ -496,3 +496,15 @@ test("parseGlabToken reads the token for a host from glab config text", () => {
   assert.equal(parseGlabToken(cfg, "missing.com"), null);
   assert.equal(parseGlabToken("", "gitlab.com"), null);
 });
+
+test("getDefaultBranch maps the project's default_branch", async () => {
+  const url = "https://gitlab.com/api/v4/projects/acme%2Fwidget";
+  const adapter = createGitlabAdapter(fakeRequest({ [url]: { default_branch: "develop" } }));
+  assert.equal(await adapter.getDefaultBranch(REPO), "develop");
+});
+
+test("getDefaultBranch falls back to main when the field is absent", async () => {
+  const url = "https://gitlab.com/api/v4/projects/acme%2Fwidget";
+  const adapter = createGitlabAdapter(fakeRequest({ [url]: { path_with_namespace: "acme/widget" } }));
+  assert.equal(await adapter.getDefaultBranch(REPO), "main");
+});

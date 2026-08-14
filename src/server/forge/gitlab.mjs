@@ -514,5 +514,17 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
       const { data } = await requestWrite(url, { method: "PUT", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
     },
+
+    // GET /projects/{encoded id} — the repo's default branch (the PR base).
+    // Returns `"main"` when the field is missing or the payload is malformed.
+    async getDefaultBranch(repo) {
+      let data = {};
+      try {
+        ({ data } = await request(`${apiBase}${projectPath(repo)}`));
+      } catch {
+        // fall through to "main"
+      }
+      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : "main";
+    },
   };
 }

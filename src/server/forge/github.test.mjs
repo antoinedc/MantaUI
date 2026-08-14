@@ -486,6 +486,20 @@ test("listMyRepos drops read-only repos and orders most-recently-pushed first", 
   assert.ok(!data.some((r) => r.fullName === "acme/readonly"));
 });
 
+// ---- getDefaultBranch: the single-repo default-branch read (BET-891) -------
+
+test("getDefaultBranch maps the repo's default_branch", async () => {
+  const url = "https://api.github.com/repos/acme/widget";
+  const adapter = createGithubAdapter(fakeRequest({ [url]: { default_branch: "develop" } }));
+  assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), "develop");
+});
+
+test("getDefaultBranch falls back to main when the field is absent", async () => {
+  const url = "https://api.github.com/repos/acme/widget";
+  const adapter = createGithubAdapter(fakeRequest({ [url]: { full_name: "acme/widget" } }));
+  assert.equal(await adapter.getDefaultBranch({ owner: "acme", repo: "widget" }), "main");
+});
+
 // ---- Work inbox (BET-795) --------------------------------------------------
 
 test("buildInboxQueries returns the three cross-repo populations with their reasons", () => {
