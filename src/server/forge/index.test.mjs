@@ -289,6 +289,42 @@ test("pullRequestForCwd: the match is exact, not positional", async () => {
   assert.equal(r.pr.headRef, "feature/x");
 });
 
+test("pullRequestForCwd: supplies branch/base/aheadCount for the ship gate", async () => {
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    getDefaultBranch: async () => "main",
+    run: async (_cmd, args) => {
+      assert.deepEqual(args, ["-C", "/repo", "rev-list", "--count", "origin/main..feature/x"]);
+      return { stdout: "5\n", stderr: "" };
+    },
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () => fakeAdapter({ prs: [] }),
+  });
+  assert.equal(r.pr, null);
+  assert.equal(r.error, null);
+  assert.equal(r.branch, "feature/x");
+  assert.equal(r.base, "main");
+  assert.equal(r.aheadCount, 5);
+});
+
+test("pullRequestForCwd: aheadCount is null when the rev-list call throws", async () => {
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    getDefaultBranch: async () => "main",
+    run: async () => {
+      throw new Error("origin/main not fetched locally");
+    },
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () => fakeAdapter({ prs: [] }),
+  });
+  assert.equal(r.pr, null);
+  assert.equal(r.branch, "feature/x");
+  assert.equal(r.base, "main");
+  assert.equal(r.aheadCount, null);
+});
+
 test("getAdapter throws UnsupportedByForgeError for an unknown kind", async () => {
   const runtime = createForgeRuntime({ fetch: async () => json({}, 200, {}) });
   assert.throws(() => runtime.getAdapter("gitea", "t"), (e) => e.name === "UnsupportedByForgeError");
@@ -352,11 +388,18 @@ test("shipPullRequest: no forge → no_forge, never pushes", async () => {
   assert.equal(pushed.length, 0);
 });
 
-test("shipPullRequest: push (setUpstream) then createPullRequest with draft", async () => {
+test("shipPullRequest: push (setUpstream) then createPullRequest without a draft flag", async () => {
+  let createArg = null;
   const pushed = [];
-  const created = { ...OPEN_PR, number: 88, draft: true };
-  const adapter = writeAdapter({ created });
-  const r = await shipPullRequest("/repo", { title: "Forge seam", body: "B", base: "main", draft: true }, {
+  const created = { ...OPEN_PR, number: 88 };
+  const adapter = {
+    kind: "github",
+    createPullRequest: async (_repo, input) => {
+      createArg = input;
+      return { data: created, stale: false };
+    },
+  };
+  const r = await shipPullRequest("/repo", { title: "Forge seam", body: "B", base: "main" }, {
     ...SHIP_DEPS,
     getAdapter: () => adapter,
     gitPush: async (i) => { pushed.push(i); return { stdout: "", stderr: "" }; },
@@ -365,6 +408,13 @@ test("shipPullRequest: push (setUpstream) then createPullRequest with draft", as
   assert.equal(r.url, created.url);
   assert.equal(pushed.length, 1);
   assert.deepEqual(pushed[0], { cwd: "/repo", branch: "feature/forge", setUpstream: true });
+  assert.deepEqual(createArg, {
+    title: "Forge seam",
+    body: "B",
+    base: "main",
+    head: "feature/forge",
+  });
+  assert.equal("draft" in createArg, false, "no draft flag is sent to the adapter");
 });
 
 test("shipPullRequest: push failure surfaces a push-failed error, never creates", async () => {

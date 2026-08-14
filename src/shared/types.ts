@@ -500,6 +500,13 @@ export type ForgePullRequestResult = {
   rollup: CheckRollup;
   stale: boolean;
   error: "no_forge" | "not_connected" | null;
+  // Branch state for the ship gate (BET-892), so the forge surface can decide
+  // whether a "Create pull request" action even makes sense BEFORE anything is
+  // clicked. `base` is the repo default branch (resolved box-side), `aheadCount`
+  // is commits ahead of `origin/<base>` (null when unknown / not fetched).
+  branch: string | null;
+  base: string | null;
+  aheadCount: number | null;
 };
 
 // A normalised forge review thread (the review pane's "incoming thread").
@@ -582,13 +589,13 @@ export type ForgeInboxResult = {
 // ----- Forge write path (BET-794) -----
 
 // forge:ship input — push the current branch then (only after the renderer's
-// human confirm card) open a pull request. `base` defaults to "main".
+// human confirm card) open a pull request. `base` defaults to "main". PRs are
+// always created as real (non-draft) pull requests (BET-892).
 export type ForgeShipInput = {
   cwd: string;
   title: string;
   body?: string;
   base?: string;
-  draft?: boolean;
 };
 
 export type ForgeShipResult =
@@ -597,8 +604,9 @@ export type ForgeShipResult =
 
 // forge:ship-preview — the facts the confirm card needs BEFORE anything is
 // pushed: the head branch, the base branch (PR target), a best-effort count
-// of files changed on the branch, and a **drafted title + body** (design §4.5
-// step 1) the card seeds editable fields from. The body honours the repo's PR
+// of files changed on the branch, and a **resolved title + body** (design §4.5
+// step 1) the confirm card displays as plain text (BET-892 — the title/body
+// are edited on GitHub, not in the card). The body honours the repo's PR
 // template when one exists.
 export type ForgeShipPreviewInput = { cwd: string };
 

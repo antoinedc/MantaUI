@@ -28,6 +28,7 @@ import {
   shouldOfferForgeConnect,
   failuresToAgentPrompt,
   branchPanelState,
+  resolveShipState,
   canMerge,
   type ChecksChipTone,
   type ContextBreakdown,
@@ -103,7 +104,8 @@ export function SessionHeader({
   shipError,
   shipBase,
   shipFileCount,
-  onDraftPr,
+  base,
+  aheadCount,
   onCreatePr,
   onEnsureShipPreview,
 }: {
@@ -179,7 +181,14 @@ export function SessionHeader({
   // popover opens). null while the preview is still loading → rows render "—".
   shipBase?: string | null;
   shipFileCount?: number | null;
-  onDraftPr?: () => void;
+  // The ship gate (BET-892): the session's current branch, the repo default
+  // base branch, and commits ahead — supplied by the forge:pull-request poll
+  // (no second poll) so the popover can decide whether a Create-PR action is
+  // even shown before anything is clicked.
+  base?: string | null;
+  aheadCount?: number | null;
+  // Opens the (single) Create-PR confirmation. Optional so non-forge callers /
+  // tests stay byte-identical.
   onCreatePr?: () => void;
   onEnsureShipPreview?: () => void;
 }) {
@@ -370,8 +379,9 @@ export function SessionHeader({
             metadata beside the breadcrumb rather than as a control. When the
             forge is connected the chip opens the ONE git surface — the branch
             popover [BET-867] — carrying either the PR (merge surface) or the
-            Draft PR / Create PR offer; a scratch dir with no forge keeps the
-            plain non-interactive Tag (byte-identical to today). */}
+            Create-PR offer gated on branch state (BET-892); a scratch dir
+            with no forge keeps the plain non-interactive Tag (byte-identical
+            to today). */}
       {branchState !== "none" ? (
         <BranchChip
           branch={branch ?? ""}
@@ -384,7 +394,8 @@ export function SessionHeader({
           shipError={shipError ?? null}
           shipBase={shipBase ?? null}
           shipFileCount={shipFileCount ?? null}
-          onDraftPr={onDraftPr}
+          base={base ?? null}
+          aheadCount={aheadCount ?? null}
           onCreatePr={onCreatePr}
           onEnsureShipPreview={onEnsureShipPreview}
           onOpenExternal={onOpenExternal}
@@ -989,11 +1000,12 @@ function SessionMenu({
 // attribute, not a peer — no second PR chip). With the forge connected it
 // opens the branch popover in two states — the branch has a PR ([F1]: title,
 // state, refs, reviewers, threads, mergeability + Merge / Review changes /
-// open-on-forge), or it does not ([F2]: Base / Changes from the ship preview
-// + Draft PR… / Create PR). BET-867 is an owner-approved departure from
-// BET-789's [C2]: the no-PR branch now opens a popover where it previously
-// stayed a plain non-interactive Tag; a scratch dir with no forge keeps the
-// Tag unchanged (branchPanelState == "none").
+// open-on-forge), or it does not ([F2]: the ship gate gated on branch state —
+// BET-892: Base / Changes + a single primary Create pull request when ready,
+// or "Nothing to ship" when there are no commits ahead of base). BET-867 is an
+// owner-approved departure from BET-789's [C2]: the no-PR branch now opens a
+// popover where it previously stayed a plain non-interactive Tag; a scratch dir
+// with no forge keeps the Tag unchanged (branchPanelState == "none").
 //
 // The panel props are shared by BranchChip and BranchPanel (the chip passes
 // them straight through) — one type, no parallel re-declaration.
@@ -1008,7 +1020,8 @@ type BranchPanelProps = {
   shipError: string | null;
   shipBase: string | null;
   shipFileCount: number | null;
-  onDraftPr?: () => void;
+  base: string | null;
+  aheadCount: number | null;
   onCreatePr?: () => void;
   onOpenExternal?: (url: string) => void;
   onReviewChanges?: () => void;
@@ -1097,8 +1110,11 @@ function PanelRow({
 }
 
 // The branch popover's single surface, branching on `pr` presence (BET-867).
-// PR present → the merge surface [F1]; no PR → the Draft PR… / Create PR
-// offer [F2][F3][F4]. PanelRow is reused verbatim for both states' rows.
+// PR present → the merge surface [F1]; no PR → the ship gate (BET-892) gated
+// on branch state: a single primary "Create pull request" when there are
+// commits ahead of base, "Nothing to ship" when there aren't, and no PR
+// surface at all on the base branch / detached HEAD. PanelRow is reused
+// verbatim for both states' rows.
 function BranchPanel({
   branch,
   pr,
@@ -1110,13 +1126,30 @@ function BranchPanel({
   shipError,
   shipBase,
   shipFileCount,
-  onDraftPr,
+  base,
+  aheadCount,
   onCreatePr,
   onOpenExternal,
   onReviewChanges,
 }: BranchPanelProps) {
   if (!pr) {
-    // No pull request on this branch [F2] — the Draft PR… / Create PR offer.
+    // No pull request on this branch — the ship gate. On the base branch or a
+    // detached HEAD there is no PR to open, so no PR surface renders at all.
+    const shipState = resolveShipState({ branch, base, aheadCount, hasPr: false });
+    if (shipState === "on-base" || shipState === "detached") {
+      return (
+        <div className="p-3">
+          <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
+            {branch}
+          </div>
+          <div className="text-xs text-text-faint">
+            {shipState === "on-base"
+              ? "On the base branch — nothing to ship."
+              : "Detached HEAD — nothing to ship."}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="p-3">
         <div className="mb-[3px] truncate text-[13.5px] font-semibold leading-snug text-text">
@@ -1124,30 +1157,35 @@ function BranchPanel({
         </div>
         {shipError ? (
           <div className="mb-2 break-words text-xs text-danger">{shipError}</div>
+        ) : shipState === "no-commits" ? (
+          <div className="mb-2 text-xs text-text-faint">
+            Nothing to ship — no commits ahead of {base}
+          </div>
         ) : (
           <div className="mb-2 text-xs text-text-faint">
-            {shipBusy ? "Opening pull request…" : "No pull request on this branch"}
+            {shipBusy ? "Opening pull request…" : "Ready to open a pull request"}
           </div>
         )}
-        <div className="flex flex-col">
-          <PanelRow label="Base" value={shipBase ?? "—"} />
-          <PanelRow
-            label="Changes"
-            value={
-              shipFileCount != null
-                ? `${shipFileCount} file${shipFileCount === 1 ? "" : "s"}`
-                : "—"
-            }
-          />
-        </div>
-        <div className="mt-3 flex flex-nowrap items-center gap-2">
-          <Button tone="primary" disabled={shipBusy} onClick={onDraftPr}>
-            Draft PR…
-          </Button>
-          <Button tone="default" disabled={shipBusy} onClick={onCreatePr}>
-            {shipBusy ? "Creating…" : "Create PR"}
-          </Button>
-        </div>
+        {shipState !== "no-commits" && (
+          <>
+            <div className="flex flex-col">
+              <PanelRow label="Base" value={shipBase ?? base ?? "—"} />
+              <PanelRow
+                label="Changes"
+                value={
+                  shipFileCount != null
+                    ? `${shipFileCount} file${shipFileCount === 1 ? "" : "s"}`
+                    : "—"
+                }
+              />
+            </div>
+            <div className="mt-3 flex flex-nowrap items-center gap-2">
+              <Button tone="primary" disabled={shipBusy} onClick={onCreatePr}>
+                {shipBusy ? "Creating…" : "Create pull request"}
+              </Button>
+            </div>
+          </>
+        )}
       </div>
     );
   }

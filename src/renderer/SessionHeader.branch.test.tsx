@@ -69,12 +69,13 @@ describe("SessionHeader branch popover (BET-867)", () => {
     h = null;
   });
 
-  it("no PR + forge connected → Draft PR… / Create PR, and NOT Merge", async () => {
+  it("no PR + forge connected (ready) → a single Create pull request, and NOT Merge", async () => {
     h = mountSessionHeader({
       branch: "feat/forge-seam",
       forgeConnected: true,
       pr: null,
-      onDraftPr: vi.fn(),
+      base: "main",
+      aheadCount: 3,
       onCreatePr: vi.fn(),
       onEnsureShipPreview: () => {},
     });
@@ -82,12 +83,45 @@ describe("SessionHeader branch popover (BET-867)", () => {
     await h.flush();
 
     const text = bodyText();
-    expect(text).toContain("No pull request on this branch");
-    expect(text).toContain("Draft PR…");
-    expect(text).toContain("Create PR");
+    expect(text).toContain("Create pull request");
     expect(text).not.toContain("Merge");
+    expect(text).not.toContain("Draft PR…");
     // No PR → no merge surface / no reviewers rows.
     expect(text).not.toContain("Review changes");
+  });
+
+  it("on the base branch the popover renders no PR surface (no Create pull request)", async () => {
+    h = mountSessionHeader({
+      branch: "main",
+      forgeConnected: true,
+      pr: null,
+      base: "main",
+      aheadCount: 0,
+      onCreatePr: vi.fn(),
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    const text = bodyText();
+    expect(text).toContain("On the base branch");
+    expect(text).not.toContain("Create pull request");
+  });
+
+  it("no commits ahead of base → Nothing to ship, no button", async () => {
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: null,
+      base: "main",
+      aheadCount: 0,
+      onCreatePr: vi.fn(),
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    const text = bodyText();
+    expect(text).toContain("Nothing to ship");
+    expect(text).not.toContain("Create pull request");
   });
 
   it("PR present → Merge, Review changes and the Open-on-GitHub tooltip button, and NOT Create PR", async () => {
@@ -107,7 +141,7 @@ describe("SessionHeader branch popover (BET-867)", () => {
     expect(text).toContain("Reviewers");
     expect(text).toContain("Unresolved threads");
     expect(text).toContain("Review changes");
-    expect(text).not.toContain("Create PR");
+    expect(text).not.toContain("Create pull request");
     expect(buttonWithText("Merge")).toBeTruthy();
 
     // Icon-only open-on-forge: the label lives in `title`, not button text.
@@ -152,22 +186,23 @@ describe("SessionHeader branch popover (BET-867)", () => {
     expect(mergeBtn.title).toBe("checks failing");
   });
 
-  it("Create PR click calls the injected create handler exactly once", async () => {
+  it("Create pull request click calls the injected create handler exactly once", async () => {
     const onCreatePr = vi.fn();
     h = mountSessionHeader({
       branch: "feat/forge-seam",
       forgeConnected: true,
       pr: null,
+      base: "main",
+      aheadCount: 3,
       shipBase: "main",
       shipFileCount: 18,
       onCreatePr,
-      onDraftPr: vi.fn(),
       onEnsureShipPreview: () => {},
     });
     openBranchChip(h);
     await h.flush();
 
-    const createBtn = buttonWithText("Create PR");
+    const createBtn = buttonWithText("Create pull request");
     act(() => createBtn.click());
     expect(onCreatePr).toHaveBeenCalledTimes(1);
 
@@ -177,14 +212,15 @@ describe("SessionHeader branch popover (BET-867)", () => {
     expect(text).toContain("18 files");
   });
 
-  it("while a ship is in flight both buttons disable and Create PR labels Creating…", async () => {
+  it("while a ship is in flight the Create pull request button disables and labels Creating…", async () => {
     h = mountSessionHeader({
       branch: "feat/forge-seam",
       forgeConnected: true,
       pr: null,
+      base: "main",
+      aheadCount: 3,
       shipBusy: true,
       shipError: null,
-      onDraftPr: vi.fn(),
       onCreatePr: vi.fn(),
       onEnsureShipPreview: () => {},
     });
@@ -193,7 +229,6 @@ describe("SessionHeader branch popover (BET-867)", () => {
 
     const text = bodyText();
     expect(text).toContain("Opening pull request…");
-    expect(buttonWithText("Draft PR…").disabled).toBe(true);
     expect(buttonWithText("Creating…").disabled).toBe(true);
   });
 });

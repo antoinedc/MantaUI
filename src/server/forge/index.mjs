@@ -611,21 +611,49 @@ async function listOpenPrs(adapter, repo) {
  */
 export async function pullRequestForCwd(cwd, deps = {}) {
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const getDefaultBranch = deps.getDefaultBranch ?? defaultGetDefaultBranch;
+  const runGit = deps.run ?? run;
 
   const ctx = await resolveForgeContext(cwd, deps);
-  if (ctx.error) return { ...EMPTY, error: ctx.error };
+
+  // Branch state for the ship gate (BET-892), resolved from the same context
+  // `resolveWriteContext` uses — NOT a second poll or a new RPC. Best-effort:
+  // anything that fails resolves to null. `base` is the repo default branch
+  // (from the forge API); `aheadCount` is commits ahead of origin/<base>.
+  const branch = ctx.error ? null : await currentBranch(cwd);
+  let base = null;
+  if (!ctx.error) {
+    try {
+      base = await getDefaultBranch({ adapter: ctx.adapter, repo: ctx.repo });
+    } catch {
+      base = null;
+    }
+  }
+  let aheadCount = null;
+  if (branch && base) {
+    try {
+      const { stdout } = await runGit("git", ["-C", cwd, "rev-list", "--count", `origin/${base}..${branch}`]);
+      aheadCount = Number(String(stdout ?? "").trim());
+      if (!Number.isFinite(aheadCount) || aheadCount < 0) aheadCount = null;
+    } catch {
+      aheadCount = null;
+    }
+  }
+  const shipState = { branch, base, aheadCount };
+
+  if (ctx.error) return { ...EMPTY, ...shipState, error: ctx.error };
   const { adapter, repo } = ctx;
 
   const { prs: prArr, stale, rateLimited } = await listOpenPrs(adapter, repo);
-  if (rateLimited) return { ...EMPTY, stale: true };
+  if (rateLimited) return { ...EMPTY, ...shipState, stale: true };
 
-  if (prArr.length === 0) return { ...EMPTY, stale };
+  if (prArr.length === 0) return { ...EMPTY, ...shipState, stale };
 
-  const branch = await currentBranch(cwd);
-  if (!branch) return { ...EMPTY, stale };
+  const branchName = await currentBranch(cwd);
+  if (!branchName) return { ...EMPTY, ...shipState, stale };
 
-  const candidate = prArr.find((p) => p.headRef === branch);
-  if (!candidate) return { ...EMPTY, stale };
+  const candidate = prArr.find((p) => p.headRef === branchName);
+  if (!candidate) return { ...EMPTY, ...shipState, stale };
 
   // Full normalised representation — getPullRequest populates reviewers + the
   // unresolved-thread count that the list endpoint cannot. Falls back to the
@@ -652,7 +680,7 @@ export async function pullRequestForCwd(cwd, deps = {}) {
     staleChecks = true;
   }
 
-  return { pr, checks, rollup: rollupChecks(checks), stale: staleChecks, error: null };
+  return { pr, checks, rollup: rollupChecks(checks), stale: staleChecks, error: null, ...shipState };
 }
 
 // ---- Inbox seed prompt (BET-795) ----------------------------------------
@@ -923,18 +951,18 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  * Ship: push the current branch, then open a pull request for it. The human
  * gate (issue §4) lives ABOVE this — this function is the push+create step
  * that runs only after an explicit confirm. It is the ONE code path for
- * "open a PR", reused by the human ship action and any future automated one
- * (a background job reaches it as a draft and never merges).
+ * "open a PR", reused by the human ship action and any future automated one.
+ * PRs are always created as real (non-draft) pull requests (BET-892).
  *
  * Push uses gitPush (120s timeout — a real network push is killed by the
  * shared 10s `run()`), then createPullRequest with the given config.
  *
  * @param {string} cwd
- * @param {{ title: string, body?: string, base?: string, draft?: boolean }} input
+ * @param {{ title: string, body?: string, base?: string }} input
  * @param {object} [deps] injectable I/O
  * @returns {Promise<{ ok: true, pr: object, url: string } | { ok: false, error: string }>}
  */
-export async function shipPullRequest(cwd, { title, body = "", base, draft = false } = {}, deps = {}) {
+export async function shipPullRequest(cwd, { title, body = "", base } = {}, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
   const gitPush = deps.gitPush ?? localGitPush;
@@ -952,7 +980,6 @@ export async function shipPullRequest(cwd, { title, body = "", base, draft = fal
       body,
       base: base ?? ctx.base,
       head: ctx.head,
-      draft: draft ?? false,
     });
     pr = res.data;
   } catch (e) {
