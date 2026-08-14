@@ -342,6 +342,9 @@ type State = {
   // the hourly server-side sweep deletes it. 0 disables cleanup. Box-server
   // config key — applies to uploads from both desktop and mobile. Default 24.
   uploadCleanupHours: number;
+  // BET-834: hours a voice note's audio survives before the sweep deletes it
+  // (voiceNotes.mjs). 0 = keep forever. Default 168. Transcript/peaks kept.
+  voiceNoteTtlHours: number;
   // Override destination for agent-pushed files. "" = main's default (~/Downloads).
   downloadsDir: string;
   // Global default model for new/cleared sessions. Set in Settings, persisted
@@ -689,6 +692,7 @@ export const useStore = create<State>((set, get) => ({
   worktreePerSession: false,
   worktreeCleanOnClose: false,
   uploadCleanupHours: 24,
+  voiceNoteTtlHours: 168,
   downloadsDir: "",
   defaultModel: null,
   deactivatedMainModels: [],
@@ -926,6 +930,7 @@ export const useStore = create<State>((set, get) => ({
       worktreePerSession: c.worktreePerSession ?? false,
       worktreeCleanOnClose: c.worktreeCleanOnClose ?? false,
       uploadCleanupHours: typeof c.uploadCleanupHours === "number" ? c.uploadCleanupHours : 24,
+      voiceNoteTtlHours: typeof c.voiceNoteTtlHours === "number" ? c.voiceNoteTtlHours : 168,
       downloadsDir: c.downloadsDir ?? "",
       defaultModel: c.defaultModel ?? null,
       deactivatedMainModels: c.deactivatedMainModels ?? [],
