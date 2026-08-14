@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppConfig, CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -3138,4 +3138,54 @@ export function buildVoiceNoteMap(
     }
   }
   return map;
+}
+
+// BET-852: the stored session-link PR ref (`projects[].link.pr`) is the source
+// of truth for "what PR is this session shipping" — recorded the moment
+// `shipPullRequest` opens a PR (onPrOpened → linkPullRequest). Reading it off
+// the AppConfig the box serves lets the branch chip show the linked PR number
+// immediately (and even when the 15s forge poll has not resolved), instead of
+// depending on the live `forgePullRequest` lookup alone. Returns the stored
+// PR number when the session has a saved link slot; null otherwise (a PR
+// opened outside the app, or before the first ship), which is the fall-back
+// to live-lookup territory.
+export function linkedPrNumber(
+  config: Pick<AppConfig, "projects"> | null | undefined,
+  tmuxSession: string | null,
+): number | null {
+  if (!config || !tmuxSession) return null;
+  const proj = (config.projects ?? []).find((p) => p.tmuxSession === tmuxSession);
+  const pr = proj?.link?.pr;
+  return pr && Number.isInteger(pr.number) && pr.number > 0 ? pr.number : null;
+}
+
+// BET-852: resolve the PR object the branch chip should render. Prefers the
+// stored link's number when the session has one (per the issue, the stored
+// link wins); otherwise preserves today's live-lookup behavior unchanged.
+// When the live poll has already resolved the SAME PR we keep its full
+// details (title/state/checks panel); when it has not resolved yet we render
+// a minimal card so `#N` appears immediately from the stored link rather than
+// waiting for the poll.
+export function preferLinkedPr(
+  live: PullRequest | null,
+  linkedNumber: number | null,
+): PullRequest | null {
+  if (linkedNumber == null) return live;
+  if (live) return live.number === linkedNumber ? live : { ...live, number: linkedNumber };
+  return {
+    number: linkedNumber,
+    title: "",
+    body: "",
+    url: "",
+    state: "open",
+    draft: false,
+    headRef: "",
+    baseRef: "",
+    headSha: "",
+    author: "",
+    reviewers: [],
+    mergeable: null,
+    mergeBlockedReason: null,
+    unresolvedThreads: 0,
+  };
 }

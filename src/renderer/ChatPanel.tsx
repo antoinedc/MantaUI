@@ -54,6 +54,8 @@ import {
   type StaleCacheResult,
   type PendingScrollWin,
   isApprovalCoveredByAlways,
+  linkedPrNumber,
+  preferLinkedPr,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
   parseModelRef,
@@ -236,6 +238,20 @@ export function ChatPanel({
   const [shipError, setShipError] = useState<string | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+  // BET-852: the stored session-link PR number (`projects[].link.pr`), read off
+  // the box config. The branch chip prefers it over the (15s) live forge lookup
+  // when present — so a freshly-shipped PR's number appears immediately and
+  // independently of the poll resolving. Refreshed on session change and after
+  // a ship/merge writes the link.
+  const [linkedPr, setLinkedPr] = useState<number | null>(null);
+  const refreshLinkedPr = useCallback(async () => {
+    try {
+      const cfg = await window.api.configGet();
+      setLinkedPr(linkedPrNumber(cfg, tmuxSession));
+    } catch {
+      /* non-fatal — fall back to the live lookup */
+    }
+  }, [tmuxSession]);
 
   // BET-418 §D: detect whether THIS session is a background job's child. A
   // job session is read-only (no composer, no cards, no model picker/fork/
@@ -536,6 +552,7 @@ export function ChatPanel({
       if (res.ok) {
         setShipOpen(false);
         setShipProposal(null);
+        void refreshLinkedPr();
         void window.api.forgePullRequest({ cwd }).then((r) => setForgeResult(r)).catch(() => {});
       } else {
         setShipError(res.error);
@@ -545,7 +562,7 @@ export function ChatPanel({
     } finally {
       setShipBusy(false);
     }
-  }, [cwd]);
+  }, [cwd, refreshLinkedPr]);
 
   // Merge the shown PR, ALWAYS with the head SHA the user approved.
   const doMerge = useCallback(async () => {
@@ -556,6 +573,7 @@ export function ChatPanel({
     try {
       const res = await window.api.forgeMerge({ cwd, number: pr.number, method: "merge", sha: pr.headSha });
       if (res.ok) {
+        void refreshLinkedPr();
         void window.api.forgePullRequest({ cwd }).then((r) => setForgeResult(r)).catch(() => {});
       } else {
         setMergeError(describeMergeFailure(res.kind));
@@ -565,7 +583,7 @@ export function ChatPanel({
     } finally {
       setMergeBusy(false);
     }
-  }, [cwd, forgeResult]);
+  }, [cwd, forgeResult, refreshLinkedPr]);
 
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
@@ -667,6 +685,12 @@ export function ChatPanel({
       // non-fatal — the forge read path is best-effort; keep last-known.
     }
   }, []);
+  // Resolve which PR the branch chip renders: the stored link's number when
+  // present, else today's live `forgePullRequest` result (the 15s poll).
+  const displayPr = useMemo(
+    () => preferLinkedPr(forge.pr, linkedPr),
+    [forge.pr, linkedPr],
+  );
 
   // BET-789: dismiss the "Connect GitHub…" offer permanently, per-box. Mirror
   // of AppConfig.forgeConnectOfferDismissed, written through the generic
@@ -694,6 +718,14 @@ export function ChatPanel({
     }, 5000);
     return () => clearInterval(branchPoll);
   }, [cwd, refreshBranch, isActive, refreshForge]);
+
+  // BET-852: refresh the stored session-link PR number on entry (and when the
+  // session changes). Gated on isActive like the other session reads — a
+  // hidden panel doesn't re-read config. Written again by ship/merge below.
+  useEffect(() => {
+    if (!isActive || !tmuxSession) return;
+    void refreshLinkedPr();
+  }, [refreshLinkedPr, isActive, tmuxSession]);
 
   // Ctrl+O toggles reasoning visibility. Matches Claude Code's TUI keybind.
   useEffect(() => {
@@ -2482,7 +2514,7 @@ export function ChatPanel({
         artifactsOpen={artifactsOpen}
         onToggleArtifacts={onToggleArtifacts}
         hiddenStatusItems={hiddenStatusItems}
-        pr={forge.pr}
+        pr={displayPr}
         checks={forge.checks}
         checksRollup={forge.rollup}
         forgeConnected={forge.connected}
