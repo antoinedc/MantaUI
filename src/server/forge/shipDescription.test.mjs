@@ -9,6 +9,8 @@ import {
   parsePrDescription,
   extractTranscriptText,
   extractAssistantText,
+  extractCompletedAssistantText,
+  isPrGenerationComplete,
   truncateTranscript,
   TRANSCRIPT_CHAR_CAP,
 } from "./shipDescription.mjs";
@@ -65,6 +67,40 @@ test("extractAssistantText returns only assistant text; empty when absent", () =
   assert.equal(extractAssistantText(messages), "  the answer  ");
   assert.equal(extractAssistantText([msg("user", [{ type: "text", text: "x" }])]), "");
   assert.equal(extractAssistantText([]), "");
+});
+
+// --- completion-aware extractor (BET-893 reviewer Block) ---------------------
+
+function assistantMsg(text, { completed } = {}) {
+  return {
+    info: { role: "assistant", ...(completed ? { time: { completed } } : {}) },
+    parts: [text ? { type: "text", text } : { type: "text", text: "" }],
+  };
+}
+
+test("isPrGenerationComplete requires a non-empty transcript AND a completed assistant turn", () => {
+  // Empty transcript must NOT read as complete — the window right after
+  // create+prompt has zero messages server-side yet (the shared helper reads
+  // empty as "complete", which would fall back prematurely here).
+  assert.equal(isPrGenerationComplete([]), false);
+  assert.equal(isPrGenerationComplete(undefined), false);
+  // A user message only → turn in flight.
+  assert.equal(isPrGenerationComplete([msg("user", [{ type: "text", text: "go" }])]), false);
+  // Assistant message without a completion stamp → still in flight (partial).
+  assert.equal(isPrGenerationComplete([assistantMsg("partial text")]), false);
+  // Assistant message WITH info.time.completed → complete.
+  assert.equal(isPrGenerationComplete([assistantMsg("final", { completed: 12345 })]), true);
+});
+
+test("extractCompletedAssistantText returns null while the turn is in flight, text only once complete", () => {
+  // Partial / still-streaming assistant text is NOT returned — the fix for the
+  // reviewed Block (never capture a truncated reply as the final description).
+  assert.equal(extractCompletedAssistantText([assistantMsg("truncated...")]), null);
+  assert.equal(extractCompletedAssistantText([msg("user", [{ type: "text", text: "go" }])]), null);
+  // Once complete, returns the assistant text.
+  assert.equal(extractCompletedAssistantText([assistantMsg("Full title\n\nFull body", { completed: 1 })]), "Full title\n\nFull body");
+  // Complete but no text → "" (the caller falls back).
+  assert.equal(extractCompletedAssistantText([assistantMsg("", { completed: 1 })]), "");
 });
 
 // ---------------------------------------------------------------------------

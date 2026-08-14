@@ -8,6 +8,8 @@
 // turn the raw inputs into a prompt and to turn the model's raw reply into a
 // `{ title, body }`.
 
+import { isAssistantTurnComplete } from "../../shared/streamInterpretation.mjs";
+
 // Hard cap on how much transcript context we hand the model. The conversation
 // is the *why* behind the diff — that is the point — but a whole session is
 // too much. Oldest text drops first so the model sees the most recent context.
@@ -48,6 +50,26 @@ export function extractAssistantText(messages) {
     }
   }
   return out.join("");
+}
+
+// Whether the throwaway-generator transcript holds a COMPLETED assistant turn.
+// Unlike the shared `isAssistantTurnComplete` (which reads an EMPTY transcript
+// as "nothing running" = complete), the generator must NOT treat an empty
+// transcript as complete — there is a window right after create+prompt where
+// zero messages exist server-side yet, and treating that as "done" would fall
+// back prematurely. So we add an explicit non-empty guard on top.
+export function isPrGenerationComplete(messages) {
+  return Array.isArray(messages) && messages.length > 0 && isAssistantTurnComplete(messages);
+}
+
+/** The COMPLETED assistant reply text, or null while the turn is still in
+ *  flight. This is the completion-aware extractor the poll loop uses: it will
+ *  not hand back partial, mid-stream text. Returns "" when the transcript is
+ *  complete but produced no text.
+ */
+export function extractCompletedAssistantText(messages) {
+  if (!isPrGenerationComplete(messages)) return null;
+  return extractAssistantText(messages);
 }
 
 /** Truncate a transcript string to the character cap, dropping the OLDEST text

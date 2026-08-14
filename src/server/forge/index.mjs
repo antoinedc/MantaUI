@@ -30,7 +30,7 @@
 import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey, repoKeyParts } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
 import { createSession as ocCreateSession, sendPrompt as ocSendPrompt, listMessages as ocListMessages, deleteSessionRaw as ocDeleteSessionRaw } from "../opencode.mjs";
-import { buildPrDescriptionPrompt, parsePrDescription, extractTranscriptText, extractAssistantText } from "./shipDescription.mjs";
+import { buildPrDescriptionPrompt, parsePrDescription, extractTranscriptText, extractCompletedAssistantText } from "./shipDescription.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
@@ -931,12 +931,18 @@ async function tryGeneratePrDescription(cwd, ctx, { base, files, deps }) {
       await new Promise((resolve) => setTimeout(resolve, pollMs));
       let detail;
       try {
-        detail = extractAssistantText(await listMessages(sid));
+        // Completion-aware: returns null while the assistant turn is STILL in
+        // flight, so we never capture partial, mid-stream text as the final
+        // PR description. (BET-893 reviewer Block — first poll at ~1s would
+        // otherwise hand back a truncated reply on a real model call.)
+        detail = extractCompletedAssistantText(await listMessages(sid));
       } catch {
         // Poll hiccup — keep waiting until the deadline.
         continue;
       }
-      if (detail) return parsePrDescription(detail);
+      if (detail === null) continue; // assistant turn still in flight
+      if (!detail) return null; // completed turn produced no text → fallback
+      return parsePrDescription(detail);
     }
     return null; // deadline passed without a completed assistant turn
   } catch {
