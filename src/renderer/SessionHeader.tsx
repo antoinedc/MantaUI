@@ -162,9 +162,9 @@ export function SessionHeader({
   onFillComposer?: (text: string) => void;
   onDismissForgeConnect?: () => void;
   // BET-867: the branch chip's popover is the ONE git surface. Merge + ship
-  // live here now (ForgeCard deleted), so ChatPanel threads the ship/merge
-  // state + handlers down. All optional so non-forge callers / tests stay
-  // byte-identical.
+  // live here now (the pinned forge card is deleted), so ChatPanel threads the
+  // ship/merge state + handlers down. All optional so non-forge callers / tests
+  // stay byte-identical.
   onMerge?: () => void;
   mergeBusy?: boolean;
   mergeError?: string | null;
