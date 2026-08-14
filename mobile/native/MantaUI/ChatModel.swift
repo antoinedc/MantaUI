@@ -209,11 +209,71 @@ enum ChatModel {
     /// the box's own capability flags rather than being inferred — a model can
     /// reason without exposing an effort dial, so deriving "reasoning" from the
     /// presence of variants mislabels it.
+    ///
+    /// The predicates are the two private helpers BELOW (`reasoningCapability` /
+    /// `visionCapability`), which share a single definition each with the
+    /// catalogue's capability filter (`matches(_:filter:in:)`). If the filter
+    /// and the badge ever disagreed, a row would show a glyph yet vanish under
+    /// the matching chip — the exact failure BET-895 exists to prevent.
     static func capabilityGlyphs(_ model: OpencodeModel) -> [String] {
         var glyphs: [String] = []
-        if model.capabilities?.reasoning == true { glyphs.append("reasoning") }
-        if model.capabilities?.input?.image == true { glyphs.append("vision") }
+        if reasoningCapability(model) { glyphs.append("reasoning") }
+        if visionCapability(model) { glyphs.append("vision") }
         return glyphs
+    }
+
+    /// The one "does this model reason" notion — shared by the reasoning badge
+    /// and the Reasoning filter. Reads the box's own `capabilities.reasoning`
+    /// flag (BET-825), never inferred from the presence of variants.
+    private static func reasoningCapability(_ model: OpencodeModel) -> Bool {
+        model.capabilities?.reasoning == true
+    }
+
+    /// The one "does this model accept images" notion — shared by the vision
+    /// badge and the Vision filter. Reads the box's own `input.image` flag.
+    private static func visionCapability(_ model: OpencodeModel) -> Bool {
+        model.capabilities?.input?.image == true
+    }
+
+    /// The catalogue's capability filter. `all` is the identity filter and is
+    /// the default; the other three narrow by a property the model itself
+    /// declares, so a provider that annotates nothing simply never matches.
+    enum ModelCapabilityFilter: String, CaseIterable, Sendable {
+        case all, reasoning, vision, fast
+
+        /// The chip's label — "All", "Reasoning", "Vision", "Fast".
+        var title: String {
+            switch self {
+            case .all: return "All"
+            case .reasoning: return "Reasoning"
+            case .vision: return "Vision"
+            case .fast: return "Fast"
+            }
+        }
+    }
+
+    /// Whether `model` satisfies `filter`. `all` matches everything (the
+    /// identity filter). `reasoning`/`vision` share their predicate with
+    /// `capabilityGlyphs`, so a filter never disagrees with the badge it
+    /// narrows. `fast` needs the whole `models` list because a fast twin is a
+    /// SEPARATE model id (`<id>-fast`), not a flag on the model.
+    static func matches(_ model: OpencodeModel,
+                        filter: ModelCapabilityFilter,
+                        in models: [OpencodeModel]) -> Bool {
+        switch filter {
+        case .all:
+            return true
+        case .reasoning:
+            return reasoningCapability(model)
+        case .vision:
+            return visionCapability(model)
+        case .fast:
+            return models.contains {
+                $0.providerID == model.providerID
+                    && $0.id == fastModelID(model.id)
+                    && isPickable($0)
+            }
+        }
     }
 
     // MARK: - Cockpit + catalogue copy (BET-894)

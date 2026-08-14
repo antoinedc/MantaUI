@@ -335,4 +335,108 @@ final class ModelRecentsTests: XCTestCase {
         let models = [OpencodeModel(id: "opus", providerID: "anthropic", name: "Claude Opus 4.7")]
         XCTAssertEqual(ChatModel.pickableCount(models), 1)
     }
+
+    // MARK: - ChatModel.ModelCapabilityFilter.matches (BET-895)
+
+    /// The capability filter shares its reasoning/vision predicates with
+    /// `capabilityGlyphs`, so the model's capability flags drive both.
+    private func capFilterModel(id: String = "m", providerID: String = "p",
+                                name: String = "m", enabled: Bool? = nil,
+                                reasoning: Bool? = nil, image: Bool? = nil) -> OpencodeModel {
+        OpencodeModel(
+            id: id,
+            providerID: providerID,
+            name: name,
+            enabled: enabled,
+            capabilities: ModelCapabilities(
+                reasoning: reasoning,
+                input: image.map { ModelCapabilities.Modalities(image: $0) }
+            )
+        )
+    }
+
+    func testAllFilterMatchesEverythingIncludingDisabled() {
+        let pickable = capFilterModel(id: "a")
+        let disabled = capFilterModel(id: "b", enabled: false)
+        let models = [pickable, disabled]
+        for m in models {
+            XCTAssertTrue(ChatModel.matches(m, filter: .all, in: models))
+        }
+        XCTAssertTrue(ChatModel.matches(disabled, filter: .all, in: models))
+    }
+
+    func testAllFilterIsIdentity() {
+        XCTAssertEqual(ChatModel.matches(capFilterModel(), filter: .all, in: []), true)
+    }
+
+    func testReasoningFilterUsesCapabilityFlag() {
+        let reasoning = capFilterModel(reasoning: true)
+        let notReasoning = capFilterModel()
+        XCTAssertTrue(ChatModel.matches(reasoning, filter: .reasoning, in: [reasoning]))
+        XCTAssertFalse(ChatModel.matches(notReasoning, filter: .reasoning, in: [notReasoning]))
+    }
+
+    func testVisionFilterUsesImageCapability() {
+        let vision = capFilterModel(image: true)
+        let notVision = capFilterModel()
+        XCTAssertTrue(ChatModel.matches(vision, filter: .vision, in: [vision]))
+        XCTAssertFalse(ChatModel.matches(notVision, filter: .vision, in: [notVision]))
+    }
+
+    func testFastFilterMatchesWhenPickableTwinPresent() {
+        let base = capFilterModel(id: "gpt-5.6", providerID: "openai", name: "GPT-5.6")
+        let fast = capFilterModel(id: "gpt-5.6-fast", providerID: "openai", name: "GPT-5.6 Fast")
+        XCTAssertTrue(ChatModel.matches(base, filter: .fast, in: [base, fast]))
+    }
+
+    func testFastFilterRejectsWhenTwinAbsent() {
+        let base = capFilterModel(id: "gpt-5.6", providerID: "openai", name: "GPT-5.6")
+        XCTAssertFalse(ChatModel.matches(base, filter: .fast, in: [base]))
+    }
+
+    func testFastFilterRejectsDisabledTwin() {
+        let base = capFilterModel(id: "gpt-5.6", providerID: "openai", name: "GPT-5.6")
+        let disabledFast = capFilterModel(id: "gpt-5.6-fast", providerID: "openai", name: "Fast", enabled: false)
+        XCTAssertFalse(ChatModel.matches(base, filter: .fast, in: [base, disabledFast]))
+    }
+
+    func testFastTwinMustShareProvider() {
+        let base = capFilterModel(id: "m", providerID: "p1", name: "M")
+        let otherProviderFast = capFilterModel(id: "m-fast", providerID: "p2", name: "M Fast")
+        XCTAssertFalse(ChatModel.matches(base, filter: .fast, in: [base, otherProviderFast]))
+    }
+
+    func testFastModelIsItsOwnTwinThroughFastModelID() {
+        // `fastModelID` leaves a fast id unchanged, so a fast model scheduled
+        // against the fast filter matches itself (it is pickable). This pins
+        // that the `-fast` rule is derived, never re-invented.
+        let fast = capFilterModel(id: "gpt-5.6-fast", providerID: "openai", name: "Fast")
+        XCTAssertTrue(ChatModel.matches(fast, filter: .fast, in: [fast]))
+    }
+
+    /// BET-895's consistency rule: the filter and the badge must never
+    /// disagree. For every combination of capability flags, `matches(.vision)`
+    /// is true exactly when `capabilityGlyphs` contains "vision", and likewise
+    /// for "reasoning" — a row that shows a glyph must not vanish under the
+    /// matching chip.
+    func testFilterAgreesWithGlyphs() {
+        let reasons: [Bool?] = [nil, true, false]
+        let images: [Bool?] = [nil, true, false]
+        for reasoning in reasons {
+            for image in images {
+                let m = capFilterModel(reasoning: reasoning, image: image)
+                let glyphs = ChatModel.capabilityGlyphs(m)
+                XCTAssertEqual(
+                    ChatModel.matches(m, filter: .vision, in: [m]),
+                    glyphs.contains("vision"),
+                    "reasoning=\(String(describing: reasoning)) image=\(String(describing: image))"
+                )
+                XCTAssertEqual(
+                    ChatModel.matches(m, filter: .reasoning, in: [m]),
+                    glyphs.contains("reasoning"),
+                    "reasoning=\(String(describing: reasoning)) image=\(String(describing: image))"
+                )
+            }
+        }
+    }
 }
