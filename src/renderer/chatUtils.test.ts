@@ -121,6 +121,9 @@ import {
   dispatchAppControl,
   sortInbox,
   inboxReasonLabel,
+  scrollElementToTail,
+  classifyFollowOnScroll,
+  FOLLOW_THRESHOLD_PX,
 } from "./chatUtils";
 
 import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem } from "../shared/types";
@@ -4613,5 +4616,65 @@ describe("sortInbox", () => {
     const before = [...rows];
     sortInbox(rows);
     expect(rows.map((r) => r.number)).toEqual(before.map((r) => r.number));
+  });
+});
+
+describe("scrollElementToTail", () => {
+  it("does not throw on a null element", () => {
+    expect(() => scrollElementToTail(null)).not.toThrow();
+  });
+
+  it("sets scrollTop to the element's scrollHeight", () => {
+    const el = { scrollTop: 5, scrollHeight: 4242 } as HTMLElement;
+    scrollElementToTail(el);
+    expect(el.scrollTop).toBe(4242);
+  });
+});
+
+describe("classifyFollowOnScroll", () => {
+  it("is following at the exact bottom (distance 0)", () => {
+    // scrollHeight - scrollTop - clientHeight === 0
+    expect(classifyFollowOnScroll({ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 }, 600))
+      .toBe(true);
+  });
+
+  it("is following when distance equals FOLLOW_THRESHOLD_PX (inclusive boundary)", () => {
+    expect(
+      classifyFollowOnScroll(
+        { scrollTop: 1000 - FOLLOW_THRESHOLD_PX, scrollHeight: 1000, clientHeight: 0 },
+        500,
+      ),
+    ).toBe(true);
+  });
+
+  it("is null (no decision) when away from the bottom but scrollTop increased", () => {
+    // Scrolling down through history must not toggle anything.
+    expect(
+      classifyFollowOnScroll({ scrollTop: 700, scrollHeight: 1000, clientHeight: 100 }, 500),
+    ).toBe(null);
+  });
+
+  it("is false (stop following) when away from the bottom and scrollTop decreased", () => {
+    // The user scrolled up — the only un-follow path.
+    expect(
+      classifyFollowOnScroll({ scrollTop: 300, scrollHeight: 1000, clientHeight: 100 }, 500),
+    ).toBe(false);
+  });
+
+  it("REGRESSION: content growth must not detach the transcript", () => {
+    // scrollHeight grew a lot, scrollTop unchanged, distance far past the
+    // threshold -> scrollTop did NOT decrease, so the event is `null`. This
+    // is the bug: a growing tool card must never detach the transcript.
+    expect(
+      classifyFollowOnScroll({ scrollTop: 500, scrollHeight: 2000, clientHeight: 100 }, 500),
+    ).toBe(null);
+  });
+
+  it("is following when the scroller clamped scrollTop down but lands at the bottom", () => {
+    // The transcript shrank so the browser clamped scrollTop down; the result
+    // is at the bottom, so following wins (bottom check evaluated first).
+    expect(
+      classifyFollowOnScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }, 999999),
+    ).toBe(true);
   });
 });

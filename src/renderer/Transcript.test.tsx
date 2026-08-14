@@ -67,7 +67,9 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     sessionId: "s1",
     setMessages: () => {},
     loadedAllRef: { current: false },
-    onAtBottomChange: () => {},
+    scrollerElRef: { current: null },
+    followingRef: { current: true },
+    onFollowingChange: () => {},
     taskContextValue: {
       childMessages: new Map(),
       liveChildStatus: new Map(),

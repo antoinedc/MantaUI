@@ -3378,3 +3378,45 @@ export function sortInbox(items: ForgeInboxItem[]): ForgeInboxItem[] {
   }
   return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
+
+/**
+ * Scroll a scroll container to its very bottom.
+ *
+ * `scrollTop = scrollHeight` (rather than Virtuoso's
+ * `scrollToIndex({ index: "LAST", align: "end" })`) because the transcript's
+ * Footer — the working indicator, the todo checklist, the question cards —
+ * renders BELOW the last item, and an item-aligned scroll leaves it under the
+ * fold. The browser clamps an over-large `scrollTop`, so no max() is needed.
+ * Instant only, deliberately: a smooth scroll toward a target that is still
+ * growing lands short, which is one of the ways the transcript used to detach.
+ */
+export function scrollElementToTail(el: HTMLElement | null): void {
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+/**
+ * Decide what a scroll event means for the transcript's "following" state.
+ *
+ * Returns the NEW following value, or `null` when the event carries no
+ * decision (leave the state alone). This is the whole reason the transcript no
+ * longer detaches on its own: content growing does not fire a scroll event, so
+ * it can never reach this function, and only a real position change can turn
+ * following off.
+ *
+ * - Landing within FOLLOW_THRESHOLD_PX of the bottom always means following,
+ *   whatever caused it (the user scrolling back down, our own tail scroll, or
+ *   the scroller clamping after the transcript shrank on /compact).
+ * - Moving UP while away from the bottom is the only thing that stops it.
+ */
+export const FOLLOW_THRESHOLD_PX = 64;
+
+export function classifyFollowOnScroll(
+  m: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  prevScrollTop: number,
+): boolean | null {
+  const distanceFromBottom = m.scrollHeight - m.scrollTop - m.clientHeight;
+  if (distanceFromBottom <= FOLLOW_THRESHOLD_PX) return true;
+  if (m.scrollTop < prevScrollTop) return false;
+  return null;
+}
