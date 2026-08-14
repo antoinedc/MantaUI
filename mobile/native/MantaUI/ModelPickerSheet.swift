@@ -290,11 +290,20 @@ struct ModelCatalogueView: View {
     let onPick: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var query = ""
+    /// The active capability filter. View state only — resets to `.all` every
+    /// time the catalogue is opened; it is a lookup aid, not a preference.
+    @State private var filter: ChatModel.ModelCapabilityFilter = .all
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
+    /// One pipeline, one place: capability filter → group → query. The filter
+    /// runs over the full model list first (a `fast` twin must be found in the
+    /// WHOLE list, including a model the filter would otherwise drop), then
+    /// `groups`/`filteredGroups` handle the pickable grouping and the search.
     private var groups: [(provider: String, models: [OpencodeModel])] {
-        ChatModel.filteredGroups(ChatModel.groups(modelStore.models), query: query)
+        let all = modelStore.models
+        let filtered = all.filter { ChatModel.matches($0, filter: filter, in: all) }
+        return ChatModel.filteredGroups(ChatModel.groups(filtered), query: query)
     }
 
     private func isSelected(_ m: OpencodeModel) -> Bool {
@@ -312,12 +321,13 @@ struct ModelCatalogueView: View {
         Group {
             if modelStore.loaded {
                 List {
+                    capabilityFilterSection
                     providerSections
                 }
                 .searchable(
                     text: $query,
                     placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "Search models"
+                    prompt: "Search \(ChatModel.pickableCount(modelStore.models)) models"
                 )
             } else {
                 ProgressView("Loading models…")
@@ -329,14 +339,38 @@ struct ModelCatalogueView: View {
         // Pushed view: no Done button, no detents — those belong to the sheet root.
     }
 
+    /// The catalogue's capability filter row: "All · Reasoning · Vision ·
+    /// Fast", exactly one active at a time (`.all` on entry). A plain
+    /// `HStack` — the four short chips fit one line, so this neither wraps nor
+    /// scrolls. It is the `List`'s first `Section` with no header, so it
+    /// scrolls with the content rather than pinning, and its row insets match
+    /// the model rows around it.
+    private var capabilityFilterSection: some View {
+        Section {
+            HStack(spacing: Metrics.spacing.sp2) {
+                ForEach(ChatModel.ModelCapabilityFilter.allCases, id: \.self) { f in
+                    ModelChip(
+                        title: f.title,
+                        selected: filter == f,
+                        tokens: tokens,
+                        accessibilityIdentifier: "model-filter-\(f.rawValue)"
+                    ) {
+                        filter = f
+                    }
+                }
+            }
+            .padding(.vertical, Metrics.spacing.sp1)
+        }
+    }
+
     /// The model list, grouped into a Section per provider. Empty-query misses
-    /// render the platform search empty state rather than ad-hoc text.
+    /// AND a capability filter with no matches both render the platform search
+    /// empty state — a user who filters to Vision on a box with no vision model
+    /// gets the platform state, not a blank list.
     @ViewBuilder
     private var providerSections: some View {
         if groups.isEmpty {
-            if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ContentUnavailableView.search(text: "No models match")
-            }
+            ContentUnavailableView.search(text: "No models match")
         } else {
             ForEach(groups, id: \.provider) { group in
                 Section {
