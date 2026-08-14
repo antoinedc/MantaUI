@@ -1,0 +1,1081 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Homepage redesign, reference implementation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<!-- Every colour, radius, shadow and font below comes from this file. -->
+<link rel="stylesheet" href="../../../website/site.css">
+<style>
+/* ==================================================================
+   TWO NEW TOKENS. Everything else resolves to site.css.
+   Add these to the :root block in website/site.css.
+   ================================================================== */
+:root{
+  --tile-fill:rgba(255,255,255,.035);
+  --tile-line:rgba(255,255,255,.055);
+}
+
+/* ==================================================================
+   PAGE-SCOPED COMPONENTS. Put this block in website/index.html's
+   inline <style>, replacing the block that is there today.
+   ================================================================== */
+
+.aw{border:1px solid var(--navy-700);border-radius:11px;overflow:hidden;background:var(--surface-app);
+  box-shadow:0 30px 70px rgba(2,4,12,.62);display:flex;flex-direction:column;font-size:12px;line-height:1.55}
+.aw .body{align-items:stretch}
+.aw .chrome{height:30px;background:var(--surface-inset);border-bottom:1px solid var(--navy-800);
+  display:flex;align-items:center;gap:6px;padding:0 12px;flex:none}
+.aw .chrome i{width:9px;height:9px;border-radius:50%;background:var(--navy-600);display:block}
+.aw .chrome .t{margin-left:10px;font-size:11px;color:var(--slate-500);font-weight:600}
+.aw .body{display:flex;flex:1;min-height:0}
+
+/* --- sidebar --- */
+.aw .sb{width:206px;flex:none;background:var(--surface-inset);border-right:1px solid var(--navy-800);
+  display:flex;flex-direction:column;min-height:0}
+.aw .sb.narrow{width:162px}
+.aw .sbh{display:flex;align-items:center;gap:8px;padding:11px 12px 7px;font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--navy-500);font-weight:700}
+.aw .sbh .sp{margin-left:auto;display:flex;gap:9px;color:var(--navy-500);font-size:11px}
+.aw .grp{padding:9px 12px 3px;font-size:9px;letter-spacing:.12em;color:var(--navy-500);font-weight:700;
+  display:flex;align-items:center;gap:5px}
+.aw .grp::before{content:"";width:0;height:0;border-left:3.5px solid currentColor;
+  border-top:2.5px solid transparent;border-bottom:2.5px solid transparent;transform:rotate(90deg)}
+.aw .ses{display:flex;align-items:center;gap:8px;padding:5px 12px;font-size:11.5px;color:var(--text-tertiary);
+  border-left:2px solid transparent}
+.aw .ses .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aw .ses .tm{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-500);flex:none}
+.aw .ses.on{background:var(--fill-subtle);color:var(--text-secondary);border-left-color:var(--blue-500);font-weight:600}
+.aw .ses.att{background:color-mix(in srgb,var(--amber-500) 11%,transparent)}
+.aw .dot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--navy-600)}
+.aw .dot.run{background:var(--cyan-400);box-shadow:0 0 7px var(--cyan-400)}
+.aw .dot.att{background:var(--amber-500);box-shadow:0 0 7px var(--amber-500)}
+.aw .dot.ok{background:var(--green-500)}
+.aw .sbf{margin-top:auto;padding:9px 12px;border-top:1px solid var(--navy-800);font-size:11px;color:var(--slate-500)}
+
+/* --- main --- */
+.aw .main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+.aw .hdr{height:36px;flex:none;border-bottom:1px solid var(--navy-800);display:flex;align-items:center;
+  gap:9px;padding:0 12px;white-space:nowrap;overflow:hidden}
+.aw .crumb{font-size:11.5px;color:var(--slate-300);overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.aw .chip{font-family:var(--font-mono);font-size:9.5px;background:var(--fill-subtle);border:1px solid var(--navy-700);
+  border-radius:5px;padding:2px 7px;color:var(--blue-300);flex:none}
+.aw .ctx{margin-left:auto;display:flex;align-items:center;gap:6px;flex:none}
+.aw .ctxbar{width:46px;height:4px;border-radius:2px;background:var(--surface-inset);display:flex;overflow:hidden}
+.aw .ctxbar b{display:block;height:100%}
+.aw .ctxpc{font-family:var(--font-mono);font-size:9.5px;color:var(--slate-400)}
+.aw .hicon{color:var(--slate-500);font-size:12px}
+
+.aw .tr{flex:1;padding:12px 14px;min-height:0;display:flex;flex-direction:column;gap:8px}
+.aw .um{border-left:2px solid var(--blue-300);background:var(--fill-subtle);border-radius:0 6px 6px 0;
+  padding:7px 10px;color:var(--slate-300);font-size:11.5px}
+.aw .am{color:var(--text-tertiary);font-size:11.5px}
+.aw .am b{color:var(--text-secondary);font-weight:600}
+.aw code{font-family:var(--font-mono);font-size:10.5px;color:var(--cyan-300)}
+.aw .tool{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:10.5px;color:var(--slate-300)}
+.aw .tool .meta{color:var(--slate-500);font-family:var(--font-sans);font-size:10.5px}
+.aw .add{color:var(--green-500)}.aw .del{color:var(--red-500)}
+.aw .sub{margin-left:13px;padding-left:9px;border-left:1px solid var(--navy-700);font-family:var(--font-mono);
+  font-size:10px;color:var(--slate-500);line-height:1.7}
+
+/* gutter diff */
+.aw .diff{background:var(--surface-inset);border:1px solid var(--navy-800);border-radius:6px;overflow:hidden;
+  font-family:var(--font-mono);font-size:10px;line-height:1.75}
+.aw .diff .ln{display:flex}
+.aw .diff .ln .g{width:26px;flex:none;text-align:right;padding-right:7px;color:var(--navy-500);
+  background:var(--surface-inset);user-select:none}
+.aw .diff .ln .s{width:11px;flex:none;text-align:center;color:var(--slate-500)}
+.aw .diff .ln .c{padding-right:8px;white-space:pre;overflow:hidden;color:var(--text-tertiary)}
+.aw .diff .ln.p{background:color-mix(in srgb,var(--green-500) 12%,transparent)}
+.aw .diff .ln.p .s,.aw .diff .ln.p .c{color:var(--green-500)}
+.aw .diff .ln.m{background:color-mix(in srgb,var(--red-500) 12%,transparent)}
+.aw .diff .ln.m .s,.aw .diff .ln.m .c{color:var(--red-500)}
+.aw .kw{color:var(--blue-300)}.aw .str{color:var(--amber-500)}.aw .cm{color:var(--slate-500)}
+
+/* pinned cards */
+.aw .card{background:var(--surface-panel);border:1px solid var(--navy-700);border-radius:8px;padding:9px 11px;flex:none}
+.aw .card .ct{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-primary);font-weight:700}
+.aw .card .cs{font-family:var(--font-mono);font-size:10px;color:var(--slate-400);margin:2px 0 0 22px}
+.aw .badgeico{width:16px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+  font-size:9px;font-weight:800;flex:none}
+.aw .row{display:flex;gap:6px;align-items:center;margin-top:8px;margin-left:22px}
+.aw .b{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:5px;white-space:nowrap}
+.aw .b.pri{background:var(--blue-500);color:#fff}
+.aw .b.sec{background:var(--fill-subtle);border:1px solid var(--navy-700);color:var(--slate-300);font-weight:600}
+.aw .b.dang{color:var(--red-500);margin-left:auto;font-weight:600}
+.aw .todo{border:1px solid var(--navy-700);border-radius:8px;overflow:hidden;flex:none}
+.aw .todo .th{display:flex;align-items:center;padding:6px 10px;background:var(--fill-subtle);
+  font-size:9.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--slate-500);font-weight:700}
+.aw .todo .ti{display:flex;align-items:center;gap:7px;padding:4px 10px;font-size:11px;color:var(--text-tertiary)}
+.aw .todo .ti.done{color:var(--slate-500);text-decoration:line-through;text-decoration-color:var(--navy-500)}
+.aw .todo .ti.now{color:var(--text-secondary);font-weight:600}
+.aw .ck{width:11px;height:11px;border-radius:50%;border:1.5px solid var(--navy-500);flex:none}
+.aw .ck.done{border-color:var(--green-500);background:var(--green-500)}
+.aw .ck.now{border-color:var(--cyan-400);box-shadow:inset 0 0 0 2px var(--surface-app),0 0 0 1px var(--cyan-400)}
+
+/* composer */
+.aw .comp{flex:none;padding:0 14px 11px}
+.aw .box{border:1px solid var(--blue-500);border-radius:8px;padding:8px 11px;display:flex;align-items:center;
+  background:var(--surface-app);color:var(--slate-500);font-size:11.5px}
+.aw .send{margin-left:auto;width:20px;height:20px;border-radius:5px;background:var(--fill-subtle);
+  display:flex;align-items:center;justify-content:center;color:var(--slate-400);font-size:10px}
+.aw .meta{display:flex;align-items:center;gap:7px;margin-top:8px}
+.aw .mp{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:3px 9px;
+  border-radius:6px;border:1px solid var(--navy-700);color:var(--slate-300)}
+.aw .mp.b{color:var(--blue-300)}
+.aw .mi{color:var(--slate-500);font-size:11px}
+.aw .perm{margin-top:7px;font-size:10.5px;color:var(--slate-500);display:flex;align-items:center;gap:6px}
+
+/* terminal pane */
+.aw .term{background:var(--surface-inset);border-top:1px solid var(--navy-800);font-family:var(--font-mono);
+  font-size:10px;line-height:1.75;padding:9px 13px;color:var(--slate-400);flex:none}
+.aw .term .p{color:var(--green-500)}
+.aw .term .d{color:var(--blue-300)}
+
+
+.ob{border:1px solid var(--navy-700);border-radius:11px;background:var(--surface-app);overflow:hidden;
+  box-shadow:0 24px 56px rgba(2,4,12,.62)}
+.ob .obh{padding:16px 20px 13px;border-bottom:1px solid var(--navy-800)}
+.ob .obh h4{font-size:16px;color:var(--text-primary);font-weight:700;margin:0}
+.ob .obh p{font-size:11.5px;color:var(--slate-400);margin-top:4px}
+.ob .hostrow{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid var(--navy-850);
+  font-size:12px;color:var(--slate-300)}
+.ob .hostrow.sel{background:var(--fill-subtle)}
+.ob .radio{width:13px;height:13px;border-radius:50%;border:1.5px solid var(--navy-500);flex:none}
+.ob .radio.on{border-color:var(--blue-500);box-shadow:inset 0 0 0 3px var(--surface-app),0 0 0 1px var(--blue-500);
+  background:var(--blue-500)}
+.ob .hostrow .sub{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--slate-500)}
+.ob .obf{padding:13px 20px;display:flex;align-items:center;gap:10px}
+
+.code6{display:flex;gap:7px}
+.code6 span{width:34px;height:44px;border:1px solid var(--navy-700);border-radius:7px;background:var(--surface-inset);
+  display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:19px;
+  font-weight:700;color:var(--text-primary)}
+.code6 span.a{border-color:var(--blue-500);box-shadow:0 0 0 2px color-mix(in srgb,var(--blue-500) 22%,transparent)}
+
+.notif{background:var(--surface-panel);border:1px solid var(--navy-700);border-radius:12px;padding:11px 13px;
+  display:flex;gap:10px;align-items:flex-start;box-shadow:0 14px 34px rgba(2,4,12,.62)}
+.notif .ic{width:26px;height:26px;border-radius:7px;background:var(--gradient-brand);flex:none}
+.notif .t{font-size:11.5px;color:var(--text-primary);font-weight:700}
+.notif .b{font-size:11px;color:var(--text-tertiary);margin-top:1px}
+.notif .w{margin-left:auto;font-size:10px;color:var(--slate-500);flex:none}
+
+.joblist{border:1px solid var(--navy-700);border-radius:10px;overflow:hidden;background:var(--surface-sunken)}
+.joblist .jh{padding:9px 13px;border-bottom:1px solid var(--navy-800);font-size:9.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--slate-500);font-weight:700;display:flex}
+.joblist .jr{display:flex;align-items:center;gap:9px;padding:9px 13px;border-bottom:1px solid var(--navy-850);
+  font-size:11.5px}
+.joblist .jr:last-child{border-bottom:0}
+.joblist .jb{font-family:var(--font-mono);font-size:10.5px;color:var(--slate-300)}
+.joblist .jm{margin-left:auto;font-size:10.5px;color:var(--slate-500);display:flex;gap:9px;align-items:center}
+
+.chain{display:flex;flex-direction:column;gap:8px}
+.chain .arrow{text-align:center;color:var(--navy-500);font-size:12px;line-height:1}
+.chain .node{background:var(--surface-sunken);border:1px solid var(--navy-700);border-radius:10px;padding:11px 13px}
+.chain .node.hi{border-color:color-mix(in srgb,var(--cyan-400) 45%,transparent)}
+.chain .node .nt{font-size:11.5px;color:var(--text-primary);font-weight:700;display:flex;align-items:center;gap:8px}
+.chain .node .nb{font-size:10.5px;color:var(--slate-500);margin-top:3px;font-family:var(--font-mono)}
+.chain .node .tag{margin-left:auto;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-500)}
+
+.bareframe{border:1px solid var(--border-default);border-radius:12px;overflow:hidden;background:var(--surface-app);
+  margin:0}
+.bareframe .vp{overflow:hidden;position:relative}
+
+/* stage layout in the document */
+.stage{display:grid;grid-template-columns:330px 1fr;gap:30px;align-items:start;padding:34px 0;
+  border-top:1px solid var(--border-subtle)}
+.stage:first-of-type{border-top:0}
+.stage .num{font-family:var(--font-mono);font-size:13px;color:var(--cyan-400);font-weight:700}
+.stage h3{font-size:23px;color:var(--text-primary);font-weight:800;letter-spacing:-.02em;margin:6px 0 0}
+.stage .promise{font-size:15px;color:var(--text-secondary);margin-top:10px}
+.stage .proves{margin-top:16px;padding-top:14px;border-top:1px solid var(--border-subtle)}
+.stage .proves dt{font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--text-tertiary);margin-top:11px}
+.stage .proves dd{font-size:13px;color:var(--text-secondary);margin-top:3px}
+@media(max-width:1000px){.stage{grid-template-columns:1fr}}
+
+/* unified feature grid in the document */
+.featgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:24px}
+@media(max-width:1000px){.featgrid{grid-template-columns:1fr}}
+
+
+/* --- Layout 1: clustered rule grid --- */
+.fl{border-top:1px solid var(--border-subtle)}
+.flband{display:grid;grid-template-columns:13rem repeat(4,1fr);border-bottom:1px solid var(--border-subtle)}
+.fllab{padding:30px 24px 30px 0;border-right:1px solid var(--border-subtle)}
+.fllab .e{font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--slate-500)}
+.fllab .p{font-size:13px;color:var(--slate-500);margin-top:8px;line-height:1.5;opacity:.8}
+.flcell{padding:30px 26px;border-right:1px solid var(--border-subtle)}
+.flcell:last-child{border-right:0}
+.flcell .n{font-family:var(--font-mono);font-size:11px;color:var(--navy-500)}
+.flcell .t{font-size:15px;font-weight:600;color:var(--text-secondary);margin-top:11px;letter-spacing:-.01em}
+.flcell .d{font-size:13px;color:var(--slate-400);margin-top:5px;line-height:1.55}
+.flcell.acc{box-shadow:inset 2px 0 0 var(--cyan-400)}
+.flcell .chip{display:inline-block;margin-top:11px;font-family:var(--font-mono);font-size:10.5px;
+  color:var(--cyan-400);background:color-mix(in srgb,var(--cyan-400) 10%,transparent);
+  border-radius:4px;padding:3px 8px}
+
+/* --- Layout 2: clustered bento tiles --- */
+.bt{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:16px}
+.btc{border-radius:14px;background:var(--tile-fill);box-shadow:inset 0 0 0 1px var(--tile-line);
+  overflow:hidden;display:flex;flex-direction:column;min-height:184px}
+.btc .g{flex:1;padding:16px 15px 0;display:flex;align-items:center;justify-content:center;min-height:92px}
+.btc .x{padding:0 15px 16px}
+.btc .t{font-size:14.5px;font-weight:650;color:var(--text-secondary);letter-spacing:-.005em}
+.btc .d{font-size:12px;color:var(--slate-400);margin-top:4px;line-height:1.5}
+.glyph{display:flex;gap:5px;align-items:center;justify-content:center;flex-wrap:wrap}
+.gchip{font-family:var(--font-mono);font-size:11px;color:var(--text-tertiary);background:var(--surface-inset);
+  border-radius:5px;padding:5px 9px;box-shadow:inset 0 0 0 1px var(--tile-line)}
+.gbar{height:8px;border-radius:3px;background:var(--navy-500);opacity:.45}
+
+
+/* --- hero layout --- */
+.hero-grid{display:grid;grid-template-columns:1fr 1.06fr;gap:46px;align-items:center}
+@media(max-width:900px){.hero-grid{grid-template-columns:1fr;gap:34px}}
+h1{font-size:clamp(34px,4.6vw,50px);line-height:1.05;letter-spacing:-.035em;color:var(--text-primary);font-weight:800}
+h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{font-size:18px;color:var(--slate-300);line-height:1.55;margin-top:20px}
+.sub b{color:var(--text-primary)}
+.btn-lg{height:52px;padding:0 28px;font-size:16px}
+.dl-note{margin-top:11px;font-size:13.5px;color:var(--slate-400)}
+.rail{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:44px;padding-top:28px;
+  border-top:1px solid var(--border-subtle)}
+@media(max-width:900px){.rail{grid-template-columns:1fr 1fr}}
+.rl{border-top:2px solid var(--border-default);padding-top:12px}
+.rl.on{border-top-color:var(--cyan-400)}
+.rl .rn{font-family:var(--font-mono);font-size:11px;color:var(--slate-500);font-weight:700}
+.rl.on .rn{color:var(--cyan-400)}
+.rl .rt{font-size:14.5px;color:var(--text-primary);font-weight:700;margin-top:2px}
+.rl .rd{font-size:11.5px;color:var(--slate-400);margin-top:4px;line-height:1.5}
+.trust{display:flex;gap:14px;justify-content:center;font-size:12.5px;color:var(--slate-500);
+  flex-wrap:wrap;max-width:920px;margin:30px auto 0}
+.trust b{color:var(--slate-300);font-weight:600}
+.glow{position:absolute;inset:0;background:radial-gradient(700px 300px at 50% 0,rgba(46,107,255,.28),transparent 70%);
+  pointer-events:none}
+
+/* --- stage sections --- */
+.stage-head{display:flex;align-items:baseline;gap:16px;margin-bottom:14px}
+.stage-head .sn{font-family:var(--font-mono);font-size:15px;color:var(--cyan-400);font-weight:700}
+.stage-head h2{font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary)}
+.stage-lede{color:var(--text-tertiary);font-size:16.5px;max-width:720px;margin-bottom:34px}
+
+/* --- reference-page scaffolding only. DO NOT PORT. --- */
+.refnote{max-width:var(--content-max);margin:0 auto;padding:26px 24px 0;color:var(--slate-500);font-size:13px}
+.refnote b{color:var(--text-secondary)}
+.refsep{max-width:var(--content-max);margin:0 auto;padding:34px 24px 0}
+.refsep span{display:inline-block;font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--cyan-400);border:1px solid var(--border-default);
+  border-radius:var(--radius-full);padding:5px 13px}
+</style>
+</head><body>
+
+<div class="refnote"><b>Reference implementation.</b> Everything below is the real markup with the real
+site.css tokens. Only <code>.refnote</code> and <code>.refsep</code> are scaffolding for this file and must not be
+ported. The nav and footer are omitted: keep the ones already in index.html.</div>
+
+<div class="refsep"><span>Section 1 &middot; hero</span></div>
+<section class="hero" style="padding-top:56px;padding-bottom:0">
+  <div class="glow"></div>
+  <div class="wrap" style="position:relative">
+    <div class="hero-grid">
+      <div>
+        <h1>Your agents keep working<br><span class="grad">after you close the laptop</span></h1>
+        <p class="sub">Manta is a desktop app for Claude, Codex and Kimi running in real tmux on a Linux box or Mac
+          <b>you own</b>. Start a task at your desk, approve it from your phone, come back to finished work.</p>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:28px">
+          <a class="btn btn-primary btn-lg" href="/downloads/Manta-latest.dmg">Download for macOS</a>
+          <a class="btn btn-ghost btn-lg" href="#download">Windows</a>
+        </div>
+        <p class="dl-note">Free and open source. macOS 13+ Apple Silicon, 96 MB. Version 1.0.14.</p>
+        <p class="dl-note" style="margin-top:13px;font-size:12.5px">Native iPhone app on TestFlight this month.
+          Android after that.</p>
+      </div>
+      <div>
+<div class="aw">
+  <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
+  <div class="body">
+    
+<div class="sb narrow">
+  <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+  
+    <div class="grp">INFRA</div>
+    
+      <div class="ses on">
+        <span class="dot run"></span><span class="nm">Deploy billing service</span>
+        <span class="tm">4m</span>
+      </div>
+      <div class="ses att">
+        <span class="dot att"></span><span class="nm">Fix red CI on main</span>
+        <span class="tm" style="color:var(--amber-500);font-weight:800">!</span>
+      </div>
+    <div class="grp">ETHERNAL</div>
+    
+      <div class="ses">
+        <span class="dot run"></span><span class="nm">Add CSV export</span>
+        <span class="tm">2m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Refactor auth middleware</span>
+        <span class="tm">14m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Investigate 500s in /orders</span>
+        <span class="tm">1h</span>
+      </div>
+    <div class="grp">MARKETING</div>
+    
+      <div class="ses">
+        <span class="dot ok"></span><span class="nm">Landing page copy</span>
+        <span class="tm">now</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Build pipeline</span>
+        <span class="tm">3h</span>
+      </div>
+  <div class="sbf">Settings</div>
+</div>
+    <div class="main">
+      
+<div class="hdr">
+  <span class="crumb">Deploy billing service</span>
+  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
+  <span class="ctx">
+    <span class="ctxbar">
+      <b style="width:44%;background:var(--blue-500)"></b>
+      <b style="width:16%;background:var(--amber-500)"></b>
+      <b style="width:22%;background:var(--cyan-400)"></b>
+    </span>
+    <span class="ctxpc">38%</span>
+    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
+  </span>
+</div>
+      <div class="tr"><div class="um">Add a <code>/export.csv</code> endpoint that streams the result set as CSV.</div><div class="tool"><span class="dot ok"></span>Read(app/routes/orders.py)</div>
+    <div class="sub">Read 23 lines</div><div class="tool"><span class="dot ok"></span>Edit(app/routes/orders.py)
+    <span class="meta"><span class="add">+38</span> <span class="del">-4</span></span></div>
+<div class="diff">
+  <div class="ln m"><span class="g">11</span><span class="s">-</span><span class="c">async def list_orders(status: str | None = None):</span></div>
+  <div class="ln p"><span class="g">11</span><span class="s">+</span><span class="c">async def list_orders(</span></div>
+  <div class="ln p"><span class="g">12</span><span class="s">+</span><span class="c">    status: str | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">13</span><span class="s">+</span><span class="c">    created_after: datetime | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">14</span><span class="s">+</span><span class="c">) -> list[dict]:</span></div>
+  <div class="ln"><span class="g">15</span><span class="s"></span><span class="c">    query = Order.query(session)</span></div>
+  <div class="ln"><span class="g">16</span><span class="s"></span><span class="c">    <span class="kw">if</span> status: query = query.filter(Order.status == status)</span></div>
+  <div class="ln p"><span class="g">17</span><span class="s">+</span><span class="c"><span class="kw">    return</span> [o.to_dict() <span class="kw">for</span> o <span class="kw">in</span> (<span class="kw">await</span> query.all())]</span></div>
+</div><div class="tool"><span class="dot run"></span>Bash(pytest tests/test_orders.py)
+    <span class="meta">running 12s</span></div>
+    <div class="sub">collected 24 items<br>tests/test_orders.py .......</div></div>
+      <div style="padding:0 14px 9px">
+<div class="card">
+  <div class="ct"><span class="badgeico" style="background:color-mix(in srgb,var(--amber-500) 16%,transparent);
+    border:1px solid color-mix(in srgb,var(--amber-500) 38%,transparent);color:var(--amber-500)">!</span>
+    Run a shell command?</div>
+  <div class="cs">alembic upgrade head</div>
+  <div class="row">
+    <span class="b pri">Allow once</span>
+    <span class="b sec">Always allow <span style="opacity:.65">alembic upgrade *</span></span>
+    <span class="b dang">Reject</span>
+  </div>
+</div></div>
+      
+<div class="comp">
+  <div class="box">Reply, or describe the next task<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
+  <div class="meta">
+    <span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span>
+    <span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M11.5 7.2 7 11.7a2.6 2.6 0 0 1-3.7-3.7l5-5a1.8 1.8 0 0 1 2.5 2.5l-5 5a.9.9 0 0 1-1.3-1.3l4.4-4.4"/></svg></span>
+    <span style="margin-left:auto;display:flex;gap:10px"><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="5.4" cy="8" r="2.6"/><path d="M8 8h6M12 8v2.2M10.2 8v1.6"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M4.5 12.4a2.6 2.6 0 1 0 0-5.2M4.5 7.2V4.6A2.2 2.2 0 0 1 6.7 2.4h2M11.5 12.4h-3"/></svg></span></span>
+  </div>
+  <div class="perm"><span>Permissions on, click to bypass</span></div>
+</div>
+      
+    </div>
+  </div>
+</div></div>
+    </div>
+    <div class="rail">
+      <div class="rl"><div class="rn">1.0</div><div class="rt">Install</div>
+        <div class="rd">Pick a machine. It sets itself up.</div></div>
+      <div class="rl"><div class="rn">2.0</div><div class="rt">Run</div>
+        <div class="rd">Chat sessions and real terminals.</div></div>
+      <div class="rl"><div class="rn">3.0</div><div class="rt">Leave</div>
+        <div class="rd">Close the lid. It carries on.</div></div>
+      <div class="rl on"><div class="rn">4.0</div><div class="rt">Automate</div>
+        <div class="rd">Work that starts without you.</div></div>
+      <div class="rl"><div class="rn">5.0</div><div class="rt">Delegate</div>
+        <div class="rd">Several agents, no collisions.</div></div>
+    </div>
+    <div class="trust">
+      <span><b>Open source</b>, MIT licensed</span>
+      <span><b>No account</b>, no telemetry</span>
+      <span><b>Your own Claude, Codex or Kimi plan</b></span>
+      <span>Sessions live on <b>your box</b></span>
+    </div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 2 &middot; the problem</span></div>
+<section class="sunk">
+  <div class="wrap" style="display:grid;grid-template-columns:1fr 1fr;gap:52px;align-items:center">
+    <div>
+      <span class="eyebrow">The problem</span>
+      <h2 style="font-size:clamp(24px,3vw,34px);font-weight:800;letter-spacing:-.025em;color:var(--text-primary);margin-top:12px">
+        Your laptop sleeps.<br><i style="color:var(--slate-300)">Your agent shouldn't.</i></h2>
+      <p class="sub" style="font-size:16.5px">A task runs for an hour and stops five minutes in to ask permission.
+        A build goes red at three in the morning. The thing you asked for finishes at seven and you are not at your desk.</p>
+      <p class="sub" style="font-size:16.5px;margin-top:12px">The box is awake for all of it, so the agent can be
+        <b>started by an event</b> and not only by you.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div class="chain"><div class="node"><div class="nt">A build fails on main<span class="tag">03:14</span></div>
+        <div class="nb" style="color:var(--red-500)">nobody is awake</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node hi"><div class="nt">Your rule starts an agent<span class="tag">03:14</span></div>
+        <div class="nb">in its own branch</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node"><div class="nt">A draft pull request opens<span class="tag">03:21</span></div>
+        <div class="nb" style="color:var(--green-500)">+18 -3, tests green</div></div>
+      <div class="arrow">&#8595;</div>
+      <div class="node"><div class="nt">Your phone tells you<span class="tag">07:02</span></div>
+        <div class="nb">over breakfast</div></div></div>
+    </div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 3 &middot; stage 1.0</span></div>
+<section>
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">1.0</span><h2>Install</h2></div>
+    <p class="stage-lede">The desktop app installs everything on the machine you choose, over SSH, and pairs itself.
+      No terminal, no keys to copy, no tunnel to configure.</p>
+    
+<div style="display:grid;grid-template-columns:1.1fr .9fr;gap:18px;align-items:start">
+  <div class="ob">
+    <div class="obh"><h4>Where should your agents run?</h4>
+      <p>Manta found these in your SSH config. It installs everything itself, nothing to type on the far end.</p></div>
+    <div class="hostrow sel"><span class="radio on"></span>
+      <span><b style="color:var(--text-primary)">hetzner-box</b> &nbsp;Ubuntu 24.04, always on</span>
+      <span class="sub">157.90.224.92</span></div>
+    <div class="hostrow"><span class="radio"></span>
+      <span>mac-mini &nbsp;macOS, Apple Silicon</span><span class="sub">local network</span></div>
+    <div class="hostrow"><span class="radio"></span>
+      <span style="color:var(--slate-400)">Another machine</span><span class="sub">host or IP</span></div>
+    <div class="obf">
+      <span class="btn sm pri">Install and pair</span>
+      <span style="font-size:11px;color:var(--slate-500)">Takes about 90 seconds</span></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="term" style="font-size:11px;padding:13px 15px">
+      <div><span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg></span> runtime installed <span class="c">node 24, no system packages touched</span></div>
+      <div><span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg></span> manta-server running <span class="c">127.0.0.1:8787</span></div>
+      <div><span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg></span> reachable over HTTPS <span class="c">certificate issued</span></div>
+      <div><span class="b"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M5 3.4 12.2 8 5 12.6z" fill="currentColor" stroke="none"/></svg></span> waiting for a device&#8230;</div>
+    </div>
+    <div class="cd" style="text-align:center;padding:18px">
+      <div style="font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500)">Pairing code</div>
+      <div class="code6" style="justify-content:center;margin-top:11px">
+        <span>4</span><span>1</span><span>9</span><span>2</span><span>0</span><span class="a">7</span></div>
+      <div style="font-size:11px;color:var(--slate-500);margin-top:11px">Type it on your phone to add it too. Expires in 5 minutes.</div>
+    </div>
+  </div>
+</div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 4 &middot; stage 2.0</span></div>
+<section class="sunk">
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">2.0</span><h2>Run</h2></div>
+    <p class="stage-lede">A readable transcript, the diff inline, one tap to approve a command, and an actual tmux
+      terminal underneath when you want one.</p>
+    
+<div class="aw">
+  <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
+  <div class="body">
+    
+<div class="sb">
+  <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+  
+    <div class="grp">INFRA</div>
+    
+      <div class="ses on">
+        <span class="dot run"></span><span class="nm">Deploy billing service</span>
+        <span class="tm">4m</span>
+      </div>
+      <div class="ses att">
+        <span class="dot att"></span><span class="nm">Fix red CI on main</span>
+        <span class="tm" style="color:var(--amber-500);font-weight:800">!</span>
+      </div>
+    <div class="grp">ETHERNAL</div>
+    
+      <div class="ses">
+        <span class="dot run"></span><span class="nm">Add CSV export</span>
+        <span class="tm">2m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Refactor auth middleware</span>
+        <span class="tm">14m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Investigate 500s in /orders</span>
+        <span class="tm">1h</span>
+      </div>
+    <div class="grp">MARKETING</div>
+    
+      <div class="ses">
+        <span class="dot ok"></span><span class="nm">Landing page copy</span>
+        <span class="tm">now</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Build pipeline</span>
+        <span class="tm">3h</span>
+      </div>
+  <div class="sbf">Settings</div>
+</div>
+    <div class="main">
+      
+<div class="hdr">
+  <span class="crumb">infra / Deploy billing service</span>
+  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
+  <span class="ctx">
+    <span class="ctxbar">
+      <b style="width:44%;background:var(--blue-500)"></b>
+      <b style="width:16%;background:var(--amber-500)"></b>
+      <b style="width:22%;background:var(--cyan-400)"></b>
+    </span>
+    <span class="ctxpc">38%</span>
+    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
+  </span>
+</div>
+      <div class="tr"><div class="um">Add a <code>/export.csv</code> endpoint that streams the result set as CSV, header row
+    first. Use the streaming helper so we don't hold 100k rows in memory.</div><div class="tool"><span class="dot ok"></span>Read(app/routes/orders.py)</div>
+    <div class="sub">Read 23 lines</div><div class="tool"><span class="dot ok"></span>Edit(app/routes/orders.py)
+    <span class="meta"><span class="add">+38</span> <span class="del">-4</span></span></div>
+<div class="diff">
+  <div class="ln m"><span class="g">11</span><span class="s">-</span><span class="c">async def list_orders(status: str | None = None):</span></div>
+  <div class="ln p"><span class="g">11</span><span class="s">+</span><span class="c">async def list_orders(</span></div>
+  <div class="ln p"><span class="g">12</span><span class="s">+</span><span class="c">    status: str | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">13</span><span class="s">+</span><span class="c">    created_after: datetime | None = Query(default=None),</span></div>
+  <div class="ln p"><span class="g">14</span><span class="s">+</span><span class="c">) -> list[dict]:</span></div>
+  <div class="ln"><span class="g">15</span><span class="s"></span><span class="c">    query = Order.query(session)</span></div>
+  <div class="ln"><span class="g">16</span><span class="s"></span><span class="c">    <span class="kw">if</span> status: query = query.filter(Order.status == status)</span></div>
+  <div class="ln p"><span class="g">17</span><span class="s">+</span><span class="c"><span class="kw">    return</span> [o.to_dict() <span class="kw">for</span> o <span class="kw">in</span> (<span class="kw">await</span> query.all())]</span></div>
+</div><div class="tool"><span class="dot run"></span>Bash(pytest tests/test_orders.py)
+    <span class="meta">running 12s</span></div>
+    <div class="sub">collected 24 items<br>tests/test_orders.py .......</div></div>
+      
+      
+<div class="comp">
+  <div class="box">Reply, or describe the next task<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
+  <div class="meta">
+    <span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span>
+    <span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M11.5 7.2 7 11.7a2.6 2.6 0 0 1-3.7-3.7l5-5a1.8 1.8 0 0 1 2.5 2.5l-5 5a.9.9 0 0 1-1.3-1.3l4.4-4.4"/></svg></span>
+    <span style="margin-left:auto;display:flex;gap:10px"><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="5.4" cy="8" r="2.6"/><path d="M8 8h6M12 8v2.2M10.2 8v1.6"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M4.5 12.4a2.6 2.6 0 1 0 0-5.2M4.5 7.2V4.6A2.2 2.2 0 0 1 6.7 2.4h2M11.5 12.4h-3"/></svg></span></span>
+  </div>
+  <div class="perm"><span>Permissions on, click to bypass</span></div>
+</div>
+      
+    </div>
+  </div>
+</div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 5 &middot; stage 3.0</span></div>
+<section>
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">3.0</span><h2>Leave</h2></div>
+    <p class="stage-lede">Shut the laptop and the work does not stop, because it was never running there. When the
+      agent needs you, the notification finds whichever device you are actually using.</p>
+    
+<div style="display:grid;grid-template-columns:1fr 262px;gap:32px;align-items:center">
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="aw" style="opacity:.4;filter:saturate(.45)">
+      <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI (disconnected)</span></div>
+      <div class="body">
+<div class="sb narrow">
+  <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+  
+    <div class="grp">INFRA</div>
+    
+      <div class="ses on">
+        <span class="dot run"></span><span class="nm">Deploy billing service</span>
+        <span class="tm">4m</span>
+      </div>
+      <div class="ses att">
+        <span class="dot att"></span><span class="nm">Fix red CI on main</span>
+        <span class="tm" style="color:var(--amber-500);font-weight:800">!</span>
+      </div>
+    <div class="grp">ETHERNAL</div>
+    
+      <div class="ses">
+        <span class="dot run"></span><span class="nm">Add CSV export</span>
+        <span class="tm">2m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Refactor auth middleware</span>
+        <span class="tm">14m</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Investigate 500s in /orders</span>
+        <span class="tm">1h</span>
+      </div>
+    <div class="grp">MARKETING</div>
+    
+      <div class="ses">
+        <span class="dot ok"></span><span class="nm">Landing page copy</span>
+        <span class="tm">now</span>
+      </div>
+      <div class="ses">
+        <span class="dot "></span><span class="nm">Build pipeline</span>
+        <span class="tm">3h</span>
+      </div>
+  <div class="sbf">Settings</div>
+</div><div class="main">
+<div class="hdr">
+  <span class="crumb">Deploy billing service</span>
+  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
+  <span class="ctx">
+    <span class="ctxbar">
+      <b style="width:44%;background:var(--blue-500)"></b>
+      <b style="width:16%;background:var(--amber-500)"></b>
+      <b style="width:22%;background:var(--cyan-400)"></b>
+    </span>
+    <span class="ctxpc">38%</span>
+    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
+  </span>
+</div>
+        <div class="tr" style="min-height:118px;align-items:center;justify-content:center">
+          <div class="am" style="color:var(--slate-500)">Laptop asleep</div></div></div></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;padding:0 4px">
+      <span style="font-size:12px;color:var(--slate-500);flex:none">Meanwhile, on the box</span>
+      <span style="flex:1;height:1px;background:var(--navy-700)"></span>
+    </div>
+    <div class="joblist">
+      <div class="jh">Still running<span style="margin-left:auto;font-family:var(--font-mono)">3 sessions</span></div>
+      <div class="jr"><span class="dot run"></span><span class="jb">infra / Deploy billing service</span>
+        <span class="jm"><span>step 4 of 6</span><span style="color:var(--cyan-400)">18m</span></span></div>
+      <div class="jr"><span class="dot run"></span><span class="jb">ethernal / Add CSV export</span>
+        <span class="jm"><span>running tests</span><span style="color:var(--cyan-400)">6m</span></span></div>
+      <div class="jr"><span class="dot ok"></span><span class="jb">marketing / Landing page copy</span>
+        <span class="jm"><span>done, waiting for you</span></span></div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:14px;align-items:center">
+    
+<div style="width:214px;border-radius:32px;border:5px solid var(--surface-raised);background:#000;
+  overflow:hidden;box-shadow:0 22px 46px rgba(2,4,12,.62);flex:none">
+  <img src="data:image/webp;base64,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" style="display:block;width:100%">
+</div>
+    <div style="font-size:12px;color:var(--slate-500);text-align:center;max-width:250px">
+      The same session, on the phone. It tells you when it needs you.</div>
+  </div>
+</div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 6 &middot; stage 4.0</span></div>
+<section class="sunk">
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">4.0</span><h2>Automate</h2></div>
+    <p class="stage-lede">An agent can be woken by something happening: a labelled issue, a failed build, a time of
+      day. It works in its own branch and leaves you a pull request.</p>
+    
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start">
+  <div class="chain">
+    <div class="node"><div class="nt">Nobody is at the keyboard<span class="tag">03:14</span></div>
+      <div class="nb" style="color:var(--red-500)">checks.failed on main</div></div>
+    <div class="arrow">&#8595;</div>
+    <div class="node"><div class="nt">Your rule decides what happens<span class="tag">on your box</span></div>
+      <div class="nb">when CI fails on my branch &#8594; start an agent</div></div>
+    <div class="arrow">&#8595;</div>
+    <div class="node hi"><div class="nt"><span class="dot run"></span>An agent starts in its own copy of the repo</div>
+      <div class="nb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> manta/fix-orders-csv-flake<br>
+        <span style="color:var(--green-500)">+18</span> <span style="color:var(--red-500)">-3</span> in 2 files, 6m 41s</div></div>
+    <div class="arrow">&#8595;</div>
+    <div class="node"><div class="nt">A draft pull request is waiting<span class="tag">03:21</span></div>
+      <div class="nb" style="color:var(--green-500)">#412 opened, tests green</div></div>
+    <div class="arrow">&#8595;</div>
+    <div class="notif"><span class="ic"></span>
+      <div><div class="t">infra / Fix red CI on main</div>
+        <div class="b">Done. Draft PR #412 is waiting for review.</div></div><span class="w">07:02</span></div>
+    <p style="text-align:center;font-size:11.5px;color:var(--slate-500);margin-top:2px">You were asleep for all of it.</p>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="cd">
+      <h3 style="font-size:16px">On a timer, too</h3>
+      <p style="font-size:12.5px;color:var(--slate-400);margin-top:5px">Ask once, in plain English.</p>
+      <div class="joblist" style="margin-top:11px">
+        <div class="jh">Scheduled<span style="margin-left:auto;font-family:var(--font-mono)">3</span></div>
+        <div class="jr"><span class="jb" style="color:var(--cyan-400);min-width:104px">every 5 min</span>
+          <span style="color:var(--slate-300)">check the deploy, tell me if it goes red</span>
+          <span class="jm">in 2m</span></div>
+        <div class="jr"><span class="jb" style="color:var(--cyan-400);min-width:104px">weekdays 9:00</span>
+          <span style="color:var(--slate-300)">summarise what changed overnight</span>
+          <span class="jm">tomorrow</span></div>
+        <div class="jr"><span class="jb" style="color:var(--cyan-400);min-width:104px">Sundays 18:00</span>
+          <span style="color:var(--slate-300)">run the dependency audit</span>
+          <span class="jm">in 4d</span></div>
+      </div>
+    </div>
+    <div class="cd">
+      <h3 style="font-size:16px">And it can drive your Mac</h3>
+      <p style="font-size:12.5px;color:var(--slate-400);margin-top:5px">Ask from your phone. Xcode, your simulators and your
+        signing certificates do the work at home.</p>
+      <div class="term" style="margin-top:11px;font-size:11px;padding:12px 14px">
+        <div><span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M5 3.4 12.2 8 5 12.6z" fill="currentColor" stroke="none"/></svg></span> build and launch MantaUI <span class="c">on Antoine&#8217;s MacBook Pro</span></div>
+        <div><span class="c"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M5 3.4 12.2 8 5 12.6z" fill="currentColor" stroke="none"/></svg> xcodebuild&#8230;</span> <span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg> 48s</span></div>
+        <div><span class="c"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M5 3.4 12.2 8 5 12.6z" fill="currentColor" stroke="none"/></svg> boot simulator&#8230;</span> <span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg> 6s</span></div>
+        <div><span class="g"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg></span> the app is open on the simulator</div>
+      </div>
+    </div>
+  </div>
+</div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 7 &middot; stage 5.0</span></div>
+<section>
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">5.0</span><h2>Delegate</h2></div>
+    <p class="stage-lede">Hand off a job and it gets its own copy of the repository and its own branch. Five can run
+      at once without touching each other, or what you are editing.</p>
+    
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start">
+  <div class="aw">
+    <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
+    <div class="body">
+      <div class="sb">
+        <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+        <div class="grp">INFRA</div>
+        <div class="ses on"><span class="dot run"></span><span class="nm">Deploy billing service</span><span class="tm">18m</span></div>
+        <div style="padding:2px 0 0 14px;border-left:1px solid var(--navy-700);margin-left:16px">
+          <div class="ses" style="padding-left:6px"><span class="dot run"></span>
+              <span class="nm" style="font-size:10.5px">fix-orders-csv-flake</span><span class="tm">6m</span></div><div class="ses" style="padding-left:6px"><span class="dot ok"></span>
+              <span class="nm" style="font-size:10.5px">bump-deps-june</span><span class="tm">22m</span></div><div class="ses" style="padding-left:6px"><span class="dot run"></span>
+              <span class="nm" style="font-size:10.5px">audit-server-spawns</span><span class="tm">3m</span></div><div class="ses" style="padding-left:6px"><span class="dot run"></span>
+              <span class="nm" style="font-size:10.5px">backfill-tests</span><span class="tm">11m</span></div><div class="ses" style="padding-left:6px"><span class="dot ok"></span>
+              <span class="nm" style="font-size:10.5px">docs-refresh</span><span class="tm">31m</span></div>
+        </div>
+        <div class="grp">ETHERNAL</div>
+        <div class="ses"><span class="dot"></span><span class="nm">Add CSV export</span><span class="tm">2m</span></div>
+        <div class="sbf">Settings</div>
+      </div>
+      <div class="main">
+        
+<div class="hdr">
+  <span class="crumb">Deploy billing service</span>
+  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
+  <span class="ctx">
+    <span class="ctxbar">
+      <b style="width:44%;background:var(--blue-500)"></b>
+      <b style="width:16%;background:var(--amber-500)"></b>
+      <b style="width:22%;background:var(--cyan-400)"></b>
+    </span>
+    <span class="ctxpc">38%</span>
+    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
+  </span>
+</div>
+        <div class="tr">
+          <div class="um">Split this into five jobs and run them in parallel. Don&#8217;t let them tread on each other.</div>
+          <div class="am">Started five background jobs. Each has its own copy of the repo and its own branch,
+            so nothing they do can collide with what you are editing. I will report back as each finishes.</div>
+          <div class="tool"><span class="dot ok"></span>Task(bump-deps-june)
+            <span class="meta">done, PR #409</span></div>
+          <div class="tool"><span class="dot run"></span>Task(fix-orders-csv-flake)
+            <span class="meta">running 6m</span></div>
+        </div>
+        
+<div class="comp">
+  <div class="box">Ask for anything else while these run<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
+  <div class="meta">
+    <span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span>
+    <span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M11.5 7.2 7 11.7a2.6 2.6 0 0 1-3.7-3.7l5-5a1.8 1.8 0 0 1 2.5 2.5l-5 5a.9.9 0 0 1-1.3-1.3l4.4-4.4"/></svg></span>
+    <span style="margin-left:auto;display:flex;gap:10px"><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="5.4" cy="8" r="2.6"/><path d="M8 8h6M12 8v2.2M10.2 8v1.6"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M4.5 12.4a2.6 2.6 0 1 0 0-5.2M4.5 7.2V4.6A2.2 2.2 0 0 1 6.7 2.4h2M11.5 12.4h-3"/></svg></span></span>
+  </div>
+  <div class="perm"><span>Permissions on, click to bypass</span></div>
+</div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="joblist">
+      <div class="jh">Background jobs<span style="margin-left:auto;font-family:var(--font-mono)">3 running, 2 done</span></div>
+      
+        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> fix-orders-csv-flake</span>
+          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+18 -3</span>
+            <span style="color:var(--cyan-400)">running</span>
+            <span>6m</span></span></div>
+        <div class="jr"><span class="dot ok"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> bump-deps-june</span>
+          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+204 -196</span>
+            <span style="color:var(--green-500)">done, PR #409</span>
+            <span>22m</span></span></div>
+        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> audit-server-spawns</span>
+          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+0 -0</span>
+            <span style="color:var(--cyan-400)">running</span>
+            <span>3m</span></span></div>
+        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> backfill-tests</span>
+          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+312 -8</span>
+            <span style="color:var(--cyan-400)">running</span>
+            <span>11m</span></span></div>
+        <div class="jr"><span class="dot ok"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> docs-refresh</span>
+          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+64 -12</span>
+            <span style="color:var(--green-500)">done, PR #410</span>
+            <span>31m</span></span></div>
+    </div>
+    <div class="cd">
+      <p style="font-size:12.5px;color:var(--slate-400)">Each job is a real branch you can check out, review and merge
+        like any other. Nothing is hidden in a service you cannot see.</p>
+    </div>
+  </div>
+</div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 8 &middot; features</span></div>
+
+<section class="sunk">
+  <div class="wrap">
+    <div style="max-width:620px">
+      <h2>Everything else it does</h2>
+      <p class="sub" style="margin-top:14px;font-size:17px">It behaves like a machine that is yours and always on,
+        because that is what it is.</p>
+    </div>
+    
+      <div style="margin-top:38px">
+        <div style="display:flex;align-items:baseline;gap:14px">
+          <span class="eyebrow">Yours alone</span>
+          <span style="font-size:14.5px;color:var(--slate-400)">No account, no middleman, and nothing of yours anywhere else.</span>
+        </div>
+        <div class="bt">
+          
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+        <span class="gchip" style="color:var(--cyan-400);font-weight:700">your box</span>
+        <span style="font-size:13px;color:var(--red-500);line-height:1;opacity:.7">&#215;</span>
+        <span class="gchip" style="opacity:.45">anyone else</span></div></div>
+              <div class="x"><div class="t">Self-Hosted</div><div class="d">Runs on your box. No account, no telemetry, no middleman.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="gap:5px"><span class="gchip">claude</span><span class="gchip">codex</span><span class="gchip">kimi</span></div></div>
+              <div class="x"><div class="t">Bring Your Own Plan</div><div class="d">The subscription you already pay for. Nothing resold.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:6px">
+        <span class="gchip" style="color:var(--cyan-400)">~/.manta-secrets/gh_pat</span>
+        <span class="gchip" style="text-decoration:line-through;opacity:.45">ghp_xxxxxxxxxxxx</span></div></div>
+              <div class="x"><div class="t">Secret Store</div><div class="d">The agent is handed a file path, never the value.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="gap:4px">
+        <span class="gchip" style="color:var(--cyan-400);font-weight:700">win 1</span><span class="gchip">win 2</span><span class="gchip">win 3</span></div></div>
+              <div class="x"><div class="t">Native Terminals</div><div class="d">Real tmux sessions. Attach in the app, or SSH in.</div></div>
+            </div>
+        </div>
+      </div>
+      <div style="margin-top:38px">
+        <div style="display:flex;align-items:baseline;gap:14px">
+          <span class="eyebrow">Runs without you</span>
+          <span style="font-size:14.5px;color:var(--slate-400)">The box is awake, so work can start when you are not there.</span>
+        </div>
+        <div class="bt">
+          
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+        <span class="gchip" style="color:var(--cyan-400)">issue labeled</span>
+        <span style="font-size:11px;color:var(--navy-500);line-height:1">&#8595;</span>
+        <span class="gchip" style="color:var(--green-500)">draft PR</span></div></div>
+              <div class="x"><div class="t">Webhooks</div><div class="d">Label a GitHub issue and an agent picks it up.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+        <span class="gchip" style="color:var(--cyan-400)">*/5 * * * *</span><span class="gchip">0 9 * * 1-5</span></div></div>
+              <div class="x"><div class="t">Native Scheduler</div><div class="d">Every weekday at nine, what changed overnight.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px;align-items:flex-start">
+        <span class="gchip" style="color:var(--cyan-400);font-size:10.5px">&#9106; fix-csv-flake</span><span class="gchip" style=";font-size:10.5px">&#9106; bump-deps</span><span class="gchip" style=";font-size:10.5px">&#9106; backfill-tests</span>
+      </div></div>
+              <div class="x"><div class="t">Native Worktrees</div><div class="d">Each job gets its own branch and its own worktree.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+        <span class="gchip" style="color:var(--cyan-400)">xcodebuild</span><span class="gchip">simctl boot</span></div></div>
+              <div class="x"><div class="t">Mac Plugins</div><div class="d">Xcode, simulators and certificates, driven from your phone.</div></div>
+            </div>
+        </div>
+      </div>
+      <div style="margin-top:38px">
+        <div style="display:flex;align-items:baseline;gap:14px">
+          <span class="eyebrow">Wherever you are</span>
+          <span style="font-size:14.5px;color:var(--slate-400)">It reaches whichever device you happen to be holding.</span>
+        </div>
+        <div class="bt">
+          
+            <div class="btc">
+              <div class="g"><div style="width:94%;border-radius:9px;background:var(--surface-inset);box-shadow:inset 0 0 0 1px var(--tile-line);
+        padding:8px 10px;display:flex;gap:8px;align-items:center">
+        <span style="width:18px;height:18px;border-radius:5px;background:var(--gradient-brand);flex:none"></span>
+        <span style="flex:1;min-width:0;line-height:1.35">
+          <span style="display:block;font-size:10px;font-weight:700;color:var(--text-secondary)">Manta</span>
+          <span style="display:block;font-size:10px;color:var(--slate-400)">Needs you</span></span>
+        <span style="font-size:9.5px;color:var(--navy-500);flex:none">now</span></div></div>
+              <div class="x"><div class="t">Push Notifications</div><div class="d">Desktop at your desk, phone when you are not.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="gap:6px">
+        <span class="gchip" style="color:#fff;background:var(--blue-500);box-shadow:none;font-weight:700">Allow</span><span class="gchip">Reject</span></div></div>
+              <div class="x"><div class="t">One-Tap Approvals</div><div class="d">Read the change, allow or reject in one tap.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:7px">
+        <span style="display:flex;align-items:center;gap:3px;height:22px">
+        <span style="width:3px;height:34%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:62%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:44%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:78%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:30%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:56%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:40%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:66%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:36%;border-radius:2px;
+          background:var(--cyan-400);opacity:.75"></span></span>
+        <span class="gchip">&ldquo;allow it&rdquo;</span></div></div>
+              <div class="x"><div class="t">Voice Support</div><div class="d">Dictate a reply, or just say allow.</div></div>
+            </div>
+            <div class="btc">
+              <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+        <span class="gchip">screenshot.png &#8593;</span><span class="gchip" style="color:var(--cyan-400)">report.csv &#8595;</span></div></div>
+              <div class="x"><div class="t">Artifacts Management</div><div class="d">Drop a screenshot in. Generated files come back.</div></div>
+            </div>
+        </div>
+      </div>
+  </div>
+</section>
+
+<div class="refsep"><span>Section 9 &middot; download and close</span></div>
+<section id="download">
+  <div class="wrap">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:18px">
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">macOS</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">Manta-latest.dmg</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Apple Silicon, macOS 13 and up.<br>Signed and notarised.</p>
+        <a class="btn btn-primary" style="width:100%;justify-content:center;margin-top:14px" href="/downloads/Manta-latest.dmg">Download</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">Windows</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">Manta-UI-x64.exe</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Windows 10 and 11, 64-bit.<br>Standard installer.</p>
+        <a class="btn btn-primary" style="width:100%;justify-content:center;margin-top:14px" href="#">Download</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">Your box</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">install.sh</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Linux or a spare Mac.<br>The app can do this for you.</p>
+        <a class="btn btn-ghost" style="width:100%;justify-content:center;margin-top:14px" href="/llms-install.md">One command</a></div>
+      <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">iPhone</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--cyan-400);margin-top:7px">TestFlight</div>
+        <p style="margin-top:8px;font-size:12px;color:var(--slate-400)">Native app. Pairs with the<br>six digits the desktop shows.</p>
+        <a class="btn btn-ghost" style="width:100%;justify-content:center;margin-top:14px" href="#">Join the beta</a></div>
+    </div>
+  </div>
+</section>
+<section class="band">
+  <div class="wrap">
+    <h2>Go to bed. It will be done.</h2>
+    <p>Free, open source, and it runs on hardware you already own.</p>
+    <a class="btn btn-primary btn-lg" href="/downloads/Manta-latest.dmg">Download for macOS</a>
+  </div>
+</section>
+
+</body></html>
