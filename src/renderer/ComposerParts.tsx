@@ -319,32 +319,37 @@ function TypeaheadRowButton({
 // ===== Input area =====
 
 // Press-and-hold mic button. Dictation-only: the transcript is inserted at
-// the caret (via the hook's onResult).
+// the caret (the orchestration hook inserts it after transcription).
 //
 // Visual states (phase):
 //   - idle       → microphone glyph in text-muted
 //   - requesting → spinner in text-faint (waiting on mic permission)
 //   - recording  → filled circle pulsing in red, hint text "release to send"
-//   - processing → spinner in accent (Groq round-trip in flight)
 //   - error      → muted-red mic; click to retry by pressing again
+//
+// Transcription is tracked by the orchestration layer (useVoice), not the
+// recorder hook's phases, so the "transcribing" spinner is driven by the
+// `busy` prop rather than a hook phase.
 export function MicButton({
   phase,
   onStart,
   onStop,
   onCancel,
+  busy = false,
   floating = false,
 }: {
   phase: VoicePhase;
   onStart: () => void;
   onStop: () => void;
   onCancel: () => void;
+  // Transcription in flight — blocks a new press and shows "transcribing…".
+  busy?: boolean;
   // `floating` = the mobile WhatsApp-style push-to-talk FAB (bottom-right,
   // above the composer). It is dictation-only, the same as the inline
   // button — transcription is always plain text into the composer.
   floating?: boolean;
 }) {
   const recording = phase === "recording" || phase === "requesting";
-  const busy = phase === "processing";
 
   // Track press state with a REF, not the rendered `recording` prop. This is
   // THE fix for "hold → red → release → nothing happens": the pointerup

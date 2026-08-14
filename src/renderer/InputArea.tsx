@@ -303,6 +303,7 @@ export function InputArea({
           onStart={startVoice}
           onStop={stopVoice}
           onCancel={cancelVoice}
+          busy={voiceProcessing}
           floating
         />
       )}
@@ -499,6 +500,7 @@ export function InputArea({
                   onStart={startVoice}
                   onStop={stopVoice}
                   onCancel={cancelVoice}
+                  busy={voiceProcessing}
                 />
               )}
               <AttachButton onFiles={onAttachFiles} />
