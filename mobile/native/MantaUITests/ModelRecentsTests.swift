@@ -109,34 +109,132 @@ final class ModelRecentsTests: XCTestCase {
 
     // MARK: - ChatModel.capabilityGlyphs
 
-    private func gylphModel(variants: Int = 0, input: [String] = []) -> OpencodeModel {
+    /// Builds a catalogue row with the capability flags directly (mirroring
+    /// the wire shape: `reasoning` and `input.image` are the declared Bool
+    /// flags, not a variant list). `nil` = the key is absent on the wire.
+    private func gylphModel(reasoning: Bool? = nil, image: Bool? = nil) -> OpencodeModel {
         OpencodeModel(
             id: "m",
             providerID: "p",
             name: "m",
-            variants: (0..<variants).map { OpencodeModel.Variant(id: "v\($0)") },
-            capabilities: ModelCapabilities(input: input)
+            capabilities: ModelCapabilities(
+                reasoning: reasoning,
+                input: image.map { ModelCapabilities.Modalities(image: $0) }
+            )
         )
     }
 
-    func testReasoningFromVariants() {
-        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(variants: 3)), ["reasoning"])
+    func testReasoningFromCapabilityFlag() {
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(reasoning: true)), ["reasoning"])
     }
 
-    func testVisionFromImageInput() {
-        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(input: ["text", "image"])), ["vision"])
+    func testVisionFromImageFlag() {
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(image: true)), ["vision"])
     }
 
     func testBothInOrderReasoningThenVision() {
-        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(variants: 5, input: ["text", "image"])), ["reasoning", "vision"])
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(reasoning: true, image: true)), ["reasoning", "vision"])
     }
 
     func testEmptyWhenNeither() {
         XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel()), [])
-        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(input: ["text"])), [])
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(reasoning: false)), [])
     }
 
-    func testVisionCaseInsensitive() {
-        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(input: ["Image"])), ["vision"])
+    func testNoVisionWhenImageFlagMissingOrFalse() {
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(image: false)), [])
+        XCTAssertEqual(ChatModel.capabilityGlyphs(gylphModel(reasoning: true, image: false)), ["reasoning"])
+    }
+
+    // MARK: - Wire decode (regression guard)
+    //
+    // Captured verbatim from `POST /rpc/opencode:models` on a live box. The
+    // point of this fixture is that it is NOT hand-written: the previous
+    // capability tests built ModelCapabilities in Swift and passed green while
+    // every real model failed to decode. Note `interleaved` is a Bool on the
+    // first model and an OBJECT on the second — declaring a field this app
+    // does not use would fail here.
+    private static let wireModelsJSON = """
+    [
+      {
+        "id": "claude-opus-4-7",
+        "providerID": "anthropic",
+        "family": "claude-opus",
+        "name": "Claude Opus 4.7",
+        "status": "active",
+        "limit": { "context": 1000000, "output": 128000 },
+        "capabilities": {
+          "temperature": false,
+          "reasoning": true,
+          "attachment": true,
+          "toolcall": true,
+          "input":  { "text": true, "audio": false, "image": true,  "video": false, "pdf": true  },
+          "output": { "text": true, "audio": false, "image": false, "video": false, "pdf": false },
+          "interleaved": false
+        },
+        "variants": [
+          { "id": "low" }, { "id": "medium" }, { "id": "high" },
+          { "id": "xhigh" }, { "id": "max" }
+        ]
+      },
+      {
+        "id": "nemotron-3.5-lightning-free",
+        "providerID": "opencode",
+        "family": "nemotron-free",
+        "name": "Nemotron 3.5 Lightning Free",
+        "status": "active",
+        "limit": { "context": 262144, "output": 262144 },
+        "capabilities": {
+          "temperature": true,
+          "reasoning": true,
+          "attachment": false,
+          "toolcall": true,
+          "input":  { "text": true, "audio": false, "image": false, "video": false, "pdf": false },
+          "output": { "text": true, "audio": false, "image": false, "video": false, "pdf": false },
+          "interleaved": { "field": "reasoning_content" }
+        }
+      }
+    ]
+    """
+
+    private func wireModels() throws -> [OpencodeModel] {
+        try JSONDecoder().decode(
+            [OpencodeModel].self,
+            from: Data(Self.wireModelsJSON.utf8))
+    }
+
+    func testWireModelsDecode() throws {
+        let models = try wireModels()
+        XCTAssertEqual(models.count, 2)
+        XCTAssertEqual(models[0].providerID, "anthropic")
+        XCTAssertEqual(models[0].id, "claude-opus-4-7")
+        XCTAssertEqual(models[0].name, "Claude Opus 4.7")
+        XCTAssertEqual(models[1].providerID, "opencode")
+        XCTAssertEqual(models[1].id, "nemotron-3.5-lightning-free")
+        XCTAssertEqual(models[1].name, "Nemotron 3.5 Lightning Free")
+    }
+
+    func testWireContextLimits() throws {
+        let models = try wireModels()
+        XCTAssertEqual(ChatModel.contextSize(models[0].limit?.context), "1M")
+        XCTAssertEqual(ChatModel.contextSize(models[1].limit?.context), "262k")
+    }
+
+    func testWireCapabilityGlyphs() throws {
+        let models = try wireModels()
+        XCTAssertEqual(ChatModel.capabilityGlyphs(models[0]), ["reasoning", "vision"])
+        XCTAssertEqual(ChatModel.capabilityGlyphs(models[1]), ["reasoning"])
+    }
+
+    func testWireVariants() throws {
+        let models = try wireModels()
+        XCTAssertEqual(models[0].variants?.map(\.id), ["low", "medium", "high", "xhigh", "max"])
+        XCTAssertEqual(models[1].variants?.count ?? 0, 0)
+    }
+
+    func testWireModelIsPickable() throws {
+        let models = try wireModels()
+        XCTAssertTrue(ChatModel.isPickable(models[0]))
+        XCTAssertTrue(ChatModel.isPickable(models[1]))
     }
 }

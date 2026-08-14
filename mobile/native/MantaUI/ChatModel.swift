@@ -189,16 +189,15 @@ enum ChatModel {
         return "\(Int((context / 1000).rounded()))k"
     }
 
-    /// Capability glyphs for a catalogue row, in display order:
-    /// "reasoning" when the model exposes reasoning effort (has variants),
-    /// "vision" when it accepts image input. The differentiator at scale is
-    /// capability, not a name — the list is drawn from the model's own data.
+    /// Capability glyphs for a catalogue row, in display order: "reasoning"
+    /// when the model reasons, "vision" when it accepts image input. Both read
+    /// the box's own capability flags rather than being inferred — a model can
+    /// reason without exposing an effort dial, so deriving "reasoning" from the
+    /// presence of variants mislabels it.
     static func capabilityGlyphs(_ model: OpencodeModel) -> [String] {
         var glyphs: [String] = []
-        if !(model.variants ?? []).isEmpty { glyphs.append("reasoning") }
-        if (model.capabilities?.input ?? []).contains(where: { $0.lowercased() == "image" }) {
-            glyphs.append("vision")
-        }
+        if model.capabilities?.reasoning == true { glyphs.append("reasoning") }
+        if model.capabilities?.input?.image == true { glyphs.append("vision") }
         return glyphs
     }
 
