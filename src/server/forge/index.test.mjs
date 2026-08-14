@@ -14,6 +14,7 @@ import {
   forgeDiffForCwd,
   shipPullRequest,
   shipPreview,
+  issueCloseRef,
   humanizeBranch,
   mergePullRequest,
   draftGetForCwd,
@@ -278,6 +279,17 @@ const SHIP_DEPS = {
   gitPush: async (input) => ({ input }),
 };
 
+// ShipPreview deps for the BET-827 linked-issue cases — the common base (a fixed
+// branch) plus per-case overrides. Shared so the cases don't each re-type the
+// SHIP_DEPS + currentBranch preamble.
+function linkedShipDeps(overrides = {}) {
+  return {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    ...overrides,
+  };
+}
+
 test("shipPullRequest: no forge → no_forge, never pushes", async () => {
   const pushed = [];
   const r = await shipPullRequest("/repo", { title: "t" }, {
@@ -419,6 +431,60 @@ test("shipPreview: repo with no forge → no_forge", async () => {
     gitRemoteOrigin: async () => null,
   });
   assert.deepEqual(r, { ok: false, error: "no_forge" });
+});
+
+// ---- issueCloseRef + the linked-issue PR body seed (BET-827) ----------------
+
+test("issueCloseRef: bare #N when the issue lives in the PR's own repo", () => {
+  assert.equal(issueCloseRef({ repoKey: "github.com/acme/widget", number: 12 }, "github.com/acme/widget"), "#12");
+});
+
+test("issueCloseRef: owner/repo#N for a cross-repo issue", () => {
+  assert.equal(issueCloseRef({ repoKey: "github.com/acme/something", number: 12 }, "github.com/acme/widget"), "acme/something#12");
+});
+
+test("issueCloseRef: \"\" for malformed or missing refs", () => {
+  assert.equal(issueCloseRef(null, "github.com/acme/widget"), "");
+  assert.equal(issueCloseRef(undefined, "github.com/acme/widget"), "");
+  assert.equal(issueCloseRef({}, "github.com/acme/widget"), "");
+  assert.equal(issueCloseRef({ repoKey: "x", number: 12 }, "github.com/acme/widget"), "");
+  assert.equal(issueCloseRef({ repoKey: "github.com/acme/widget" }, "github.com/acme/widget"), "");
+});
+
+test("shipPreview prepends Closes #N before the template when the session has a linked issue", async () => {
+  const r = await shipPreview("/repo", linkedShipDeps({
+    readPrTemplate: async () => "## Summary\n\n${head} → ${base}\n\n## Checklist\n- [x] tests",
+    linkedIssue: async () => ({ repoKey: "github.com/acme/widget", number: 12 }),
+  }));
+  assert.equal(r.ok, true);
+  assert.match(r.body, /^Closes #12\n\n## Summary/, "close line + blank line precede the template");
+});
+
+test("shipPreview uses a cross-repo owner/repo#N close ref", async () => {
+  const r = await shipPreview("/repo", linkedShipDeps({
+    readPrTemplate: async () => "## Summary\n\nbody",
+    linkedIssue: async () => ({ repoKey: "github.com/acme/something", number: 12 }),
+  }));
+  assert.equal(r.ok, true);
+  assert.match(r.body, /^Closes acme\/something#12\n\n## Summary/);
+});
+
+test("shipPreview with a linked issue and no template still emits the close line", async () => {
+  const r = await shipPreview("/repo", linkedShipDeps({
+    readPrTemplate: async () => null,
+    linkedIssue: async () => ({ repoKey: "github.com/acme/widget", number: 7 }),
+  }));
+  assert.equal(r.ok, true);
+  assert.match(r.body, /^Closes #7\n\n/);
+});
+
+test("shipPreview with no linkedIssue dep leaves the body unchanged from today", async () => {
+  const r = await shipPreview("/repo", linkedShipDeps({
+    readPrTemplate: async () => "## Summary\n\nbody without a close line",
+  }));
+  assert.equal(r.ok, true);
+  assert.match(r.body, /^## Summary/);
+  assert.ok(!r.body.includes("Closes"), "no linkedIssue dep ⇒ no Closes line");
 });
 
 
@@ -579,6 +645,24 @@ async function addComments(k, comments) {
   }
 }
 
+// A draftKit whose adapter reports whether replyToThread was ever invoked —
+// shared by the replyThreadForCwd no-call cases so the two don't repeat the
+// adapter fixture. `called()` is queried AFTER the call under test.
+function replyKit() {
+  let called = false;
+  const k = draftKit({
+    adapter: {
+      kind: "github",
+      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+      replyToThread: async () => {
+        called = true;
+      },
+    },
+  });
+  return { k, called: () => called };
+}
+
 const DRAFT_REPO_KEY = "github.com/acme/widget";
 
 test("draftGetForCwd: head SHA moved → draft marked stale, comments kept", async () => {
@@ -639,39 +723,19 @@ test("replyThreadForCwd: posts immediately with the resolved repo, PR number and
 });
 
 test("replyThreadForCwd: empty threadId → error without calling the adapter", async () => {
-  let called = false;
-  const k = draftKit({
-    adapter: {
-      kind: "github",
-      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-      replyToThread: async () => {
-        called = true;
-      },
-    },
-  });
+  const { k, called } = replyKit();
   const r = await replyThreadForCwd("/repo", { threadId: "", body: "hi" }, k);
   assert.equal(r.ok, false);
   assert.equal(r.error, "missing threadId");
-  assert.equal(called, false);
+  assert.equal(called(), false);
 });
 
 test("replyThreadForCwd: empty body → error without calling the adapter", async () => {
-  let called = false;
-  const k = draftKit({
-    adapter: {
-      kind: "github",
-      listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-      getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-      replyToThread: async () => {
-        called = true;
-      },
-    },
-  });
+  const { k, called } = replyKit();
   const r = await replyThreadForCwd("/repo", { threadId: "t1", body: "   " }, k);
   assert.equal(r.ok, false);
   assert.equal(r.error, "empty reply");
-  assert.equal(called, false);
+  assert.equal(called(), false);
 });
 
 test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with correct anchors, then clears", async () => {

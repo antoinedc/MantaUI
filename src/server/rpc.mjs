@@ -392,8 +392,20 @@ export function buildHandlers({
       );
       return res;
     },
-    "forge:ship-preview": (input) =>
-      shipPreview(typeof input === "object" && input !== null ? input.cwd : ""),
+    "forge:ship-preview": (input) => {
+      const cwd = typeof input === "object" && input !== null ? input.cwd : "";
+      // Seed the PR body with a "Closes #N" line from the session-linked issue
+      // (BET-827): reuse the same projectNameForCwd + sessionLinkGet pair the
+      // forge:ship onPrOpened handler uses — no second session-link reader.
+      return shipPreview(cwd, {
+        linkedIssue: async () => {
+          const name = cwd ? await projectNameForCwd(cwd) : null;
+          if (!name) return null;
+          const link = await local.sessionLinkGet(name);
+          return link?.issue ?? null;
+        },
+      });
+    },
     "forge:merge": (input) =>
       mergePullRequest(
         typeof input === "object" && input !== null ? input.cwd : "",

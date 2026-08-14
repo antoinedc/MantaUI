@@ -799,7 +799,11 @@ export async function shipPreview(cwd, deps = {}) {
   }
 
   const title = await draftTitle(cwd, ctx.head, deps);
-  const body = await draftBody(cwd, ctx.head, base, files, deps);
+  const body = await draftBody(cwd, ctx.head, base, files, {
+    ...deps,
+    linkedIssue: deps.linkedIssue ?? null,
+    prRepoKey: forgeRepoKey(ctx.forge),
+  });
   return { ok: true, head: ctx.head, base, fileCount: files.length, title, body };
 }
 
@@ -844,19 +848,39 @@ export function humanizeBranch(branch) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
+// `repoKey` is "host/owner/repo" (e.g. "github.com/antoinedc/MantaUI"); a forge
+// close-reference is "owner/repo#N", or bare "#N" when the issue lives in the
+// same repo as the pull request. Pure + exported for tests.
+export function issueCloseRef(issue, prRepoKey) {
+  if (!issue?.repoKey || !Number.isInteger(issue.number)) return "";
+  if (issue.repoKey === prRepoKey) return `#${issue.number}`;
+  const [, owner, repo] = String(issue.repoKey).split("/");
+  return owner && repo ? `${owner}/${repo}#${issue.number}` : "";
+}
+
 // Body draft: the repo's PR template when one exists (honouring step-1's
 // "honouring the repo's PR template"), else a short changed-files summary.
-// Template `${head}` / `${base}` placeholders, if present, are filled.
+// Template `${head}` / `${base}` placeholders, if present, are filled. When
+// `deps.linkedIssue` (an async fn returning `{ repoKey, number } | null`)
+// resolves a ref, ONE "Closes <ref>" line plus a blank line is prepended to
+// whichever body branch runs — `deps.prRepoKey` decides the bare/suffixed ref.
+// With no ref (or no dep) the output is byte-identical to today.
 async function draftBody(cwd, head, base, files, deps) {
   const readPrTemplate = deps.readPrTemplate ?? defaultReadPrTemplate;
+  let issueRef = "";
+  if (deps.linkedIssue) {
+    const issue = await deps.linkedIssue();
+    issueRef = issueCloseRef(issue, deps.prRepoKey);
+  }
+  const preamble = issueRef ? `Closes ${issueRef}\n\n` : "";
   const template = await readPrTemplate(cwd, deps);
   if (template && template.trim()) {
-    return template
+    return preamble + template
       .replace(/\$\{head\}/g, head || "")
       .replace(/\$\{base\}/g, base || "");
   }
-  if (files.length === 0) return "";
-  return `## What\n\nOpens ${head} → ${base}.\n\n## Changed files\n\n${files.map((f) => `- ${f}`).join("\n")}`;
+  if (files.length === 0) return preamble;
+  return preamble + `## What\n\nOpens ${head} → ${base}.\n\n## Changed files\n\n${files.map((f) => `- ${f}`).join("\n")}`;
 }
 
 // Find + read the repo's PR template, best-first from the candidates list.
