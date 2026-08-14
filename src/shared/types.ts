@@ -709,6 +709,18 @@ export type ForgeDraftSubmitResult =
   | { ok: true }
   | { ok: false; error: string; kind?: string | null };
 
+// forge:thread-reply input + result. A reply targets ONE existing incoming
+// thread and posts immediately — it is never buffered in the draft, which
+// batches new line comments only.
+export type ForgeThreadReplyInput = {
+  threadId: string;
+  body: string;
+} & ForgeRefTarget;
+
+export type ForgeThreadReplyResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 
 // ----- IPC inputs -----
 
@@ -982,6 +994,7 @@ export const IPC = {
   forgeDraftGet: "forge:draft-get",
   forgeDraftComment: "forge:draft-comment",
   forgeDraftSubmit: "forge:draft-submit",
+  forgeThreadReply: "forge:thread-reply",
 
   // BET-796: fresh-box clone flow, all box-side (a forge token never reaches
   // the renderer). forge:device-start mints the GitHub device grant (returns a

@@ -62,6 +62,8 @@ import type {
   ForgeDraftCommentResult,
   ForgeDraftSubmitInput,
   ForgeDraftSubmitResult,
+  ForgeThreadReplyInput,
+  ForgeThreadReplyResult,
   ForgeDeviceStartResult,
   ForgeDevicePollResult,
   ForgeRepoListResult,
@@ -228,6 +230,7 @@ export interface Api {
   forgeDraftGet(input: ForgeRefTarget): Promise<ForgeDraftGetResult>;
   forgeDraftComment(input: ForgeDraftCommentInput): Promise<ForgeDraftCommentResult>;
   forgeDraftSubmit(input: ForgeDraftSubmitInput): Promise<ForgeDraftSubmitResult>;
+  forgeThreadReply(input: ForgeThreadReplyInput): Promise<ForgeThreadReplyResult>;
 
   // BET-796: fresh-box clone flow (box-side only — a forge token never leaves
   // the box). deviceStart mints the GitHub device grant (RENDERER-SAFE: no

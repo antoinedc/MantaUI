@@ -1109,6 +1109,35 @@ export async function draftCommentForCwd(ref, input = {}, deps = {}) {
 }
 
 /**
+ * forge:thread-reply — post a reply to ONE existing incoming thread. Unlike a
+ * draft comment this is not buffered: a reply is per-thread and publishes
+ * immediately. Box-side only; the token never reaches the renderer.
+ *
+ * @param {string|object} ref
+ * @param {{ threadId: string, body: string }} input
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+export async function replyThreadForCwd(ref, input = {}, deps = {}) {
+  const ctx = await resolveDraftContext(ref, deps);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const threadId = String(input.threadId ?? "").trim();
+  const body = String(input.body ?? "").trim();
+  if (!threadId) return { ok: false, error: "missing threadId" };
+  if (!body) return { ok: false, error: "empty reply" };
+  try {
+    await ctx.adapter.replyToThread(ctx.repo, ctx.number, {
+      threadId,
+      body,
+      headSha: ctx.headSha,
+    });
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+  return { ok: true };
+}
+
+/**
  * forge:draft-submit — flush the box-buffered draft as ONE review. The draft
  * is cleared ONLY on success; a failed submit leaves it intact and recoverable.
  * Returns a typed error (`kind`) for the distinguishable failure modes.

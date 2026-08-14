@@ -725,6 +725,7 @@ export const httpApi: Api = {
   forgeDraftGet: (input) => rpc(IPC.forgeDraftGet, input),
   forgeDraftComment: (input) => rpc(IPC.forgeDraftComment, input),
   forgeDraftSubmit: (input) => rpc(IPC.forgeDraftSubmit, input),
+  forgeThreadReply: (input) => rpc(IPC.forgeThreadReply, input),
 
   // -- forge clone flow (BET-796), box-side only --
   forgeDeviceStart: () => rpc(IPC.forgeDeviceStart),
