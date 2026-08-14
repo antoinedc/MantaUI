@@ -102,7 +102,7 @@ export const SCREENS = [
     ready: '[data-screen="welcome"]',
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/welcome/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn"],
+    surfacesClosed: [],
   },
   {
     id: "session",
@@ -122,10 +122,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -146,6 +143,7 @@ export const SCREENS = [
     // (but not the click-only ctx pill). From the coverage gate's failure
     // output — BET-486 requires every non-opening row to declare this.
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -163,6 +161,7 @@ export const SCREENS = [
     viewport: DESKTOP_VIEWPORT,
     mockup: null,
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -179,6 +178,7 @@ export const SCREENS = [
     viewport: DESKTOP_VIEWPORT,
     mockup: null,
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -195,6 +195,7 @@ export const SCREENS = [
     viewport: DESKTOP_VIEWPORT,
     mockup: null,
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -211,6 +212,7 @@ export const SCREENS = [
     viewport: DESKTOP_VIEWPORT,
     mockup: null,
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -242,10 +244,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -270,10 +269,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -291,10 +287,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -316,7 +309,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // REGION ROWS — a component that owns its own small baseline. These are
@@ -337,7 +330,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     id: "settings-general",
@@ -352,7 +345,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // Extensions panel — the four settings sections (box/accounts/extensions)
@@ -376,7 +369,7 @@ export const SCREENS = [
     },
     viewport: DESKTOP_VIEWPORT,
     mockup: "docs/screens/settings/mockup.html",
-    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+    surfacesClosed: ["manta-ctx-pill", "manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
   {
     // Folder picker — the LAST designed screen with no mockup and no gate
@@ -437,10 +430,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
     ],
   },
   // BET-511: the model picker's dropdown was previously opened by NO capture —
@@ -467,9 +457,6 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -496,10 +483,7 @@ export const SCREENS = [
     mockup: null,
     surfacesClosed: [
       "manta-ctx-pill",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -522,10 +506,7 @@ export const SCREENS = [
     mockup: null,
     surfacesClosed: [
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -552,6 +533,7 @@ export const SCREENS = [
         .click();
     },
     surfacesClosed: [
+      "manta-ctx-pill",
       "manta-effort-picker-btn",
       "manta-model-picker-btn",
       "manta-session-menu-trigger",
@@ -589,10 +571,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -619,10 +598,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -647,10 +623,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
@@ -675,10 +648,7 @@ export const SCREENS = [
     surfacesClosed: [
       "manta-ctx-pill",
       "manta-effort-picker-btn",
-      "manta-effort-picker-btn",
       "manta-model-picker-btn",
-      "manta-model-picker-btn",
-      "manta-session-menu-trigger",
       "manta-session-menu-trigger",
     ],
   },
