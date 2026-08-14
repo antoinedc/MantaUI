@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
+import { startPoller } from "./startPoller.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -1651,12 +1652,7 @@ export function createCredentialRefreshSweep({
 
 export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS } = {}) {
   const { sweep } = createCredentialRefreshSweep();
-  // Run once immediately so a fresh server boot doesn't have to wait
-  // intervalMs to discover an already-near-expiry credential.
-  sweep();
-  const timer = setInterval(sweep, intervalMs);
-  timer.unref();
-  return { stop: () => clearInterval(timer) };
+  return startPoller(sweep, { intervalMs, label: "opencode-credentials" });
 }
 
 // ---------------------------------------------------------------------------

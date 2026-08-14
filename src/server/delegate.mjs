@@ -997,22 +997,7 @@ export async function tickActivity(deps) {
 }
 
 export function startActivityPoller(deps = {}, { intervalMs = ACTIVITY_INTERVAL_MS } = {}) {
-  let inFlight = false;
-  const tick = async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      await tickActivity(deps);
-    } catch (e) {
-      console.warn("[delegate] activity tick failed:", e?.message ?? e);
-    } finally {
-      inFlight = false;
-    }
-  };
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-  return { stop() { clearInterval(timer); } };
+  return startPoller(() => tickActivity(deps), { intervalMs, label: "delegate-activity" });
 }
 
 // ---------------------------------------------------------------------------

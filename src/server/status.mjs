@@ -10,6 +10,7 @@
 // countSubagents looks for Task(…) followed by ⎿  Running… within 3 lines.
 
 import { run } from "./tmux.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const POLL_MS = 2000;
 const CAPTURE_LINES = 40;
@@ -158,34 +159,10 @@ export async function collectPanes(runFn = run) {
  * @returns {{ stop: () => void }}
  */
 export function startStatusPoller(bus, { intervalMs = POLL_MS } = {}) {
-  let inFlight = false;
-
   async function tick() {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const stdout = await collectPanes();
-      const batch = parseStatus(stdout);
-      bus.publish({ kind: "status", payload: batch });
-    } catch (e) {
-      // Defensive: collectPanes already absorbs tmux errors; this catches
-      // anything else (e.g. bus.publish throwing) without crashing the process.
-      console.warn("[status] tick failed:", e?.message ?? e);
-    } finally {
-      inFlight = false;
-    }
+    const stdout = await collectPanes();
+    const batch = parseStatus(stdout);
+    bus.publish({ kind: "status", payload: batch });
   }
-
-  // Fire one tick immediately so the sidebar fills in without waiting intervalMs.
-  void tick();
-
-  const timer = setInterval(() => void tick(), intervalMs);
-  // Don't hold the process open for the poller alone (mirrors events.mjs keep-alive).
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(tick, { intervalMs, label: "status" });
 }

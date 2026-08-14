@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import { join, dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const STORE_PATH = statePath("serve-page.json");
 const PAGES_DIR = statePath("pages");
@@ -300,9 +301,5 @@ export function createCleanupSweep({
 
 export function startCleanupPoller({ intervalMs = CLEANUP_MS } = {}) {
   const { sweep } = createCleanupSweep();
-  // Run once immediately to clean up any leftover expired pages.
-  sweep();
-  const timer = setInterval(sweep, intervalMs);
-  timer.unref();
-  return { stop: () => clearInterval(timer) };
+  return startPoller(sweep, { intervalMs, label: "serve-page" });
 }

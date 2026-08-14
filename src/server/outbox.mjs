@@ -19,6 +19,7 @@
 import { readdir, stat, copyFile, mkdir, rm } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { outboxRoot as defaultOutboxRoot } from "../shared/paths.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const POLL_MS = 3000;
 // Default tenure of a pushed artifact (7 days). Overridable per push via
@@ -252,13 +253,5 @@ export function startOutboxPoller(bus, { intervalMs = POLL_MS, root } = {}) {
   const outboxRoot = root ?? defaultOutboxRoot();
   const { tick } = createOutboxScanner(bus, outboxRoot);
 
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(tick, { intervalMs, label: "outbox" });
 }

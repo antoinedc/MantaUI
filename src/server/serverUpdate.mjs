@@ -18,6 +18,7 @@
 
 import { isUpdateAvailable } from "../shared/versionCompare.mjs";
 import { resolveBoxChannel } from "../shared/channel.mjs";
+import { startPoller } from "./startPoller.mjs";
 
 const POLL_MS = 6 * 60 * 60 * 1000; // 6h, per the stage-2 spec.
 
@@ -180,13 +181,5 @@ export function startServerUpdatePoller(
     }
   }
 
-  void runTick();
-  const timer = setInterval(() => void runTick(), POLL_MS);
-  timer.unref();
-
-  return {
-    stop() {
-      clearInterval(timer);
-    },
-  };
+  return startPoller(runTick, { intervalMs: POLL_MS, label: "server-update" });
 }
