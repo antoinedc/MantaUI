@@ -93,6 +93,7 @@ export function SessionHeader({
   forgeKind,
   forgeConnectOfferDismissed,
   onOpenExternal,
+  onReviewChanges,
   onFillComposer,
   onDismissForgeConnect,
   onMerge,
@@ -159,6 +160,10 @@ export function SessionHeader({
   forgeKind?: string | null;
   forgeConnectOfferDismissed?: boolean;
   onOpenExternal?: (url: string) => void;
+  // BET-869: from the PR-present branch popover, "Review changes" opens the
+  // artifacts panel on its Review tab. ChatPanel wires this to the
+  // `manta-open-review` window event.
+  onReviewChanges?: () => void;
   onFillComposer?: (text: string) => void;
   onDismissForgeConnect?: () => void;
   // BET-867: the branch chip's popover is the ONE git surface. Merge + ship
@@ -383,6 +388,7 @@ export function SessionHeader({
           onCreatePr={onCreatePr}
           onEnsureShipPreview={onEnsureShipPreview}
           onOpenExternal={onOpenExternal}
+          onReviewChanges={onReviewChanges}
         />
       ) : branch ? (
         <Tag
@@ -1005,6 +1011,7 @@ type BranchPanelProps = {
   onDraftPr?: () => void;
   onCreatePr?: () => void;
   onOpenExternal?: (url: string) => void;
+  onReviewChanges?: () => void;
 };
 
 function BranchChip({
@@ -1106,6 +1113,7 @@ function BranchPanel({
   onDraftPr,
   onCreatePr,
   onOpenExternal,
+  onReviewChanges,
 }: BranchPanelProps) {
   if (!pr) {
     // No pull request on this branch [F2] — the Draft PR… / Create PR offer.
@@ -1187,8 +1195,7 @@ function BranchPanel({
         >
           {mergeBusy ? "Merging…" : "Merge"}
         </Button>
-        {/* "Review changes" is inert in BET-867 — BET-869 wires it. */}
-        <Button tone="default">Review changes</Button>
+        <Button tone="default" onClick={onReviewChanges}>Review changes</Button>
         {onOpenExternal && (
           <Button tone="ghost" title="Open on GitHub" onClick={() => onOpenExternal(pr.url)}>
             <ExternalLink size={14} aria-hidden="true" />
