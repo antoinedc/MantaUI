@@ -25,10 +25,12 @@ import {
   uploadRoot,
   outboxRoot,
   secretsRoot,
+  voiceRoot,
   STATE_DIRNAME,
   UPLOAD_DIRNAME,
   OUTBOX_DIRNAME,
   SECRETS_DIRNAME,
+  VOICE_DIRNAME,
 } from "./paths.mjs";
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ describe("paths — state directory resolution", () => {
     expect(uploadRoot()).toBe(join(homedir(), UPLOAD_DIRNAME));
     expect(outboxRoot()).toBe(join(homedir(), OUTBOX_DIRNAME));
     expect(secretsRoot()).toBe(join(homedir(), SECRETS_DIRNAME));
+    expect(voiceRoot()).toBe(join(homedir(), VOICE_DIRNAME));
   });
 
   it("relocates every state dir together when MANTA_STATE_HOME is set", () => {
@@ -65,6 +68,7 @@ describe("paths — state directory resolution", () => {
     expect(uploadRoot()).toBe(join("/tmp/sandbox-home", UPLOAD_DIRNAME));
     expect(outboxRoot()).toBe(join("/tmp/sandbox-home", OUTBOX_DIRNAME));
     expect(secretsRoot()).toBe(join("/tmp/sandbox-home", SECRETS_DIRNAME));
+    expect(voiceRoot()).toBe(join("/tmp/sandbox-home", VOICE_DIRNAME));
   });
 
   it("ignores an empty or whitespace override rather than writing to /", () => {

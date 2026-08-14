@@ -6,6 +6,7 @@ export const STATE_DIRNAME: string;
 export const UPLOAD_DIRNAME: string;
 export const OUTBOX_DIRNAME: string;
 export const SECRETS_DIRNAME: string;
+export const VOICE_DIRNAME: string;
 
 // Base directory the state dirs hang off: `$MANTA_STATE_HOME` when set to a
 // non-blank value, else `os.homedir()`. The override is a TEST-ISOLATION seam
@@ -17,10 +18,14 @@ export function stateHome(): string;
 // schedules, webhooks, cap jobs, …). No args → the `.manta` dir itself.
 export function statePath(...parts: string[]): string;
 
-// The three roots that sit NEXT to `.manta` rather than inside it.
+// The roots that sit NEXT to `.manta` rather than inside it.
 export function uploadRoot(): string;
 export function outboxRoot(): string;
 export function secretsRoot(): string;
+// Voice-note audio root (BET-834) — a SEPARATE tree from ~/.manta-uploads/ so
+// the hourly upload cleanup never sweeps voice audio; voice notes have their
+// own 7-day TTL sweep in src/server/voiceNotes.mjs.
+export function voiceRoot(): string;
 
 // macOS-only PATH prefix used by `patchPath`. Single source of truth for
 // the desktop plugin runner (src/main/capExecutor.ts) and the box server's

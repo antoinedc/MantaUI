@@ -57,6 +57,12 @@ export type AppConfig = {
   // `0` disables cleanup (keep everything). Default 24. See
   // src/server/uploads.mjs `startUploadCleanupPoller`.
   uploadCleanupHours?: number;
+  // BET-834: hours a voice note's AUDIO survives on the box before the sweep
+  // (voiceNotes.mjs `startVoiceSweep`) deletes the file. The transcript and
+  // waveform outlive the audio — after expiry the record stays with
+  // `audioAvailable:false`. `0` keeps the audio forever. Default 168 (7 days).
+  // Rides the same generic configGet/configUpdate channel as other fields.
+  voiceNoteTtlHours?: number;
   /**
    * Per-launcher CLI flag values for TUI launch modes (BET-138 refinement).
    * Keyed by launcher id (see src/server/launcherRegistry.mjs), then flag key.

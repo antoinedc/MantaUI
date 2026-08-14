@@ -18,6 +18,7 @@ export const STATE_DIRNAME = ".manta";
 export const UPLOAD_DIRNAME = ".manta-uploads";
 export const OUTBOX_DIRNAME = ".manta-outbox";
 export const SECRETS_DIRNAME = ".manta-secrets";
+export const VOICE_DIRNAME = ".manta-voice";
 
 // ---------------------------------------------------------------------------
 // Where the state directories live — and how to redirect them
@@ -69,6 +70,14 @@ export function outboxRoot() {
 
 export function secretsRoot() {
   return join(stateHome(), SECRETS_DIRNAME);
+}
+
+// Voice-note audio root (BET-834). Deliberately a SEPARATE top-level dir from
+// ~/.manta-uploads/: the upload tree is swept hourly by the upload cleanup
+// (uploadCleanupHours), which would delete voice audio an hour after
+// recording. Voice notes have their own 7-day TTL sweep (voiceNoteTtlHours).
+export function voiceRoot() {
+  return join(stateHome(), VOICE_DIRNAME);
 }
 
 // Leading `~` → os.homedir(); `~/foo` → `<homedir>/foo`. Other strings pass

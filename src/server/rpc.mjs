@@ -209,6 +209,7 @@ export function buildHandlers({
   runServerSelfUpdate,
   delegate,
   progress,
+  voiceNotes,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -373,6 +374,13 @@ export function buildHandlers({
         model: cfg.voiceTranscriptionModel,
       });
     },
+
+    // BET-834: list a session's voice notes (metadata only — no audio, no
+    // binary). Binary goes over REST (GET /api/voice/<id>), metadata over
+    // /rpc — that split is the existing convention. Oldest first. Returned
+    // records omit any audio bytes that might have been stored alongside
+    // (there are none today, but the split is explicit).
+    "voice:list-notes": ({ sessionId } = {}) => voiceNotes.list({ sessionId }),
 
     // preload: ipcRenderer.invoke(IPC.uploadFiles, { projectName, localPaths })
     // → args[0] = { projectName, localPaths }

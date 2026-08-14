@@ -32,7 +32,7 @@ function explainFetchError(e) {
  *
  * @param {string} mime
  */
-function filenameFor(mime) {
+export function filenameFor(mime) {
   if (mime.includes("webm")) return "audio.webm";
   if (mime.includes("ogg")) return "audio.ogg";
   if (mime.includes("mp4") || mime.includes("m4a")) return "audio.m4a";

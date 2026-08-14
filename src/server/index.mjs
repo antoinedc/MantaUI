@@ -44,6 +44,13 @@ import { createSyncState } from "./syncState.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
+import {
+  uploadVoiceNote,
+  retryTranscript,
+  resolvePlayback,
+  loadNotes,
+  startVoiceSweep,
+} from "./voiceNotes.mjs";
 import { startServerUpdatePoller } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
@@ -413,6 +420,28 @@ rpcHandlers = buildHandlers({
   // determinate progress bar.
   runServerSelfUpdate: (scriptPath) =>
     runServerSelfUpdate(scriptPath, undefined, { publish: (e) => bus.publish(e) }),
+  // BET-834: voice-note metadata over /rpc (audio goes over REST). Oldest
+  // first, filtered by session, no audio bytes.
+  voiceNotes: {
+    list: ({ sessionId } = {}) => {
+      const notes = loadNotes();
+      const sid = typeof sessionId === "string" && sessionId ? sessionId : null;
+      return notes
+        .filter((n) => (sid ? n.sessionId === sid : true))
+        .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+        .map(({ id, sessionId: s, transcript, mime, durationMs, peaks, createdAt, expiresAt, audioAvailable }) => ({
+          id,
+          sessionId: s,
+          transcript,
+          mime,
+          durationMs,
+          peaks,
+          createdAt,
+          expiresAt,
+          audioAvailable: audioAvailable !== false,
+        }));
+    },
+  },
 });
 
 // Server-update checker: polls https://mantaui.com/updates/server.json every
@@ -440,6 +469,14 @@ const { stop: stopServePageCleanup } = startCleanupPoller();
 // eslint-disable-next-line no-unused-vars
 const artifactSweep = createArtifactSweep();
 artifactSweep.start();
+
+// Voice-note audio TTL sweep (BET-834): deletes EXPIRED audio files every 5
+// min but KEEPS the records (transcript + waveform outlive the clip), flipping
+// each note's audioAvailable to false so a client renders a disabled play
+// button without probing. Same cadence as the servePage/outbox/schedule
+// pollers. See src/server/voiceNotes.mjs.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopVoiceSweep } = startVoiceSweep();
 
 // Proactive pre-expiry Claude credential refresh (BET-281): clocks
 // ~/.claude/.credentials.json every 10 min and refreshes ~30 min ahead of
@@ -661,6 +698,28 @@ const readJsonBody = (req, limit) => readBody(req, { parse: true, limit });
 // need exact bytes (parsing + re-serializing would change whitespace).
 const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
 
+// Raw BINARY body for octet-stream uploads (voice audio). Unlike readBody this
+// returns the exact Buffer (its parse:false path coerces to a UTF-8 string,
+// which would mangle audio bytes). Capped so a hostile/runaway body can't OOM
+// the box; 16 MB comfortably covers a 5-minute opus/webm clip.
+function readRawBuffer(req, limit = 16 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error("body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 // ---------- tiny HTTP helpers ----------
 //
 // respondJson — write a JSON response (the most common response shape in this
@@ -782,6 +841,81 @@ async function handleDownload(req, res, url) {
       res.destroy();
     }
   }
+}
+
+// ---------- voice notes (BET-834) ----------
+//
+// POST /api/voice?session=<opencodeSessionId>
+//   Raw audio bytes (application/octet-stream) + headers x-mime, x-duration-ms,
+//   x-peaks (base64). Server writes the file then transcribes in one round
+//   trip — the client must not upload and transcribe separately. Then stores
+//   the note and replies { id, transcript, durationMs, expiresAt }.
+//
+// GET /api/voice/<id>
+//   Streams the audio with the record's mime + Cache-Control: private.
+//   404 when unknown / expired / file gone (file-gone prunes the record).
+//
+// POST /api/voice/<id>/retry
+//   Re-runs transcription for a record whose transcript is empty.
+//   404 unknown/expired, 409 if the retry fails again.
+async function handleVoiceUpload(req, res, url) {
+  const sessionId = url.searchParams.get("session");
+  let bytes;
+  try {
+    bytes = await readRawBuffer(req);
+  } catch {
+    return respondJson(res, 413, { error: "audio body too large" });
+  }
+  const cfg = await local.configGet();
+  const mime = typeof req.headers["x-mime"] === "string" ? req.headers["x-mime"] : "audio/webm";
+  const durationMs = Number(req.headers["x-duration-ms"] ?? 0) || 0;
+  const peaks = typeof req.headers["x-peaks"] === "string" ? req.headers["x-peaks"] : "";
+  const result = await uploadVoiceNote(
+    {
+      sessionId,
+      mime,
+      durationMs,
+      peaks,
+      bytes,
+      ttlHours: cfg.voiceNoteTtlHours ?? undefined,
+      apiKey: cfg.groqApiKey,
+      model: cfg.voiceTranscriptionModel,
+    },
+  );
+  if (!result.ok) {
+    const body = result.status === 409 ? { error: result.error, id: result.record?.id } : { error: result.error };
+    return respondJson(res, result.status, body);
+  }
+  const { record } = result;
+  return respondJson(res, 200, {
+    id: record.id,
+    transcript: record.transcript,
+    durationMs: record.durationMs,
+    expiresAt: record.expiresAt,
+  });
+}
+
+async function handleVoicePlayback(req, res, id) {
+  const playback = await resolvePlayback(id);
+  if (!playback.ok) return respondJson(res, playback.status, { error: "not found" });
+  res.writeHead(200, {
+    "content-type": playback.note.mime || "audio/webm",
+    "content-length": String(playback.bytes.length),
+    "cache-control": "private, max-age=3600",
+  });
+  res.end(playback.bytes);
+}
+
+async function handleVoiceRetry(req, res, id) {
+  const cfg = await local.configGet();
+  const result = await retryTranscript(id, {
+    apiKey: cfg.groqApiKey,
+    model: cfg.voiceTranscriptionModel,
+  });
+  if (!result.ok) {
+    return respondJson(res, result.status, { error: result.error });
+  }
+  return respondJson(res, 200, { id, transcript: result.transcript });
 }
 
 // ---------- HTTP ----------
@@ -1106,6 +1240,24 @@ const handleRequest = async (req, res) => {
     return result.ok
       ? respondJson(res, 200, { ok: true, row: result.row })
       : respondJson(res, 400, { error: result.error });
+  }
+
+  // ---------- Voice notes (BET-834) ----------
+  // POST /api/voice?session=<sid>       — raw audio bytes → store + transcribe
+  // GET  /api/voice/<id>                — stream the audio back
+  // POST /api/voice/<id>/retry          — re-run transcription
+  // The id segment is validated against /^[a-f0-9]{32}$/ by the regex BEFORE
+  // touching the filesystem — that regex is the path-traversal guard.
+  const voiceRoute = path.match(
+    /^\/api\/voice(?:\/([a-f0-9]{32}))?(?:\/(retry))?$/,
+  );
+  if (voiceRoute) {
+    const [, vId, vAction] = voiceRoute;
+    if (req.method === "POST" && !vId) return handleVoiceUpload(req, res, url);
+    if (!vId) return respondJson(res, 404, { error: "not found" });
+    if (req.method === "GET" && !vAction) return handleVoicePlayback(req, res, vId);
+    if (req.method === "POST" && vAction === "retry") return handleVoiceRetry(req, res, vId);
+    return respondJson(res, 404, { error: "not found" });
   }
 
   // ---------- File peek (HTTP-mode desktop) ----------

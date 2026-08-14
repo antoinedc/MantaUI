@@ -247,6 +247,21 @@ export const SETTINGS: SettingEntry[] = [
       { value: "0", label: "Never (keep)" },
     ],
   },
+  {
+    id: "voiceNoteTtlHours",
+    section: "files",
+    label: "Voice note audio retention",
+    help: "How long a voice note's audio stays on the box before the sweep deletes the file. The transcript and waveform are always kept. 0 keeps the audio forever. Box-server setting.",
+    control: "segmented",
+    configKey: "voiceNoteTtlHours",
+    platform: "both",
+    default: 168,
+    options: [
+      { value: "24", label: "24 hours" },
+      { value: "168", label: "7 days" },
+      { value: "0", label: "Never (keep)" },
+    ],
+  },
 
   // ----- extensions (plugins, skill registries, AI-CLI flags) -----
   {

@@ -51,6 +51,10 @@ const DEFAULT_CONFIG = {
   // uploads.mjs deletes it. 0 disables cleanup. Default 24h (more forgiving
   // than the old 1h so a file survives a long session).
   uploadCleanupHours: 24,
+  // BET-834: hours a voice note's audio survives before the voiceNotes.mjs
+  // sweep deletes the file (transcript + waveform are kept forever). 0 = keep
+  // forever. Default 168 (7 days).
+  voiceNoteTtlHours: 168,
 };
 
 let _config = null;
