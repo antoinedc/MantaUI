@@ -365,6 +365,33 @@ function toGithubAnchor(c, headSha) {
  *   instance serves `<host>/api/v3`.
  */
 export function createGithubAdapter(request, requestWrite, requestText = request, apiBase = API) {
+  /**
+   * GET every page of a paginated list endpoint into one array. GitHub caps
+   * list endpoints at `per_page` (default 30); this passes an explicit
+   * `per_page=100` to cut round-trips and keeps requesting pages while the
+   * last one comes back full, stopping at the first short/empty page. Each
+   * page is a distinct URL so they cannot collide in the request layer's ETag
+   * store. Pagination is purely an adapter concern — the accumulated array is
+   * returned so the caller normalises it exactly once.
+   *
+   * @param {string} url
+   * @param {{ perPage?: number }} [opts]
+   * @returns {Promise<{ data: Array<any>, stale: boolean }>}
+   */
+  async function getAllPages(url, { perPage = 100 } = {}) {
+    const all = [];
+    let stale = false;
+    for (let page = 1; ; page++) {
+      const sep = url.includes("?") ? "&" : "?";
+      const { data, stale: s } = await request(`${url}${sep}per_page=${perPage}&page=${page}`);
+      stale = stale || Boolean(s);
+      const items = Array.isArray(data) ? data : [];
+      all.push(...items);
+      if (items.length < perPage) break;
+    }
+    return { data: all, stale };
+  }
+
   return {
     kind: "github",
 
@@ -426,9 +453,9 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         // there must not blank the PR.
       }
       try {
-        const t = await request(`${base}/comments`);
+        const t = await getAllPages(`${base}/comments`);
         threads = Array.isArray(t.data) ? t.data : [];
-        stale = stale || t.stale;
+        stale = stale || Boolean(t.stale);
       } catch {
         // Same — inline-thread count is display-only.
       }
@@ -624,7 +651,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
       headSha = pr?.data?.head?.sha ?? "";
       const [diffRes, commentsRes] = await Promise.all([
         requestText(pull).catch(() => null),
-        request(pull + "/comments").catch(() => null),
+        getAllPages(pull + "/comments").catch(() => null),
       ]);
       if (diffRes) {
         stale = stale || Boolean(diffRes.stale);
