@@ -288,6 +288,13 @@ Window-scoped, in `App.tsx`. xterm-internal handlers (⌘C/V/F/K) live in
 | ⌥⌘↑ / ⌥⌘↓ | Step prev/next session, wraps both ends     |
 | ⌘I          | Toggle the Artifacts panel (chat pane active only) |
 | ⌘,          | Open Settings                                |
+| ⇧⌘M         | Voice (chat composer): tap toggles recording on/off, hold is push-to-talk |
+
+The voice row is a capture-phase handler in `src/renderer/hooks/useVoice.ts`,
+not a window-scoped `App.tsx` one; while a take is active, `Enter` stops +
+sends, `Space` pauses/resumes (only when the composer textarea isn't focused),
+and `Esc` discards. The old no-shift binding was retired — it collided with the
+terminal's carriage return and sat on Wispr Flow's conflict list.
 
 Flat order for ⌘1..9 / ⌥⌘ navigation comes from `flatSessions(projects)` —
 the sidebar's top-down (project, window) tuple list. Don't reorder it without
@@ -1538,8 +1545,8 @@ footer row holds: the model picker (model + effort + fast-toggle, inside
 `ModelPicker`), the mic and attach buttons (input-mode affordances), and on
 the right the usage dial (`UsageDial`) plus the ⏰ schedules / 🔑 secrets /
 🪝 webhooks `SessionToolbar` buttons, with a transient voice/running status
-string ("transcribing… · esc cancels" / "recording · ⏎ send · ctrl+m stop ·
-esc cancel" / "esc · interrupt") appearing while voice or a turn is active.
+string ("transcribing… · esc cancels" / "recording · ⏎ send · ⇧⌘M stop ·
+space pause · esc cancel" / "esc · interrupt") appearing while voice or a turn is active.
 A trust toggle ("Permissions on — click to bypass" / "Bypassing permissions")
 sits on its own row beneath the footer. Status that describes the SESSION
 (branch, context pill, stale-cache warning, fork/compact/clear/delete) lives
