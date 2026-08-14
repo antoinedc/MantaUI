@@ -141,9 +141,51 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
 
 const bus = createBus();
+// Model context windows for the interpreter's context reading. listModels() is
+// a provider round-trip, so it is fetched once and refreshed only when a model
+// we have never seen appears (a newly connected provider). A miss returns null
+// and the interpreter falls back to the assumed window rather than blocking.
+let modelContextLimits = null;
+let modelContextRefresh = null;
+function refreshModelContextLimits() {
+  if (modelContextRefresh) return modelContextRefresh;
+  modelContextRefresh = (async () => {
+    try {
+      const models = await oc.listModels();
+      const next = new Map();
+      for (const m of models ?? []) {
+        const ctx = m?.limit?.context;
+        if (typeof ctx === "number" && Number.isFinite(ctx) && ctx > 0) {
+          next.set(`${m.providerID}/${m.id}`, ctx);
+        }
+      }
+      modelContextLimits = next;
+    } catch {
+      modelContextLimits = modelContextLimits ?? new Map();
+    } finally {
+      modelContextRefresh = null;
+    }
+  })();
+  return modelContextRefresh;
+}
+function contextLimitFor(providerID, modelID) {
+  if (!providerID || !modelID) return null;
+  if (modelContextLimits === null) {
+    void refreshModelContextLimits();
+    return null;
+  }
+  const hit = modelContextLimits.get(`${providerID}/${modelID}`);
+  if (hit) return hit;
+  void refreshModelContextLimits();
+  return null;
+}
+
 // Box-side stream interpretation (BET-551): interprets the opencode stream on
 // the box and republishes derived events on THIS bus (single stream/endpoint).
-const streamInterp = createStreamInterpreter({ publish: (evt) => bus.publish(evt) });
+const streamInterp = createStreamInterpreter({
+  publish: (evt) => bus.publish(evt),
+  contextLimitFor,
+});
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
