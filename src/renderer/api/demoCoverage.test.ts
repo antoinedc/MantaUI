@@ -71,6 +71,7 @@ export const DEMO_UNIMPLEMENTED = [
   "gitAddWorktree",
   "gitRemoveWorktree",
   "onAgentFileReady",
+  "onAppControl",
   "onAutoUpdateAvailable",
   "onAutoUpdateDownloaded",
   "onDelegateUpdated",

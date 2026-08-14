@@ -741,6 +741,21 @@ export type ServerUpdateAvailablePayload = {
   notesUrl: string | null;
 };
 
+// App-control bus envelope payload (BET-840/841). manta-server publishes ONE
+// bus kind, `appControl`, with an `action` discriminator
+// (src/server/appControl.mjs). The desktop renderer subscribes once
+// (src/renderer/App.tsx) and switches on `action`. `providerID`/`modelID`
+// ride the `switch-model` event; `name` rides `rename-session`. Client-
+// agnostic by design so the native client can adopt the same bus kind later
+// without a server change.
+export type AppControlPayload = {
+  action: string;
+  sessionId?: string;
+  providerID?: string;
+  modelID?: string;
+  name?: string;
+};
+
 // SSH installer (BET-355) — push-event shape + state snapshot. These types
 // are declared in src/shared/types.ts so both the preload runtime (which
 // imports them into src/preload/index.ts) AND the renderer-side accessor

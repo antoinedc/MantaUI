@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppConfig, CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppConfig, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -3188,4 +3188,54 @@ export function preferLinkedPr(
     mergeBlockedReason: null,
     unresolvedThreads: 0,
   };
+};
+
+// ---------------------------------------------------------------------------
+// App-control bus dispatcher (BET-840/841).
+//
+// The box publishes ONE `appControl` bus kind with an `action` discriminator.
+// The desktop renderer subscribes once (App.tsx) and funnels every envelope
+// through this pure dispatcher, which routes each known action to a handler
+// from the injected `handlers` bag. Pure and side-effect-free so it can be
+// unit-tested without mounting App.
+//
+// - switch-model  -> handlers.switchModel (persist override + apply to the
+//                    open panel via the shared model-selection path)
+// - rename-session-> handlers.renameSession (refresh the sidebar; tmux is the
+//                    source of truth)
+// - compact-session -> no-op by design: opencode emits `session.compacted` and
+//                    the renderer already reacts to it. Kept so nobody adds a
+//                    redundant branch.
+// - unknown action -> ignored silently. A newer box may publish an action an
+//                    older desktop does not know; that must not throw.
+// ---------------------------------------------------------------------------
+export type AppControlHandlers = {
+  switchModel?: (m: { sessionId: string; providerID: string; modelID: string }) => void;
+  renameSession?: (p: { sessionId?: string; name: string }) => void;
+};
+
+export function dispatchAppControl(
+  payload: unknown,
+  handlers: AppControlHandlers,
+): void {
+  if (!payload || typeof payload !== "object") return;
+  const p = payload as AppControlPayload;
+  if (p.action === "switch-model") {
+    const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
+    const providerID = typeof p.providerID === "string" ? p.providerID : "";
+    const modelID = typeof p.modelID === "string" ? p.modelID : "";
+    if (sessionId && providerID && modelID) {
+      handlers.switchModel?.({ sessionId, providerID, modelID });
+    }
+    return;
+  }
+  if (p.action === "rename-session") {
+    const name = typeof p.name === "string" ? p.name : "";
+    handlers.renameSession?.({
+      sessionId: typeof p.sessionId === "string" ? p.sessionId : undefined,
+      name,
+    });
+    return;
+  }
+  // compact-session + any unknown action: no-op.
 }

@@ -69,6 +69,7 @@ import type {
   SubagentInput,
   PluginRegistryRow,
   TranscriptHit,
+  AppControlPayload,
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
@@ -447,6 +448,13 @@ export interface Api {
   // refetch. No-op on the preload bridge and on demoApi (Proxy fallback
   // returns a no-op unsubscribe).
   onUsageUpdated(cb: (payload: { snapshots: UsageSnapshot[] }) => void): () => void;
+
+  // App-control (BET-840/841). The box publishes ONE `appControl` bus kind
+  // with an `action` discriminator (switch-model / rename-session /
+  // compact-session); the desktop subscribes here once and switches on
+  // `action`. No-op on the preload bridge and on demoApi (Proxy fallback
+  // returns a no-op unsubscribe).
+  onAppControl(cb: (payload: AppControlPayload) => void): () => void;
 
   // Secrets (manta-server owned; desktop reaches it over -L 18787). list returns
   // METADATA ONLY (never values). set carries the value renderer → box (never
