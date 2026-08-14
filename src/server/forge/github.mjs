@@ -481,7 +481,6 @@ export function createGithubAdapter(request, requestWrite, requestText = request
     },
 
     /**
-    /**
      * GET /repos/{o}/{r}/pulls/{n} with `Accept: application/vnd.github.diff`
      * (raw unified diff as TEXT) + GET /repos/{o}/{r}/pulls/{n}/comments
      * (normalised into forge-neutral Threads). headSha comes from the PR

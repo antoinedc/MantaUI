@@ -526,7 +526,6 @@ export function Settings({
     return "connected";
   };
 
-
   // Remove box — in-app confirm replaces window.confirm (BET-419 §D).
   const [removingBox, setRemovingBox] = useState(false);
   const [removeResult, setRemoveResult] = useState<{ ok: boolean; message: string } | null>(null);
