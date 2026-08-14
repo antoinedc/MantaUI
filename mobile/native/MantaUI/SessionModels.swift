@@ -235,6 +235,20 @@ enum SessionPinID {
     }
 }
 
+// MARK: - Pin ordering (BET-898)
+
+enum SessionOrder {
+    /// Pinned windows first, everything else in its existing tmux order.
+    /// STABLE within each half — a pin must not otherwise reshuffle a project.
+    /// Written as two filters rather than a comparator on purpose:
+    /// `sort(by:)` in Swift is NOT guaranteed stable, and an unstable sort
+    /// here would reorder unpinned windows on every pin toggle.
+    static func sorted(_ windows: [MantaWindow], project: String, pinned: Set<String>) -> [MantaWindow] {
+        let isPinned = { (w: MantaWindow) in pinned.contains(SessionPinID.window(project, index: w.index)) }
+        return windows.filter(isPinned) + windows.filter { !isPinned($0) }
+    }
+}
+
 // MARK: - Model label (§7.1 subtitle "running · opus 4.8")
 
 enum ModelLabel {
