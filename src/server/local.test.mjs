@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -246,4 +247,46 @@ test("parseCloneProgress ignores remote's own 100% lines (no early full bar)", (
 
 test("parseCloneProgress clamps percent into 0..100", () => {
   assert.equal(parseCloneProgress("Receiving objects: 250% (999/394)").percent, 100);
+});
+
+// makeSpawn() returns a { spawn, calls } pair for asserting gitPush's argv.
+// The injectable spawn must mimic node's: called with (cmd, argv, options) and
+// returning a child whose stdout/stderr are emit-events and which resolves with
+// exit code 0 once `close` is subscribed. It records every argv it's given.
+function makeSpawn() {
+  const calls = [];
+  const spawn = (cmd, argv) => {
+    calls.push(argv);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    process.nextTick(() => child.emit("close", 0));
+    return child;
+  };
+  return { spawn, calls };
+}
+
+test("gitPush: setUpstream + branch emits the remote before the branch", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitPush({ cwd: "/r", branch: "feat/x", setUpstream: true }, { spawn });
+  assert.deepEqual(calls[0], ["-C", "/r", "push", "-u", "origin", "feat/x"]);
+});
+
+test("gitPush: branch without setUpstream emits remote + branch", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitPush({ cwd: "/r", branch: "feat/x" }, { spawn });
+  assert.deepEqual(calls[0], ["-C", "/r", "push", "origin", "feat/x"]);
+});
+
+test("gitPush: no branch keeps the bare push with no remote", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitPush({ cwd: "/r" }, { spawn });
+  assert.deepEqual(calls[0], ["-C", "/r", "push"]);
+});
+
+test("gitPush: explicit remote is honored with setUpstream", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitPush({ cwd: "/r", branch: "feat/x", remote: "upstream", setUpstream: true }, { spawn });
+  assert.deepEqual(calls[0], ["-C", "/r", "push", "-u", "upstream", "feat/x"]);
 });
