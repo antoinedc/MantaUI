@@ -541,6 +541,7 @@ const { stop: stopForgePoller } = createForgePoller({
 // auto-disables. 15 min: a box that sleeps at night falls a few checks behind
 // but re-arms promptly on wake, far below GitLab's permanent-disable threshold.
 const FORGE_HEALTH_INTERVAL_MS = 15 * 60_000;
+// eslint-disable-next-line no-unused-vars
 const { stop: stopForgeHealthCheck } = startForgeHealthCheck({
   intervalMs: FORGE_HEALTH_INTERVAL_MS,
   listHooks: async () => {
@@ -563,8 +564,6 @@ const { stop: stopForgeHealthCheck } = startForgeHealthCheck({
   resolveToken: async (host) => ((await forgeResolveToken(host).catch(() => null))?.token) ?? null,
   checkHook: healthCheckRepoHook,
 });
-// eslint-disable-next-line no-unused-vars
-void stopForgeHealthCheck;
 
 // Resolve a parent directory to branch a forge-triggered job's worktree off.
 // The parent-directory the session-link primitive names (spec §3.4⑥, BET-844):
