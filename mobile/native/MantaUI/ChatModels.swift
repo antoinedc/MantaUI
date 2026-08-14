@@ -306,7 +306,12 @@ enum ChatTranscriptMapper {
                 return step.id
             }
         })
-        let toAppend = liveSteps.filter { !existingIDs.contains($0.id) }
+        // A live tool becomes a `.step` row — the `.rows` case holds
+        // `[StepGroupRow]`, and a step row is the step payload wrapped in
+        // `.step`. Deduping uses the ToolStep id before wrapping.
+        let toAppend: [StepGroupRow] = liveSteps
+            .filter { !existingIDs.contains($0.id) }
+            .map { .step($0) }
         guard !toAppend.isEmpty else { return blocks }
 
         var result = blocks
