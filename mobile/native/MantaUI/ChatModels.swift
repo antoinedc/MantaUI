@@ -271,7 +271,7 @@ enum ChatTranscriptMapper {
     /// Append the still-running LIVE tools (streamed mid-turn by the box) to the
     /// transcript, in the turn that spawned them.
     ///
-    /// This is the replacement for the deleted pinned `RunningToolRow` overlay:
+    /// This is the replacement for the deleted pinned running-tool overlay:
     /// a tool call renders inside the transcript (tailing its output as a live
     /// step) instead of floating above the composer. Each live tool becomes a
     /// `.running` step keyed by the SAME `callID` the canonical `stepIdentity`
