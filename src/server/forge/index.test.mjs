@@ -239,6 +239,56 @@ test("pullRequestForCwd: no open PR → well-formed empty result, not an error",
   assert.deepEqual(r.checks, []);
 });
 
+test("pullRequestForCwd: open PRs exist but none on this branch → no PR", async () => {
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () =>
+      fakeAdapter({
+        prs: [
+          { ...OPEN_PR, number: 1, headRef: "topic/a" },
+          { ...OPEN_PR, number: 2, headRef: "topic/b" },
+        ],
+      }),
+  });
+  assert.equal(r.pr, null);
+  assert.equal(r.error, null);
+  assert.equal(r.rollup, "none");
+  assert.deepEqual(r.checks, []);
+});
+
+test("pullRequestForCwd: detached HEAD / unknown branch → no PR", async () => {
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => null,
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () => fakeAdapter({ prs: [OPEN_PR] }),
+  });
+  assert.equal(r.pr, null);
+  assert.equal(r.error, null);
+  assert.equal(r.rollup, "none");
+  assert.deepEqual(r.checks, []);
+});
+
+test("pullRequestForCwd: the match is exact, not positional", async () => {
+  const r = await pullRequestForCwd("/repo", {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
+    getAdapter: () =>
+      fakeAdapter({
+        prs: [
+          { ...OPEN_PR, number: 1, headRef: "other" },
+          { ...OPEN_PR, number: 42, headRef: "feature/x" },
+        ],
+      }),
+  });
+  assert.equal(r.error, null);
+  assert.equal(r.pr.number, 42, "returns the branch-matching PR, not the first open PR");
+  assert.equal(r.pr.headRef, "feature/x");
+});
+
 test("getAdapter throws UnsupportedByForgeError for an unknown kind", async () => {
   const runtime = createForgeRuntime({ fetch: async () => json({}, 200, {}) });
   assert.throws(() => runtime.getAdapter("gitea", "t"), (e) => e.name === "UnsupportedByForgeError");

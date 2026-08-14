@@ -586,10 +586,12 @@ async function listOpenPrs(adapter, repo) {
 }
 
 /**
- * forge:pull-request — resolve `cwd → origin → repo`, pick the open PR on the
- * current branch (falling back to the first open PR), and return the
- * normalised PR + merged checks + rollup. Never throws for "no PR" or "not
- * connected" — those are well-formed `{ error }` / `{ pr: null }` results.
+ * forge:pull-request — resolve `cwd → origin → repo`, pick the open PR whose
+ * head is the current branch, and return the normalised PR + merged checks +
+ * rollup. A branch with no open PR — or no branch at all (detached HEAD) —
+ * returns the well-formed empty result `{ pr: null }`, never someone else's
+ * PR. Never throws for "no PR" or "not connected" — those are well-formed
+ * `{ error }` / `{ pr: null }` results.
  *
  * All git/forge deps are injectable for tests.
  *
@@ -612,8 +614,10 @@ export async function pullRequestForCwd(cwd, deps = {}) {
   if (prArr.length === 0) return { ...EMPTY, stale };
 
   const branch = await currentBranch(cwd);
-  let candidate = branch ? prArr.find((p) => p.headRef === branch) : undefined;
-  if (!candidate) candidate = prArr[0];
+  if (!branch) return { ...EMPTY, stale };
+
+  const candidate = prArr.find((p) => p.headRef === branch);
+  if (!candidate) return { ...EMPTY, stale };
 
   // Full normalised representation — getPullRequest populates reviewers + the
   // unresolved-thread count that the list endpoint cannot. Falls back to the
