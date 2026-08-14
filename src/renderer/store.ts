@@ -407,6 +407,11 @@ type State = {
   // first mount (draft → new-session flow). Consumed (cleared) by the panel
   // once it fires, so re-navigating to the session never re-sends it.
   autoSubmitPrompt: { sid: string; text: string; model?: ModelSelection } | null;
+  // BET-795: a one-shot composer SEED — the inbox's "Start a session" lands in
+  // a chat session with the prompt seeded into the composer but NOT submitted
+  // (the user reviews + hits Enter). Delivered to the session's ChatPanel like
+  // autoSubmitPrompt, but the panel only fills the input — no submit().
+  seedPrompt: { sid: string; text: string } | null;
   // sessionName -> windowIndex -> status
   status: Record<string, Record<number, WindowStatusUI>>;
   // Background-delegation jobs keyed by childSessionID (BET-381). Drives the
@@ -543,6 +548,7 @@ type State = {
   setAutoSubmitPrompt: (
     p: { sid: string; text: string; model?: ModelSelection } | null,
   ) => void;
+  setSeedPrompt: (p: { sid: string; text: string } | null) => void;
   refresh: () => Promise<void>;
   // Onboarding lifecycle. `skipOnboarding` persists onboardingSkipped (so the
   // flow doesn't re-trigger) and clears the forced flag. `relaunchOnboarding`
@@ -711,6 +717,7 @@ export const useStore = create<State>((set, get) => ({
   activeDraftId: null,
   drafts: [],
   autoSubmitPrompt: null,
+  seedPrompt: null,
   status: {},
   jobs: {},
   usage: [],
@@ -838,6 +845,7 @@ export const useStore = create<State>((set, get) => ({
     }),
   setActiveDraft: (id) => set({ activeDraftId: id }),
   setAutoSubmitPrompt: (p) => set({ autoSubmitPrompt: p }),
+  setSeedPrompt: (p) => set({ seedPrompt: p }),
 
   refresh: async () => {
     // BET-678: single cursor RPC. Pass the last-confirmed cursor so the box

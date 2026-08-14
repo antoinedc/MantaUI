@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
+import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules } from "./forgeRules.mjs";
 import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
@@ -358,6 +358,11 @@ export function buildHandlers({
       invalidateForgeToken(GH_HOST);
       return { ok: true };
     },
+
+    // BET-795: forge:inbox — the aggregated work inbox. Box-side read; three
+    // cross-repo SEARCH queries (assigned, review-requested, my red PRs),
+    // cached a full 60s on the search bucket. No per-repo iteration.
+    "forge:inbox": () => forgeInbox(),
 
     // BET-794: forge write path. Both box-side — a forge token never reaches
     // the renderer; the server resolves it. forge:ship previews/creates a PR
@@ -1019,9 +1024,12 @@ export function buildHandlers({
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are
-    // CREATED by the AI tool (Stage 3), NOT by the UI — there is deliberately
-    // no `delegate:create` channel. list/stop/delete route to the engine
-    // wired in src/server/index.mjs (createDelegateEngine). Stop/delete
+    // CREATED by the AI tool, and — since BET-795 — by the work inbox's
+    // "Delegate in background" row action, which routes through the SAME
+    // engine (createDelegateEngine wired in src/server/index.mjs) as the
+    // REST surface. Start goes through `startJob` exactly as the REST POST
+    // does; an inbox delegation declares no tools, so no pre-flight approval
+    // card is raised. list/stop/delete route to the engine too. Stop/delete
     // publish delegate.updated so a future UI card refetches live.
     // preload: ipcRenderer.invoke(IPC.delegateList, sessionId) → args[0] = sessionId?
     "delegate:list": (sessionId) =>
@@ -1030,6 +1038,20 @@ export function buildHandlers({
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
     // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
     "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
+    // preload: ipcRenderer.invoke(IPC.delegateStart, input) → args[0] = { prompt, sessionID, directory, model? }
+    // BET-795 inbox "Delegate in background": starts a background job through
+    // the existing delegate engine (own worktree + branch + rail row) instead
+    // of a foreground session. Same engine, same store, same completion path.
+    "delegate:start": (input) => {
+      const i = typeof input === "object" && input !== null ? input : {};
+      if (!delegate) return { ok: false, error: "no engine" };
+      return delegate.startJob({
+        prompt: i.prompt,
+        model: i.model,
+        parentSessionID: i.sessionID,
+        parentDirectory: i.directory,
+      });
+    },
 
     // ---- session progress (manta-server owned; BET-790) ----
     // Read-only: the durable progress record for a session (written by the AI's

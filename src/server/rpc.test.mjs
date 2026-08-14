@@ -850,3 +850,37 @@ test("tmux:select-window triggers exactly one syncState.refreshNow", async () =>
   assert.equal(calls.refreshNow, 1);
   assert.deepEqual(out, { selected: { sessionName: "s", windowIndex: 2 } });
 });
+
+// BET-795: the work inbox's "Delegate in background" must route through the
+// existing delegate engine (spec §3), not a foreground session.
+test("delegate:start routes the inbox delegation through the delegate engine + clear no-engine fallback", async () => {
+  let startCalled = null;
+  const { deps } = makeDeps([]);
+  deps.delegate = {
+    startJob: async (input) => {
+      startCalled = input;
+      return { ok: true, job: { id: "jid" } };
+    },
+  };
+  const handlers = buildHandlers(deps);
+  const res = await handlers["delegate:start"]({
+    prompt: "Complete u",
+    sessionID: "ses_active",
+    directory: "/repo",
+  });
+  assert.equal(res.ok, true);
+  assert.deepEqual(startCalled, {
+    prompt: "Complete u",
+    model: undefined,
+    parentSessionID: "ses_active",
+    parentDirectory: "/repo",
+  });
+
+  const noEngine = await buildHandlers(makeDeps([]).deps)["delegate:start"]({
+    prompt: "x",
+    sessionID: "s",
+    directory: "/",
+  });
+  assert.equal(noEngine.ok, false);
+  assert.equal(noEngine.error, "no engine");
+});

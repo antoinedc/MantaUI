@@ -114,9 +114,11 @@ import {
   linkedPrNumber,
   preferLinkedPr,
   dispatchAppControl,
+  sortInbox,
+  inboxReasonLabel,
 } from "./chatUtils";
 
-import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem } from "../shared/types";
 
 
 
@@ -4332,5 +4334,71 @@ describe("dispatchAppControl (BET-841)", () => {
     dispatchAppControl(undefined, { switchModel, renameSession });
     expect(switchModel).not.toHaveBeenCalled();
     expect(renameSession).not.toHaveBeenCalled();
+  });
+});
+
+// ---- Work inbox (BET-795) -------------------------------------------------
+
+const inboxItem = (over: Partial<ForgeInboxItem>): ForgeInboxItem => ({
+  kind: "issue",
+  repoKey: "github.com/acme/widget",
+  number: 1,
+  title: "thing",
+  url: "https://github.com/acme/widget/issues/1",
+  state: "open",
+  rollup: "none",
+  updatedAt: 0,
+  reason: "assigned",
+  seed: "Complete https://github.com/acme/widget/issues/1",
+  ...over,
+});
+
+describe("inboxReasonLabel", () => {
+  it("maps the three inbox reasons to their verbatim mockup copy", () => {
+    expect(inboxReasonLabel("assigned")).toBe("issue · assigned to you");
+    expect(inboxReasonLabel("review requested")).toBe("review requested");
+    expect(inboxReasonLabel("checks failing")).toBe("checks red");
+  });
+});
+
+describe("sortInbox", () => {
+  it("sorts by updatedAt descending", () => {
+    const rows = [
+      inboxItem({ number: 1, updatedAt: 100 }),
+      inboxItem({ number: 2, updatedAt: 900 }),
+      inboxItem({ number: 3, updatedAt: 500 }),
+    ];
+    expect(sortInbox(rows).map((r) => r.number)).toEqual([2, 3, 1]);
+  });
+
+  it("dedupes the same object at two keys to one row, more urgent reason wins (dedupe-precedence case)", () => {
+    const rows = [
+      inboxItem({
+        number: 9,
+        kind: "pr",
+        reason: "review requested",
+        updatedAt: 500,
+        rollup: "red",
+        url: "https://github.com/acme/widget/pull/9",
+      }),
+      inboxItem({
+        number: 9,
+        kind: "pr",
+        reason: "checks failing",
+        updatedAt: 500,
+        rollup: "red",
+        url: "https://github.com/acme/widget/pull/9",
+      }),
+    ];
+    const result = sortInbox(rows);
+    expect(result).toHaveLength(1);
+    expect(result[0].reason).toBe("checks failing");
+  });
+
+  it("does not mutate the caller's array", () => {
+    const rows = [inboxItem({ number: 2, updatedAt: 900 }), inboxItem({ number: 1, updatedAt: 100 })];
+    const before = [...rows];
+    sortInbox(rows);
+    expect(rows.map((r) => r.number)).toEqual(before.map((r) => r.number));
   });
 });

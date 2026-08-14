@@ -10,6 +10,9 @@ import {
   MergeNotAllowedError,
   MergeShaMismatchError,
   MergePermissionError,
+  buildInboxQueries,
+  normalizeSearchHit,
+  mergeInboxSources,
 } from "./github.mjs";
 import { rollupChecks } from "../../shared/forge.mjs";
 
@@ -440,4 +443,112 @@ test("listMyRepos drops read-only repos and orders most-recently-pushed first", 
   assert.equal(data[1].defaultBranch, "main");
   assert.equal(data[1].cloneUrl, "https://github.com/octo/manta-skills.git");
   assert.ok(!data.some((r) => r.fullName === "acme/readonly"));
+});
+
+// ---- Work inbox (BET-795) --------------------------------------------------
+
+test("buildInboxQueries returns the three cross-repo populations with their reasons", () => {
+  const qs = buildInboxQueries();
+  assert.deepEqual(qs, [
+    { query: "assignee:@me", reason: "assigned" },
+    { query: "review-requested:@me", reason: "review requested" },
+    { query: "author:@me is:open", reason: "checks failing" },
+  ]);
+});
+
+test("searchIssues GETs /search/issues with the query and passes the ttl through", async () => {
+  const seen = [];
+  const request = async (url, opts) => {
+    seen.push({ url, opts });
+    return {
+      data: {
+        items: [
+          {
+            number: 5,
+            title: "Fix login",
+            html_url: "https://github.com/acme/widget/issues/5",
+            state: "open",
+            repository_url: "https://api.github.com/repos/acme/widget",
+            updated_at: "2026-08-13T10:00:00Z",
+          },
+        ],
+      },
+      stale: false,
+    };
+  };
+  const adapter = createGithubAdapter(request);
+  const { data } = await adapter.searchIssues("assignee:@me", { ttl: 60000 });
+  assert.equal(seen[0].url, "https://api.github.com/search/issues?q=assignee%3A%40me");
+  assert.equal(seen[0].opts.ttl, 60000, "the search bucket's longer freshness is threaded through");
+  assert.equal(seen[0].opts.method, undefined); // a plain GET
+  assert.equal(data[0].number, 5);
+  assert.equal(data[0].kind, "issue");
+  assert.equal(data[0].repoKey, "github.com/acme/widget");
+});
+
+test("normalizeSearchHit: repo identity from repository_url, kind flips on the PR marker, headSha read defensively", () => {
+  const issue = normalizeSearchHit({
+    number: 1,
+    title: "t",
+    html_url: "https://github.com/acme/widget/issues/1",
+    state: "open",
+    repository_url: "https://api.github.com/repos/acme/widget",
+    updated_at: "2026-08-13T10:00:00Z",
+  });
+  assert.equal(issue.kind, "issue");
+  assert.equal(issue.owner, "acme");
+  assert.equal(issue.repo, "widget");
+  assert.equal(issue.repoKey, "github.com/acme/widget");
+
+  const pr = normalizeSearchHit({
+    number: 2,
+    title: "p",
+    html_url: "https://github.com/acme/widget/pull/2",
+    repository_url: "https://api.github.com/repos/acme/widget",
+    updated_at: "2026-08-13T11:00:00Z",
+    pull_request: { url: "https://api.github.com/repos/acme/widget/pulls/2", html_url: "https://github.com/acme/widget/pull/2" },
+    head: { ref: "feat/x", sha: "abc123" },
+  });
+  assert.equal(pr.kind, "pr");
+  assert.equal(pr.headSha, "abc123");
+  assert.equal(normalizeSearchHit(null).kind, "issue", "defensive: a null/empty item normalises, doesn't throw");
+});
+
+test("mergeInboxSources dedupes a PR matching two queries to one row with the more urgent reason", () => {
+  const a = {
+    kind: "pr", owner: "acme", repo: "widget", repoKey: "github.com/acme/widget",
+    number: 9, title: "Same PR", url: "https://github.com/acme/widget/pull/9",
+    state: "open", updatedAt: 1000, headSha: "s", reason: "review requested",
+  };
+  const b = { ...a, reason: "checks failing" }; // same PR, claimed by the red-checks population
+  const c = { ...a, number: 10, reason: "assigned", kind: "issue" };
+
+  const merged = mergeInboxSources([[a], [b, c]]);
+  assert.equal(merged.length, 2, "the two claims for PR 9 collapse into one row");
+  const pr9 = merged.find((i) => i.number === 9);
+  assert.equal(pr9.reason, "checks failing", "checks failing beats review requested");
+  assert.equal(pr9.owner, "acme");
+  const pr10 = merged.find((i) => i.number === 10);
+  assert.equal(pr10.reason, "assigned");
+});
+
+test("mergeInboxSources precedence: checks failing > review requested > assigned", () => {
+  const base = {
+    kind: "pr", repoKey: "github.com/acme/widget", number: 3,
+    title: "x", url: "u", state: "open", updatedAt: 0, headSha: "",
+  };
+  const assigned = { ...base, reason: "assigned" };
+  const review = { ...base, reason: "review requested" };
+  const red = { ...base, reason: "checks failing" };
+  // assigned then review → review wins
+  const m1 = mergeInboxSources([[assigned, review]]);
+  assert.equal(m1[0].reason, "review requested");
+  // review then assigned → review still wins (order-independent)
+  const m2 = mergeInboxSources([[review, assigned]]);
+  assert.equal(m2[0].reason, "review requested");
+  // red beats review regardless of order
+  const m3 = mergeInboxSources([[red, review]]);
+  const m4 = mergeInboxSources([[review, red]]);
+  assert.equal(m3[0].reason, "checks failing");
+  assert.equal(m4[0].reason, "checks failing");
 });

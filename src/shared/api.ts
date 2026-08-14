@@ -47,6 +47,9 @@ import type {
   ForgeDiffResult,
   ForgeDisconnectResult,
   ForgeRuleRow,
+  ForgeInboxResult,
+  DelegateStartInput,
+  DelegateStartResult,
   ForgeShipInput,
   ForgeShipResult,
   ForgeShipPreviewInput,
@@ -197,6 +200,9 @@ export interface Api {
   forgeStatus(): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
   forgeDiff(input: { cwd: string }): Promise<ForgeDiffResult>;
+  // BET-795: the work inbox. Box-side only — three cross-repo SEARCH queries,
+  // never per-repo iteration, cached a full 60s on the search bucket.
+  forgeInbox(): Promise<ForgeInboxResult>;
 
   // BET-794: forge write path (box-side only — a token never leaves the box).
   // forgeShip pushes the current branch then opens a PR — this is called ONLY
@@ -492,6 +498,7 @@ export interface Api {
   // worktree is refused with {ok:false, reason:"dirty"} and the record kept.
   // No create channel — jobs are started by the AI's `delegate` opencode tool.
   delegateList(sessionId?: string): Promise<DelegateJob[]>;
+  delegateStart(input: DelegateStartInput): Promise<DelegateStartResult>;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   // BET-418 §A pre-flight approval: the renderer polls pending approvals for

@@ -19,6 +19,9 @@ import {
   draftGetForCwd,
   draftCommentForCwd,
   draftSubmitForCwd,
+  forgeInbox,
+  seedPromptFor,
+  INBOX_SEED_PROMPT,
   ForgeRateLimitedError,
 } from "./index.mjs";
 import { getDraft, putComment } from "./draft.mjs";
@@ -492,6 +495,26 @@ function draftKit({ prs = [OPEN_PR], headSha = "abc", adapter } = {}) {
   return deps;
 }
 
+// Shared draft-submit test adapter: the forge-read half (list/get the PR) is
+// identical for every submit test; only submitReview differs, so it is the one
+// injected argument.
+function submitAdapter(submitReview) {
+  return {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
+    submitReview,
+  };
+}
+
+// Seed a draft with comments through the real draftCommentForCwd path, so the
+// multi-add setup never has to be written out per test.
+async function addComments(k, comments) {
+  for (const comment of comments) {
+    await draftCommentForCwd("/repo", { op: "add", comment }, k);
+  }
+}
+
 const DRAFT_REPO_KEY = "github.com/acme/widget";
 
 test("draftGetForCwd: head SHA moved → draft marked stale, comments kept", async () => {
@@ -531,19 +554,17 @@ test("draftCommentForCwd: add + set-verdict persist box-side", async () => {
 
 test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with correct anchors, then clears", async () => {
   let submitted = null;
-  const adapter = {
-    kind: "github",
-    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-    submitReview: async (repo, n, input) => {
+  const k = draftKit({
+    adapter: submitAdapter(async (repo, n, input) => {
       submitted = { repo, n, input };
       return { data: {}, stale: false };
-    },
-  };
-  const k = draftKit({ adapter });
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "old", body: "c2" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" } }, k);
+    }),
+  });
+  await addComments(k, [
+    { path: "a.ts", line: 1, side: "new", body: "c1" },
+    { path: "a.ts", line: 2, side: "old", body: "c2" },
+    { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" },
+  ]);
 
   const r = await draftSubmitForCwd("/repo", { verdict: "approved" }, k);
   assert.equal(r.ok, true);
@@ -564,19 +585,17 @@ test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with corre
 });
 
 test("draftSubmitForCwd: a failed submit returns a typed error and leaves the draft intact", async () => {
-  const adapter = {
-    kind: "github",
-    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
-    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc" }, stale: false }),
-    submitReview: async () => {
+  const k = draftKit({
+    adapter: submitAdapter(async () => {
       const e = new Error("review failed");
       e.kind = "http_422";
       throw e;
-    },
-  };
-  const k = draftKit({ adapter });
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "c1" } }, k);
-  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "c2" } }, k);
+    }),
+  });
+  await addComments(k, [
+    { path: "a.ts", line: 1, side: "new", body: "c1" },
+    { path: "a.ts", line: 2, side: "new", body: "c2" },
+  ]);
 
   const r = await draftSubmitForCwd("/repo", {}, k);
   assert.equal(r.ok, false);
@@ -632,4 +651,93 @@ test("forgeDeviceStart: placeholder client_id surfaces a notConfigured state (gu
   assert.equal(r.connected, false);
   assert.equal(r.notConfigured, true);
   assert.equal(r.grant, null);
+});
+
+// ---- forge:inbox (BET-795) -------------------------------------------------
+
+test("forgeInbox: not_connected → empty items, no adapter call", async () => {
+  let called = false;
+  const r = await forgeInbox({
+    resolveToken: async () => null,
+    getAdapter: () => {
+      called = true;
+      return {};
+    },
+  });
+  assert.equal(r.error, "not_connected");
+  assert.deepEqual(r.items, []);
+  assert.equal(called, false);
+});
+
+test("forgeInbox: three search queries (60s ttl), keeps only red PRs, dedupes + sorts by updatedAt desc", async () => {
+  const searched = [];
+  const checksBySha = { red1: ["bad"], green1: ["good"] };
+  const adapter = {
+    searchIssues: async (query, opts) => {
+      searched.push({ query, ttl: opts?.ttl });
+      const hit = (num, title, kind, sha, updatedAt) => ({
+        kind, owner: "acme", repo: "widget", repoKey: "github.com/acme/widget",
+        number: num, title, url: `https://github.com/acme/widget/pull/${num}`,
+        state: "open", updatedAt, headSha: sha, reason: "assigned",
+      });
+      if (query === "assignee:@me") {
+        return { data: [hit(1, "issue a", "issue", "", 100)], stale: false };
+      }
+      if (query === "review-requested:@me") {
+        // Only PR 9 is awaiting my review.
+        return { data: [hit(9, "pr awaiting", "pr", "red1", 500)], stale: false };
+      }
+      // author:@me is:open — my open PRs; the inbox keeps only the red ones
+      // (green PR 3 must be excluded).
+      return { data: [hit(9, "pr awaiting", "pr", "red1", 500), hit(3, "green pr", "pr", "green1", 300)], stale: false };
+    },
+    getChecks: async (repo, sha) => {
+      const list = checksBySha[sha] ?? [];
+      return { data: list.map((c) => ({ name: c, status: "completed", conclusion: c === "bad" ? "failure" : "success" })), stale: false };
+    },
+  };
+  const r = await forgeInbox({
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () => adapter,
+  });
+  // Every query carries the 60s freshness override (the search bucket's own
+  // lower rate limit) — the acceptance criterion's "no second round inside 60s".
+  assert.equal(searched.length, 3);
+  for (const s of searched) assert.equal(s.ttl, 60000);
+  assert.deepEqual(searched.map((s) => s.query), ["assignee:@me", "review-requested:@me", "author:@me is:open"]);
+
+  // PR 9 matches two queries (review-requested AND author is:open with red
+  // checks) but must appear once, with the more urgent reason winning. The
+  // green PR 3 (from the author query) is excluded — its checks aren't red.
+  assert.equal(r.error, null);
+  const nums = r.items.map((i) => i.number);
+  assert.deepEqual(nums, [9, 1], "9 (500) sorts before 1 (100); green PR 3 is excluded");
+
+  const pr9 = r.items.find((i) => i.number === 9);
+  assert.equal(pr9.reason, "checks failing", "red-checks beats review-requested, and it appears exactly once");
+  assert.equal(pr9.kind, "pr");
+  const issue1 = r.items.find((i) => i.number === 1);
+  assert.equal(issue1.reason, "assigned");
+});
+
+test("request layer: a resource fetched with a 60s ttl issues no second request inside 60s", async () => {
+  const c = clock();
+  let fetches = 0;
+  const fetch = async () => {
+    fetches++;
+    return json({ items: [{ id: 1 }] }, 200, { etag: "\"e1\"" });
+  };
+  const layer = createRequestLayer({ fetch, now: c.now });
+  await layer.getJson("https://api.github.com/search/issues?q=x", { token: "t", ttl: 60000 });
+  // 30s later — inside the inbox's 60s shelf life — a second call serves from
+  // memory with ZERO network requests.
+  c.advance(30_000);
+  await layer.getJson("https://api.github.com/search/issues?q=x", { token: "t", ttl: 60000 });
+  assert.equal(fetches, 1, "opening the inbox twice inside 60s issues no second round of requests");
+});
+
+test("seedPromptFor fills the {{url}} placeholder from the shared template", () => {
+  assert.equal(INBOX_SEED_PROMPT, "Complete {{url}}");
+  assert.equal(seedPromptFor({ url: "https://github.com/acme/widget/issues/5" }), "Complete https://github.com/acme/widget/issues/5");
+  assert.equal(seedPromptFor({ url: "u" }, "Fix {{url}}"), "Fix u");
 });

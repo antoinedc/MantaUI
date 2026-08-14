@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppConfig, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppConfig, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -3238,4 +3238,57 @@ export function dispatchAppControl(
     return;
   }
   // compact-session + any unknown action: no-op.
+}
+
+// ---- Work inbox (BET-795) --------------------------------------------------
+
+// How urgent each inbox reason is — the merge tiebreak. A checks-failing PR is
+// the most urgent (bad dot), a requested review next (warn dot), a plain
+// assignment least (mute dot) — the dot-tone order of the mockup. Mirrors the
+// server's precedence so a renderer that ever receives a duplicated key settles
+// it the same way, independently of the box.
+const INBOX_REASON_PRIORITY: Record<InboxReason, number> = {
+  "checks failing": 3,
+  "review requested": 2,
+  assigned: 1,
+};
+
+/**
+ * The human phrase for an inbox reason — what the row's secondary column shows,
+ * with the mockup's copy verbatim ("checks red", "review requested",
+ * "issue · assigned to you"). Pure + tested.
+ */
+export function inboxReasonLabel(reason: InboxReason): string {
+  switch (reason) {
+    case "checks failing":
+      return "checks red";
+    case "review requested":
+      return "review requested";
+    case "assigned":
+      return "issue · assigned to you";
+  }
+}
+
+/**
+ * Sort inbox rows by `updatedAt` descending (most recent first), AND dedupe by
+ * `repoKey#number` with the more urgent reason winning when the same object
+ * appears twice (a PR matching two inbox populations). The server already
+ * merges + dedupes, but the renderer guarantees the invariant it renders by —
+ * nothing displays a duplicated row or a stale lower-priority reason. Pure +
+ * tested, including the dedupe-precedence case.
+ */
+export function sortInbox(items: ForgeInboxItem[]): ForgeInboxItem[] {
+  const byKey = new Map<string, ForgeInboxItem>();
+  for (const item of items) {
+    const key = `${item.repoKey}#${item.number}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+    if (INBOX_REASON_PRIORITY[item.reason] > INBOX_REASON_PRIORITY[existing.reason]) {
+      byKey.set(key, item);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }

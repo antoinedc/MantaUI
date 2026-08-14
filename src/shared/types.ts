@@ -534,6 +534,44 @@ export type ForgeDiffResult = {
   error: "no_forge" | "not_connected" | "no_pr" | null;
 };
 
+// ----- Work inbox (BET-795) -----
+
+// Why an item is in the inbox. This is the value the row's secondary column
+// largely spells out (the label mapping lives in chatUtils.inboxReasonLabel),
+// and it is what the row ultimately displays.
+export type InboxReason = "assigned" | "review requested" | "checks failing";
+
+// One cross-repo work-inbox row. Three populations, one list: issues assigned
+// to you, PRs awaiting your review, your own open PRs whose checks are red.
+// `repoKey` is host/owner/repo (the join key). `rollup` is the CI traffic-light
+// for a PR row (the checks-red population's reason to be here); "none" for an
+// assigned issue. `reason` is the population that claimed it — the merge rule
+// gives a PR matching two queries its more urgent reason.
+export type ForgeInboxItem = {
+  kind: "issue" | "pr";
+  repoKey: string;
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  rollup: string;
+  updatedAt: number;
+  reason: InboxReason;
+  // The seeded first prompt for "Start a session" — built box-side from the
+  // single INBOX_SEED_PROMPT constant so the renderer never constructs its own
+  // "Complete {{url}}" copy (one default, not two).
+  seed: string;
+};
+
+// forge:inbox result. `items` are sorted by updatedAt desc. `error` is
+// "not_connected" when the box has no GitHub token (items empty) or null.
+// `stale` is true when any population was served from last-known state.
+export type ForgeInboxResult = {
+  items: ForgeInboxItem[];
+  stale: boolean;
+  error: "not_connected" | null;
+};
+
 // ----- Forge write path (BET-794) -----
 
 // forge:ship input — push the current branch then (only after the renderer's
@@ -906,6 +944,10 @@ export const IPC = {
   forgePullRequest: "forge:pull-request",
   forgeDiff: "forge:diff",
 
+  // BET-795: forge:inbox — the aggregated work inbox (assigned issues + review
+  // requests + my red PRs). Box-side only; three cross-repo SEARCH queries.
+  forgeInbox: "forge:inbox",
+
   // BET-794: forge write path. Both box-side only — the renderer never sees a
   // forge token. forge:ship pushes the current branch then opens a PR (only
   // after the renderer's human confirm). forge:merge merges with the head SHA
@@ -1260,6 +1302,7 @@ export const IPC = {
   // window + worktree (force:false — refuses a dirty worktree with
   // {ok:false, reason:"dirty"}) and drops the record.
   delegateList: "delegate:list", // (sessionId?) → DelegateJob[]
+  delegateStart: "delegate:start", // ({prompt, sessionID, directory, model?}) → { ok, error? } — BET-795 inbox Delegate in background
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
@@ -1614,6 +1657,20 @@ export type DelegateApproval = {
   tools: DelegateApprovalTool[];
   createdAt: number;
 };
+
+// BET-795: the work inbox's "Delegate in background" starts a background job
+// through the existing delegate engine. `sessionID` is the parent (active)
+// chat session the job nests under; `directory` is the repo the worktree is
+// created in; `prompt` is the seeded instruction. Mirrors the /api/delegate
+// POST body. Result is { ok } or { ok:false, error } (e.g. no parent session,
+// at the MAX_RUNNING_JOBS cap, or the caller isn't a chat session).
+export type DelegateStartInput = {
+  prompt: string;
+  sessionID: string;
+  directory: string;
+  model?: { providerID?: string; modelID?: string } | null;
+};
+export type DelegateStartResult = { ok: boolean; error?: string };
 
 // ----- Agent → laptop file push (outbox) -----
 

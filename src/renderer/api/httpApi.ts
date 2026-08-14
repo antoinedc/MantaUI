@@ -709,6 +709,8 @@ export const httpApi: Api = {
   forgeStatus: () => rpc(IPC.forgeStatus),
   forgePullRequest: (input) => rpc(IPC.forgePullRequest, input),
   forgeDiff: (input) => rpc(IPC.forgeDiff, input),
+  // BET-795: the work inbox (box-side aggregated read).
+  forgeInbox: () => rpc(IPC.forgeInbox),
 
   // -- forge write path (BET-794) --
   forgeShip: (input) => rpc(IPC.forgeShip, input),
@@ -1072,6 +1074,9 @@ export const httpApi: Api = {
     rpc<DelegateJob[] | { jobs: DelegateJob[] }>(IPC.delegateList, sessionId).then(
       (r) => (Array.isArray(r) ? r : Array.isArray(r?.jobs) ? r.jobs : []),
     ),
+  // BET-795: the work inbox's "Delegate in background" — start a background
+  // job through the existing delegate engine (own worktree + window + rail).
+  delegateStart: (input) => rpc(IPC.delegateStart, input),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls

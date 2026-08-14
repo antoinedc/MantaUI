@@ -11,6 +11,7 @@ import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
+import { InboxPalette } from "./InboxPalette";
 import type { Project, TmuxWindow } from "../shared/types";
 import {
   classifyCacheAge,
@@ -115,6 +116,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteSel, setPaletteSel] = useState(0);
+  // BET-795: the work inbox (⌘K → Inbox). Rendered as a PaletteShell sibling
+  // of the command palette; opened from the command palette's Inbox entry.
+  const [inboxOpen, setInboxOpen] = useState(false);
 
   // BET-414: keyboard tree-nav focus (roving tabindex). `focusedKey` is the
   // row that currently holds tabIndex=0; ArrowUp/Down moves it along the
@@ -868,8 +872,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           onActivate={(proj, idx) => {
             void activateWindow(proj, idx);
           }}
+          onOpenInbox={() => {
+            setPaletteOpen(false);
+            setInboxOpen(true);
+          }}
         />
       )}
+
+      {inboxOpen && <InboxPalette onClose={() => setInboxOpen(false)} />}
     </aside>
   );
 });
@@ -1288,6 +1298,7 @@ function CommandPalette({
   setSel,
   onClose,
   onActivate,
+  onOpenInbox,
 }: {
   query: string;
   setQuery: (v: string) => void;
@@ -1296,38 +1307,58 @@ function CommandPalette({
   setSel: (n: number) => void;
   onClose: () => void;
   onActivate: (project: Project, windowIndex: number) => void;
+  onOpenInbox: () => void;
 }) {
+  // The Inbox action is a pinned row at index 0; the session rows shift by 1.
   return (
     <PaletteShell
       label="Command palette"
       placeholder="Search sessions…"
       query={query}
       setQuery={setQuery}
-      itemCount={results.length}
+      itemCount={results.length + 1}
       sel={sel}
       setSel={setSel}
       onPick={(i) => {
-        const r = results[i];
+        if (i === 0) {
+          onOpenInbox();
+          return;
+        }
+        const r = results[i - 1];
         if (r) onActivate(r.project, r.window.index);
       }}
       onClose={onClose}
     >
-      {(pick) =>
-        results.length === 0 ? (
-          <div className="px-3 py-3 text-label text-text-faint">No sessions match</div>
-        ) : (
-          results.map((r, i) => (
-            <SessionRow
-              key={`${r.project.tmuxSession}/${r.window.index}`}
-              name={r.window.name}
-              workspace={r.project.tmuxSession}
-              selected={i === sel}
-              onEnter={() => setSel(i)}
-              onClick={() => pick(i)}
-            />
-          ))
-        )
-      }
+      {(pick) => (
+        <>
+          <button
+            onMouseEnter={() => setSel(0)}
+            onClick={() => pick(0)}
+            className={`w-full flex items-center gap-3 px-3 py-3 rounded-md text-left text-label border-l-2 ${
+              sel === 0
+                ? "bg-bg-soft border-l-accent text-text"
+                : "border-l-transparent text-text-muted hover:bg-bg-soft"
+            }`}
+          >
+            <span className="flex-1 min-w-0 truncate">Inbox</span>
+            <span className="text-meta text-text-faint truncate">assigned · reviews · red checks</span>
+          </button>
+          {results.length === 0 ? (
+            <div className="px-3 py-3 text-label text-text-faint">No sessions match</div>
+          ) : (
+            results.map((r, i) => (
+              <SessionRow
+                key={`${r.project.tmuxSession}/${r.window.index}`}
+                name={r.window.name}
+                workspace={r.project.tmuxSession}
+                selected={i + 1 === sel}
+                onEnter={() => setSel(i + 1)}
+                onClick={() => pick(i + 1)}
+              />
+            ))
+          )}
+        </>
+      )}
     </PaletteShell>
   );
 }
