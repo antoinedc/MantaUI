@@ -40,10 +40,15 @@ function openMenu(h: Harness) {
   return trigger!;
 }
 
+// The menu is portalled to <body> by Popover, so content/assertions that used
+// to read the harness container now read the whole body (container ⊂ body).
+const bodyText = () => document.body.textContent ?? "";
+
 // The launcher button whose text begins with `label` (the icon renders no
-// text, the label text starts the button's text content).
+// text, the label text starts the button's text content). The menu (and its
+// buttons) are portalled to <body> by Popover, so this searches document.body.
 function launcherButton(h: Harness, label: string): HTMLButtonElement {
-  const btn = [...h.container.querySelectorAll<HTMLButtonElement>("button")].find(
+  const btn = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
     (b) => b.textContent?.trim()?.startsWith(label),
   );
   expect(btn, `expected a "${label}" menu button`).not.toBeUndefined();
@@ -68,7 +73,7 @@ describe("SessionHeader session menu launcher entries (BET-467)", () => {
     await h!.flush();
     openMenu(h!);
 
-    const text = h!.text();
+    const text = bodyText();
     expect(text).toContain("Mode");
     expect(text).toContain("Chat");
     expect(text).toContain("Terminal");
@@ -110,9 +115,9 @@ describe("SessionHeader session menu launcher entries (BET-467)", () => {
 
     // No onModeChange → no Mode group, no launcher entries; the session
     // actions still render.
-    expect(h!.text()).not.toContain("AI-CLI");
-    expect(h!.text()).not.toContain("Claude");
-    expect(h!.text()).toContain("Fork session");
+    expect(bodyText()).not.toContain("AI-CLI");
+    expect(bodyText()).not.toContain("Claude");
+    expect(bodyText()).toContain("Fork session");
   });
 });
 
@@ -137,7 +142,8 @@ describe("SessionHeader session menu — WAI-ARIA focus (BET-741)", () => {
     await h!.flush();
     openMenu(h!);
 
-    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement | null;
+    // The surface is portalled to <body> by Popover.
+    const menu = document.body.querySelector('[role="menu"]') as HTMLElement | null;
     expect(menu).not.toBeNull();
     expect(document.activeElement).toBe(menu);
   });
@@ -147,12 +153,14 @@ describe("SessionHeader session menu — WAI-ARIA focus (BET-741)", () => {
     await h!.flush();
     const trigger = openMenu(h!);
 
-    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    const menu = document.body.querySelector('[role="menu"]') as HTMLElement;
+    expect(menu).not.toBeNull();
     expect(document.activeElement).toBe(menu);
     act(() => {
-      menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      // Escape is handled document-wide by Popover (it also restores focus).
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
-    expect(h!.container.querySelector('[role="menu"]')).toBeNull();
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
 });

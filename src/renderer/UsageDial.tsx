@@ -1,10 +1,9 @@
 // ===== Usage dial + popover (BET-738) =====
 //
 // The composer icon row's subscription-usage meter: a 16px ring trigger plus
-// a detail popover. Mirrors ContextPill's structure in SessionHeader.tsx
-// (the canonical popover pattern in this codebase) — trigger and panel are
-// SIBLINGS under a `relative` wrapper, dismissed via the shared useClickAway
-// hook, never nested (a button-inside-a-button is invalid HTML).
+// a detail popover. Renders through the shared portalled Popover primitive
+// (BET-865) — trigger and panel stay siblings, and the panel is portalled to
+// <body> so it can never be clipped or stacked behind the transcript.
 //
 // THIS IS NOT THE CONTEXT-WINDOW PILL. ContextPill (SessionHeader.tsx) is
 // per-CONVERSATION token usage; this is per-SUBSCRIPTION plan usage (BET-737's

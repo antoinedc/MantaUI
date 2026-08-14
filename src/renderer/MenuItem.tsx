@@ -10,9 +10,10 @@
 // row highlight corrected against the spec's `.mi` — see below):
 //   - dropdown surface: `--card`/`bg-bg-soft` (the proposal's `.dd` won C5
 //     over the old `--panel`/`bg-bg-elev` contract, for the whole menu
-//     family), `--border` edge, `--shadow-lg`, `--r-lg` (`rounded-lg`),
-//     max-h 460px, a flex column whose search/header/footer regions are fixed
-//     and whose body is the only scroller.
+//     family), `--border` edge, and the shared floating-surface shadow + `--r-lg`
+//     radius (both owned by the portalled Popover primitive, BET-865), max-h
+//     460px, a flex column whose search/header/footer regions are fixed and
+//     whose body is the only scroller.
 //   - item label 13px medium `--tx2` (`text-label font-medium text-text-muted`)
 //     brightening to `--tx1` on hover, padding `sp-2/sp-2` (`px-2 py-2`),
 //     `sp-3` icon gap, `--r-md` radius, hover fill `--fill-hover`, icon 14px.
@@ -119,9 +120,9 @@ type DropdownAlign = PopoverAlign;
 type DropdownWidth = "menu" | "wide" | "narrow";
 
 // What remains of the old surface after Popover owns the chrome: only the
-// layout it genuinely needs. The chrome (rounded-lg border border-border
-// bg-bg-soft shadow-lg) now lives in POPOVER_SURFACE; the position/z-index live
-// in Popover's fixed positioning.
+// layout it genuinely needs. The surface chrome (rounded-lg border border-border
+// bg-bg-soft + the shared shadow) now lives in POPOVER_SURFACE; the
+// position/z-index live in Popover's fixed positioning.
 const DROPDOWN_LAYOUT = "overflow-hidden flex flex-col max-h-[460px]";
 const DROPDOWN_WIDTH: Record<DropdownWidth, string> = {
   menu: "min-w-[11.25rem]",

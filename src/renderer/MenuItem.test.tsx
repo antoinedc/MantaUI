@@ -33,43 +33,55 @@ describe("Dropdown — the shared dropdown surface", () => {
     h = null;
   });
 
+  // Popover ports the surface to <body>, so the surface is never a child of
+  // the harness `container`. Tests query the portalled surface directly on
+  // document.body (the same body the `mount` harness appends its container to).
+  const anchorRef = () => ({ current: null }) as React.RefObject<HTMLButtonElement>;
+  const surface = (role = "menu") =>
+    document.body.querySelector<HTMLElement>(`[role="${role}"]`);
+
+  function mountD(children: React.ReactNode, props: Partial<React.ComponentProps<typeof Dropdown>> = {}) {
+    h = mount(
+      <Dropdown open onClose={() => {}} anchorRef={anchorRef()} {...props}>
+        {children}
+      </Dropdown>,
+    );
+  }
+
   it("renders the panel tokens (bg-soft, border, shadow-lg, r-lg) and role=menu", () => {
-    h = mount(<Dropdown>hello</Dropdown>);
-    const el = h.container.firstElementChild as HTMLElement;
-    expect(el.getAttribute("role")).toBe("menu");
-    expect(el.className).toContain("rounded-lg");
-    expect(el.className).toContain("border");
-    expect(el.className).toContain("border-border");
-    expect(el.className).toContain("bg-bg-soft");
-    expect(el.className).toContain("shadow-lg");
-    expect(el.textContent).toBe("hello");
+    mountD("hello");
+    const el = surface();
+    expect(el).toBeTruthy();
+    expect(el!.getAttribute("role")).toBe("menu");
+    expect(el!.className).toContain("rounded-lg");
+    expect(el!.className).toContain("border");
+    expect(el!.className).toContain("border-border");
+    expect(el!.className).toContain("bg-bg-soft");
+    expect(el!.className).toContain("shadow-lg");
+    expect(el!.textContent).toBe("hello");
   });
 
   it("carries a manta-* identity hook without accepting arbitrary className", () => {
-    h = mount(<Dropdown hook="manta-session-menu-dropdown">x</Dropdown>);
-    const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toContain("manta-session-menu-dropdown");
+    mountD("x", { hook: "manta-session-menu-dropdown" });
+    const el = surface();
+    expect(el!.className).toContain("manta-session-menu-dropdown");
   });
 
   it("wraps children in a scrolling body — the surface's only scroller", () => {
-    h = mount(<Dropdown>row</Dropdown>);
-    const body = h.container.querySelector("div.overflow-y-auto") as HTMLElement;
+    mountD("row");
+    const body = surface()!.querySelector("div.overflow-y-auto") as HTMLElement;
     expect(body).toBeTruthy();
     expect(body.className).toContain("min-h-0");
     expect(body.textContent).toBe("row");
   });
 
   it("renders the fixed search / header / footer slots as flex-none regions", () => {
-    h = mount(
-      <Dropdown
-        search={<input aria-label="Search models" />}
-        header={<span>header</span>}
-        footer={<button>footer</button>}
-      >
-        body
-      </Dropdown>,
-    );
-    const root = h.container.firstElementChild as HTMLElement;
+    mountD("body", {
+      search: <input aria-label="Search models" />,
+      header: <span>header</span>,
+      footer: <button>footer</button>,
+    });
+    const root = surface()!;
     expect(root.querySelector('input[aria-label="Search models"]')).toBeTruthy();
     expect(root.textContent).toContain("header");
     expect(root.textContent).toContain("footer");
@@ -77,25 +89,27 @@ describe("Dropdown — the shared dropdown surface", () => {
     expect(searchStrip.className).toContain("flex-none");
   });
 
-  it("placement=above flips to bottom-full, align=start to left-0", () => {
-    h = mount(<Dropdown placement="above" align="start">x</Dropdown>);
-    const el = h.container.firstElementChild as HTMLElement;
-    expect(el.className).toContain("bottom-full");
-    expect(el.className).toContain("mb-1");
-    expect(el.className).toContain("left-0");
+  // Position is now computed `fixed` from the trigger's rect (Popover), so
+  // placement/align no longer paint Tailwind position classes. They render
+  // without error and the alignment/placement values are accepted (the layout-
+  // effect geometry is verified where a real anchor + rect is available).
+  it("accepts placement=above and align=start (positions are now computed, not classed)", () => {
+    mountD("x", { placement: "above", align: "start" });
+    expect(surface()).toBeTruthy();
   });
 
   it("width wide/narrow set the 340px / 250px spec panels", () => {
-    h = mount(<Dropdown width="wide">x</Dropdown>);
-    expect((h.container.firstElementChild as HTMLElement).className).toContain("w-[340px]");
-    h.unmount();
-    h = mount(<Dropdown width="narrow">x</Dropdown>);
-    expect((h.container.firstElementChild as HTMLElement).className).toContain("w-[250px]");
+    mountD("x", { width: "wide" });
+    expect(surface()!.className).toContain("w-[340px]");
+    h!.unmount();
+    h = null;
+    mountD("x", { width: "narrow" });
+    expect(surface()!.className).toContain("w-[250px]");
   });
 
   it("role=listbox is honoured for the single-select pickers", () => {
-    h = mount(<Dropdown role="listbox">x</Dropdown>);
-    expect((h.container.firstElementChild as HTMLElement).getAttribute("role")).toBe("listbox");
+    mountD("x", { role: "listbox" });
+    expect(surface("listbox")!.getAttribute("role")).toBe("listbox");
   });
 });
 
@@ -250,7 +264,8 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
   }
 
   function items(): HTMLElement[] {
-    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    // The menu surface is portalled to <body> (Popover), not the harness container.
+    const menu = document.body.querySelector('[role="menu"]') as HTMLElement;
     expect(menu).toBeTruthy();
     return [...menu.querySelectorAll<HTMLElement>("button[role='menuitem']")];
   }
@@ -263,7 +278,7 @@ describe("MenuItem migration — SessionMenu call sites (BET-535)", () => {
 
   it("renders the dropdown surface and the normal Fork / Compact / Clear rows with MenuItem chrome", () => {
     openMenu();
-    const surface = h!.container.querySelector(".manta-session-menu-dropdown") as HTMLElement;
+    const surface = document.body.querySelector(".manta-session-menu-dropdown") as HTMLElement;
     expect(surface.getAttribute("role")).toBe("menu");
     expect(surface.className).toContain("bg-bg-soft");
     expect(surface.className).toContain("shadow-lg");
@@ -318,7 +333,8 @@ describe("SessionHeader session menu — Delete/Clear confirm (BET-724 §D7)", (
   // The menu row and the confirm's own action button can share a label
   // ("Delete session") — this only searches the DROPDOWN's menuitem rows.
   function menuItemByText(text: string): HTMLElement {
-    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    // The menu surface is portalled to <body> (Popover), not the harness container.
+    const menu = document.body.querySelector('[role="menu"]') as HTMLElement;
     expect(menu).toBeTruthy();
     const rows = [...menu.querySelectorAll<HTMLElement>("button[role='menuitem']")];
     const el = rows.find((b) => b.textContent?.trim().includes(text));
@@ -423,8 +439,18 @@ describe("SessionMenu — keyboard roving focus (BET-741)", () => {
     });
   }
 
+  // The menu surface is portalled to <body> (Popover), and the roving keydown
+  // handler lives ON that surface — so arrow/home/end/enter are dispatched on
+  // it (where real DOM focus rests after open), not on the trigger. Escape is
+  // handled document-wide by Popover, so it can be dispatched on the trigger.
+  function menuEl(): HTMLElement {
+    const el = document.body.querySelector('[role="menu"]') as HTMLElement;
+    expect(el, "menu should be portalled onto <body>").toBeTruthy();
+    return el;
+  }
+
   function rowByText(text: string): HTMLElement {
-    const el = [...h!.container.querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
+    const el = [...menuEl().querySelectorAll<HTMLElement>("button[role='menuitem']")].find(
       (b) => b.textContent?.includes(text),
     )!;
     expect(el, `expected a "${text}" menu row`).toBeTruthy();
@@ -433,35 +459,35 @@ describe("SessionMenu — keyboard roving focus (BET-741)", () => {
 
   it("ArrowDown focuses the first row (tabIndex=0) and Enter activates it", () => {
     let changed: unknown = null;
-    const trigger = openMenu({ onModeChange: (m) => { changed = m; } });
-    press(trigger, "ArrowDown");
+    openMenu({ onModeChange: (m) => { changed = m; } });
+    press(menuEl(), "ArrowDown");
     const chatRow = rowByText("Chat");
     expect(document.activeElement).toBe(chatRow);
     expect(chatRow.tabIndex).toBe(0);
-    press(trigger, "Enter");
+    press(menuEl(), "Enter");
     expect(changed).toBe("chat");
   });
 
   it("ArrowUp before any ArrowDown wraps focus to the LAST row", () => {
     let deleted = 0;
-    const trigger = openMenu({ onDelete: () => deleted++ });
-    press(trigger, "ArrowUp");
+    openMenu({ onDelete: () => deleted++ });
+    press(menuEl(), "ArrowUp");
     const deleteRow = rowByText("Delete session");
     expect(document.activeElement).toBe(deleteRow);
     // Enter on "Delete session" opens the confirm, not onDelete directly
     // (BET-724 §D7) — same activation path a click would take.
-    press(trigger, "Enter");
+    press(menuEl(), "Enter");
     expect(deleted).toBe(0);
     expect(h!.text()).toContain("Delete this session?");
   });
 
   it("Home/End rove focus to the first/last row", () => {
-    const trigger = openMenu();
-    press(trigger, "End");
+    openMenu();
+    press(menuEl(), "End");
     let deleteRow = rowByText("Delete session");
     expect(document.activeElement).toBe(deleteRow);
     expect(deleteRow.tabIndex).toBe(0);
-    press(trigger, "Home");
+    press(menuEl(), "Home");
     const chatRow = rowByText("Chat");
     expect(document.activeElement).toBe(chatRow);
     expect(chatRow.tabIndex).toBe(0);
@@ -471,16 +497,17 @@ describe("SessionMenu — keyboard roving focus (BET-741)", () => {
 
   it("re-opening the menu resets focus: no stale row is focused or tabbable", () => {
     const trigger = openMenu();
-    press(trigger, "ArrowDown");
+    press(menuEl(), "ArrowDown");
     expect(rowByText("Chat").tabIndex).toBe(0);
-    // Escape closes (and returns focus to the trigger); reopen.
+    // Escape closes (and returns focus to the trigger — Popover's document
+    // handler); reopen.
     press(trigger, "Escape");
     expect(document.activeElement).toBe(trigger);
     act(() => trigger.click());
     expect(
-      h!.container.querySelector("button[role='menuitem'][tabindex='0']"),
+      menuEl().querySelector("button[role='menuitem'][tabindex='0']"),
     ).toBeNull();
-    const menu = h!.container.querySelector('[role="menu"]') as HTMLElement;
+    const menu = menuEl();
     expect(document.activeElement).toBe(menu);
   });
 });

@@ -19,6 +19,25 @@ const GROUPS: Array<[string, OpencodeModel[]]> = [
   ],
 ];
 
+// anchorRef is required now that the menu is portalled to <body>. The anchor
+// itself (the model button) isn't mounted by these unit tests; a null-current
+// ref is enough for Popover to render the surface (positioning no-ops).
+const anchorRef = () => ({ current: null }) as React.RefObject<HTMLButtonElement>;
+
+// The menu surface is portalled to <body> by Popover (never a child of the
+// harness container).
+function surface(): HTMLElement {
+  const el = document.body.querySelector(".manta-model-dropdown") as HTMLElement;
+  expect(el, "model dropdown should be portalled onto <body>").toBeTruthy();
+  return el;
+}
+
+function manageButton(): HTMLButtonElement | undefined {
+  return [...surface().querySelectorAll<HTMLButtonElement>("button")].find((b) =>
+    b.textContent?.trim().includes("Manage models…"),
+  );
+}
+
 describe("ModelMenu footer — Manage models… (BET-645)", () => {
   let h: Harness | null = null;
   afterEach(() => {
@@ -29,6 +48,8 @@ describe("ModelMenu footer — Manage models… (BET-645)", () => {
   it("renders a non-option 'Manage models…' action in the footer slot", () => {
     h = mount(
       <ModelMenu
+        open
+        anchorRef={anchorRef()}
         groups={GROUPS}
         modelOverride={null}
         defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
@@ -36,9 +57,7 @@ describe("ModelMenu footer — Manage models… (BET-645)", () => {
         onClose={() => {}}
       />,
     );
-    const btn = [...h.container.querySelectorAll<HTMLElement>("button")].find(
-      (b) => b.textContent?.trim().includes("Manage models…"),
-    );
+    const btn = manageButton();
     expect(btn).toBeTruthy();
     // It is a plain footer action — NOT a MenuOption / menuitem (no tick slot,
     // not part of the option ring).
@@ -60,6 +79,8 @@ describe("ModelMenu footer — Manage models… (BET-645)", () => {
     try {
       h = mount(
         <ModelMenu
+          open
+          anchorRef={anchorRef()}
           groups={GROUPS}
           modelOverride={null}
           defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
@@ -69,9 +90,7 @@ describe("ModelMenu footer — Manage models… (BET-645)", () => {
           }}
         />,
       );
-      const btn = [...h.container.querySelectorAll<HTMLElement>("button")].find(
-        (b) => b.textContent?.trim().includes("Manage models…"),
-      );
+      const btn = manageButton();
       expect(btn).toBeTruthy();
       btn!.click();
       expect(closed).toBe(1);

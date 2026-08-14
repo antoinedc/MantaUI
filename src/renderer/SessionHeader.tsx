@@ -689,10 +689,10 @@ function SessionMenu({
   // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
   // sidebar's inline delete confirm — previously both fired instantly.
   const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
-  // The trigger's wrapper is the anchor (positioning + focus). The menu
-  // surface itself is portalled to <body> by Popover, so roving rests on a
-  // ref to that portalled surface, not the wrapper.
-  const rootRef = useRef<HTMLDivElement>(null);
+  // The trigger button is the anchor (positioning + Escape focus-restoration).
+  // The menu surface itself is portalled to <body> by Popover, so keyboard
+  // roving rests on a ref to that portalled surface, not the trigger.
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // WAI-ARIA menu-button pattern (BET-741): real DOM focus replaces the
@@ -826,26 +826,20 @@ function SessionMenu({
 
   return (
     <>
-      {/* The wrapper is the trigger's anchor (not a positioning context — the
-          menu is portalled). Its onKeyDown handled roving because the menu
-          used to live in this subtree; now the handler lives on the portalled
-          Dropdown surface, and this wrapper just hosts the trigger + the
-          confirm modals. */}
-      <div ref={rootRef} className="shrink-0">
-        <IconButton
-          icon={<MoreHorizontal />}
-          label="Session actions"
-          hook="manta-session-menu-trigger"
-          onClick={() => setOpen((v) => !v)}
-          ariaHaspopup="menu"
-          ariaExpanded={open}
-        />
-      </div>
+      <IconButton
+        buttonRef={triggerRef}
+        icon={<MoreHorizontal />}
+        label="Session actions"
+        hook="manta-session-menu-trigger"
+        onClick={() => setOpen((v) => !v)}
+        ariaHaspopup="menu"
+        ariaExpanded={open}
+      />
       <Dropdown
         hook="manta-session-menu-dropdown"
         open={open}
         onClose={() => setOpen(false)}
-        anchorRef={rootRef}
+        anchorRef={triggerRef}
         panelRef={panelRef}
         onKeyDown={onMenuKeyDown}
       >
