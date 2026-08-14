@@ -2168,7 +2168,7 @@ describe("isBackgroundJobCompletionTurn", () => {
 
 // ===== BET-414 sidebar helpers =====
 
-import type { Project, PermissionRequest } from "../shared/types";
+import type { Project, PermissionRequest, SessionLink } from "../shared/types";
 
 function mkProject(
   tmuxSession: string,
@@ -4177,7 +4177,7 @@ describe("buildVoiceNoteMap (BET-837)", () => {
 });
 
 describe("linkedPrNumber (BET-852)", () => {
-  const cfg = (link?: unknown) => ({
+  const cfg = (link?: SessionLink | null) => ({
     projects: [{ tmuxSession: "ethernal", defaultCwd: "/p", link }],
   });
 
