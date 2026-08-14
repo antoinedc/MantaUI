@@ -252,17 +252,46 @@ export function familyKey(modelID) {
 /**
  * Match a fuzzy model query against a list of models. Exact id wins, then
  * every token present in the id, then every token present in the name, then a
- * providerID prefix.
- *
- * @param {string|null|undefined} query
- * @param {Array<{id?: string, name?: string, providerID?: string}>} models
- * @returns {object|null} the resolved model, or null when nothing matches.
- */
+  * providerID prefix.
+  *
+  * @param {string|null|undefined} query
+  * @param {Array<{id?: string, name?: string, providerID?: string}>} models
+  * @returns {object|null} the resolved model, or null when nothing matches.
+  */
+
+// Split an id/name into lowercase alphanumeric tokens on any non-alphanumeric
+// boundary. "claude-opus-4-5" -> ["claude","opus","4","5"];
+// "claude-opus-5" -> ["claude","opus","5"]. Used so a query token like "5"
+// matches a standalone "5" segment, not the "5" inside "4-5".
+function idWords(s) {
+  return String(s ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
 export function fuzzyMatchModel(query, models) {
   const list = Array.isArray(models) ? models : [];
   if (!query || !list.length) return null;
   const q = String(query).toLowerCase().trim();
   if (!q) return null;
+
+  // Accept an explicit "providerID/modelID" form by matching the model part
+  // scoped to that provider, then reuse the normal matcher for the rest.
+  const slash = q.indexOf("/");
+  if (slash > 0 && slash < q.length - 1) {
+    const prov = q.slice(0, slash);
+    const rest = q.slice(slash + 1);
+    const scoped = list.filter(
+      (m) => String(m?.providerID ?? "").toLowerCase() === prov,
+    );
+    // Recurse on the provider-scoped list with the model part only.
+    const hit = fuzzyMatchModel(rest, scoped);
+    if (hit) return hit;
+    // Fall through: if the provider/model didn't resolve, try the whole
+    // string against the normal path (handles ids that legitimately
+    // contain a slash, if any ever exist).
+  }
 
   const direct = list.find((m) => String(m?.id ?? "").toLowerCase() === q);
   if (direct) return direct;
@@ -270,14 +299,27 @@ export function fuzzyMatchModel(query, models) {
   const tokens = q.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return null;
 
-  for (const m of list) {
-    const id = String(m?.id ?? "").toLowerCase();
-    if (tokens.every((t) => id.includes(t))) return m;
-  }
-  for (const m of list) {
-    const name = String(m?.name ?? "").toLowerCase();
-    if (tokens.every((t) => name.includes(t))) return m;
-  }
+  const pickFewestWords = (candidates) => {
+    if (candidates.length === 0) return null;
+    return candidates.reduce((best, m) =>
+      idWords(m?.id).length < idWords(best?.id).length ? m : best,
+    );
+  };
+
+  const byId = list.filter((m) => {
+    const words = new Set(idWords(m?.id));
+    return tokens.every((t) => words.has(t));
+  });
+  const idHit = pickFewestWords(byId);
+  if (idHit) return idHit;
+
+  const byName = list.filter((m) => {
+    const words = new Set(idWords(m?.name));
+    return tokens.every((t) => words.has(t));
+  });
+  const nameHit = pickFewestWords(byName);
+  if (nameHit) return nameHit;
+
   for (const m of list) {
     if (tokens[0] === String(m?.providerID ?? "").toLowerCase()) return m;
   }

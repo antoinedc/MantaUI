@@ -2330,6 +2330,13 @@ const handleRequest = async (req, res) => {
         const body = await readJsonBody(req);
         const deps = { publish: (payload) => bus.publish({ kind: "appControl", payload }) };
         const result = await appControl.dispatch(body?.action, body || {}, deps);
+        // Rename mutates the tmux window list; re-materialize sync state so the
+        // `sync` delta publishes now (parity with the tmux:rename-window RPC,
+        // which already refreshes). Without this the sidebar lags until the 2s
+        // poller. Only on success, only for the mutating action.
+        if (result?.ok && body?.action === "rename-session") {
+          await syncState.refreshNow();
+        }
         respondJson(res, result.ok ? 200 : 400, result);
         return;
       }
