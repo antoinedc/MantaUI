@@ -1474,12 +1474,7 @@ export function ChatPanel({
   }, [running, messages, autoRenameSessions, tmuxSession, windowIndex, cwd, refresh]);
 
   // ===== Voice (extracted to useVoice) =====
-  const {
-    voiceEnabled,
-    voiceRecording,
-    voiceProcessing,
-    voiceRecorder,
-  } = useVoice({
+  const voice = useVoice({
     input,
     setInput,
     inputRef,
@@ -2523,13 +2518,7 @@ export function ChatPanel({
         modelLabel={modelLabel}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
-        voiceEnabled={voiceEnabled}
-        voicePhase={voiceRecorder.phase}
-        voiceRecording={voiceRecording}
-        voiceProcessing={voiceProcessing}
-        startVoice={() => { voiceRecorder.start(); }}
-        stopVoice={voiceRecorder.stop}
-        cancelVoice={voiceRecorder.cancel}
+        voice={voice}
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}

@@ -17,7 +17,7 @@ export const VOICE_MAX_DURATION_MS = 300_000;    // 5 min hard cap
 export const VOICE_WARN_REMAINING_MS = 30_000;   // warn in the last 30 s
 export const VOICE_MIN_DURATION_MS = 400;        // shorter is a mis-tap, discarded silently
 export const VOICE_CONFIRM_DISCARD_MS = 30_000;  // above this, discard asks for confirmation
-export const VOICE_TAP_HOLD_MS = 500;            // key/button: hold >= this = push-to-talk, < this = tap
+export const VOICE_TAP_HOLD_MS = 250;            // press held this long = push-to-talk (stop+send), shorter = a tap (toggle). Shared by the mic button and the CmdOrCtrl+Shift+M keyboard shortcut.
 
 /**
  * Clamp a float 0..1 to an integer 0..255.
