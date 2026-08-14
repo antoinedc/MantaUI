@@ -48,7 +48,7 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
     );
     await h.flush();
 
-    const input = h.container.querySelector("input") as HTMLInputElement;
+    const input = h.docQuery("input") as HTMLInputElement;
     expect(input).toBeTruthy();
 
     act(() => {
@@ -59,14 +59,14 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
     await act(async () => {
       await new Promise((r) => setTimeout(r, 150));
     });
-    expect(h.text()).toContain("jects/"); // the ghost-text tail of "/home/dev/projects/"
+    expect(h.docText()).toContain("jects/"); // the ghost-text tail of "/home/dev/projects/"
 
     // First Escape: dismisses the suggestion, dialog stays open.
     act(() => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(cancelled).toBe(0);
-    expect(h.text()).not.toContain("jects/");
+    expect(h.docText()).not.toContain("jects/");
 
     // Second Escape, no suggestion live: bubbles to Modal and closes.
     act(() => {
@@ -91,7 +91,7 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
     );
     await h.flush();
 
-    const input = h.container.querySelector("input") as HTMLInputElement;
+    const input = h.docQuery("input") as HTMLInputElement;
     act(() => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });

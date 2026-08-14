@@ -21,7 +21,6 @@
 // inside the card).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { formatModelContextSize } from "./chatUtils";
@@ -557,19 +556,14 @@ export function ModelsCard() {
         if (target) lastEditModel.current = target;
         const model = lastEditModel.current ?? models[0];
         if (!model) return null;
-        // Render through a portal to document.body: the modal is the only one
-        // in the app nested inside the full-screen Settings dialog, and
-        // portaling it out of that frequently re-rendering subtree guarantees
-        // a store-driven Settings re-render can never remount it (which would
-        // drop focus from the field being typed in).
-        return createPortal(
+        // Modal portals itself to document.body (BET-885).
+        return (
           <EditModelModal
             model={model}
             open={!!target}
             onSave={(override) => void saveOverride(modelKey(model.providerID, model.id), model, override)}
             onCancel={() => setEditing(null)}
-          />,
-          document.body,
+          />
         );
       })()}
     </div>

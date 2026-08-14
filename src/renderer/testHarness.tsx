@@ -221,6 +221,11 @@ export type Harness = {
   flush: () => Promise<void>;
   html: () => string;
   text: () => string;
+  /** Portal-aware query — Modal renders through a portal to document.body, so a
+   *  dialog is NOT inside `container`. Use for anything rendered by <Modal>. */
+  docQuery: <T extends Element = HTMLElement>(sel: string) => T | null;
+  /** Portal-aware text — same reason as docQuery. */
+  docText: () => string;
 };
 
 export type MountOptions = {
@@ -269,6 +274,8 @@ export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness 
     flush,
     html: () => container.innerHTML,
     text: () => container.textContent ?? "",
+    docQuery: (sel) => document.body.querySelector(sel),
+    docText: () => document.body.textContent ?? "",
   };
 }
 
