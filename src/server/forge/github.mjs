@@ -23,7 +23,7 @@
 //   3. `mergeable` can be null (GitHub is still computing it). We do not
 //      coerce it to false — the shared type has three states for this reason.
 
-import { normalizePrState, rollupChecks } from "../../shared/forge.mjs";
+import { normalizePrState, repoKey, rollupChecks } from "../../shared/forge.mjs";
 
 const API = "https://api.github.com";
 
@@ -93,6 +93,102 @@ function qs(params) {
 
 function issuePath(repo) {
   return `/repos/${repo.owner}/${repo.repo}`;
+}
+
+// ---------------------------------------------------------------------------
+// Work-inbox helpers (BET-795)
+// ---------------------------------------------------------------------------
+//
+// The inbox is the ONE cross-repo read in the project. Per-repo iteration is
+// O(N repos) and would exhaust the search rate limit on anyone with more than
+// a handful of repos, so the three populations come from three SEARCH queries
+// against GET /search/issues: `assignee:@me` (my issues), `review-requested:@me`
+// (PRs awaiting my review), `author:@me is:open` (my open PRs — kept only when
+// their checks are red). This module owns query construction + result
+// normalisation + the dedupe-with-precedence merge; index.mjs owns the network
+// and the per-PR checks fetch for the checks-failing population.
+//
+// Inbox reason precedence — which population's claim "wins" when the same PR
+// matches two queries (a PR on a branch I authored can also be awaiting my
+// review). A checks-failing PR is the most urgent (bad dot), a requested review
+// next (warn dot), a plain assignment least (mute dot) — the dot-tone order in
+// the mockup. The `reason` values are the shared InboxReason vocabulary.
+const INBOX_REASON_PRIORITY = Object.freeze({
+  "checks failing": 3,
+  "review requested": 2,
+  assigned: 1,
+});
+
+/**
+ * The three search queries that answer the whole inbox in three requests,
+ * regardless of how many repos the user has. Each carries the `reason` its
+ * results are claimed with — the caller iterates EXACTLY this set, so the
+ * queries the tests pin are the queries production runs.
+ *
+ * @returns {Array<{ query: string, reason: "assigned"|"review requested"|"checks failing" }>}
+ */
+export function buildInboxQueries() {
+  return [
+    { query: "assignee:@me", reason: "assigned" },
+    { query: "review-requested:@me", reason: "review requested" },
+    { query: "author:@me is:open", reason: "checks failing" },
+  ];
+}
+
+// Normalise one raw GET /search/issues item into the cross-repo InboxItem
+// skeleton. Kind flips on GitHub's PR marker (PRs are issues — the same trap
+// the issue list handles). Repo identity comes from `repository_url`
+// (GitHub's canonical per-item source) via repoKey; `updatedAt` is the search
+// item's updated_at in ms. `headSha` is read defensively — a PR whose search
+// item omits `head` just carries an empty SHA (checks can't be fetched).
+export function normalizeSearchHit(raw) {
+  const m = /\/repos\/([^/]+)\/([^/]+)\/?$/.exec(raw?.repository_url ?? "");
+  const owner = m ? m[1] : "";
+  const repo = m ? m[2] : "";
+  const updatedAt = raw?.updated_at ? Date.parse(raw.updated_at) : 0;
+  return {
+    kind: raw?.pull_request ? "pr" : "issue",
+    owner,
+    repo,
+    repoKey: owner && repo ? repoKey({ host: "github.com", owner, repo }) : "",
+    number: raw?.number ?? 0,
+    title: raw?.title ?? "",
+    url: raw?.html_url ?? "",
+    state: raw?.state ?? "open",
+    updatedAt,
+    headSha: raw?.head?.sha ?? "",
+    headRef: raw?.head?.ref ?? "",
+    // Stamped by the caller from the query — see buildInboxQueries.
+    reason: "assigned",
+  };
+}
+
+/**
+ * Merge the per-query inbox populations into ONE deduplicated list. A single
+ * PR can match two queries (e.g. `author:@me` AND `review-requested:@me`) and
+ * must appear exactly once — the more urgent `reason` wins (checks failing >
+ * review requested > assigned). Items are keyed by `repoKey#number`.
+ *
+ * @param {Array<Array<object>>} sources the per-query normalised arrays
+ * @returns {Array<object>}
+ */
+export function mergeInboxSources(sources) {
+  const byKey = new Map();
+  for (const source of sources ?? []) {
+    for (const it of Array.isArray(source) ? source : []) {
+      const key = `${it.repoKey}#${it.number}`;
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { ...it });
+        continue;
+      }
+      // Tie (same PR, same reason) keeps the first claim — order is stable.
+      if (INBOX_REASON_PRIORITY[it.reason] > INBOX_REASON_PRIORITY[existing.reason]) {
+        byKey.set(key, { ...existing, ...it });
+      }
+    }
+  }
+  return [...byKey.values()];
 }
 
 // Normalise one raw GitHub PR (from `/pulls` list or `/pulls/{n}`) into the
@@ -281,6 +377,27 @@ export function createGithubAdapter(request, requestWrite, requestText = request
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((p) => normalizePr(p)), stale };
+    },
+
+    /**
+     * GET /search/issues — the CROSS-REPO search surface (spec §4.5④). The
+     * inbox answers its three populations in three requests regardless of the
+     * user's repo count; per-repo /repos iteration would be O(N repos) and
+     * would exhaust the search bucket's much lower rate limit. Results are
+     * normalised by {@link normalizeSearchHit} and `reason` is stamped by the
+     * caller from buildInboxQueries. Pass `{ ttl }` to extend the request
+     * layer's freshness window — search has its own, lower rate limit, so the
+     * box caches it a full 60s (spec §4.5④, "cache aggressively").
+     *
+     * @param {string} query the raw GitHub search qualifiers, e.g. "assignee:@me"
+     * @param {{ ttl?: number }} [opts]
+     * @returns {Promise<{ data: Array<object>, stale: boolean }>}
+     */
+    async searchIssues(query, { ttl } = {}) {
+      const url = `${API}/search/issues${qs({ q: query })}`;
+      const { data, stale } = await request(url, { ttl });
+      const items = Array.isArray(data?.items) ? data.items : [];
+      return { data: items.map(normalizeSearchHit), stale };
     },
 
     /**

@@ -33,7 +33,7 @@ import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectF
 import { resolveToken as authResolveToken } from "./auth.mjs";
 import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
-import { createGithubAdapter, GithubRequestError } from "./github.mjs";
+import { createGithubAdapter, GithubRequestError, buildInboxQueries, mergeInboxSources } from "./github.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -41,6 +41,11 @@ import { join } from "node:path";
 // How long a fetched value is served from memory with no network request at
 // all. After this, the ETag conditional GET (If-None-Match) takes over.
 const FRESH_TTL_MS = 30_000;
+// The inbox's SEARCH bucket has its own, much lower rate limit than core
+// (spec §4.5④) — so the box caches its three queries a full 60s. Opening the
+// inbox twice inside 60 seconds must issue NO second round of requests. This
+// is the same request layer — just a longer shelf life for the search bucket.
+const INBOX_TTL_MS = 60_000;
 // How long an ETag value stays usable for a conditional GET.
 const ETAG_HOLD_MS = 5 * 60_000;
 // How long a rate-limited bucket is cooled for.
@@ -73,7 +78,7 @@ function bucketOf(url) {
  *
  * @param {{ fetch?: typeof fetch, now?: () => number }} [opts]
  * @returns {{
- *   getJson: (url: string, opts: { token: string }) => Promise<{ data: any, stale: boolean }>,
+ *   getJson: (url: string, opts: { token: string, ttl?: number }) => Promise<{ data: any, stale: boolean }>,
  * }}
  */
 export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } = {}) {
@@ -81,8 +86,15 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
   const inflight = new Map(); // url -> Promise
   const coolingUntil = new Map(); // bucketKey -> ms
 
-  async function getJson(url, { token }) {
+  async function getJson(url, { token, ttl } = {}) {
     const bucket = bucketOf(url);
+    // Per-resource freshness override: the inbox's search bucket has its own,
+    // much lower rate limit (spec §4.5④), so its values are held a full 60s —
+    // long enough that "opening the inbox twice inside 60s" issues no second
+    // round of requests. The ETag conditional GET then takes over exactly as
+    // for every other resource. One cache, one backoff — just a longer shelf
+    // life for the rate-limited bucket.
+    const ttlMs = ttl ?? FRESH_TTL_MS;
 
     // Rate-limit cooling: stop issuing for this bucket, serve last-known.
     if ((coolingUntil.get(bucket) ?? 0) > now()) {
@@ -91,10 +103,10 @@ export function createRequestLayer({ fetch = globalThis.fetch, now = Date.now } 
       throw new ForgeRateLimitedError(url);
     }
 
-    // Freshness window: a value fetched within FRESH_TTL_MS is served from
+    // Freshness window: a value fetched within ttlMs is served from
     // memory with zero network requests.
     const hit = etagStore.get(url);
-    if (hit && now() - hit.at < FRESH_TTL_MS) {
+    if (hit && now() - hit.at < ttlMs) {
       return { data: hit.data, stale: false };
     }
 
@@ -232,7 +244,7 @@ export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
     getAdapter(kind, token) {
       const create = ADAPTERS[kind];
       if (!create) throw unsupportedByForge(kind, "read path");
-      const request = (url) => requestLayer.getJson(url, { token });
+      const request = (url, opts) => requestLayer.getJson(url, { token, ttl: opts?.ttl });
       const requestWrite = (url, opts) => requestLayer.requestJson(url, { token, ...opts });
       const requestText = (url) => requestLayer.getText(url, { token });
       return create(request, requestWrite, requestText);
@@ -499,6 +511,102 @@ export async function pullRequestForCwd(cwd, deps = {}) {
   }
 
   return { pr, checks, rollup: rollupChecks(checks), stale: staleChecks, error: null };
+}
+
+// ---- Inbox seed prompt (BET-795) ----------------------------------------
+//
+// The template "Start a session" seeds the first prompt from. `{{url}}` is the
+// placeholder filled with the work item's URL. Defined ONCE here and exported
+// so the per-repo rules file (rules-engine issue) reads the SAME constant as
+// its default — one default, not two.
+export const INBOX_SEED_PROMPT = "Complete {{url}}";
+
+// Fill INBOX_SEED_PROMPT for one inbox item. Exported for tests.
+export function seedPromptFor(item, template = INBOX_SEED_PROMPT) {
+  return template.replace("{{url}}", item?.url ?? "");
+}
+
+// ---- Box-facing read: forge:inbox (BET-795) ------------------------------
+//
+// The work inbox: issues assigned to you + PRs awaiting your review + your own
+// open PRs whose checks are red — ONE cross-repo list, answered by three SEARCH
+// queries (spec §4.5④). All forge access is box-side: `resolveToken` provides
+// the token to the shared request layer and it never reaches the renderer.
+// Results are deduplicated by the adapter's precedence rule (a PR matching two
+// queries appears once, most urgent reason wins) and sorted by updatedAt desc.
+//
+// The checks-failing population needs each candidate PR's checks, so it is
+// fetched per-PR AFTER the search (a search result can't tell you checks) and
+// only PRs whose rollup is red are kept — but it is NEVER per-repo iteration.
+async function defaultForgeInbox(deps) {
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  const tok = await resolveToken(GH_HOST);
+  if (!tok) return { items: [], stale: false, error: "not_connected" };
+
+  const adapter = getAdapterFn("github", tok.token);
+  const populations = [];
+  let stale = false;
+
+  for (const { query, reason } of buildInboxQueries()) {
+    try {
+      const res = await adapter.searchIssues(query, { ttl: INBOX_TTL_MS });
+      stale = stale || Boolean(res.stale);
+      const hits = (Array.isArray(res.data) ? res.data : []).map((h) =>
+        h && typeof h === "object" ? { ...h, reason } : h,
+      );
+      // The checks-failing population: keep only my open PRs whose CI is red.
+      const kept =
+        reason === "checks failing"
+          ? await keepRedPrs(hits, adapter)
+          : hits;
+      populations.push(kept);
+    } catch (err) {
+      if (err instanceof ForgeRateLimitedError) {
+        // A rate-limited search bucket is not an inbox failure — serve what we
+        // have (possibly nothing splus stale) rather than blanking the panel.
+        stale = true;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  const items = mergeInboxSources(populations).sort((a, b) => b.updatedAt - a.updatedAt);
+  return { items, stale, error: null };
+}
+
+// Keep only the PRs whose checks roll up red, fetching checks per PR against
+// its own repo (from the search hit's owner/repo). A PR whose checks can't be
+// fetched (no headSha, rate-limited, unreachable) is dropped — it cannot be
+// proven red, and a stale scan must not mislabel it. Best-effort: never throws.
+async function keepRedPrs(hits, adapter) {
+  const kept = [];
+  for (const hit of hits) {
+    if (hit.kind !== "pr") continue;
+    if (!hit.headSha || !hit.owner || !hit.repo) continue;
+    try {
+      const res = await adapter.getChecks({ owner: hit.owner, repo: hit.repo }, hit.headSha);
+      const checks = Array.isArray(res.data) ? res.data : [];
+      if (rollupChecks(checks) === "red") kept.push(hit);
+    } catch {
+      // checks unreachable — can't prove red, skip
+    }
+  }
+  return kept;
+}
+
+/**
+ * forge:inbox — the aggregated work inbox. Box-side read; a forge token never
+ * leaves the box. Returns `{ items, stale, error }` where `error` is
+ * "not_connected" when no GitHub token resolves (empty items) or null.
+ *
+ * @param {{ resolveToken?: typeof authResolveToken,
+ *          getAdapter?: (kind: string, token: string) => any }} [deps]
+ */
+export async function forgeInbox(deps = {}) {
+  return defaultForgeInbox(deps);
 }
 
 // ---- Box-facing writes (issue BET-794) --------------------------------------
@@ -959,4 +1067,5 @@ export async function draftSubmitForCwd(cwd, input = {}, deps = {}) {
  * @property {(repo: { owner: string, repo: string }, filter?: { state?: string }) => Promise<{ data: Array<any>, stale: boolean }>} listIssues
  * @property {(repo: { owner: string, repo: string }, sha: string) => Promise<{ data: Array<any>, stale: boolean }>} getChecks
  * @property {((repo: { owner: string, repo: string }, number: number) => Promise<{ data: { diff: string, threads: Array<any>, headSha: string }, stale: boolean }>)} [getDiff] — OPTIONAL. Presence is the capability model: an adapter without the diff/threads read simply omits it and the caller checks presence.
+ * @property {(query: string, opts?: { ttl?: number }) => Promise<{ data: Array<any>, stale: boolean }>} [searchIssues] — OPTIONAL. The cross-repo search read that powers the inbox (spec §4.5④). GitHub implements it; an adapter whose forge has no equivalent search surface omits it. Results are already normalised to the shared InboxItem shape.
  */

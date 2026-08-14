@@ -47,6 +47,8 @@ import type {
   ForgeDiffResult,
   ForgeDisconnectResult,
   ForgeRuleRow,
+  ForgeInboxItem,
+  ForgeInboxResult,
   ForgeShipInput,
   ForgeShipResult,
   ForgeShipPreviewInput,
@@ -197,6 +199,9 @@ export interface Api {
   forgeStatus(): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
   forgeDiff(input: { cwd: string }): Promise<ForgeDiffResult>;
+  // BET-795: the work inbox. Box-side only — three cross-repo SEARCH queries,
+  // never per-repo iteration, cached a full 60s on the search bucket.
+  forgeInbox(): Promise<ForgeInboxResult>;
 
   // BET-794: forge write path (box-side only — a token never leaves the box).
   // forgeShip pushes the current branch then opens a PR — this is called ONLY

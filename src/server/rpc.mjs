@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
+import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules } from "./forgeRules.mjs";
 import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
@@ -358,6 +358,11 @@ export function buildHandlers({
       invalidateForgeToken(GH_HOST);
       return { ok: true };
     },
+
+    // BET-795: forge:inbox — the aggregated work inbox. Box-side read; three
+    // cross-repo SEARCH queries (assigned, review-requested, my red PRs),
+    // cached a full 60s on the search bucket. No per-repo iteration.
+    "forge:inbox": () => forgeInbox(),
 
     // BET-794: forge write path. Both box-side — a forge token never reaches
     // the renderer; the server resolves it. forge:ship previews/creates a PR
