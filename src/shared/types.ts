@@ -1061,6 +1061,11 @@ export const IPC = {
   // touches the renderer process. Same channel + shape on desktop and
   // mobile transports. Returns the raw transcript.
   voiceTranscribe: "voice:transcribe",
+  // BET-837: list a session's voice notes (metadata only — no audio bytes).
+  // Audio rides the REST GET /api/voice/<id>; this channel returns the notes
+  // a client renders as text-first bubbles. Same shape as voice:transcribe
+  // (single round trip over /rpc, JSON only).
+  voiceListNotes: "voice:list-notes",
 
   // ---- onboarding pairing (BET-49) ----
   // Exchange a 6-digit pairing code for the box's { boxToken, boxId } via
@@ -1904,6 +1909,51 @@ export type VoiceTranscribeInput = {
 export type VoiceTranscribeResult = {
   text: string;
 };
+
+// ----- Voice notes (BET-830 / BET-837) -----
+
+// A stored voice note as the RENDERER sees it. The server stores `peaks` as a
+// base64 string and hands records back over JSON; the client decodes that to a
+// `Uint8Array` at the transport boundary (httpApi.ts `voiceListNotes`), so the
+// shared type here is already the component-friendly byte array.
+export type VoiceNoteRecord = {
+  id: string;
+  sessionId: string;
+  transcript: string;
+  mime: string;
+  durationMs: number;
+  peaks: Uint8Array;
+  createdAt: number;
+  expiresAt: number | null;
+  // The audio may have been swept (TTL) even though the transcript + waveform
+  // survive. When false the player renders a disabled/dimmed affordance.
+  audioAvailable: boolean;
+};
+
+// Input for voiceUploadNote — the raw audio bytes + the waveform/duration that
+// rode back with the artifact from useVoiceRecorder.
+export type VoiceUploadNoteInput = {
+  sessionId: string;
+  buffer: ArrayBuffer;
+  mime: string;
+  durationMs: number;
+  peaks: Uint8Array;
+};
+
+// Result of voiceUploadNote — a 200 (stored + transcribed, note ready to
+// render) or a 409 (stored but transcription failed; the pending row keeps
+// its id to retry against). Other statuses (no key, invalid session) resolve
+// to a non-throwing `{ ok:false }` so the caller can decide how loudly to
+// fail — the pending row's error state is the intended surface.
+export type VoiceUploadNoteResult =
+  | { ok: true; note: VoiceNoteRecord }
+  | { ok: false; status: number; id?: string; error: string };
+
+// Result of voiceRetryNote — 200 (transcription now present) or 409 (failed
+// again, keep the error state) / 404 (audio swept, regenerate the note).
+export type VoiceRetryResult =
+  | { ok: true; id: string; transcript: string }
+  | { ok: false; status: number; error: string };
 
 // ----- Subscription provider auth (BET-308 / BET-309) -----
 //

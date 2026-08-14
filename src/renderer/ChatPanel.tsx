@@ -92,6 +92,9 @@ import { useTypeahead } from "./hooks/useTypeahead";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
+import { buildVoiceNoteMap } from "./chatUtils";
+import type { VoiceNoteRecord } from "../shared/types";
+import type { PendingVoiceNote } from "./VoiceNote";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
 // the extracted composer components and live in ./chatShared.
@@ -272,6 +275,14 @@ export function ChatPanel({
   // freshly-persisted prompt becomes immediately cyclable (BET-257). The hook
   // can't watch localStorage on its own — we drive the re-read from here.
   const [historyEpoch, setHistoryEpoch] = useState(0);
+
+  // BET-837 voice notes. `voiceNotes` is the session's stored notes (fetched
+  // once per session, reset on session change — same lifecycle as the
+  // transcript state); `pendingVoiceNote` is the not-yet-real row shown while
+  // a take uploads + transcribes. The send flow (useVoice.onComplete) sets
+  // both via the setters passed into the hook.
+  const [voiceNotes, setVoiceNotes] = useState<VoiceNoteRecord[]>([]);
+  const [pendingVoiceNote, setPendingVoiceNote] = useState<PendingVoiceNote | null>(null);
 
   // ===== Transcript state (extracted to useTranscriptState) =====
   // The entry-motion state is owned HERE and shared with both Transcript
@@ -600,6 +611,14 @@ export function ChatPanel({
     setAgentMentions([]);
     setSystemNotice(null);
     setDragHover(false);
+    // BET-837: voice notes reset on session change, then fetched once per
+    // session (metadata only — audio rides the REST GET on demand).
+    setVoiceNotes([]);
+    setPendingVoiceNote(null);
+    window.api
+      .voiceListNotes(sessionId)
+      .then((notes) => { if (Array.isArray(notes)) setVoiceNotes(notes); })
+      .catch(() => { /* non-fatal — voice notes are ambient */ });
     // NOTE: the BRANCH POLL is intentionally NOT here. Chat panels stay
     // mounted (hidden with display:none) and this reset effect must only run
     // on a genuine session change — if isActive were a dep here, switching
@@ -1482,6 +1501,9 @@ export function ChatPanel({
     setSendError,
     setSystemNotice,
     groqApiKey: useStore((s) => s.groqApiKey),
+    sessionId,
+    setPendingVoiceNote,
+    setVoiceNotes,
   });
 
   // ===== Drag-drop attachments =====
@@ -2056,6 +2078,61 @@ export function ChatPanel({
     return out;
   }, [messages, commandByMessageId, commands]);
 
+  // BET-837: user-message-id → voice-note map. Passed to MessageRow exactly
+  // like userCommandInfo — an O(1) Map lookup in messages.map, never an object
+  // literal built inside the callback (that would defeat the row memo and
+  // reintroduce documented keystroke lag).
+  const voiceNoteByMessageId = useMemo(
+    () => buildVoiceNoteMap(messages, voiceNotes),
+    [messages, voiceNotes],
+  );
+
+  // Retry transcription for a note whose transcript came back empty (the 409
+  // send path). On success append the (now-transcribed) record and clear the
+  // pending row; the transcript flows through as a normal user message exactly
+  // as a non-retry send would.
+  const retryVoiceNote = useCallback(
+    async (noteId: string) => {
+      if (!pendingVoiceNote) return;
+      const prev = pendingVoiceNote;
+      setPendingVoiceNote({ ...prev, error: undefined });
+      try {
+        const res = await window.api.voiceRetryNote(noteId);
+        if (res.ok && res.transcript) {
+          const current = pendingVoiceNote;
+          setVoiceNotes((existing) => {
+            if (existing.some((n) => n.id === noteId)) return existing;
+            return [
+              ...existing,
+              {
+                id: noteId,
+                sessionId,
+                transcript: res.transcript,
+                mime: "audio/webm",
+                durationMs: current?.durationMs ?? 0,
+                peaks: current?.peaks ?? new Uint8Array(0),
+                createdAt: Date.now(),
+                expiresAt: null,
+                audioAvailable: true,
+              },
+            ];
+          });
+          setPendingVoiceNote(null);
+          const text = res.transcript.trim();
+          if (!text) return;
+          setInput((prev) => (prev ? `${prev}\n${text}` : text));
+          setTimeout(() => submitRef.current?.(), 0);
+          return;
+        }
+        setPendingVoiceNote({ ...prev, noteId, error: res.ok ? "Transcription failed" : res.error });
+      } catch (e) {
+        setPendingVoiceNote({ ...prev, noteId, error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pendingVoiceNote, sessionId],
+  );
+
   // Memoized TaskContext value. Identity-stable across keystroke renders
   // (input/typeahead state churn): only changes when one of the underlying
   // subagent maps or showThinking flips. Without the memo, the Provider
@@ -2437,6 +2514,9 @@ export function ChatPanel({
         turnInfo={turnInfo}
         finishByMessageId={finishByMessageId}
         userCommandInfo={userCommandInfo}
+        voiceNoteByMessageId={voiceNoteByMessageId}
+        pendingVoiceNote={pendingVoiceNote}
+        onRetryVoiceNote={retryVoiceNote}
         onReplyQuestion={replyQuestion}
         onRejectQuestion={rejectQuestion}
         onAtBottomChange={onAtBottomChange}

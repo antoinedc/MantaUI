@@ -23,6 +23,8 @@ import { useVoiceRecorder } from "../voice";
 import type { VoiceArtifact, VoicePhase } from "../voice";
 import { VOICE_TAP_HOLD_MS, VOICE_CONFIRM_DISCARD_MS } from "../../shared/waveform.mjs";
 import { IS_MAC } from "../platform";
+import type { VoiceNoteRecord } from "../../shared/types";
+import type { PendingVoiceNote } from "../VoiceNote";
 
 export type Voice = {
   voiceEnabled: boolean;
@@ -62,6 +64,12 @@ export function useVoice(params: {
   setSendError: (e: string | null) => void;
   setSystemNotice: (n: string | null) => void;
   groqApiKey: string;
+  // BET-837 voice notes: the send flow lives HERE (it owns onComplete), but
+  // the pending row + the session's voiceNotes are ChatPanel state — so the
+  // setters are injected rather than re-implemented in the hook.
+  sessionId: string;
+  setPendingVoiceNote: (p: PendingVoiceNote | null) => void;
+  setVoiceNotes: React.Dispatch<React.SetStateAction<VoiceNoteRecord[]>>;
 }): Voice {
   const {
     input,
@@ -71,6 +79,9 @@ export function useVoice(params: {
     setSendError,
     setSystemNotice,
     groqApiKey,
+    sessionId,
+    setPendingVoiceNote,
+    setVoiceNotes,
   } = params;
 
   // When the user presses Enter, or ends a push-to-talk hold (the
@@ -80,7 +91,7 @@ export function useVoice(params: {
   const submitAfterTranscribeRef = useRef(false);
   // Transcription in flight — the recorder's own phases don't include
   // "processing" (that is our business now), so we track it here for the UI.
-  const [transcribing, setTranscribing] = useState(false);
+  const [transcribing] = useState(false);
 
   // Discard-with-confirmation state (BET-836). Under VOICE_CONFIRM_DISCARD_MS
   // the first discard discards immediately; at or above it the first discard
@@ -124,19 +135,53 @@ export function useVoice(params: {
 
   const voiceRecorder = useVoiceRecorder({
     onComplete: async (artifact: VoiceArtifact) => {
-      // Transcribe the artifact the recorder handed back. The new upload
-      // route is NOT used yet — that lands with the transcript ticket.
-      setTranscribing(true);
+      // BET-837 send flow. One POST /api/voice stores the clip AND transcribes
+      // it. The pending row appears instantly so the COMPOSER returns to idle
+      // immediately — it is never blocked on the network. The waveform is fully
+      // formed the moment the take ends, which is what makes the wait read as
+      // "almost done". On success the note is appended to voiceNotes, the
+      // pending row clears, and the transcript goes through the EXISTING
+      // submit() so slash handling, model resolution and attachments all behave
+      // normally.
+      //
+      // NOTE on `transcribing`/`voiceProcessing`: deliberately NOT set here.
+      // Holding it (even true-then-false-in-finally) kept `busy` on the mic
+      // buttons across the whole upload+transcribe round trip, which is exactly
+      // the network block the pending row exists to eliminate. The pending row
+      // is the wait signal; the composer stays fully idle from the moment the
+      // take ends.
+      const peaks = artifact.peaks;
+      const durationMs = artifact.durationMs;
+      setPendingVoiceNote({ peaks, durationMs });
       try {
         const buffer = await artifact.blob.arrayBuffer();
-        const res = await window.api.voiceTranscribe({
+        const res = await window.api.voiceUploadNote({
+          sessionId,
           buffer,
           mime: artifact.mime,
+          durationMs,
+          peaks,
         });
-        const text = res.text.trim();
+        if (!res.ok) {
+          if (res.status === 409) {
+            // Stored but transcription failed — keep the pending row and its
+            // note id so the user can Retry. Do NOT clear the row, do NOT
+            // discard the audio.
+            setPendingVoiceNote({ peaks, durationMs, noteId: res.id, error: res.error });
+          } else {
+            // Non-409 failure — drop the pending row and surface the error.
+            setPendingVoiceNote(null);
+            setSendError(res.error || `Voice upload failed (${res.status})`);
+            submitAfterTranscribeRef.current = false;
+          }
+          return;
+        }
+        setVoiceNotes((prev) => [...prev, res.note]);
+        setPendingVoiceNote(null);
+        const text = res.note.transcript.trim();
         if (!text) {
-          // Pipeline worked but Groq heard no speech (silence / too quiet /
-          // unintelligible). Surface it so the release isn't a silent no-op.
+          // Pipeline worked but Groq heard no speech (silence / too quiet).
+          // Surface it so the release isn't a silent no-op.
           submitAfterTranscribeRef.current = false;
           setSystemNotice(
             "Didn't catch any speech. Try again, a little louder or closer to the mic.",
@@ -149,10 +194,9 @@ export function useVoice(params: {
           setTimeout(() => submitRef.current?.(), 0);
         }
       } catch (e) {
+        setPendingVoiceNote(null);
         submitAfterTranscribeRef.current = false;
         setSendError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setTranscribing(false);
       }
     },
     onError: (e) => {

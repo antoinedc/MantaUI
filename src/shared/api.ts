@@ -35,6 +35,10 @@ import type {
   TmuxConfigStatus,
   VoiceTranscribeInput,
   VoiceTranscribeResult,
+  VoiceNoteRecord,
+  VoiceUploadNoteInput,
+  VoiceUploadNoteResult,
+  VoiceRetryResult,
   WindowStatus,
   WorktreeInfo,
   ForgeProbeResult,
@@ -231,6 +235,15 @@ export interface Api {
 
   // Voice (Groq STT). Main owns the API key; renderer only ships audio bytes.
   voiceTranscribe(input: VoiceTranscribeInput): Promise<VoiceTranscribeResult>;
+
+  // Voice notes (BET-830/BET-837). One POST stores the clip AND transcribes it
+  // (409 = stored but transcription failed, retry against the returned id).
+  // Audio is fetched to a Blob (never a `?token=` URL — box token must not
+  // leak into a URL), metadata lists over /rpc.
+  voiceUploadNote(input: VoiceUploadNoteInput): Promise<VoiceUploadNoteResult>;
+  voiceListNotes(sessionId: string): Promise<VoiceNoteRecord[]>;
+  voiceRetryNote(id: string): Promise<VoiceRetryResult>;
+  voiceFetchNote(id: string): Promise<Blob>;
 
   clipboardWriteText(text: string): Promise<void>;
   clipboardReadImage(): Promise<ArrayBuffer | null>;

@@ -30,8 +30,9 @@ import { WORKING_TICK_MS, nowMs, useClockTick } from "./clock";
 import { QuestionCard } from "./Cards";
 import { Button } from "./Button";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { PendingVoiceRow, type PendingVoiceNote } from "./VoiceNote";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
-import type { OpencodeMessage, ProgressRecord, QuestionRequest } from "../shared/types";
+import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
 import {
   createEntryMotionState,
   isBackgroundJobCompletionTurn,
@@ -63,6 +64,11 @@ export type TranscriptContext = {
   questions: QuestionRequest[];
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
+  // BET-837: the pending voice-note row (upload/transcribe in flight) renders
+  // here — after the message list, before the working indicator. When it
+  // resolves into a real note it lands as a VoiceNoteChip on its message row.
+  pendingVoiceNote?: PendingVoiceNote | null;
+  onRetryVoiceNote?: (noteId: string) => void;
 };
 
 // ===== The reading inset =====
@@ -263,6 +269,12 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         paddingBottom: "var(--sp-6)",
       }}
     >
+      {(context.pendingVoiceNote != null) && (
+        <PendingVoiceRow
+          pending={context.pendingVoiceNote}
+          onRetry={(id) => context.onRetryVoiceNote?.(id)}
+        />
+      )}
       <WorkingIndicator
         running={context.running}
         liveTurn={context.liveTurn}
@@ -327,6 +339,9 @@ export type TranscriptProps = {
   >;
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
   userCommandInfo: Map<string, { name: string; arguments: string }>;
+  voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
+  pendingVoiceNote: PendingVoiceNote | null;
+  onRetryVoiceNote: (noteId: string) => void;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
   onAtBottomChange: (atBottom: boolean) => void;
@@ -354,6 +369,9 @@ export function Transcript({
   turnInfo,
   finishByMessageId,
   userCommandInfo,
+  voiceNoteByMessageId,
+  pendingVoiceNote,
+  onRetryVoiceNote,
   onReplyQuestion,
   onRejectQuestion,
   onAtBottomChange,
@@ -413,6 +431,8 @@ export function Transcript({
     questions,
     onReplyQuestion,
     onRejectQuestion,
+    pendingVoiceNote,
+    onRetryVoiceNote,
   };
 
   // Anchor the initial view to the newest turn. A chat transcript opens at the
@@ -513,6 +533,10 @@ export function Transcript({
                   m.info.role === "user"
                     ? userCommandInfo.get(m.info.id) ?? null
                     : null;
+                const voiceNote =
+                  m.info.role === "user"
+                    ? voiceNoteByMessageId.get(m.info.id) ?? null
+                    : null;
                 return (
                   <MessageRow
                     msg={m}
@@ -522,6 +546,7 @@ export function Transcript({
                     verbSeedId={turnInfo.get(m.info.id)?.verbSeedId ?? null}
                     truncation={finishByMessageId.get(m.info.id) ?? null}
                     commandInfo={cmdInfo}
+                    voiceNote={voiceNote}
                     entering={entryMotion.entering.has(m.info.id)}
                   />
                 );

@@ -248,3 +248,24 @@ html, body, #root {
   }
 }
 @keyframes manta-pulse-fallback { 50% { opacity: 0.2; } }
+
+/* BET-837: shimmer skeleton for the pending voice-note row. A flat sheen that
+   sweeps left→right across the placeholder bars while transcription runs. The
+   200% background-size with a centred keyframe is what makes the gradient
+   appear to travel. Under reduced-motion the sweep is dropped for a flat
+   --raised fill (the row's bars still read as placeholders by their shape). */
+@keyframes manta-shimmer {
+  from { background-position: 0% 0; }
+  to { background-position: -200% 0; }
+}
+.manta-shimmer {
+  background: linear-gradient(90deg, var(--raised), var(--border), var(--raised));
+  background-size: 200% 100%;
+  animation: manta-shimmer 1.35s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-shimmer {
+    animation: none;
+    background: var(--raised);
+  }
+}

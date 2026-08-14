@@ -14,6 +14,10 @@ import {
   type StreamEnvelope,
   type UsageSnapshot,
   type WindowStatus,
+  type VoiceNoteRecord,
+  type VoiceRetryResult,
+  type VoiceUploadNoteInput,
+  type VoiceUploadNoteResult,
 } from "../../shared/types.js";
 import type { Api, SyncDelta } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
@@ -1234,6 +1238,108 @@ export const httpApi: Api = {
     return rpc(IPC.voiceTranscribe, { buffer: b64, mime });
   },
 
+  // -- voice notes (BET-830 / BET-837) --
+  // One POST to /api/voice stores the clip AND transcribes it (the upload
+  // route's contract — the client must not upload and transcribe separately).
+  // Raw bytes go straight up (octet-stream, like uploadBuffer); the waveform
+  // and duration ride the x-peaks / x-duration-ms headers. 200 → a ready note;
+  // 409 → stored but transcription failed, keep the pending row and its id.
+  voiceUploadNote: async ({
+    sessionId,
+    buffer,
+    mime,
+    durationMs,
+    peaks,
+  }: VoiceUploadNoteInput): Promise<VoiceUploadNoteResult> => {
+    const url = `${serverBase()}/api/voice?session=${encodeURIComponent(sessionId)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: authHeaders(clientToken(), {
+          "content-type": "application/octet-stream",
+          "x-mime": mime || "audio/webm",
+          "x-duration-ms": String(durationMs || 0),
+          "x-peaks": arrayBufferToBase64(peaks.buffer as ArrayBuffer),
+        }),
+        body: buffer,
+      });
+    } catch (e) {
+      return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { id?: string; transcript?: string; durationMs?: number; expiresAt?: number | null; error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+    if (res.status === 409) {
+      return { ok: false, status: 409, id: json.id, error: json.error ?? "Transcription failed" };
+    }
+    if (!res.ok) return { ok: false, status: res.status, error: json.error ?? `HTTP ${res.status}` };
+    return {
+      ok: true,
+      note: {
+        id: json.id ?? "",
+        sessionId,
+        transcript: json.transcript ?? "",
+        mime: mime || "audio/webm",
+        durationMs,
+        peaks,
+        createdAt: Date.now(),
+        expiresAt: json.expiresAt ?? null,
+        audioAvailable: true,
+      },
+    };
+  },
+
+  // Metadata only, over /rpc (the existing convention: binary over REST,
+  // metadata over /rpc). Server records carry `peaks` as base64; decode to a
+  // Uint8Array at the boundary so components get the byte array directly.
+  voiceListNotes: async (sessionId: string): Promise<VoiceNoteRecord[]> => {
+    const rows = (await rpc<Array<Record<string, unknown>>>(IPC.voiceListNotes, {
+      sessionId,
+    })) as Array<Record<string, unknown>> | null | undefined;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r) => ({
+      id: String(r.id ?? ""),
+      sessionId: String(r.sessionId ?? ""),
+      transcript: String(r.transcript ?? ""),
+      mime: String(r.mime ?? "audio/webm"),
+      durationMs: Number(r.durationMs ?? 0),
+      peaks: base64ToBytes(String(r.peaks ?? "")),
+      createdAt: Number(r.createdAt ?? 0),
+      expiresAt: r.expiresAt == null ? null : Number(r.expiresAt),
+      audioAvailable: r.audioAvailable !== false,
+    }));
+  },
+
+  // Re-run transcription for a note whose transcript came back empty (the 409
+  // path above). 200 → transcript now present; 409 → failed again.
+  voiceRetryNote: async (id: string): Promise<VoiceRetryResult> => {
+    const url = `${serverBase()}/api/voice/${encodeURIComponent(id)}/retry`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "POST", headers: authHeaders(clientToken()) });
+    } catch (e) {
+      return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { id?: string; transcript?: string; error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+    if (!res.ok) return { ok: false, status: res.status, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: true, id: json.id ?? id, transcript: json.transcript ?? "" };
+  },
+
+  // Stream the audio back as a Blob. An `<audio src>` cannot carry an
+  // Authorization header, and a `?token=` query param would put the box token
+  // in a URL — so we fetch with the bearer header and hand back a Blob for the
+  // caller to URL.createObjectURL (and revoke on unmount).
+  voiceFetchNote: async (id: string): Promise<Blob> => {
+    const url = `${serverBase()}/api/voice/${encodeURIComponent(id)}`;
+    const res = await fetch(url, { method: "GET", headers: authHeaders(clientToken()) });
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.blob();
+  },
+
   // -- connection retry (BET-365 / BET-357 §1) --
   // The events WebSocket auto-reconnects on its own backoff; this is the
   // user-facing "Retry now" trigger wired into ReconnectingBanner. Calling it
@@ -1260,4 +1366,18 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     );
   }
   return btoa(binary);
+}
+
+// Decode a base64 string (as the server stores a note's `peaks`) to a
+// Uint8Array. Empty/invalid input → an empty array, never a throw.
+function base64ToBytes(b64: string): Uint8Array {
+  if (!b64) return new Uint8Array(0);
+  try {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return new Uint8Array(0);
+  }
 }
