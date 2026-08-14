@@ -262,4 +262,77 @@ final class ModelRecentsTests: XCTestCase {
         XCTAssertTrue(label.contains("xHigh"))
         XCTAssertFalse(label.contains("Xhigh"))
     }
+
+    // MARK: - Cockpit + catalogue copy (BET-894): catalogueBadge / cardSubtitle / pickableCount
+
+    /// A bare model for the badge/subtitle tests, with the context limit and
+    /// capability flags explicit the way the wire object carries them.
+    private func badgeModel(context: Double?, reasoning: Bool? = nil, image: Bool? = nil) -> OpencodeModel {
+        OpencodeModel(
+            id: "m",
+            providerID: "anthropic",
+            name: "m",
+            limit: context.map { ModelLimit(context: $0) },
+            capabilities: ModelCapabilities(
+                reasoning: reasoning,
+                input: image.map { ModelCapabilities.Modalities(image: $0) }
+            )
+        )
+    }
+
+    // MARK: - ChatModel.catalogueBadge
+
+    func testCatalogueBadgeFullModel() {
+        let m = badgeModel(context: 1_000_000, reasoning: true, image: true)
+        XCTAssertEqual(ChatModel.catalogueBadge(m), "1M · reasoning · vision")
+    }
+
+    func testCatalogueBadgeNoLimitGlyphsOnly() {
+        let m = badgeModel(context: nil, reasoning: true, image: true)
+        XCTAssertEqual(ChatModel.catalogueBadge(m), "reasoning · vision")
+    }
+
+    func testCatalogueBadgeNoLimitNoCapabilitiesIsEmpty() {
+        let m = badgeModel(context: nil)
+        XCTAssertEqual(ChatModel.catalogueBadge(m), "")
+    }
+
+    // MARK: - ChatModel.cardSubtitle
+
+    func testCardSubtitleFullModel() {
+        let m = badgeModel(context: 1_000_000, reasoning: true)
+        XCTAssertEqual(ChatModel.cardSubtitle(m), "anthropic · 1M context · reasoning")
+    }
+
+    func testCardSubtitleMissingLimitOmitsContextClause() {
+        let m = badgeModel(context: nil, reasoning: true)
+        XCTAssertEqual(ChatModel.cardSubtitle(m), "anthropic · reasoning")
+    }
+
+    func testCardSubtitleNoCapabilitiesProviderAndContext() {
+        let m = badgeModel(context: 1_000_000)
+        XCTAssertEqual(ChatModel.cardSubtitle(m), "anthropic · 1M context")
+    }
+
+    // MARK: - ChatModel.pickableCount
+
+    func testPickableCountExcludesDisabledDeprecatedAndFastTwins() {
+        let base = OpencodeModel(id: "gpt-5.6", providerID: "openai", name: "GPT-5.6")
+        // The -fast twin of a visible base is a MODE, not a choice — excluded.
+        let fast = OpencodeModel(id: "gpt-5.6-fast", providerID: "openai", name: "GPT-5.6 Fast")
+        let disabled = OpencodeModel(id: "disabled", providerID: "openai", name: "Disabled", enabled: false)
+        let deprecated = OpencodeModel(id: "deprecated", providerID: "openai", name: "Deprecated", status: "deprecated")
+        let regular = OpencodeModel(id: "gpt-4o", providerID: "openai", name: "GPT-4o")
+        let models = [base, fast, disabled, deprecated, regular]
+
+        XCTAssertEqual(ChatModel.pickableCount(models), 2)
+        // Must equal the sum of the sections `groups(_:)` actually renders.
+        let groupsSum = ChatModel.groups(models).reduce(0) { $0 + $1.models.count }
+        XCTAssertEqual(ChatModel.pickableCount(models), groupsSum)
+    }
+
+    func testPickableCountSingleModel() {
+        let models = [OpencodeModel(id: "opus", providerID: "anthropic", name: "Claude Opus 4.7")]
+        XCTAssertEqual(ChatModel.pickableCount(models), 1)
+    }
 }

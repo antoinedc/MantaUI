@@ -216,6 +216,42 @@ enum ChatModel {
         return glyphs
     }
 
+    // MARK: - Cockpit + catalogue copy (BET-894)
+
+    /// The catalogue row's badge line: context size, then capability glyphs —
+    /// "1M · reasoning · vision". Any absent part is omitted, never rendered
+    /// empty. Moved verbatim from the old `ModelPickerSheet.badgeText` so the
+    /// string lives in the pure layer, not a view.
+    static func catalogueBadge(_ m: OpencodeModel) -> String {
+        var parts: [String] = []
+        if let ctx = contextSize(m.limit?.context) {
+            parts.append(ctx)
+        }
+        parts.append(contentsOf: capabilityGlyphs(m))
+        return parts.joined(separator: " · ")
+    }
+
+    /// The cockpit card's subtitle: provider, then "<context> context" when the
+    /// limit is known, then the capability glyphs — "anthropic · 1M context ·
+    /// reasoning". Any absent part is omitted, never rendered empty; a missing
+    /// limit must not leave a stray " · ".
+    static func cardSubtitle(_ m: OpencodeModel) -> String {
+        var parts = [m.providerID]
+        if let ctx = contextSize(m.limit?.context) {
+            parts.append("\(ctx) context")
+        }
+        parts.append(contentsOf: capabilityGlyphs(m))
+        return parts.joined(separator: " · ")
+    }
+
+    /// How many models the catalogue will actually show in its "All models · N"
+    /// count — the total across `groups(_:)`, so the count can never disagree
+    /// with the list beneath it (which likewise excludes disabled/deprecated
+    /// models and `-fast` twins whose base twin survives).
+    static func pickableCount(_ models: [OpencodeModel]) -> Int {
+        groups(models).reduce(0) { $0 + $1.models.count }
+    }
+
     /// Encode a selection as the persisted `providerID/modelID` string.
     static func encode(_ id: OpencodeModelID) -> String {
         "\(id.providerID)/\(id.modelID)"

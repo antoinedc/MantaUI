@@ -445,18 +445,16 @@ struct ComposerView: View {
         .presentationDetents([.large])
     }
 
-    // MARK: - Model pill → menu (BET-825)
+    // MARK: - Model pill → cockpit sheet (BET-894)
 
-    /// The composer chip: a real control (a `Menu`) anchored on a filled
-    /// capsule. The capsule is ONE token — "✦ Opus 4.7 · High" plus a bolt when
-    /// fast — with a fill, so the resolved (model · effort · fast) triple reads
-    /// at a glance and the model name can never wrap. The menu holds the common
-    /// case (recents + inline effort + fast); the catalogue sheet is reached
-    /// only from "More Models…".
+    /// The composer chip: a plain button anchored on a filled capsule. The
+    /// capsule is ONE token — "✦ Opus 4.7 · High" plus a bolt when fast — with
+    /// a fill, so the resolved (model · effort · fast) triple reads at a glance
+    /// and the model name can never wrap. Tapping opens the model sheet, whose
+    /// cockpit hosts the effort/fast controls + recents that a SwiftUI `Menu`
+    /// (a UIKit menu) cannot lay out — see `ModelPickerSheet`'s header comment.
     private var modelPill: some View {
-        Menu {
-            modelMenuContent
-        } label: {
+        Button { showModelPicker = true } label: {
             chipLabel
         }
         .accessibilityLabel("Model")
@@ -513,111 +511,6 @@ struct ComposerView: View {
             parts.append(ChatModel.effortLabel(variant))
         }
         return parts.joined(separator: " · ")
-    }
-
-    // MARK: - Tier 1 menu content
-
-    /// The menu: recents + Server default, inline effort + fast, then the
-    /// catalogue sheet. Order is HIG-driven (most-frequent first).
-    @ViewBuilder
-    private var modelMenuContent: some View {
-        // 1. Recents (most recent first) + the ever-present Server-default
-        //    escape. Each recent is a (model, effort, fast) triple.
-        if !modelStore.recents.isEmpty {
-            ForEach(modelStore.recents, id: \.self) { choice in
-                recentButton(choice)
-            }
-        }
-        Button(action: { modelStore.setOverride(nil) }) {
-            HStack {
-                Text("Server default")
-                Spacer()
-                if modelStore.override == nil { Image(systemName: "checkmark") }
-            }
-        }
-
-        // 3 + 4. Effort and Fast mode, each omitted when the active model does
-        //    not offer it. The trailing Divider is conditional so a model with
-        //    neither does not draw two separators back to back.
-        Divider()
-        if showEffortPicker {
-            Section("Effort") { effortPicker }
-        }
-        if showFastToggle {
-            fastToggle
-        }
-        if showEffortPicker || showFastToggle {
-            Divider()
-        }
-
-        // 6. The catalogue sheet — the ellipsis (per HIG, it opens another view).
-        Button { showModelPicker = true } label: {
-            Label("More Models…", systemImage: "ellipsis")
-        }
-    }
-
-    private func recentButton(_ choice: ModelChoice) -> some View {
-        Button(action: { modelStore.apply(choice) }) {
-            HStack {
-                Text(ModelRecents.label(for: choice, models: modelStore.models))
-                    .lineLimit(1)
-                Spacer()
-                if modelStore.activeChoice == choice {
-                    Image(systemName: "checkmark")
-                }
-            }
-        }
-    }
-
-    private var showEffortPicker: Bool {
-        !modelStore.activeVariants.isEmpty
-    }
-
-    private var fastToggleState: ChatModel.FastToggle {
-        ChatModel.fastToggle(models: modelStore.models, active: activeModel, variantId: modelStore.variant)
-    }
-
-    private var showFastToggle: Bool {
-        let fast = fastToggleState
-        return fast.available || fast.on
-    }
-
-    /// Inline effort control. `.palette` is the ONLY picker style a menu
-    /// renders as a horizontal strip — a menu is a UIMenu and discards
-    /// arbitrary layout, so the earlier `VStack` + `.segmented` version drew
-    /// nothing at all. A strip is used rather than a submenu because it shows
-    /// the CURRENT value without a second tap. The "Default" segment is the
-    /// model's own recommended level (no explicit variant).
-    private var effortPicker: some View {
-        Picker("Effort", selection: Binding<String>(
-            get: { modelStore.variant ?? "" },
-            set: { newValue in
-                modelStore.setVariant(newValue.isEmpty ? nil : newValue)
-                modelStore.recordCurrentChoice()
-            }
-        )) {
-            Text("Default").tag("")
-            ForEach(modelStore.activeVariants, id: \.id) { variant in
-                Text(ChatModel.effortLabel(variant.id)).tag(variant.id)
-            }
-        }
-        .pickerStyle(.palette)
-    }
-
-    /// Fast-mode toggle — a session-level flag, so it sits at the same level
-    /// as effort, never nested under it. Omitted when the model has no fast twin.
-    private var fastToggle: some View {
-        let fast = fastToggleState
-        return Toggle(isOn: Binding(
-            get: { fast.on },
-            set: { on in
-                modelStore.setFast(on)
-                modelStore.recordCurrentChoice()
-            }
-        )) {
-            Label("Fast mode", systemImage: fast.on ? "bolt.fill" : "bolt")
-        }
-        .disabled(!fast.available)
     }
 
     // MARK: - Scroll to bottom
