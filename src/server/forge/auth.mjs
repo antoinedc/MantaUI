@@ -182,9 +182,30 @@ export function invalidateToken(host) {
 //      this on receipt) so the user pastes rather than retypes on a phone.
 
 // The public OAuth client_id for the device grant. The device flow needs NO
-// secret — a client_id is public. Supply the real product id at deploy; the
-// mechanics below are client-id-agnostic and fully injectable.
+// secret — a client_id is public. Supply the real product id at deploy (BET-849);
+// the mechanics below are client-id-agnostic and fully injectable.
 export const DEVICE_CLIENT_ID = "Iv1.0000000000000000";
+
+// A placeholder id has NEVER been registered with GitHub, so a start against it
+// would categorically dead-end at /login/device/code. The flow is GUARDED: a
+// placeholder (or empty) id raises DeviceFlowNotConfiguredError before any
+// GitHub call, which forgeDeviceStart surfaces to the renderer as a clear
+// "GitHub sign-in isn't configured on this box yet" state — a real user is
+// never sent down a screen that cannot succeed.
+export const DEVICE_CLIENT_ID_PLACEHOLDER = "Iv1.0000000000000000";
+
+/**
+ * Raised when the device grant is attempted with a not-yet-configured
+ * `client_id`. Distinct from a network/HTTP failure so the caller can surface a
+ * configuration state rather than a retryable error ([E2] is an *expired code*,
+ * not a *not configured* box).
+ */
+export class DeviceFlowNotConfiguredError extends Error {
+  constructor() {
+    super("The GitHub device flow is not configured on this box yet.");
+    this.name = "DeviceFlowNotConfiguredError";
+  }
+}
 
 // GitHub's own device-code TTL (15 min) — the existing provider poll caps at 5
 // min, but the device grant is GitHub's clock, not opencode's.
@@ -235,6 +256,11 @@ export async function startDeviceGrant({
   fetch: fetchFn = globalThis.fetch,
   now = Date.now,
 } = {}) {
+  // Guard: a placeholder/unset public id would dead-end at GitHub — fail fast
+  // with a typed "not configured" signal, never hit the network.
+  if (!clientId || clientId === DEVICE_CLIENT_ID_PLACEHOLDER) {
+    throw new DeviceFlowNotConfiguredError();
+  }
   const res = await fetchFn("https://github.com/login/device/code", {
     method: "POST",
     headers: {

@@ -3,7 +3,7 @@
 
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError } from "./auth.mjs";
+import { resolveToken, invalidateToken, normalizeUserCode, startDeviceGrant, pollDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError, DEVICE_CLIENT_ID_PLACEHOLDER } from "./auth.mjs";
 
 // The module-level auth cache persists across test cases in this file — clear
 // it before each so a cached github.com resolution from one test can't leak
@@ -199,7 +199,7 @@ test("device grant: happy path returns a RENDERER-SAFE shape and stores the toke
     if (calls === 1) return { error: "authorization_pending", error_description: "wait" };
     return { access_token: "ghp_device_ok", token_type: "bearer" };
   });
-  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
   // device_code MUST never cross RPC (spec rule 1 + acceptance criterion 6).
   assert.equal("device_code" in started, false, "start result has no device_code");
   assert.equal(Object.prototype.hasOwnProperty.call(started, "deviceCode"), false);
@@ -223,7 +223,7 @@ test("device grant: happy path returns a RENDERER-SAFE shape and stores the toke
 test("device grant: slow_down adds 5s PERMANENTLY to the poll interval", async () => {
   const clock = makeClock();
   const fetchFn = makeFetch(async () => ({ error: "slow_down", error_description: "slow" }));
-  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
   assert.equal(started.pollInterval, 5);
   const p1 = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
   assert.equal(p1.pollInterval, 10);
@@ -234,7 +234,7 @@ test("device grant: slow_down adds 5s PERMANENTLY to the poll interval", async (
 test("device grant: authorization_pending keeps polling at the same interval", async () => {
   const clock = makeClock();
   const fetchFn = makeFetch(async () => ({ error: "authorization_pending" }));
-  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
   const p = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
   assert.deepEqual(p, { status: "pending", pollInterval: 5 });
 });
@@ -242,7 +242,7 @@ test("device grant: authorization_pending keeps polling at the same interval", a
 test("device grant: expired_token surfaces as ExpiredCodeError ([E2])", async () => {
   const clock = makeClock();
   const fetchFn = makeFetch(async () => ({ error: "expired_token", error_description: "expired" }));
-  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
   await assert.rejects(
     () => pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore }),
     ExpiredCodeError,
@@ -252,7 +252,7 @@ test("device grant: expired_token surfaces as ExpiredCodeError ([E2])", async ()
 test("device grant: grant past its TTL throws ExpiredCodeError too", async () => {
   const clock = makeClock();
   const fetchFn = makeFetch(async () => ({ error: "authorization_pending" }));
-  const started = await startDeviceGrant({ fetch: fetchFn, now: clock.now });
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
   clock.advance(16 * 60_000); // GitHub's 15-min cap elapsed
   await assert.rejects(
     () => pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore }),
@@ -279,4 +279,19 @@ test("normalizeUserCode strips dashes/whitespace and uppercases", () => {
   assert.equal(normalizeUserCode("WDJB-MJHT"), "WDJBMJHT");
   assert.equal(normalizeUserCode("  "), "");
   assert.equal(normalizeUserCode(""), "");
+});
+
+test("device grant: placeholder client_id refuses to start (guard, BET-849)", async () => {
+  let fetched = false;
+  const clock = makeClock();
+  const fetchFn = async () => { fetched = true; throw new Error("should not be called"); };
+  await assert.rejects(
+    () => startDeviceGrant({ clientId: DEVICE_CLIENT_ID_PLACEHOLDER, fetch: fetchFn, now: clock.now }),
+    DeviceFlowNotConfiguredError,
+  );
+  await assert.rejects(
+    () => startDeviceGrant({ clientId: "", fetch: fetchFn, now: clock.now }),
+    DeviceFlowNotConfiguredError,
+  );
+  assert.equal(fetched, false, "no GitHub call is made for a placeholder id");
 });

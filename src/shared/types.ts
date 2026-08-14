@@ -388,7 +388,11 @@ export type ForgeDeviceGrant = {
 
 export type ForgeDeviceStartResult =
   | { connected: true; grant: null }
-  | { connected: false; grant: ForgeDeviceGrant; error: null };
+  | { connected: false; grant: ForgeDeviceGrant; error: null }
+  // The box's DEVICE_CLIENT_ID is a placeholder/unset (BET-849) — the device
+  // flow would dead-end at GitHub, so the renderer shows a clear "not
+  // configured" state instead of launching a guaranteed-failing screen.
+  | { connected: false; notConfigured: true; grant: null };
 
 export type ForgeDevicePollResult =
   | { status: "pending"; pollInterval: number }

@@ -40,6 +40,7 @@ import type {
 
 type Phase =
   | { kind: "connect" }
+  | { kind: "notConfigured" }
   | { kind: "pick" }
   | { kind: "clone"; queue: ForgeRepo[]; index: number }
   | { kind: "expired" }
@@ -122,6 +123,12 @@ export function CloneFromGitHub({
       try {
         const res = await window.api.forgeDeviceStart();
         if (cancelled) return;
+        if (res.notConfigured) {
+          // The box's device-grant id is a placeholder (BET-849) — surface a
+          // clear "not configured" state, never a guaranteed-dead-end screen.
+          setPhase({ kind: "notConfigured" });
+          return;
+        }
         if (res.connected) {
           setPhase({ kind: "pick" });
           return;
@@ -267,8 +274,15 @@ export function CloneFromGitHub({
         return;
       }
       controller.id = res.id;
-      // Poll the clone job for progress until done.
+      // Poll the clone job for progress until done. Explicitly bounded: the
+      // underlying spawn times out at 120s, but this loop caps at 130s so a
+      // hung job can never poll forever even if the server stops reporting.
+      const deadline = Date.now() + 130_000;
       while (!cancelled && !stop) {
+        if (Date.now() > deadline) {
+          setPhase({ kind: "failed", repo, message: "The clone timed out.", errorKind: "network" });
+          return;
+        }
         const st = await window.api.forgeCloneStatus({ id: res.id }).catch(() => null);
         if (cancelled) return;
         if (!st) {
@@ -456,7 +470,7 @@ export function CloneFromGitHub({
 
             <div className="flex gap-2 mt-3">
               <Button tone="primary" disabled={selected.length === 0} onClick={() => runClones(selected, 0)}>
-                Clone {selected.length} {selected.length === 1 ? "selected" : "selected"}
+                Clone {selected.length} selected
               </Button>
               <Button tone="ghost" onClick={onCancel}>
                 Back
@@ -489,6 +503,22 @@ export function CloneFromGitHub({
             </Button>
           </div>
         </div>
+      )}
+
+      {phase.kind === "notConfigured" && (
+        <>
+          <PanelHeader title="Connect GitHub" />
+          <div className="p-4">
+            <Callout tone="warn">
+              GitHub sign-in isn't configured on this box yet.
+            </Callout>
+            <div className="flex gap-2 mt-3">
+              <Button tone="ghost" onClick={onCancel}>
+                Back
+              </Button>
+            </div>
+          </div>
+        </>
       )}
 
       {phase.kind === "expired" && (

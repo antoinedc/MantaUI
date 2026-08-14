@@ -31,7 +31,7 @@ import { detectForge, rollupChecks, unsupportedByForge, repoKey as forgeRepoKey 
 import { run } from "../tmux.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
-import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError } from "./auth.mjs";
+import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
 import { createGithubAdapter, GithubRequestError } from "./github.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
@@ -297,8 +297,17 @@ export async function forgeDeviceStart(
   // flow at all — report it so the UI skips straight to the picker.
   const tok = await resolveToken(GH_HOST);
   if (tok) return { connected: true, grant: null };
-  const grant = await start();
-  return { connected: false, grant, error: null };
+  try {
+    const grant = await start();
+    return { connected: false, grant, error: null };
+  } catch (e) {
+    // A placeholder/unset client_id (BET-849) must surface as a clear "not
+    // configured" state, NOT retry a guaranteed-dead-end device screen.
+    if (e instanceof DeviceFlowNotConfiguredError) {
+      return { connected: false, notConfigured: true, grant: null };
+    }
+    throw e;
+  }
 }
 
 /**
