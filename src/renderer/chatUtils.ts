@@ -2702,10 +2702,10 @@ export type StatusItem = {
   render: () => ReactNode;
 };
 
-// The two container breakpoints the spec mandates (BET-782 §3). The header is
-// a CSS container query (`container: sessionheader / inline-size`); the width
-// passed in here is that container's inline size — NOT the viewport, which
-// measures the wrong thing when the sidebar / artifacts panel resize the pane.
+// The two container breakpoints the spec mandates (BET-782 §3). The width
+// passed in here is the header element's own measured width, taken by a
+// ResizeObserver in SessionHeader.tsx — NOT the viewport, which measures
+// the wrong thing when the sidebar / artifacts panel resize the pane.
 const STATUS_CUT_560 = 560;
 const STATUS_CUT_420 = 420;
 // The overflow cut refuses to auto-hide anything at ≥ 80 (artifacts / menu are

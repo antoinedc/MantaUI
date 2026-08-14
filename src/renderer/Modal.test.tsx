@@ -17,6 +17,8 @@
 // clean.
 
 import { describe, it, expect, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { Modal } from "./Modal";
@@ -253,4 +255,38 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
     expect(document.activeElement).toBe(opener);
     opener.remove();
   });
+});
+
+// BET-884: no stylesheet under src/renderer may declare CSS containment.
+// `container-type: inline-size` (and any `container:` / `contain:`) applies
+// layout containment, which makes the element the containing block for every
+// `position: fixed` descendant AND traps its z-index in a new stacking
+// context — silently breaking every dialog rendered beneath it (the
+// session-header confirm dialogs were rendered inside the 44px header, their
+// panels clipped above the window and their buttons dead). Files are read
+// from disk so the rule fires even if a sheet is no longer imported
+// anywhere. Mirrors the source-reading style of primitives.test.ts.
+describe("no CSS containment in renderer stylesheets (BET-884)", () => {
+  const RENDERER = fileURLToPath(new URL(".", import.meta.url));
+  const SHEETS = ["index.css", "tokens.css"];
+  const CONT_CONTAINMENT = /(?:container-type\s*:|container\s*:|contain\s*:)/;
+
+  for (const file of SHEETS) {
+    it(`${file} has no containment declaration`, () => {
+      const css = readFileSync(new URL(file, RENDERER), "utf8");
+      const offenders = css
+        .split("\n")
+        .map((line, i) => ({ line: line.trim(), n: i + 1 }))
+        .filter(({ line }) => CONT_CONTAINMENT.test(line))
+        .map((o) => `${o.n}: ${o.line}`);
+      expect(
+        offenders,
+        `${file} must not declare CSS containment — containment makes an ` +
+          `element the containing block / stacking context for Modal's ` +
+          `position:fixed overlay, silently breaking every dialog rendered ` +
+          `beneath it (BET-884). Offending line(s): ` +
+          (offenders.join(" | ") || "none"),
+      ).toEqual([]);
+    });
+  }
 });
