@@ -32,9 +32,11 @@ export async function binExists(bin) {
   }
 }
 
+// The deps object is OPTIONAL: the rpc `launchers:list` channel calls with no
+// arguments, and only the unit tests inject a probe.
 export async function listAvailableLaunchers({
   binExists: probe = binExists,
-}) {
+} = {}) {
   const out = [];
   for (const l of LAUNCHERS) {
     // Hidden launchers (BET-354 `claude-auth-login`) are programmatic
