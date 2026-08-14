@@ -251,6 +251,36 @@ enum MantaStreamRouter {
         return s
     }
 
+    /// Replace running state across ALL known sessions from the box's
+    /// authoritative set. A session absent from the set is not running.
+    /// Only `running` / `runningSince` are touched — `turnComplete`, `chunks`
+    /// and `tools` are deliberately left alone (turn retirement + tool rows are
+    /// owned by the reconnect transcript refetch; synthesising `turnComplete`
+    /// here would double-fire the completion haptic).
+    static func applyingRunningSet(
+        _ payload: StreamRunningSetPayload,
+        to states: [String: MantaSessionStreamState]
+    ) -> [String: MantaSessionStreamState] {
+        var next = states
+        let bySession = Dictionary(uniqueKeysWithValues: payload.sessions.map { ($0.sessionId, $0) })
+        for (sid, var s) in next {
+            let entry = bySession[sid]
+            s.running = entry != nil
+            s.runningSince = resolveRunningSince(
+                running: entry != nil, since: entry?.since, current: s.runningSince
+            )
+            next[sid] = s
+        }
+        // A session the device has never seen a frame for can still be running.
+        for entry in payload.sessions where next[entry.sessionId] == nil {
+            var s = MantaSessionStreamState(sessionId: entry.sessionId)
+            s.running = true
+            s.runningSince = resolveRunningSince(running: true, since: entry.since, current: nil)
+            next[entry.sessionId] = s
+        }
+        return next
+    }
+
     /// Retire the live chunks whose message the canonical transcript now
     /// carries. Pure so the retirement rule is testable without a socket.
     ///
@@ -320,6 +350,12 @@ final class MantaEventStore: ObservableObject {
     /// can't tell a consumer which fields the frame just delivered. This is the
     /// per-frame delta the single-writer merge (BET-668) feeds off.
     private(set) var lastStreamFrame: StreamFrameStamp?
+
+    /// Bumped on every authoritative running-set apply. A consumer holding
+    /// optimistic local running state compares against this to know the box
+    /// has since spoken definitively. Not `@Published` — `sessionStates` is,
+    /// and it is reassigned in the same call, so observers already re-run.
+    private(set) var runningSetSeq: Int = 0
 
     /// Which session the most recent stream frame targeted and the `sub` it
     /// carried. `sub == nil` for a non-routed frame (nothing turn-state-related
@@ -439,11 +475,23 @@ final class MantaEventStore: ObservableObject {
         lastFrameAt = Date()
         guard let frame = try? MantaStreamFrame.parse(text) else { return }
         if frame.isHeartbeat { return }
-        if frame.kind == "stream" {
+        if frame.kind == "runningSet" {
+            applyRunningSet(frame)
+        } else if frame.kind == "stream" {
             routeStream(frame)
         } else {
             rawFrameHandler?(frame)
         }
+    }
+
+    /// The box's authoritative running set, replayed on every (re)connect.
+    /// Deliberately NOT behind `routeStream`'s `degraded` guard: a client that
+    /// discarded frames while unreachable is exactly the client whose running
+    /// state needs correcting the moment it hears from the box again.
+    private func applyRunningSet(_ frame: MantaStreamFrame) {
+        guard let p = try? frame.decodedPayload(StreamRunningSetPayload.self) else { return }
+        sessionStates = MantaStreamRouter.applyingRunningSet(p, to: sessionStates)
+        runningSetSeq += 1
     }
 
     private func routeStream(_ frame: MantaStreamFrame) {

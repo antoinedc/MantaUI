@@ -160,6 +160,18 @@ struct StreamRunningPayload: Codable, Equatable, Sendable {
     var since: Double?          // epoch ms; absent on an older box
 }
 
+/// `kind: "runningSet"` — the COMPLETE set of sessions the box currently has
+/// running, replayed on every (re)connect. Authoritative: a session absent from
+/// `sessions` is NOT running (BET-922).
+struct StreamRunningSetPayload: Codable, Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
+        var sessionId: String
+        var since: Double?
+        var type: String?
+    }
+    var sessions: [Entry]
+}
+
 /// `sub: "turnComplete"` — emitted by `message.updated`/`session.idle`.
 struct StreamTurnCompletePayload: Codable, Equatable, Sendable {
     var complete: Bool
