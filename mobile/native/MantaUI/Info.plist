@@ -2,6 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Export compliance. The app speaks only standard HTTPS/TLS to the box and
+	     to Apple's own services, which is exempt under the encryption-export
+	     rules. Declaring it here answers the question ONCE, in the binary: with
+	     the key absent, every uploaded build lands in App Store Connect as
+	     "Missing Compliance" and the TestFlight beta-review submission is
+	     rejected with `422 The build is missing export compliance` — the whole
+	     Codemagic build goes green, the .ipa uploads and processes, and only
+	     the post-build App Store Connect task fails, so it reads like a
+	     publishing fluke rather than a missing plist key (it is not). Do not
+	     remove this to "answer it in the UI instead" — that is a manual step
+	     per build, and the automated TestFlight submission runs before a human
+	     can take it. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
