@@ -4,7 +4,19 @@ App vs `docs/screens/session/mockup.html`, from `npm run visual:compare session`
 Advisory: nothing here blocks a merge. Findings are recorded so they survive
 the PR that found them.
 
-Last reviewed: 2026-08-13 (18d3d807) — stage 6's composer-migration PR (#525, merged as c6669362) closed the composer onto the spec; the one divergence it left open (attach + voice composer buttons) is recorded below.
+Last reviewed: 2026-08-14 (bd38d73a)
+
+## Re-record (BET-813)
+
+Baselines re-recorded with `npm run visual:update` after the deferred re-record
+(BET-662 cancelled, BET-768 composer change) landed. BET-663 reordered the demo
+fixture so `?demo&desktop` opens directly on the transcript-bearing `infra`
+session — the `session` baseline now shows that transcript (and the session rail
+lists `infra` first) instead of the old Welcome shell. The same re-record
+captures the composer/todo/Artifacts state that had landed since the last
+baseline (composer quick prompts, refined todo list, the Artifacts region) for
+the `session` / `session-header` / `session-composer` rows. No registry,
+crop-region or capture-harness changes.
 
 ## Artifacts toggle added to the header (BET-659)
 
