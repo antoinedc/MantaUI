@@ -708,6 +708,11 @@ export const httpApi: Api = {
   forgeShipPreview: (input) => rpc(IPC.forgeShipPreview, input),
   forgeMerge: (input) => rpc(IPC.forgeMerge, input),
 
+  // -- forge draft review (BET-793) --
+  forgeDraftGet: (input) => rpc(IPC.forgeDraftGet, input),
+  forgeDraftComment: (input) => rpc(IPC.forgeDraftComment, input),
+  forgeDraftSubmit: (input) => rpc(IPC.forgeDraftSubmit, input),
+
   // -- tmux config management --
   tmuxConfigStatus: () => rpc(IPC.tmuxConfigStatus),
   tmuxSetupConfig: () => rpc(IPC.tmuxSetupConfig),

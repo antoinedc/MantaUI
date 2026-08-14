@@ -325,3 +325,63 @@ test("a file-level comment (no line) normalises to a thread with a null line, an
   assert.equal(file.path, "src/forge.mjs");
   assert.equal(file.comments[0].body, "file-level note");
 });
+
+// ---- Review writes (BET-793): submitReview + replyToThread ------------------
+
+test("submitReview POSTs ONE review carrying every buffered comment with correct anchors", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls/42/reviews";
+  const write = fakeWrite({ [url]: { id: "rvw1", state: "APPROVED" } });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+
+  const comments = [
+    { path: "a.ts", line: 1, side: "new", body: "c1" },
+    { path: "a.ts", line: 2, side: "old", body: "c2" },
+    { path: "b.ts", line: 5, side: "new", startLine: 3, body: "multi" },
+  ];
+  const { data } = await adapter.submitReview(REPO, 42, {
+    verdict: "approve",
+    body: "nice work",
+    comments,
+    headSha: "abc123",
+  });
+
+  assert.equal(write.calls.length, 1, "one write for the whole draft — the box-buffer payoff");
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].opts.method, "POST");
+  const body = write.calls[0].opts.body;
+  assert.equal(body.event, "APPROVE");
+  assert.equal(body.body, "nice work");
+  assert.equal(body.comments.length, 3);
+  assert.deepEqual(body.comments[0], { path: "a.ts", line: 1, side: "RIGHT", body: "c1", commit_id: "abc123" });
+  assert.equal(body.comments[1].side, "LEFT", "old side maps to LEFT");
+  const multi = body.comments[2];
+  assert.equal(multi.line, 5);
+  assert.equal(multi.side, "RIGHT");
+  assert.equal(multi.start_line, 3);
+  assert.equal(multi.start_side, "RIGHT");
+  assert.equal(multi.commit_id, "abc123");
+  assert.equal(data.state, "APPROVED");
+});
+
+test("submitReview verdict mapping: request_changes → REQUEST_CHANGES, null → COMMENT", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls/42/reviews";
+  const seen = [];
+  const write = async (u, opts) => { seen.push(opts.body); return { data: {}, stale: false }; };
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+
+  await adapter.submitReview(REPO, 42, { verdict: "request_changes", comments: [{ path: "a.ts", line: 1, side: "new", body: "x" }] });
+  await adapter.submitReview(REPO, 42, { verdict: null, comments: [{ path: "a.ts", line: 1, side: "new", body: "x" }] });
+  assert.equal(seen[0].event, "REQUEST_CHANGES");
+  assert.equal(seen[1].event, "COMMENT", "no verdict → the neutral COMMENT event");
+});
+
+test("replyToThread POSTs a reply body + reviewed commit to the thread endpoint", async () => {
+  const url = "https://api.github.com/repos/acme/widget/pulls/42/comments/77/replies";
+  const write = fakeWrite({ [url]: { id: 88, body: "ok" } });
+  const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
+  const { data } = await adapter.replyToThread(REPO, 42, { threadId: "77", body: "got it", headSha: "abc123" });
+  assert.equal(write.calls[0].url, url);
+  assert.equal(write.calls[0].opts.method, "POST");
+  assert.deepEqual(write.calls[0].opts.body, { body: "got it", commit_id: "abc123" });
+  assert.equal(data.id, 88);
+});

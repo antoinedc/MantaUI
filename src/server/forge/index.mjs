@@ -27,11 +27,12 @@
 // cwd → origin → repo server-side, keeping the renderer ignorant of forge
 // identity).
 
-import { detectForge, rollupChecks, unsupportedByForge } from "../../shared/forge.mjs";
+import { detectForge, rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
 import { createGithubAdapter, GithubRequestError } from "./github.mjs";
+import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -639,6 +640,146 @@ export async function forgeDiffForCwd(cwd, deps = {}) {
     }
     throw err;
   }
+}
+
+// ---- Box-facing draft review (BET-793) -------------------------------------
+//
+// The box owns the draft review (spec §3.4①). Comments accumulate in the
+// durable draft store (draft.mjs) and "submit" flushes them in ONE operation.
+// These ops resolve cwd → origin → repo → PR → token → adapter box-side, so a
+// forge token never reaches the renderer (§Hygiene), and reconcile the stored
+// draft against the PR's CURRENT head SHA: if the head moved past what we
+// anchored to, the draft is marked stale (kept, never discarded — the renderer
+// warns instead of losing typed comments).
+
+// Resolve the box-side context a draft op needs: the forge identity, the
+// adapter, the target PR number and its current head SHA, plus the canonical
+// repoKey the draft store uses. Returns `{ error }` for no_forge /
+// not_connected / no_pr; otherwise the full context.
+async function resolveDraftContext(cwd, deps) {
+  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
+  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  const origin = await gitRemoteOrigin(cwd);
+  const forge = origin ? detectForge(origin) : null;
+  if (!forge || forge.kind !== "github") return { error: "no_forge" };
+  const tok = await resolveToken(forge.host);
+  if (!tok) return { error: "not_connected" };
+
+  const adapter = getAdapterFn(forge.kind, tok.token);
+  const repo = { owner: forge.owner, repo: forge.repo };
+
+  const res = await adapter.listPullRequests(repo, { state: "open" });
+  const prArr = Array.isArray(res.data) ? res.data : [];
+  if (prArr.length === 0) return { error: "no_pr" };
+
+  const branch = await currentBranch(cwd);
+  const branchPr = branch ? prArr.find((p) => p.headRef === branch) : undefined;
+  const number = branchPr?.number ?? prArr[0].number;
+
+  // The head SHA the diff was anchored at. getPullRequest is the authoritative
+  // source; a failure (stale/counting) falls back to the list entry's SHA so
+  // the context still resolves and the reconciler degrades gracefully.
+  let headSha = prArr.find((p) => p.number === number)?.headSha ?? "";
+  try {
+    const full = await adapter.getPullRequest(repo, number);
+    if (full?.data?.headSha) headSha = full.data.headSha;
+  } catch {
+    /* fall back to the list's headSha */
+  }
+
+  return {
+    forge,
+    repo,
+    adapter,
+    number,
+    headSha,
+    repoKey: forgeRepoKey({ host: forge.host, owner: forge.owner, repo: forge.repo }),
+  };
+}
+
+/**
+ * forge:draft-get — the current box-buffered draft for a session's PR. If the
+ * PR head has moved past the SHA the draft anchored to, the draft is marked
+ * stale (kept, never cleared) and returned so the renderer warns.
+ *
+ * @param {string} cwd
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ draft: object | null, error: "no_forge"|"not_connected"|"no_pr"|null }>}
+ */
+export async function draftGetForCwd(cwd, deps = {}) {
+  const ctx = await resolveDraftContext(cwd, deps);
+  if (ctx.error) return { draft: null, error: ctx.error };
+  let draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
+  if (draft && draft.headSha && ctx.headSha && draft.headSha !== ctx.headSha) {
+    draft = (await storeMarkDraftStale(ctx.repoKey, ctx.number, deps)) ?? draft;
+  }
+  return { draft, error: null };
+}
+
+/**
+ * forge:draft-comment — mutate one draft comment (add / edit / delete) or set
+ * the draft verdict. The box owns the draft, so every mutation is box-side and
+ * publishes a `forge-draft.updated` event for connected clients.
+ *
+ * @param {string} cwd
+ * @param {{ op: "add"|"edit"|"delete"|"set-verdict", comment?: object, verdict?: string, body?: string }} input
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true, draft: object } | { ok: false, error: string }>}
+ */
+export async function draftCommentForCwd(cwd, input = {}, deps = {}) {
+  const ctx = await resolveDraftContext(cwd, deps);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const { op, comment, verdict, body } = input;
+  switch (op) {
+    case "add":
+    case "edit": {
+      const r = await storePutComment(ctx.repoKey, ctx.number, ctx.headSha, comment, deps);
+      return r.ok ? { ok: true, draft: r.draft } : r;
+    }
+    case "delete": {
+      const r = await storeDeleteComment(ctx.repoKey, ctx.number, comment?.id, deps);
+      return { ok: true, draft: r.draft };
+    }
+    case "set-verdict": {
+      const r = await storeSetVerdict(ctx.repoKey, ctx.number, ctx.headSha, { verdict, body }, deps);
+      return r.ok ? { ok: true, draft: r.draft } : r;
+    }
+    default:
+      return { ok: false, error: `unknown op "${op}"` };
+  }
+}
+
+/**
+ * forge:draft-submit — flush the box-buffered draft as ONE review. The draft
+ * is cleared ONLY on success; a failed submit leaves it intact and recoverable.
+ * Returns a typed error (`kind`) for the distinguishable failure modes.
+ *
+ * @param {string} cwd
+ * @param {{ verdict?: string, body?: string }} input
+ * @param {object} [deps] injectable I/O
+ * @returns {Promise<{ ok: true } | { ok: false, error: string, kind?: string }>}
+ */
+export async function draftSubmitForCwd(cwd, input = {}, deps = {}) {
+  const ctx = await resolveDraftContext(cwd, deps);
+  if (ctx.error) return { ok: false, error: ctx.error };
+  const draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
+  if (!draft || draft.comments.length === 0) return { ok: false, error: "nothing to submit" };
+  try {
+    await ctx.adapter.submitReview(ctx.repo, ctx.number, {
+      verdict: input.verdict ?? draft.verdict,
+      body: typeof input.body === "string" ? input.body : draft.body,
+      comments: draft.comments,
+      headSha: ctx.headSha || draft.headSha,
+    });
+  } catch (e) {
+    const kind = e?.kind ?? (e?.name === "GithubRequestError" ? `http_${e.status}` : null);
+    return { ok: false, error: String(e?.message ?? e), kind };
+  }
+  await storeClearDraft(ctx.repoKey, ctx.number, deps);
+  return { ok: true };
 }
 
 // ---- Adapter interface (the seam a second adapter implements) ------------------

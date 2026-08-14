@@ -29,7 +29,7 @@ import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
-import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest } from "./forge/index.mjs";
+import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd } from "./forge/index.mjs";
 
 // Same dirname derivation as src/server/index.mjs (line 83) so the script
 // path resolves identically. The script lives at <repoRoot>/scripts/
@@ -326,6 +326,25 @@ export function buildHandlers({
       shipPreview(typeof input === "object" && input !== null ? input.cwd : ""),
     "forge:merge": (input) =>
       mergePullRequest(
+        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : {},
+      ),
+
+    // BET-793: box-buffered draft review. The box owns the draft (§3.4①) —
+    // comments accumulate in durable box state and "submit" flushes them as ONE
+    // review. All three channels are box-side only (a forge token never reaches
+    // the renderer). forge:draft-get reads the current draft (reconciling head
+    // movement → stale); forge:draft-comment mutates a comment or sets the
+    // verdict; forge:draft-submit flushes and clears only on success.
+    "forge:draft-get": (input) =>
+      draftGetForCwd(typeof input === "object" && input !== null ? input.cwd : ""),
+    "forge:draft-comment": (input) =>
+      draftCommentForCwd(
+        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : {},
+      ),
+    "forge:draft-submit": (input) =>
+      draftSubmitForCwd(
         typeof input === "object" && input !== null ? input.cwd : "",
         typeof input === "object" && input !== null ? input : {},
       ),
