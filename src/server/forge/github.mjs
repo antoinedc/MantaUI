@@ -714,6 +714,22 @@ export function createGithubAdapter(request, requestWrite, requestText = request
     },
 
     /**
+     * GET /repos/{o}/{r} — the repo's default branch (the PR base). Returns
+     * `"main"` when the field is missing or the payload is malformed.
+     * @param {{ owner: string, repo: string }} repo
+     * @returns {Promise<string>}
+     */
+    async getDefaultBranch(repo) {
+      let data = {};
+      try {
+        ({ data } = await request(`${apiBase}/repos/${repo.owner}/${repo.repo}`));
+      } catch {
+        // fall through to "main"
+      }
+      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : "main";
+    },
+
+    /**
      * GET /user/repos — the repos the connected user can actually PUSH to,
      * most-recently-pushed first. Filtering to write access is what keeps the
      * clone picker usable: a read-only repo you cannot push to is noise here,

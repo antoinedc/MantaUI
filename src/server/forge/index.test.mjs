@@ -324,6 +324,7 @@ function writeAdapter({ created = { ...OPEN_PR, number: 77 }, merge = { merged: 
 const SHIP_DEPS = {
   gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
   currentBranch: async () => "feature/forge",
+  getDefaultBranch: async () => "main",
   resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
   getAdapter: () => writeAdapter(),
   gitPush: async (input) => ({ input }),
@@ -409,6 +410,59 @@ test("shipPreview returns head, base and a best-effort file count", async () => 
   assert.equal(r.head, "feat/forge-seam");
   assert.equal(r.base, "main");
   assert.equal(typeof r.fileCount, "number");
+});
+
+test("shipPreview uses the forge-resolved default branch for base and the diff range", async () => {
+  const gitCalls = [];
+  const r = await shipPreview("/repo", {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    getDefaultBranch: async () => "master",
+    run: async (cmd, args) => { gitCalls.push({ cmd, args }); return { stdout: "a.ts\nb.ts\n", stderr: "" }; },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.base, "master");
+  assert.equal(r.fileCount, 2);
+  const diff = gitCalls.find((c) => c.args.includes("diff"));
+  assert.ok(diff, "git diff ran");
+  assert.ok(
+    diff.args.includes("origin/master...feat/forge-seam"),
+    `diff range uses origin/<base>...<head>, got ${JSON.stringify(diff.args)}`
+  );
+});
+
+test("shipPullRequest passes the forge-resolved base to createPullRequest", async () => {
+  const created = [];
+  const adapter = {
+    kind: "github",
+    createPullRequest: async (_repo, input) => { created.push(input); return { data: { ...OPEN_PR, number: 77 }, stale: false }; },
+    merge: async () => ({ data: { merged: true }, stale: false }),
+  };
+  const r = await shipPullRequest("/repo", { title: "t", body: "B" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => adapter,
+    getDefaultBranch: async () => "master",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].base, "master");
+});
+
+test("shipPullRequest: an explicit base input still wins over the resolved one", async () => {
+  const created = [];
+  const adapter = {
+    kind: "github",
+    createPullRequest: async (_repo, input) => { created.push(input); return { data: { ...OPEN_PR, number: 77 }, stale: false }; },
+    merge: async () => ({ data: { merged: true }, stale: false }),
+  };
+  const r = await shipPullRequest("/repo", { title: "t", body: "B", base: "trunk" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => adapter,
+    getDefaultBranch: async () => "master",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(created.length, 1);
+  assert.equal(created[0].base, "trunk");
 });
 
 test("shipPreview drafts a title from the tip commit (design step 1)", async () => {
