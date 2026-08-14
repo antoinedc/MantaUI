@@ -169,6 +169,39 @@ enum ChatModel {
         return nil
     }
 
+    // MARK: - Catalogue row badges (BET-825)
+
+    /// Compact context-window display, ported from the desktop
+    /// `formatModelContextSize` (src/renderer/chatUtils.ts): 200_000 → "200k",
+    /// 1_000_000 → "1M", 1_500_000 → "1.5M". Returns nil for a missing /
+    /// non-positive limit so callers omit the badge entirely rather than
+    /// rendering "0k". At 1M+ it switches to millions and strips a trailing
+    /// ".0"; below it keeps the k form.
+    static func contextSize(_ context: Double?) -> String? {
+        guard let context, context.isFinite, context > 0 else { return nil }
+        if context >= 1_000_000 {
+            let m = context / 1_000_000
+            let rounded = (m * 10).rounded() / 10
+            let text = String(format: "%.1f", rounded)
+            let trimmed = text.hasSuffix(".0") ? String(text.dropLast(2)) : text
+            return "\(trimmed)M"
+        }
+        return "\(Int((context / 1000).rounded()))k"
+    }
+
+    /// Capability glyphs for a catalogue row, in display order:
+    /// "reasoning" when the model exposes reasoning effort (has variants),
+    /// "vision" when it accepts image input. The differentiator at scale is
+    /// capability, not a name — the list is drawn from the model's own data.
+    static func capabilityGlyphs(_ model: OpencodeModel) -> [String] {
+        var glyphs: [String] = []
+        if !(model.variants ?? []).isEmpty { glyphs.append("reasoning") }
+        if (model.capabilities?.input ?? []).contains(where: { $0.lowercased() == "image" }) {
+            glyphs.append("vision")
+        }
+        return glyphs
+    }
+
     /// Encode a selection as the persisted `providerID/modelID` string.
     static func encode(_ id: OpencodeModelID) -> String {
         "\(id.providerID)/\(id.modelID)"

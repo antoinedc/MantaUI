@@ -32,6 +32,10 @@ final class ChatModelStore: ObservableObject {
     /// model "variants"). Model-specific, so it is cleared whenever the model
     /// changes rather than carried onto a model that has no such setting.
     @Published private(set) var variant: String?
+    /// The last 3–5 (model, effort, fast) triples actually used, most recent
+    /// first. Persisted PER BOX (a habit, not a conversation), unlike the
+    /// override/variant above which are per-session.
+    @Published private(set) var recents: [ModelChoice] = []
 
     let sessionId: String
     private let catalog: ChatModelCatalog
@@ -51,6 +55,7 @@ final class ChatModelStore: ObservableObject {
         self.defaultModel = catalog.defaultModel
         self.loadFailed = catalog.loadFailed
         self.loaded = catalog.loaded
+        self.recents = ModelRecents.load()
         catalog.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.mirrorCatalog() }
@@ -129,6 +134,68 @@ final class ChatModelStore: ObservableObject {
     /// The effort variants the ACTIVE model offers (empty when it has none).
     var activeVariants: [OpencodeModel.Variant] {
         ChatModel.activeModel(models, override: override, default: defaultModel)?.variants ?? []
+    }
+
+    // MARK: - Recents (BET-825)
+
+    /// The currently-active (model, effort, fast) triple, or nil when there is
+    /// no per-session override (the "Server default" state — the checkmark
+    /// lands on Server default, not on a recent). `modelID` is always the
+    /// base id; fast is expressed as the `fast` flag.
+    var activeChoice: ModelChoice? {
+        guard let override, let active = ChatModel.activeModel(models, override: override, default: defaultModel) else {
+            return nil
+        }
+        return ModelChoice(
+            providerID: override.providerID,
+            modelID: ChatModel.baseModelID(active.id),
+            variant: variant,
+            fast: ChatModel.isFastModelID(active.id)
+        )
+    }
+
+    /// Apply a stored recent choice (base model id + effort + fast) to the
+    /// override + variant, then move it to the front of recents. Selecting a
+    /// recent IS the act of using it, so it is recorded on apply.
+    func apply(_ choice: ModelChoice) {
+        let targetID = choice.fast ? ChatModel.fastModelID(choice.modelID) : choice.modelID
+        setOverride(OpencodeModelID(providerID: choice.providerID, modelID: targetID))
+        setVariant(choice.variant)
+        recents = ModelRecents.record(choice, into: recents)
+        ModelRecents.save(recents)
+    }
+
+    /// Record the current effective (model, effort, fast) as a recent — called
+    /// when the user changes effort or fast, or picks a model from the
+    /// catalogue sheet. Only records when the user has an explicit model
+    /// override (the "Server default" state is not a recent — it is the
+    /// always-present escape hatch, so it must not crowd recents with one
+    /// entry per effort dial).
+    func recordCurrentChoice() {
+        guard
+            let override,
+            let active = ChatModel.activeModel(models, override: override, default: defaultModel)
+        else { return }
+        let choice = ModelChoice(
+            providerID: override.providerID,
+            modelID: ChatModel.baseModelID(active.id),
+            variant: variant,
+            fast: ChatModel.isFastModelID(active.id)
+        )
+        recents = ModelRecents.record(choice, into: recents)
+        ModelRecents.save(recents)
+    }
+
+    /// Flip fast mode on the active model, carrying the current effort across
+    /// (the fast twin keeps the chosen effort, or fast is unavailable). Moved
+    /// here from the sheet so the menu and the sheet share one implementation.
+    func setFast(_ on: Bool) {
+        guard let active = ChatModel.activeModel(models, override: override, default: defaultModel) else { return }
+        let f = ChatModel.fastToggle(models: models, active: active, variantId: variant)
+        guard let target = f.target else { return }
+        let currentVariant = variant
+        setOverride(OpencodeModelID(providerID: target.providerID, modelID: target.modelID))
+        if let currentVariant { setVariant(currentVariant) }
     }
 
     static func loadOverride(for sessionId: String) -> OpencodeModelID? {
