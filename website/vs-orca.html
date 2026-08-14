@@ -83,7 +83,7 @@
       "name": "Why is Orca so much more mature?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
+        "text": "Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly."
       }
     },
     {
@@ -123,7 +123,7 @@
     <div class="verdict">
       <h2>Verdict</h2>
       <ul>
-        <li><span class="vtag">Pick Orca</span><span><b>If you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop.</b> Orca is the more mature IDE today, and the only one of the two with a Windows or Linux desktop.</span></li>
+        <li><span class="vtag">Pick Orca</span><span><b>If you want 34 agent runtimes, a Monaco-based editor with Design Mode, and you only need your laptop.</b> Orca is the more mature IDE today, and the only one of the two with a Linux desktop.</span></li>
         <li><span class="vtag">Pick Manta</span><span><b>If your agent should keep running after you close the laptop, your phone should be able to approve a command, and you want one self-hosted box rather than a desktop app you have to keep open.</b></span></li>
         <li><span class="vtag">Overlap</span><span>Both give you an agent chat panel, a worktree per session, and a real terminal. The trade-off is where the work lives.</span></li>
       </ul>
@@ -159,7 +159,7 @@
           <tr><td>Diff review / inline annotation</td><td class="us off">No</td><td class="on">Yes</td></tr>
           <tr><td>Built-in code editor</td><td class="us mid">Terminal + chat only</td><td class="on">Monaco with Design Mode</td></tr>
           <tr><td>Agent runtimes supported</td><td class="us mid">2 (Claude Code, opencode)</td><td class="on">34</td></tr>
-          <tr><td>Desktop OS coverage</td><td class="us mid">macOS desktop (box runs on Linux or macOS)</td><td class="on">macOS, Windows, Linux</td></tr>
+          <tr><td>Desktop OS coverage</td><td class="us mid">macOS and Windows desktop, iPhone app (box runs on Linux or macOS)</td><td class="on">macOS, Windows, Linux</td></tr>
           <tr><td>Git worktree per session</td><td class="us on">Yes</td><td class="on">Yes</td></tr>
           <tr><td>Real tmux underneath</td><td class="us on">Yes, you can SSH in</td><td class="off">No</td></tr>
           <tr><td>Agent scheduling, webhooks, secrets</td><td class="us on">Yes</td><td class="off">No</td></tr>
@@ -189,7 +189,7 @@
       <li><span class="ck">›</span><span><b>Agent runtime count.</b> Orca ships 34. Manta ships two today (Claude Code and opencode). If you want Cursor, Codex, Aider and the rest of the field on the same desktop, Orca is the answer.</span></li>
       <li><span class="ck">›</span><span><b>Built-in editor.</b> Monaco with Design Mode lets you edit, preview and let the agent touch the same file. Manta gives you a terminal and a chat panel; your editor stays your editor.</span></li>
       <li><span class="ck">›</span><span><b>Diff review and inline annotation.</b> Orca's PR/merge tail and inline comments back to the agent are the strongest part of the product. Manta has none of it.</span></li>
-      <li><span class="ck">›</span><span><b>Cross-platform desktop.</b> macOS, Windows and Linux. The Manta desktop is macOS only today; the box itself runs on Linux or macOS.</span></li>
+      <li><span class="ck">›</span><span><b>A Linux desktop.</b> Orca ships one; Manta does not. Manta's desktop is macOS and Windows, and the box itself runs on Linux or macOS.</span></li>
       <li><span class="ck">›</span><span><b>Maturity.</b> 29.6k GitHub stars, YC-backed, widely deployed. Manta is new and ships less surface.</span></li>
     </ul>
     <div class="quotebox">
@@ -274,7 +274,7 @@
       <div class="q"><h3>Is Manta a fork of Orca?</h3><p>No. They are separate products with separate codebases. Both are MIT, both run Claude Code in a terminal, and the similarity ends there. Orca is desktop-first and ships 34 agent runtimes; Manta is box-first and ships two.</p></div>
       <div class="q"><h3>Does Manta run on any of Orca's agent runtimes?</h3><p>No. Manta runs Claude Code and opencode in a real tmux session on your box. Orca's runtime count comes from packaging many agent CLIs into the desktop app; Manta does not do that today and would not benefit from the same approach because it does not own the editor.</p></div>
       <div class="q"><h3>Can Manta and Orca share a machine?</h3><p>Yes, on a macOS box. They use different ports and different tmux sessions, so they do not interfere. On a Linux box the same applies; the desktop piece of Orca simply has no Linux desktop binary to launch there.</p></div>
-      <div class="q"><h3>Why is Orca so much more mature?</h3><p>Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Windows and Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.</p></div>
+      <div class="q"><h3>Why is Orca so much more mature?</h3><p>Orca is older, has 29.6k stars on GitHub, and is YC-backed. Manta is a solo project and is younger. Maturity buys you a larger surface today (diff review, an editor, more runtimes, a Linux desktop) and a smaller backlog. We concede the comparison on maturity plainly.</p></div>
       <div class="q"><h3>Which one should I pick if my work runs locally?</h3><p>Orca. Manta is for when the work needs to outlive the laptop, or when you want a phone client that can approve a command. If neither matters and your editor matters most, Orca's Monaco integration is the answer.</p></div>
     </div>
   </div>
