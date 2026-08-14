@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   detectForge,
   repoKey,
+  repoKeyParts,
   normalizePrState,
   rollupChecks,
   UnsupportedByForgeError,
@@ -118,6 +119,42 @@ describe("repoKey", () => {
     expect(repoKey({ host: "Github.Com", owner: "Owner", repo: "Repo.git" })).toBe(
       "github.com/owner/repo",
     );
+  });
+});
+
+describe("repoKeyParts", () => {
+  it("round-trips a flat github key back into forge identity", () => {
+    expect(repoKeyParts("github.com/acme/widget")).toEqual({
+      kind: "github",
+      host: "github.com",
+      owner: "acme",
+      repo: "widget",
+    });
+  });
+  it("round-trips a gitlab subgroup key, preserving the owners path", () => {
+    expect(repoKeyParts("gitlab.com/group/sub/proj")).toEqual({
+      kind: "gitlab",
+      host: "gitlab.com",
+      owner: "group/sub",
+      repo: "proj",
+    });
+  });
+  it("normalises case and strips a trailing .git", () => {
+    expect(repoKeyParts("GITHUB.com/Acme/Widget.git")).toEqual({
+      kind: "github",
+      host: "github.com",
+      owner: "acme",
+      repo: "widget",
+    });
+  });
+  it("is the inverse of repoKey(detectForge(...))", () => {
+    const identity = detectForge("https://gitlab.com/Group/Sub/Proj.git")!;
+    expect(repoKeyParts(repoKey(identity))).toEqual(identity);
+  });
+  it("returns null for a non-string, a short key, or an unknown host", () => {
+    expect(repoKeyParts(undefined)).toBeNull();
+    expect(repoKeyParts("github.com/acme")).toBeNull();
+    expect(repoKeyParts("example.com/acme/widget")).toBeNull();
   });
 });
 

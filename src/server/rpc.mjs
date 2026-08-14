@@ -337,8 +337,11 @@ export function buildHandlers({
     "forge:status": () => forgeStatus(),
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
-    "forge:diff": (input) =>
-      forgeDiffForCwd(typeof input === "object" && input !== null ? input.cwd : input),
+    // A forge ref is either the session cwd ({ cwd }) — resolved box-side to
+    // the open PR — or an explicit cross-repo inbox target ({ repoKey, number },
+    // BET-850). Pass the whole input so the server reads whichever addressing
+    // mode the caller supplied.
+    "forge:diff": (input) => forgeDiffForCwd(input),
 
     // BET-798: box-side rules registry reads + disconnect (the Settings [G1]
     // surface). A forge token never reaches the renderer — list returns rule
@@ -403,16 +406,15 @@ export function buildHandlers({
     // the renderer). forge:draft-get reads the current draft (reconciling head
     // movement → stale); forge:draft-comment mutates a comment or sets the
     // verdict; forge:draft-submit flushes and clears only on success.
-    "forge:draft-get": (input) =>
-      draftGetForCwd(typeof input === "object" && input !== null ? input.cwd : ""),
+    "forge:draft-get": (input) => draftGetForCwd(input),
     "forge:draft-comment": (input) =>
       draftCommentForCwd(
-        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : "",
         typeof input === "object" && input !== null ? input : {},
       ),
     "forge:draft-submit": (input) =>
       draftSubmitForCwd(
-        typeof input === "object" && input !== null ? input.cwd : "",
+        typeof input === "object" && input !== null ? input : "",
         typeof input === "object" && input !== null ? input : {},
       ),
 

@@ -27,7 +27,7 @@
 // cwd → origin → repo server-side, keeping the renderer ignorant of forge
 // identity).
 
-import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
+import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey, repoKeyParts } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
@@ -511,6 +511,66 @@ async function resolveForgeContext(cwd, deps) {
   return { forge, repo, token: tok, adapter };
 }
 
+// Resolve the forge identity a diff/draft read addresses. A `ref` is either
+// the session's `cwd` (resolve cwd → origin → repo, as before) OR an explicit
+// cross-repo inbox target `{ repoKey, number }` (no cwd to resolve — the row
+// carries only host/owner/repo + the PR number, BET-850). Returns the same
+// `{ forge, repo, adapter }` context as resolveForgeContext plus a canonical
+// `repoKey`, or `{ error: "no_forge" | "not_connected" }`.
+//
+// The explicit branch does NOT call git at all — a cross-repo PR may live in a
+// repo the box has not cloned, so the read must get to the forge over the API
+// alone, keyed by the inbox row's host/owner/repo + number.
+async function resolveRefContext(ref, deps) {
+  const resolveToken = deps.resolveToken ?? authResolveToken;
+  const getAdapterFn = deps.getAdapter ?? getAdapter;
+
+  if (typeof ref === "object" && ref !== null && ref.repoKey) {
+    const target = repoKeyParts(ref.repoKey);
+    if (!target) return { error: "no_forge" };
+    const tok = await resolveToken(target.host);
+    if (!tok) return { error: "not_connected" };
+    return {
+      forge: { kind: target.kind, host: target.host, owner: target.owner, repo: target.repo },
+      repo: { owner: target.owner, repo: target.repo },
+      adapter: getAdapterFn(target.kind, tok.token),
+      repoKey: forgeRepoKey({ host: target.host, owner: target.owner, repo: target.repo }),
+      cwd: null,
+      error: null,
+    };
+  }
+
+  const cwd = typeof ref === "string" ? ref : ref?.cwd;
+  const ctx = await resolveForgeContext(cwd, deps);
+  if (ctx.error) return { error: ctx.error };
+  return {
+    ...ctx,
+    cwd,
+    repoKey: forgeRepoKey({ host: ctx.forge.host, owner: ctx.forge.owner, repo: ctx.forge.repo }),
+  };
+}
+
+// Pick the PR number a diff/draft read targets. An explicit `{ repoKey, number }`
+// ref wins outright (a cross-repo inbox PR — never derived from a branch). A
+// cwd ref picks the open PR on the current branch, falling back to the first
+// open PR, exactly as before. Returns `{ number, stale }` or `{ error: "no_pr" }`
+// / `{ rateLimited: true }`.
+async function resolveRefNumber(ref, ctx, deps) {
+  if (typeof ref === "object" && ref !== null && ref.repoKey) {
+    const number = Number(ref.number);
+    if (!Number.isInteger(number) || number <= 0) return { error: "no_pr" };
+    return { number, stale: false };
+  }
+  const { prs, stale, rateLimited } = await listOpenPrs(ctx.adapter, ctx.repo);
+  if (rateLimited) return { rateLimited: true };
+  if (prs.length === 0) return { error: "no_pr" };
+  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
+  const branch = await currentBranch(ctx.cwd);
+  let candidate = branch ? prs.find((p) => p.headRef === branch) : undefined;
+  if (!candidate) candidate = prs[0];
+  return { number: candidate.number, stale };
+}
+
 // List a repo's open PRs the way both cwd-scoped readers do, normalising the
 // rate-limit guard once. A rate-limited list is not an error — it yields an
 // empty list flagged `rateLimited` so the caller can serve a stale result
@@ -906,42 +966,37 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
 // ---- Adapter interface (the seam a second adapter implements) ------------------
 
 /**
- * forge:diff — the review pane's read. Resolve `cwd → origin → repo`, pick the
- * open PR on the current branch (falling back to the first open PR) exactly as
- * `pullRequestForCwd` does, then fetch its raw unified diff + normalised
- * incoming threads + head SHA. Returns `{ diff, threads, headSha, error }` —
- * never throws for a repo with no forge ("no_forge"), no token
- * ("not_connected") or no open PR ("no_pr").
+ * forge:diff — the review pane's read. A `ref` is either a session `cwd`
+ * (resolve cwd → origin → repo, then pick the open PR on the current branch,
+ * falling back to the first open PR) OR an explicit cross-repo target
+ * `{ repoKey, number }` for an inbox PR row (no git — the read addresses the
+ * forge over the API directly, BET-850). Fetches the PR's raw unified diff +
+ * normalised incoming threads + head SHA. Returns `{ diff, threads, headSha,
+ * error }` — never throws for a repo with no forge ("no_forge"), no token
+ * ("not_connected") or no PR ("no_pr").
  *
- * @param {string} cwd
+ * @param {string | { cwd?: string } | { repoKey: string, number: number }} ref
  * @param {{ gitRemoteOrigin?: (cwd: string) => Promise<string|null>,
  *          currentBranch?: (cwd: string) => Promise<string|null>,
  *          resolveToken?: typeof authResolveToken,
  *          getAdapter?: (kind: string, token: string) => any }} [deps]
  */
-export async function forgeDiffForCwd(cwd, deps = {}) {
-  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-
-  const ctx = await resolveForgeContext(cwd, deps);
+export async function forgeDiffForCwd(ref, deps = {}) {
+  const ctx = await resolveRefContext(ref, deps);
   if (ctx.error) return { diff: "", threads: [], headSha: "", error: ctx.error };
   const { adapter, repo } = ctx;
 
-  const { prs: prArr, stale, rateLimited } = await listOpenPrs(adapter, repo);
-  if (rateLimited) return { diff: "", threads: [], headSha: "", error: null, stale: true };
-
-  if (prArr.length === 0) return { diff: "", threads: [], headSha: "", error: "no_pr" };
-
-  const branch = await currentBranch(cwd);
-  let candidate = branch ? prArr.find((p) => p.headRef === branch) : undefined;
-  if (!candidate) candidate = prArr[0];
+  const target = await resolveRefNumber(ref, ctx, deps);
+  if (target.rateLimited) return { diff: "", threads: [], headSha: "", error: null, stale: true };
+  if (target.error) return { diff: "", threads: [], headSha: "", error: target.error };
 
   try {
-    const res = await adapter.getDiff(repo, candidate.number);
+    const res = await adapter.getDiff(repo, target.number);
     return {
       diff: res.data.diff ?? "",
       threads: Array.isArray(res.data.threads) ? res.data.threads : [],
       headSha: res.data.headSha ?? "",
-      stale: stale || Boolean(res.stale),
+      stale: target.stale || Boolean(res.stale),
       error: null,
     };
   } catch (err) {
@@ -964,47 +1019,40 @@ export async function forgeDiffForCwd(cwd, deps = {}) {
 
 // Resolve the box-side context a draft op needs: the forge identity, the
 // adapter, the target PR number and its current head SHA, plus the canonical
-// repoKey the draft store uses. Returns `{ error }` for no_forge /
+// repoKey the draft store uses. `ref` is either a session `cwd` (the
+// cwd → origin → forge → token → adapter preamble) or an explicit cross-repo
+// `{ repoKey, number }` inbox target (BET-850 — the draft ops must hit the
+// SAME PR the diff pane shows when it is opened from the inbox, which may be a
+// repo the box has not cloned). Returns `{ error }` for no_forge /
 // not_connected / no_pr; otherwise the full context.
-//
-// Built on the SHARED resolveWriteContext (the cwd → origin → forge → token →
-// adapter preamble) rather than a parallel copy — the draft variant only adds
-// the PR-number + head-SHA resolution on top of what that resolver already
-// returns. One code path (issue §Hygiene).
-async function resolveDraftContext(cwd, deps) {
-  const base = await resolveWriteContext(cwd, deps, false);
-  if (base.error) return { error: base.error };
+async function resolveDraftContext(ref, deps) {
+  const ctx = await resolveRefContext(ref, deps);
+  if (ctx.error) return { error: ctx.error };
+  const { adapter, repo } = ctx;
 
-  const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-  const adapter = base.adapter;
-  const repo = base.repo;
-
-  const res = await adapter.listPullRequests(repo, { state: "open" });
-  const prArr = Array.isArray(res.data) ? res.data : [];
-  if (prArr.length === 0) return { error: "no_pr" };
-
-  const branch = await currentBranch(cwd);
-  const branchPr = branch ? prArr.find((p) => p.headRef === branch) : undefined;
-  const number = branchPr?.number ?? prArr[0].number;
+  const target = await resolveRefNumber(ref, ctx, deps);
+  if (target.rateLimited) return { error: "no_pr" };
+  if (target.error) return { error: target.error };
+  const number = target.number;
 
   // The head SHA the diff was anchored at. getPullRequest is the authoritative
-  // source; a failure (stale/counting) falls back to the list entry's SHA so
-  // the context still resolves and the reconciler degrades gracefully.
-  let headSha = prArr.find((p) => p.number === number)?.headSha ?? "";
+  // source; a failure (stale/counting) degrades to "" so the context still
+  // resolves and the reconciler degrades gracefully.
+  let headSha = "";
   try {
     const full = await adapter.getPullRequest(repo, number);
     if (full?.data?.headSha) headSha = full.data.headSha;
   } catch {
-    /* fall back to the list's headSha */
+    /* fall back to "" */
   }
 
   return {
-    forge: base.forge,
+    forge: ctx.forge,
     repo,
     adapter,
     number,
     headSha,
-    repoKey: forgeRepoKey({ host: base.forge.host, owner: base.forge.owner, repo: base.forge.repo }),
+    repoKey: ctx.repoKey,
   };
 }
 
@@ -1017,8 +1065,8 @@ async function resolveDraftContext(cwd, deps) {
  * @param {object} [deps] injectable I/O
  * @returns {Promise<{ draft: object | null, error: "no_forge"|"not_connected"|"no_pr"|null }>}
  */
-export async function draftGetForCwd(cwd, deps = {}) {
-  const ctx = await resolveDraftContext(cwd, deps);
+export async function draftGetForCwd(ref, deps = {}) {
+  const ctx = await resolveDraftContext(ref, deps);
   if (ctx.error) return { draft: null, error: ctx.error };
   let draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
   if (draft && draft.headSha && ctx.headSha && draft.headSha !== ctx.headSha) {
@@ -1037,8 +1085,8 @@ export async function draftGetForCwd(cwd, deps = {}) {
  * @param {object} [deps] injectable I/O
  * @returns {Promise<{ ok: true, draft: object } | { ok: false, error: string }>}
  */
-export async function draftCommentForCwd(cwd, input = {}, deps = {}) {
-  const ctx = await resolveDraftContext(cwd, deps);
+export async function draftCommentForCwd(ref, input = {}, deps = {}) {
+  const ctx = await resolveDraftContext(ref, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
   const { op, comment, verdict, body } = input;
   switch (op) {
@@ -1070,8 +1118,8 @@ export async function draftCommentForCwd(cwd, input = {}, deps = {}) {
  * @param {object} [deps] injectable I/O
  * @returns {Promise<{ ok: true } | { ok: false, error: string, kind?: string }>}
  */
-export async function draftSubmitForCwd(cwd, input = {}, deps = {}) {
-  const ctx = await resolveDraftContext(cwd, deps);
+export async function draftSubmitForCwd(ref, input = {}, deps = {}) {
+  const ctx = await resolveDraftContext(ref, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
   const draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
   if (!draft || draft.comments.length === 0) return { ok: false, error: "nothing to submit" };

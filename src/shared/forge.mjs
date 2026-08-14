@@ -185,6 +185,40 @@ export function repoKey({ host, owner, repo }) {
   return `${h}/${o}/${r}`;
 }
 
+/**
+ * The inverse of `repoKey`: split a `host/owner/repo` key back into its forge
+ * identity. `host` is the first segment and must map to a known forge kind
+ * (github.com / gitlab.com); `owner` is every middle segment joined with `/`
+ * (so GitLab subgroups fall out unchanged); `repo` is the last segment.
+ *
+ * Cross-repo inbox rows carry only this join key (host/owner/repo) plus a PR
+ * number — there is no cwd to resolve from. This is what lets the diff/draft
+ * reads address an explicit inbox PR instead of the session's cwd (BET-850).
+ *
+ * Returns `null` for a non-string, a key with fewer than three segments, or a
+ * host that is not a known forge (mirrors `detectForge`'s loud rejection of
+ * unknown hosts).
+ *
+ * @param {unknown} key `host/owner/repo`
+ * @returns {{ kind: ForgeKind, host: string, owner: string, repo: string } | null}
+ */
+export function repoKeyParts(key) {
+  if (typeof key !== "string") return null;
+  const parts = key
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .filter((s) => s !== "");
+  if (parts.length < 3) return null;
+  const host = parts[0].toLowerCase();
+  const kind = HOST_KIND[host];
+  if (kind === undefined) return null;
+  const owner = parts.slice(1, -1).map((s) => s.toLowerCase()).join("/");
+  const repo = parts[parts.length - 1].toLowerCase().replace(/\.git$/, "");
+  if (owner === "" || repo === "") return null;
+  return { kind, host, owner, repo };
+}
+
 // ---------------------------------------------------------------------------
 // PR/MR state normalisation
 // ---------------------------------------------------------------------------
