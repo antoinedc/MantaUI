@@ -176,6 +176,10 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
         windowName: "default",
         chatMode: true,
         createDir: false,
+        // BET-871: only ISSUE items carry the originating issue onto the
+        // session's `@manta-forge-issue` stamp — a PR is not something a PR
+        // closes. Omitted entirely (not null) so the box skips the stamp.
+        ...(item.kind !== "pr" ? { forgeIssue: { repoKey: item.repoKey, number: item.number } } : {}),
       });
       applyProjects(Array.isArray(created) ? created : created.projects);
       const proj = useStore.getState().projects.find((p) => p.tmuxSession === name);

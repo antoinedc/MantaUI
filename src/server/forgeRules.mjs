@@ -54,6 +54,36 @@ export function parseRepoKey(key) {
   };
 }
 
+// BET-871: canonical issue reference for the session-scoped "originating
+// issue" carrier — `repoKey#number` (e.g. "github.com/acme/widget#412"),
+// stored as the `@manta-forge-issue` tmux window user-option. The number is
+// the only digits-after-# token; a repoKey contains no "#". `repoKey` is
+// validated with parseRepoKey (so a malformed key is never written), and the
+// number must be a positive integer. Both directions are pure + exported for
+// tests; format returns null for invalid input, so a bad ref never reaches
+// storage (the caller simply skips the stamp). Inverse of formatIssueRef.
+export function formatIssueRef({ repoKey, number }) {
+  if (!parseRepoKey(repoKey)) return null;
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return `${repoKey}#${number}`;
+}
+
+// Split a canonical "repoKey#number" ref back into its parts, or null when it
+// is malformed — a missing/empty repo key, a repoKey parseRepoKey rejects, or
+// a non-integer / non-positive number. Round-trips with formatIssueRef.
+export function parseIssueRef(ref) {
+  if (typeof ref !== "string") return null;
+  const idx = ref.lastIndexOf("#");
+  if (idx < 1) return null;
+  const repoKey = ref.slice(0, idx);
+  const numberStr = ref.slice(idx + 1);
+  if (!parseRepoKey(repoKey)) return null;
+  if (!/^[0-9]+$/.test(numberStr)) return null;
+  const number = Number(numberStr);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return { repoKey, number };
+}
+
 // The on-disk rules file path for a repo identity, after path-component
 // validation. Returns {ok:true, path} or {ok:false, error}. The owner may be a
 // GitLab subgroup path; each component is validated by validateForgeRepoPath
