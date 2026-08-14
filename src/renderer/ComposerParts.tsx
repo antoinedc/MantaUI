@@ -319,7 +319,7 @@ function TypeaheadRowButton({
 // ===== Input area =====
 
 // Press-and-hold mic button. Dictation-only: the transcript is inserted at
-// the caret (via the hook's onResult).
+// the caret (the orchestration hook inserts it after transcription).
 //
 // Visual states (phase):
 //   - idle       → microphone glyph in text-muted
