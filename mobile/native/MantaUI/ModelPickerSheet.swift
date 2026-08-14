@@ -233,7 +233,8 @@ struct ModelPickerSheet: View {
                 ModelChip(
                     title: "Server default",
                     selected: modelStore.override == nil,
-                    tokens: tokens
+                    tokens: tokens,
+                    accessibilityIdentifier: "model-server-default"
                 ) {
                     modelStore.setOverride(nil)
                     dismiss()
@@ -381,6 +382,7 @@ struct ModelChip: View {
     let selected: Bool
     let tokens: Tokens
     let action: () -> Void
+    var accessibilityIdentifier: String?
 
     var body: some View {
         Button(action: action) {
@@ -393,6 +395,7 @@ struct ModelChip: View {
                 .foregroundColor(selected ? tokens.accentTx : tokens.tx2)
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityIdentifier ?? "")
     }
 }
 
