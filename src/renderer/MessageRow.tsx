@@ -32,7 +32,7 @@ import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
 import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
-import { VoiceNoteChip, VoicePlayer } from "./VoiceNote";
+import { VoicePlayer } from "./VoiceNote";
 
 // ===== Active todos =====
 //
@@ -278,10 +278,11 @@ export const MessageRow = memo(function MessageRow({
   // chevron instead of the full expanded template body.
   commandInfo: { name: string; arguments: string } | null;
   // BET-837: the voice note claimed by this user message (via
-  // buildVoiceNoteMap). When set, the row renders a VoiceNoteChip below the
-  // text — the transcript stays fully visible (text-first); the chip marks it
-  // as spoken and expands a VoicePlayer. null/undefined = a normal typed
-  // message (and the subagent transcripts in TaskCard, which have no notes).
+  // buildVoiceNoteMap). When set, the row renders a VoicePlayer below the
+  // text — the transcript stays fully visible (text-first); the player is
+  // immediately operable, no collapsed chip and no expand state. null /
+  // undefined = a normal typed message (and the subagent transcripts in
+  // TaskCard, which have no notes).
   voiceNote?: VoiceNoteRecord | null;
   // True when this message ARRIVED while the user was watching, as opposed to
   // being part of the transcript they loaded (transcript-motion). Decided once
@@ -297,10 +298,6 @@ export const MessageRow = memo(function MessageRow({
   entering?: boolean;
 }) {
   const isUser = msg.info.role === "user";
-  // BET-837: whether the note's player (VoicePlayer) is expanded below the
-  // chip for THIS row. Local state is fine — the memo chain passes `voiceNote`
-  // (a stable Map value) not this, so keystrokes don't touch it.
-  const [voiceExpanded, setVoiceExpanded] = useState(false);
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
@@ -393,18 +390,12 @@ export const MessageRow = memo(function MessageRow({
             <MessageBubble entering={entering}>{text}</MessageBubble>
           )
         )}
-        {/* Text-first voice note: the transcript stays visible at all times;
-            the chip marks the message as spoken and expands a player below. */}
+        {/* Text-first voice note: the transcript stays fully visible; the player
+            sits below it and is immediately operable — no collapsed chip and no
+            expand state (see VoiceNote.tsx). */}
         {voiceNote && (
           <div className="flex justify-end">
-            <div className="flex flex-col items-end">
-              <VoiceNoteChip
-                audioAvailable={voiceNote.audioAvailable}
-                durationMs={voiceNote.durationMs}
-                onToggle={() => setVoiceExpanded((v) => !v)}
-              />
-              {voiceExpanded && <VoicePlayer note={voiceNote} />}
-            </div>
+            <VoicePlayer note={voiceNote} />
           </div>
         )}
       </div>,

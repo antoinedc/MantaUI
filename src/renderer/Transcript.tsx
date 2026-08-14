@@ -66,7 +66,7 @@ export type TranscriptContext = {
   onRejectQuestion: (q: QuestionRequest) => void;
   // BET-837: the pending voice-note row (upload/transcribe in flight) renders
   // here — after the message list, before the working indicator. When it
-  // resolves into a real note it lands as a VoiceNoteChip on its message row.
+  // resolves into a real note it lands as a VoicePlayer on its message row.
   pendingVoiceNote?: PendingVoiceNote | null;
   onRetryVoiceNote?: (noteId: string) => void;
 };

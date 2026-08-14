@@ -121,6 +121,7 @@ function defaultApiImpl(): Record<string, unknown> {
     getPathForFile: () => "",
     clipboardReadImage: () => Promise.resolve(null),
     voiceListNotes: () => Promise.resolve([]),
+    voiceFetchNote: () => Promise.resolve(new Blob()),
   };
 }
 
