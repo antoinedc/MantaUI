@@ -604,8 +604,9 @@ export type ForgeShipResult =
 
 // forge:ship-preview — the facts the confirm card needs BEFORE anything is
 // pushed: the head branch, the base branch (PR target), a best-effort count
-// of files changed on the branch, and a **drafted title + body** (design §4.5
-// step 1) the card seeds editable fields from. The body honours the repo's PR
+// of files changed on the branch, and a **resolved title + body** (design §4.5
+// step 1) the confirm card displays as plain text (BET-892 — the title/body
+// are edited on GitHub, not in the card). The body honours the repo's PR
 // template when one exists.
 export type ForgeShipPreviewInput = { cwd: string };
 

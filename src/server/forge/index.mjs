@@ -951,8 +951,8 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  * Ship: push the current branch, then open a pull request for it. The human
  * gate (issue §4) lives ABOVE this — this function is the push+create step
  * that runs only after an explicit confirm. It is the ONE code path for
- * "open a PR", reused by the human ship action and any future automated one
- * (a background job reaches it as a draft and never merges).
+ * "open a PR", reused by the human ship action and any future automated one.
+ * PRs are always created as real (non-draft) pull requests (BET-892).
  *
  * Push uses gitPush (120s timeout — a real network push is killed by the
  * shared 10s `run()`), then createPullRequest with the given config.
