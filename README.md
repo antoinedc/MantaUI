@@ -4,8 +4,8 @@
 
 Drive [Claude Code](https://docs.claude.com/en/docs/claude-code) and
 [opencode](https://opencode.ai) running on your own Linux box or Mac.
-Real tmux, real terminal, native chat panel, and a remote iPhone app or
-any browser. Self-hosted, open source, MIT licensed.
+Real tmux, real terminal, native chat panel, and a remote iPhone app.
+Self-hosted, open source, MIT licensed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platforms: Linux · macOS · iOS · Web](https://img.shields.io/badge/Platforms-Linux%20·%20macOS%20·%20iOS%20·%20Web-lightgrey.svg)](#install)
