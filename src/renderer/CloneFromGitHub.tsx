@@ -123,7 +123,7 @@ export function CloneFromGitHub({
       try {
         const res = await window.api.forgeDeviceStart();
         if (cancelled) return;
-        if (res.notConfigured) {
+        if ("notConfigured" in res && res.notConfigured) {
           // The box's device-grant id is a placeholder (BET-849) — surface a
           // clear "not configured" state, never a guaranteed-dead-end screen.
           setPhase({ kind: "notConfigured" });

@@ -561,6 +561,9 @@ export function createGithubAdapter(request, requestWrite, requestText = request
       const url = `${API}/repos/${repo.owner}/${repo.repo}/issues/comments/${commentId}`;
       const { data } = await requestWrite(url, { method: "PATCH", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
+    },
+
+    /**
      * GET /user/repos — the repos the connected user can actually PUSH to,
      * most-recently-pushed first. Filtering to write access is what keeps the
      * clone picker usable: a read-only repo you cannot push to is noise here,
