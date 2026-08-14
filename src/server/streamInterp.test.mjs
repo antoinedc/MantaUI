@@ -359,10 +359,19 @@ test("session.status busy emits a running frame with a non-null since", () => {
   assert.equal(ev.payload.since, 42_000, "stamped from the injectable now()");
 });
 
-test("snapshotState replays a running frame for a currently-busy session only (BET-913)", () => {
+test("snapshotState always emits exactly one runningSet frame, even with nothing running (BET-922)", () => {
   const { interp } = make(42_000);
-  // Nothing busy yet -> no replay events.
-  assert.deepEqual(interp.snapshotState(), []);
+  // Nothing busy yet -> the set must STILL be exactly one frame, because an
+  // empty list is the correction a stale client needs (the old shape returned
+  // nothing and could never clear a latched `running:true`).
+  const empty = interp.snapshotState();
+  assert.equal(empty.length, 1);
+  assert.equal(empty[0].kind, "runningSet");
+  assert.deepEqual(empty[0].payload.sessions, [], "nothing running = an empty, authoritative set");
+});
+
+test("snapshotState lists a busy session in the runningSet with its original since (BET-922)", () => {
+  const { interp } = make(42_000);
   // Start a turn; the replay carries the frame the busy->idle edge never
   // re-emits, with the ORIGINAL since so the timer survives a fresh process.
   interp.interpret({
@@ -370,16 +379,18 @@ test("snapshotState replays a running frame for a currently-busy session only (B
     properties: { sessionID: SID, status: { type: "busy" } },
   });
   const snap = interp.snapshotState();
-  assert.equal(snap.length, 1);
-  assert.equal(snap[0].kind, "stream");
-  assert.equal(snap[0].sub, "running");
-  assert.equal(snap[0].sessionId, SID);
-  assert.equal(snap[0].payload.running, true);
-  assert.equal(snap[0].payload.since, 42_000, "original idle->busy stamp, not reconnect time");
-  assert.equal(snap[0].payload.type, "busy", "last status type preserved additively");
-  // An idle session leaves nothing to replay.
+  assert.equal(snap.length, 1, "only the runningSet when nothing else is pending");
+  assert.equal(snap[0].kind, "runningSet");
+  assert.equal(snap[0].payload.sessions.length, 1);
+  assert.equal(snap[0].payload.sessions[0].sessionId, SID);
+  assert.equal(snap[0].payload.sessions[0].since, 42_000, "original idle->busy stamp, not reconnect time");
+  assert.equal(snap[0].payload.sessions[0].type, "busy", "last status type preserved additively");
+  // An idle session drops out of the set entirely — absent == not running.
   interp.interpret({ type: "session.idle", properties: { sessionID: SID } });
-  assert.deepEqual(interp.snapshotState(), []);
+  const afterIdle = interp.snapshotState();
+  assert.equal(afterIdle.length, 1);
+  assert.equal(afterIdle[0].kind, "runningSet");
+  assert.deepEqual(afterIdle[0].payload.sessions, [], "a session that went idle drops out of the set");
 });
 
 test("snapshotState ignores sessions that were never marked running", () => {
@@ -388,7 +399,10 @@ test("snapshotState ignores sessions that were never marked running", () => {
     type: "message.part.delta",
     properties: { sessionID: SID, messageID: "m", part: { id: "p", type: "text", text: "hi" } },
   });
-  assert.deepEqual(interp.snapshotState(), []);
+  const snap = interp.snapshotState();
+  assert.equal(snap.length, 1);
+  assert.equal(snap[0].kind, "runningSet");
+  assert.deepEqual(snap[0].payload.sessions, []);
 });
 
 // BET-916 — sibling of BET-913: pending questions/permissions are edge-only too
@@ -453,7 +467,11 @@ test("snapshotState does not replay resolved/empty questions or permissions", ()
     properties: { sessionID: SID, id: "que_1" },
   });
   assert.equal(interp.getState(SID).questions.length, 0);
-  assert.deepEqual(interp.snapshotState(), [], "nothing pending, nothing replayed");
+  const snap = interp.snapshotState();
+  assert.equal(snap.length, 1, "only the always-present runningSet remains");
+  assert.equal(snap[0].kind, "runningSet");
+  assert.equal(snap.filter((e) => e.sub === "questions").length, 0, "no questions frame pending");
+  assert.equal(snap.filter((e) => e.sub === "permissions").length, 0, "no permissions frame pending");
 });
 
 test("snapshotState replays running + questions + permissions together, each with its own frame", () => {
@@ -475,8 +493,12 @@ test("snapshotState replays running + questions + permissions together, each wit
     type: "permission.asked",
     properties: { sessionID: SID, id: "perm_1", prompt: "p" },
   });
-  const subs = interp.snapshotState().map((e) => e.sub).sort();
-  assert.deepEqual(subs, ["permissions", "questions", "running"]);
+  const snap = interp.snapshotState();
+  assert.equal(snap[0].kind, "runningSet", "running is one authoritative frame, not one per session");
+  assert.equal(snap[0].payload.sessions.length, 1);
+  assert.equal(snap[0].payload.sessions[0].sessionId, SID);
+  const subs = snap.slice(1).map((e) => e.sub).sort();
+  assert.deepEqual(subs, ["permissions", "questions"]);
 });
 
 test("a second busy while already running emits the SAME since (clock not restarted)", () => {

@@ -371,6 +371,87 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(resulting, original)
     }
 
+    // MARK: - Running-set reconcile on reconnect (BET-922)
+
+    /// The box's reconnect snapshot is an authoritative `runningSet` frame. A
+    /// session in the set is running, with `since` converted ms -> seconds.
+    func testRunningSetMarksListedSessionRunningWithSinceConverted() {
+        var states: [String: MantaSessionStreamState] = [:]
+        states["ses_1"] = MantaSessionStreamState(sessionId: "ses_1")
+        let payload = StreamRunningSetPayload(sessions: [
+            .init(sessionId: "ses_1", since: 1_700_000_000_000, type: "busy")
+        ])
+        states = MantaStreamRouter.applyingRunningSet(payload, to: states)
+        XCTAssertEqual(states["ses_1"]?.running, true)
+        XCTAssertEqual(states["ses_1"]?.runningSince, Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    /// REGRESSION (the whole point of BET-922): a session latched `running:true`
+    /// in state but absent from the authoritative set must flip to idle. Silence
+    /// from the box is now "it stopped".
+    func testRunningSetClearsLatchedRunningAbsentFromTheSet() {
+        var states: [String: MantaSessionStreamState] = [:]
+        var s = MantaSessionStreamState(sessionId: "ses_1")
+        s.running = true
+        s.runningSince = Date(timeIntervalSince1970: 1000)
+        states["ses_1"] = s
+        let payload = StreamRunningSetPayload(sessions: [])
+        states = MantaStreamRouter.applyingRunningSet(payload, to: states)
+        XCTAssertEqual(states["ses_1"]?.running, false)
+        XCTAssertNil(states["ses_1"]?.runningSince)
+    }
+
+    /// A session the device has never seen a frame for can still be running on
+    /// the box, so the set must materialise it.
+    func testRunningSetCreatesStateForSessionItHasNeverSeen() {
+        var states: [String: MantaSessionStreamState] = [:]
+        let payload = StreamRunningSetPayload(sessions: [
+            .init(sessionId: "ses_new", since: 1_700_000_000_000, type: nil)
+        ])
+        states = MantaStreamRouter.applyingRunningSet(payload, to: states)
+        XCTAssertEqual(states["ses_new"]?.running, true)
+        XCTAssertEqual(states["ses_new"]?.runningSince, Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    /// An empty set is the correction a stale client needs: every running
+    /// session is cleared.
+    func testRunningSetEmptyClearsEveryRunningSession() {
+        var states: [String: MantaSessionStreamState] = [:]
+        for id in ["ses_a", "ses_b"] {
+            var s = MantaSessionStreamState(sessionId: id)
+            s.running = true
+            s.runningSince = Date(timeIntervalSince1970: 1000)
+            states[id] = s
+        }
+        states = MantaStreamRouter.applyingRunningSet(
+            StreamRunningSetPayload(sessions: []), to: states
+        )
+        XCTAssertEqual(states["ses_a"]?.running, false)
+        XCTAssertEqual(states["ses_b"]?.running, false)
+        XCTAssertNil(states["ses_a"]?.runningSince)
+        XCTAssertNil(states["ses_b"]?.runningSince)
+    }
+
+    /// Only `running` / `runningSince` are reconciled — turn retirement, stream
+    /// chunks and live tools are owned by the reconnect transcript refetch and
+    /// must survive the apply untouched.
+    func testRunningSetLeavesTurnCompleteChunksAndToolsUntouched() {
+        var s = MantaSessionStreamState(sessionId: "ses_1")
+        s.turnComplete = true
+        s.chunks = [StreamTextChunk(partID: "p", messageID: "m", field: "text", text: "hi")]
+        s.tools["t1"] = LiveTool(idx: "t1", callID: "t1", name: "bash", presentationHint: nil, status: "running")
+        s.toolStartOrder = ["t1"]
+        let payload = StreamRunningSetPayload(sessions: [
+            .init(sessionId: "ses_1", since: 1_700_000_000_000, type: "busy")
+        ])
+        let next = MantaStreamRouter.applyingRunningSet(payload, to: ["ses_1": s])
+        XCTAssertEqual(next["ses_1"]?.running, true)
+        XCTAssertEqual(next["ses_1"]?.turnComplete, true)
+        XCTAssertEqual(next["ses_1"]?.chunks, [StreamTextChunk(partID: "p", messageID: "m", field: "text", text: "hi")])
+        XCTAssertEqual(next["ses_1"]?.tools["t1"]?.name, "bash")
+        XCTAssertEqual(next["ses_1"]?.toolStartOrder, ["t1"])
+    }
+
     // MARK: - Subagent upsert (BET-672)
 
     /// A subagent that goes running→done for the SAME child must leave exactly
@@ -726,6 +807,53 @@ final class MantaEventStoreTests: XCTestCase {
         let store = makeStore(fake)
         fake.inject(#"{"kind":"heartbeat","ts":1e12}"#)
         XCTAssertTrue(store.sessionStates.isEmpty)
+    }
+
+    // MARK: - Running-set routing (BET-922)
+
+    /// A `runningSet` frame reconciles running state across sessions and bumps
+    /// `runningSetSeq`.
+    func testRunningSetFrameReconcilesAndBumpsSeq() throws {
+        let fake = FakeStreamControl()
+        fake.drive(.connected)
+        let store = makeStore(fake)
+
+        // Session latched running by a live `running` frame...
+        fake.inject(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true,"since":1700000000000}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, true)
+
+        XCTAssertEqual(store.runningSetSeq, 0)
+        // ...then the box's authoritative set omits it -> cleared.
+        fake.inject(#"{"kind":"runningSet","payload":{"sessions":[]}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, false)
+        XCTAssertNil(store.sessionStates["ses_1"]?.runningSince)
+        XCTAssertEqual(store.runningSetSeq, 1)
+    }
+
+    /// The running set is delivered even while degraded: a client that dropped
+    /// frames while unreachable is exactly the one whose running state needs
+    /// correcting the moment the box speaks again.
+    func testRunningSetAppliesEvenWhileDegraded() throws {
+        let fake = FakeStreamControl()
+        fake.hasConnectedOnce = true
+        fake.drive(.connected)
+        let store = makeStore(fake)
+
+        fake.inject(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true,"since":1700000000000}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, true)
+
+        fake.drive(.reconnecting(attempt: 1, backoffMs: 1000))
+        XCTAssertTrue(store.degraded)
+
+        // A normal stream frame is dropped while degraded...
+        fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"m","partID":"p","field":"text","text":"ignored"}}"#)
+        XCTAssertNil(store.sessionStates["ses_1"]?.textByPart["p"])
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, true)
+
+        // ...but the runningSet still lands and corrects the latched flag.
+        fake.inject(#"{"kind":"runningSet","payload":{"sessions":[]}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, false)
+        XCTAssertEqual(store.runningSetSeq, 1)
     }
 
     // MARK: - Turn-complete chunk eviction for unobserved sessions (BET-672)

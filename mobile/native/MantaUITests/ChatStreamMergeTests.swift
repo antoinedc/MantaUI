@@ -149,6 +149,39 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertFalse(store.running)
     }
 
+    /// BET-922: a send whose acknowledging frame was missed can leave the
+    /// optimistic `running = true` lit forever. The box's authoritative
+    /// `runningSet` (replayed on every reconnect) must supersede it: once the
+    /// set has spoken, the accumulated snapshot is authoritative even if it
+    /// says idle.
+    func testRunningSetSupersedesOptimisticRunning() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+        )
+        await Task.yield()
+
+        // Establish snapshot state for the session (running stays nil) so the
+        // running-set apply reaches the running merge rather than the
+        // no-state early return.
+        stream.inject(#"{"kind":"stream","sub":"context","sessionId":"ses","payload":{"freshInput":0,"cacheRead":0,"cacheWrite":0,"totalInput":0,"pct":0,"segments":[]}}"#)
+        await Task.yield()
+
+        let ok = await store.send(text: "hello", attachments: [], model: nil)
+        XCTAssertTrue(ok)
+        XCTAssertTrue(store.running, "a send reports running optimistically")
+
+        // The box reconnects and states the authoritative running set: this
+        // session is NOT in it. The optimistic flag must yield, so the working
+        // row is NOT left lit forever even though no 'running' frame arrived.
+        stream.inject(#"{"kind":"runningSet","payload":{"sessions":[]}}"#)
+        await Task.yield()
+        XCTAssertFalse(store.running, "an authoritative running set supersedes the optimistic flag")
+    }
+
     /// Block 2: a local transcript-refetch republish (retireCoveredStreamText)
     /// must NOT replay the previous frame's fields over an optimistic send — the
     /// freshly-minted tail and optimistic running survive it.

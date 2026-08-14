@@ -242,6 +242,11 @@ final class ChatSessionStore: ObservableObject {
     /// `false`) must not clobber the optimistic `true` — but once the box
     /// reports running at all, the snapshot is authoritative.
     private var optimisticRunning = false
+    /// The last `runningSetSeq` this store has folded into its running state. A
+    /// change in it means the box has (re)stated the authoritative running set
+    /// since `send()` stamped `optimisticRunning`, so the optimistic flag must
+    /// yield (BET-922).
+    private var lastRunningSetSeq = 0
     private var didRunOnce = false
     /// Test seams (internal, readable via `@testable`): count one-time vs
     /// resumable work so tests can assert the split without touching live
@@ -427,6 +432,14 @@ final class ChatSessionStore: ObservableObject {
         // stale previous-turn `false` must not clobber while the box hasn't yet
         // confirmed. Reading the snapshot (not a per-frame stamp) also makes
         // this robust to frames that coalesce between publishes.
+        // The box's authoritative running set supersedes the optimistic stamp
+        // `send()` set — without this, a send whose acknowledging frame was
+        // missed leaves the working row lit forever (BET-922).
+        let seq = eventStore.runningSetSeq
+        if seq != lastRunningSetSeq {
+            lastRunningSetSeq = seq
+            optimisticRunning = false
+        }
         if optimisticRunning, (carried.running || s.running == true) {
             optimisticRunning = false
         }

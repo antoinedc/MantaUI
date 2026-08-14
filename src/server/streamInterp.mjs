@@ -564,35 +564,36 @@ export function createStreamInterpreter({
     interpret,
     getState: (sid) => sessions.get(sid),
     // Replay current edge-only state for the bus's connect-time snapshot
-    // (BET-913 + BET-916). These frames are emitted only on an EDGE — their
-    // current value is never re-sent on its own — so a client that
-    // (re)connects mid-state never sees them: the `running` frame fires only
-    // on the idle->busy edge (the turn timer survives a force-quit +
-    // relaunch only if this is reconstructed with the ORIGINAL `since`), and
-    // `questions` / `permissions` frames fire only as `question.*` /
-    // `permission.*` events arrive. A fresh /events subscription therefore
-    // recovers the still-pending interactive cards too. Each is replayed with
-    // exactly the same envelope the live path emits, so a reconnecting client
-    // needs no change. Empty when there is nothing to replay.
+    // (BET-913 + BET-916 + BET-922). These frames are emitted only on an EDGE —
+    // their current value is never re-sent on its own — so a client that
+    // (re)connects mid-state never sees them: `questions` / `permissions`
+    // frames fire only as `question.*` / `permission.*` events arrive, and the
+    // running set below is reconstructed live. A fresh /events subscription
+    // therefore recovers the still-pending interactive cards too. Each is
+    // replayed with exactly the same envelope the live path emits, so a
+    // reconnecting client needs no change.
+    //
+    // The COMPLETE set of currently-running sessions is replayed to every new
+    // /events subscriber as ONE authoritative `runningSet` frame (BET-922).
+    // BET-913 replayed one `stream/running` frame per busy session, which could
+    // only ever ADD running state — a client that missed a turn ending stayed
+    // latched forever. The set is always exactly one frame, index 0, even when
+    // the list is empty: "nothing is running" is the correction a stale client
+    // needs, and a client that receives nothing learns nothing. A session
+    // absent from the set is NOT running.
     //
     // Replayed independently of one another and of `st.running`: a pending
     // question/permission blocks the turn but never sets `running`, so gating
     // on `running` would skip exactly the sessions that need the replay.
     snapshotState() {
-      const out = [];
+      const running = [];
       for (const [sid, st] of sessions) {
         if (st.running && st.runningSince != null) {
-          out.push({
-            kind: "stream",
-            sub: "running",
-            sessionId: sid,
-            payload: {
-              running: true,
-              type: st.runningType ?? null,
-              since: st.runningSince,
-            },
-          });
+          running.push({ sessionId: sid, since: st.runningSince, type: st.runningType ?? null });
         }
+      }
+      const out = [{ kind: "runningSet", payload: { sessions: running } }];
+      for (const [sid, st] of sessions) {
         if (st.questions.length > 0) {
           out.push({
             kind: "stream",
