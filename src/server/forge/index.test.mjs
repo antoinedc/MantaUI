@@ -14,7 +14,6 @@ import {
   forgeDiffForCwd,
   shipPullRequest,
   shipPreview,
-  issueCloseRef,
   humanizeBranch,
   mergePullRequest,
   draftGetForCwd,
@@ -375,29 +374,6 @@ test("shipPullRequest: push failure surfaces a push-failed error, never creates"
   assert.ok(r.error.startsWith("push failed"));
 });
 
-test("shipPullRequest: onPrOpened is called with repoKey + number on a successful create", async () => {
-  let opened = null;
-  const created = { ...OPEN_PR, number: 91 };
-  const adapter = writeAdapter({ created });
-  const r = await shipPullRequest("/repo", { title: "t" }, {
-    ...SHIP_DEPS,
-    getAdapter: () => adapter,
-    gitPush: async () => ({ stdout: "", stderr: "" }),
-    onPrOpened: async (arg) => { opened = arg; },
-  });
-  assert.equal(r.ok, true);
-  assert.deepEqual(opened, { cwd: "/repo", repoKey: "github.com/acme/widget", number: 91 });
-});
-
-test("shipPullRequest: a throwing onPrOpened never fails the ship", async () => {
-  const r = await shipPullRequest("/repo", { title: "t" }, {
-    ...SHIP_DEPS,
-    gitPush: async () => ({ stdout: "", stderr: "" }),
-    onPrOpened: async () => { throw new Error("link-store down"); },
-  });
-  assert.equal(r.ok, true);
-});
-
 test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure", async () => {
   let mergeInput = null;
   const adapter = {
@@ -481,51 +457,6 @@ test("shipPreview: repo with no forge → no_forge", async () => {
     gitRemoteOrigin: async () => null,
   });
   assert.deepEqual(r, { ok: false, error: "no_forge" });
-});
-
-// ---- issueCloseRef + the linked-issue PR body seed (BET-827) ----------------
-
-test("issueCloseRef: bare #N when the issue lives in the PR's own repo", () => {
-  assert.equal(issueCloseRef({ repoKey: "github.com/acme/widget", number: 12 }, "github.com/acme/widget"), "#12");
-});
-
-test("issueCloseRef: owner/repo#N for a cross-repo issue", () => {
-  assert.equal(issueCloseRef({ repoKey: "github.com/acme/something", number: 12 }, "github.com/acme/widget"), "acme/something#12");
-});
-
-test("issueCloseRef: \"\" for malformed or missing refs", () => {
-  assert.equal(issueCloseRef(null, "github.com/acme/widget"), "");
-  assert.equal(issueCloseRef(undefined, "github.com/acme/widget"), "");
-  assert.equal(issueCloseRef({}, "github.com/acme/widget"), "");
-  assert.equal(issueCloseRef({ repoKey: "x", number: 12 }, "github.com/acme/widget"), "");
-  assert.equal(issueCloseRef({ repoKey: "github.com/acme/widget" }, "github.com/acme/widget"), "");
-});
-
-test("shipPreview prepends Closes #N before the template when the session has a linked issue", async () => {
-  const r = await shipPreview("/repo", linkedShipDeps({
-    readPrTemplate: async () => "## Summary\n\n${head} → ${base}\n\n## Checklist\n- [x] tests",
-    linkedIssue: async () => ({ repoKey: "github.com/acme/widget", number: 12 }),
-  }));
-  assert.equal(r.ok, true);
-  assert.match(r.body, /^Closes #12\n\n## Summary/, "close line + blank line precede the template");
-});
-
-test("shipPreview uses a cross-repo owner/repo#N close ref", async () => {
-  const r = await shipPreview("/repo", linkedShipDeps({
-    readPrTemplate: async () => "## Summary\n\nbody",
-    linkedIssue: async () => ({ repoKey: "github.com/acme/something", number: 12 }),
-  }));
-  assert.equal(r.ok, true);
-  assert.match(r.body, /^Closes acme\/something#12\n\n## Summary/);
-});
-
-test("shipPreview with a linked issue and no template still emits the close line", async () => {
-  const r = await shipPreview("/repo", linkedShipDeps({
-    readPrTemplate: async () => null,
-    linkedIssue: async () => ({ repoKey: "github.com/acme/widget", number: 7 }),
-  }));
-  assert.equal(r.ok, true);
-  assert.match(r.body, /^Closes #7\n\n/);
 });
 
 test("shipPreview with no linkedIssue dep leaves the body unchanged from today", async () => {

@@ -16,12 +16,6 @@ import { join, dirname, basename } from "node:path";
 import { statePath, expandTilde } from "../shared/paths.mjs";
 import { deriveWorktree, isWorktreeDirtyError } from "../shared/worktree.mjs";
 import { detectForge, repoKey } from "../shared/forge.mjs";
-import {
-  sessionLink as readSessionLink,
-  linkIssue,
-  linkPullRequest,
-  clearLink,
-} from "../shared/sessionLink.mjs";
 import { runLoginShell } from "./launchers.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 
@@ -124,55 +118,6 @@ export async function projectMetaDelete(tmuxSession) {
   const next = { ...cfg, projects: cfg.projects.filter((p) => p.tmuxSession !== tmuxSession) };
   await saveConfig(next);
   return next;
-}
-
-// ---- Session link primitive (§3.4⑥, BET-847) ----
-//
-// The session link lives on the ProjectMeta record inside `config.json`
-// `projects[]` — the ONE store and ONE code path for per-session state (no
-// parallel store, no second config file, no new RPC channel). These helpers
-// read and mutate a project's link through the existing config path
-// (`projectMetaUpsert`), applying the pure `src/shared/sessionLink.mjs`
-// mutators so consumers read a single field with no per-feature plumbing.
-//
-// A session is addressed by its `tmuxSession` name (its project name). The
-// mutators no-op (return null) when no such project is tracked, so a caller
-// that fires a link at an unknown session fails safe.
-
-function findProjectMeta(cfg, tmuxSession) {
-  if (!cfg?.projects) return null;
-  return cfg.projects.find((p) => p.tmuxSession === tmuxSession) ?? null;
-}
-
-// Read a project's link — `{ issue?, pr? }` or null when unset / untracked.
-export async function sessionLinkGet(tmuxSession) {
-  const meta = findProjectMeta(await getConfig(), tmuxSession);
-  return meta ? readSessionLink(meta) : null;
-}
-
-// Apply a pure mutator to the matching project and persist via the existing
-// upsert path. Returns the new normalized link, or null when no such project.
-async function mutateProjectLink(tmuxSession, apply) {
-  const meta = findProjectMeta(await getConfig(), tmuxSession);
-  if (!meta) return null;
-  const next = apply(meta);
-  await projectMetaUpsert(next);
-  return readSessionLink(next);
-}
-
-// Set (replace) the project's issue link, preserving any PR link.
-export function linkSessionIssue(tmuxSession, ref) {
-  return mutateProjectLink(tmuxSession, (meta) => linkIssue(meta, ref));
-}
-
-// Set (replace) the project's PR link, preserving any issue link.
-export function linkSessionPullRequest(tmuxSession, ref) {
-  return mutateProjectLink(tmuxSession, (meta) => linkPullRequest(meta, ref));
-}
-
-// Remove the project's link (both slots).
-export function clearSessionLink(tmuxSession) {
-  return mutateProjectLink(tmuxSession, (meta) => clearLink(meta));
 }
 
 // ============================================================

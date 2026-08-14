@@ -10,12 +10,6 @@ import type { SshTarget } from "./sshTarget.js";
 export type ProjectMeta = {
   tmuxSession: string; // == project name (and the tmux session name on the remote)
   defaultCwd: string;
-  // Session link primitive (§3.4⑥, BET-847): at most one issue and one pull
-  // request per session. `repoKey`/`number` reuse the forge vocabulary (see
-  // src/shared/forge.mjs). Null (or absent) = unlinked. Saving a new issue
-  // replaces the prior issue; saving a new PR replaces the prior PR; the two
-  // slots are independent.
-  link?: SessionLink | null;
 };
 
 // A forge object reference — the minimal "what is this session about" pointer

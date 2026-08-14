@@ -11,6 +11,9 @@ import {
 import { gunzipSync } from "node:zlib";
 import { savePages } from "./servePage.mjs";
 import { statePath } from "../shared/paths.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("dispatch routes a known channel to its handler with args", async () => {
   const handlers = { "echo:it": async (a, b) => ({ sum: a + b }) };
@@ -883,4 +886,17 @@ test("delegate:start routes the inbox delegation through the delegate engine + c
   });
   assert.equal(noEngine.ok, false);
   assert.equal(noEngine.error, "no engine");
+});
+
+test("forge:ship returns the forge result unchanged and performs no config write", async () => {
+  // BET-870: forge:ship no longer carries an onPrOpened handler, so opening a
+  // PR can never write to the config store from the forge:ship path. Feed it a
+  // cwd with no forge; the ship must fail fast with no_forge (the forge
+  // result, returned unchanged) and record zero project-meta writes.
+  const { deps, calls } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const cwd = mkdtempSync(join(tmpdir(), "bet870-noforge-"));
+  const res = await handlers["forge:ship"]({ cwd });
+  assert.deepEqual(res, { ok: false, error: "no_forge" });
+  assert.equal(calls.projectMetaUpsert.length, 0);
 });

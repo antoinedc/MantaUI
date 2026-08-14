@@ -804,11 +804,7 @@ export async function shipPreview(cwd, deps = {}) {
   }
 
   const title = await draftTitle(cwd, ctx.head, deps);
-  const body = await draftBody(cwd, ctx.head, base, files, {
-    ...deps,
-    linkedIssue: deps.linkedIssue ?? null,
-    prRepoKey: forgeRepoKey(ctx.forge),
-  });
+  const body = await draftBody(cwd, ctx.head, base, files, deps);
   return { ok: true, head: ctx.head, base, fileCount: files.length, title, body };
 }
 
@@ -853,39 +849,19 @@ export function humanizeBranch(branch) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
-// `repoKey` is "host/owner/repo" (e.g. "github.com/antoinedc/MantaUI"); a forge
-// close-reference is "owner/repo#N", or bare "#N" when the issue lives in the
-// same repo as the pull request. Pure + exported for tests.
-export function issueCloseRef(issue, prRepoKey) {
-  if (!issue?.repoKey || !Number.isInteger(issue.number)) return "";
-  if (issue.repoKey === prRepoKey) return `#${issue.number}`;
-  const [, owner, repo] = String(issue.repoKey).split("/");
-  return owner && repo ? `${owner}/${repo}#${issue.number}` : "";
-}
-
 // Body draft: the repo's PR template when one exists (honouring step-1's
 // "honouring the repo's PR template"), else a short changed-files summary.
-// Template `${head}` / `${base}` placeholders, if present, are filled. When
-// `deps.linkedIssue` (an async fn returning `{ repoKey, number } | null`)
-// resolves a ref, ONE "Closes <ref>" line plus a blank line is prepended to
-// whichever body branch runs — `deps.prRepoKey` decides the bare/suffixed ref.
-// With no ref (or no dep) the output is byte-identical to today.
+// Template `${head}` / `${base}` placeholders, if present, are filled.
 async function draftBody(cwd, head, base, files, deps) {
   const readPrTemplate = deps.readPrTemplate ?? defaultReadPrTemplate;
-  let issueRef = "";
-  if (deps.linkedIssue) {
-    const issue = await deps.linkedIssue();
-    issueRef = issueCloseRef(issue, deps.prRepoKey);
-  }
-  const preamble = issueRef ? `Closes ${issueRef}\n\n` : "";
   const template = await readPrTemplate(cwd, deps);
   if (template && template.trim()) {
-    return preamble + template
+    return template
       .replace(/\$\{head\}/g, head || "")
       .replace(/\$\{base\}/g, base || "");
   }
-  if (files.length === 0) return preamble;
-  return preamble + `## What\n\nOpens ${head} → ${base}.\n\n## Changed files\n\n${files.map((f) => `- ${f}`).join("\n")}`;
+  if (files.length === 0) return "";
+  return `## What\n\nOpens ${head} → ${base}.\n\n## Changed files\n\n${files.map((f) => `- ${f}`).join("\n")}`;
 }
 
 // Find + read the repo's PR template, best-first from the candidates list.
@@ -918,11 +894,6 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  * Push uses gitPush (120s timeout — a real network push is killed by the
  * shared 10s `run()`), then createPullRequest with the given config.
  *
- * When `deps.onPrOpened` is provided, it is invoked with
- * `{ cwd, repoKey, number }` once a PR is created (best-effort; a throwing /
- * absent dep never fails the ship). BET-847 wires this to record the session
- * link (`link.pr`) at the point the field is set.
- *
  * @param {string} cwd
  * @param {{ title: string, body?: string, base?: string, draft?: boolean }} input
  * @param {object} [deps] injectable I/O
@@ -951,18 +922,6 @@ export async function shipPullRequest(cwd, { title, body = "", base, draft = fal
     pr = res.data;
   } catch (e) {
     return { ok: false, error: `create pull request failed: ${String(e?.message ?? e)}` };
-  }
-
-  // Session-link primitive (BET-847): the one code path for opening a PR is the
-  // natural place to set the session's PR link. Best-effort — the ship result
-  // is returned regardless, and consumers (sink / notification / inbox / chip)
-  // read the linked PR from the session record.
-  if (deps.onPrOpened && pr?.number) {
-    try {
-      await deps.onPrOpened({ cwd, repoKey: forgeRepoKey(ctx.forge), number: pr.number });
-    } catch {
-      // link persistence is auxiliary; never fail the ship because of it
-    }
   }
 
   return { ok: true, pr, url: pr?.url ?? "" };
