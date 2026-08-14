@@ -65,11 +65,25 @@ const STORED_KEYS_BY_HOST = Object.freeze({
 // host -> { at, found, token?, source? }
 const CACHE = new Map();
 
+// Derive the env/secret key NAMESPACE for an arbitrary host. A self-hosted
+// host isn't in the fixed maps, so it gets a deterministic, host-derived name:
+// `git.example.com` → env `MANTA_GIT_EXAMPLE_COM_TOKEN`, secrets `[GIT_EXAMPLE_COM_TOKEN, forge.git.example.com.token]`.
+function hostKey(host) {
+  return String(host).replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+}
+
 function envToken(host, env) {
-  const key = ENV_BY_HOST[host];
+  const key = ENV_BY_HOST[host] ?? (host ? `MANTA_${hostKey(host)}_TOKEN` : null);
   if (!key) return null;
   const v = env?.[key];
   return typeof v === "string" && v ? v : null;
+}
+
+function storedTokenKeys(host) {
+  if (STORED_KEYS_BY_HOST[host]) return STORED_KEYS_BY_HOST[host];
+  if (!host) return null;
+  const k = hostKey(host);
+  return [`${k}_TOKEN`, `forge.${host}.token`];
 }
 
 async function cliToken(host, shell) {
@@ -148,7 +162,7 @@ export function parseGlabToken(text, host) {
 }
 
 function storedToken(host, loadSecretsFn) {
-  const keys = STORED_KEYS_BY_HOST[host];
+  const keys = storedTokenKeys(host);
   if (!keys || keys.length === 0) return null;
   try {
     const secrets = loadSecretsFn();

@@ -303,20 +303,22 @@ export function buildPosition(shas, a) {
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} request
  * @param {(url: string, opts: { method: string, body?: any }) => Promise<{ data: any, stale: boolean }>} [requestWrite]
  * @param {(url: string) => Promise<{ data: any, stale: boolean }>} [requestText]
+ * @param {string} [apiBase] the API root; defaults to gitlab.com. A self-hosted
+ *   instance serves `<host>/api/v4`.
  */
-export function createGitlabAdapter(request, requestWrite, requestText = request) {
+export function createGitlabAdapter(request, requestWrite, requestText = request, apiBase = API) {
   return {
     kind: "gitlab",
 
     async listPullRequests(repo, filter = {}) {
-      const url = `${API}${projectPath(repo)}/merge_requests${qs({ state: stateFilter(filter.state ?? "opened") })}`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests${qs({ state: stateFilter(filter.state ?? "opened") })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((m) => normalizeMr(m)), stale };
     },
 
     async getPullRequest(repo, number) {
-      const base = `${API}${projectPath(repo)}/merge_requests/${number}`;
+      const base = `${apiBase}${projectPath(repo)}/merge_requests/${number}`;
       const prRes = await request(base);
       const raw = prRes.data;
       let stale = prRes.stale;
@@ -334,7 +336,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // GitLab issues and MRs are DISJOINT objects (mismatch #4) — unlike
     // GitHub, an issue list never leaks MRs, so nothing needs filtering.
     async listIssues(repo, filter = {}) {
-      const url = `${API}${projectPath(repo)}/issues${qs({ state: stateFilter(filter.state ?? "opened") })}`;
+      const url = `${apiBase}${projectPath(repo)}/issues${qs({ state: stateFilter(filter.state ?? "opened") })}`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       const issues = raw.map((i) => ({
@@ -352,7 +354,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // by HEAD SHA — GitLab indexes pipelines by commit too, so the shared
     // `getChecks(repo, sha)` signature (no MR iid) still resolves them.
     async getChecks(repo, sha) {
-      const base = `${API}${projectPath(repo)}`;
+      const base = `${apiBase}${projectPath(repo)}`;
       let stale = false;
       let checks = [];
       try {
@@ -374,7 +376,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
 
     async createPullRequest(repo, { title, head, base, body = "", draft = false }) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests`;
       // GitLab has no `draft` boolean on create — a title prefixed "Draft:" is
       // how a draft MR is created (and how `work_in_progress` is signalled).
       const { data } = await requestWrite(url, {
@@ -391,7 +393,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
 
     async merge(repo, number, { method = "merge", sha } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/merge`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/merge`;
       let data;
       try {
         ({ data } = await requestWrite(url, { method: "PUT", body: { sha } }));
@@ -414,7 +416,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // the buffer.
     async submitReview(repo, number, { verdict = null, body = "", comments = [], headSha = "" } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const base = `${API}${projectPath(repo)}/merge_requests/${number}`;
+      const base = `${apiBase}${projectPath(repo)}/merge_requests/${number}`;
       const commentsArr = Array.isArray(comments) ? comments : [];
       const shas = await positionShas(base, headSha, request);
       for (const c of commentsArr) {
@@ -438,7 +440,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
 
     async replyToThread(repo, number, { threadId, body, headSha = "" } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/discussions/${threadId}/notes`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/discussions/${threadId}/notes`;
       const { data } = await requestWrite(url, { method: "POST", body: { body: String(body ?? "").trim() } });
       return { data, stale: false };
     },
@@ -447,13 +449,13 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // which needs GraphQL). Presence is the capability model.
     async resolveThread(repo, number, { discussionId } = {}) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/discussions/${discussionId}`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/discussions/${discussionId}`;
       const { data } = await requestWrite(url, { method: "PUT", body: { resolved: true } });
       return { data, stale: false };
     },
 
     async getDiff(repo, number) {
-      const base = `${API}${projectPath(repo)}/merge_requests/${number}`;
+      const base = `${apiBase}${projectPath(repo)}/merge_requests/${number}`;
       let stale = false;
       let headSha = "";
       let diff = "";
@@ -490,7 +492,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // MR notes (GitLab's plain comments live on the MR, not an issues endpoint
     // — mismatch #4 again). The progress sink reads these for its topic marker.
     async listIssueComments(repo, number) {
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/notes`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`;
       const { data, stale } = await request(url);
       const raw = Array.isArray(data) ? data : [];
       return { data: raw.map((c) => ({ id: c?.id ?? null, body: c?.body ?? "" })), stale };
@@ -498,7 +500,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
 
     async createIssueComment(repo, number, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/notes`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes`;
       const { data } = await requestWrite(url, { method: "POST", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
     },
@@ -507,7 +509,7 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     // GitHub's comment id is global — an interface asymmetry GitLab forces.
     async updateIssueComment(repo, number, commentId, body) {
       if (!requestWrite) throw new Error("write transport not available");
-      const url = `${API}${projectPath(repo)}/merge_requests/${number}/notes/${commentId}`;
+      const url = `${apiBase}${projectPath(repo)}/merge_requests/${number}/notes/${commentId}`;
       const { data } = await requestWrite(url, { method: "PUT", body: { body } });
       return { data: { id: data?.id ?? null }, stale: false };
     },

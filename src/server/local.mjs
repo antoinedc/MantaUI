@@ -61,6 +61,10 @@ const DEFAULT_CONFIG = {
   // sweep deletes the file (transcript + waveform are kept forever). 0 = keep
   // forever. Default 168 (7 days).
   voiceNoteTtlHours: 168,
+  // BET-799: user-configured self-hosted forge hosts — `[{ host, kind, apiBase? }]`.
+  // Lets a self-hosted GitHub/GitLab instance (which `detectForge` deliberately
+  // rejects) resolve to its forge + API root. `kind` is "github" | "gitlab".
+  forgeHosts: [],
 };
 
 let _config = null;

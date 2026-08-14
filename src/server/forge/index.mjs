@@ -27,9 +27,10 @@
 // cwd → origin → repo server-side, keeping the renderer ignorant of forge
 // identity).
 
-import { detectForge, rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
+import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
-import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
+import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
+import { detectForgeWithHosts } from "./selfhost.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
 import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
@@ -261,7 +262,7 @@ const ADAPTERS = Object.freeze({ github: createGithubAdapter, gitlab: createGitl
 export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
   const requestLayer = createRequestLayer({ fetch });
   return {
-    getAdapter(kind, token) {
+    getAdapter(kind, token, apiBase) {
       const create = ADAPTERS[kind];
       if (!create) throw unsupportedByForge(kind, "read path");
       const wire = AUTH_BY_KIND[kind] ?? AUTH_BY_KIND.github;
@@ -271,7 +272,10 @@ export function createForgeRuntime({ fetch = globalThis.fetch } = {}) {
         requestLayer.requestJson(url, { token, tokenHeader: wire.tokenHeader, accept: wire.accept, ...opts });
       const requestText = (url) =>
         requestLayer.getText(url, { token, tokenHeader: wire.tokenHeader, accept: wire.accept });
-      return create(request, requestWrite, requestText);
+      // apiBase is the per-host API root (github.com → api.github.com, a
+      // self-hosted GitLab → <host>/api/v4); omitted it defaults inside the
+      // adapter to its canonical hosted root.
+      return create(request, requestWrite, requestText, apiBase);
     },
     requestLayer,
   };
@@ -282,12 +286,13 @@ const defaultRuntime = createForgeRuntime();
 /**
  * `getAdapter(kind)` → the adapter for a forge, or throws UnsupportedByForgeError
  * for an unknown kind. The instance is bound to the shared request layer and a
- * per-call token.
+ * per-call token. `apiBase` is the per-host API root for self-hosted forges.
  * @param {"github"} kind
  * @param {string} token
+ * @param {string} [apiBase]
  */
-export function getAdapter(kind, token) {
-  return defaultRuntime.getAdapter(kind, token);
+export function getAdapter(kind, token, apiBase) {
+  return defaultRuntime.getAdapter(kind, token, apiBase);
 }
 
 // ---- Box-facing reads ----------------------------------------------------------
@@ -301,6 +306,23 @@ const EMPTY = Object.freeze({ pr: null, checks: [], rollup: "none", stale: false
 const KNOWN_KINDS = new Set(["github", "gitlab"]);
 function isKnownKind(kind) {
   return typeof kind === "string" && KNOWN_KINDS.has(kind);
+}
+
+// Default box-facing forge detection: the shared `detectForge` plus the
+// user-configured `forgeHosts` (AppConfig) mapping layered on top, so a
+// self-hosted GitHub/GitLab host a user has configured resolves to its kind
+// + apiBase while an unconfigured unknown host still falls through to null.
+// `getConfig` is injectable for tests; failures degrade to the known hosts.
+async function detectFromConfig(origin, { getConfig = localConfigGet } = {}) {
+  if (!origin) return null;
+  let hostKinds = [];
+  try {
+    const cfg = await getConfig();
+    hostKinds = Array.isArray(cfg?.forgeHosts) ? cfg.forgeHosts : [];
+  } catch {
+    /* config unreadable — known hosts still resolve */
+  }
+  return detectForgeWithHosts(origin, hostKinds);
 }
 
 /**
@@ -477,13 +499,14 @@ async function resolveForgeContext(cwd, deps) {
   const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
   const resolveToken = deps.resolveToken ?? authResolveToken;
   const getAdapterFn = deps.getAdapter ?? getAdapter;
+  const detectForge = deps.detectForge ?? detectFromConfig;
 
   const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
+  const forge = origin ? await detectForge(origin, deps) : null;
   if (!forge || !isKnownKind(forge.kind)) return { error: "no_forge" };
   const tok = await resolveToken(forge.host);
   if (!tok) return { error: "not_connected" };
-  const adapter = getAdapterFn(forge.kind, tok.token);
+  const adapter = getAdapterFn(forge.kind, tok.token, forge.apiBase);
   const repo = { owner: forge.owner, repo: forge.repo };
   return { forge, repo, token: tok, adapter };
 }
