@@ -93,6 +93,7 @@ import {
   deleteHook,
   createRateLimiter,
   findForgeHook,
+  listForgeHooks,
 } from "./webhooks.mjs";
 import { putRegistry as pluginsPutRegistry, getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import {
@@ -112,6 +113,7 @@ import { ensureCommentByTopic, pushSinkAction } from "./forge/sinks.mjs";
 import { parseRepoKey as forgeParseRepoKey } from "./forgeRules.mjs";
 import { getAdapter } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
+import { startForgeHealthCheck, healthCheckRepoHook } from "./forge/webhook.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { detectForge as detectForgeUrl } from "../shared/forge.mjs";
 import { sessionLink as readSessionLink } from "../shared/sessionLink.mjs";
@@ -528,6 +530,41 @@ const { stop: stopForgePoller } = createForgePoller({
   },
   handleEvent: (ev) => forgeRulesEngine.handleEvent(ev),
 });
+
+// The forge hook health check (BET-855) — the production caller for the
+// re-enable capability in forge/webhook.mjs. GitLab permanently disables a
+// failing webhook with no automatic recovery, so a periodic pass iterates the
+// persisted forge-hook store, resolves each GitLab host's token, and re-enables
+// (`PUT {active:true}`) any hook GitLab disabled. Same startPoller cadence as
+// the forge poller above; does nothing while the forge-rules toggle is off (no
+// gitlab hooks exist then anyway). Github hooks are skipped — GitHub never
+// auto-disables. 15 min: a box that sleeps at night falls a few checks behind
+// but re-arms promptly on wake, far below GitLab's permanent-disable threshold.
+const FORGE_HEALTH_INTERVAL_MS = 15 * 60_000;
+const { stop: stopForgeHealthCheck } = startForgeHealthCheck({
+  intervalMs: FORGE_HEALTH_INTERVAL_MS,
+  listHooks: async () => {
+    const cfg = await local.configGet();
+    if (cfg?.forgeRulesEnabled !== true) return [];
+    return (await listForgeHooks().catch(() => []))
+      .map((h) => {
+        const parts = forgeParseRepoKey(h.repoKey);
+        if (!parts) return null;
+        return {
+          kind: h.provider ?? "github",
+          host: parts.host,
+          owner: parts.owner,
+          repo: parts.repo,
+          hookId: h.hookId,
+        };
+      })
+      .filter(Boolean);
+  },
+  resolveToken: async (host) => ((await forgeResolveToken(host).catch(() => null))?.token) ?? null,
+  checkHook: healthCheckRepoHook,
+});
+// eslint-disable-next-line no-unused-vars
+void stopForgeHealthCheck;
 
 // Resolve a parent directory to branch a forge-triggered job's worktree off.
 // The parent-directory the session-link primitive names (spec §3.4⑥, BET-844):

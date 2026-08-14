@@ -10,6 +10,7 @@ import {
   ensureRepoHook,
   healthCheckRepoHook,
   forgeHookUrl,
+  startForgeHealthCheck,
 } from "./webhook.mjs";
 
 const PUBLIC = "https://12998f00.boxes.mantaui.com";
@@ -112,3 +113,116 @@ test("healthCheckRepoHook leaves an active gitlab hook alone (no re-enable)", as
   assert.equal(res.reenabled, false);
   assert.equal(calls.some((c) => c.method === "PUT"), false, "an active hook is never re-PUT");
 });
+
+// ----------------------------------------------------------------------------
+// startForgeHealthCheck — the scheduled loop that drives healthCheckRepoHook
+// ----------------------------------------------------------------------------
+
+// startPoller fires its first tick immediately, then on intervalMs. These tests
+// use a long interval (so the only tick is the immediate one) and drain enough
+// microtask turns for that tick's awaits to resolve.
+const flush = () => new Promise((r) => setTimeout(r, 20));
+
+test("health-check loop re-enables a disabled gitlab hook (BET-855)", async () => {
+  const checked = [];
+  const poller = startForgeHealthCheck({
+    intervalMs: 60_000,
+    listHooks: async () => [
+      { kind: "gitlab", host: "gitlab.com", owner: "acme", repo: "widget", hookId: 5 },
+    ],
+    resolveToken: async (host) => (host === "gitlab.com" ? "glpat_x" : null),
+    checkHook: async (input) => {
+      checked.push(input);
+      assert.equal(input.kind, "gitlab");
+      assert.equal(input.host, "gitlab.com");
+      assert.equal(input.hookId, 5);
+      assert.equal(input.token, "glpat_x");
+      return { ok: true, active: true, reenabled: true };
+    },
+    log: () => {},
+  });
+  try {
+    await flush();
+    assert.equal(checked.length, 1, "the disabled gitlab hook is health-checked");
+  } finally {
+    poller.stop();
+  }
+});
+
+test("health-check loop skips non-gitlab hooks and hook-less / token-less records (BET-855)", async () => {
+  const checked = [];
+  const poller = startForgeHealthCheck({
+    intervalMs: 60_000,
+    listHooks: async () => [
+      { kind: "github", host: "github.com", owner: "acme", repo: "other", hookId: 1 },
+      { kind: "gitlab", host: "gitlab.com", owner: "acme", repo: "notokened", hookId: 2 },
+      { kind: "gitlab", host: "gitlab.com", owner: "acme", repo: "ok", hookId: 3 },
+    ],
+    // No token for gitlab.com → the "notokened" and "ok" records are skipped.
+    resolveToken: async () => null,
+    checkHook: async (input) => {
+      checked.push(input);
+      return { ok: true, active: true, reenabled: false };
+    },
+    log: () => {},
+  });
+  try {
+    await flush();
+    assert.equal(checked.length, 0, "no hook is health-checked without a forge token");
+  } finally {
+    poller.stop();
+  }
+});
+
+test("health-check loop checks every gitlab record for a host it has a token for (BET-855)", async () => {
+  const checked = [];
+  const poller = startForgeHealthCheck({
+    intervalMs: 60_000,
+    listHooks: async () => [
+      { kind: "github", host: "github.com", owner: "a", repo: "d", hookId: 3 },
+      { kind: "gitlab", host: "gitlab.com", owner: "a", repo: "b", hookId: 1 },
+      { kind: "gitlab", host: "gitlab.com", owner: "a", repo: "c", hookId: 2 },
+    ],
+    resolveToken: async (host) => (host === "gitlab.com" ? "t1" : null),
+    checkHook: async (input) => {
+      checked.push(input);
+      assert.equal(input.kind, "gitlab");
+      return { ok: true, active: true, reenabled: input.hookId === 2 };
+    },
+    log: () => {},
+  });
+  try {
+    await flush();
+    assert.deepEqual(
+      checked.map((c) => c.repo),
+      ["b", "c"],
+      "only gitlab records are checked; the github record is skipped",
+    );
+  } finally {
+    poller.stop();
+  }
+});
+
+test("health-check loop logs a per-hook failure and keeps going (BET-855)", async () => {
+  const checked = [];
+  const poller = startForgeHealthCheck({
+    intervalMs: 60_000,
+    listHooks: async () => [
+      { kind: "gitlab", host: "gitlab.com", owner: "a", repo: "bad", hookId: 1 },
+      { kind: "gitlab", host: "gitlab.com", owner: "a", repo: "good", hookId: 2 },
+    ],
+    resolveToken: async () => "t",
+    checkHook: async ({ repo }) => {
+      checked.push(repo);
+      return repo === "bad" ? { ok: false, error: "boom" } : { ok: true, active: true, reenabled: true };
+    },
+    log: () => {},
+  });
+  try {
+    await flush();
+    assert.deepEqual(checked, ["bad", "good"], "a failing hook does not stop the pass");
+  } finally {
+    poller.stop();
+  }
+});
+
