@@ -1,0 +1,83 @@
+Attributes: Application, 0x116469b80, pid: 20776, label: 'MantaUI'
+Element subtree:
+ →Application, 0x116469b80, pid: 20776, label: 'MantaUI'
+    Window (Main), 0x116468000, {{0.0, 0.0}, {402.0, 874.0}}
+      Other, 0x116469400, {{0.0, 0.0}, {402.0, 874.0}}
+        Other, 0x11646bc00, {{0.0, 0.0}, {402.0, 874.0}}
+          Other, 0x11646bd40, {{0.0, 0.0}, {402.0, 874.0}}
+            Other, 0x11646be80, {{0.0, 0.0}, {402.0, 874.0}}
+              Other, 0x1164697c0, {{0.0, 0.0}, {402.0, 874.0}}
+                NavigationBar, 0x116469900, {{0.0, 62.0}, {402.0, 54.0}}, identifier: 'Chat'
+                  Button, 0x116469a40, {{16.0, 62.0}, {44.0, 44.0}}, identifier: 'BackButton', label: 'Sessions'
+                  StaticText, 0x116469680, {{182.0, 73.7}, {38.0, 20.7}}, label: 'Chat'
+                  Other, 0x11646abc0, {{346.0, 66.0}, {36.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                    Other, 0x11646ad00, {{346.0, 66.0}, {36.0, 36.0}}
+                      Button, 0x11646ae40, {{350.0, 66.0}, {28.0, 36.0}}, identifier: 'ellipsis', label: 'Session actions'
+                Other, 0x11646af80, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x11646b0c0, {{0.0, 0.0}, {402.0, 874.0}}
+                    Other, 0x11646b200, {{0.0, 0.0}, {402.0, 874.0}}
+                      Other, 0x11646b340, {{0.0, 0.0}, {402.0, 874.0}}
+                        Other, 0x11646b480, {{0.0, 0.0}, {402.0, 884.0}}, identifier: 'chat-screen'
+                          Other, 0x11646b5c0, {{0.0, 0.0}, {402.0, 874.0}}
+                            CollectionView, 0x11646b700, {{0.0, 0.0}, {402.0, 874.0}}
+                              Other, 0x10661b200, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x10661b340, {{0.0, 0.0}, {402.0, 204.8}}
+                              Other, 0x10661b480, {{0.0, 0.0}, {402.0, 874.0}}
+                                Other, 0x10661b700, {{0.0, 0.0}, {402.0, 204.8}}
+                                  Image, 0x10661b840, {{-120.0, -166.0}, {642.0, 332.0}}, identifier: 'AdditionalDimmingOverlay'
+                                  Other, 0x10661b980, {{0.0, 0.0}, {402.0, 140.0}}
+                                  Other, 0x10661bac0, {{0.0, 0.0}, {402.0, 204.8}}
+                                    Other, 0x10661bc00, {{0.0, 0.0}, {402.0, 204.8}}
+                                  Other, 0x10661bd40, {{0.0, 0.0}, {402.0, 204.8}}
+                                    Other, 0x10661be80, {{0.0, 0.0}, {402.0, 204.8}}
+                                  Other, 0x10661ae40, {{0.0, 0.0}, {402.0, 204.8}}
+                                    Other, 0x116580000, {{0.0, 0.0}, {402.0, 204.8}}
+                                    Other, 0x116580140, {{0.0, 0.0}, {402.0, 204.8}}
+                              Cell, 0x116580280, {{0.0, 116.0}, {402.0, 83.3}}
+                                Other, 0x1165803c0, {{0.0, 116.0}, {402.0, 83.3}}
+                                  Other, 0x116580500, {{0.0, 116.0}, {402.0, 83.3}}
+                                    Other, 0x116580640, {{0.0, 116.0}, {446.7, 67.3}}, identifier: 'user-band'
+                                      StaticText, 0x116580780, {{12.0, 128.0}, {351.3, 43.3}}, label: 'Can this sheet show attach, a live scheduled-task count and secrets?'
+                                    StaticText, 0x1165808c0, {{415.3, 151.0}, {31.3, 13.3}}, label: '17:18'
+                              Cell, 0x116580a00, {{0.0, 199.3}, {402.0, 82.3}}
+                                Other, 0x116580b40, {{0.0, 199.3}, {402.0, 82.3}}
+                                  Other, 0x116580c80, {{0.0, 199.3}, {402.0, 82.3}}
+                                    Other, 0x116580dc0, {{12.0, 199.3}, {434.7, 70.3}}, identifier: 'assistant-prose'
+                                      StaticText, 0x116580f00, {{12.0, 199.3}, {362.0, 70.3}}, label: 'Yes — tap the ellipsis in the header. Scheduled tasks carries a live count, and secrets lists names without ever sending a value to the phone.'
+                                    StaticText, 0x116581040, {{415.3, 233.8}, {31.3, 13.3}}, label: '17:18'
+                              Other, 0x116581180, {{369.0, 140.0}, {30.0, 564.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 0 %
+                                Other, 0x1165812c0, {{396.0, 565.3}, {3.0, 135.7}}
+                              Other, 0x116581400, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x116581540, {{65.0, 868.0}, {272.0, 3.0}}
+                              Other, 0x116581680, {{369.0, 140.0}, {30.0, 564.0}}, label: 'Vertical scroll bar, 138 122 pages', value: 0 %
+                                Other, 0x1165817c0, {{396.0, 565.3}, {3.0, 135.7}}
+                              Other, 0x116581900, {{62.0, 841.0}, {278.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0 %
+                                Other, 0x116581a40, {{65.0, 868.0}, {272.0, 3.0}}
+                          Button, 0x116581b80, {{0.0, 116.0}, {402.0, 24.0}}, identifier: 'context-strip', label: 'Context 55 percent', value: 55 %
+                            StaticText, 0x116581cc0, {{0.0, 121.3}, {43.0, 13.3}}, label: 'Context'
+                            Other, 0x116581e00, {{51.0, 126.0}, {300.3, 4.0}}, value: 55 %
+                              ProgressIndicator, 0x116581f40, {{51.0, 116.0}, {300.3, 24.0}}, value: 55 %
+                            StaticText, 0x116582080, {{359.3, 121.3}, {26.3, 13.3}}, label: '55%'
+                            Image, 0x1165821c0, {{395.7, 123.3}, {5.7, 9.7}}, identifier: 'chevron.right', label: 'Forward'
+                          StaticText, 0x116582300, {{29.0, 752.0}, {73.7, 18.0}}, label: 'Message…'
+                          TextView, 0x116582440, {{24.0, 744.0}, {354.0, 34.0}}, identifier: 'composer-input'
+                            Other, 0x116582580, {{345.0, 744.0}, {30.0, 34.0}}, label: 'Vertical scroll bar, 1 page', value: 0 %
+                              Other, 0x1165826c0, {{372.0, 731.0}, {3.0, 36.0}}
+                          Button, 0x116582800, {{24.0, 793.3}, {79.0, 23.7}}, identifier: 'model-picker', label: 'Model'
+                            Button, 0x116582940, {{24.0, 793.3}, {79.0, 23.7}}
+                              Image, 0x116582a80, {{33.3, 798.3}, {11.3, 13.7}}, identifier: 'sparkles', label: 'Sparkle'
+                              StaticText, 0x116582bc0, {{50.0, 797.2}, {45.0, 15.7}}, label: 'Default'
+                          Button, 0x116582d00, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'attach-button', label: 'Attach'
+                            Button, 0x116582e40, {{111.0, 786.0}, {38.0, 38.0}}
+                              Image, 0x116582f80, {{111.0, 786.0}, {38.0, 38.0}}, identifier: 'paperclip', label: 'Attach'
+                          Button, 0x1165830c0, {{340.0, 786.0}, {38.0, 38.0}}, identifier: 'send-button', label: 'Send', Disabled
+                Other, 0x116583200, {{0.0, 0.0}, {402.0, 874.0}}
+                  Other, 0x116583340, {{0.0, 0.0}, {402.0, 874.0}}
+Path to element:
+ →Application, 0x116469b80, pid: 20776, label: 'MantaUI'
+Query chain:
+ →Find: Target Application 'com.antoinedc.mantaui'
+  Output: {
+    Application, 0x116583480, pid: 20776, label: 'MantaUI'
+  }
+

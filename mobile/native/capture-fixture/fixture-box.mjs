@@ -304,6 +304,24 @@ const server = http.createServer((req, res) => {
           wsSend(wsFrame("running", { running: false }));
           wsSend(wsFrame("turnComplete", { complete: true, running: false }));
           break;
+        case "context": // BET-889: emit a known context/cache reading (what a
+          // real box's `message.updated` interpreter publishes). Lets a UI test
+          // verify the iOS context strip renders deterministically on-device.
+          wsSend(wsFrame("context", {
+            freshInput: 4200,
+            cacheRead: 50800,
+            cacheWrite: 0,
+            totalInput: 55000,
+            pct: 55,
+            segments: [],
+          }));
+          wsSend(wsFrame("cache", {
+            isStale: true,
+            idleMs: 1_800_000,
+            staleTokens: 12400,
+            ttlMs: 3_600_000,
+          }));
+          break;
         default:
           break;
       }
