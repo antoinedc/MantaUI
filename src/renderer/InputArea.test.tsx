@@ -12,8 +12,113 @@
 // that keeps the real controls clickable — the half that is easy to get
 // wrong, since a too-broad rule would swallow the Send button's click.
 
-import { describe, it, expect } from "vitest";
-import { isComposerControlTarget } from "./InputArea";
+import { describe, it, expect, vi } from "vitest";
+import { act } from "react";
+import { isComposerControlTarget, InputArea } from "./InputArea";
+import { mount } from "./testHarness";
+
+// A full InputArea has ~40 props, nearly all inert scaffolding for any given
+// assertion. `makeProps` supplies the quiet default (empty input, no running
+// turn, no voice, no typeahead); a test overrides only what its assertion is
+// about. Mirrors the SessionHeader mount helper's overrides pattern.
+function makeProps(over: Partial<Parameters<typeof InputArea>[0]> = {}) {
+  const setInput = vi.fn();
+  const submit = vi.fn();
+  const props = {
+    input: "",
+    setInput,
+    inputRef: { current: null as HTMLTextAreaElement | null },
+    submit,
+    abort: vi.fn(),
+    running: false,
+    refreshing: false,
+    attachments: [],
+    onRemoveAttachment: vi.fn(),
+    onAttachFiles: vi.fn(),
+    pendingScreenshots: [],
+    onAcceptScreenshots: vi.fn(),
+    onDiscardScreenshot: vi.fn(),
+    modelLabel: null,
+    chatAutoAllow: false,
+    setChatAutoAllow: vi.fn(),
+    voice: {
+      voiceEnabled: false,
+      voiceRecording: false,
+      voiceProcessing: false,
+      voiceAnnouncement: "",
+      voiceRecorder: {
+        phase: "idle" as const,
+        elapsedMs: 0,
+        nearLimit: false,
+        lastError: null,
+        liveWindowRef: { current: null as Float32Array | null },
+        start: vi.fn(),
+        pause: vi.fn(),
+        resume: vi.fn(),
+        send: vi.fn(),
+        stop: vi.fn(),
+        requestDiscard: vi.fn(),
+        cancel: vi.fn(),
+        discardArmed: false,
+      },
+    },
+    models: null,
+    modelOverride: null,
+    defaultModel: null,
+    activeProviderID: null,
+    deactivatedMainModels: [],
+    onOpenModels: vi.fn(),
+    onSelectModel: vi.fn(),
+    scheduleCount: 0,
+    onSchedules: vi.fn(),
+    onSecrets: vi.fn(),
+    onWebhooks: vi.fn(),
+    typeaheadOpen: false,
+    typeaheadExactMatch: false,
+    onTypeaheadConfirm: vi.fn(),
+    onTypeaheadMove: vi.fn(),
+    onTypeaheadCancel: vi.fn(),
+    onHistoryUp: vi.fn(),
+    onHistoryDown: vi.fn(),
+    onQueuePop: vi.fn(),
+    onPaste: vi.fn(),
+    ...over,
+  };
+  return props;
+}
+
+// Empty-state suggestion chips (manta-forge S9): shown while the composer is
+// empty, and each chip FILLS the input (setInput) without submitting.
+describe("InputArea suggestion chips", () => {
+  it("renders the suggestion chips while the composer is empty", () => {
+    const h = mount(<InputArea {...makeProps()} />);
+    expect(h.text()).toContain("Explain this codebase");
+    expect(h.text()).toContain("What's the test setup?");
+    h.unmount();
+  });
+
+  it("hides the suggestion chips once the composer has text", () => {
+    const h = mount(<InputArea {...makeProps({ input: "hello" })} />);
+    expect(h.text()).not.toContain("Explain this codebase");
+    expect(h.text()).not.toContain("What's the test setup?");
+    h.unmount();
+  });
+
+  it("fills the input on click without submitting (chips never auto-send)", () => {
+    const setInput = vi.fn();
+    const submit = vi.fn();
+    const h = mount(<InputArea {...makeProps({ setInput, submit })} />);
+    const buttons = h.container.querySelectorAll("button");
+    const chip = Array.from(buttons).find((b) =>
+      b.textContent?.includes("Explain this codebase"),
+    );
+    expect(chip).toBeTruthy();
+    act(() => chip!.click());
+    expect(setInput).toHaveBeenCalledWith("Explain this codebase");
+    expect(submit).not.toHaveBeenCalled();
+    h.unmount();
+  });
+});
 
 /** Build a detached composer-box-shaped tree and hand back its parts. */
 function box() {
