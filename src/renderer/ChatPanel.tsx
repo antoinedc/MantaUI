@@ -162,6 +162,10 @@ type Props = {
   // optional — omitted in test harnesses that mount ChatPanel directly.
   registerModelControl?: (sessionId: string, apply: (m: ModelSelection) => void) => void;
   unregisterModelControl?: (sessionId: string) => void;
+  // BET-795: a one-shot composer SEED — the inbox's "Start a session". Like
+  // autoSubmit, delivered to the RIGHT session's panel, but it only fills the
+  // composer (setInput); it does NOT submit. The user reviews + hits Enter.
+  seedPrompt?: { text: string };
 };
 
 export function ChatPanel({
@@ -180,6 +184,7 @@ export function ChatPanel({
   autoSubmit,
   registerModelControl,
   unregisterModelControl,
+  seedPrompt,
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
@@ -1215,6 +1220,24 @@ export function ChatPanel({
       autoSubmitted.current = false;
     };
   }, [autoSubmit, setModelOverride, setInput]);
+
+  // BET-795: inbox "Start a session" — seed the composer (setInput) but do NOT
+  // submit. One-shot via the same ref guard idiom as autoSubmit. Clearing the
+  // store flips seedPrompt → undefined; clearing inside the timeout (never the
+  // effect body) keeps the effect's own cleanup from racing the clear.
+  const seedApplied = useRef(false);
+  useEffect(() => {
+    if (!seedPrompt || seedApplied.current) return;
+    seedApplied.current = true;
+    setInput(seedPrompt.text);
+    const t = setTimeout(() => {
+      useStore.getState().setSeedPrompt(null);
+    }, 0);
+    return () => {
+      clearTimeout(t);
+      seedApplied.current = false;
+    };
+  }, [seedPrompt, setInput]);
 
   // When the AI goes idle (running flips false) and there are queued
   // messages, dispatch the next one. We restore it into `input` and call

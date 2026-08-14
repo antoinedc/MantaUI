@@ -554,7 +554,9 @@ async function defaultForgeInbox(deps) {
       const res = await adapter.searchIssues(query, { ttl: INBOX_TTL_MS });
       stale = stale || Boolean(res.stale);
       const hits = (Array.isArray(res.data) ? res.data : []).map((h) =>
-        h && typeof h === "object" ? { ...h, reason } : h,
+        h && typeof h === "object"
+          ? { ...h, reason, seed: seedPromptFor(h) }
+          : h,
       );
       // The checks-failing population: keep only my open PRs whose CI is red.
       const kept =
@@ -573,7 +575,9 @@ async function defaultForgeInbox(deps) {
     }
   }
 
-  const items = mergeInboxSources(populations).sort((a, b) => b.updatedAt - a.updatedAt);
+  const items = mergeInboxSources(populations)
+    .map((it) => ({ ...it, rollup: it.reason === "checks failing" ? "red" : "none" }))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
   return { items, stale, error: null };
 }
 

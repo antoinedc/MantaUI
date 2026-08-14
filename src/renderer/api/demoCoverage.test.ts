@@ -59,6 +59,7 @@ export const DEMO_UNIMPLEMENTED = [
   "forgeDraftComment",
   "forgeDraftGet",
   "forgeDraftSubmit",
+  "forgeInbox",
   "forgeMerge",
   "forgeProbe",
   "forgePullRequest",

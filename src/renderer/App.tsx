@@ -245,6 +245,7 @@ function AppInner() {
   // One-shot first-prompt for a freshly-created session (draft → new session):
   // App passes it to the matching ChatPanel, which auto-submits then clears it.
   const autoSubmitPrompt = useStore((s) => s.autoSubmitPrompt);
+  const seedPrompt = useStore((s) => s.seedPrompt);
   const openNewProject = () => createDraft("new-project");
   const openNewSessionInProject = (name: string) =>
     createDraft({ projectName: name });
@@ -1696,6 +1697,7 @@ function AppInner() {
                       }
                       registerModelControl={registerModelControl}
                       unregisterModelControl={unregisterModelControl}
+                      seedPrompt={seedPrompt?.sid === sid ? seedPrompt : undefined}
                     />
                   </PanelShell>
                 );

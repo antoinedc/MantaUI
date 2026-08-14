@@ -47,7 +47,6 @@ import type {
   ForgeDiffResult,
   ForgeDisconnectResult,
   ForgeRuleRow,
-  ForgeInboxItem,
   ForgeInboxResult,
   ForgeShipInput,
   ForgeShipResult,

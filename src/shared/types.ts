@@ -557,6 +557,10 @@ export type ForgeInboxItem = {
   rollup: string;
   updatedAt: number;
   reason: InboxReason;
+  // The seeded first prompt for "Start a session" — built box-side from the
+  // single INBOX_SEED_PROMPT constant so the renderer never constructs its own
+  // "Complete {{url}}" copy (one default, not two).
+  seed: string;
 };
 
 // forge:inbox result. `items` are sorted by updatedAt desc. `error` is
