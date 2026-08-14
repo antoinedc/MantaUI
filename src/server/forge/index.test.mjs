@@ -394,7 +394,7 @@ test("shipPullRequest: push (setUpstream) then createPullRequest without a draft
       return { data: created, stale: false };
     },
   };
-  const r = await shipPullRequest("/repo", { title: "Forge seam", body: "B", base: "main" }, {
+  const r = await shipPullRequest("/repo", { title: "Forge seam", body: "B" }, {
     ...SHIP_DEPS,
     getAdapter: () => adapter,
     gitPush: async (i) => { pushed.push(i); return { stdout: "", stderr: "" }; },
@@ -499,17 +499,24 @@ test("shipPullRequest passes the forge-resolved base to createPullRequest", asyn
   assert.equal(created[0].base, "master");
 });
 
-test("shipPullRequest: an explicit base input still wins over the resolved one", async () => {
-  const created = [];
-  const adapter = createSpyAdapter(created);
-  const r = await shipPullRequest("/repo", { title: "t", body: "B", base: "trunk" }, {
-    ...SHIP_DEPS,
-    getAdapter: () => adapter,
-    getDefaultBranch: async () => "master",
+test("shipPreview refuses an unknown base without running any git", async () => {
+  let runCalls = 0;
+  const r = await shipPreview("/repo", {
+    ...linkedShipDeps({ getDefaultBranch: async () => null }),
+    run: async () => { runCalls += 1; return { stdout: "", stderr: "" }; },
   });
-  assert.equal(r.ok, true);
-  assert.equal(created.length, 1);
-  assert.equal(created[0].base, "trunk");
+  assert.deepEqual(r, { ok: false, error: "unknown_base" });
+  assert.equal(runCalls, 0, "no git call happens when the base is unknown");
+});
+
+test("shipPullRequest refuses an unknown base and never pushes", async () => {
+  const pushed = [];
+  const r = await shipPullRequest("/repo", { title: "t", body: "B" }, {
+    ...linkedShipDeps({ getDefaultBranch: async () => null }),
+    gitPush: async (i) => { pushed.push(i); },
+  });
+  assert.deepEqual(r, { ok: false, error: "unknown_base" });
+  assert.equal(pushed.length, 0, "a PR that cannot exist must not leave a pushed branch behind");
 });
 
 test("shipPreview drafts a title from the tip commit (design step 1)", async () => {

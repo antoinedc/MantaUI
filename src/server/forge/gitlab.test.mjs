@@ -503,8 +503,16 @@ test("getDefaultBranch maps the project's default_branch", async () => {
   assert.equal(await adapter.getDefaultBranch(REPO), "develop");
 });
 
-test("getDefaultBranch falls back to main when the field is absent", async () => {
+test("getDefaultBranch returns null when the field is absent", async () => {
   const url = "https://gitlab.com/api/v4/projects/acme%2Fwidget";
   const adapter = createGitlabAdapter(fakeRequest({ [url]: { path_with_namespace: "acme/widget" } }));
-  assert.equal(await adapter.getDefaultBranch(REPO), "main");
+  assert.equal(await adapter.getDefaultBranch(REPO), null);
+});
+
+test("getDefaultBranch returns null when the request fails", async () => {
+  const throwing = async () => {
+    throw new Error("revoked token");
+  };
+  const adapter = createGitlabAdapter(throwing);
+  assert.equal(await adapter.getDefaultBranch(REPO), null);
 });

@@ -833,6 +833,7 @@ async function resolveWriteContext(cwd, deps, wantBranch = true) {
 export async function shipPreview(cwd, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
+  if (!ctx.base) return { ok: false, error: "unknown_base" };
   const base = ctx.base;
   const runGit = deps.run ?? run;
 
@@ -1061,13 +1062,14 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  * shared 10s `run()`), then createPullRequest with the given config.
  *
  * @param {string} cwd
- * @param {{ title: string, body?: string, base?: string }} input
+ * @param {{ title: string, body?: string }} input
  * @param {object} [deps] injectable I/O
  * @returns {Promise<{ ok: true, pr: object, url: string } | { ok: false, error: string }>}
  */
-export async function shipPullRequest(cwd, { title, body = "", base } = {}, deps = {}) {
+export async function shipPullRequest(cwd, { title, body = "" } = {}, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
   if (ctx.error) return { ok: false, error: ctx.error };
+  if (!ctx.base) return { ok: false, error: "unknown_base" };
   const gitPush = deps.gitPush ?? localGitPush;
 
   try {
@@ -1081,7 +1083,7 @@ export async function shipPullRequest(cwd, { title, body = "", base } = {}, deps
     const res = await ctx.adapter.createPullRequest(ctx.repo, {
       title,
       body,
-      base: base ?? ctx.base,
+      base: ctx.base,
       head: ctx.head,
     });
     pr = res.data;

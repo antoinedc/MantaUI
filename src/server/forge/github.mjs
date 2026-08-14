@@ -715,18 +715,19 @@ export function createGithubAdapter(request, requestWrite, requestText = request
 
     /**
      * GET /repos/{o}/{r} — the repo's default branch (the PR base). Returns
-     * `"main"` when the field is missing or the payload is malformed.
+     * `null` (unknown) when the field is missing, the payload is malformed, or
+     * the request fails.
      * @param {{ owner: string, repo: string }} repo
-     * @returns {Promise<string>}
+     * @returns {Promise<string|null>}
      */
     async getDefaultBranch(repo) {
       let data = {};
       try {
         ({ data } = await request(`${apiBase}/repos/${repo.owner}/${repo.repo}`));
       } catch {
-        // fall through to "main"
+        // leave data empty — an unknown default branch is unknown
       }
-      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : "main";
+      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : null;
     },
 
     /**

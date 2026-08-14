@@ -516,15 +516,16 @@ export function createGitlabAdapter(request, requestWrite, requestText = request
     },
 
     // GET /projects/{encoded id} — the repo's default branch (the PR base).
-    // Returns `"main"` when the field is missing or the payload is malformed.
+    // Returns `null` (unknown) when the field is missing, the payload is
+    // malformed, or the request fails.
     async getDefaultBranch(repo) {
       let data = {};
       try {
         ({ data } = await request(`${apiBase}${projectPath(repo)}`));
       } catch {
-        // fall through to "main"
+        // leave data empty — an unknown default branch is unknown
       }
-      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : "main";
+      return typeof data?.default_branch === "string" && data.default_branch ? data.default_branch : null;
     },
   };
 }
