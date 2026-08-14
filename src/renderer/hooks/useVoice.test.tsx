@@ -57,16 +57,16 @@ describe("useVoice via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles voice keybind Ctrl+M to start recording", async () => {
+  it("handles voice keybind CmdOrCtrl+Shift+M to start recording", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Simulate Ctrl+M keydown
+    // Simulate CmdOrCtrl+Shift+M keydown
     await act(async () => {
       const event = new KeyboardEvent("keydown", {
         key: "m",
         ctrlKey: true,
-        metaKey: false,
+        shiftKey: true,
         altKey: false,
         bubbles: true,
       });
@@ -77,28 +77,28 @@ describe("useVoice via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("handles voice keybind Ctrl+M to stop recording", async () => {
+  it("handles voice keybind CmdOrCtrl+Shift+M to stop recording", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Simulate Ctrl+M keydown (start)
+    // Simulate CmdOrCtrl+Shift+M keydown (start)
     await act(async () => {
       const event = new KeyboardEvent("keydown", {
         key: "m",
         ctrlKey: true,
-        metaKey: false,
+        shiftKey: true,
         altKey: false,
         bubbles: true,
       });
       window.dispatchEvent(event);
     });
 
-    // Simulate Ctrl+M keydown again (stop)
+    // Simulate CmdOrCtrl+Shift+M keydown again (stop)
     await act(async () => {
       const event = new KeyboardEvent("keydown", {
         key: "m",
         ctrlKey: true,
-        metaKey: false,
+        shiftKey: true,
         altKey: false,
         bubbles: true,
       });
@@ -152,12 +152,12 @@ describe("useVoice via ChatPanel", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Simulate Ctrl+M keydown (should be ignored when voice is disabled)
+    // Simulate CmdOrCtrl+Shift+M keydown (should be ignored when voice is disabled)
     await act(async () => {
       const event = new KeyboardEvent("keydown", {
         key: "m",
         ctrlKey: true,
-        metaKey: false,
+        shiftKey: true,
         altKey: false,
         bubbles: true,
       });

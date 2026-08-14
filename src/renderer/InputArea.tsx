@@ -33,7 +33,7 @@ import {
 import { baseModelId, isFastModelId, shortModelName } from "./chatUtils";
 import { ModelPicker } from "./ModelPicker";
 import { MeasureColumn } from "./MeasureColumn";
-import { AttachButton, AttachmentStrip, MicButton, SessionToolbar, PendingScreenshotStrip } from "./ComposerParts";
+import { AttachButton, AttachmentStrip, MicButton, SessionToolbar, PendingScreenshotStrip, VOICE_SHORTCUT_LABEL } from "./ComposerParts";
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
@@ -257,7 +257,7 @@ export function InputArea({
   const voiceActive = voiceRecording || voiceProcessing;
   // Detect mobile shell (touch device using the no-window.api branch with
   // MobileApp + .mobile-body wrapper). MicButton is only rendered there;
-  // on desktop the keyboard shortcut (Ctrl+M / Enter / Esc) drives voice.
+  // on desktop the keyboard shortcut (CmdOrCtrl+Shift+M / Enter / Esc) drives voice.
   const [isMobileShell, setIsMobileShell] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -296,7 +296,7 @@ export function InputArea({
           composer). Hold to record, release to insert the transcript into
           the composer for review. Positioned + sized by `.mobile-ptt-fab` in
           mobile.css; only rendered in the mobile shell with a Groq key set.
-          Desktop voice stays keyboard-driven (Ctrl+M / Enter / Esc). */}
+          Desktop voice stays keyboard-driven (CmdOrCtrl+Shift+M / Enter / Esc). */}
       {voiceEnabled && isMobileShell && (
         <MicButton
           phase={voicePhase}
@@ -523,7 +523,7 @@ export function InputArea({
               {voiceActive
                 ? voiceProcessing
                   ? "transcribing… · esc cancels"
-                  : <span className="inline-flex items-center gap-1"><Mic size={14} aria-hidden="true" />recording · ⏎ send · ctrl+m stop · esc cancel</span>
+                  : <span className="inline-flex items-center gap-1"><Mic size={14} aria-hidden="true" />recording · ⏎ send · {VOICE_SHORTCUT_LABEL} stop · space pause · esc cancel</span>
                 : "esc · interrupt"}
             </span>
           )}

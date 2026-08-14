@@ -8,7 +8,7 @@
 //
 // The hook owns:
 //   - The voiceRecorder instance (via useVoiceRecorder)
-//   - The desktop voice keybinds (Ctrl+M / Enter / Esc)
+//   - The desktop voice keybinds (CmdOrCtrl+Shift+M / Enter / Space / Esc)
 //   - The voiceEnabled gate (groqApiKey + MediaRecorder support)
 //   - The transcription step (recorder hands back {blob, mime, peaks})
 //
@@ -18,6 +18,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useVoiceRecorder } from "../voice";
 import type { VoiceArtifact, VoicePhase } from "../voice";
+import { VOICE_TAP_HOLD_MS } from "../../shared/waveform.mjs";
+import { IS_MAC } from "../platform";
 
 export type Voice = {
   voiceEnabled: boolean;
@@ -54,9 +56,10 @@ export function useVoice(params: {
     groqApiKey,
   } = params;
 
-  // When the user presses Enter (or Ctrl+M) WHILE the desktop voice recorder
-  // is active, we want the transcribed text to land in the composer AND
-  // immediately submit, in one keystroke.
+  // When the user presses Enter (or holds the CmdOrCtrl+Shift+M shortcut into
+  // push-to-talk) WHILE the desktop voice recorder is active, we want the
+  // transcribed text to land in the composer AND immediately submit, in one
+  // keystroke.
   const submitAfterTranscribeRef = useRef(false);
   // Transcription in flight — the recorder's own phases don't include
   // "processing" (that is our business now), so we track it here for the UI.
@@ -151,33 +154,76 @@ export function useVoice(params: {
   voiceStopRef.current = voiceRecorder.stop;
   const voiceCancelRef = useRef(voiceRecorder.cancel);
   voiceCancelRef.current = voiceRecorder.cancel;
+  const voicePauseRef = useRef(voiceRecorder.pause);
+  voicePauseRef.current = voiceRecorder.pause;
+  const voiceResumeRef = useRef(voiceRecorder.resume);
+  voiceResumeRef.current = voiceRecorder.resume;
+  // Timestamp the shortcut's keydown so keyup can decide tap-vs-hold.
+  const voiceKeyDownAtRef = useRef<number | null>(null);
   const voiceRecording =
     voiceRecorder.phase === "recording" ||
     voiceRecorder.phase === "requesting" ||
     voiceRecorder.phase === "paused";
   const voiceProcessing = transcribing;
 
-  // Desktop voice keybinds (Ctrl+M / Enter / Esc)
+  // Desktop voice keybinds (CmdOrCtrl+Shift+M / Enter / Space / Esc).
+  //
+  // CmdOrCtrl+Shift+M mirrors the mic button's tap-versus-hold model:
+  //   keydown while idle → start recording immediately (never wait for the
+  //                        threshold — that would swallow the first
+  //                        quarter-second of speech) and timestamp the press.
+  //   keyup while a take → held >= VOICE_TAP_HOLD_MS → it was push-to-talk →
+  //                        stop and send (insert at the caret). Held <
+  //                        threshold → it was a tap → stay recording (toggle
+  //                        stays ON).
+  //   keydown while recording/paused → stop and send (tap toggles OFF).
+  // Enter stops+submits; Space pauses/resumes (only while the composer
+  // textarea is NOT focused, so typing a space never pauses); Esc discards.
+  // Enter/Space/Esc stopPropagation while a take is active so the composer's
+  // own handlers do not also fire.
   useEffect(() => {
     if (!voiceEnabled) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "m" || e.key === "M")) {
+
+    const isShortcut = (e: KeyboardEvent) => {
+      if (e.altKey || !e.shiftKey) return false;
+      if (e.key.toLowerCase() !== "m") return false;
+      // CmdOrCtrl = meta on macOS, ctrl elsewhere.
+      return IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+    };
+
+    const takeActive = () => {
+      const p = voicePhaseRef.current;
+      return p === "requesting" || p === "recording" || p === "paused";
+    };
+    // The shortcut's end-a-take path: stop and insert at the caret (dictate),
+    // but do NOT auto-submit — Enter is the act of sending.
+    const stopAndSendShortcut = () => {
+      submitAfterTranscribeRef.current = false;
+      voiceStopRef.current();
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isShortcut(e)) {
         e.preventDefault();
+        e.stopPropagation();
+        if (e.repeat) return;
         const phase = voicePhaseRef.current;
         if (
           phase === "recording" ||
           phase === "requesting" ||
           phase === "paused"
         ) {
-          submitAfterTranscribeRef.current = false;
-          voiceStopRef.current();
+          // keydown while a take is active → tap toggles OFF: stop and send.
+          voiceKeyDownAtRef.current = null;
+          stopAndSendShortcut();
         } else if (phase === "idle" || phase === "error") {
+          // keydown while idle → start immediately + timestamp for tap/hold.
+          voiceKeyDownAtRef.current = performance.now();
           void voiceStartRef.current();
         }
         return;
       }
-      const phase = voicePhaseRef.current;
-      if (phase === "idle" || phase === "error") return;
+      if (!takeActive()) return;
       if (
         e.key === "Enter" &&
         !e.shiftKey &&
@@ -185,11 +231,30 @@ export function useVoice(params: {
         !e.ctrlKey &&
         !e.altKey
       ) {
-        if (phase !== "recording" && phase !== "paused") return;
+        const p = voicePhaseRef.current;
+        if (p !== "recording" && p !== "paused") return;
         e.preventDefault();
         e.stopPropagation();
         submitAfterTranscribeRef.current = true;
         voiceStopRef.current();
+        return;
+      }
+      if (
+        e.key === " " &&
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        // Space pauses/resumes but never while the composer textarea is
+        // focused — typing a space into the message must not pause a take.
+        if (inputRef.current && document.activeElement === inputRef.current) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        if (voicePhaseRef.current === "recording") voicePauseRef.current();
+        else if (voicePhaseRef.current === "paused") voiceResumeRef.current();
         return;
       }
       if (e.key === "Escape") {
@@ -200,9 +265,30 @@ export function useVoice(params: {
         return;
       }
     };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, [voiceEnabled]);
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!isShortcut(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const downAt = voiceKeyDownAtRef.current;
+      voiceKeyDownAtRef.current = null;
+      if (downAt == null) return;
+      if (!takeActive()) return;
+      const held = performance.now() - downAt;
+      if (held >= VOICE_TAP_HOLD_MS) {
+        // It was push-to-talk → stop and send (insert at the caret).
+        stopAndSendShortcut();
+      }
+      // else: it was a tap → stay recording (toggle stays ON).
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [voiceEnabled, inputRef]);
 
   return {
     voiceEnabled,

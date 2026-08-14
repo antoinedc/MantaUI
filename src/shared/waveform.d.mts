@@ -10,6 +10,7 @@ export const VOICE_MAX_DURATION_MS: number;
 export const VOICE_WARN_REMAINING_MS: number;
 export const VOICE_MIN_DURATION_MS: number;
 export const VOICE_CONFIRM_DISCARD_MS: number;
+export const VOICE_TAP_HOLD_MS: number;
 
 export function quantizePeak(v: number): number;
 

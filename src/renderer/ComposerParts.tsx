@@ -11,6 +11,7 @@ import type { VoicePhase } from "./voice";
 import { type Attachment, type TypeaheadRow } from "./chatShared";
 import type { PendingScreenshot } from "./store";
 import { IconButton } from "./IconButton";
+import { IS_MAC } from "./platform";
 // BET-726 Task 1: same scrollIntoView idiom the ⌘K / ⌘F palettes and the
 // model/effort menus use (PaletteShell.tsx) — keeps the keyboard-selected
 // @-file row visible when it moves past the popup's scroll fold.
@@ -24,6 +25,11 @@ import { useSelectedIntoView } from "./PaletteShell";
 export const mbtn =
   "inline-flex items-center gap-[6px] h-[27px] px-2 rounded-sm text-text-faint hover:bg-fill-hover hover:text-text transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+
+// Human-readable form of the voice shortcut (CmdOrCtrl+Shift+M). Shared by
+// the mic button title/aria-label and the composer's transient status hint so
+// both name the binding in one place.
+export const VOICE_SHORTCUT_LABEL = IS_MAC ? "⇧⌘M" : "Ctrl+Shift+M";
 
 // SessionToolbar — footer affordances. fork / compact / delete moved out of the
 // footer (they live in the header ⋯ menu); only the ⏰ schedules toggle remains
@@ -402,11 +408,11 @@ export function MicButton({
     ? "transcribing…"
     : recording
       ? floating
-        ? "release to insert"
-        : "release · dictate"
+        ? `release to insert · ${VOICE_SHORTCUT_LABEL}`
+        : `release · dictate · ${VOICE_SHORTCUT_LABEL}`
       : floating
-        ? "hold to talk"
-        : "hold to speak";
+        ? `hold to talk · ${VOICE_SHORTCUT_LABEL}`
+        : `hold to speak · ${VOICE_SHORTCUT_LABEL}`;
 
   // Floating PTT FAB: round bubble, bottom-right (positioned by the
   // `.mobile-ptt-fab` rule in mobile.css — visual/layout lives there per the
