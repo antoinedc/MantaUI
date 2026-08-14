@@ -189,6 +189,21 @@ enum ChatModel {
         return "\(Int((context / 1000).rounded()))k"
     }
 
+    /// Display label for an effort variant id. A lookup, not a string
+    /// transform: `.capitalized` renders the camel-cased level "xhigh" as
+    /// "Xhigh". Unknown ids fall back to capitalisation so a provider that
+    /// ships a new level still reads sensibly rather than disappearing.
+    static func effortLabel(_ variantID: String) -> String {
+        switch variantID.lowercased() {
+        case "low": return "Low"
+        case "medium": return "Medium"
+        case "high": return "High"
+        case "xhigh": return "xHigh"
+        case "max": return "Max"
+        default: return variantID.capitalized
+        }
+    }
+
     /// Capability glyphs for a catalogue row, in display order: "reasoning"
     /// when the model reasons, "vision" when it accepts image input. Both read
     /// the box's own capability flags rather than being inferred — a model can

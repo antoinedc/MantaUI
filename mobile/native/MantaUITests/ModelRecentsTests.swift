@@ -237,4 +237,29 @@ final class ModelRecentsTests: XCTestCase {
         XCTAssertTrue(ChatModel.isPickable(models[0]))
         XCTAssertTrue(ChatModel.isPickable(models[1]))
     }
+
+    // MARK: - ChatModel.effortLabel (BET-888)
+
+    func testEffortLabelKnownLevels() {
+        XCTAssertEqual(ChatModel.effortLabel("low"), "Low")
+        XCTAssertEqual(ChatModel.effortLabel("medium"), "Medium")
+        XCTAssertEqual(ChatModel.effortLabel("high"), "High")
+        XCTAssertEqual(ChatModel.effortLabel("xhigh"), "xHigh")
+        XCTAssertEqual(ChatModel.effortLabel("max"), "Max")
+    }
+
+    func testEffortLabelIsCaseInsensitive() {
+        XCTAssertEqual(ChatModel.effortLabel("XHIGH"), "xHigh")
+    }
+
+    func testEffortLabelUnknownFallsBack() {
+        XCTAssertEqual(ChatModel.effortLabel("turbo"), "Turbo")
+    }
+
+    func testRecentsLabelUsesEffortLabel() {
+        let c = ModelChoice(providerID: "anthropic", modelID: "opus", variant: "xhigh", fast: false)
+        let label = ModelRecents.label(for: c, models: [])
+        XCTAssertTrue(label.contains("xHigh"))
+        XCTAssertFalse(label.contains("Xhigh"))
+    }
 }

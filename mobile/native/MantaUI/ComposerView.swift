@@ -510,7 +510,7 @@ struct ComposerView: View {
         guard let model = activeModel else { return "Default" }
         var parts = [model.name]
         if let variant = modelStore.variant, !variant.isEmpty {
-            parts.append(variant.capitalized)
+            parts.append(ChatModel.effortLabel(variant))
         }
         return parts.joined(separator: " · ")
     }
@@ -536,19 +536,17 @@ struct ComposerView: View {
             }
         }
 
-        // 3 + 4. Effort (inline segmented) and Fast mode. Omitted when the
-        //    active model offers neither — a model with no variants shows no
-        //    effort control anywhere.
+        // 3 + 4. Effort and Fast mode, each omitted when the active model does
+        //    not offer it. The trailing Divider is conditional so a model with
+        //    neither does not draw two separators back to back.
+        Divider()
+        if showEffortPicker {
+            Section("Effort") { effortPicker }
+        }
+        if showFastToggle {
+            fastToggle
+        }
         if showEffortPicker || showFastToggle {
-            Divider()
-            if showEffortPicker {
-                effortPicker
-            }
-            if showFastToggle {
-                fastToggle
-            }
-            Divider()
-        } else {
             Divider()
         }
 
@@ -584,33 +582,26 @@ struct ComposerView: View {
         return fast.available || fast.on
     }
 
-    /// Inline segmented effort control — a segmented control shows the CURRENT
-    /// value without a second tap, which an effort submenu cannot. The "Default"
-    /// segment is the model's recommended level (no explicit variant).
+    /// Inline effort control. `.palette` is the ONLY picker style a menu
+    /// renders as a horizontal strip — a menu is a UIMenu and discards
+    /// arbitrary layout, so the earlier `VStack` + `.segmented` version drew
+    /// nothing at all. A strip is used rather than a submenu because it shows
+    /// the CURRENT value without a second tap. The "Default" segment is the
+    /// model's own recommended level (no explicit variant).
     private var effortPicker: some View {
-        let selection = Binding<String>(
+        Picker("Effort", selection: Binding<String>(
             get: { modelStore.variant ?? "" },
             set: { newValue in
-                if newValue.isEmpty {
-                    modelStore.setVariant(nil)
-                } else {
-                    modelStore.setVariant(newValue)
-                }
+                modelStore.setVariant(newValue.isEmpty ? nil : newValue)
                 modelStore.recordCurrentChoice()
             }
-        )
-        return VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-            Text("Effort")
-                .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.semibold)))
-                .foregroundColor(tokens.tx3)
-            Picker("Effort", selection: selection) {
-                Text("Default").tag("")
-                ForEach(modelStore.activeVariants, id: \.id) { variant in
-                    Text(variant.id.capitalized).tag(variant.id)
-                }
+        )) {
+            Text("Default").tag("")
+            ForEach(modelStore.activeVariants, id: \.id) { variant in
+                Text(ChatModel.effortLabel(variant.id)).tag(variant.id)
             }
-            .pickerStyle(.segmented)
         }
+        .pickerStyle(.palette)
     }
 
     /// Fast-mode toggle — a session-level flag, so it sits at the same level
