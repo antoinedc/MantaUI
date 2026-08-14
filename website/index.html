@@ -276,6 +276,19 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
   .stage-lede + div[style*="display:grid"]{grid-template-columns:minmax(0,1fr) !important}
   .stage-lede + div[style*="display:grid"] > *{min-width:0}
 }
+/* BET-906 AC#6 — the twelve tile grid (.bt) is four equal columns in the
+   reference, which is not responsive. Collapse it to two tiles a row at
+   tablet widths and to a single column on phones (mirroring BET-904/BET-905),
+   so it stays four-across on desktop, two at 1024px, one at 390px and never
+   overflows the viewport. The tile markers are 1fr tracks that default to auto
+   min-content, so the chips force .btc below its column width; minmax(0,1fr)
+   lets them shrink. */
+@media(max-width:1024px){
+  .bt{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+  .bt{grid-template-columns:minmax(0,1fr)}
+}
 </style>
 
 <!-- BEGIN:head-meta -->
@@ -1045,6 +1058,114 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     </div>
   </div>
 </div>
+  </div>
+</section>
+<!-- ============ 8. Everything else it does ============ -->
+<section class="sunk">
+  <div class="wrap">
+    <div style="max-width:620px">
+      <h2>Everything else it does</h2>
+      <p class="sub" style="margin-top:14px;font-size:17px">It behaves like a machine that is yours and always on,
+        because that is what it is.</p>
+    </div>
+
+    <div style="margin-top:38px">
+      <div style="display:flex;align-items:baseline;gap:14px">
+        <span class="eyebrow">Yours alone</span>
+        <span style="font-size:14.5px;color:var(--slate-400)">No account, no middleman, and nothing of yours anywhere else.</span>
+      </div>
+      <div class="bt">
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+            <span class="gchip" style="color:var(--cyan-400);font-weight:700">your box</span>
+            <span style="font-size:13px;color:var(--red-500);line-height:1;opacity:.7">&#215;</span>
+            <span class="gchip" style="opacity:.45">anyone else</span></div></div>
+          <div class="x"><div class="t">Self-Hosted</div><div class="d">Runs on your box. No account, no telemetry, no middleman.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="gap:5px"><span class="gchip">claude</span><span class="gchip">codex</span><span class="gchip">kimi</span></div></div>
+          <div class="x"><div class="t">Bring Your Own Plan</div><div class="d">The subscription you already pay for. Nothing resold.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:6px">
+            <span class="gchip" style="color:var(--cyan-400)">~/.manta-secrets/gh_pat</span>
+            <span class="gchip" style="text-decoration:line-through;opacity:.45">ghp_xxxxxxxxxxxx</span></div></div>
+          <div class="x"><div class="t">Secret Store</div><div class="d">The agent is handed a file path, never the value.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="gap:4px">
+            <span class="gchip" style="color:var(--cyan-400);font-weight:700">win 1</span><span class="gchip">win 2</span><span class="gchip">win 3</span></div></div>
+          <div class="x"><div class="t">Native Terminals</div><div class="d">Real tmux sessions. Attach in the app, or SSH in.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:38px">
+      <div style="display:flex;align-items:baseline;gap:14px">
+        <span class="eyebrow">Runs without you</span>
+        <span style="font-size:14.5px;color:var(--slate-400)">The box is awake, so work can start when you are not there.</span>
+      </div>
+      <div class="bt">
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+            <span class="gchip" style="color:var(--cyan-400)">issue labeled</span>
+            <span style="font-size:11px;color:var(--navy-500);line-height:1">&#8595;</span>
+            <span class="gchip" style="color:var(--green-500)">draft PR</span></div></div>
+          <div class="x"><div class="t">Webhooks</div><div class="d">Label a GitHub issue and an agent picks it up.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+            <span class="gchip" style="color:var(--cyan-400)">*/5 * * * *</span><span class="gchip">0 9 * * 1-5</span></div></div>
+          <div class="x"><div class="t">Native Scheduler</div><div class="d">Every weekday at nine, what changed overnight.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px;align-items:flex-start">
+            <span class="gchip" style="color:var(--cyan-400);font-size:10.5px">&#9106; fix-csv-flake</span><span class="gchip" style="font-size:10.5px">&#9106; bump-deps</span><span class="gchip" style="font-size:10.5px">&#9106; backfill-tests</span></div></div>
+          <div class="x"><div class="t">Native Worktrees</div><div class="d">Each job gets its own branch and its own worktree.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+            <span class="gchip" style="color:var(--cyan-400)">xcodebuild</span><span class="gchip">simctl boot</span></div></div>
+          <div class="x"><div class="t">Mac Plugins</div><div class="d">Xcode, simulators and certificates, driven from your phone.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:38px">
+      <div style="display:flex;align-items:baseline;gap:14px">
+        <span class="eyebrow">Wherever you are</span>
+        <span style="font-size:14.5px;color:var(--slate-400)">It reaches whichever device you happen to be holding.</span>
+      </div>
+      <div class="bt">
+        <div class="btc">
+          <div class="g"><div style="width:94%;border-radius:9px;background:var(--surface-inset);box-shadow:inset 0 0 0 1px var(--tile-line);
+            padding:8px 10px;display:flex;gap:8px;align-items:center">
+            <span style="width:18px;height:18px;border-radius:5px;background:var(--gradient-brand);flex:none"></span>
+            <span style="flex:1;min-width:0;line-height:1.35">
+              <span style="display:block;font-size:10px;font-weight:700;color:var(--text-secondary)">Manta</span>
+              <span style="display:block;font-size:10px;color:var(--slate-400)">Needs you</span></span>
+            <span style="font-size:9.5px;color:var(--navy-500);flex:none">now</span></div></div>
+          <div class="x"><div class="t">Push Notifications</div><div class="d">Desktop at your desk, phone when you are not.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="gap:6px">
+            <span class="gchip" style="color:#fff;background:var(--blue-500);box-shadow:none;font-weight:700">Allow</span><span class="gchip">Reject</span></div></div>
+          <div class="x"><div class="t">One-Tap Approvals</div><div class="d">Read the change, allow or reject in one tap.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:7px">
+            <span style="display:flex;align-items:center;gap:3px;height:22px">
+              <span style="width:3px;height:34%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:62%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:44%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:78%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:30%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:56%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:40%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:66%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span><span style="width:3px;height:36%;border-radius:2px;background:var(--cyan-400);opacity:.75"></span></span>
+            <span class="gchip">&ldquo;allow it&rdquo;</span></div></div>
+          <div class="x"><div class="t">Voice Support</div><div class="d">Dictate a reply, or just say allow.</div></div>
+        </div>
+        <div class="btc">
+          <div class="g"><div class="glyph" style="flex-direction:column;gap:5px">
+            <span class="gchip">screenshot.png &#8593;</span><span class="gchip" style="color:var(--cyan-400)">report.csv &#8595;</span></div></div>
+          <div class="x"><div class="t">Artifacts Management</div><div class="d">Drop a screenshot in. Generated files come back.</div></div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 <!-- ============ 9. FAQ ============ -->
