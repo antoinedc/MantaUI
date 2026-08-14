@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
-import { Clock, X } from "lucide-react";
+import { ArrowDown, Clock, X } from "lucide-react";
 import type {
   AvailableLauncher,
   CheckRollup,
@@ -358,7 +358,7 @@ export function ChatPanel({
   // growing under the user must not detach them — see the header comment on
   // classifyFollowOnScroll.
   const followingRef = useRef(true);
-  const [, setFollowingState] = useState(true);
+  const [following, setFollowingState] = useState(true);
   const setFollowing = useCallback((v: boolean) => {
     if (followingRef.current === v) return;
     followingRef.current = v;
@@ -2541,39 +2541,56 @@ export function ChatPanel({
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
-      <VoicePlaybackProvider active={isActive}>
-        <Transcript
-          messages={messages}
-          virtuosoRef={virtuosoRef}
-          sessionId={sessionId}
-          setMessages={setMessages}
-          loadedAllRef={loadedAllRef}
-          taskContextValue={taskContextValue}
-          showThinking={showThinking}
-          running={running}
-          liveTurn={liveTurn}
-          progress={liveProgress}
-          isActive={isActive}
-          activeTodos={activeTodos}
-          onDismissTodos={dismissTodos}
-          // BET-418 §D: a job session is read-only — never show its (anyway
-          // impossible) question cards. Defensive: a job's pre-flight ruleset
-          // means it never generates asks.
-          questions={jobOwnership ? [] : questions}
-          turnInfo={turnInfo}
-          finishByMessageId={finishByMessageId}
-          userCommandInfo={userCommandInfo}
-          voiceNoteByMessageId={voiceNoteByMessageId}
-          pendingVoiceNote={pendingVoiceNote}
-          onRetryVoiceNote={retryVoiceNote}
-          onReplyQuestion={replyQuestion}
-          onRejectQuestion={rejectQuestion}
-          scrollerElRef={scrollerElRef}
-          followingRef={followingRef}
-          onFollowingChange={setFollowing}
-          motionStateRef={motionStateRef}
-        />
-      </VoicePlaybackProvider>
+      {/* The transcript region owns its own positioning context so the
+          jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above
+          the card stack and the composer, both of which change height. */}
+      <div className="relative flex-1 min-h-0 flex flex-col">
+        <VoicePlaybackProvider active={isActive}>
+          <Transcript
+            messages={messages}
+            virtuosoRef={virtuosoRef}
+            sessionId={sessionId}
+            setMessages={setMessages}
+            loadedAllRef={loadedAllRef}
+            taskContextValue={taskContextValue}
+            showThinking={showThinking}
+            running={running}
+            liveTurn={liveTurn}
+            progress={liveProgress}
+            isActive={isActive}
+            activeTodos={activeTodos}
+            onDismissTodos={dismissTodos}
+            // BET-418 §D: a job session is read-only — never show its (anyway
+            // impossible) question cards. Defensive: a job's pre-flight ruleset
+            // means it never generates asks.
+            questions={jobOwnership ? [] : questions}
+            turnInfo={turnInfo}
+            finishByMessageId={finishByMessageId}
+            userCommandInfo={userCommandInfo}
+            voiceNoteByMessageId={voiceNoteByMessageId}
+            pendingVoiceNote={pendingVoiceNote}
+            onRetryVoiceNote={retryVoiceNote}
+            onReplyQuestion={replyQuestion}
+            onRejectQuestion={rejectQuestion}
+            scrollerElRef={scrollerElRef}
+            followingRef={followingRef}
+            onFollowingChange={setFollowing}
+            motionStateRef={motionStateRef}
+          />
+        </VoicePlaybackProvider>
+        <button
+          type="button"
+          className="manta-jump-latest"
+          data-shown={!following}
+          aria-hidden={following}
+          tabIndex={following ? -1 : 0}
+          aria-label="Jump to latest"
+          title="Jump to latest"
+          onClick={scrollToTail}
+        >
+          <ArrowDown size={16} aria-hidden />
+        </button>
+      </div>
 
       {/* Pinned card stack above the composer (BET-783): blocking always
           above ambient, at most one blocking expanded, at most two ambient

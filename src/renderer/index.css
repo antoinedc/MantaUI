@@ -118,6 +118,65 @@ html, body, #root {
   .manta-recording-dot { animation: none; }
 }
 
+/* Jump to latest (BET-933). The escape hatch shown when the transcript has
+   stopped following the tail. It floats over the BOTTOM OF THE TRANSCRIPT
+   (its container is the transcript region in ChatPanel, not the panel root)
+   so it clears the card stack and the composer, both of which change height.
+   Centred rather than right-aligned: the right-hand column already carries
+   the usage dial and the schedules/secrets/webhooks buttons.
+
+   Hidden AND out of the tab order while following — a permanently visible
+   control reads as chrome and gets ignored, which is the whole failure this
+   affordance exists to fix.
+
+   Tokens only. --sp-8 is the 32px hit area (the mockup's 34px snapped to the
+   spacing grid); --card / --border / --shadow-md is the standard floating-
+   surface trio; --accent-tx / --accent is IconButton's hover pair. The 8px
+   entry offset is --sp-2. It is NOT built on CardMount: that animates
+   height 0 -> auto, which is meaningless for an absolutely positioned circle. */
+.manta-jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: var(--sp-4);
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--sp-8);
+  height: var(--sp-8);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  background: var(--card);
+  color: var(--tx2);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  opacity: 0;
+  transform: translate(-50%, var(--sp-2)) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-base) var(--ease-out),
+    transform var(--motion-base) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.manta-jump-latest[data-shown="true"] {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+}
+.manta-jump-latest:hover {
+  color: var(--accent-tx);
+  border-color: var(--accent);
+}
+.manta-jump-latest:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .manta-jump-latest { transition: none; }
+}
+
 /* MantaLoader — the two counter-rotating arcs (src/renderer/MantaLoader.tsx).
    Speeds are the native client's, verbatim: 0.9s clockwise outer, 1.4s
    anticlockwise inner. The mismatched periods are what stop the pair reading
