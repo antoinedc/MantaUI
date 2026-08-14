@@ -69,7 +69,7 @@ struct ContextSheet: View {
 
     /// Big percentage in the band colour + "824k of 1M · Opus 4.7".
     private var header: some View {
-        HStack(alignment: .baseline, spacing: Metrics.spacing.sp2) {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
             Group {
                 Text("\(Int(context.pct.rounded()))")
                     .font(.system(size: Metrics.type.display, weight: .bold))
