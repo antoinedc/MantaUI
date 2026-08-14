@@ -13,9 +13,9 @@ import Foundation
 //    line up with `NSString` ranges and the `Mention.source` start/end the
 //    box expects.
 //  * `slashCommands` / `filterSlashCommands` — the compact `/` palette, listing
-//    exactly the actions the composer/store already implement (the voice
-//    `VoiceAction` set and the overflow sheet). Nothing new is invented here;
-//    a typed token that matches nothing is honestly absent from the palette.
+//    exactly the actions the composer/store already implement and the overflow
+//    sheet. Nothing new is invented here; a typed token that matches nothing is
+//    honestly absent from the palette.
 // ===========================================================================
 
 enum ComposerTypeahead {
@@ -135,9 +135,9 @@ enum ComposerTypeahead {
         return SlashAnchor(query: query)
     }
 
-    /// The actions the composer/store already implement — the voice
-    /// `VoiceAction` set and the overflow sheet, nothing more. Abort appears
-    /// only while a turn is running (that is the only time it is meaningful).
+    /// The actions the composer/store already implement and the overflow sheet,
+    /// nothing more. Abort appears only while a turn is running (that is the
+    /// only time it is meaningful).
     static func slashCommands(running: Bool) -> [SlashCommand] {
         var commands = [
             SlashCommand(id: "submit", title: "Submit", subtitle: "Send this message", kind: .submit),

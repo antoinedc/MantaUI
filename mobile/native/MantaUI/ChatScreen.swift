@@ -402,7 +402,6 @@ private struct ChatScreenContent: View {
                             showScrollToBottom = false
                         },
                         onGlassBoxHeightChange: { composerGlassHeight = $0 },
-                        onToggleTrust: { flipTrustMode() },
                         sessionDirectory: sessionWindow?.cwd,
                         onSlashClear: { Task { await clearSession() } },
                         onSlashFork: { Task { await forkSession() } }

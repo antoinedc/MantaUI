@@ -254,13 +254,12 @@ enum PermissionReply: String, Sendable {
     case reject
 }
 
-// MARK: - S5 composer: model picker + voice (BET-597)
+// MARK: - S5 composer: model picker (BET-597)
 //
 // Models for the composer extras. `OpencodeModel` mirrors the box's
-// `opencode:models` payload (from `getProviders()` → `listModels()`); the
-// `VoiceClassifyResult` mirrors `voice:classify-command`'s reply. These are
-// wire DTOs only — resolution/selection logic lives in ChatModel / ChatVoice
-// (pure, tested).
+// `opencode:models` payload (from `getProviders()` → `listModels()`). These
+// are wire DTOs only — resolution/selection logic lives in ChatModel (pure,
+// tested).
 
 /// A model from a connected provider, as served by `opencode:models`.
 struct OpencodeModel: Codable, Equatable, Sendable {
@@ -287,20 +286,6 @@ struct OpencodeModelID: Codable, Equatable, Hashable, Sendable {
         case providerID
         case modelID
     }
-}
-
-/// The box-side voice classifier's reply (voice:classify-command). Standard
-/// actions carry `kind` (+ optional payload); the LLM fallback degrades to
-/// `unknown` carrying the verbatim transcript. Never interpreted device-side —
-/// the classifier IS the box.
-struct VoiceClassifyResult: Codable, Equatable, Sendable {
-    var kind: String?
-    var text: String?
-    var index: Int?
-    var query: String?
-    var choice: String?
-    var transcript: String?
-    var actions: [VoiceClassifyResult]?
 }
 // MARK: - Overflow sheet resources (BET-627: attach, scheduled tasks, secrets)
 //
