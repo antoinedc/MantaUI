@@ -33,7 +33,7 @@ test("seq starts at 1; applying identical projects twice bumps seq once", async 
   state.applyConfig({ foo: 1 }); // identical — no bump
   assert.equal(state.snapshot().seq, 2);
   assert.equal(published.length, 1);
-  assert.deepEqual(published[0].changed, { config: { foo: 1 } });
+  assert.deepEqual(published[0].payload.changed, { config: { foo: 1 } });
 });
 
 test("applyConfig publishes only on change", () => {
@@ -42,7 +42,7 @@ test("applyConfig publishes only on change", () => {
   state.applyConfig({ a: 1 });
   state.applyConfig({ a: 2 });
   assert.equal(published.length, 2);
-  assert.deepEqual(published.map((p) => p.changed), [{ config: { a: 1 } }, { config: { a: 2 } }]);
+  assert.deepEqual(published.map((p) => p.payload.changed), [{ config: { a: 1 } }, { config: { a: 2 } }]);
 });
 
 test("refreshNow success applies projects change + a fresh tick is a no-op", async () => {
@@ -52,12 +52,12 @@ test("refreshNow success applies projects change + a fresh tick is a no-op", asy
   assert.equal(state.snapshot().projects, P1);
   assert.equal(state.snapshot().stale, false);
   assert.equal(published.length, 1);
-  assert.deepEqual(published[0].changed, { projects: P1 });
+  assert.deepEqual(published[0].payload.changed, { projects: P1 });
 
   setProjects(P2);
   await state.refreshNow();
   assert.equal(published.length, 2);
-  assert.deepEqual(published[1].changed, { projects: P2 });
+  assert.deepEqual(published[1].payload.changed, { projects: P2 });
 });
 
 test("refreshNow failure → stale=true, last-known-good kept, publish changed.stale", async () => {
@@ -71,7 +71,7 @@ test("refreshNow failure → stale=true, last-known-good kept, publish changed.s
   assert.equal(snap.projects, P1); // last-known-good untouched
   assert.ok(snap.seq > before);
   const last = published[published.length - 1];
-  assert.deepEqual(last.changed, { stale: true });
+  assert.deepEqual(last.payload.changed, { stale: true });
 });
 
 test("refreshNow success after failure → stale=false published", async () => {
@@ -83,7 +83,7 @@ test("refreshNow success after failure → stale=false published", async () => {
   await state.refreshNow(); // recovery
   assert.equal(state.snapshot().stale, false);
   const last = published[published.length - 1];
-  assert.deepEqual(last.changed, { stale: false });
+  assert.deepEqual(last.payload.changed, { stale: false });
 });
 
 test("payloadSince(null) includes all fields", async () => {
@@ -155,14 +155,15 @@ test("everSucceeded reflects whether a tick ever succeeded", async () => {
   assert.equal(state.everSucceeded(), true);
 });
 
-test("publish envelope shape is pinned {kind, gen, seq, changed}", async () => {
+test("publish envelope shape is pinned {kind, payload:{gen, seq, changed}}", async () => {
   const { state, published } = makeFixture();
   await state.refreshNow();
   const env = published[0];
   assert.equal(env.kind, "sync");
-  assert.equal(env.gen, "aabbccdd");
-  assert.equal(typeof env.seq, "number");
-  assert.deepEqual(Object.keys(env), ["kind", "gen", "seq", "changed"]);
-  assert.ok("projects" in env.changed);
-  assert.equal(env.seq, state.snapshot().seq);
+  assert.deepEqual(Object.keys(env), ["kind", "payload"]);
+  assert.deepEqual(Object.keys(env.payload), ["gen", "seq", "changed"]);
+  assert.equal(env.payload.gen, "aabbccdd");
+  assert.equal(typeof env.payload.seq, "number");
+  assert.ok("projects" in env.payload.changed);
+  assert.equal(env.payload.seq, state.snapshot().seq);
 });

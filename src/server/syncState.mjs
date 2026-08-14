@@ -6,7 +6,8 @@
 // and the ownership sidecar got pruned. This module materializes the session
 // list + config in memory with a monotonic sequence cursor, serves snapshots
 // instantly from memory, and publishes `sync` deltas on the event bus as
-// state changes.
+// state changes. Each delta rides the standard `{ kind, payload }` envelope
+// (like every other bus kind): `{ kind:"sync", payload:{ gen, seq, changed } }`.
 //
 // PURE + injected-I/O only: all external effects (listProjects + publish) are
 // injected. No tmux / fs imports, no live bus here — the poller in index.mjs
@@ -31,7 +32,7 @@ function defaultGenId() {
 /**
  * @param {object} deps
  * @param {() => Promise<Array>} deps.listProjects   one tmux listing tick
- * @param {(env: object) => void} deps.publish        pushes `{kind:"sync",…}` envelopes on the bus
+ * @param {(env: object) => void} deps.publish        pushes `{kind:"sync", payload:{gen,seq,changed}}` envelopes on the bus
  * @param {() => string} [deps.genId]                 injectable gen generator (default: crypto)
  */
 export function createSyncState({ listProjects, publish, genId = defaultGenId }) {
@@ -46,7 +47,7 @@ export function createSyncState({ listProjects, publish, genId = defaultGenId })
   function bump(field, value) {
     seq += 1;
     versions[field] = seq;
-    publish({ kind: "sync", gen, seq, changed: { [field]: value } });
+    publish({ kind: "sync", payload: { gen, seq, changed: { [field]: value } } });
   }
 
   // Dedupe concurrent refreshes: if a refresh is already in flight, await the
