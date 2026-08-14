@@ -630,7 +630,7 @@ and writes `generated/swift/SettingsSchema.swift`. It runs on the CI Node 20
 | Models | `cacheTtl` (segmented) |
 | Sessions | `autoRenameSessions`, `chatAutoAllow` (toggles) |
 | Files | `uploadCleanupHours` (segmented, numeric coerced) |
-| Voice | `groqApiKey` (password, commit-on-blur), `voiceTranscriptionModel`, `voiceCommandModel` (text, commit-on-blur) |
+| Voice | `groqApiKey` (password, commit-on-blur), `voiceTranscriptionModel` |
 
 `accountsList` is a `custom` control with no configKey — rendered as a
 reachable/searchable label row (no native accounts-subscription management UI;
