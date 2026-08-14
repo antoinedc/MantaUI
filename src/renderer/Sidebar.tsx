@@ -6,7 +6,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import type { ReactElement, ReactNode } from "react";
+import type { ReactElement } from "react";
 import { ChevronRight, ChevronDown, X, Pin, Search } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI } from "./store";
 import { nowMs, useAgeTick } from "./clock";
@@ -22,9 +22,14 @@ import {
   resolvePin,
   selectCacheTtlMs,
   windowPinId,
+  describeProjectClose,
+  describeSessionClose,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
+import { ConfirmModal } from "./ConfirmModal";
+import { Modal } from "./Modal";
+import { Button } from "./Button";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -386,10 +391,10 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     }
   };
 
-  // Delete / ContextMenu → the SAME inline ConfirmDelete the right-click path
-  // already opens (BET-726 Task 2.1) — right-click's onContextMenu just calls
-  // this same setConfirmDeleteFor shape, so there is no separate "menu" to
-  // build for the ContextMenu key either.
+  // Delete / ContextMenu → the same confirm the right-click path already
+  // opens (BET-726 Task 2.1) — right-click's onContextMenu just calls this
+  // same setConfirmDeleteFor shape, so there is no separate "menu" to build
+  // for the ContextMenu key either.
   const requestDeleteFocused = () => {
     if (!focusedKey) return;
     if (focusedKey.startsWith("group:")) {
@@ -691,12 +696,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   commitRename={commitRename}
                   cancelRename={() => setRenameTarget(null)}
                   title={rowTitle(r.window)}
-                  confirmDeleteFor={confirmDeleteFor}
-                  setConfirmDeleteFor={setConfirmDeleteFor}
-                  onKillWindow={() => killWindow(r.project.tmuxSession, r.window.index)}
-                  onKillWorktreeDirty={(wtPath, force) =>
-                    killWorktreeDirtyAndClose(r.project.tmuxSession, r.window.index, wtPath, force)
-                  }
                 />
               ))}
             </div>
@@ -732,15 +731,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   startRename({ kind: "project", old: p.tmuxSession }, p.tmuxSession)
                 }
               />
-
-              {confirmDeleteFor?.kind === "project" &&
-                confirmDeleteFor.project === p.tmuxSession && (
-                  <ConfirmDelete
-                    label={`project "${p.tmuxSession}"`}
-                    onKill={() => killProject(p.tmuxSession)}
-                    onCancel={() => setConfirmDeleteFor(null)}
-                  />
-                )}
 
               {!isCollapsed && (
                 <div className="pl-2 space-y-px mt-px">
@@ -783,12 +773,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           commitRename={commitRename}
                           cancelRename={() => setRenameTarget(null)}
                           title={rowTitle(w)}
-                          confirmDeleteFor={confirmDeleteFor}
-                          setConfirmDeleteFor={setConfirmDeleteFor}
-                          onKillWindow={() => killWindow(p.tmuxSession, w.index)}
-                          onKillWorktreeDirty={(wtPath, force) =>
-                            killWorktreeDirtyAndClose(p.tmuxSession, w.index, wtPath, force)
-                          }
                         />
                         {kids.map((childIdx, i) => {
                           const childWin = p.windows.find((x) => x.index === childIdx);
@@ -813,9 +797,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                 })
                               }
                               title={rowTitle(childWin)}
-                              confirmDeleteFor={confirmDeleteFor}
-                              setConfirmDeleteFor={setConfirmDeleteFor}
-                              onKillWindow={() => killWindow(p.tmuxSession, childIdx)}
                             />
                           );
                         })}
@@ -881,6 +862,115 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       )}
 
       {inboxOpen && <InboxPalette onClose={() => setInboxOpen(false)} />}
+
+      {/*
+        Destructive-confirm surfaces (BET-935). Both sit at the Sidebar root,
+        as siblings of the palettes and OUTSIDE the scroll container, so no row
+        ever shifts when one opens. D1 is the two-way ConfirmModal (session /
+        project close); D2 is the three-way dirty-worktree modal built on the
+        raw Modal primitive (ConfirmModal renders exactly Cancel + one confirm,
+        and the dirty case has three outcomes).
+      */}
+      {(() => {
+        const c = confirmDeleteFor;
+        if (!c || c.kind === "worktree-dirty") {
+          // Keep the modal MOUNTED with open={false} so its exit animation plays.
+          return (
+            <ConfirmModal
+              open={false}
+              title=""
+              body=""
+              confirmLabel=""
+              onConfirm={() => {}}
+              onCancel={() => setConfirmDeleteFor(null)}
+            />
+          );
+        }
+        const proj = projects.find((p) => p.tmuxSession === c.project);
+        const copy =
+          c.kind === "session"
+            ? describeSessionClose({
+                name: c.name,
+                running: statusFor(c.project, c.index)?.running ?? false,
+                worktreePath: worktreeCleanOnClose
+                  ? (proj?.windows.find((w) => w.index === c.index)?.worktreePath ?? null)
+                  : null,
+              })
+            : describeProjectClose({
+                name: c.project,
+                sessionCount: proj?.windows.length ?? 0,
+                runningCount:
+                  proj?.windows.filter((w) => statusFor(c.project, w.index)?.running).length ?? 0,
+                // Project close does NOT remove worktrees yet. Workstream 3 adds
+                // that AND flips this to the real count. Do not pass a count here.
+                worktreeCount: 0,
+              });
+        return (
+          <ConfirmModal
+            open
+            title={copy.title}
+            body={copy.body}
+            confirmLabel={copy.confirmLabel}
+            onConfirm={() => {
+              if (c.kind === "session") void killWindow(c.project, c.index);
+              else void killProject(c.project);
+            }}
+            onCancel={() => setConfirmDeleteFor(null)}
+          />
+        );
+      })()}
+
+      <Modal
+        size="sm"
+        open={confirmDeleteFor?.kind === "worktree-dirty"}
+        onDismiss={() => setConfirmDeleteFor(null)}
+        label="Uncommitted changes in this worktree"
+      >
+        <div className="space-y-4">
+          <h3 className="text-title font-semibold">Uncommitted changes in this worktree</h3>
+          <div className="text-body text-text-faint">
+            <code className="break-all">
+              {confirmDeleteFor?.kind === "worktree-dirty" ? confirmDeleteFor.worktreePath : ""}
+            </code>{" "}
+            has uncommitted changes. Removing the worktree will permanently delete that work.
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button tone="ghost" onClick={() => setConfirmDeleteFor(null)}>
+              Cancel
+            </Button>
+            <Button
+              tone="default"
+              onClick={() => {
+                if (confirmDeleteFor?.kind === "worktree-dirty") {
+                  void killWorktreeDirtyAndClose(
+                    confirmDeleteFor.project,
+                    confirmDeleteFor.index,
+                    confirmDeleteFor.worktreePath,
+                    false,
+                  );
+                }
+              }}
+            >
+              Keep worktree
+            </Button>
+            <Button
+              tone="danger"
+              onClick={() => {
+                if (confirmDeleteFor?.kind === "worktree-dirty") {
+                  void killWorktreeDirtyAndClose(
+                    confirmDeleteFor.project,
+                    confirmDeleteFor.index,
+                    confirmDeleteFor.worktreePath,
+                    true,
+                  );
+                }
+              }}
+            >
+              Remove worktree
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </aside>
   );
 });
@@ -971,32 +1061,20 @@ function PinSlot({
 }
 
 // One composed session row: the SessionRow primitive PLUS the session delete
-// affordance. Right-clicking a row requests the delete confirm (the same
-// context-menu behaviour both window and job rows share) and, when armed, the
-// ConfirmDelete dialog renders below the row. Both the top-level window rows
-// and the nested job rows render through this, so the delete-on-context-menu
-// handler + ConfirmDelete block live in exactly ONE place — without it the
-// SessionRow migration would reintroduce the 17-line clone between
-// WindowRow/JobChildRow that BET-536 is supposed to remove.
+// affordance. Right-clicking a row requests the delete confirm (BET-935 routes
+// the confirm into the shared root modal rather than rendering it inline
+// below the row). Both the top-level window rows and the nested job rows
+// render through this, so the delete-on-context-menu handler lives in exactly
+// ONE place — without it the SessionRow migration would reintroduce the
+// 17-line clone between WindowRow/JobChildRow that BET-536 is supposed to
+// remove.
 function DeletableSessionRow({
   row,
-  showConfirm,
-  label,
-  onKill,
-  onCancel,
   onRequestDelete,
-  children,
 }: {
   /** The SessionRow element; its onContextMenu is overridden to request the delete. */
   row: ReactElement;
-  showConfirm: boolean;
-  /** ConfirmDelete label, e.g. `session "Deploy"`. */
-  label: string;
-  onKill: () => void;
-  onCancel: () => void;
   onRequestDelete: () => void;
-  /** Optional extra sibling confirm dialogs (e.g. the worktree-dirty prompt). */
-  children?: ReactNode;
 }) {
   return (
     <div>
@@ -1007,8 +1085,6 @@ function DeletableSessionRow({
           onRequestDelete();
         },
       })}
-      {showConfirm && <ConfirmDelete label={label} onKill={onKill} onCancel={onCancel} />}
-      {children}
     </div>
   );
 }
@@ -1034,10 +1110,6 @@ function WindowRow({
   commitRename,
   cancelRename,
   title,
-  confirmDeleteFor,
-  setConfirmDeleteFor,
-  onKillWindow,
-  onKillWorktreeDirty,
 }: {
   project: Project;
   window: TmuxWindow;
@@ -1058,23 +1130,11 @@ function WindowRow({
   commitRename: () => void;
   cancelRename: () => void;
   title: string;
-  confirmDeleteFor: ConfirmDeleteFor;
-  setConfirmDeleteFor: (v: ConfirmDeleteFor) => void;
-  onKillWindow: () => void;
-  onKillWorktreeDirty: (wtPath: string, force: boolean) => void;
 }) {
   const isRenaming =
     renameTarget?.kind === "window" &&
     renameTarget.project === project.tmuxSession &&
     renameTarget.index === w.index;
-  const showConfirm =
-    confirmDeleteFor?.kind === "session" &&
-    confirmDeleteFor.project === project.tmuxSession &&
-    confirmDeleteFor.index === w.index;
-  const showWorktreeConfirm =
-    confirmDeleteFor?.kind === "worktree-dirty" &&
-    confirmDeleteFor.project === project.tmuxSession &&
-    confirmDeleteFor.index === w.index;
   const dot = dotFor(status);
   const age = useAge(status);
   return (
@@ -1113,20 +1173,8 @@ function WindowRow({
           onClick={onActivate}
         />
       }
-      showConfirm={showConfirm}
-      label={`session "${w.name}"`}
-      onKill={onKillWindow}
-      onCancel={() => setConfirmDeleteFor(null)}
       onRequestDelete={onClose}
-    >
-      {showWorktreeConfirm && confirmDeleteFor?.kind === "worktree-dirty" && (
-        <ConfirmWorktreeDirty
-          worktreePath={confirmDeleteFor.worktreePath}
-          onRemove={() => onKillWorktreeDirty(confirmDeleteFor.worktreePath, true)}
-          onKeep={() => onKillWorktreeDirty(confirmDeleteFor.worktreePath, false)}
-        />
-      )}
-    </DeletableSessionRow>
+    />
   );
 }
 
@@ -1143,9 +1191,6 @@ function JobChildRow({
   onActivate,
   onClose,
   title,
-  confirmDeleteFor,
-  setConfirmDeleteFor,
-  onKillWindow,
 }: {
   project: Project;
   window: TmuxWindow;
@@ -1156,14 +1201,7 @@ function JobChildRow({
   onActivate: () => void;
   onClose: () => void;
   title: string;
-  confirmDeleteFor: ConfirmDeleteFor;
-  setConfirmDeleteFor: (v: ConfirmDeleteFor) => void;
-  onKillWindow: () => void;
 }) {
-  const showConfirm =
-    confirmDeleteFor?.kind === "session" &&
-    confirmDeleteFor.project === project.tmuxSession &&
-    confirmDeleteFor.index === w.index;
   const dot = dotFor(status);
   const age = useAge(status);
   return (
@@ -1185,10 +1223,6 @@ function JobChildRow({
           onClick={onActivate}
         />
       }
-      showConfirm={showConfirm}
-      label={`session "${w.name}"`}
-      onKill={onKillWindow}
-      onCancel={() => setConfirmDeleteFor(null)}
       onRequestDelete={onClose}
     />
   );
@@ -1430,81 +1464,3 @@ function RenameInput({
   );
 }
 
-function ConfirmDelete({
-  label,
-  onKill,
-  onCancel,
-}: {
-  label: string;
-  onKill: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded-xs bg-bg-soft border border-border space-y-2">
-      <div className="text-meta text-text-muted">Close {label}?</div>
-      <div className="flex flex-wrap gap-1">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onKill();
-          }}
-          className="text-meta px-2 py-px rounded-xs bg-transparent text-danger hover:bg-danger-bg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-          title="kill the tmux session/window on the remote"
-        >
-          Kill on server
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onCancel();
-          }}
-          className="text-meta px-2 py-px text-text-faint hover:text-text"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ConfirmWorktreeDirty({
-  worktreePath,
-  onRemove,
-  onKeep,
-}: {
-  worktreePath: string;
-  onRemove: () => void;
-  onKeep: () => void;
-}) {
-  return (
-    <div className="ml-2 mt-1 mb-1 px-2 py-2 rounded-xs bg-bg-soft border border-border space-y-2">
-      <div className="text-meta text-text-muted">
-        <code className="break-all">{worktreePath}</code> has uncommitted
-        changes. Removing the worktree will permanently delete that work.
-        Remove anyway?
-      </div>
-      <div className="flex flex-wrap gap-1">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-          className="text-meta px-2 py-px rounded-xs bg-transparent text-danger hover:bg-danger-bg focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
-          title="git worktree remove --force (discards uncommitted changes)"
-        >
-          Remove
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onKeep();
-          }}
-          className="text-meta px-2 py-px text-text-faint hover:text-text"
-          title="leave the worktree + branch on disk; just close the session"
-        >
-          Keep worktree
-        </button>
-      </div>
-    </div>
-  );
-}

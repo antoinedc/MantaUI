@@ -3420,3 +3420,61 @@ export function classifyFollowOnScroll(
   if (m.scrollTop < prevScrollTop) return false;
   return null;
 }
+
+/**
+ * Confirm copy for destructive "Close" actions in the sidebar rail (BET-935).
+ * Pure string assembly so the confirm wording is testable without a DOM.
+ */
+
+export type CloseConfirmCopy = {
+  title: string;
+  body: string;
+  confirmLabel: string;
+};
+
+/** Confirm copy for closing ONE session (a tmux window). */
+export function describeSessionClose(args: {
+  name: string;
+  /** true when a turn is in flight for this window. */
+  running: boolean;
+  /** The worktree that WILL be removed, or null when none will be. */
+  worktreePath: string | null;
+}): CloseConfirmCopy {
+  const parts = ["Its tmux window will be killed on the box."];
+  if (args.running) parts.push("A turn is currently running and will be stopped.");
+  if (args.worktreePath) parts.push(`Its worktree at ${args.worktreePath} will be removed.`);
+  return {
+    title: `Close “${args.name}”?`,
+    body: parts.join(" "),
+    confirmLabel: "Close session",
+  };
+}
+
+/** Confirm copy for closing a WHOLE project (a tmux session). */
+export function describeProjectClose(args: {
+  name: string;
+  sessionCount: number;
+  runningCount: number;
+  /** Worktrees that WILL be removed. Pass 0 when project close does not remove them. */
+  worktreeCount: number;
+}): CloseConfirmCopy {
+  const { name, sessionCount, runningCount, worktreeCount } = args;
+  const title =
+    sessionCount === 0
+      ? `Close “${name}”?`
+      : `Close “${name}” and its ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`;
+  const parts = [
+    sessionCount === 0
+      ? "Its tmux session will be killed on the box."
+      : `All ${sessionCount} tmux window${sessionCount === 1 ? "" : "s"} will be killed on the box.`,
+  ];
+  if (runningCount > 0) {
+    parts.push(
+      `${runningCount} session${runningCount === 1 ? " is" : "s are"} mid-turn and will be stopped.`,
+    );
+  }
+  if (worktreeCount > 0) {
+    parts.push(`${worktreeCount} worktree${worktreeCount === 1 ? "" : "s"} will be removed.`);
+  }
+  return { title, body: parts.join(" "), confirmLabel: "Close project" };
+}
