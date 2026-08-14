@@ -80,7 +80,7 @@ import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { BlockedProgressCard, CompactionCard, PermissionCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
-import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, ShipConfirmCard, WebhooksCard } from "./PanelCards";
+import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
 import { useInputHistory } from "./hooks/useInputHistory";
@@ -238,15 +238,27 @@ export function ChatPanel({
 
   // BET-794/867: forge ship + merge for this session. The server resolves cwd →
   // repo → token box-side (a forge token never reaches the renderer). The
-  // branch chip's popover is the merge surface (BET-867); the ShipConfirmCard
-  // is the mandatory human gate before a Draft PR is pushed/opened, and Create
-  // PR ships inline (BET-867 owner-approved departure) — never auto-submitted.
-  const [shipOpen, setShipOpen] = useState(false);
+  // branch chip's popover is the ONE git surface (BET-867): it is the human
+  // gate (BET-794 [SH1]) before a PR is pushed/opened — the ship preview is
+  // loaded, the title shown, and the explicit non-default Create button names
+  // the head, base, file count and title. Create PR ships inline from the
+  // popover — never auto-submitted.
   const [shipProposal, setShipProposal] = useState<{ head: string; base: string; fileCount: number; title: string; body: string } | null>(null);
   const [shipBusy, setShipBusy] = useState(false);
   const [shipError, setShipError] = useState<string | null>(null);
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
+
+  // BET-925: a few seconds of "Opened #N" in the branch popover after a ship,
+  // so the state swap is affirmed rather than silent. Mirrors the compaction
+  // card's 2.5s hold; the timer is cleared on unmount so a late fire can never
+  // write into a different session.
+  const [shipJustCreated, setShipJustCreated] = useState(false);
+  useEffect(() => {
+    if (!shipJustCreated) return;
+    const t = setTimeout(() => setShipJustCreated(false), 4000);
+    return () => clearTimeout(t);
+  }, [shipJustCreated]);
 
   // BET-418 §D: detect whether THIS session is a background job's child. A
   // job session is read-only (no composer, no cards, no model picker/fork/
@@ -613,7 +625,10 @@ export function ChatPanel({
         ...(modelOverride ? { model: { providerID: modelOverride.providerID, modelID: modelOverride.modelID }, sessionId } : {}),
       });
       if (prev.ok) {
-        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title ?? "", body: prev.body ?? "" });
+        // BET-925: fall back to the head branch name when the box is still
+        // drafting (or returned an empty) title, so the Create button can never
+        // enable on an empty title.
+        setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title || prev.head, body: prev.body ?? "" });
       } else {
         setShipProposal(null);
         setShipError(prev.error);
@@ -624,11 +639,12 @@ export function ChatPanel({
     }
   }, [cwd, shipProposal, modelOverride, sessionId]);
 
-  // Confirm → push + create. Only reached after the human confirms the
-  // ShipConfirmCard. The title/body come from shipProposal (the box's preview,
-  // already resolved — no arg this time, the form is gone). On success it opens
-  // the PR in the browser and refreshes the PR (the branch popover swaps in
-  // place to the PR state).
+  // Confirm → push + create, inline from the branch popover (BET-925). Only
+  // reached after the human confirms the popover's Create button. The
+  // title/body come from shipProposal (the box's preview, already resolved).
+  // On success it writes the PR straight into local forge state so the popover
+  // swaps to the PR state in the same tick (no flicker through the ready
+  // state), opens the PR in the browser, then refreshes checks/mergeability.
   const confirmShip = useCallback(async () => {
     if (!cwd) return;
     const { title, body } = shipProposal ?? { title: "", body: "" };
@@ -637,8 +653,12 @@ export function ChatPanel({
     try {
       const res = await window.api.forgeShip({ cwd, title, body });
       if (res.ok) {
-        setShipOpen(false);
+        // Swap the popover to the PR state in the same tick the write returns —
+        // waiting for the next forge poll would flash the ready state back.
+        // refreshForge then reconciles checks / mergeability.
+        setForge((f) => ({ ...f, pr: res.pr }));
         setShipProposal(null);
+        setShipJustCreated(true);
         if (res.url) void window.api.openExternal(res.url);
         void refreshForge(cwd);
       } else {
@@ -650,16 +670,6 @@ export function ChatPanel({
       setShipBusy(false);
     }
   }, [cwd, shipProposal, refreshForge]);
-
-  // Open the ship confirm card — the single human gate for creating a PR.
-  // Loads the preview (head/base/fileCount) so the card shows real facts; if
-  // the preview is already loaded it must not re-fetch. Nothing is pushed or
-  // opened until the user confirms (confirmShip).
-  const openShip = useCallback(() => {
-    setShipError(null);
-    setShipOpen(true);
-    void ensureShipPreview();
-  }, [ensureShipPreview]);
 
   // Merge the shown PR, ALWAYS with the head SHA the user approved.
   const doMerge = useCallback(async () => {
@@ -2300,26 +2310,8 @@ export function ChatPanel({
             setPendingApproval(null);
             void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
           }}
-        />,
-      ));
-      // BET-794 [SH1]: the ship confirm — a human gate, ALWAYS. Shown in the
-      // blocking tier while a ship is in progress; nothing is pushed or opened
-      // until the user confirms here.
-      if (shipOpen) list.push(block(
-        "ship-confirm", blockOrder("ship-confirm"),
-        <ShipConfirmCard
-          proposal={shipProposal ?? { head: "", base: "", fileCount: 0, title: "", body: "" }}
-          busy={shipBusy}
-          error={shipError}
-          onApprove={confirmShip}
-          onDecline={() => {
-            setShipOpen(false);
-            setShipProposal(null);
-            setShipError(null);
-          }}
-        />,
-      ));
-
+          />,
+        ));
       // BET-791 [C9]: a model reporting it has STOPPED and needs a human
       // decision earns the one card `blocked` gets — a warn-toned ask in the
       // blocking tier, alongside permission and question, never below an
@@ -2418,7 +2410,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipOpen, shipProposal, shipBusy, shipError, confirmShip, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -2525,9 +2517,11 @@ export function ChatPanel({
         shipError={shipError}
         shipBase={shipProposal?.base ?? null}
         shipFileCount={shipProposal?.fileCount ?? null}
+        shipTitle={shipProposal ? shipProposal.title : null}
+        justShipped={shipJustCreated}
         base={forge.base}
         aheadCount={forge.aheadCount}
-        onCreatePr={() => void openShip()}
+        onCreatePr={() => void confirmShip()}
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 

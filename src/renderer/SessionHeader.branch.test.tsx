@@ -76,6 +76,7 @@ describe("SessionHeader branch popover (BET-867)", () => {
       pr: null,
       base: "main",
       aheadCount: 3,
+      shipTitle: "some title",
       onCreatePr: vi.fn(),
       onEnsureShipPreview: () => {},
     });
@@ -213,6 +214,7 @@ describe("SessionHeader branch popover (BET-867)", () => {
       aheadCount: 3,
       shipBase: "main",
       shipFileCount: 18,
+      shipTitle: "some title",
       onCreatePr,
       onEnsureShipPreview: () => {},
     });
@@ -220,13 +222,15 @@ describe("SessionHeader branch popover (BET-867)", () => {
     await h.flush();
 
     const createBtn = buttonWithText("Create pull request");
+    expect(createBtn.disabled).toBe(false);
     act(() => createBtn.click());
     expect(onCreatePr).toHaveBeenCalledTimes(1);
 
-    // Preview rows come from the ship preview (Base / Changes).
+    // The ship preview drives the head→base→files line + the drafted title,
+    // both moved up from the deleted confirm card.
     const text = bodyText();
-    expect(text).toContain("Base");
-    expect(text).toContain("18 files");
+    expect(text).toContain("→ main · 18 files");
+    expect(text).toContain("some title");
   });
 
   it("while a ship is in flight the Create pull request button disables and labels Creating…", async () => {
@@ -236,6 +240,7 @@ describe("SessionHeader branch popover (BET-867)", () => {
       pr: null,
       base: "main",
       aheadCount: 3,
+      shipTitle: "some title",
       shipBusy: true,
       shipError: null,
       onCreatePr: vi.fn(),
@@ -245,7 +250,83 @@ describe("SessionHeader branch popover (BET-867)", () => {
     await h.flush();
 
     const text = bodyText();
-    expect(text).toContain("Opening pull request…");
+    // Busy → no "Drafting title…" hint; the button owns the loading state.
+    expect(text).not.toContain("Drafting title…");
     expect(buttonWithText("Creating…").disabled).toBe(true);
+  });
+
+  it("shipTitle null → the Create button is disabled and the body shows Drafting title…", async () => {
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: null,
+      base: "main",
+      aheadCount: 3,
+      shipTitle: null,
+      onCreatePr: vi.fn(),
+      onEnsureShipPreview: () => {},
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    const text = bodyText();
+    expect(text).toContain("Drafting title…");
+    expect(buttonWithText("Create pull request").disabled).toBe(true);
+  });
+
+  it("the drafted title is rendered in the ready state", async () => {
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: null,
+      base: "main",
+      aheadCount: 3,
+      shipTitle: "Show every check in the checks popover",
+      onCreatePr: vi.fn(),
+      onEnsureShipPreview: () => {},
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    expect(bodyText()).toContain("Show every check in the checks popover");
+  });
+
+  it("justShipped with a PR present → the body shows 'Opened #412'", async () => {
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: PR,
+      checksRollup: "green",
+      justShipped: true,
+      onMerge: vi.fn(),
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    expect(bodyText()).toContain("Opened #412");
+  });
+
+  it("with pr null and shipBusy true, clicking outside does not close the popover", async () => {
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: null,
+      base: "main",
+      aheadCount: 3,
+      shipTitle: "some title",
+      shipBusy: true,
+      onCreatePr: vi.fn(),
+      onEnsureShipPreview: () => {},
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    // The drafted title only exists inside the popover panel.
+    expect(bodyText()).toContain("some title");
+    // A click-away is held open while the PR write is settling (BET-925).
+    act(() =>
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })),
+    );
+    expect(bodyText()).toContain("some title");
   });
 });
