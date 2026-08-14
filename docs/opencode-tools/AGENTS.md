@@ -350,6 +350,38 @@ checkout.
 and run `systemctl --user restart opencode-serve`. A symlinked tool fails
 to resolve `@opencode-ai/plugin` and silently never registers.
 
+## MantaUI app control
+
+You have four `manta_*` tools to drive the app the user is looking at from
+THIS chat session:
+
+- `manta_compact_session()` — compact this session to free context (the same
+  as `/compact`). Immediate and visible in the transcript.
+- `manta_switch_model(query)` — switch this session to the model the user
+  asked for (e.g. "opus", "sonnet 4"), resolved with a fuzzy matcher. The
+  change is immediate and visible in the composer's model pill, but applies
+  to **subsequent** turns — the current reply has already started on the old
+  model, so never claim the current response is on the new one.
+- `manta_rename_session(name)` — rename this session/window in the sidebar.
+  Immediate; the sidebar refreshes on its own.
+- `manta_list_sessions()` — list the sessions (windows) in this workspace with
+  their name, index, type (chat/terminal), branch, and which one you are.
+
+Use them to **act rather than ask** when the user's intent is clear — just do
+it and confirm tersely; each reports the effect as immediate and visible.
+`manta_list_sessions` is the cheap read for orienting within the workspace.
+
+**What is NOT available, and must not be attempted:** there is no tool to
+interrupt or abort the current turn, and no way to approve a pending
+permission or answer a question from these tools. Interruption and permission
+approval are out of scope for app control — do not claim you performed them or
+try to route around them with the other tools.
+
+Install/update is a COPY, never a symlink: copy
+`docs/opencode-tools/manta-app.ts` to `~/.config/opencode/tools/manta-app.ts`
+then `systemctl --user restart opencode-serve`. A symlink fails to resolve
+`@opencode-ai/plugin` and the tool silently never registers.
+
 ## manta send-file
 
 You have a `send_file` tool to hand a file to the user and record it as a

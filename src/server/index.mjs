@@ -83,6 +83,7 @@ import {
   isValidSubdomain,
 } from "./servePage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
+import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import {
@@ -2017,6 +2018,34 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- App control ----------
+  // POST /api/app-control  body {action, sessionID, directory, ...args}
+  //   → {ok, ...} on success, or {ok:false, error} (400) on a bad request.
+  // Lets an opencode session drive the app the user is looking at: switch its
+  // model, rename the session, compact it, or list the caller's workspace
+  // sessions. Called by the remote AI's global opencode `manta_*` tools. See
+  // src/server/appControl.mjs.
+  //
+  // The client-visible effects are published on the bus as ONE kind,
+  // `appControl`, with an `action` discriminator — the renderer subscribes
+  // once (the sibling ticket) and switches on payload.action.
+  if (path === "/api/app-control") {
+    try {
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const deps = { publish: (payload) => bus.publish({ kind: "appControl", payload }) };
+        const result = await appControl.dispatch(body?.action, body || {}, deps);
+        respondJson(res, result.ok ? 200 : 400, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      // Errors return a message the model can act on, never a bare 500.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
