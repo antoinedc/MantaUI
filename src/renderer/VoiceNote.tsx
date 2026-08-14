@@ -22,11 +22,21 @@
 //                        player's chrome is described. No hooks, no fetching,
 //                        no <audio>: every visual is a prop, so the ready,
 //                        expired and pending states cannot drift apart.
-//   - VoicePlayer      — binds a stored note to playback and renders the frame.
+//   - VoicePlayer      — binds a stored note to the SHARED conversation-wide
+//                        playback engine (useVoicePlayback) and renders the
+//                        frame.
 //   - PendingVoiceRow  — the not-yet-real row shown while a recording uploads +
 //                        transcribes; renders the same frame, non-interactive.
+//
+// Why is the engine NOT in the row? The transcript is virtualised — Virtuoso
+// destroys rows that scroll out of view, so a row-owned <audio> would be torn
+// down (its object URL revoked) mid-playback by scrolling. The engine lives in
+// the conversation-level VoicePlaybackProvider instead, which means scrolling
+// never affects playback, only one note plays at a time, and each clip is
+// fetched once for the whole conversation.
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo } from "react";
+import { useVoicePlayback } from "./hooks/useVoicePlayback";
 import { Pause, Play } from "lucide-react";
 import { bucketPeaks, formatClock, normalizeForDisplay } from "../shared/waveform.mjs";
 import type { VoiceNoteRecord } from "../shared/types";
@@ -75,8 +85,6 @@ export const VoiceBars = memo(function VoiceBars({
     </div>
   );
 });
-
-const SPEEDS = [1, 1.5, 2];
 
 // ===== VoicePlayerFrame — the presentational shell =====
 //
@@ -152,90 +160,32 @@ export const VoicePlayerFrame = memo(function VoicePlayerFrame({
   );
 });
 
-// ===== VoicePlayer — a stored note bound to playback =====
+// ===== VoicePlayer — a stored note bound to the shared playback engine =====
 //
-// Drives ONE <audio> from a fetched blob URL (never a `?token=` URL) and hands
-// the frame its visual state. An expired note skips the fetch entirely.
+// Pure consumer: it renders the frame and calls into the conversation-wide
+// engine (useVoicePlayback). It owns no <audio>, no fetch, no audio state —
+// those live in VoicePlaybackProvider, so scrolling the virtualised transcript
+// never interrupts playback and only one note plays at a time.
 export const VoicePlayer = memo(function VoicePlayer({ note }: { note: VoiceNoteRecord }) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [url, setUrl] = useState<string | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [currentMs, setCurrentMs] = useState(0);
-  const [speedIdx, setSpeedIdx] = useState(0);
-  const audioAvailable = note.audioAvailable;
+  const { playing, currentMs, speed, toggle, cycleSpeed } = useVoicePlayback(note.id);
 
-  // CHANGE 1: skip the fetch for an expired note — it can only 404.
-  useEffect(() => {
-    if (!audioAvailable) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    window.api
-      .voiceFetchNote(note.id)
-      .then((blob) => {
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
-      })
-      .catch(() => {
-        // Audio swept/expired between the list and the tap — leave the row
-        // silent rather than throwing (the frame already reads as inactive).
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      setUrl(null);
-      setPlaying(false);
-    };
-  }, [note.id, audioAvailable]);
-
-  const durationMs =
-    note.durationMs > 0 ? note.durationMs : Math.round((audioRef.current?.duration ?? 0) * 1000);
-  const progress = durationMs > 0 ? Math.min(1, currentMs / durationMs) : 0;
-  const remainingMs = Math.max(0, durationMs - currentMs);
-
-  const toggle = () => {
-    const a = audioRef.current;
-    if (!a || !url) return;
-    if (playing) a.pause();
-    // CHANGE 2: drop the `a.currentTime = a.currentTime || 0;` line — it
-    // assigns currentTime to itself and is a no-op.
-    else void a.play().catch(() => { /* autoplay block — ignore */ });
-  };
-
-  const cycleSpeed = () => {
-    const next = (speedIdx + 1) % SPEEDS.length;
-    setSpeedIdx(next);
-    if (audioRef.current) audioRef.current.playbackRate = SPEEDS[next];
-  };
-
-  if (!audioAvailable) {
+  if (!note.audioAvailable) {
     return <VoicePlayerFrame peaks={note.peaks} clockMs={note.durationMs} expired />;
   }
 
+  const progress = note.durationMs > 0 ? Math.min(1, currentMs / note.durationMs) : 0;
+  const remainingMs = Math.max(0, note.durationMs - currentMs);
+
   return (
-    <>
-      <VoicePlayerFrame
-        peaks={note.peaks}
-        clockMs={remainingMs}
-        progress={progress}
-        playing={playing}
-        // CHANGE 3: withholding onToggle until the blob has arrived replaces the
-        // old `disabled={!url}` — the disc reads as not-yet-ready instead of
-        // being a live button that silently does nothing.
-        onToggle={url ? toggle : undefined}
-        speed={SPEEDS[speedIdx]}
-        onCycleSpeed={cycleSpeed}
-      />
-      <audio
-        ref={audioRef}
-        src={url ?? undefined}
-        onTimeUpdate={(e) => setCurrentMs(Math.round(e.currentTarget.currentTime * 1000))}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onEnded={() => { setPlaying(false); setCurrentMs(durationMs); }}
-        onLoadedMetadata={() => setCurrentMs(0)}
-      />
-    </>
+    <VoicePlayerFrame
+      peaks={note.peaks}
+      clockMs={remainingMs}
+      progress={progress}
+      playing={playing}
+      onToggle={toggle}
+      speed={speed}
+      onCycleSpeed={cycleSpeed}
+    />
   );
 });
 
