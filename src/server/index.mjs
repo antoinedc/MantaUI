@@ -1191,10 +1191,14 @@ const handleRequest = async (req, res) => {
   // answer CORS preflight so the mobile WebView's fetch() isn't blocked.
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, X-Filename, Authorization",
-  );
+  // `*` covers every custom header a client sends (x-filename on uploads;
+  // x-mime / x-duration-ms / x-peaks on voice notes) so this can never drift
+  // behind a new route again. `Authorization` is NOT covered by the wildcard
+  // per the Fetch spec and must stay listed by name. The wildcard is only
+  // honoured for non-credentialed requests — every client here sends the box
+  // token in an Authorization header, never a cookie.
+  res.setHeader("Access-Control-Allow-Headers", "*, Authorization");
+  res.setHeader("Access-Control-Max-Age", "600");
   if (req.method === "OPTIONS") {
     res.writeHead(204).end();
     return;

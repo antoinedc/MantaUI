@@ -24,7 +24,7 @@
 
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { readBody, sendJson, sendText } from "./http.mjs";
+import { readBody, sendJson, sendText, corsHeaders } from "./http.mjs";
 import {
   isValidBoxId,
   loadStore,
@@ -351,12 +351,7 @@ export function createGatewayServer({
 
     // CORS preflight — short-circuit before any other handling.
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type, authorization, x-box-id",
-        "Access-Control-Max-Age": "600",
-      });
+      res.writeHead(204, corsHeaders());
       return res.end();
     }
 

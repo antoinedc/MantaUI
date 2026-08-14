@@ -85,7 +85,7 @@ test("corsHeaders: shape used by both sendJson and sendText", () => {
   const h = corsHeaders();
   assert.equal(h["Access-Control-Allow-Origin"], "*");
   assert.match(h["Access-Control-Allow-Methods"], /POST/);
-  assert.match(h["Access-Control-Allow-Headers"], /authorization/);
+  assert.equal(h["Access-Control-Allow-Headers"], "*, Authorization");
 });
 
 test("sendJson: writes a JSON response with CORS + content-type", () => {
