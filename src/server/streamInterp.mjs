@@ -108,7 +108,7 @@ function newSessionState() {
 //
 // App contract (the iOS rendering half, sequenced BET, must read exactly these
 // frame + field names so the two halves cannot drift):
-//   toolStarted { sessionId, idx, toolName, toolPresentationHint?, status }
+//   toolStarted { sessionId, idx, callID, toolName, toolPresentationHint?, status }
 //   toolOutput  { sessionId, idx, text }
 //   toolEnded   { sessionId, idx, ok, truncated? }
 //
@@ -116,6 +116,11 @@ function newSessionState() {
 //   sessionId            string   — the opencode session the tool belongs to
 //   idx                  string   — the tool PART ID; stable per tool across the
 //                                   whole run (identical on started/output/ended)
+//   callID               string   — the tool's stable call id (opencode's
+//                                   `callID`, falling back to `idx`); shared with
+//                                   the canonical step row's id so a live row is
+//                                   replaced IN PLACE by its completed sibling
+//                                   instead of removing one and inserting another
 //   toolName             string   — e.g. "bash", "read", "write", "task"
 //   toolPresentationHint string?  — opencode's human title for the part (e.g.
 //                                   "Run: npm test"); null when the box gave none
@@ -141,15 +146,23 @@ function updateToolFrames(st, sid, part, emit) {
   const status = typeof state?.status === "string" ? state.status : null;
   if (!status) return;
 
+  // The canonical step row is keyed by the tool's callID (see the Swift
+  // `ChatTranscriptMapper.stepIdentity`). Stream that same id here so the live
+  // row and its completed canonical sibling carry the same identity — the only
+  // thing that lets the turn-boundary refetch REPLACE the row in place instead
+  // of removing + inserting (a visible flash/reorder).
+  const callID = typeof part.callID === "string" && part.callID.length > 0 ? part.callID : idx;
+
   let tool = st.tools.get(idx);
 
   // A tool the device hasn't been told about yet -> toolStarted.
   if (!tool) {
-    tool = { idx, name: part.tool ?? null, status, sent: 0, truncated: false, ended: false };
+    tool = { idx, callID, name: part.tool ?? null, status, sent: 0, truncated: false, ended: false };
     st.tools.set(idx, tool);
     emit(sid, "toolStarted", {
       sessionId: sid,
       idx,
+      callID,
       toolName: tool.name,
       toolPresentationHint: typeof state?.title === "string" ? state.title : null,
       status,

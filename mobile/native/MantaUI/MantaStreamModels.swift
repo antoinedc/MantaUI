@@ -289,6 +289,9 @@ struct StreamSubagentChildPayload: Codable, Equatable, Sendable {
 struct StreamToolStartedPayload: Codable, Equatable, Sendable {
     var sessionId: String
     var idx: String
+    /// The tool's stable call id. Optional so a frame from an older box (or a
+    /// fixture that omits it) still decodes; callers fall back to `idx`.
+    var callID: String?
     var toolName: String?
     var toolPresentationHint: String?
     var status: String?

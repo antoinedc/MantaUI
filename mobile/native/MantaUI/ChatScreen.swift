@@ -808,32 +808,13 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
-            // LIVE running-tool rows (BET-753): what the box is doing mid-turn,
-            // pinned above the composer. Each vanishes when its `toolEnded`
-            // frame lands and the canonical refetch renders it as a step row.
-            if !store.runningTools.isEmpty {
-                ForEach(Array(store.runningTools.enumerated()), id: \.element.idx) { _, tool in
-                    RunningToolRow(tool: tool, tokens: tokens)
-                        .transition(.opacity)
-                }
-            }
-            if let err = store.sessionError {
-                ChatNoticeRow(text: err.message, color: tokens.danger, tokens: tokens)
-            }
-            if let trunc = store.truncation, !store.running {
-                ChatNoticeRow(text: trunc.label ?? "Response truncated", color: tokens.warn, tokens: tokens)
-            }
-            if !store.queuedPrompts.isEmpty {
-                ChatNoticeRow(
-                    text: store.queuedPrompts.count == 1
-                        ? "1 message queued — sends when this turn finishes"
-                        : "\(store.queuedPrompts.count) messages queued — send when this turn finishes",
-                    color: tokens.tx2,
-                    tokens: tokens
-                )
-            }
+            // Only things that BLOCK the turn and need a tap stay here. Live
+            // running tools now render INSIDE the transcript (in the turn that
+            // spawned them); sessionError / truncation / queued prompts moved
+            // into the transcript tail too. Todos stay, collapsed to a single
+            // line while a turn runs.
             if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
-                TodosCard(payload: todos, tokens: tokens)
+                TodosCard(payload: todos, tokens: tokens, compact: store.running)
             }
             if let permission = newestPermission {
                 PermissionCard(permission: permission, tokens: tokens) { reply in
@@ -951,6 +932,9 @@ struct ChatSubagentScreen: View {
 private struct TodosCard: View {
     let payload: StreamTodosPayload
     let tokens: Tokens
+    /// True while a turn runs: the card collapses to a single summary line so
+    /// the pinned area reads quiet during work (BET-823).
+    let compact: Bool
 
     /// The rows to draw: the box already computes the "top 5 + hidden counts"
     /// window (`visible`), so prefer it and fall back to the raw active list.
@@ -973,18 +957,22 @@ private struct TodosCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            // The box's todo items carry NO id field, ever, so every item's
-            // `id` is nil and keying on it gives every row the SAME identity —
-            // SwiftUI then renders one row's content repeated N times. Key on
-            // array POSITION instead: position IS the identity here, exactly as
-            // the desktop card does (src/renderer/MessageRow.tsx, ActiveTodos).
-            ForEach(Array(rows.enumerated()), id: \.offset) { pair in
-                todoRow(pair.element)
-            }
-            if let overflowSummary {
-                Text(overflowSummary)
-                    .font(.manta(size: Metrics.type.xs))
-                    .foregroundColor(tokens.tx4)
+            if compact {
+                compactRow
+            } else {
+                // The box's todo items carry NO id field, ever, so every item's
+                // `id` is nil and keying on it gives every row the SAME identity —
+                // SwiftUI then renders one row's content repeated N times. Key on
+                // array POSITION instead: position IS the identity here, exactly as
+                // the desktop card does (src/renderer/MessageRow.tsx, ActiveTodos).
+                ForEach(Array(rows.enumerated()), id: \.offset) { pair in
+                    todoRow(pair.element)
+                }
+                if let overflowSummary {
+                    Text(overflowSummary)
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                }
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -996,6 +984,30 @@ private struct TodosCard: View {
         )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("todos-card")
+    }
+
+    /// The single-line collapse shown during a running turn — a count summary
+    /// with the in-progress figure, so the user still knows work is pending
+    /// without a full checklist pinning the composer.
+    private var compactRow: some View {
+        HStack(spacing: Metrics.spacing.sp2) {
+            Image(systemName: "checklist")
+                .font(.system(size: Metrics.type.xs))
+                .foregroundColor(tokens.tx4)
+            Text(compactSummary)
+                .font(.manta(size: Metrics.type.small))
+                .foregroundColor(tokens.tx2)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var compactSummary: String {
+        let total = rows.count
+        let inProgress = rows.filter { ($0.status ?? "").lowercased() == "in_progress" }.count
+        if total <= 1 { return "1 todo" }
+        if inProgress == 0 { return "\(total) todos" }
+        return "\(total) todos · \(inProgress) in progress"
     }
 
     /// One todo row. Status styling matches the desktop; `status` is compared
@@ -1231,27 +1243,5 @@ private struct QuestionCard: View {
                 customText: customText
             )
         )
-    }
-}
-
-// MARK: - Shared notice row (session errors / truncation)
-
-private struct ChatNoticeRow: View {
-    let text: String
-    let color: Color
-    let tokens: Tokens
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(color)
-            Text(text)
-                .font(.manta(size: Metrics.type.xs))
-                .foregroundColor(color)
-                .lineLimit(3)
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 }

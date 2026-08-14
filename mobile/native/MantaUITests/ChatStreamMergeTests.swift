@@ -493,12 +493,25 @@ final class ChatStreamMergeTests: XCTestCase {
 
     // MARK: - Live tools (BET-753)
 
-    /// A `toolStarted` frame surfaces a running-tool row on the store, even
-    /// before any canonical transcript rows exist.
-    func testToolStartedPopulatesRunningTools() async {
+    /// The step rows across all blocks in order, for asserting the live-tool
+    /// merge (BET-823).
+    private static func stepRows(in blocks: [TranscriptBlock]) -> [ToolStep] {
+        blocks.flatMap { block -> [ToolStep] in
+            guard case .steps(let content) = block else { return [] }
+            return content.rows.compactMap { row in
+                guard case .step(let step) = row else { return nil }
+                return step
+            }
+        }
+    }
+
+    /// A `toolStarted` frame surfaces the live tool as a step row INSIDE the
+    /// transcript (merged into a step group keyed by its callID), not as a
+    /// pinned overlay above the composer.
+    func testToolStartedMergesLiveToolIntoTranscript() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
-        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","callID":"toolu_1","toolName":"bash","toolPresentationHint":"Run: npm test","status":"running"}}"#)
 
         let store = ChatSessionStore(
             sessionId: "ses",
@@ -507,15 +520,17 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         await Task.yield()
 
-        XCTAssertEqual(store.runningTools.count, 1)
-        XCTAssertEqual(store.runningTools[0].idx, "toolu_1")
-        XCTAssertEqual(store.runningTools[0].name, "bash")
-        XCTAssertEqual(store.runningTools[0].presentationHint, "Run: npm test")
+        let steps = Self.stepRows(in: store.blocks)
+        XCTAssertEqual(steps.count, 1, "the live tool renders as a step row in the transcript")
+        XCTAssertEqual(steps[0].id, "toolu_1", "the live step is keyed by the callID so it replaces in place on completion")
+        XCTAssertEqual(steps[0].verb, "Ran")
+        XCTAssertEqual(steps[0].target, "Run: npm test")
+        XCTAssertEqual(steps[0].status, .running)
     }
 
-    /// Appended `toolOutput` deltas for the same `idx` concatenate in order; a
-    /// new `idx` starts a fresh tail.
-    func testToolOutputConcatenatesByIndexInOrder() async {
+    /// Appended `toolOutput` deltas for the same `idx` concatenate onto the live
+    /// step's tail in order; a new `idx` starts a fresh tail.
+    func testToolOutputTailConcatenatesOnLiveStep() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -532,15 +547,15 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_2","text":"file.txt"}}"#)
         await Task.yield()
 
-        XCTAssertEqual(store.runningTools.map(\.idx), ["toolu_1", "toolu_2"])
-        XCTAssertEqual(store.runningTools[0].tail, "one\ntwo\n", "deltas for the same idx concatenate in order")
-        XCTAssertEqual(store.runningTools[1].tail, "file.txt", "a new idx starts a fresh tail")
+        let steps = Self.stepRows(in: store.blocks)
+        XCTAssertEqual(steps.map(\.id), ["toolu_1", "toolu_2"], "live tools render in start order")
+        XCTAssertEqual(steps[0].output, "one\ntwo\n", "deltas for the same idx concatenate in order")
+        XCTAssertEqual(steps[1].output, "file.txt", "a new idx starts a fresh tail")
     }
 
-    /// `toolEnded` removes the running tool; the store surfaces the outcome
-    /// (`ok:false`/`truncated`) on the retained record until the canonical
-    /// refetch takes over.
-    func testToolEndedRemovesRunningToolAndReflectsOutcome() async {
+    /// `toolEnded` removes the live step from the transcript; the event store
+    /// retains the outcome (`ok:false`/`truncated`) for the canonical refetch.
+    func testToolEndedRemovesLiveStepAndRetainsOutcome() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -555,7 +570,7 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
         await Task.yield()
 
-        XCTAssertEqual(store.runningTools.count, 0, "an ended tool leaves the running set")
+        XCTAssertEqual(Self.stepRows(in: store.blocks).count, 0, "an ended tool leaves the transcript's live steps")
         let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
         XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
         XCTAssertEqual(reflected?.ok, false)

@@ -40,6 +40,11 @@ struct StreamTextChunk: Equatable, Sendable {
 /// turn-boundary refetch lands. Mirror of the server's `st.tools` record.
 struct LiveTool: Equatable, Sendable {
     var idx: String
+    /// The tool's stable call id — the SAME identity the canonical `ToolStep`
+    /// row carries (see `ChatTranscriptMapper.stepIdentity`), so the live row
+    /// and its completed canonical sibling share an id and replace in place.
+    /// Falls back to `idx` when the box gave no callID.
+    var callID: String
     var name: String?
     var presentationHint: String?
     var status: String?
@@ -172,8 +177,10 @@ enum MantaStreamRouter {
             s.toolStartOrder.removeAll()
         case "toolStarted":
             if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
+                let callID = (p.callID?.isEmpty ?? true) ? p.idx : p.callID!
                 s.tools[p.idx] = LiveTool(
                     idx: p.idx,
+                    callID: callID,
                     name: p.toolName,
                     presentationHint: p.toolPresentationHint,
                     status: p.status

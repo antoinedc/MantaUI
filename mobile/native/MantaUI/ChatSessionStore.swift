@@ -168,11 +168,6 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var questions: [QuestionRequest] = []
     @Published private(set) var permissions: [PermissionRequest] = []
     @Published private(set) var subagents: [StreamSubagentPayload] = []
-    /// Live tools currently running on the box, in start order (BET-753). The
-    /// chat renders each as a running-tool row with its live bash tail; a tool
-    /// leaves the set the moment its `toolEnded` frame lands, and the canonical
-    /// turn-boundary refetch renders it as a step row.
-    @Published private(set) var runningTools: [LiveTool] = []
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
     /// POSTed while `running`, which is what used to implicitly abort the
@@ -418,7 +413,6 @@ final class ChatSessionStore: ObservableObject {
         sessionError = s.sessionError
         todos = s.todos
         subagents = s.subagents
-        runningTools = s.runningTools
 
         // Which frame (if any) just changed this session's stream state. The
         // `$sessionStates` sink fires on every republish, so the stamp only
@@ -582,10 +576,29 @@ final class ChatSessionStore: ObservableObject {
     /// visible duplicate, not a harmless overlap. The tail is emptied by the
     /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
-        // `uniqueTranscriptRows` (not a bare `stableScrollID` map) is
-        // load-bearing: content-derived ids can collide across a long history,
-        // and a duplicate id traps inside MessagingUI's diff the moment
-        // `loadEarlier()` widens the window over the colliding pair.
+        // LIVE running tools, appended into THIS turn's step rail. They are not
+        // canonical content, so they merge here (on every stream frame) rather
+        // than in the mapper that feeds `transcript` — that keeps `transcript`
+        // pristine while the live rows tail their output and vanish on
+        // turnComplete (when the canonical refetch takes them over as steps).
+        let liveTools = eventStore.sessionStates[sessionId]?.runningTools ?? []
+        let liveTranscript = ChatTranscriptMapper.appendingLiveTools(liveTools, to: transcript)
+
+        // Terminal state of the current turn, MOVED out of the pinned area into
+        // the transcript, at the end of the turn it belongs to: session errors
+        // and truncations scroll WITH their turn rather than hovering over the
+        // composer.
+        var trailing: [TranscriptBlock] = []
+        if let err = sessionError {
+            trailing.append(.notice(err.message, .error))
+        }
+        if let trunc = truncation, !running {
+            trailing.append(.notice(trunc.label ?? "Response truncated", .warn))
+        }
+        // Prompts accepted mid-turn render as dim ghost bubbles at the very
+        // tail — where they will actually land once the current turn finishes.
+        trailing.append(contentsOf: queuedPrompts.map { .queuedPrompt($0.text) })
+
         let newRows: [TranscriptRow]
         if inProgressText.isEmpty {
             // No live tail: the whole transcript is canonical. If the turn
@@ -597,7 +610,7 @@ final class ChatSessionStore: ObservableObject {
             // Guarded on `wasRenderingTail`: `send()` mints `liveTailRowID`
             // before any text exists, and that optimistic no-tail state must
             // not rebadge the previous turn's last prose.
-            var rows = uniqueTranscriptRows(transcript)
+            var rows = uniqueTranscriptRows(liveTranscript)
             if wasRenderingTail,
                !liveTailRowID.isEmpty,
                let lastProse = rows.lastIndex(where: {
@@ -607,16 +620,17 @@ final class ChatSessionStore: ObservableObject {
                 liveTailRowID = ""
             }
             wasRenderingTail = false
-            blocks = transcript
-            newRows = rows
+            blocks = liveTranscript + trailing
+            newRows = rows + uniqueTranscriptRows(trailing)
         } else {
             // The live tail has no completion time yet — it gets one when the
             // turn ends and the canonical refetch replaces this block. The row
             // keeps `liveTailRowID` across the settle so it never blinks.
             wasRenderingTail = true
-            blocks = transcript + [.prose(inProgressText, at: nil)]
-            newRows = uniqueTranscriptRows(transcript)
+            blocks = liveTranscript + [.prose(inProgressText, at: nil)] + trailing
+            newRows = uniqueTranscriptRows(liveTranscript)
                 + [TranscriptRow(id: liveTailRowID, block: .prose(inProgressText, at: nil))]
+                + uniqueTranscriptRows(trailing)
         }
         rows = newRows
         // Cap the subagent stores at the children the CURRENT transcript can

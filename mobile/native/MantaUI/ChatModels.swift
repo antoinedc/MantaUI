@@ -119,12 +119,37 @@ enum ChatClock {
     }
 }
 
-/// Map a tool part's `state.status` string onto the StepStatus dot.
+/// Map a tool part's `state.status` string onto the StepStatus taxonomy.
 enum StepStatusFromTool {
     static func status(_ raw: String?) -> StepStatus {
-        // Only an explicit terminal "completed" is `done`; everything else
-        // (pending / running / error) is a live `running` row.
-        raw?.lowercased() == "completed" ? .done : .running
+        switch (raw ?? "").lowercased() {
+        case "completed": return .completed
+        case "error": return .error
+        case "denied": return .denied
+        case "awaitingapproval", "awaiting_approval": return .awaitingApproval
+        case "pending": return .pending
+        default: return .running
+        }
+    }
+}
+
+/// Whether a step row renders expanded, given its state and the user's manual
+/// override. Pure so it is unit-testable with no view dependencies (mirrors the
+/// `BranchFreshnessPolicy` shape in ChatScreen.swift).
+enum StepDisclosure {
+    /// User intent always wins: a row someone opened must never close under
+    /// them, and a row they closed must stay closed. Only when the user has
+    /// not touched the row does the state-driven default apply.
+    static func expanded(status: StepStatus, userToggled: Bool?) -> Bool {
+        if let userToggled { return userToggled }
+        switch status {
+        case .running, .awaitingApproval, .error, .denied:
+            // Live output tails; a failure must never auto-collapse.
+            return true
+        case .completed, .pending:
+            // Keeps a many-step turn readable by default.
+            return false
+        }
     }
 }
 
@@ -241,6 +266,61 @@ enum ChatTranscriptMapper {
         }
         flush(&pending, into: &blocks)
         return blocks
+    }
+
+    /// Append the still-running LIVE tools (streamed mid-turn by the box) to the
+    /// transcript, in the turn that spawned them.
+    ///
+    /// This is the replacement for the deleted pinned running-tool overlay:
+    /// a tool call renders inside the transcript (tailing its output as a live
+    /// step) instead of floating above the composer. Each live tool becomes a
+    /// `.running` step keyed by the SAME `callID` the canonical `stepIdentity`
+    /// uses, so a live row and its completed canonical sibling share one
+    /// identity and the turn-boundary refetch replaces the row IN PLACE — no
+    /// remove-and-reinsert flash (the whole point of this issue).
+    ///
+    /// A live tool whose `callID` the transcript already owns is skipped: the
+    /// canonical step has taken over, so appending again would duplicate it.
+    /// Live tools append to the LAST unrolled `.steps` group (continuing the
+    /// turn's rail); if the last step block is a rolled-up summary — completed
+    /// content a running tool does not belong to — or there is none, a fresh
+    /// group is opened at the end.
+    static func appendingLiveTools(_ liveTools: [LiveTool], to blocks: [TranscriptBlock]) -> [TranscriptBlock] {
+        guard !liveTools.isEmpty else { return blocks }
+
+        let liveSteps: [ToolStep] = liveTools.map { tool in
+            ToolStep(
+                id: tool.callID.isEmpty ? tool.idx : tool.callID,
+                verb: StepVerb.text(for: tool.name ?? "tool"),
+                target: tool.presentationHint.flatMap { $0.isEmpty ? nil : $0 } ?? tool.name ?? "tool",
+                duration: "",
+                status: .running,
+                output: tool.tail.isEmpty ? nil : tool.tail
+            )
+        }
+
+        let existingIDs = Set(blocks.flatMap { block -> [String] in
+            guard case .steps(let content) = block else { return [] }
+            return content.rows.compactMap { row -> String? in
+                guard case .step(let step) = row else { return nil }
+                return step.id
+            }
+        })
+        // A live tool becomes a `.step` row — the `.rows` case holds
+        // `[StepGroupRow]`, and a step row is the step payload wrapped in
+        // `.step`. Deduping uses the ToolStep id before wrapping.
+        let toAppend: [StepGroupRow] = liveSteps
+            .filter { !existingIDs.contains($0.id) }
+            .map { .step($0) }
+        guard !toAppend.isEmpty else { return blocks }
+
+        var result = blocks
+        if let last = result.indices.last, case .steps(.rows(let rows)) = result[last] {
+            result[last] = .steps(.rows(rows + toAppend))
+        } else {
+            result.append(.steps(.rows(toAppend)))
+        }
+        return result
     }
 
     private static func flush(_ pending: inout [StepGroupRow], into blocks: inout [TranscriptBlock]) {

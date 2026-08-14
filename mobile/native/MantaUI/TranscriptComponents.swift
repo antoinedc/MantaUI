@@ -211,9 +211,18 @@ struct MantaProseCaptureScene: View {
 // Verb is 600 weight `tx2`; target is 12px mono `tx4`. Output is collapsed by
 // default, revealed inline on `inset` in 12px mono when the row is tapped.
 
+/// The Vercel AI Elements tool-step taxonomy, ported verbatim. `awaitingApproval`
+/// (a tool blocked on a permission gate) and `denied` (permission refused) are
+/// FIRST-CLASS states, not error variants — a coding agent with a permission
+/// gate needs to tell "waiting for the user" from "failed", and folding either
+/// into `.error` would lose that.
 enum StepStatus: Hashable {
+    case pending           // queued, not started
+    case awaitingApproval  // blocked on a permission request
     case running
-    case done
+    case completed
+    case error
+    case denied            // permission refused
 }
 
 struct ToolStep: Identifiable, Hashable {
@@ -243,15 +252,22 @@ struct ToolStep: Identifiable, Hashable {
 struct StepRowView: View {
     let step: ToolStep
     let tokens: Tokens
-    @State private var revealed = false
+    /// The user's own expand/collapse intent, nil until they tap. User intent
+    /// always beats the state-driven default: a row they opened must never
+    /// close under them, and one they closed must stay closed (StepDisclosure).
+    @State private var userToggled: Bool?
+
+    /// The expanded state is DECIDED in the pure `StepDisclosure` function, not
+    /// inline here — so expansion-by-state is unit-testable without a view.
+    private var expanded: Bool {
+        StepDisclosure.expanded(status: step.status, userToggled: userToggled)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            Button(action: { revealed.toggle() }) {
+            Button(action: { userToggled = !expanded }) {
                 HStack(spacing: Metrics.spacing.sp2) {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
+                    statusGlyph
                     // §8: a step row is ONE line. The verb is normally a word
                     // ("Ran", "Read"), but a tool name can be long enough to
                     // wrap, which broke the row's fixed height and made the
@@ -274,33 +290,73 @@ struct StepRowView: View {
                         .foregroundColor(tokens.tx4)
                 }
                 .padding(.vertical, Metrics.type.stepRowY)
-                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.leading, glyphLeading)
+                .padding(.trailing, Metrics.spacing.sp3)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            if revealed, let output = step.output {
+            if expanded, let output = step.output {
                 Text(output)
                     .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, Metrics.spacing.sp2)
-                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.leading, contentLeading)
+                    .padding(.trailing, Metrics.spacing.sp3)
+                    // Only an EXPANDED row's output well keeps a material of its
+                    // own — Liquid Glass belongs to the navigation layer, never
+                    // the content layer, so a tool step gets no background of its
+                    // own (see StepGroupView; a rail replaces the old panel).
                     .background(tokens.inset)
                     .accessibilityIdentifier("step-output")
             }
         }
         // Expand/collapse is animated, matching the file's animation convention
         // (BET-752 task 6).
-        .animation(.smooth(duration: 0.22), value: revealed)
+        .animation(.smooth(duration: 0.22), value: expanded)
     }
 
-    private var dotColor: Color {
+    /// The rail line (StepGroupView) sits at `sp4` from the group's leading
+    /// edge, and each status glyph sits ON that line, breaking it. Parking the
+    /// glyph's leading at `sp4 - stepDot/2` centres it on the line.
+    private var glyphLeading: CGFloat {
+        Metrics.spacing.sp4 - Metrics.type.stepDot / 2
+    }
+
+    /// Text and output align after the glyph + its inter-glyph spacing, so an
+    /// expanded output well reads as continuing the row it belongs to.
+    private var contentLeading: CGFloat {
+        glyphLeading + Metrics.type.stepDot + Metrics.spacing.sp2
+    }
+
+    /// One SF Symbol + one Tokens colour per state, in a SINGLE switch — the
+    /// colour logic is not scattered across the view. `running` pulses.
+    @ViewBuilder
+    private var statusGlyph: some View {
         switch step.status {
-        case .running: return tokens.accent
-        case .done: return tokens.ok
+        case .pending:
+            glyph(systemName: "circle.dotted", color: tokens.tx4)
+        case .awaitingApproval:
+            glyph(systemName: "hand.raised.fill", color: tokens.warn)
+        case .running:
+            glyph(systemName: "circle.fill", color: tokens.accent)
+                .symbolEffect(.pulse)
+        case .completed:
+            glyph(systemName: "checkmark.circle.fill", color: tokens.ok)
+        case .error:
+            glyph(systemName: "exclamationmark.circle.fill", color: tokens.danger)
+        case .denied:
+            glyph(systemName: "slash.circle.fill", color: tokens.tx4)
         }
+    }
+
+    private func glyph(systemName: String, color: Color) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: Metrics.type.stepDot))
+            .foregroundColor(color)
+            .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
     }
 }
 
@@ -348,7 +404,8 @@ struct StepGroupView: View {
                             .foregroundColor(tokens.tx4)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, Metrics.type.stepRowY)
-                            .padding(.horizontal, Metrics.spacing.sp3)
+                            .padding(.leading, Metrics.spacing.sp4)
+                            .padding(.trailing, Metrics.spacing.sp3)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -361,11 +418,19 @@ struct StepGroupView: View {
                 .animation(.smooth(duration: 0.22), value: rollupExpanded)
             }
         }
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
+        // The step group is a TIMELINE RAIL, not a panel: a 1pt vertical
+        // connector inset `sp4` from the leading edge, running the height of the
+        // group, with each row's status glyph sitting on it and breaking it.
+        // Liquid Glass belongs to the navigation layer, never the content layer,
+        // so a tool step gets no material of its own — the old panel, its
+        // border stroke, and the hairline separators between rows are all gone;
+        // only an expanded row's output well keeps a fill (see StepRowView).
+        .background(alignment: .leading) {
+            Rectangle()
+                .fill(tokens.borderSubtle)
+                .frame(width: Metrics.spacing.spPx)
+                .padding(.leading, Metrics.spacing.sp4)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("step-rows")
     }
@@ -373,11 +438,8 @@ struct StepGroupView: View {
     @ViewBuilder
     private func rowsView(_ rows: [StepGroupRow]) -> some View {
         VStack(spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+            ForEach(Array(rows.enumerated()), id: \.element.id) { _, row in
                 rowView(row)
-                if index < rows.count - 1 {
-                    tokens.borderSubtle.frame(height: Metrics.spacing.spPx)
-                }
             }
         }
     }
@@ -389,85 +451,6 @@ struct StepGroupView: View {
             StepRowView(step: step, tokens: tokens)
         case .subagent(let agent):
             SubagentRowView(agent: agent, tokens: tokens)
-        }
-    }
-}
-
-// MARK: - Live running tool row (BET-753)
-//
-// The LIVE counterpart to a canonical step row. While a tool call is still in
-// flight the box streams `toolStarted`/`toolOutput`/`toolEnded` frames, and
-// this row renders what the box is doing mid-turn (tool name + status + the
-// accumulated bash tail) pinned above the composer, so the phone shows
-// something instead of nothing until the turn-boundary refetch lands.
-//
-// It mirrors the canonical `StepRowView` treatment (status dot + tool name +
-// mono tail on a `panel` group) so the live→canonical swap at the refetch
-// boundary doesn't pop. It is an OVERLAY — never part of the canonical
-// transcript (that remains `ChatSessionStore.swift`'s source of truth).
-struct RunningToolRow: View {
-    let tool: LiveTool
-    let tokens: Tokens
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: Metrics.spacing.sp2) {
-                Circle()
-                    .fill(tokens.accent)
-                    .frame(width: Metrics.type.stepDot, height: Metrics.type.stepDot)
-                Text(tool.name ?? "tool")
-                    .font(.system(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
-                    .foregroundColor(tokens.tx2)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(1)
-                // The box's human title for the part (e.g. "Run: npm test"),
-                // when it differs from the bare tool name.
-                if let hint = tool.presentationHint, !hint.isEmpty, hint != tool.name {
-                    Text(hint)
-                        .font(.system(size: Metrics.type.xs, design: .monospaced))
-                        .foregroundColor(tokens.tx4)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                Spacer(minLength: 0)
-                Text(statusText)
-                    .font(.system(size: Metrics.type.twoXS))
-                    .foregroundColor(tokens.tx4)
-            }
-            .padding(.vertical, Metrics.type.stepRowY)
-            .padding(.horizontal, Metrics.spacing.sp3)
-
-            if !tool.tail.isEmpty {
-                Text(tool.tail)
-                    .font(.system(size: Metrics.type.xs, design: .monospaced))
-                    .foregroundColor(tokens.tx3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, Metrics.spacing.sp2)
-                    .padding(.horizontal, Metrics.spacing.sp3)
-                    .background(tokens.inset)
-                    .accessibilityIdentifier("running-tool-tail")
-            }
-        }
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("running-tool-row")
-    }
-
-    /// The row's live status label. The wire `status` is one of
-    /// pending/running/completed/error; while the row renders the tool is
-    /// still in flight, so this stays truthful to the incoming value.
-    private var statusText: String {
-        switch (tool.status ?? "").lowercased() {
-        case "error": return "error"
-        case "pending": return "queued"
-        case "completed": return "done"
-        default: return "running"
         }
     }
 }
@@ -637,6 +620,14 @@ struct TimestampGutterLabel: View {
     }
 }
 
+/// A system notice (session error / truncation) rendered inline in the
+/// transcript at the end of the turn it belongs to — NOT pinned above the
+/// composer. `error` is a failed turn; `warn` is a truncation.
+enum SystemNotice: Equatable {
+    case error
+    case warn
+}
+
 enum TranscriptBlock: Equatable {
     // The date is the block's wall-clock time, shown only in the swipe-to-reveal
     // gutter. Machinery (`.steps`) carries none: a step row already states how
@@ -644,12 +635,18 @@ enum TranscriptBlock: Equatable {
     case user(String, at: Date?)
     case prose(String, at: Date?)
     case steps(StepGroupContent)
+    /// A terminal system notice (session error / truncation) at the end of the
+    /// turn it belongs to.
+    case notice(String, SystemNotice)
+    /// A prompt accepted mid-turn, waiting for the session to go idle. Rendered
+    /// as a DIM ghost user bubble where the message will actually land.
+    case queuedPrompt(String)
 
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps: return nil
+        case .steps, .notice, .queuedPrompt: return nil
         }
     }
 }
