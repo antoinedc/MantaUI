@@ -2507,6 +2507,9 @@ export function ChatPanel({
         forgeKind={forge.kind}
         forgeConnectOfferDismissed={forgeConnectOfferDismissed}
         onOpenExternal={(url) => void window.api.openExternal(url)}
+        onReviewChanges={() =>
+          void window.dispatchEvent(new CustomEvent("manta-open-review"))
+        }
         onFillComposer={updateInputWithHistoryReset}
         onDismissForgeConnect={dismissForgeConnect}
         onMerge={() => void doMerge()}

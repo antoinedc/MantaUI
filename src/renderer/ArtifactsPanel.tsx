@@ -536,6 +536,15 @@ export function ArtifactsPanel({
     setPreviewIndex(null);
   }, [sessionId]);
 
+  // BET-869: the "Review changes" button in the branch popover opens this panel
+  // on its Review tab (App.tsx separately flips the panel open). Same
+  // window-CustomEvent convention as the manta-open-* bridges.
+  useEffect(() => {
+    const handler = () => setTab("review");
+    window.addEventListener("manta-open-review", handler);
+    return () => window.removeEventListener("manta-open-review", handler);
+  }, []);
+
   const now = useMemo(() => Date.now(), []);
   const artifacts = useMemo(
     () => deriveArtifacts(messages, pages, sessionId ?? "", outbox),

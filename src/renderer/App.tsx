@@ -1268,6 +1268,15 @@ function AppInner() {
       window.removeEventListener("manta-open-settings", handler as EventListener);
   }, []);
 
+  // BET-869: the "Review changes" button in the branch popover opens the
+  // artifacts panel (ArtifactsPanel separately switches itself to its Review
+  // tab). Same window-CustomEvent convention as manta-open-settings above.
+  useEffect(() => {
+    const handler = () => setArtifactsOpen(true);
+    window.addEventListener("manta-open-review", handler);
+    return () => window.removeEventListener("manta-open-review", handler);
+  }, []);
+
   const activeWinName = activeProject?.windows.find(
     (w) => w.index === activeWindowByProject[activeProjectName!],
   )?.name ?? null;

@@ -119,6 +119,23 @@ describe("SessionHeader branch popover (BET-867)", () => {
     expect(onOpenExternal).toHaveBeenCalledWith(PR.url);
   });
 
+  it("PR present → clicking Review changes calls onReviewChanges exactly once", async () => {
+    const onReviewChanges = vi.fn();
+    h = mountSessionHeader({
+      branch: "feat/forge-seam",
+      forgeConnected: true,
+      pr: PR,
+      checksRollup: "green",
+      onReviewChanges,
+    });
+    openBranchChip(h);
+    await h.flush();
+
+    const reviewBtn = buttonWithText("Review changes");
+    act(() => reviewBtn.click());
+    expect(onReviewChanges).toHaveBeenCalledTimes(1);
+  });
+
   it("Merge is disabled with the reason as title when canMerge is false", async () => {
     h = mountSessionHeader({
       branch: "feat/forge-seam",
