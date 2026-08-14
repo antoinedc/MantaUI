@@ -596,6 +596,56 @@ test("forgeDiffForCwd: no open PR → no_pr (not an error)", async () => {
   assert.deepEqual(r.threads, []);
 });
 
+test("forgeDiffForCwd: open PRs exist but none on this branch → no_pr, not the first PR", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "git@github.com:acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () =>
+      diffAdapter({
+        prs: [
+          { ...OPEN_PR, headRef: "topic/a" },
+          { ...OPEN_PR, number: 43, headRef: "other" },
+        ],
+        diff: "@@ -1 +1 @@\n+someone elses PR\n",
+      }),
+  });
+  assert.deepEqual(r.error, "no_pr");
+  assert.equal(r.diff, "");
+  assert.deepEqual(r.threads, []);
+});
+
+test("forgeDiffForCwd: detached HEAD / unknown branch → no_pr, not the first PR", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "git@github.com:acme/widget.git",
+    currentBranch: async () => null,
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () =>
+      diffAdapter({
+        prs: [OPEN_PR],
+        diff: "@@ -1 +1 @@\n+someone elses PR\n",
+      }),
+  });
+  assert.deepEqual(r.error, "no_pr");
+  assert.equal(r.diff, "");
+  assert.deepEqual(r.threads, []);
+});
+
+test("forgeDiffForCwd: match is exact, not positional — picks the branch's PR", async () => {
+  const r = await forgeDiffForCwd("/repo", {
+    gitRemoteOrigin: async () => "git@github.com:acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () =>
+      diffAdapter({
+        prs: [{ ...OPEN_PR, number: 1, headRef: "topic/a" }, OPEN_PR],
+        diff: "@@ -1 +1 @@\n+mine\n",
+      }),
+  });
+  assert.equal(r.error, null);
+  assert.equal(r.diff, "@@ -1 +1 @@\n+mine\n");
+});
+
 test("forgeDiffForCwd: explicit { repoKey, number } addresses the PR directly (BET-850)", async () => {
   // No git deps at all — the explicit inbox target must not touch cwd/git.
   const getAdapter = (kind, token) => {
@@ -646,12 +696,12 @@ test("forgeDiffForCwd: explicit target with an invalid number → no_pr", async 
 // A draft-op test kit: injectable git/forge deps plus an in-memory stand-in
 // for the durable draft store (deep-copy load/save). `headSha` is what the
 // adapter's getPullRequest reports as the PR's CURRENT head.
-function draftKit({ prs = [OPEN_PR], headSha = "abc", adapter } = {}) {
+function draftKit({ prs = [OPEN_PR], headSha = "abc", adapter, currentBranch = async () => "feature/x" } = {}) {
   let store = [];
   const events = [];
   const deps = {
     gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
-    currentBranch: async () => "feature/x",
+    currentBranch,
     resolveToken: async () => ({ token: "ghp_t", source: "cli" }),
     getAdapter: () =>
       adapter ?? {
@@ -883,6 +933,21 @@ test("draft ops resolve no_forge / not_connected like the other write ops", asyn
     getAdapter: () => ({}),
   });
   assert.equal(rTok.error, "not_connected");
+});
+
+test("draft ops resolve no_pr when the branch has no open PR, not the first PR (BET-875)", async () => {
+  const k1 = draftKit({ prs: [{ ...OPEN_PR, headRef: "other" }] });
+  const rNone = await draftGetForCwd("/repo", k1);
+  assert.equal(rNone.draft, null);
+  assert.deepEqual(rNone.error, "no_pr");
+  const cNone = await draftCommentForCwd("/repo", { op: "add", comment: {} }, k1);
+  assert.equal(cNone.ok, false);
+  assert.deepEqual(cNone.error, "no_pr");
+
+  const k2 = draftKit({ currentBranch: async () => null });
+  const rDetached = await draftGetForCwd("/repo", k2);
+  assert.equal(rDetached.draft, null);
+  assert.deepEqual(rDetached.error, "no_pr");
 });
 
 test("forgeDeviceStart: an existing credential skips straight to the picker", async () => {

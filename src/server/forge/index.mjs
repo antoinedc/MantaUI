@@ -552,9 +552,10 @@ async function resolveRefContext(ref, deps) {
 
 // Pick the PR number a diff/draft read targets. An explicit `{ repoKey, number }`
 // ref wins outright (a cross-repo inbox PR — never derived from a branch). A
-// cwd ref picks the open PR on the current branch, falling back to the first
-// open PR, exactly as before. Returns `{ number, stale }` or `{ error: "no_pr" }`
-// / `{ rateLimited: true }`.
+// cwd ref picks the open PR on the current branch; a branch with no open PR —
+// or no branch at all (detached HEAD) — resolves to `"no_pr"`, never someone
+// else's PR. Returns `{ number, stale }` or `{ error: "no_pr" }` /
+// `{ rateLimited: true }`.
 async function resolveRefNumber(ref, ctx, deps) {
   if (typeof ref === "object" && ref !== null && ref.repoKey) {
     const number = Number(ref.number);
@@ -566,8 +567,8 @@ async function resolveRefNumber(ref, ctx, deps) {
   if (prs.length === 0) return { error: "no_pr" };
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
   const branch = await currentBranch(ctx.cwd);
-  let candidate = branch ? prs.find((p) => p.headRef === branch) : undefined;
-  if (!candidate) candidate = prs[0];
+  const candidate = branch ? prs.find((p) => p.headRef === branch) : undefined;
+  if (!candidate) return { error: "no_pr" };
   return { number: candidate.number, stale };
 }
 
@@ -995,13 +996,13 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
 
 /**
  * forge:diff — the review pane's read. A `ref` is either a session `cwd`
- * (resolve cwd → origin → repo, then pick the open PR on the current branch,
- * falling back to the first open PR) OR an explicit cross-repo target
- * `{ repoKey, number }` for an inbox PR row (no git — the read addresses the
- * forge over the API directly, BET-850). Fetches the PR's raw unified diff +
- * normalised incoming threads + head SHA. Returns `{ diff, threads, headSha,
- * error }` — never throws for a repo with no forge ("no_forge"), no token
- * ("not_connected") or no PR ("no_pr").
+ * (resolve cwd → origin → repo, then pick the open PR on the current branch;
+ * a branch with none — or detached HEAD — yields "no_pr") OR an explicit
+ * cross-repo target `{ repoKey, number }` for an inbox PR row (no git — the
+ * read addresses the forge over the API directly, BET-850). Fetches the PR's
+ * raw unified diff + normalised incoming threads + head SHA. Returns `{ diff,
+ * threads, headSha, error }` — never throws for a repo with no forge
+ * ("no_forge"), no token ("not_connected") or no PR ("no_pr").
  *
  * @param {string | { cwd?: string } | { repoKey: string, number: number }} ref
  * @param {{ gitRemoteOrigin?: (cwd: string) => Promise<string|null>,
