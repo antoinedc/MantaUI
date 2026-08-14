@@ -18,6 +18,7 @@ import { formatClock, VOICE_TAP_HOLD_MS } from "../shared/waveform.mjs";
 // model/effort menus use (PaletteShell.tsx) — keeps the keyboard-selected
 // @-file row visible when it moves past the popup's scroll fold.
 import { useSelectedIntoView } from "./PaletteShell";
+import { MeasureColumn } from "./MeasureColumn";
 
 /**
  * The send glyph: lucide's paper plane as a SOLID shape.
@@ -364,10 +365,11 @@ export function PendingScreenshotStrip({
 
 // ===== Typeahead popup =====
 //
-// Anchored above the composer box's top edge. Card elevation (--card bg,
-// --border, --shadow-md), 12px radius, max-height with scroll. Keyboard
-// up/down/Enter/Tab/Esc nav is handled by InputArea — this component is
-// purely visual + mouse selection. The selected row uses --accent-bg.
+// Sits directly above the composer box in normal flow, inside the same 72ch
+// measure column so its edges align with the input box. Card elevation
+// (--card bg, --border, --shadow-md), 12px radius, max-height with scroll.
+// Keyboard up/down/Enter/Tab/Esc nav is handled by InputArea — this component
+// is purely visual + mouse selection. The selected row uses --accent-bg.
 
 export function TypeaheadPopup({
   rows,
@@ -383,42 +385,44 @@ export function TypeaheadPopup({
   emptyHint: string;
 }) {
   return (
-    <div
-      className="shrink-0 mx-4 mb-1 max-h-[240px] overflow-y-auto rounded-lg border border-border bg-bg-soft text-meta font-mono shadow-md"
-    >
-      {rows.length === 0 && (
-        <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>
-      )}
-      {rows.map((row, idx) => {
-        const active = idx === selectedIdx;
-        // Special-case the "no attachment support" warning row — render in
-        // red, non-selectable (clicking is a no-op).
-        const isWarning = row.kind === "file" && row.key === "" && row.primary.startsWith("⚠");
-        if (isWarning) {
-          return (
-            <div
-              key={`warn:${idx}`}
-              className="px-2 py-1 flex items-center gap-2 text-danger bg-danger-bg cursor-default"
-            >
-              <span className="truncate flex-1">{row.primary}</span>
-              {row.secondary && (
-                <span className="text-danger/70 truncate max-w-[50%] text-label">
-                  {row.secondary}
-                </span>
-              )}
-            </div>
-          );
-        }
-        return (
-          <TypeaheadRowButton
-            key={`${row.kind}:${row.key}`}
-            row={row}
-            active={active}
-            onSelect={() => onSelect(row)}
-            onHover={() => onHover(idx)}
-          />
-        );
-      })}
+    <div className="shrink-0">
+      <MeasureColumn>
+        <div className="mb-1 max-h-[240px] overflow-y-auto rounded-lg border border-border bg-bg-soft text-meta font-mono shadow-md">
+          {rows.length === 0 && (
+            <div className="px-2 py-1 text-text-faint italic">{emptyHint}</div>
+          )}
+          {rows.map((row, idx) => {
+            const active = idx === selectedIdx;
+            // Special-case the "no attachment support" warning row — render in
+            // red, non-selectable (clicking is a no-op).
+            const isWarning = row.kind === "file" && row.key === "" && row.primary.startsWith("⚠");
+            if (isWarning) {
+              return (
+                <div
+                  key={`warn:${idx}`}
+                  className="px-2 py-1 flex items-center gap-2 text-danger bg-danger-bg cursor-default"
+                >
+                  <span className="truncate flex-1">{row.primary}</span>
+                  {row.secondary && (
+                    <span className="text-danger/70 truncate max-w-[50%] text-label">
+                      {row.secondary}
+                    </span>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <TypeaheadRowButton
+                key={`${row.kind}:${row.key}`}
+                row={row}
+                active={active}
+                onSelect={() => onSelect(row)}
+                onHover={() => onHover(idx)}
+              />
+            );
+          })}
+        </div>
+      </MeasureColumn>
     </div>
   );
 }

@@ -15,8 +15,8 @@
 //
 // Attachment chips render INSIDE the InputArea box (BET-416 §B), so they are
 // threaded straight through via InputAreaProps; Composer no longer renders an
-// AttachmentStrip sibling above the box. The TypeaheadPopup still floats
-// ABOVE the box (it anchors to the box's top edge).
+// AttachmentStrip sibling above the box. The TypeaheadPopup renders directly
+// ABOVE the box in normal flow, measure-capped like the box itself (BET-934).
 //
 // The InputArea prop surface is large (~40 fields) and its type is declared
 // inline in InputArea.tsx, so rather than duplicate it we accept exactly
@@ -55,7 +55,7 @@ export function Composer({
       {/* Typeahead popup — shown the moment typeahead state is set, even */}
       {/* if the result list is still loading. Empty rows render a small */}
       {/* "Searching…" placeholder so the user sees instant feedback. Floats */}
-      {/* above the composer box (anchors to its top edge, BET-416 §C). */}
+      {/* renders directly above the composer box in normal flow, measure-capped like the box (BET-934). */}
       {typeahead && (
         <TypeaheadPopup
           rows={typeaheadRows}
