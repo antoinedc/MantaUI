@@ -121,9 +121,9 @@ test("head-SHA change marks stale and does NOT delete (the invalidation rule)", 
 
 test("setVerdict persists the shared verdict subset and rejects an unknown one", async () => {
   const m = memStore();
-  const r = await setVerdict(REPO, 1, "sha1", { verdict: "approve" }, m);
+  const r = await setVerdict(REPO, 1, "sha1", { verdict: "approved" }, m);
   assert.equal(r.ok, true);
-  assert.equal(r.draft.verdict, "approve");
+  assert.equal(r.draft.verdict, "approved");
 
   const bad = await setVerdict(REPO, 1, "sha1", { verdict: "banana" }, m);
   assert.equal(bad.ok, false);

@@ -217,11 +217,11 @@ function normalizeReviewThreads(raw) {
   return threads;
 }
 
-// Map the shared draft verdict to GitHub's `event`. null (a plain "post the
-// comments, no verdict") → COMMENT, which is the neutral publish event.
+// Map the shared ReviewVerdict draft-action to GitHub's `event`. null (a plain
+// "post the comments, no verdict") → COMMENT, the neutral publish event.
 function verdictToEvent(verdict) {
-  if (verdict === "approve") return "APPROVE";
-  if (verdict === "request_changes") return "REQUEST_CHANGES";
+  if (verdict === "approved") return "APPROVE";
+  if (verdict === "changes_requested") return "REQUEST_CHANGES";
   return "COMMENT";
 }
 
@@ -439,7 +439,7 @@ export function createGithubAdapter(request, requestWrite, requestText = request
      *
      * @param {{ owner: string, repo: string }} repo
      * @param {number} number
-     * @param {{ verdict?: "approve" | "request_changes" | "comment" | null,
+     * @param {{ verdict?: "approved" | "changes_requested" | "commented" | null,
      *           body?: string,
      *           comments?: Array<{ path: string, line: number, side: string, startLine?: number | null, body: string }>,
      *           headSha?: string }} [input]

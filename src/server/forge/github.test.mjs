@@ -339,7 +339,7 @@ test("submitReview POSTs ONE review carrying every buffered comment with correct
     { path: "b.ts", line: 5, side: "new", startLine: 3, body: "multi" },
   ];
   const { data } = await adapter.submitReview(REPO, 42, {
-    verdict: "approve",
+    verdict: "approved",
     body: "nice work",
     comments,
     headSha: "abc123",
@@ -369,7 +369,7 @@ test("submitReview verdict mapping: request_changes → REQUEST_CHANGES, null �
   const write = async (u, opts) => { seen.push(opts.body); return { data: {}, stale: false }; };
   const adapter = createGithubAdapter(() => Promise.resolve({ data: [], stale: false }), write);
 
-  await adapter.submitReview(REPO, 42, { verdict: "request_changes", comments: [{ path: "a.ts", line: 1, side: "new", body: "x" }] });
+  await adapter.submitReview(REPO, 42, { verdict: "changes_requested", comments: [{ path: "a.ts", line: 1, side: "new", body: "x" }] });
   await adapter.submitReview(REPO, 42, { verdict: null, comments: [{ path: "a.ts", line: 1, side: "new", body: "x" }] });
   assert.equal(seen[0].event, "REQUEST_CHANGES");
   assert.equal(seen[1].event, "COMMENT", "no verdict → the neutral COMMENT event");

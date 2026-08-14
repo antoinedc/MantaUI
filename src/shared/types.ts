@@ -504,7 +504,7 @@ export type ForgeDraft = {
   repoKey: string;
   number: number;
   headSha: string;
-  verdict: "approve" | "request_changes" | "comment" | null;
+  verdict: "approved" | "changes_requested" | "commented" | null;
   body: string;
   comments: ForgeDraftComment[];
   stale: boolean;
@@ -533,7 +533,7 @@ export type ForgeDraftCommentInput = {
     startLine?: number | null;
     body?: string;
   };
-  verdict?: "approve" | "request_changes" | "comment" | null;
+  verdict?: "approved" | "changes_requested" | "commented" | null;
   body?: string;
 };
 
@@ -546,7 +546,7 @@ export type ForgeDraftCommentResult =
 // `kind` (e.g. "http_422") and leaves the draft intact.
 export type ForgeDraftSubmitInput = {
   cwd: string;
-  verdict?: "approve" | "request_changes" | "comment" | null;
+  verdict?: "approved" | "changes_requested" | "commented" | null;
   body?: string;
 };
 

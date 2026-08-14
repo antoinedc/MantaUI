@@ -31,9 +31,9 @@ import { Pill } from "./Pill";
 import { UnifiedDiff, type UnifiedDiffGutter, type UnifiedDiffNote } from "./ToolBodies";
 
 const REVIEW_VERDICTS = [
-  { value: "approve", label: "Approve" },
-  { value: "request_changes", label: "Request changes" },
-  { value: "comment", label: "Comment" },
+  { value: "approved", label: "Approve" },
+  { value: "changes_requested", label: "Request changes" },
+  { value: "commented", label: "Comment" },
 ] as const;
 
 // Map a GitHub thread anchor onto the forge-neutral `{ path, line, side }` the

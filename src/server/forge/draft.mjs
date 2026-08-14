@@ -33,11 +33,13 @@ import { readJsonSync, writeJsonAtomic } from "../jsonStore.mjs";
 
 const STORE_PATH = statePath("forge-drafts.json");
 
-// The only review verdicts the box-buffered draft can carry. Kept in sync with
-// the shared `ReviewVerdict` in forge.mjs — this is the *draft* subset (the
-// shared enum also has "pending" / "approved" / etc. for already-posted
-// reviews, which a draft never is).
-const VERDICTS = new Set(["approve", "request_changes", "comment"]);
+// The only review verdicts the box-buffered draft can carry. Deliberately the
+// shared `ReviewVerdict` vocabulary from src/shared/forge.mjs
+// ("approved" | "changes_requested" | "commented" | "pending") — minus
+// "pending", which is a *review state*, not a draft action. A draft is never
+// already-pending; it holds one of the three postable verdicts or null (no
+// verdict yet). No second enum is defined anywhere (issue §Hygiene).
+const VERDICTS = new Set(["approved", "changes_requested", "commented"]);
 
 // A forge-neutral review-comment anchor. `side` is the renderer's "new"|"old"
 // (the adapter maps it onto the forge's word — GitHub "RIGHT"/"LEFT"). `line`

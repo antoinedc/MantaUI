@@ -495,9 +495,9 @@ test("draftCommentForCwd: add + set-verdict persist box-side", async () => {
   assert.equal(add.ok, true);
   assert.equal(add.draft.comments.length, 1);
 
-  const v = await draftCommentForCwd("/repo", { op: "set-verdict", verdict: "approve" }, k);
+  const v = await draftCommentForCwd("/repo", { op: "set-verdict", verdict: "approved" }, k);
   assert.equal(v.ok, true);
-  assert.equal(v.draft.verdict, "approve");
+  assert.equal(v.draft.verdict, "approved");
   assert.equal(v.draft.comments.length, 1, "set-verdict does not touch comments");
 
   const bad = await draftCommentForCwd("/repo", { op: "frobnicate" }, k);
@@ -521,11 +521,11 @@ test("draftSubmitForCwd: flushes EVERY buffered comment as ONE review with corre
   await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "old", body: "c2" } }, k);
   await draftCommentForCwd("/repo", { op: "add", comment: { path: "b.ts", line: 5, side: "new", startLine: 3, body: "c3" } }, k);
 
-  const r = await draftSubmitForCwd("/repo", { verdict: "approve" }, k);
+  const r = await draftSubmitForCwd("/repo", { verdict: "approved" }, k);
   assert.equal(r.ok, true);
   assert.equal(submitted.repo.owner, "acme");
   assert.equal(submitted.n, 42);
-  assert.equal(submitted.input.verdict, "approve");
+  assert.equal(submitted.input.verdict, "approved");
   assert.equal(submitted.input.comments.length, 3, "all three comments in one review");
   assert.equal(submitted.input.headSha, "abc");
   // The demo adapter receives the forge-NEUTRAL anchors (path/line/side/startLine);
