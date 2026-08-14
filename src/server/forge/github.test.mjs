@@ -57,7 +57,7 @@ test("getPullRequest normalises a captured GitHub payload into the shared PullRe
     fakeRequest({
       [base]: PR_FIXTURE,
       [`${base}/reviews`]: REVIEWS,
-      [`${base}/comments`]: COMMENTS,
+      [`${base}/comments?per_page=100&page=1`]: COMMENTS,
     }),
   );
   const { data: pr } = await adapter.getPullRequest(REPO, 42);
@@ -77,11 +77,30 @@ test("getPullRequest normalises a captured GitHub payload into the shared PullRe
   assert.equal(pr.unresolvedThreads, 2);
 });
 
+test("getPullRequest counts unresolved threads across multiple comment pages", async () => {
+  const base = `https://api.github.com/repos/acme/widget/pulls/9`;
+  const pr = { ...PR_FIXTURE, number: 9 };
+  const comment = (id, inReplyTo) => ({ id, body: `b${id}`, in_reply_to_id: inReplyTo });
+  // 100 top-level comments on page 1 (each its own thread) + one more on page 2.
+  const page1 = Array.from({ length: 100 }, (_, i) => comment(3000 + i, null));
+  const page2 = [comment(3100, null)];
+  const adapter = createGithubAdapter(
+    fakeRequest({
+      [base]: pr,
+      [`${base}/reviews`]: [],
+      [`${base}/comments?per_page=100&page=1`]: page1,
+      [`${base}/comments?per_page=100&page=2`]: page2,
+    }),
+  );
+  const { data } = await adapter.getPullRequest(REPO, 9);
+  assert.equal(data.unresolvedThreads, 101, "threads on later pages are not dropped");
+});
+
 test("mergeable:null survives as null (forge still computing)", async () => {
   const base = `https://api.github.com/repos/acme/widget/pulls/7`;
   const pending = { ...PR_FIXTURE, number: 7, mergeable: null, mergeable_state: null };
   const adapter = createGithubAdapter(
-    fakeRequest({ [base]: pending, [`${base}/reviews`]: [], [`${base}/comments`]: [] }),
+    fakeRequest({ [base]: pending, [`${base}/reviews`]: [], [`${base}/comments?per_page=100&page=1`]: [] }),
   );
   const { data: pr } = await adapter.getPullRequest(REPO, 7);
   assert.equal(pr.mergeable, null);
@@ -100,7 +119,7 @@ test("deriveMergeBlockedReason: draft → 'draft', dirty → 'conflicts', unstab
   for (const c of cases) {
     map[`${base(c.number)}`] = c;
     map[`${base(c.number)}/reviews`] = [];
-    map[`${base(c.number)}/comments`] = [];
+    map[`${base(c.number)}/comments?per_page=100&page=1`] = [];
   }
   const adapter = createGithubAdapter(fakeRequest(map));
   assert.equal((await adapter.getPullRequest(REPO, 1)).data.mergeBlockedReason, "draft");

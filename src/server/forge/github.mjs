@@ -453,9 +453,9 @@ export function createGithubAdapter(request, requestWrite, requestText = request
         // there must not blank the PR.
       }
       try {
-        const t = await request(`${base}/comments`);
+        const t = await getAllPages(`${base}/comments`);
         threads = Array.isArray(t.data) ? t.data : [];
-        stale = stale || t.stale;
+        stale = stale || Boolean(t.stale);
       } catch {
         // Same — inline-thread count is display-only.
       }
