@@ -18,6 +18,7 @@ import {
   type VoiceRetryResult,
   type VoiceUploadNoteInput,
   type VoiceUploadNoteResult,
+  type AppControlPayload,
 } from "../../shared/types.js";
 import type { Api, SyncDelta } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
@@ -358,6 +359,7 @@ type Kind =
   | "delegate.updated"
   | "usage.updated"
   | "progress.updated"
+  | "appControl"
   | "stream"
   | "sync";
 
@@ -377,6 +379,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
   "progress.updated": new Set(),
+  appControl: new Set(),
   stream: new Set(),
   sync: new Set(),
 };
@@ -1094,6 +1097,12 @@ export const httpApi: Api = {
   // the store's `usage` slice via setUsage, no refetch needed.
   onUsageUpdated: (cb) =>
     on<{ snapshots: UsageSnapshot[] }>("usage.updated", cb),
+
+  // BET-840/841: the box publishes a single `appControl` bus kind with an
+  // `action` discriminator whenever an app-control tool lands a client-visible
+  // effect (switch-model, rename-session, ...). The payload IS the full event
+  // — the renderer switches on `action` directly, no refetch.
+  onAppControl: (cb) => on<AppControlPayload>("appControl", cb),
 
   // -- APNs native-push registration (BET-181) --
   // iOS Capacitor app registers its APNs device token via the standard 6-site

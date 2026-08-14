@@ -113,6 +113,7 @@ import {
   buildVoiceNoteMap,
   linkedPrNumber,
   preferLinkedPr,
+  dispatchAppControl,
 } from "./chatUtils";
 
 import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
@@ -4268,5 +4269,66 @@ describe("preferLinkedPr (BET-852)", () => {
     expect(out!.number).toBe(412);
     expect(out!.url).toBe("");
     expect(out!.reviewers).toEqual([]);
+
+describe("dispatchAppControl (BET-841)", () => {
+  it("routes switch-model to the handler with the resolved model", () => {
+    const switchModel = vi.fn();
+    const renameSession = vi.fn();
+    dispatchAppControl(
+      { action: "switch-model", sessionId: "ses_1", providerID: "anthropic", modelID: "claude-opus-4-7" },
+      { switchModel, renameSession },
+    );
+    expect(switchModel).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenCalledWith({
+      sessionId: "ses_1",
+      providerID: "anthropic",
+      modelID: "claude-opus-4-7",
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it("does not fire switch-model when required fields are missing", () => {
+    const switchModel = vi.fn();
+    dispatchAppControl(
+      { action: "switch-model", sessionId: "ses_1", providerID: "anthropic" },
+      { switchModel },
+    );
+    dispatchAppControl({ action: "switch-model" }, { switchModel });
+    expect(switchModel).not.toHaveBeenCalled();
+  });
+
+  it("routes rename-session to the handler with the new name", () => {
+    const renameSession = vi.fn();
+    dispatchAppControl(
+      { action: "rename-session", sessionId: "ses_1", name: "my session" },
+      { renameSession },
+    );
+    expect(renameSession).toHaveBeenCalledTimes(1);
+    expect(renameSession).toHaveBeenCalledWith({
+      sessionId: "ses_1",
+      name: "my session",
+    });
+  });
+
+  it("no-ops for compact-session", () => {
+    const switchModel = vi.fn();
+    const renameSession = vi.fn();
+    dispatchAppControl(
+      { action: "compact-session", sessionId: "ses_1" },
+      { switchModel, renameSession },
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it("ignores unknown actions and non-object payloads silently", () => {
+    const switchModel = vi.fn();
+    const renameSession = vi.fn();
+    dispatchAppControl({ action: "future-action" }, { switchModel, renameSession });
+    dispatchAppControl(null, { switchModel, renameSession });
+    dispatchAppControl("nope", { switchModel, renameSession });
+    dispatchAppControl(undefined, { switchModel, renameSession });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(renameSession).not.toHaveBeenCalled();
   });
 });

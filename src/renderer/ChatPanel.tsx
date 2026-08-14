@@ -155,6 +155,13 @@ type Props = {
   // indicator appear immediately in the real chat view. Optional; present
   // only on the transient panel rendered while the tmux window is created.
   autoSubmit?: { text: string; model?: ModelSelection };
+  // App-control (BET-840/841): App owns the single `appControl` bus listener
+  // and reaches the open panel for a `switch-model` action through these.
+  // `selectModel` is registered so a model-switch applies the override through
+  // the SAME path the picker uses (no parallel setter that could drift). Both
+  // optional — omitted in test harnesses that mount ChatPanel directly.
+  registerModelControl?: (sessionId: string, apply: (m: ModelSelection) => void) => void;
+  unregisterModelControl?: (sessionId: string) => void;
 };
 
 export function ChatPanel({
@@ -171,6 +178,8 @@ export function ChatPanel({
   artifactsOpen = false,
   onToggleArtifacts = () => {},
   autoSubmit,
+  registerModelControl,
+  unregisterModelControl,
 }: Props) {
   const chatAutoAllow = useStore((s) => s.chatAutoAllow);
   const setChatAutoAllow = useStore((s) => s.setChatAutoAllow);
@@ -1355,6 +1364,16 @@ export function ChatPanel({
     },
     [sessionId],
   );
+
+  // App-control (BET-840/841): expose this panel's `selectModel` to App so the
+  // box's `switch-model` app-control event drives the override through the same
+  // path the picker uses (setModelOverride + writeSavedModel). Re-registers on
+  // session change; unregisters on unmount so a closed panel can't be reached.
+  useEffect(() => {
+    registerModelControl?.(sessionId, selectModel);
+    return () => unregisterModelControl?.(sessionId);
+  }, [sessionId, selectModel, registerModelControl, unregisterModelControl]);
+
 
   // Session ops. All three depend on tmuxSession/windowIndex being non-null
   // (the panel hides the buttons otherwise). The store will pick up the new

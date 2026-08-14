@@ -17,12 +17,14 @@ import { getMantaPreload } from "./preloadAccess";
 import { describe as describeConnection } from "../shared/net/state.js";
 import {
   type SessionMode,
+  type ModelSelection,
   readSavedMode,
   writeSavedMode,
+  writeSavedModel,
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -1031,6 +1033,48 @@ function AppInner() {
     return off;
   }, [apiGeneration]);
 
+  // App-control bus (BET-840/841). The box publishes ONE `appControl` kind
+  // with an `action` discriminator whenever an app-control tool lands a
+  // client-visible effect. Subscribe ONCE here (not per-action, not from
+  // inside ChatPanel — panels mount/unmount per session) and switch on
+  // `action`.
+  //
+  // switch-model's effect is RENDERER state (the per-session model override),
+  // so it is applied in two steps that stay on ONE path: persist via the
+  // shared `writeSavedModel`, then drive the OPEN panel's override through
+  // its own `selectModel` setter (registered in the map below) — the same
+  // function the model picker calls, so `/clear` carries the override forward.
+  // No panel mounted → writing the key is enough; the panel reads it on mount.
+  const panelModelControl = useRef(new Map<string, (m: ModelSelection) => void>());
+  const registerModelControl = useCallback(
+    (sid: string, apply: (m: ModelSelection) => void) => {
+      panelModelControl.current.set(sid, apply);
+    },
+    [],
+  );
+  const unregisterModelControl = useCallback((sid: string) => {
+    panelModelControl.current.delete(sid);
+  }, []);
+  useEffect(() => {
+    if (!window.api.onAppControl) return;
+    const off = window.api.onAppControl((payload) => {
+      const handlers: AppControlHandlers = {
+        switchModel: ({ sessionId, providerID, modelID }) => {
+          const sel: ModelSelection = { providerID, modelID };
+          const apply = panelModelControl.current.get(sessionId);
+          if (apply) apply(sel);
+          else writeSavedModel(sessionId, sel);
+        },
+        renameSession: () => {
+          // tmux is the source of truth; the existing refresh re-reads it.
+          void refresh();
+        },
+      };
+      dispatchAppControl(payload, handlers);
+    });
+    return off;
+  }, [refresh, apiGeneration]);
+
   // Desktop OS notifications. manta-server's router (push.mjs) decides WHICH
   // device(s) get a notification (no duplicates) and forwards a desktop directive
   // → main → IPC here. We add the final local
@@ -1650,6 +1694,8 @@ function AppInner() {
                       autoSubmit={
                         autoSubmitPrompt?.sid === sid ? autoSubmitPrompt : undefined
                       }
+                      registerModelControl={registerModelControl}
+                      unregisterModelControl={unregisterModelControl}
                     />
                   </PanelShell>
                 );
