@@ -656,20 +656,18 @@ export async function forgeDiffForCwd(cwd, deps = {}) {
 // adapter, the target PR number and its current head SHA, plus the canonical
 // repoKey the draft store uses. Returns `{ error }` for no_forge /
 // not_connected / no_pr; otherwise the full context.
+//
+// Built on the SHARED resolveWriteContext (the cwd → origin → forge → token →
+// adapter preamble) rather than a parallel copy — the draft variant only adds
+// the PR-number + head-SHA resolution on top of what that resolver already
+// returns. One code path (issue §Hygiene).
 async function resolveDraftContext(cwd, deps) {
-  const gitRemoteOrigin = deps.gitRemoteOrigin ?? defaultGitRemoteOrigin;
+  const base = await resolveWriteContext(cwd, deps, false);
+  if (base.error) return { error: base.error };
+
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
-  const resolveToken = deps.resolveToken ?? authResolveToken;
-  const getAdapterFn = deps.getAdapter ?? getAdapter;
-
-  const origin = await gitRemoteOrigin(cwd);
-  const forge = origin ? detectForge(origin) : null;
-  if (!forge || forge.kind !== "github") return { error: "no_forge" };
-  const tok = await resolveToken(forge.host);
-  if (!tok) return { error: "not_connected" };
-
-  const adapter = getAdapterFn(forge.kind, tok.token);
-  const repo = { owner: forge.owner, repo: forge.repo };
+  const adapter = base.adapter;
+  const repo = base.repo;
 
   const res = await adapter.listPullRequests(repo, { state: "open" });
   const prArr = Array.isArray(res.data) ? res.data : [];
@@ -691,12 +689,12 @@ async function resolveDraftContext(cwd, deps) {
   }
 
   return {
-    forge,
+    forge: base.forge,
     repo,
     adapter,
     number,
     headSha,
-    repoKey: forgeRepoKey({ host: forge.host, owner: forge.owner, repo: forge.repo }),
+    repoKey: forgeRepoKey({ host: base.forge.host, owner: base.forge.owner, repo: base.forge.repo }),
   };
 }
 
