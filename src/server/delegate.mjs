@@ -307,6 +307,7 @@ async function registerJob(
     existingSessionId,
     origin,
     permission,
+    link,
   },
   deps = {},
 ) {
@@ -374,6 +375,13 @@ async function registerJob(
     branch,
     baseSha,
     origin,
+    // Session-link primitive (§3.4⑥, BET-847/844): the at-most-one issue + one
+    // pull request this job's session is about. Stored on the job's own session
+    // record in the shared `{ issue?, pr? }` shape so the forge progress sink
+    // (and future notification/inbox readers) address the linked issue or PR —
+    // the triggering issue — with no per-feature plumbing. A forge-triggered
+    // delegate sets this at dispatch; a user delegate leaves it null.
+    link: link ?? null,
     status: "running",
     activity: null,
     createdAt: now(),
@@ -394,7 +402,11 @@ async function registerJob(
 }
 
 /**
- * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string}} input
+ * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string,
+ *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
+ *        `link` (BET-844) — the optional session link (at most one issue + one
+ *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
+ *        progress sink addresses the linked issue/PR. Stored on the job record.
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
  *        newWindow/gitAddWorktree/gitRun/oc listMessages/now)
  */
@@ -486,6 +498,7 @@ export async function startJob(input, deps = {}) {
         existingSessionId: undefined,
         origin: "delegate",
         permission: input?.permission,
+        link: input?.link,
       },
       deps,
     );

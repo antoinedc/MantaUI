@@ -368,6 +368,46 @@ test("sweep leaves a running job whose parent session is alive", async () => {
 // 4. Nesting: a start whose parentSessionID is a live job's childSessionID
 // ----------------------------------------------------------------------------
 
+test("startJob persists the session link on the job record (BET-844)", async () => {
+  const h = harness([]);
+  h.deps.gitAddWorktree = async ({ name }) => ({ path: `/repo/wt-${name}`, branch: name });
+  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
+  h.deps.listProjects = async () => [{ tmuxSession: "forge-work", windows: [parentWin] }];
+  h.deps.newWindow = async (input) => ({
+    sessionId: "child_link",
+    windowIndex: 5,
+    projects: [{ tmuxSession: input.sessionName, windows: [parentWin] }],
+  });
+  const res = await startJob(
+    {
+      prompt: "complete the issue",
+      parentSessionID: "parent",
+      parentDirectory: "/repo",
+      link: { issue: { repoKey: "github.com/owner/repo", number: 42 } },
+    },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  const job = h.jobs.find((j) => j.childSessionID === "child_link");
+  assert.ok(job, "job persisted");
+  assert.deepEqual(job.link, { issue: { repoKey: "github.com/owner/repo", number: 42 } });
+});
+
+test("startJob leaves the link null when none is provided", async () => {
+  const h = harness([]);
+  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
+  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
+  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
+  h.deps.newWindow = async () => ({ sessionId: "child_nolink", windowIndex: 1 });
+  const res = await startJob(
+    { prompt: "plain delegate", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  const job = h.jobs.find((j) => j.childSessionID === "child_nolink");
+  assert.equal(job.link, null);
+});
+
 test("startJob refuses nesting when parentSessionID is a live job's childSessionID", async () => {
   const live = { ...runningJob(0), childSessionID: "child_live", status: "running" };
   const h = harness([live]);

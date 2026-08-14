@@ -101,7 +101,7 @@ import {
   saveRules as forgeSaveRules,
   forgeIngest,
 } from "./forgeRules.mjs";
-import { createRulesEngine } from "./forge/rules.mjs";
+import { createRulesEngine, eventLinkRef } from "./forge/rules.mjs";
 import {
   createForgePoller,
   pollChecksFailed,
@@ -114,6 +114,7 @@ import { getAdapter } from "./forge/index.mjs";
 import { resolveToken as forgeResolveToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 import { detectForge as detectForgeUrl } from "../shared/forge.mjs";
+import { sessionLink as readSessionLink } from "../shared/sessionLink.mjs";
 import {
   ensureAuth,
   createAuthEngine,
@@ -406,19 +407,22 @@ const forgePollSeen = new Map(); // repoKey -> { issues, checks, reviews } seen-
 forgeRulesEngine = createRulesEngine({
   enabled: async () => (await local.configGet())?.forgeRulesEnabled === true,
   startDelegate: async ({ prompt, repoKey, event, rule }) => {
-    // Resolve a parent directory to branch the worktree off. The session-link
-    // primitive (spec §3.4⑥) is not yet shipped, so the parent is sourced from
-    // a documented box-side forge checkout when one exists; otherwise the job
-    // is refused (recorded below) rather than guessed at. This keeps a real
-    // rule storm bounded to the delegate engine's five-job cap with clean
-    // refusals — never queued.
+    // Resolve a parent directory to branch the worktree off: the box's own
+    // local checkout of the linked repo (found via the same repo scan the
+    // forge probe uses, matched by repoKey). This replaces the BET-798 stopgap
+    // that required a hand-made directory at ~/.manta/forge-checkouts/<repo>.
     const cwd = await resolveForgeParentDirectory(repoKey);
     if (!cwd) {
       return {
         ok: false,
-        error: "no local forge checkout to branch the job worktree off (session-link primitive not yet shipped)",
+        error: "no local checkout of this repo to branch the job worktree off",
       };
     }
+    // Session-link primitive (§3.4⑥, BET-844): carry the triggering issue / PR
+    // on the job's session record so the forge progress sink comments on the
+    // ISSUE, not a job-own-PR guess. checks.failed has no issue/PR number →
+    // no link → the sink no-ops (no distinct target), which is correct.
+    const link = eventLinkRef(repoKey, event);
     const permission = delegateBuildPermissionRuleset([
       { permission: "bash", pattern: "**" },
       { permission: "write", pattern: "**" },
@@ -430,6 +434,7 @@ forgeRulesEngine = createRulesEngine({
       parentSessionID: "forge", // synthetic parent channel; real parent arrives with the link primitive
       parentDirectory: cwd,
       permission,
+      link,
     });
   },
   notify: async ({ message, event }) =>
@@ -514,59 +519,46 @@ const { stop: stopForgePoller } = createForgePoller({
 });
 
 // Resolve a parent directory to branch a forge-triggered job's worktree off.
-// A documented box-side convention: a directory at ~/.manta/forge-checkouts/<repo>
-// when it exists (otherwise the job is refused). This is the concrete seam the
-// session-link primitive will replace.
+// The parent-directory the session-link primitive names (spec §3.4⑥, BET-844):
+// the box's own local checkout of the linked repo — found via the same repo
+// scan the forge probe uses, matched by repoKey — rather than the BET-798
+// stopgap convention of a hand-made ~/.manta/forge-checkouts/<repo> directory.
+// Returns the checkout path, or null when the repo isn't checked out on this
+// box (the job is then refused: you cannot branch a worktree off a clone you
+// don't have).
 async function resolveForgeParentDirectory(repoKey) {
-  const parts = forgeParseRepoKey(repoKey);
-  if (!parts) return null;
+  if (typeof repoKey !== "string" || !forgeParseRepoKey(repoKey)) return null;
   try {
-    const { stat } = await import("node:fs/promises");
-    const dir = join(
-      homedir(),
-      ".manta",
-      "forge-checkouts",
-      `${parts.host}-${parts.owner}-${parts.repo}`.replace(/\//g, "_"),
-    );
-    await stat(dir);
-    return dir;
+    const { repos } = await local.scanRepos({ roots: local.buildRoots() });
+    const hit = (repos ?? []).find((r) => r.repoKey === repoKey);
+    return hit?.path ?? null;
   } catch {
     return null;
   }
 }
 
-// Resolve the PR a forge progress sink should comment on, for a job's child
-// session. Walks job worktree → origin → open PR on the branch, and returns
-// the adapter + repo + number when one exists. The session-link primitive
-// (spec §3.4⑥) that names the target outright is a later issue; until then the
-// sink targets a job's OWN PR, and returns null (no-op) for everything else.
+// Resolve the forge progress sink target from the session-link primitive
+// (spec §3.4⑥, BET-844): the LINKED pull request or issue on the job's own
+// session record — the triggering issue. Replaces the BET-798 stopgap that
+// walked worktree → origin → open PR (which could only ever reach a job's own
+// PR, never the issue that started it). Returns { adapter, repo, number } or
+// null (the sink no-ops) when the job has no link — e.g. checks.failed, which
+// carries no issue/PR number in its event.
 async function resolveForgeSinkTarget(childSessionID) {
   try {
     const { jobs } = await delegateEngine.listJobs();
-    const job = jobs?.find((j) => j.childSessionID === childSessionID && j.worktree);
-    if (!job?.worktree) return null;
-    const origin = await local.gitRemoteOrigin(job.worktree);
-    const forge = origin ? detectForgeUrl(origin) : null;
-    if (!forge || forge.kind !== "github") return null;
+    const job = jobs?.find((j) => j.childSessionID === childSessionID);
+    const link = readSessionLink(job ?? null);
+    const ref = link?.pr ?? link?.issue;
+    if (!ref) return null;
+    const parts = forgeParseRepoKey(ref.repoKey);
+    if (!parts) return null;
+    const forge = detectForgeUrl(`https://${parts.host}/${parts.owner}/${parts.repo}`);
+    if (!forge) return null;
     const tok = await forgeResolveToken(forge.host).catch(() => null);
     if (!tok) return null;
     const adapter = getAdapter(forge.kind, tok.token);
-    const repo = { owner: forge.owner, repo: forge.repo };
-    const { data } = await adapter.listPullRequests(repo, { state: "open" });
-    const prs = Array.isArray(data) ? data : [];
-    const branch = await gitBranchFor(job.worktree);
-    const pr = branch ? prs.find((p) => p.headRef === branch) : undefined;
-    if (!pr?.number) return null;
-    return { adapter, repo, number: pr.number };
-  } catch {
-    return null;
-  }
-}
-
-async function gitBranchFor(cwd) {
-  try {
-    const { stdout } = await run("git", ["-C", cwd, "branch", "--show-current"]);
-    return (stdout ?? "").trim() || null;
+    return { adapter, repo: { owner: forge.owner, repo: forge.repo }, number: ref.number };
   } catch {
     return null;
   }

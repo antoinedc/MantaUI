@@ -8,6 +8,7 @@ import {
   createRulesEngine,
   normalizeEvent,
   substitutePrompt,
+  eventLinkRef,
   DEFAULT_DELEGATE_PROMPT,
   AUTONOMOUS_JOB_CONTRACT,
 } from "./rules.mjs";
@@ -162,6 +163,34 @@ test("substitutePrompt tolerates an absent placeholder", () => {
     substitutePrompt("Complete {{url}}.", { title: "T" }),
     "Complete .",
   );
+});
+
+// eventLinkRef — session-link from a normalised event (BET-844)
+test("eventLinkRef: issue.labeled url links the ISSUE", () => {
+  assert.deepEqual(eventLinkRef("github.com/owner/repo", { url: "https://github.com/owner/repo/issues/42" }), {
+    issue: { repoKey: "github.com/owner/repo", number: 42 },
+  });
+});
+
+test("eventLinkRef: review.requested url links the PR", () => {
+  assert.deepEqual(eventLinkRef("github.com/owner/repo", { url: "https://github.com/owner/repo/pull/7" }), {
+    pr: { repoKey: "github.com/owner/repo", number: 7 },
+  });
+});
+
+test("eventLinkRef: GitLab merge_request url links the PR", () => {
+  assert.deepEqual(eventLinkRef("gitlab.com/owner/repo", { url: "https://gitlab.com/owner/repo/-/merge_requests/88" }), {
+    pr: { repoKey: "gitlab.com/owner/repo", number: 88 },
+  });
+});
+
+test("eventLinkRef: checks.failed has no issue/PR number → null", () => {
+  assert.equal(eventLinkRef("github.com/owner/repo", { url: "https://github.com/owner/repo" }), null);
+});
+
+test("eventLinkRef: missing url or repoKey → null", () => {
+  assert.equal(eventLinkRef("github.com/owner/repo", {}), null);
+  assert.equal(eventLinkRef(null, { url: "https://github.com/o/r/issues/1" }), null);
 });
 
 // ---------------------------------------------------------------------------
