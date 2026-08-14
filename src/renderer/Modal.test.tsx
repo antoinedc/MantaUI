@@ -18,7 +18,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { act } from "react";
 import { mount, type Harness } from "./testHarness";
 import { Modal } from "./Modal";
@@ -267,13 +267,12 @@ describe("Modal — Escape + focus trap + restore (BET-724)", () => {
 // from disk so the rule fires even if a sheet is no longer imported
 // anywhere. Mirrors the source-reading style of primitives.test.ts.
 describe("no CSS containment in renderer stylesheets (BET-884)", () => {
-  const RENDERER = fileURLToPath(new URL(".", import.meta.url));
-  const SHEETS = ["index.css", "tokens.css"];
+  const SHEETS = [resolve("src/renderer", "index.css"), resolve("src/renderer", "tokens.css")];
   const CONT_CONTAINMENT = /(?:container-type\s*:|container\s*:|contain\s*:)/;
 
   for (const file of SHEETS) {
     it(`${file} has no containment declaration`, () => {
-      const css = readFileSync(new URL(file, RENDERER), "utf8");
+      const css = readFileSync(file, "utf8");
       const offenders = css
         .split("\n")
         .map((line, i) => ({ line: line.trim(), n: i + 1 }))
