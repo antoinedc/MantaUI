@@ -608,7 +608,17 @@ export type ForgeShipResult =
 // step 1) the confirm card displays as plain text (BET-892 — the title/body
 // are edited on GitHub, not in the card). The body honours the repo's PR
 // template when one exists.
-export type ForgeShipPreviewInput = { cwd: string };
+//
+// BET-893: when the caller supplies the session's selected `model` (and the
+// calling `sessionId` for transcript context), the box generates the title +
+// body with that model OUT OF BAND — a throwaway opencode session, never the
+// user's own conversation. With no model, the box falls back to the
+// deterministic draft (tip-commit title / template-or-files body).
+export type ForgeShipPreviewInput = {
+  cwd: string;
+  model?: { providerID: string; modelID: string };
+  sessionId?: string;
+};
 
 export type ForgeShipPreviewResult =
   | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }

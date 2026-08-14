@@ -371,6 +371,8 @@ export function buildHandlers({
     },
     "forge:ship-preview": async (input) => {
       const cwd = typeof input === "object" && input !== null ? input.cwd : "";
+      const model = typeof input === "object" && input !== null ? input.model : undefined;
+      const sessionId = typeof input === "object" && input !== null ? input.sessionId : undefined;
       // Seed the PR body with a "Closes #N" line from the originating issue
       // (BET-871): resolve the session's window from the shipping cwd and read
       // the `@manta-forge-issue` user-option the inbox's Start-a-session flow
@@ -379,6 +381,12 @@ export function buildHandlers({
       // byte-identical body. No second session-link store — the tmux window IS
       // the app session.
       return shipPreview(cwd, {
+        model,
+        sessionId,
+        createSession: oc.createSession,
+        sendPrompt: oc.sendPrompt,
+        listMessages: oc.listMessages,
+        deleteSessionRaw: oc.deleteSessionRaw,
         linkedIssue: async () => {
           if (!cwd) return null;
           const win = await tmux.findWindowForCwd(cwd);

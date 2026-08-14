@@ -600,13 +600,18 @@ export function ChatPanel({
 
   // Fetch the ship preview once (the branch popover's no-PR state shows
   // Base / Changes). Click-only surface ⇒ fetched on popover open, never
-  // polled, and not re-fetched if already loaded for this cwd.
+  // polled, and not re-fetched if already loaded for this cwd. The session's
+  // selected model + sessionId ride along (BET-893) so the box can generate
+  // the title/body with that model, out of band.
   const ensureShipPreview = useCallback(async () => {
     if (!cwd) return;
     setShipError(null);
     if (shipProposal) return;
     try {
-      const prev = await window.api.forgeShipPreview({ cwd });
+      const prev = await window.api.forgeShipPreview({
+        cwd,
+        ...(modelOverride ? { model: { providerID: modelOverride.providerID, modelID: modelOverride.modelID }, sessionId } : {}),
+      });
       if (prev.ok) {
         setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title ?? "", body: prev.body ?? "" });
       } else {
@@ -617,7 +622,7 @@ export function ChatPanel({
       setShipProposal(null);
       setShipError(e instanceof Error ? e.message : "could not prepare the pull request");
     }
-  }, [cwd, shipProposal]);
+  }, [cwd, shipProposal, modelOverride, sessionId]);
 
   // Confirm → push + create. Only reached after the human confirms the
   // ShipConfirmCard. The title/body come from shipProposal (the box's preview,

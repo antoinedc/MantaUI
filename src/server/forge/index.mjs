@@ -29,6 +29,8 @@
 
 import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey, repoKeyParts } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
+import { createSession as ocCreateSession, sendPrompt as ocSendPrompt, listMessages as ocListMessages, deleteSessionRaw as ocDeleteSessionRaw } from "../opencode.mjs";
+import { buildPrDescriptionPrompt, parsePrDescription, extractTranscriptText, extractAssistantText } from "./shipDescription.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
@@ -842,6 +844,17 @@ export async function shipPreview(cwd, deps = {}) {
     // origin/<base> may not exist locally yet — best-effort empty.
   }
 
+  // BET-893: when the caller supplies the session's selected model, generate
+  // the title + body OUT OF BAND (a throwaway opencode session — never the
+  // user's own transcript) and use it. A generation failure NEVER surfaces as
+  // an error: we fall through to the deterministic draft below.
+  if (deps.model) {
+    const generated = await tryGeneratePrDescription(cwd, ctx, { base, files, deps });
+    if (generated) {
+      return { ok: true, head: ctx.head, base, fileCount: files.length, title: generated.title, body: generated.body };
+    }
+  }
+
   const title = await draftTitle(cwd, ctx.head, deps);
   const body = await draftBody(cwd, ctx.head, base, files, {
     ...deps,
@@ -849,6 +862,90 @@ export async function shipPreview(cwd, deps = {}) {
     prRepoKey: forgeRepoKey(ctx.forge),
   });
   return { ok: true, head: ctx.head, base, fileCount: files.length, title, body };
+}
+
+// Throwaway-session naming + poll cadence for the out-of-band generation.
+const PR_DESC_SESSION_TITLE = "manta: pr description";
+const PR_DESC_POLL_MS = 1000;
+const PR_DESC_DEADLINE_MS = 60000;
+
+/**
+ * Generate the PR title + body with the session's selected model, OUT OF BAND
+ * (BET-893). A throwaway opencode session — created WITHOUT a tmux window, so
+ * it never appears in the sidebar and never enters the user's own conversation
+ * — is created → prompted → polled → deleted. Everything opencode owns
+ * (createSession, sendPrompt, listMessages, deleteSessionRaw) is injectable as
+ * deps so tests never touch a live opencode.
+ *
+ * Returns `{ title, body }` on success, or null on ANY failure/timeout so the
+ * caller falls back to the deterministic draft. Never throws.
+ */
+async function tryGeneratePrDescription(cwd, ctx, { base, files, deps }) {
+  const {
+    model, sessionId,
+    run: runGit = run,
+    readPrTemplate = defaultReadPrTemplate,
+    createSession = ocCreateSession,
+    sendPrompt = ocSendPrompt,
+    listMessages = ocListMessages,
+    deleteSessionRaw = ocDeleteSessionRaw,
+    pollMs = PR_DESC_POLL_MS,
+    deadlineMs = PR_DESC_DEADLINE_MS,
+  } = deps;
+
+  let commits = [];
+  try {
+    const { stdout } = await runGit("git", ["-C", cwd, "log", "--pretty=%s", `origin/${base}..${ctx.head}`]);
+    commits = String(stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  } catch {
+    // origin/<base>..<head> may not resolve locally — best-effort empty.
+  }
+
+  let transcript = "";
+  if (sessionId) {
+    try {
+      transcript = extractTranscriptText(await listMessages(sessionId));
+    } catch {
+      // Transcript is best-effort *why* context; generation still runs without it.
+    }
+  }
+
+  let template = "";
+  try {
+    template = (await readPrTemplate(cwd, deps)) ?? "";
+  } catch {
+    /* no template — the prompt just omits the template block */
+  }
+
+  const prompt = buildPrDescriptionPrompt({ head: ctx.head, base, files, commits, template, transcript });
+
+  let sid = null;
+  try {
+    const created = await createSession({ directory: cwd, title: PR_DESC_SESSION_TITLE });
+    sid = created?.id;
+    if (!sid) return null;
+    await sendPrompt({ sessionId: sid, text: prompt, model: { providerID: model.providerID, modelID: model.modelID } });
+
+    const deadline = Date.now() + deadlineMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      let detail;
+      try {
+        detail = extractAssistantText(await listMessages(sid));
+      } catch {
+        // Poll hiccup — keep waiting until the deadline.
+        continue;
+      }
+      if (detail) return parsePrDescription(detail);
+    }
+    return null; // deadline passed without a completed assistant turn
+  } catch {
+    return null;
+  } finally {
+    if (sid) {
+      try { await deleteSessionRaw(sid); } catch { /* best-effort */ }
+    }
+  }
 }
 
 // PR templates, in GitHub's usual discovery order. Resolved against the repo
