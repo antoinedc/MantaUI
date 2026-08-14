@@ -55,15 +55,16 @@ describe("VoicePlayerFrame", () => {
         onCycleSpeed={onCycleSpeed}
       />,
     );
-    const disc = discButton(h.container);
+    const container = h.container;
+    const disc = discButton(container);
     expect(disc).not.toBeNull();
     expect(disc!.disabled).toBe(false);
-    expect(speedButton(h.container)?.textContent).toBe("1×");
+    expect(speedButton(container)?.textContent).toBe("1×");
 
     act(() => disc!.click());
     expect(onToggle).toHaveBeenCalledTimes(1);
 
-    act(() => speedButton(h.container)!.click());
+    act(() => speedButton(container)!.click());
     expect(onCycleSpeed).toHaveBeenCalledTimes(1);
   });
 
@@ -125,7 +126,8 @@ describe("VoicePlayer — 'two players' regression guard", () => {
       };
       const h = mount(<VoicePlayer note={note} />);
       await h.flush();
-      const playControls = Array.from(h.container.querySelectorAll("button")).filter(
+      const container = h.container;
+      const playControls = Array.from(container.querySelectorAll("button")).filter(
         (b) => /^(Play|Pause) voice note/.test(b.getAttribute("aria-label") ?? ""),
       );
       // The old shape stacked a collapsed chip (its own disc) ABOVE a player
