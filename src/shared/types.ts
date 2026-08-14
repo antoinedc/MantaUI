@@ -357,6 +357,68 @@ export type ForgeProbeResult = {
   partial: boolean;
 };
 
+// ----- Forge clone flow (BET-796) -----
+
+// A normalised repo the clone picker ([S6]) can push to, from the adapter's
+// listMyRepos. `pushedAt` is a millis timestamp (most-recently-pushed first).
+// NO credential fields ever ride this shape — the renderer only needs the
+// clone URL, which git uses box-side.
+export type ForgeRepo = {
+  name: string;
+  fullName: string;
+  owner: string;
+  description: string | null;
+  pushedAt: number | null;
+  defaultBranch: string;
+  cloneUrl: string;
+  url: string;
+};
+
+// The GitHub device grant ([S5]) — RENDERER-SAFE by construction: `device_code`
+// is the one field that is deliberately ABSENT. `user_code` is what the user
+// enters on github.com/login/device; `grantId` is an opaque server-side handle
+// the renderer echoes back to poll/cancel. Values are in seconds.
+export type ForgeDeviceGrant = {
+  grantId: string;
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  pollInterval: number;
+};
+
+export type ForgeDeviceStartResult =
+  | { connected: true; grant: null }
+  | { connected: false; grant: ForgeDeviceGrant; error: null }
+  // The box's DEVICE_CLIENT_ID is a placeholder/unset (BET-849) — the device
+  // flow would dead-end at GitHub, so the renderer shows a clear "not
+  // configured" state instead of launching a guaranteed-failing screen.
+  | { connected: false; notConfigured: true; grant: null };
+
+export type ForgeDevicePollResult =
+  | { status: "pending"; pollInterval: number }
+  | { status: "done" }
+  | { status: "expired" }
+  | { status: "error"; error: string };
+
+export type ForgeRepoListResult = {
+  repos: ForgeRepo[];
+  stale: boolean;
+  error: string | null;
+};
+
+export type ForgeCloneStatus = {
+  id: string;
+  name: string;
+  url: string;
+  dest: string;
+  percent: number;
+  bytes: number;
+  done: boolean;
+  ok: boolean;
+  error: string | null;
+  cancelled: boolean;
+};
+
 // ----- Forge read path (BET-788) -----
 
 // The normalised CI traffic-light — the same tri-state the shared
@@ -850,7 +912,20 @@ export const IPC = {
   forgeDraftComment: "forge:draft-comment",
   forgeDraftSubmit: "forge:draft-submit",
 
-  // Remote tmux config management
+  // BET-796: fresh-box clone flow, all box-side (a forge token never reaches
+  // the renderer). forge:device-start mints the GitHub device grant (returns a
+  // renderer-safe shape, NEVER device_code); forge:device-poll drives the
+  // countdown; forge:device-cancel backs out to [S4]. forge:repos lists the
+  // clone picker's push-to repos; forge:clone-{start,status,cancel} run a
+  // clone on the box with real progress.
+  forgeDeviceStart: "forge:device-start",
+  forgeDevicePoll: "forge:device-poll",
+  forgeDeviceCancel: "forge:device-cancel",
+  forgeRepos: "forge:repos",
+  forgeCloneStart: "forge:clone-start",
+  forgeCloneStatus: "forge:clone-status",
+  forgeCloneCancel: "forge:clone-cancel",
+
   tmuxConfigStatus: "tmux:config-status",
   tmuxSetupConfig: "tmux:setup-config",     // backup user config, install manta's
   tmuxRestoreConfig: "tmux:restore-config", // restore user's backup

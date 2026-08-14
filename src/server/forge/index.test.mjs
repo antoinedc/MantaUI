@@ -9,6 +9,7 @@ import {
   createRequestLayer,
   createForgeRuntime,
   forgeStatus,
+  forgeDeviceStart,
   pullRequestForCwd,
   forgeDiffForCwd,
   shipPullRequest,
@@ -607,4 +608,28 @@ test("draft ops resolve no_forge / not_connected like the other write ops", asyn
     getAdapter: () => ({}),
   });
   assert.equal(rTok.error, "not_connected");
+});
+
+test("forgeDeviceStart: an existing credential skips straight to the picker", async () => {
+  const r = await forgeDeviceStart({
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    start: async () => {
+      throw new Error("start must not run");
+    },
+  });
+  assert.equal(r.connected, true);
+  assert.equal(r.grant, null);
+});
+
+test("forgeDeviceStart: placeholder client_id surfaces a notConfigured state (guard)", async () => {
+  const r = await forgeDeviceStart({
+    resolveToken: async () => null,
+    start: async () => {
+      const { DeviceFlowNotConfiguredError } = await import("./auth.mjs");
+      throw new DeviceFlowNotConfiguredError();
+    },
+  });
+  assert.equal(r.connected, false);
+  assert.equal(r.notConfigured, true);
+  assert.equal(r.grant, null);
 });

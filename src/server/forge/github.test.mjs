@@ -385,3 +385,59 @@ test("replyToThread POSTs a reply body + reviewed commit to the thread endpoint"
   assert.deepEqual(write.calls[0].opts.body, { body: "got it", commit_id: "abc123" });
   assert.equal(data.id, 88);
 });
+
+// ---- listMyRepos (BET-796): the clone picker's remote repo source -----------
+
+test("listMyRepos drops read-only repos and orders most-recently-pushed first", async () => {
+  const url = "https://api.github.com/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member";
+  const adapter = createGithubAdapter(
+    fakeRequest({
+      [url]: [
+        {
+          name: "tenanture",
+          full_name: "acme/tenanture",
+          owner: { login: "acme" },
+          description: null,
+          pushed_at: "2026-08-01T00:00:00Z",
+          default_branch: "main",
+          clone_url: "https://github.com/acme/tenanture.git",
+          html_url: "https://github.com/acme/tenanture",
+          permissions: { push: true },
+        },
+        {
+          name: "manta-skills",
+          full_name: "octo/manta-skills",
+          owner: { login: "octo" },
+          description: "Skill registry",
+          pushed_at: "2026-07-20T00:00:00Z",
+          default_branch: "main",
+          clone_url: "https://github.com/octo/manta-skills.git",
+          html_url: "https://github.com/octo/manta-skills",
+          permissions: { push: true },
+        },
+        {
+          name: "readonly",
+          full_name: "acme/readonly",
+          owner: { login: "acme" },
+          description: "I cannot push here",
+          pushed_at: "2026-08-02T00:00:00Z",
+          default_branch: "main",
+          clone_url: "https://github.com/acme/readonly.git",
+          html_url: "https://github.com/acme/readonly",
+          permissions: { push: false },
+        },
+      ],
+    }),
+  );
+  const { data, stale } = await adapter.listMyRepos();
+  assert.equal(stale, false);
+  // read-only repo dropped, and order is most-recent-pushed first.
+  assert.deepEqual(data.map((r) => r.name), ["tenanture", "manta-skills"]);
+  assert.equal(data[0].fullName, "acme/tenanture");
+  assert.equal(data[0].owner, "acme");
+  assert.equal(data[0].pushedAt, Date.parse("2026-08-01T00:00:00Z"));
+  assert.equal(data[1].description, "Skill registry");
+  assert.equal(data[1].defaultBranch, "main");
+  assert.equal(data[1].cloneUrl, "https://github.com/octo/manta-skills.git");
+  assert.ok(!data.some((r) => r.fullName === "acme/readonly"));
+});

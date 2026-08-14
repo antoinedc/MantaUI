@@ -60,6 +60,7 @@ import { Terminal } from "./Terminal";
 import { useStore } from "./store";
 import { ProcessPanel } from "./ProcessPanel";
 import { Callout } from "./Callout";
+import { DeviceCodeSteps } from "./DeviceFlow";
 
 // Poll cadences (BET-312, BET-354): 3s for both the device-code wait and
 // the post-restart readiness poll. BET-354 adds a 1s tick for the
@@ -845,38 +846,41 @@ function WaitingBlockBody({
   const fallback = deviceCodeFallback(instructions);
   return (
     <div className="space-y-2">
-      <div className="text-text">
-        <div className="text-label font-medium text-text-faint mb-1">Step 1 — open this link</div>
-        {url ? (
-          <div className="flex items-center gap-2 min-w-0">
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-text-muted underline decoration-dotted truncate min-w-0"
-              title={url}
-            >
-              {url.replace(/^https?:\/\//, "")}
-            </a>
-            <CopyButton text={url} />
-          </div>
-        ) : (
-          <span className="text-text-muted">Open the sign-in page on any device.</span>
-        )}
-      </div>
-      <div className="text-text">
-        <div className="text-label font-medium text-text-faint mb-1">Step 2 — enter the code</div>
-        {code ? (
-          <div className="flex items-center gap-2">
-            <code className="font-mono text-text bg-bg px-2 py-px rounded-xs">{code}</code>
-            <CopyButton text={code} />
-          </div>
-        ) : fallback ? (
-          <p className="text-text-muted">{fallback}</p>
-        ) : (
-          <p className="text-text-muted">The code will appear on the page above.</p>
-        )}
-      </div>
+      {code && url ? (
+        // The shared device-flow step block (open the link → enter the code) —
+        // the same one the GitHub clone flow uses, so the two can't drift.
+        <DeviceCodeSteps
+          url={url}
+          displayUrl={url.replace(/^https?:\/\//, "")}
+          code={code}
+        />
+      ) : (
+        <>
+          {url && (
+            <div className="text-text">
+              <div className="text-label font-medium text-text-faint mb-1">Step 1 — open this link</div>
+              <div className="flex items-center gap-2 min-w-0">
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-text-muted underline decoration-dotted truncate min-w-0"
+                  title={url}
+                >
+                  {url.replace(/^https?:\/\//, "")}
+                </a>
+                <CopyButton text={url} />
+              </div>
+            </div>
+          )}
+          {!url && <span className="text-text-muted">Open the sign-in page on any device.</span>}
+          {fallback ? (
+            <p className="text-text-muted">{fallback}</p>
+          ) : (
+            <p className="text-text-muted">The code will appear on the page above.</p>
+          )}
+        </>
+      )}
       {instructions && (
         <details className="text-meta">
           <summary className="text-text-faint cursor-pointer hover:text-text-muted">

@@ -32,8 +32,9 @@
 // write it to disk. The only thing a caller outside this module may do with a
 // resolved token is pass it to the fetch layer.
 
+import { randomBytes } from "node:crypto";
 import { runLoginShell } from "../launchers.mjs";
-import { resolveSecret, loadSecrets } from "../secrets.mjs";
+import { resolveSecret, loadSecrets, setSecret } from "../secrets.mjs";
 
 // How long a cached resolution is trusted before the CLI/secret is re-read.
 const TTL_MS = 60_000;
@@ -148,4 +149,215 @@ export async function resolveToken(
  */
 export function invalidateToken(host) {
   CACHE.delete(host);
+}
+
+// ===========================================================================
+// §7.4 case C — the device grant (BET-796): step 3 of the ladder, INTERACTIVE
+// ===========================================================================
+//
+// resolveToken above is the passive ladder (env → CLI → stored secret). A
+// freshly provisioned box has none of those, so the UI runs an explicit device
+// flow (the "Connect GitHub" screen): POST /login/device/code, the user signs
+// in on github.com/login/device and enters the user_code, and we poll
+// /login/oauth/access_token until it yields a token. That token is stored in
+// the existing secrets vault under `GITHUB_TOKEN` (shared scope) — the same key
+// resolveToken's step 2 already checks — so every subsequent boot picks it up
+// with no re-auth. No new credential store, no GitHub App, no client secret:
+// the device grant authenticates with only a PUBLIC client_id.
+//
+// Spec rules, all mandatory:
+//   1. `device_code` is an internal identifier and NEVER crosses RPC or reaches
+//      the renderer — only `user_code`, the verification URI and poll metadata
+//      are returned. The server keeps the device_code box-side, keyed by an
+//      opaque grant id.
+//   2. `user_code` is NOT baked into the verification URL (no query string) —
+//      that would lengthen what the user types and remove our ability to
+//      highlight a typo.
+//   3. `slow_down` adds 5s PERMANENTLY to the poll interval (GitHub's
+//      directive); `authorization_pending` keeps polling; `expired_token` is a
+//      typed ExpiredCodeError ([E2]).
+//   4. normalizeUserCode strips dashes/whitespace and uppercases before any
+//      comparison, so `wdjb-mjht ` matches `WDJBMJHT`.
+//   5. The code is copied to the clipboard automatically (the renderer does
+//      this on receipt) so the user pastes rather than retypes on a phone.
+
+// The public OAuth client_id for the device grant. The device flow needs NO
+// secret — a client_id is public. Supply the real product id at deploy (BET-849);
+// the mechanics below are client-id-agnostic and fully injectable.
+export const DEVICE_CLIENT_ID = "Iv1.0000000000000000";
+
+// A placeholder id has NEVER been registered with GitHub, so a start against it
+// would categorically dead-end at /login/device/code. The flow is GUARDED: a
+// placeholder (or empty) id raises DeviceFlowNotConfiguredError before any
+// GitHub call, which forgeDeviceStart surfaces to the renderer as a clear
+// "GitHub sign-in isn't configured on this box yet" state — a real user is
+// never sent down a screen that cannot succeed.
+export const DEVICE_CLIENT_ID_PLACEHOLDER = "Iv1.0000000000000000";
+
+/**
+ * Raised when the device grant is attempted with a not-yet-configured
+ * `client_id`. Distinct from a network/HTTP failure so the caller can surface a
+ * configuration state rather than a retryable error ([E2] is an *expired code*,
+ * not a *not configured* box).
+ */
+export class DeviceFlowNotConfiguredError extends Error {
+  constructor() {
+    super("The GitHub device flow is not configured on this box yet.");
+    this.name = "DeviceFlowNotConfiguredError";
+  }
+}
+
+// GitHub's own device-code TTL (15 min) — the existing provider poll caps at 5
+// min, but the device grant is GitHub's clock, not opencode's.
+const DEVICE_TTL_MS = 15 * 60_000;
+
+// grantId -> { deviceCode, expiresAt, intervalSec }
+const ACTIVE_GRANTS = new Map();
+
+function genGrantId() {
+  return randomBytes(8).toString("hex");
+}
+
+/**
+ * Normalise a user code for comparison: strip all separators/whitespace and
+ * uppercase, so `wdjb-mjht ` → `WDJBMJHT`. The GitHub device code is case- and
+ * dash-insensitive; comparing raw input would wrongly reject valid pastes.
+ * @param {string} code
+ * @returns {string}
+ */
+export function normalizeUserCode(code) {
+  return String(code ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+/**
+ * Typed signal for `expired_token` (spec rule 3) → the [E2] screen.
+ */
+export class ExpiredCodeError extends Error {
+  constructor() {
+    super("The sign-in code expired before it was entered.");
+    this.name = "ExpiredCodeError";
+  }
+}
+
+async function defaultStoreToken(token) {
+  return setSecret({ key: "GITHUB_TOKEN", value: token, scope: "shared" });
+}
+
+/**
+ * Start a GitHub device grant. Returns a RENDERER-SAFE shape — `device_code`
+ * is intentionally absent (rule 1); the server keeps it box-side under the
+ * returned `grantId` so the renderer can never leak it.
+ *
+ * @param {{ clientId?: string, fetch?: typeof fetch, now?: () => number, storeToken?: (token: string) => Promise<{ ok: boolean, error?: string }> }} [opts]
+ * @returns {Promise<{ grantId: string, userCode: string, verificationUri: string, expiresIn: number, pollInterval: number }>}
+ */
+export async function startDeviceGrant({
+  clientId = DEVICE_CLIENT_ID,
+  fetch: fetchFn = globalThis.fetch,
+  now = Date.now,
+} = {}) {
+  // Guard: a placeholder/unset public id would dead-end at GitHub — fail fast
+  // with a typed "not configured" signal, never hit the network.
+  if (!clientId || clientId === DEVICE_CLIENT_ID_PLACEHOLDER) {
+    throw new DeviceFlowNotConfiguredError();
+  }
+  const res = await fetchFn("https://github.com/login/device/code", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ client_id: clientId, scope: "repo" }),
+  });
+  if (!res.ok) {
+    throw new Error(`couldn't start the GitHub device grant (${res.status})`);
+  }
+  const raw = await res.json();
+  if (!raw.device_code || !raw.user_code) {
+    throw new Error("unexpected device-code response from GitHub");
+  }
+  const grantId = genGrantId();
+  const intervalSec = Math.max(Number(raw.interval) || 5, 5);
+  ACTIVE_GRANTS.set(grantId, {
+    deviceCode: raw.device_code,
+    expiresAt: now() + DEVICE_TTL_MS,
+    intervalSec,
+  });
+  return {
+    grantId,
+    userCode: raw.user_code,
+    verificationUri: raw.verification_uri,
+    expiresIn: Number(raw.expires_in) || 900,
+    pollInterval: intervalSec,
+  };
+}
+
+/**
+ * Cancel an in-flight device grant (the [S5] Cancel button). Safe to call for
+ * an unknown/already-finished grant — no-op. Returns void.
+ * @param {string} grantId
+ */
+export function cancelDeviceGrant(grantId) {
+  ACTIVE_GRANTS.delete(grantId);
+}
+
+/**
+ * Poll an in-flight device grant for its token. On success the token is stored
+ * in the secrets vault under `GITHUB_TOKEN` (shared scope) via storeToken and
+ * the ladder's resolution cache is invalidated so the stored secret is picked
+ * up next boot. `authorization_pending` returns `{ status: "pending" }`;
+ * `slow_down` bumps the poll interval +5s permanently; `expired_token` throws
+ * ExpiredCodeError ([E2]).
+ *
+ * @param {string} grantId
+ * @param {{ clientId?: string, fetch?: typeof fetch, now?: () => number, storeToken?: (token: string) => Promise<{ ok: boolean, error?: string }> }} [opts]
+ * @returns {Promise<{ status: "pending" | "done", pollInterval?: number }>}
+ */
+export async function pollDeviceGrant(
+  grantId,
+  { clientId = DEVICE_CLIENT_ID, fetch: fetchFn = globalThis.fetch, now = Date.now, storeToken = defaultStoreToken } = {},
+) {
+  const grant = ACTIVE_GRANTS.get(grantId);
+  if (!grant) {
+    throw new Error("unknown device grant");
+  }
+  if (now() >= grant.expiresAt) {
+    ACTIVE_GRANTS.delete(grantId);
+    throw new ExpiredCodeError();
+  }
+  const res = await fetchFn("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      client_id: clientId,
+      device_code: grant.deviceCode,
+      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    }),
+  });
+  let raw;
+  try {
+    raw = await res.json();
+  } catch {
+    throw new Error("unexpected access-token response from GitHub");
+  }
+  if (raw.error === "authorization_pending") return { status: "pending", pollInterval: grant.intervalSec };
+  if (raw.error === "slow_down") {
+    grant.intervalSec += 5;
+    return { status: "pending", pollInterval: grant.intervalSec };
+  }
+  if (raw.error === "expired_token") {
+    ACTIVE_GRANTS.delete(grantId);
+    throw new ExpiredCodeError();
+  }
+  if (!raw.access_token) {
+    throw new Error(raw.error_description || "device sign-in failed");
+  }
+  const stored = await storeToken(raw.access_token);
+  if (!stored.ok) throw new Error(stored.error || "couldn't store the token");
+  ACTIVE_GRANTS.delete(grantId);
+  invalidateToken(CLI_HOST);
+  return { status: "done" };
 }

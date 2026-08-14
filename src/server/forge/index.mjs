@@ -31,6 +31,8 @@ import { detectForge, rollupChecks, unsupportedByForge, repoKey as forgeRepoKey 
 import { run } from "../tmux.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush } from "../local.mjs";
 import { resolveToken as authResolveToken } from "./auth.mjs";
+import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
+import { getCloneStore } from "./clone.mjs";
 import { createGithubAdapter, GithubRequestError } from "./github.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
@@ -272,6 +274,139 @@ export async function forgeStatus({ resolveToken = authResolveToken, detectCli =
   const [cli, tok] = await Promise.all([detectCli(), resolveToken(GH_HOST)]);
   if (!tok) return { connected: false };
   return { connected: true, login: cli?.login ?? null, kind: "github", source: tok.source ?? null };
+}
+
+// ---- §7.4 case C: zero-state clone flow (BET-796) --------------------------
+//
+// All box-side. The device grant and repo/clone ops share the one rule that
+// every other forge op follows: a token never crosses RPC. The device grant
+// returns a renderer-safe shape (no device_code, rule 1); clones authenticate
+// box-side and the renderer only ever sees a status snapshot.
+
+/**
+ * Start the GitHub device grant. Returns the renderer-safe shape — grantId
+ * (opaque handle), userCode, verificationUri, expiresIn, pollInterval.
+ * `device_code` is held box-side and NEVER appears here.
+ *
+ * @param {{ resolveToken?: typeof authResolveToken, start?: typeof authStartDeviceGrant }} [deps]
+ */
+export async function forgeDeviceStart(
+  { resolveToken = authResolveToken, start = authStartDeviceGrant } = {},
+) {
+  // A box that already has a credential (CLI/secret) needn't run the device
+  // flow at all — report it so the UI skips straight to the picker.
+  const tok = await resolveToken(GH_HOST);
+  if (tok) return { connected: true, grant: null };
+  try {
+    const grant = await start();
+    return { connected: false, grant, error: null };
+  } catch (e) {
+    // A placeholder/unset client_id (BET-849) must surface as a clear "not
+    // configured" state, NOT retry a guaranteed-dead-end device screen.
+    if (e instanceof DeviceFlowNotConfiguredError) {
+      return { connected: false, notConfigured: true, grant: null };
+    }
+    throw e;
+  }
+}
+
+/**
+ * Poll an in-flight device grant. Returns `{ status: "pending", pollInterval }`,
+ * `{ status: "done" }`, or `{ status: "expired" }` ([E2]) — never throws. On
+ * success the token is already stored under GITHUB_TOKEN by the auth layer.
+ *
+ * @param {string} grantId
+ * @param {{ poll?: typeof authPollDeviceGrant }} [deps]
+ */
+export async function forgeDevicePoll(
+  grantId,
+  { poll = authPollDeviceGrant } = {},
+) {
+  if (typeof grantId !== "string" || !grantId) return { status: "expired" };
+  try {
+    return await poll(grantId);
+  } catch (e) {
+    if (e instanceof ExpiredCodeError) return { status: "expired" };
+    return { status: "error", error: String((e && e.message) || e) };
+  }
+}
+
+/**
+ * Cancel an in-flight device grant ([S5] Cancel → back to [S4] with nothing
+ * changed). No-op for an unknown grant.
+ *
+ * @param {string} grantId
+ * @param {{ cancel?: typeof authCancelDeviceGrant }} [deps]
+ */
+export function forgeDeviceCancel(
+  grantId,
+  { cancel = authCancelDeviceGrant } = {},
+) {
+  cancel(grantId);
+  return { ok: true };
+}
+
+/**
+ * The remote repo picker's source ([S6]): the repos the connected user can
+ * push to, most-recently-pushed first (adapter.listMyRepos). Box-side — a
+ * token resolves but never crosses RPC.
+ *
+ * @param {{ resolveToken?: typeof authResolveToken, getAdapterFn?: typeof getAdapter }} [deps]
+ */
+export async function forgeListRepos(
+  { resolveToken = authResolveToken, getAdapterFn = getAdapter } = {},
+) {
+  const tok = await resolveToken(GH_HOST);
+  if (!tok) return { error: "not_connected", repos: [] };
+  const adapter = getAdapterFn("github", tok.token);
+  try {
+    const { data, stale } = await adapter.listMyRepos();
+    return { repos: Array.isArray(data) ? data : [], stale: Boolean(stale), error: null };
+  } catch (e) {
+    return { repos: [], error: String((e && e.message) || e), stale: false };
+  }
+}
+
+/**
+ * Start a clone. Resolves the token box-side (private-repo auth via the
+ * clone's extraheader) and returns an opaque job id tracked by the clone
+ * store; the renderer polls forge:clone-status for the determinate progress.
+ * Never returns the token.
+ *
+ * @param {{ url: string, dest: string, name: string }} input
+ * @param {{ resolveToken?: typeof authResolveToken, store?: ReturnType<typeof getCloneStore> }} [deps]
+ */
+export async function forgeCloneStart(
+  input,
+  { resolveToken = authResolveToken, store = getCloneStore() } = {},
+) {
+  const url = input?.url;
+  const dest = input?.dest;
+  const name = input?.name;
+  if (typeof url !== "string" || !url || typeof dest !== "string" || !dest) {
+    return { error: "bad_request" };
+  }
+  const tok = await resolveToken(GH_HOST);
+  const id = store.start({ url, dest, name: name || "", token: tok?.token ?? undefined });
+  return { id };
+}
+
+/**
+ * Clone status snapshot for the determinate bar ([S7]).
+ * @param {string} id
+ * @param {{ store?: ReturnType<typeof getCloneStore> }} [deps]
+ */
+export function forgeCloneStatus(id, { store = getCloneStore() } = {}) {
+  return store.status(id);
+}
+
+/**
+ * Cancel an in-flight clone ([S7] Cancel).
+ * @param {string} id
+ * @param {{ store?: ReturnType<typeof getCloneStore> }} [deps]
+ */
+export function forgeCloneCancel(id, { store = getCloneStore() } = {}) {
+  return store.cancel(id);
 }
 
 async function defaultGitRemoteOrigin(cwd) {

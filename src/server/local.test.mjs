@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -212,3 +212,38 @@ test("parseGhAuthStatus: no token-looking substring is ever returned", () => {
   assert.ok(!/ghp_[A-Za-z0-9]+/.test(out ?? ""), "no token fragment in the result");
 });
 
+
+// ---- BET-796: parseCloneProgress (determinate clone bar) --------------------
+
+test("parseCloneProgress parses a real git clone receiving-objects line", () => {
+  const line = "Receiving objects:  61% (240/394), 34.00 MiB | 3.00 MiB/s";
+  assert.deepEqual(parseCloneProgress(line), { percent: 61, bytes: 34 * 1024 * 1024 });
+});
+
+test("parseCloneProgress parses checking-out-files lines too", () => {
+  const line = "Checking out files: 100% (394/394), done.";
+  const out = parseCloneProgress(line);
+  assert.equal(out.percent, 100);
+  assert.equal(out.bytes, 0); // no byte token in a done line
+});
+
+test("parseCloneProgress parses KiB and bare-B byte tokens", () => {
+  assert.equal(parseCloneProgress("Receiving objects: 10% (1/394), 512.00 KiB").bytes, 512 * 1024);
+  assert.equal(parseCloneProgress("Receiving objects: 50% (1/394), 8 B").bytes, 8);
+});
+
+test("parseCloneProgress returns null for lines with no percentage", () => {
+  assert.equal(parseCloneProgress("Cloning into 'widget'..."), null);
+  assert.equal(parseCloneProgress(""), null);
+  assert.equal(parseCloneProgress(null), null);
+  assert.equal(parseCloneProgress(undefined), null);
+});
+
+test("parseCloneProgress ignores remote's own 100% lines (no early full bar)", () => {
+  const remote = "remote: Enumerating objects: 100% (394/394), done.";
+  assert.equal(parseCloneProgress(remote), null, "remote lines must not flip the bar to 100%");
+});
+
+test("parseCloneProgress clamps percent into 0..100", () => {
+  assert.equal(parseCloneProgress("Receiving objects: 250% (999/394)").percent, 100);
+});
