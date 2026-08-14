@@ -123,6 +123,32 @@
   font-size:10px;line-height:1.75;padding:9px 13px;color:var(--slate-400);flex:none}
 .aw .term .p{color:var(--green-500)}
 .aw .term .d{color:var(--blue-300)}
+/* stage 4.0 Design — the generated page. The browser window is .aw with a URL
+   pill in place of the window title; .gp is the page it is showing. */
+.aw .url{flex:1;min-width:0;margin-left:10px;display:flex;align-items:center;gap:6px;
+  background:var(--surface-app);border:1px solid var(--navy-700);border-radius:var(--radius-full);
+  padding:2px 10px;font-family:var(--font-mono);font-size:9.5px;color:var(--slate-400);
+  overflow:hidden;white-space:nowrap}
+.aw .url .lock{color:var(--green-500);display:flex}
+.aw .url b{color:var(--cyan-400);font-weight:700}
+.gp{background:var(--surface-app);padding-bottom:16px}
+.gp .gn{display:flex;align-items:center;justify-content:space-between;padding:9px 14px;
+  border-bottom:1px solid var(--navy-800);font-size:9.5px;color:var(--slate-500)}
+.gp .gn b{color:var(--text-primary);font-size:11px}
+.gp .gh{padding:18px 14px 14px;text-align:center}
+.gp .gh h4{font-size:16px;font-weight:800;letter-spacing:-.02em;color:var(--text-primary);line-height:1.15}
+.gp .gh p{font-size:10px;color:var(--slate-400);margin-top:5px}
+.gp .gc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:0 14px}
+.gp .pc{border-radius:9px;background:var(--tile-fill);box-shadow:inset 0 0 0 1px var(--tile-line);padding:10px 9px}
+.gp .pc.hi{box-shadow:inset 0 0 0 1px var(--cyan-400)}
+.gp .pc .n{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--slate-500);font-weight:700}
+.gp .pc .amt{font-size:18px;font-weight:800;color:var(--text-primary);margin-top:4px;letter-spacing:-.02em}
+.gp .pc .amt span{font-size:9px;font-weight:600;color:var(--slate-500)}
+.gp .pc ul{list-style:none;margin:8px 0 0;font-size:9px;color:var(--slate-400);line-height:1.9}
+.gp .pc .cta{margin-top:9px;text-align:center;font-size:9px;font-weight:700;border-radius:5px;padding:5px 0;
+  background:var(--fill-subtle);color:var(--slate-300)}
+.gp .pc.hi .cta{background:var(--blue-500);color:var(--slate-50)}
+
 
 
 .ob{border:1px solid var(--navy-700);border-radius:11px;background:var(--surface-app);overflow:hidden;
@@ -588,10 +614,10 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
         <div class="rd">Chat sessions and real terminals.</div></div>
       <div class="rl"><div class="rn">3.0</div><div class="rt">Leave</div>
         <div class="rd">Close the lid. It carries on.</div></div>
-      <div class="rl"><div class="rn">4.0</div><div class="rt">Automate</div>
+      <div class="rl"><div class="rn">4.0</div><div class="rt">Design</div>
+        <div class="rd">Ask for a page. Get a URL.</div></div>
+      <div class="rl"><div class="rn">5.0</div><div class="rt">Automate</div>
         <div class="rd">Work that starts without you.</div></div>
-      <div class="rl"><div class="rn">5.0</div><div class="rt">Delegate</div>
-        <div class="rd">Several agents, no collisions.</div></div>
     </div>
     <div class="trust">
       <span><b>Open source</b>, MIT licensed</span>
@@ -662,7 +688,7 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
     style="flex:none;vertical-align:-1px"><path d="M5 3.4 12.2 8 5 12.6z" fill="currentColor" stroke="none"/></svg></span> waiting for a device&#8230;</div>
     </div>
-    <div class="cd" style="text-align:center;padding:18px">
+    <div class="card" style="text-align:center;padding:18px">
       <div style="font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--slate-500)">Pairing code</div>
       <div class="code6" style="justify-content:center;margin-top:11px">
         <span>4</span><span>1</span><span>9</span><span>2</span><span>0</span><span class="a">7</span></div>
@@ -889,7 +915,97 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 </section>
 <section class="sunk">
   <div class="wrap">
-    <div class="stage-head"><span class="sn">4.0</span><h2>Automate</h2></div>
+    <div class="stage-head"><span class="sn">4.0</span><h2>Design</h2></div>
+    <p class="stage-lede">Ask for a mockup and you get a link, not a file. The agent writes the page on your box,
+      serves it from your own hostname over HTTPS and hands back a URL. Open it on your phone, send it to whoever
+      needs to look at it, then ask for the next revision &mdash; the same link updates.</p>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start">
+  <div class="aw">
+    <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
+    <div class="body">
+      <div class="sb narrow">
+        <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
+        <div class="grp">ETHERNAL</div>
+        <div class="ses on"><span class="dot run"></span><span class="nm">Pricing page ideas</span><span class="tm">1m</span></div>
+        <div class="ses"><span class="dot ok"></span><span class="nm">Add CSV export</span><span class="tm">2m</span></div>
+        <div class="grp">MARKETING</div>
+        <div class="ses"><span class="dot "></span><span class="nm">Landing page copy</span><span class="tm">3h</span></div>
+        <div class="sbf">Settings</div>
+      </div>
+      <div class="main">
+        <div class="hdr">
+          <span class="crumb">Pricing page ideas</span>
+          <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> main</span>
+        </div>
+        <div class="tr">
+          <div class="um">Three-tier pricing page, dark, same palette as the app. Show it to me.</div>
+          <div class="am">Built it and put it on your box. I would push the third tier &mdash; it is the only one
+            with the annual discount.</div>
+          <div class="tool"><span class="dot ok"></span>serve_page(pricing-v3)<span class="meta">1.2s</span></div>
+          <div class="card">
+            <div class="ct"><span class="badgeico" style="background:color-mix(in srgb,var(--cyan-400) 16%,transparent);
+              border:1px solid color-mix(in srgb,var(--cyan-400) 38%,transparent);color:var(--cyan-400)">&#8599;</span>
+              Your page is live</div>
+            <div class="cs">a3f9&hellip;ea650.boxes.mantaui.com/pages/pricing-v3</div>
+            <div class="row">
+              <span class="b pri">Open</span>
+              <span class="b sec">Copy link</span>
+            </div>
+          </div>
+        </div>
+        <div class="comp">
+          <div class="box">Make the middle tier the highlighted one<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div class="aw">
+      <div class="chrome"><i></i><i></i><i></i>
+        <span class="url"><span class="lock"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor"
+    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+    style="flex:none;vertical-align:-1px"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.4"/><path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7"/></svg></span>a3f9&hellip;ea650.boxes.mantaui.com<b>/pages/pricing-v3</b></span></div>
+      <div class="gp">
+        <div class="gn"><b>Ethernal</b><span>Product &nbsp; Docs &nbsp; Pricing</span></div>
+        <div class="gh"><h4>Simple pricing. No surprises.</h4>
+          <p>Start free. Move up when the team does.</p></div>
+        <div class="gc">
+          <div class="pc"><div class="n">Solo</div><div class="amt">$0<span>/mo</span></div>
+            <ul><li>1 workspace</li><li>Community support</li><li>7-day history</li></ul>
+            <div class="cta">Get started</div></div>
+          <div class="pc"><div class="n">Team</div><div class="amt">$24<span>/mo</span></div>
+            <ul><li>Unlimited workspaces</li><li>Shared secrets</li><li>90-day history</li></ul>
+            <div class="cta">Choose Team</div></div>
+          <div class="pc hi"><div class="n">Scale</div><div class="amt">$79<span>/mo</span></div>
+            <ul><li>SSO and audit log</li><li>Priority support</li><li>2 months free yearly</li></ul>
+            <div class="cta">Talk to us</div></div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--slate-400)">
+      <span>Same link, each time you ask:</span>
+      <span class="gchip">v1</span><span class="gchip">v2</span>
+      <span class="gchip" style="color:var(--cyan-400);box-shadow:inset 0 0 0 1px var(--cyan-400)">v3</span>
+    </div>
+    <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">It lives on your box</div>
+      <p style="margin-top:8px;font-size:13px;color:var(--slate-400)">Written to your machine and served from the
+        hostname it already holds a certificate for. No third-party host, no account, nothing to deploy.</p></div>
+    <div class="card"><div style="font-size:15px;color:var(--text-primary);font-weight:700">Sandboxed, and it expires</div>
+      <p style="margin-top:8px;font-size:13px;color:var(--slate-400)">A page the model wrote is served in a sandbox,
+        so it cannot read your session. It disappears after a day unless you ask for longer.</p></div>
+  </div>
+</div>
+  </div>
+</section>
+<section>
+  <div class="wrap">
+    <div class="stage-head"><span class="sn">5.0</span><h2>Automate</h2></div>
     <p class="stage-lede">An agent can be woken by something happening: a labelled issue, a failed build, a time of
       day. It works in its own branch and leaves you a pull request.</p>
     
@@ -916,7 +1032,7 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     <p style="text-align:center;font-size:11.5px;color:var(--slate-500);margin-top:2px">You were asleep for all of it.</p>
   </div>
   <div style="display:flex;flex-direction:column;gap:16px">
-    <div class="cd">
+    <div class="card">
       <h3 style="font-size:16px">On a timer, too</h3>
       <p style="font-size:12.5px;color:var(--slate-400);margin-top:5px">Ask once, in plain English.</p>
       <div class="joblist" style="margin-top:11px">
@@ -932,7 +1048,7 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
           <span class="jm">in 4d</span></div>
       </div>
     </div>
-    <div class="cd">
+    <div class="card">
       <h3 style="font-size:16px">And it can drive your Mac</h3>
       <p style="font-size:12.5px;color:var(--slate-400);margin-top:5px">Ask from your phone. Xcode, your simulators and your
         signing certificates do the work at home.</p>
@@ -954,130 +1070,6 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
     style="flex:none;vertical-align:-1px"><path d="M3 8.4 6.2 11.6 13 4.8"/></svg></span> the app is open on the simulator</div>
       </div>
-    </div>
-  </div>
-</div>
-  </div>
-</section>
-<section>
-  <div class="wrap">
-    <div class="stage-head"><span class="sn">5.0</span><h2>Delegate</h2></div>
-    <p class="stage-lede">Hand off a job and it gets its own copy of the repository and its own branch. Five can run
-      at once without touching each other, or what you are editing.</p>
-    
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:22px;align-items:start">
-  <div class="aw">
-    <div class="chrome"><i></i><i></i><i></i><span class="t">Manta UI</span></div>
-    <div class="body">
-      <div class="sb">
-        <div class="sbh">Workspace<span class="sp"><span><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg></span><span>+</span></span></div>
-        <div class="grp">INFRA</div>
-        <div class="ses on"><span class="dot run"></span><span class="nm">Deploy billing service</span><span class="tm">18m</span></div>
-        <div style="padding:2px 0 0 14px;border-left:1px solid var(--navy-700);margin-left:16px">
-          <div class="ses" style="padding-left:6px"><span class="dot run"></span>
-              <span class="nm" style="font-size:10.5px">fix-orders-csv-flake</span><span class="tm">6m</span></div><div class="ses" style="padding-left:6px"><span class="dot ok"></span>
-              <span class="nm" style="font-size:10.5px">bump-deps-june</span><span class="tm">22m</span></div><div class="ses" style="padding-left:6px"><span class="dot run"></span>
-              <span class="nm" style="font-size:10.5px">audit-server-spawns</span><span class="tm">3m</span></div><div class="ses" style="padding-left:6px"><span class="dot run"></span>
-              <span class="nm" style="font-size:10.5px">backfill-tests</span><span class="tm">11m</span></div><div class="ses" style="padding-left:6px"><span class="dot ok"></span>
-              <span class="nm" style="font-size:10.5px">docs-refresh</span><span class="tm">31m</span></div>
-        </div>
-        <div class="grp">ETHERNAL</div>
-        <div class="ses"><span class="dot"></span><span class="nm">Add CSV export</span><span class="tm">2m</span></div>
-        <div class="sbf">Settings</div>
-      </div>
-      <div class="main">
-        
-<div class="hdr">
-  <span class="crumb">Deploy billing service</span>
-  <span class="chip"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> feat/orders-csv</span>
-  <span class="ctx">
-    <span class="ctxbar">
-      <b style="width:44%;background:var(--blue-500)"></b>
-      <b style="width:16%;background:var(--amber-500)"></b>
-      <b style="width:22%;background:var(--cyan-400)"></b>
-    </span>
-    <span class="ctxpc">38%</span>
-    <span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M10 3v10"/></svg></span><span class="hicon"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="3.4" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="12.6" cy="8" r=".9" fill="currentColor" stroke="none"/></svg></span>
-  </span>
-</div>
-        <div class="tr">
-          <div class="um">Split this into five jobs and run them in parallel. Don&#8217;t let them tread on each other.</div>
-          <div class="am">Started five background jobs. Each has its own copy of the repo and its own branch,
-            so nothing they do can collide with what you are editing. I will report back as each finishes.</div>
-          <div class="tool"><span class="dot ok"></span>Task(bump-deps-june)
-            <span class="meta">done, PR #409</span></div>
-          <div class="tool"><span class="dot run"></span>Task(fix-orders-csv-flake)
-            <span class="meta">running 6m</span></div>
-        </div>
-        
-<div class="comp">
-  <div class="box">Ask for anything else while these run<span class="send"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><path d="M14 2 7.2 8.8M14 2l-4.4 12-2.4-5.2L2 6.4z"/></svg></span></div>
-  <div class="meta">
-    <span class="mp b">Opus 4.7 &#9662;</span><span class="mp">High &#9662;</span>
-    <span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><path d="M11.5 7.2 7 11.7a2.6 2.6 0 0 1-3.7-3.7l5-5a1.8 1.8 0 0 1 2.5 2.5l-5 5a.9.9 0 0 1-1.3-1.3l4.4-4.4"/></svg></span>
-    <span style="margin-left:auto;display:flex;gap:10px"><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="5.4" cy="8" r="2.6"/><path d="M8 8h6M12 8v2.2M10.2 8v1.6"/></svg></span><span class="mi"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><path d="M4.5 12.4a2.6 2.6 0 1 0 0-5.2M4.5 7.2V4.6A2.2 2.2 0 0 1 6.7 2.4h2M11.5 12.4h-3"/></svg></span></span>
-  </div>
-  <div class="perm"><span>Permissions on, click to bypass</span></div>
-</div>
-      </div>
-    </div>
-  </div>
-  <div style="display:flex;flex-direction:column;gap:14px">
-    <div class="joblist">
-      <div class="jh">Background jobs<span style="margin-left:auto;font-family:var(--font-mono)">3 running, 2 done</span></div>
-      
-        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> fix-orders-csv-flake</span>
-          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+18 -3</span>
-            <span style="color:var(--cyan-400)">running</span>
-            <span>6m</span></span></div>
-        <div class="jr"><span class="dot ok"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> bump-deps-june</span>
-          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+204 -196</span>
-            <span style="color:var(--green-500)">done, PR #409</span>
-            <span>22m</span></span></div>
-        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> audit-server-spawns</span>
-          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+0 -0</span>
-            <span style="color:var(--cyan-400)">running</span>
-            <span>3m</span></span></div>
-        <div class="jr"><span class="dot run"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> backfill-tests</span>
-          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+312 -8</span>
-            <span style="color:var(--cyan-400)">running</span>
-            <span>11m</span></span></div>
-        <div class="jr"><span class="dot ok"></span><span class="jb"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor"
-    stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
-    style="flex:none;vertical-align:-1px"><circle cx="4.6" cy="3.6" r="1.7"/><circle cx="4.6" cy="12.4" r="1.7"/><circle cx="11.4" cy="6" r="1.7"/><path d="M4.6 5.3v5.4M11.4 7.7c0 2-1.6 2.6-3.4 2.9"/></svg> docs-refresh</span>
-          <span class="jm"><span style="font-family:var(--font-mono);color:var(--slate-500)">+64 -12</span>
-            <span style="color:var(--green-500)">done, PR #410</span>
-            <span>31m</span></span></div>
-    </div>
-    <div class="cd">
-      <p style="font-size:12.5px;color:var(--slate-400)">Each job is a real branch you can check out, review and merge
-        like any other. Nothing is hidden in a service you cannot see.</p>
     </div>
   </div>
 </div>
