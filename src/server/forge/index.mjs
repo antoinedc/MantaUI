@@ -519,6 +519,11 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  * Push uses gitPush (120s timeout — a real network push is killed by the
  * shared 10s `run()`), then createPullRequest with the given config.
  *
+ * When `deps.onPrOpened` is provided, it is invoked with
+ * `{ cwd, repoKey, number }` once a PR is created (best-effort; a throwing /
+ * absent dep never fails the ship). BET-847 wires this to record the session
+ * link (`link.pr`) at the point the field is set.
+ *
  * @param {string} cwd
  * @param {{ title: string, body?: string, base?: string, draft?: boolean }} input
  * @param {object} [deps] injectable I/O
@@ -547,6 +552,18 @@ export async function shipPullRequest(cwd, { title, body = "", base, draft = fal
     pr = res.data;
   } catch (e) {
     return { ok: false, error: `create pull request failed: ${String(e?.message ?? e)}` };
+  }
+
+  // Session-link primitive (BET-847): the one code path for opening a PR is the
+  // natural place to set the session's PR link. Best-effort — the ship result
+  // is returned regardless, and consumers (sink / notification / inbox / chip)
+  // read the linked PR from the session record.
+  if (deps.onPrOpened && pr?.number) {
+    try {
+      await deps.onPrOpened({ cwd, repoKey: forgeRepoKey(ctx.forge), number: pr.number });
+    } catch {
+      // link persistence is auxiliary; never fail the ship because of it
+    }
   }
 
   return { ok: true, pr, url: pr?.url ?? "" };
