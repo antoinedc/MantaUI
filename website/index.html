@@ -266,6 +266,16 @@ h1 .grad{background:var(--gradient-brand);-webkit-background-clip:text;backgroun
 @media(max-width:600px){
   #download .wrap>div{grid-template-columns:repeat(2,minmax(0,1fr)) !important}
 }
+/* BET-905 AC#4 — the five stage sections (1.0-5.0) use inline grid-column
+   definitions from the reference, which are not responsive. Stack their content
+   grids to a single column at narrow widths (mirroring BET-904's hero fix) and
+   let the fixed-width app window / phone / cards shrink below intrinsic width,
+   so none of them overflow the viewport at 390px. No markup change: the selector
+   targets the grid wrapper div that follows each stage section's lede paragraph. */
+@media(max-width:900px){
+  .stage-lede + div[style*="display:grid"]{grid-template-columns:minmax(0,1fr) !important}
+  .stage-lede + div[style*="display:grid"] > *{min-width:0}
+}
 </style>
 
 <!-- BEGIN:head-meta -->
