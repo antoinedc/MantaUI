@@ -137,6 +137,9 @@ private struct ChatScreenContent: View {
     /// the chat surface's window into the same settings the Settings screen
     /// renders — no second `config:get`.
     @StateObject private var settingsStore: MantaSettingsStore
+    /// The plan-usage snapshot set (BET-824), polled every 60s while the chat
+    /// is open. Feeds the composer dot, the usage sheet and the weekly banner.
+    @StateObject private var usageStore: UsageStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -144,6 +147,14 @@ private struct ChatScreenContent: View {
     @State private var showOverflow = false
     /// Presents the title menu's "Session info" summary.
     @State private var showingSessionInfo = false
+    /// Context sheet — opened by tapping the context strip.
+    @State private var showContextSheet = false
+    /// Usage sheet — opened by tapping the composer's usage dot, or the weekly
+    /// banner's Details.
+    @State private var showUsageSheet = false
+    /// One-per-session gate for the weekly ≥ 90% warning banner. Resets when
+    /// the session changes (ChatScreenContent is rebuilt on a clear via `.id`).
+    @State private var weeklyBannerShown = false
     @State private var branch: String?
     /// The session's working directory relative to the project root, shown
     /// alongside the branch capsule (BET-747).
@@ -212,6 +223,7 @@ private struct ChatScreenContent: View {
         ))
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
+        _usageStore = StateObject(wrappedValue: UsageStore(api: api))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -259,6 +271,7 @@ private struct ChatScreenContent: View {
                 store.start()
                 modelStore.load()
                 Task { await settingsStore.load() }
+                usageStore.start()
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
@@ -266,6 +279,7 @@ private struct ChatScreenContent: View {
             }
             .onDisappear {
                 store.stop()
+                usageStore.stop()
                 MantaPushRouter.shared.visibleSessionID = nil
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
             }
@@ -396,6 +410,8 @@ private struct ChatScreenContent: View {
                         api: MantaAPIClient.live(),
                         store: store,
                         modelStore: modelStore,
+                        usageStore: usageStore,
+                        onShowUsage: { showUsageSheet = true },
                         showScrollToBottom: showScrollToBottom,
                         onScrollToBottom: {
                             scrollPosition.scrollTo(edge: .bottom, animated: true)
@@ -450,6 +466,14 @@ private struct ChatScreenContent: View {
         .sheet(isPresented: $showOverflow) { overflowSheet }
         .sheet(item: $overflowDestination) { destination in
             destinationCard(destination)
+        }
+        // BET-824 — each meter opens the sheet for what it represents: the
+        // strip opens context, the dot opens the plan.
+        .sheet(isPresented: $showContextSheet) {
+            contextSheet
+        }
+        .sheet(isPresented: $showUsageSheet) {
+            usageSheet
         }
     }
 
@@ -778,6 +802,16 @@ private struct ChatScreenContent: View {
         .onChange(of: store.rows, initial: true) { _, rows in
             dataSource.apply(rows)
         }
+        // Context meter (BET-824): a strip mounted directly under the
+        // navigation bar. `safeAreaBar(edge: .top)` insets the scroll view's
+        // safe area AND extends the scroll-edge effect, so the transcript
+        // scrolls correctly beneath it — no toolbar item, no hand-rolled
+        // overlay. The strip is absent entirely below 70% (no reserved height,
+        // so appearing costs no layout shift); it animates in above the
+        // transcript.
+        .safeAreaBar(edge: .top) {
+            contextStrip
+        }
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
         .simultaneousGesture(TapGesture().onEnded { resignKeyboard() })
@@ -803,11 +837,184 @@ private struct ChatScreenContent: View {
     // 3). It is ALSO the harness scene `ChatLoadingScene` (MantaAppRoot) that
     // the capture fixture drives, so fixture and live screen share one view.
 
+    // MARK: - Context meter (BET-824)
+
+    /// The context reading from the live stream payload: `.known` with a real
+    /// percentage, `.unknown` when the box has none (nil early in a session,
+    /// and again after a compaction). Never renders 0% for "don't know".
+    private var contextMeterReading: MeterReading {
+        guard let ctx = store.context, ctx.pct.isFinite else { return .unknown }
+        return .known(pct: ctx.pct)
+    }
+
+    /// The active model's own context window — the meter's denominator. Opus
+    /// 4.7 reports 1M against Sonnet's 200k, so it is read per-model, never
+    /// hardcoded.
+    private var activeModelContextLimit: Double? {
+        guard let model = ChatModel.activeModel(modelStore.models,
+                                                override: modelStore.override,
+                                                default: modelStore.defaultModel) else { return nil }
+        return model.limit?.context
+    }
+
+    private var activeModelName: String {
+        ChatModel.label(modelStore.models, override: modelStore.override, default: modelStore.defaultModel)
+    }
+
+    /// The desktop's `alwaysShowUsage`, honoured on iOS: when true the strip
+    /// stays open below 70%. Read through the existing settings store — no new
+    /// config channel.
+    private var alwaysShowUsage: Bool {
+        guard let entry = SettingsSchema.entries.first(where: { $0.id == "alwaysShowUsage" }),
+              case .bool(let on) = settingsStore.current(entry) else { return false }
+        return on
+    }
+
+    private var contextStripVisible: Bool {
+        UsageMeters.contextStripVisible(contextMeterReading, alwaysShow: alwaysShowUsage)
+    }
+
+    /// The band colour for the current context reading (strip + sheet).
+    private var contextBandColor: Color {
+        if case .known(let pct) = contextMeterReading {
+            return MeterRing.tint(UsageMeters.band(pct), tokens)
+        }
+        return tokens.tx4
+    }
+
+    /// Full-width, one-tap strip directly under the navigation bar: the word
+    /// "Context", a linear meter filling the remaining width, the percentage,
+    /// a chevron. Absent below 70% (no reserved height, no layout shift) and
+    /// animates in above the transcript via `safeAreaBar`. A `Gauge`, not a
+    /// `ProgressView` — the HIG treats progress indicators as transient, and
+    /// this one never disappears (until it genuinely drops), so it reads as a
+    /// persistent meter and VoiceOver announces it so.
+    @ViewBuilder
+    private var contextStrip: some View {
+        if contextStripVisible, case .known(let pct) = contextMeterReading {
+            Button { showContextSheet = true } label: {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    Text("Context")
+                        .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
+                        .foregroundColor(tokens.tx4)
+                    Gauge(value: pct, in: 0...100) { EmptyView() }
+                        .gaugeStyle(.accessoryLinearCapacity)
+                        .tint(contextBandColor)
+                        .frame(maxWidth: .infinity, maxHeight: 4)
+                    Text("\(Int(pct.rounded()))%")
+                        .font(.manta(size: Metrics.type.twoXS, weight: .bold))
+                        .foregroundColor(contextBandColor)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: Metrics.type.twoXS, weight: .semibold))
+                        .foregroundColor(tokens.tx4)
+                }
+                .frame(height: 24)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Context \(Int(pct.rounded())) percent")
+            .accessibilityIdentifier("context-strip")
+            // Context legitimately drops after a compaction; animate that drop
+            // rather than snapping it, or it reads as a glitch.
+            .animation(.easeInOut(duration: 0.4), value: pct)
+        }
+    }
+
+    @ViewBuilder
+    private var contextSheet: some View {
+        // The strip only shows for a known reading, but the context can go
+        // unknown in the window between the tap and the sheet presenting —
+        // never fabricate a 0% sheet for "we don't know".
+        if let ctx = store.context {
+            ContextSheet(
+                context: ctx,
+                cache: store.cache,
+                limit: activeModelContextLimit,
+                modelName: activeModelName,
+                bandColor: contextBandColor,
+                tokens: tokens,
+                onCompact: { store.compact() },
+                onClear: { Task { await clearSession() } }
+            )
+        } else {
+            Color.clear
+        }
+    }
+
+    private var usageSheet: some View {
+        UsageSheet(snapshots: usageStore.snapshots, lastFetch: usageStore.lastFetch, tokens: tokens)
+    }
+
+    /// Whether the one-per-session weekly warning banner should render.
+    private var weeklyBannerVisible: Bool {
+        UsageMeters.shouldShowWeeklyBanner(
+            UsageMeters.weeklyWindow(usageStore.snapshots),
+            alreadyShown: weeklyBannerShown
+        )
+    }
+
+    /// The pinned dismissible card shown once per session when the weekly sits
+    /// at/over 90%. "Details" opens the usage sheet; the × dismisses (and
+    /// stays dismissed this session).
+    private var weeklyBanner: some View {
+        let weekly = UsageMeters.weeklyWindow(usageStore.snapshots)
+        return HStack(spacing: Metrics.spacing.sp2) {
+            MeterRing(color: tokens.danger, diameter: 14, lineWidth: 2.5)
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+                Text("Weekly limit \(Int((weekly?.pct ?? 0).rounded()))%")
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.danger)
+                if let resetsAt = weekly?.resetsAt {
+                    Text("Resets \(UsageMeters.formatReset(Date(timeIntervalSince1970: resetsAt / 1000), now: Date()))")
+                        .font(.manta(size: Metrics.type.twoXS))
+                        .foregroundColor(tokens.tx4)
+                }
+            }
+            Spacer(minLength: 0)
+            Button { showUsageSheet = true } label: {
+                Text("Details")
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.accentTx)
+                    .padding(.horizontal, Metrics.spacing.sp2)
+                    .padding(.vertical, Metrics.spacing.sp1)
+                    .background(tokens.accentSoft, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            Button { weeklyBannerShown = true } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.tx4)
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(.leading, Metrics.spacing.sp3)
+        .padding(.trailing, Metrics.spacing.sp2)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("weekly-banner")
+    }
+
     // MARK: - Live cards (todos / permission / question)
 
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            // Weekly-limit banner (BET-824): one pinned dismissible card, once
+            // per session, when the weekly window is at/over 90%. The dot
+            // tracks the 5-hour window, so it can read green while the weekly
+            // is nearly spent — this banner is the only thing between a green
+            // dot and a multi-day lockout the user did not see coming.
+            if weeklyBannerVisible {
+                weeklyBanner
+            }
             // Only things that BLOCK the turn and need a tap stay here. Live
             // running tools now render INSIDE the transcript (in the turn that
             // spawned them); sessionError / truncation / queued prompts moved
