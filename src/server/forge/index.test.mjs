@@ -618,6 +618,183 @@ test("shipPreview with a linked issue and no template still emits the close line
   assert.match(r.body, /^Closes #7\n\n/);
 });
 
+// ---- shipPreview PR-description generation (BET-893) ------------------------
+//
+// When deps.model + deps.sessionId are supplied, shipPreview tries to generate
+// the title/body out of band (a throwaway opencode session) and falls back to
+// the deterministic draft on ANY failure. All opencode calls are injected;
+// nothing touches a live opencode.
+
+// A fake `run` that serves the diff (files) and log (commits) git commands
+// shipPreview + the generator run, and nothing else.
+function genGitRun({ files = "a.ts\nb.ts\n", commits = "feat: one\ntest: two\n" } = {}) {
+  return async (_bin, args) => {
+    const joined = (args ?? []).join(" ");
+    if (joined.includes("diff --name-only")) return { stdout: files, stderr: "" };
+    if (joined.includes("log --pretty=%s")) return { stdout: commits, stderr: "" };
+    throw new Error(`unexpected git invocation: ${joined}`);
+  };
+}
+
+// Build Inject-PR-description deps. `sessionListing` is what the throwaway
+// session's listMessages poll returns (a fixed snapshot); `transcriptSeq` is an
+// OPTIONAL ordered list of snapshots served one per poll (last repeats) for
+// simulating a stream that grows partial→complete. `completed` is the unix-ms
+// stamp that makes an assistant turn read as finished (opencode sets it only
+// when the turn is fully done). The calling session's transcript (sessionId)
+// returns a fixed "why" message. Collects the session ids passed to
+// deleteSessionRaw so tests can assert cleanup on both paths.
+function assistantCompleted(parts, stamp) {
+  return {
+    info: { role: "assistant", time: { completed: stamp } },
+    parts: parts.map((text) => ({ type: "text", text })),
+  };
+}
+function prDescDeps({
+  sessionListing,
+  transcriptSeq,
+  throwOnCreate = false,
+  throwOnPrompt = false,
+  dead = false,
+} = {}) {
+  const deleted = [];
+  const conversationTranscript = [
+    { info: { role: "user" }, parts: [{ type: "text", text: "reviewed this branch already" }] },
+  ];
+  let polls = 0;
+  const deps = {
+    ...SHIP_DEPS,
+    currentBranch: async () => "feat/forge-seam",
+    model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    sessionId: "user-session-1",
+    run: genGitRun(),
+    createSession: async (opts) => {
+      if (throwOnCreate) throw new Error("create boom");
+      return { id: "pr-desc-throwaway" };
+    },
+    sendPrompt: async () => { if (throwOnPrompt) throw new Error("prompt boom"); },
+    listMessages: async (id) => {
+      if (dead) throw new Error("messages boom");
+      if (id === "user-session-1") return conversationTranscript;
+      if (transcriptSeq) {
+        const snap = transcriptSeq[Math.min(polls, transcriptSeq.length - 1)];
+        polls++;
+        return snap;
+      }
+      return sessionListing;
+    },
+    deleteSessionRaw: async (id) => { deleted.push(id); },
+  };
+  return { deps, deleted };
+}
+
+test("shipPreview uses the session model's out-of-band generated title/body on success", async () => {
+  const { deps, deleted } = prDescDeps({
+    sessionListing: [assistantCompleted(["Model written title\n\nModel written body.\n"], 1000)],
+  });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Model written title");
+  assert.equal(r.body, "Model written body.");
+  assert.deepEqual(deleted, ["pr-desc-throwaway"], "throwaway session deleted on success");
+});
+
+test("shipPreview waits for the assistant turn to complete — a partial-then-grows stream is not returned early", async () => {
+  // The reviewed Block: the first poll observes a PARTIAL assistant message
+  // (no info.time.completed — generation still streaming) and must NOT be
+  // returned as the final PR description. Only after a later poll shows the
+  // turn COMPLETE (time.completed set) do we parse it.
+  const { deps, deleted } = prDescDeps({
+    transcriptSeq: [
+      // poll 1: partial, in-flight (no completion stamp)
+      [{ info: { role: "assistant" }, parts: [{ type: "text", text: "Model written t" }] }],
+      // poll 2: still streaming
+      [{ info: { role: "assistant" }, parts: [{ type: "text", text: "Model written title v" }] }],
+      // poll 3: complete
+      [assistantCompleted(["Model written title\n\nModel written body.\n"], 2000)],
+    ],
+  });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Model written title", "full completed text, not the partial");
+  assert.equal(r.body, "Model written body.");
+  assert.deepEqual(deleted, ["pr-desc-throwaway"]);
+});
+
+test("shipPreview falls back to the deterministic draft when generation throws", async () => {
+  const { deps, deleted } = prDescDeps({ throwOnPrompt: true });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam", "deterministic humanised-branch title");
+  assert.match(r.body, /^## What\n\nOpens feat\/forge-seam → main\./);
+  assert.deepEqual(deleted, ["pr-desc-throwaway"], "throwaway session deleted on the failure path");
+});
+
+test("shipPreview falls back when generation never completes (deadline)", async () => {
+  const { deps, deleted } = prDescDeps({
+    // An assistant message that is STILL IN FLIGHT (no completion stamp) — the
+    // loop keeps polling and blows the 60s budget → fallback.
+    sessionListing: [{ info: { role: "assistant" }, parts: [{ type: "text", text: "still streaming..." }] }],
+  });
+  Object.assign(deps, { deadlineMs: 40, pollMs: 10 });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam");
+  assert.match(r.body, /^## What/);
+  assert.deepEqual(deleted, ["pr-desc-throwaway"]);
+});
+
+test("shipPreview falls back when a completed turn produced no text", async () => {
+  const { deps, deleted } = prDescDeps({
+    sessionListing: [assistantCompleted([""], 1000)],
+  });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam");
+  assert.deepEqual(deleted, ["pr-desc-throwaway"]);
+});
+
+test("shipPreview falls back when the model reply is unparseable (null)", async () => {
+  const { deps, deleted } = prDescDeps({
+    sessionListing: [assistantCompleted(["   \n\n "], 1000)],
+  });
+  Object.assign(deps, { deadlineMs: 100, pollMs: 10 });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam");
+  assert.deepEqual(deleted, ["pr-desc-throwaway"], "throwaway session deleted when reply is unparseable");
+});
+
+test("shipPreview falls back when reading the throwaway session's messages throws", async () => {
+  const { deps } = prDescDeps({ dead: true });
+  Object.assign(deps, { deadlineMs: 40, pollMs: 10 });
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam");
+});
+
+test("shipPreview falls back when session create returns no id", async () => {
+  const { deps, deleted } = prDescDeps({});
+  deps.createSession = async () => ({});
+  const r = await shipPreview("/repo", deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam");
+  assert.deepEqual(deleted, [], "no session existed → nothing to delete");
+});
+
+test("shipPreview's model generation is skipped entirely when no model is supplied", async () => {
+  const { deps } = prDescDeps({});
+  delete deps.model;
+  delete deps.sessionId;
+  let created = false;
+  deps.createSession = async () => { created = true; return { id: "x" }; };
+  const r = await shipPreview("/repo", deps);
+  assert.equal(created, false, "no throwaway session for a model-less preview");
+  assert.equal(r.ok, true);
+  assert.equal(r.title, "Forge seam", "byte-identical deterministic draft");
+});
+
+
 
 // ---- forgeDiffForCwd (BET-792) ---------------------------------------------
 
