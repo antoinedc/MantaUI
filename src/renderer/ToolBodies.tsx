@@ -7,7 +7,12 @@
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
 import { Fragment, memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { resolveToolOutput, trimOutputEdges, type CommentableLine } from "./chatUtils";
+import {
+  commentableLines,
+  resolveToolOutput,
+  trimOutputEdges,
+  type CommentableLine,
+} from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
@@ -327,15 +332,13 @@ export function UnifiedDiff({
 }) {
   const children: ReactNode[] = [];
   const lines = text.split("\n");
-  let oldLine = 0;
-  let newLine = 0;
-  // The active file path the stream is currently inside, so anchors and notes
-  // are keyed PER-FILE — a PR diff is one merged stream of many files, and
-  // `(side, line)` alone collides whenever two files share a line number. Track
-  // it from the `+++ b/` marker (falling back to `--- a/` for a file deleted to
-  // `/dev/null`).
-  let path = "";
-  let aPath = "";
+  // THE single source of truth for `(path, side, line)` anchors: commentableLines
+  // (pure, tested) walks hunks and derives every anchor up front. UnifiedDiff
+  // renders rows but does NOT re-derive anchor geometry itself — it consumes
+  // the precomputed set in the exact order content lines appear, so the line-
+  // classification / `side` rule lives in exactly one place (BET-859), not two.
+  const anchors = commentableLines(text);
+  let ci = 0;
 
   const rowKey = (a: CommentableLine) => `${a.path}\u0000${a.side}\u0000${a.line}`;
   const notesByAnchor = new Map<string, UnifiedDiffNote[]>();
@@ -358,11 +361,6 @@ export function UnifiedDiff({
 
     // Hunk header.
     if (line.startsWith("@@")) {
-      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) {
-        oldLine = parseInt(m[1], 10);
-        newLine = parseInt(m[2], 10);
-      }
       // The tool diff treats hunks as noise and drops them; the review pane
       // keeps them as the mockup's muted `.diffline.meta` rows.
       if (showHunks) {
@@ -385,31 +383,27 @@ export function UnifiedDiff({
     }
 
     // File markers / Index preamble — drop entirely in BOTH modes (they're
-    // noise next to the changes), but use the `--- a/` / `+++ b/` pair to track
-    // which file the following hunks belong to (per-file anchoring above).
-    if (line.startsWith("--- ")) {
-      const am = /^--- a\/(.+)$/.exec(line);
-      if (am) aPath = am[1].trim();
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      const bm = /^\+\+\+ b\/(.+)$/.exec(line);
-      if (bm) path = bm[1].trim();
-      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
-      continue;
-    }
-    if (line.startsWith("Index: ") || /^=+$/.test(line)) {
+    // noise next to the changes). No local `--- a/` / `+++ b/` path tracking is
+    // needed here — commentableLines already carries the per-file path on every
+    // anchor in the precomputed set.
+    if (
+      line.startsWith("--- ") ||
+      line.startsWith("+++ ") ||
+      line.startsWith("Index: ") ||
+      /^=+$/.test(line)
+    ) {
       continue;
     }
 
-    // +/− /context line classification.
+    // +/− /context line classification — the row's CHROME (sign, colors, body)
+    // is decided here from the prefix, but the anchor geometry `(path, side,
+    // line)` is taken from the precomputed set below, NOT re-derived, so the
+    // `side` rule cannot drift from commentableLines' (BET-859).
     let bg = "";
     let signCls = "text-text-faint";
     let lnCls = "text-text-faint";
     let sign: string | null = null;
     let body = line;
-    let ln: number | null = null;
-    let anchor: CommentableLine | null = null;
 
     if (line.startsWith("+") && !line.startsWith("+++")) {
       bg = "bg-[var(--diff-add)]";
@@ -417,31 +411,24 @@ export function UnifiedDiff({
       lnCls = "text-ok/70";
       sign = "+";
       body = line.slice(1);
-      ln = newLine;
-      anchor = { path, line: newLine, side: "new" };
-      newLine++;
     } else if (line.startsWith("-") && !line.startsWith("---")) {
       bg = "bg-[var(--diff-del)]";
       signCls = "text-danger";
       lnCls = "text-danger/70";
       sign = "−";
       body = line.slice(1);
-      ln = oldLine;
-      anchor = { path, line: oldLine, side: "old" };
-      oldLine++;
     } else if (line.startsWith(" ")) {
       sign = " ";
       body = line.slice(1);
-      ln = newLine;
-      // An unchanged context line exists in BOTH versions — GitLab positions it
-      // with both `new_line` and `old_line`, so the anchor is "both" (BET-856),
-      // not "new" (which would misplace it as a pure addition on GitLab).
-      anchor = { path, line: newLine, side: "both" };
-      newLine++;
-      oldLine++;
     }
 
     if (sign !== null) {
+      // Consume the next precomputed anchor for this content row. Its `line` is
+      // the row's gutter line number, and its `side` is what decides
+      // commentability on the new/old/both side. `anchors` and the content
+      // rows share the same hunk walk, so the index is always in sync.
+      const anchor = anchors[ci] ?? null;
+      const ln = anchor?.line ?? null;
       const commentable = anchor != null && gutter?.commentable(anchor) === true;
       const rowClass = [
         "flex whitespace-pre",
@@ -505,6 +492,9 @@ export function UnifiedDiff({
           children.push(<Fragment key={n.key}>{n.node}</Fragment>);
         }
       }
+      // Advance to the next precomputed anchor — one content row consumes one
+      // anchor (added/removed/context), in the same hunk order.
+      ci++;
     }
   }
 

@@ -3063,6 +3063,9 @@ export type CommentableLine = { path: string; line: number; side: "new" | "old" 
 // active file path is tracked from the `+++ b/` marker (falling back to `--- a/`
 // when a file is deleted to `/dev/null`), so every anchor is keyed to its file.
 // File markers / hunk headers are not commentable. An empty diff yields `[]`.
+// This is the SINGLE anchor producer (BET-859): `UnifiedDiff` (ToolBodies.tsx)
+// consumes its output rather than re-deriving `(path, side, line)` inline, so
+// the line-classification rule can't diverge from a second implementation.
 export function commentableLines(diffText: string): CommentableLine[] {
   const result: CommentableLine[] = [];
   let oldLine = 0;
