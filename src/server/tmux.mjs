@@ -443,7 +443,7 @@ export async function newWindowGetIndex(sessionName, windowName, cwd, chatMode =
 // @param {boolean} [input.chatMode]    create an opencode chat-mode window
 // @param {object} [input.oc]           opencode client (required when chatMode)
 // @param {Array} [input.permission]    opencode permission ruleset (chatMode jobs)
-export async function newSession({ name, cwd, windowName, createDir, chatMode, existingSessionId, oc, permission }) {
+export async function newSession({ name, cwd, windowName, createDir, chatMode, existingSessionId, oc, permission, forgeIssueRef }) {
   // Onboarding's first-project step opts into auto-creation via createDir: a
   // missing ~/projects/<name> should be created, not silently swallowed. tmux
   // new-session -c falls back to $HOME for a non-existent dir, so the mkdir -p
@@ -469,6 +469,12 @@ export async function newSession({ name, cwd, windowName, createDir, chatMode, e
   const idx = await newSessionGetIndex(name, dir, windowName, !!chatMode);
   await applySessionSurvivability(name);
   if (sid) await restampSessionId(name, idx, sid);
+  // BET-871: stamp the originating inbox issue on `@manta-forge-issue` right
+  // after `@manta-session-id`, when the session was started from an inbox
+  // issue. `forgeIssueRef` is the canonical "repoKey#number" string, already
+  // formatted by the caller (formatIssueRef in forgeRules.mjs); null skips the
+  // stamp. Issue-only by construction — the inbox never sets it for PR items.
+  if (forgeIssueRef) await setWindowOption(name, idx, "@manta-forge-issue", forgeIssueRef);
   // BET-348: record ownership AFTER tmux accepted the new-session. If
   // anything above threw, we never get here — and we'd rather fail loud
   // than stamp a phantom entry. The next listProjects() will reconcile
@@ -551,6 +557,49 @@ export async function selectWindow({ sessionName, windowIndex }) {
 }
 
 /**
+ * Set a user-option on a tmux window. The ONE write path every manta
+ * window-option stamp goes through — `@manta-session-id`,
+ * `@manta-worktree-path`, `@manta-forge-issue`. Do not add a second
+ * `tmux set-window-option` wrapper; extend this.
+ *
+ * @param {string} sessionName
+ * @param {number} windowIndex
+ * @param {string} name   option name (e.g. "@manta-session-id")
+ * @param {string} value  stored as-is
+ */
+export async function setWindowOption(sessionName, windowIndex, name, value) {
+  await run("tmux", [
+    "set-window-option",
+    "-t", `${sessionName}:${windowIndex}`,
+    name, value,
+  ]);
+}
+
+/**
+ * Read a window user-option value, or null when the window has none set. The
+ * ONE read path that pairs with setWindowOption — a single option is queried
+ * with `show-window-options -v`, which prints only the value and errors when
+ * the option is unset (→ null).
+ *
+ * @param {string} sessionName
+ * @param {number} windowIndex
+ * @param {string} name   option name (e.g. "@manta-forge-issue")
+ * @returns {Promise<string|null>}
+ */
+export async function getWindowOption(sessionName, windowIndex, name) {
+  try {
+    const { stdout } = await run("tmux", [
+      "show-window-options",
+      "-t", `${sessionName}:${windowIndex}`,
+      "-v", name,
+    ]);
+    return String(stdout ?? "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Stamp (or update) the @manta-session-id user-option on a tmux window.
  * This is how the renderer knows a window is a chat-mode window and which
  * opencode session it belongs to.
@@ -560,28 +609,45 @@ export async function selectWindow({ sessionName, windowIndex }) {
  * @param {string} sessionId   opencode session id (e.g. "ses_...")
  */
 export async function restampSessionId(sessionName, windowIndex, sessionId) {
-  await run("tmux", [
-    "set-window-option",
-    "-t", `${sessionName}:${windowIndex}`,
-    "@manta-session-id", sessionId,
-  ]);
+  await setWindowOption(sessionName, windowIndex, "@manta-session-id", sessionId);
 }
 
 /**
  * Stamp (or update) the @manta-worktree-path user-option on a tmux window.
  * Used by BET-246's clean-on-close to know which windows own a worktree
  * that manta created (vs. pre-existing worktrees, which must NEVER be
- * removed). Mirrors restampSessionId verbatim — separate option name so
- * the two stamps never collide.
+ * removed). Separate option name so the two stamps never collide.
  *
  * @param {string} sessionName
  * @param {number} windowIndex
  * @param {string} path   absolute worktree path
  */
 export async function stampWorktreePath(sessionName, windowIndex, path) {
-  await run("tmux", [
-    "set-window-option",
-    "-t", `${sessionName}:${windowIndex}`,
-    "@manta-worktree-path", path,
+  await setWindowOption(sessionName, windowIndex, "@manta-worktree-path", path);
+}
+
+/**
+ * Find the (sessionName, windowIndex) whose pane is rooted at `cwd`, or null
+ * when no window matches. BET-871's read-point: forge:ship-preview resolves
+ * the session's window from the shipping cwd so it can read the originating
+ * issue off `@manta-forge-issue`. `cwd` is expanded (`~`) and matched against
+ * `pane_current_path` exactly — the session was created in that same resolved
+ * dir.
+ *
+ * @param {string} cwd
+ * @returns {Promise<{ sessionName: string, windowIndex: number } | null>}
+ */
+export async function findWindowForCwd(cwd) {
+  const dir = expandTilde(cwd ?? "");
+  if (!dir) return null;
+  const stdout = await tmuxListOutput([
+    "list-windows", "-a",
+    "-F", `#{session_name}${FS}#{window_index}${FS}#{pane_current_path}`,
   ]);
+  for (const line of String(stdout ?? "").split("\n").filter(Boolean)) {
+    const [sessionName, windowIndex, pane] = line.split(FS);
+    if (!sessionName || !windowIndex) continue;
+    if (pane === dir) return { sessionName, windowIndex: Number(windowIndex) };
+  }
+  return null;
 }

@@ -156,6 +156,11 @@ export interface Api {
     // by the draft flow) instead of creating a new one, and stamp it on the
     // new tmux window.
     existingSessionId?: string;
+    // BET-871: when the session is started from an inbox ISSUE, the box stamps
+    // the originating issue on the `@manta-forge-issue` window option so
+    // shipping a PR from it carries a "Closes #N" line. Omitted for PR-kind
+    // items and any other session start — no stamp.
+    forgeIssue?: { repoKey: string; number: number };
   }): Promise<TmuxCreateResult>;
   tmuxNewWindow(input: {
     sessionName: string;

@@ -20,6 +20,9 @@ import {
   addOwnedSession,
   removeOwnedSession,
   listProjects,
+  setWindowOption,
+  getWindowOption,
+  findWindowForCwd,
   killSession,
   renameSession,
   _resetOwnedSessionsCache,
@@ -842,4 +845,130 @@ test("run waits for stdout to close, not just for the child to exit", async () =
     "{ sleep 0.2; printf late-bytes; } & exit 0",
   ]);
   assert.equal(stdout, "late-bytes", "stdout must not be lost when the child exits early");
+});
+
+// ---- setWindowOption / getWindowOption (BET-871) ---------------------------
+// The ONE write path for every manta window-option stamp and its paired read.
+// A fake tmux holds options in a map so set-then-get round-trips.
+
+test("setWindowOption issues the single set-window-option command", async () => {
+  const cmds = installFakeTmux();
+  try {
+    await setWindowOption("proj", 2, "@manta-forge-issue", "github.com/acme/widget#412");
+  } finally {
+    _setRun(null);
+  }
+  const cmd = cmds.find((c) => c.args.includes("set-window-option"));
+  assert.ok(cmd, "set-window-option issued");
+  assert.deepEqual(cmd.args, [
+    "set-window-option", "-t", "proj:2", "@manta-forge-issue", "github.com/acme/widget#412",
+  ]);
+});
+
+test("getWindowOption returns the stored value via show-window-options -v", async () => {
+  let queried = null;
+  _setRun(async (_cmd, args) => {
+    if (args.includes("show-window-options")) {
+      queried = args;
+      return { stdout: "github.com/acme/widget#412", stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  });
+  try {
+    const v = await getWindowOption("proj", 2, "@manta-forge-issue");
+    assert.equal(v, "github.com/acme/widget#412", "value is the raw -v output, trimmed");
+  } finally {
+    _setRun(null);
+  }
+  assert.ok(queried, "show-window-options issued");
+});
+
+test("getWindowOption returns null when the option is unset (tmux errors)", async () => {
+  _setRun(async () => { throw new Error("unknown option: @manta-forge-issue"); });
+  try {
+    assert.equal(await getWindowOption("proj", 2, "@manta-forge-issue"), null);
+  } finally {
+    _setRun(null);
+  }
+});
+
+test("getWindowOption returns null for empty output", async () => {
+  _setRun(async () => ({ stdout: "", stderr: "" }));
+  try {
+    assert.equal(await getWindowOption("proj", 2, "@manta-forge-issue"), null);
+  } finally {
+    _setRun(null);
+  }
+});
+
+// ---- findWindowForCwd (BET-871) --------------------------------------------
+test("findWindowForCwd resolves a window by its pane_current_path", async () => {
+  _setRun(async (_cmd, args) => {
+    if (args.includes("list-windows")) {
+      return {
+        stdout:
+          "alpha\t1\t/home/u/other\n" +
+          "beta\t3\t/home/u/worktree",
+        stderr: "",
+      };
+    }
+    return { stdout: "", stderr: "" };
+  });
+  try {
+    assert.deepEqual(await findWindowForCwd("/home/u/worktree"), { sessionName: "beta", windowIndex: 3 });
+    assert.deepEqual(await findWindowForCwd("/home/u/missing"), null);
+    assert.deepEqual(await findWindowForCwd(""), null);
+  } finally {
+    _setRun(null);
+  }
+});
+
+// ---- newSession + forgeIssueRef (BET-871) ----------------------------------
+test("newSession stamps @manta-forge-issue after @manta-session-id when given a ref", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc("ses_sess1");
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-ns-forge-"));
+  try {
+    await newSession({
+      name: "newproj",
+      cwd,
+      windowName: "default",
+      chatMode: true,
+      oc,
+      forgeIssueRef: "github.com/acme/widget#412",
+    });
+  } finally {
+    _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
+  }
+  const stamps = cmds.filter((c) => c.args.includes("set-window-option"));
+  assert.equal(stamps.length, 2, "session-id + forge-issue stamps issued");
+  const sid = stamps.find((c) => c.args.includes("@manta-session-id"));
+  const forge = stamps.find((c) => c.args.includes("@manta-forge-issue"));
+  assert.ok(sid, "@manta-session-id stamped");
+  assert.ok(sid.args.includes("ses_sess1"), "session-id stamp carries the opencode id");
+  assert.ok(forge, "@manta-forge-issue stamped");
+  assert.ok(forge.args.includes("github.com/acme/widget#412"), "forge stamp carries the issue ref");
+});
+
+test("newSession without forgeIssueRef stamps only @manta-session-id", async () => {
+  const cmds = installFakeTmux();
+  const oc = fakeOc("ses_sess1");
+  const cwd = await mkdtemp(join(tmpdir(), "tmux-ns-noforge-"));
+  try {
+    await newSession({
+      name: "newproj",
+      cwd,
+      windowName: "default",
+      chatMode: true,
+      oc,
+    });
+  } finally {
+    _setRun(null);
+    await rm(cwd, { recursive: true, force: true });
+  }
+  const stamps = cmds.filter((c) => c.args.includes("set-window-option"));
+  assert.equal(stamps.length, 1, "only the session-id stamp is issued");
+  assert.ok(stamps[0].args.includes("@manta-session-id"));
+  assert.ok(!stamps.some((c) => c.args.includes("@manta-forge-issue")), "no forge-issue stamp");
 });

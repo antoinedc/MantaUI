@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { saveRules } from "./forgeRules.mjs";
+import { saveRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 
 const VALID_YAML = "on:\n  issue.labeled:\n    do: notify\n";
 const PUBLIC_BASE = "https://00000000000000000000000000000000.boxes.mantaui.com";
@@ -117,4 +117,60 @@ test("saveRules requires a public hostname before registration", async () => {
   assert.equal(res.webhook.registered, false);
   assert.match(res.webhook.error, /no public hostname/);
   assert.equal(ensureCalled, false);
+});
+
+// ---- formatIssueRef / parseIssueRef (BET-871) -------------------------------
+
+test("formatIssueRef / parseIssueRef round-trip a canonical ref", () => {
+  const ref = formatIssueRef({ repoKey: "github.com/acme/widget", number: 412 });
+  assert.equal(ref, "github.com/acme/widget#412");
+  assert.deepEqual(parseIssueRef(ref), { repoKey: "github.com/acme/widget", number: 412 });
+});
+
+test("formatIssueRef/parseIssueRef round-trip a GitLab subgroup owner", () => {
+  const ref = formatIssueRef({ repoKey: "gitlab.com/group/subgroup/widget", number: 7 });
+  assert.equal(ref, "gitlab.com/group/subgroup/widget#7");
+  assert.deepEqual(parseIssueRef(ref), {
+    repoKey: "gitlab.com/group/subgroup/widget",
+    number: 7,
+  });
+});
+
+test("formatIssueRef returns null for a repoKey parseRepoKey rejects", () => {
+  assert.equal(formatIssueRef({ repoKey: "acme/widget", number: 1 }), null); // 2 parts
+  assert.equal(formatIssueRef({ repoKey: "not a key", number: 1 }), null);
+  assert.equal(formatIssueRef({ repoKey: "", number: 1 }), null);
+  assert.equal(formatIssueRef({ repoKey: null, number: 1 }), null);
+});
+
+test("formatIssueRef returns null for a non-integer or non-positive number", () => {
+  assert.equal(formatIssueRef({ repoKey: "github.com/acme/widget", number: 0 }), null);
+  assert.equal(formatIssueRef({ repoKey: "github.com/acme/widget", number: -3 }), null);
+  assert.equal(formatIssueRef({ repoKey: "github.com/acme/widget", number: 1.5 }), null);
+  assert.equal(formatIssueRef({ repoKey: "github.com/acme/widget", number: "12" }), null);
+  assert.equal(formatIssueRef({ repoKey: "github.com/acme/widget", number: NaN }), null);
+});
+
+test("parseIssueRef returns null for a malformed string", () => {
+  assert.equal(parseIssueRef(null), null);
+  assert.equal(parseIssueRef(undefined), null);
+  assert.equal(parseIssueRef(42), null);
+  assert.equal(parseIssueRef(""), null);
+  assert.equal(parseIssueRef("github.com/acme/widget"), null); // no #
+  assert.equal(parseIssueRef("#12"), null); // empty repoKey
+  assert.equal(parseIssueRef("github.com/acme/widget#"), null); // empty number
+});
+
+test("parseIssueRef rejects a non-integer or non-positive number", () => {
+  assert.equal(parseIssueRef("github.com/acme/widget#0"), null);
+  assert.equal(parseIssueRef("github.com/acme/widget#-1"), null);
+  assert.equal(parseIssueRef("github.com/acme/widget#1.5"), null);
+  assert.equal(parseIssueRef("github.com/acme/widget#abc"), null);
+  assert.equal(parseIssueRef("github.com/acme/widget#1_2"), null);
+});
+
+test("parseIssueRef rejects a repoKey parseRepoKey does not accept", () => {
+  assert.equal(parseIssueRef("acme/widget#12"), null); // 2 parts
+  assert.equal(parseIssueRef("github.com/acme#12"), null); // 2 parts
+  assert.equal(parseIssueRef("/acme/widget#12"), null); // empty leading segment
 });

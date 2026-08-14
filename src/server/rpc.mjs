@@ -30,7 +30,7 @@ import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
-import { listRules as forgeListRules } from "./forgeRules.mjs";
+import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
 import { invalidateToken as invalidateForgeToken } from "./forge/auth.mjs";
 import { parseRules as parseForgeRules } from "../shared/forgeRules.mjs";
 
@@ -369,8 +369,25 @@ export function buildHandlers({
       );
       return res;
     },
-    "forge:ship-preview": (input) =>
-      shipPreview(typeof input === "object" && input !== null ? input.cwd : ""),
+    "forge:ship-preview": async (input) => {
+      const cwd = typeof input === "object" && input !== null ? input.cwd : "";
+      // Seed the PR body with a "Closes #N" line from the originating issue
+      // (BET-871): resolve the session's window from the shipping cwd and read
+      // the `@manta-forge-issue` user-option the inbox's Start-a-session flow
+      // stamped. parseIssueRef returns null for a missing/malformed option, so
+      // a session started any other way (or from an inbox PR) keeps today's
+      // byte-identical body. No second session-link store — the tmux window IS
+      // the app session.
+      return shipPreview(cwd, {
+        linkedIssue: async () => {
+          if (!cwd) return null;
+          const win = await tmux.findWindowForCwd(cwd);
+          if (!win) return null;
+          const raw = await tmux.getWindowOption(win.sessionName, win.windowIndex, "@manta-forge-issue");
+          return raw ? parseIssueRef(raw) : null;
+        },
+      });
+    },
     "forge:merge": (input) =>
       mergePullRequest(
         typeof input === "object" && input !== null ? input.cwd : "",
@@ -516,7 +533,14 @@ export function buildHandlers({
     // issue is about.
     "tmux:new-session": async (i) => {
       const cwd = await resolveProjectCwd(i.name, i.cwd);
-      const result = await tmux.newSession({ ...i, cwd, oc });
+      // BET-871: the inbox's "Start a session" flow passes the originating
+      // issue ({ repoKey, number }) for issue-kind items. Format it to the
+      // canonical "repoKey#number" ref the newSession stamp carries — done
+      // server-side so the format logic lives in one tested place, never in
+      // the renderer. formatIssueRef returns null for invalid input, which
+      // simply skips the stamp.
+      const forgeIssueRef = i?.forgeIssue ? formatIssueRef(i.forgeIssue) : null;
+      const result = await tmux.newSession({ ...i, cwd, oc, forgeIssueRef });
       await local
         .projectMetaUpsert({
           tmuxSession: i.name,
