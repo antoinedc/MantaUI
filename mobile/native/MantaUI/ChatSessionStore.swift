@@ -486,12 +486,9 @@ final class ChatSessionStore: ObservableObject {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
             liveTailRowID = streamingTailID
         }
-        // runningSince tracks the turn that's running for the header timer.
-        if running {
-            if runningSince == nil { runningSince = Date() }
-        } else {
-            runningSince = nil
-        }
+        // Prefer the box's turn start; keep the optimistic stamp `send()` set
+        // until the first frame confirms it; fall back only if neither exists.
+        runningSince = running ? (s.runningSince ?? runningSince ?? Date()) : nil
 
         // The session just went idle (stream fold set `running = false`): any
         // queued prompt may now be sent. Guard-based, so firing on whichever

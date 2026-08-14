@@ -67,6 +67,8 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// with its paragraphs shuffled.
     var chunks: [StreamTextChunk] = []
     var running: Bool?
+    /// When the running turn started, as reported by the box. Nil when idle.
+    var runningSince: Date?
     var turnComplete: Bool?
     var context: StreamContextPayload?
     var cache: StreamCachePayload?
@@ -141,6 +143,15 @@ struct MantaSessionStreamState: Equatable, Sendable {
 // MARK: - Pure routing (box `stream.*` subs -> session state)
 
 enum MantaStreamRouter {
+    /// Box-reported start wins; an older box that omits it keeps whatever we
+    /// already had, and only a turn we have never seen a start for falls back
+    /// to the local clock.
+    private static func resolveRunningSince(running: Bool, since: Double?, current: Date?) -> Date? {
+        guard running else { return nil }
+        if let since { return Date(timeIntervalSince1970: since / 1000) }
+        return current ?? Date()
+    }
+
     /// Apply one frame to a session's state. Pure so the mapping is testable.
     static func applying(_ frame: MantaStreamFrame, to state: MantaSessionStreamState?) -> MantaSessionStreamState {
         guard frame.kind == "stream", let sub = frame.sub else {
@@ -155,6 +166,7 @@ enum MantaStreamRouter {
         case "running":
             if let p = try? frame.decodedPayload(StreamRunningPayload.self) {
                 s.running = p.running
+                s.runningSince = resolveRunningSince(running: p.running, since: p.since, current: s.runningSince)
                 // A new turn clears any stale error surfaced by the previous one.
                 if p.running { s.sessionError = nil }
             }
@@ -169,6 +181,7 @@ enum MantaStreamRouter {
                 // life of the session, so the working row and session-list timer
                 // never stopped.
                 s.running = p.running
+                s.runningSince = resolveRunningSince(running: p.running, since: p.since, current: s.runningSince)
             }
             // A finished turn has no running tools; the canonical refetch now
             // owns them as step rows, so drop the live map to bound memory

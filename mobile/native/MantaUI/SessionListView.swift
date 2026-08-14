@@ -325,7 +325,7 @@ struct SessionListView: View {
 
     private func timerText(_ window: MantaWindow, now: Date) -> String? {
         let status = store.rowStatus(for: window)
-        guard status.running, let sid = window.opencodeSessionId, let since = store.runningSince[sid] else {
+        guard status.running, let since = store.runningStart(for: window) else {
             return nil
         }
         return SessionTimerFormat.elapsed(now.timeIntervalSince(since))
@@ -351,7 +351,7 @@ struct SessionListView: View {
     }
 
     private func runningDuration(of window: MantaWindow) -> String {
-        guard let sid = window.opencodeSessionId, let since = store.runningSince[sid] else {
+        guard let since = store.runningStart(for: window) else {
             return SessionTimerFormat.runningDuration(0)
         }
         return SessionTimerFormat.runningDuration(Date().timeIntervalSince(since))

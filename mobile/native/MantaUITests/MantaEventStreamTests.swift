@@ -309,6 +309,61 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.turnComplete, true)
     }
 
+    // MARK: - Turn-start stamp (BET-896)
+
+    /// The box stamps `since` (epoch ms) on the idle->busy edge; the router
+    /// converts it to a Date (ms -> seconds) that the UI counts from.
+    func testRunningFrameWithSinceProducesMatchingDate() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true,"since":1700000000000}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.runningSince, Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    /// An older box omits `since`; a running:true frame must keep whatever we
+    /// already had rather than restart the clock.
+    func testRunningFrameWithoutSinceKeepsExistingStamp() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state.runningSince = Date(timeIntervalSince1970: 1234)
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.runningSince, Date(timeIntervalSince1970: 1234))
+    }
+
+    /// running:true with neither a box stamp nor an existing value falls back
+    /// to the local clock so a timer still shows.
+    func testRunningFrameWithoutSinceAndNoExistingFallsBackToNow() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":true}}"#),
+            to: state
+        )
+        XCTAssertNotNil(state.runningSince)
+    }
+
+    /// running:false on either sub clears the stamp back to nil.
+    func testRunningFalseClearsStamp() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state.runningSince = Date(timeIntervalSince1970: 5000)
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"running","sessionId":"ses_1","payload":{"running":false,"since":null}}"#),
+            to: state
+        )
+        XCTAssertNil(state.runningSince)
+
+        var state2 = MantaSessionStreamState(sessionId: "ses_1")
+        state2.runningSince = Date(timeIntervalSince1970: 5000)
+        state2 = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false,"since":null}}"#),
+            to: state2
+        )
+        XCTAssertNil(state2.runningSince)
+    }
+
     func testNonStreamFrameLeavesStateUntouched() throws {
         let original = MantaSessionStreamState(sessionId: "ses_1")
         let status = try MantaStreamFrame.parse(#"{"kind":"status","payload":[]}"#)
