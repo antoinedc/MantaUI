@@ -17,6 +17,7 @@ import { useFocusTrap } from "./useFocusTrap";
 import { Checkbox } from "./Checkbox";
 import { Toggle } from "./Toggle";
 import { StatusDot } from "./StatusDot";
+import { ListRow } from "./ListRow";
 import { ProvidersCard } from "./ProvidersCard";
 import { ModelsCard } from "./ModelsCard";
 import { SubscriptionsCard } from "./SubscriptionsCard";
@@ -806,25 +807,25 @@ export function Settings({
                 point — "from the gh CLI on your box" reads as a courtesy, not
                 surveillance. */}
             {forgeStatus?.connected ? (
-              <div className="flex items-center gap-2 py-2">
-                <StatusDot tone="ok" />
-                <span className="text-body font-medium text-text">GitHub</span>
-                <span className="text-body text-text-faint">{forgeStatus.login ? `@${forgeStatus.login} · ${sourceTextFor(forgeStatus.source)}` : sourceTextFor(forgeStatus.source)}</span>
-                <button onClick={() => void disconnectForge()} className="ml-auto text-label px-3 py-1 rounded-full border border-border text-text-muted hover:text-text">Disconnect</button>
-              </div>
+              <ListRow
+                leading={<StatusDot tone="ok" />}
+                name="GitHub"
+                secondary={forgeStatus.login ? `@${forgeStatus.login} · ${sourceTextFor(forgeStatus.source)}` : sourceTextFor(forgeStatus.source)}
+                trailing={<button onClick={() => void disconnectForge()} className="text-label px-3 py-1 rounded-full border border-border text-text-muted hover:text-text">Disconnect</button>}
+              />
             ) : (
-              <div className="flex items-center gap-2 py-2">
-                <StatusDot tone="idle" />
-                <span className="text-body font-medium text-text">GitHub</span>
-                <span className="text-body text-text-faint">Not connected — authenticate the gh CLI on this box to register forge webhooks.</span>
-              </div>
+              <ListRow
+                leading={<StatusDot tone="idle" />}
+                name="GitHub"
+                secondary="Not connected — authenticate the gh CLI on this box to register forge webhooks."
+              />
             )}
             {/* Divider — the mockup's border-top between connection and rules. */}
             <div className="border-t border-border-subtle my-3" />
             {/* The one global toggle, mirroring the plugins toggle (a checkbox,
                 not a switch). Gates dispatch, not the visibility of the list
                 below. */}
-            <div className="flex items-center gap-2 pb-1">
+            <div className="flex items-center gap-2 py-1">
               <Checkbox id="forge-rules-enabled" checked={forgeRulesOn} onChange={(v) => void toggleForgeRules(v)} ariaLabel="Let forge rules start agents on this box" />
               <span className="text-body text-text-muted">Let forge rules start agents on this box</span>
             </div>
@@ -836,16 +837,26 @@ export function Settings({
               <div className="text-body text-text-faint">No forge rules yet. The AI authors them on the box with <code className="text-text-muted">forge_rules.save</code>; each is a YAML file at <code className="text-text-muted">~/.manta/forge-rules/</code>.</div>
             ) : (
               <div className="space-y-1">
-                {forgeRules.map((r) => (
-                  <div key={r.repoKey} className="flex items-center gap-2 py-2 hover:bg-fill rounded-xs">
-                    {r.valid ? <StatusDot tone="ok" /> : <StatusDot tone="error" />}
-                    <span className="text-body font-medium text-text">{r.repoKey}</span>
-                    {r.valid ? (
-                      <span className="text-body text-text-faint">{r.ruleCount ?? 0} rule{r.ruleCount === 1 ? "" : "s"}</span>
-                    ) : null}
-                    <span className={r.valid ? "ml-auto text-label font-mono text-text-quiet" : "ml-auto text-body text-danger break-all"}>{r.valid ? "valid" : r.error}</span>
-                  </div>
-                ))}
+                {forgeRules.map((r) =>
+                  r.valid ? (
+                    <ListRow
+                      key={r.repoKey}
+                      leading={<StatusDot tone="ok" />}
+                      name={r.repoKey}
+                      secondary={`${r.ruleCount ?? 0} rule${r.ruleCount === 1 ? "" : "s"}`}
+                      trailing="valid"
+                    />
+                  ) : (
+                    // Invalid rule sets are listed with their error, verbatim
+                    // and un-truncated, in danger. A rules file that silently
+                    // fails to load is worse than one that loudly refuses.
+                    <div key={r.repoKey} className="flex items-center gap-2 py-2 hover:bg-fill rounded-md text-[13px]">
+                      <StatusDot tone="error" />
+                      <span className="text-text font-medium truncate min-w-0">{r.repoKey}</span>
+                      <span className="text-text-faint min-w-0 text-danger break-all">{r.error}</span>
+                    </div>
+                  ),
+                )}
               </div>
             )}
           </GroupCard>
