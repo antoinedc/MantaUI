@@ -355,6 +355,10 @@ export type ForgeProbeResult = {
   repos: RepoHit[];
   cli: ForgeCliStatus;
   partial: boolean;
+  // The box's $HOME, so the renderer can render a repo under it as `~/...`
+  // instead of the absolute path. null when not provided (renderer degrades
+  // to the absolute path).
+  homeDir: string | null;
 };
 
 // ----- Forge clone flow (BET-796) -----

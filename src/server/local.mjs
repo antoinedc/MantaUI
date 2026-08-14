@@ -892,7 +892,7 @@ export async function forgeProbe() {
   const projectCwds = (cfg.projects ?? []).map((p) => p.defaultCwd).filter(Boolean);
   const { repos, partial } = await scanRepos({ roots: buildRoots(projectCwds) });
   const cli = await detectForgeCli();
-  const result = { repos, cli, partial };
+  const result = { repos, cli, partial, homeDir: homedir() };
   _forgeCache = { at: now, result };
   return result;
 }

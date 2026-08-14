@@ -2929,12 +2929,27 @@ export function initialRepoSelection(repos: RepoRow[], cap: number): RepoRow[] {
   return selected;
 }
 
+// Substitute a leading home-dir prefix with `~` for display, matching the
+// manta-forge zero-state mockup (`~/scratch`). Given no homeDir (unavailable),
+// the absolute path is shown unchanged. Pure.
+export function homeRelativePath(path: string, homeDir?: string | null): string {
+  if (!homeDir || !path) return path;
+  if (path === homeDir) return "~";
+  const prefix = homeDir.endsWith("/") ? homeDir : `${homeDir}/`;
+  return path.startsWith(prefix) ? `~/${path.slice(prefix.length)}` : path;
+}
+
 // The secondary line under a repo row. With an origin, the branch alone
 // identifies the row; without one the bare basename does not, so the path and
-// "no remote" are added so the user can tell the row apart.
-export function describeRepoRow(repo: RepoHit): string {
+// "no remote" are added so the user can tell the row apart. `homeDir` (the
+// box's $HOME, from the forge probe) lets a repo under the home dir render
+// as `~/scratch` instead of the absolute path, per the manta-forge mockup.
+export function describeRepoRow(repo: RepoHit, homeDir?: string | null): string {
   const branch = repo.branch ? `⎇ ${repo.branch}` : "no branch";
-  if (!repo.originUrl) return `${branch} · ${repo.path} · no remote`;
+  if (!repo.originUrl) {
+    const path = homeRelativePath(repo.path, homeDir);
+    return `${branch} · ${path} · no remote`;
+  }
   return branch;
 }
 
