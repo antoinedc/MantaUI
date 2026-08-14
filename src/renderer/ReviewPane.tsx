@@ -88,7 +88,23 @@ function NoteInline({
   );
 }
 
-export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string }) {
+export function ReviewPane({
+  sessionId,
+  cwd,
+  target,
+}: {
+  sessionId?: string;
+  cwd?: string;
+  // BET-850: an explicit cross-repo inbox PR. When present, the pane addresses
+  // the forge by { repoKey, number } instead of resolving the session's cwd →
+  // origin → open PR (the inbox row may live in a repo the box has not cloned).
+  target?: { repoKey: string; number: number };
+}) {
+  // The forge read/write ref: the explicit inbox target wins; otherwise the
+  // session's cwd (resolved box-side). "Send to agent" needs a live session,
+  // so it is gated on a non-empty sessionId (hidden for a standalone review).
+  const ref = target ?? { cwd: cwd ?? "" };
+  const canSend = Boolean(sessionId);
   const [diff, setDiff] = useState<string>("");
   const [threads, setThreads] = useState<ForgeThread[]>([]);
   const [error, setError] = useState<"no_forge" | "not_connected" | "no_pr" | null>(null);
@@ -107,10 +123,12 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
   const sentRef = useRef<Set<string>>(new Set());
   const [, forceRender] = useState(0);
 
-  // Fetch the PR diff + the box-owned draft for the session's cwd. Re-runs
-  // when the cwd changes (session switch). No interval — refetch on reopen.
+  // Fetch the PR diff + the box-owned draft for the forge ref (the session's
+  // cwd, or an explicit inbox target). Re-runs when the ref changes. No
+  // interval — refetch on reopen.
   useEffect(() => {
-    if (!cwd) {
+    const refKey = target ? `${target.repoKey}#${target.number}` : cwd;
+    if (!refKey) {
       setLoading(false);
       setError("no_forge");
       return;
@@ -123,7 +141,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
     sentRef.current = new Set();
 
     window.api
-      .forgeDiff({ cwd })
+      .forgeDiff(ref)
       .then((res) => {
         if (cancelled) return;
         setDiff(res.diff ?? "");
@@ -138,7 +156,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
       });
 
     window.api
-      .forgeDraftGet({ cwd })
+      .forgeDraftGet(ref)
       .then((res) => {
         if (cancelled) return;
         if (res.draft) setDraft(res.draft);
@@ -150,7 +168,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
     return () => {
       cancelled = true;
     };
-  }, [cwd, sessionId]);
+  }, [cwd, target, sessionId]);
 
   // ---- Composer / draft mutations (all box-side) --------------------------
 
@@ -159,14 +177,14 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
     const body = draftText.trim();
     if (!body) return;
     const res = await window.api.forgeDraftComment({
-      cwd,
+      ...ref,
       op: "add",
       comment: { path: composing.path, line: composing.line, side: composing.side, body },
     });
     if (res.ok) setDraft(res.draft);
     setComposing(null);
     setDraftText("");
-  }, [cwd, composing, draftText]);
+  }, [target, cwd, composing, draftText]);
 
   const sendToAgent = useCallback(
     (text: string, commentId?: string) => {
@@ -185,25 +203,25 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
 
   const removeComment = useCallback(
     async (commentId: string) => {
-      const res = await window.api.forgeDraftComment({ cwd, op: "delete", comment: { id: commentId } });
+      const res = await window.api.forgeDraftComment({ ...ref, op: "delete", comment: { id: commentId } });
       if (res.ok) setDraft(res.draft);
     },
-    [cwd],
+    [target, cwd],
   );
 
   const setVerdict = useCallback(
     async (verdict: ForgeDraft["verdict"]) => {
-      const res = await window.api.forgeDraftComment({ cwd, op: "set-verdict", verdict });
+      const res = await window.api.forgeDraftComment({ ...ref, op: "set-verdict", verdict });
       if (res.ok) setDraft(res.draft);
     },
-    [cwd],
+    [target, cwd],
   );
 
   const submit = useCallback(async () => {
     if (!draft || draft.comments.length === 0 || submitting) return;
     setSubmitting(true);
     try {
-      const res = await window.api.forgeDraftSubmit({ cwd, verdict: draft.verdict ?? undefined });
+      const res = await window.api.forgeDraftSubmit({ ...ref, verdict: draft.verdict ?? undefined });
       if (res.ok) {
         setDraft(null);
         sentRef.current = new Set();
@@ -213,7 +231,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
     } finally {
       setSubmitting(false);
     }
-  }, [cwd, draft, submitting]);
+  }, [target, cwd, draft, submitting]);
 
   const { label, plus, minus } = useMemo(() => diffHeader(diff), [diff]);
 
@@ -274,7 +292,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
             body={c.body}
             action={
               <>
-                {sent ? null : (
+                {sent ? null : canSend && (
                   <Chip on onClick={() => sendToAgent(c.body, c.id)}>
                     Send to agent
                   </Chip>
@@ -319,9 +337,11 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
               className="w-full resize-none rounded-xs border border-border-strong bg-bg px-2 py-1 font-mono text-meta text-text outline-none placeholder:text-text-faint focus:border-accent"
             />
             <div className="mt-2 flex items-center gap-[6px]">
-              <Chip on onClick={() => sendToAgent(draftText)}>
-                Send to agent
-              </Chip>
+              {canSend && (
+                <Chip on onClick={() => sendToAgent(draftText)}>
+                  Send to agent
+                </Chip>
+              )}
               <Button tone="default" onClick={addToReview}>
                 Add to review
               </Button>
@@ -341,7 +361,7 @@ export function ReviewPane({ sessionId, cwd }: { sessionId: string; cwd: string 
     }
 
     return out;
-  }, [threads, draft, composing, draftText, addToReview, sendToAgent, removeComment]);
+  }, [threads, draft, composing, draftText, addToReview, sendToAgent, removeComment, canSend]);
 
   const draftCount = draft?.comments.length ?? 0;
 

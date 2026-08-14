@@ -524,6 +524,15 @@ export type ForgeThread = {
   comments: { author: string; body: string; createdAt: string | null }[];
 };
 
+// The target of a forge read/write. Either the session's `cwd` (resolved
+// box-side to the open PR on the current branch) or an explicit cross-repo
+// inbox PR — `repoKey` (host/owner/repo) + `number` (BET-850). The inbox
+// "Open review" row action addresses the review pane this way when the PR is
+// not the current session's (it may live in a repo the box has not cloned).
+export type ForgeRefTarget =
+  | { cwd: string }
+  | { repoKey: string; number: number };
+
 // forge:diff result — the review pane's read for a session cwd. `diff` is the
 // RAW unified diff text consumed verbatim by UnifiedDiff; `threads` are the
 // incoming forge threads; `headSha` is the PR head the diff was fetched at (so
@@ -668,7 +677,6 @@ export type ForgeDraftGetResult = {
 // (optional) — which subset is required depends on `op`, and the box validates
 // the payload per op rather than encoding it in the transport type.
 export type ForgeDraftCommentInput = {
-  cwd: string;
   op: "add" | "edit" | "delete" | "set-verdict";
   comment?: {
     id?: string;
@@ -680,7 +688,7 @@ export type ForgeDraftCommentInput = {
   };
   verdict?: "approved" | "changes_requested" | "commented" | null;
   body?: string;
-};
+} & ForgeRefTarget;
 
 export type ForgeDraftCommentResult =
   | { ok: true; draft: ForgeDraft }
@@ -690,10 +698,9 @@ export type ForgeDraftCommentResult =
 // review; the draft is cleared only on success. A failed submit returns a typed
 // `kind` (e.g. "http_422") and leaves the draft intact.
 export type ForgeDraftSubmitInput = {
-  cwd: string;
   verdict?: "approved" | "changes_requested" | "commented" | null;
   body?: string;
-};
+} & ForgeRefTarget;
 
 export type ForgeDraftSubmitResult =
   | { ok: true }

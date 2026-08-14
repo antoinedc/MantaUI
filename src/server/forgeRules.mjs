@@ -244,16 +244,19 @@ export async function saveRules(
       };
     } else {
       const key = repoKey(parts);
-      // Reuse the existing hook's delivery token so the URL stays stable across
-      // re-saves; otherwise mint a fresh capability token for this repo.
-      const existing = await findForgeHook(key);
-      const deliveryToken = existing?.token ?? genDeliveryToken();
       // Derive the forge kind (known host / user-configured forgeHosts mapping)
-      // so hook registration uses the right provider endpoint + auth, and so a
-      // GitLab repo never registers against the GitHub hooks endpoint.
+      // FIRST so hook registration uses the right provider endpoint + auth, and
+      // so a GitLab repo never registers against the GitHub hooks endpoint (nor
+      // reuses a GitHub hook's record in the store).
       const hostKinds = (await getConfig().catch(() => ({ forgeHosts: [] }))).forgeHosts ?? [];
       const forgeId = detectForgeWithHosts(`https://${parts.host}/${parts.owner}/${parts.repo}`, hostKinds);
       const kind = forgeId?.kind ?? "github";
+      // Reuse the existing hook's delivery token so the URL stays stable across
+      // re-saves; otherwise mint a fresh capability token for this repo. The
+      // lookup is provider-scoped so a GitLab repo read is distinct from a
+      // GitHub repo of the same owner/name.
+      const existing = await findForgeHook(key, { provider: kind });
+      const deliveryToken = existing?.token ?? genDeliveryToken();
       const res = await ensureHook({
         kind,
         host: parts.host,
@@ -267,11 +270,16 @@ export async function saveRules(
       if (!res.ok) {
         webhook = { registered: false, error: res.error };
       } else {
+        // Persist provider + the remote hookId the forge assigned, so the
+        // scheduled health check can target this exact hook to re-enable it
+        // (GitLab disables failing hooks; BET-855).
         await upsertForgeHook({
           repoKey: key,
+          provider: kind,
           label: key,
           token: deliveryToken,
           secret: res.secret,
+          hookId: res.hookId ?? null,
           events: eventsForRules(parsed.rules),
         });
         webhook = { registered: true, url: res.url };

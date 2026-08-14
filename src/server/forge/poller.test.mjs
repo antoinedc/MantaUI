@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createForgePoller, pollChecksFailed, pollIssueLabels, pollReviewRequested } from "./poller.mjs";
+import { createForgePoller, repoPollPlan, pollChecksFailed, pollIssueLabels, pollReviewRequested } from "./poller.mjs";
 
 const repo = { owner: "anomalyco", repo: "manta" };
 
@@ -185,4 +185,64 @@ test("poller feeds pollRepo events to handleEvent", async () => {
     setTimeout(() => resolve(false), 500);
   });
   assert.equal(done, true);
+});
+
+// ----------------------------------------------------------------------------
+// repoPollPlan — provider-aware webhook detection (BET-855 review fix)
+// ----------------------------------------------------------------------------
+
+// A hook-store stub keyed by (repoKey, provider).
+function storeHook(map) {
+  return async (repoKey, { provider }) => map[`${provider}:${repoKey}`] ?? null;
+}
+
+test("repoPollPlan: a gitlab rule with a gitlab-provider hook is webhookRegistered", async () => {
+  const plan = await repoPollPlan(
+    {
+      repoKey: "gitlab.com/group/sub/widget",
+      yaml: `on:\n  issue.labeled:\n    label: manta\n    do: notify\n`,
+      hostKinds: [],
+      findHook: storeHook({ "gitlab:gitlab.com/group/sub/widget": { id: "h1" } }),
+    },
+  );
+  assert.equal(plan.kind, "gitlab", "kind is derived for a gitlab host");
+  assert.equal(plan.webhookRegistered, true, "the gitlab hook is seen even though it is not stored under provider github");
+  assert.equal(plan.label, "manta");
+});
+
+test("repoPollPlan: a gitlab rule with NO hook is not webhookRegistered (should poll)", async () => {
+  const plan = await repoPollPlan(
+    {
+      repoKey: "gitlab.com/acme/widget",
+      yaml: `on:\n  checks.failed:\n    do: notify\n`,
+      hostKinds: [],
+      findHook: storeHook({}),
+    },
+  );
+  assert.equal(plan.kind, "gitlab");
+  assert.equal(plan.webhookRegistered, false);
+  assert.equal(plan.pollChecksFailed, true);
+  assert.equal(plan.label, null);
+});
+
+test("repoPollPlan: a github rule stays unaffected and a github hook registers it", async () => {
+  const plan = await repoPollPlan(
+    {
+      repoKey: "github.com/acme/widget",
+      yaml: `on:\n  review.requested:\n    do: inbox\n`,
+      hostKinds: [],
+      findHook: storeHook({ "github:github.com/acme/widget": { id: "g1" } }),
+    },
+  );
+  assert.equal(plan.kind, "github");
+  assert.equal(plan.webhookRegistered, true);
+  assert.equal(plan.pollReviewRequested, true);
+});
+
+test("repoPollPlan: an invalid repo key returns null", async () => {
+  const plan = await repoPollPlan({
+    repoKey: "not-a-valid-key",
+    findHook: storeHook({}),
+  });
+  assert.equal(plan, null);
 });

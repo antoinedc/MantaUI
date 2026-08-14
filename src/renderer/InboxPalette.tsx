@@ -19,13 +19,14 @@
 // path but auto-submits (the agent starts working immediately).
 
 import { useEffect, useMemo, useState } from "react";
-import { CornerDownLeft } from "lucide-react";
+import { CornerDownLeft, X } from "lucide-react";
 import { PaletteShell } from "./PaletteShell";
 import { ListRow } from "./ListRow";
 import { StatusDot } from "./StatusDot";
 import { Chip } from "./Chip";
 import { Button } from "./Button";
 import { Pill } from "./Pill";
+import { ReviewPane } from "./ReviewPane";
 import { useStore } from "./store";
 import { formatAge, inboxReasonLabel, sortInbox } from "./chatUtils";
 import { deriveProjectName, uniqueSessionName } from "./NewSessionScreen";
@@ -92,6 +93,11 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [repos, setRepos] = useState<Record<string, string>>({}); // repoKey -> local path
   const [error, setError] = useState<string | null>(null);
+
+  // BET-850: the inbox PR currently open in the in-app review pane (null =
+  // no review open, showing the inbox list). Addressed by { repoKey, number }
+  // — a cross-repo PR the box may not have cloned — NOT the session's cwd.
+  const [reviewItem, setReviewItem] = useState<ForgeInboxItem | null>(null);
 
   // One fetch on open — never polled while closed (§ Hygiene).
   useEffect(() => {
@@ -231,13 +237,67 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   };
 
   const startSession = (item: ForgeInboxItem) => void createSessionFromItem(item);
+  // BET-850: "Open review" opens the in-app review pane (ReviewPane) for the
+  // inbox PR — addressed explicitly by { repoKey, number }, so a cross-repo PR
+  // from outside the session (possibly a repo the box has not cloned) renders
+  // its diff + comment gutter + box-buffered draft review, not the browser.
   const openReview = (item: ForgeInboxItem) => {
-    if (item.url) void window.api.openExternal(item.url);
+    if (item.kind !== "pr") {
+      setError("Open review is for pull requests.");
+      return;
+    }
+    setError(null);
+    setReviewItem(item);
   };
 
   const selected = rows[sel] ?? null;
 
+  // The stable { repoKey, number } the review pane addresses. Memoized on the
+  // item so the pane's fetch effect keyed on `target` does not re-run on every
+  // InboxPalette re-render (the inline object would otherwise be new each time).
+  const reviewTarget = useMemo(
+    () => (reviewItem ? { repoKey: reviewItem.repoKey, number: reviewItem.number } : null),
+    [reviewItem],
+  );
+
+  // The in-app review overlay that "Open review" mounts on top of the inbox.
+  // A full-surface sheet (above the z-50 palette) hosting the shared
+  // ReviewPane, addressed by the inbox PR's { repoKey, number }. No session —
+  // "Send to agent" is hidden; the box-buffered draft review + comment gutter
+  // still work against the cross-repo forge read.
+  const reviewOverlay = reviewItem ? (
+    <div
+      className="fixed inset-0 z-[60] flex flex-col bg-bg"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          setReviewItem(null);
+        }
+      }}
+    >
+      <div className="flex items-center gap-3 border-b border-border-subtle px-4 py-3">
+        <span className="font-mono text-meta text-text-faint">{`!${reviewItem.number}`}</span>
+        <span className="min-w-0 flex-1 truncate text-label font-semibold text-text">
+          {reviewItem.title}
+        </span>
+        <button
+          type="button"
+          onClick={() => setReviewItem(null)}
+          title="Back to inbox (Esc)"
+          aria-label="Back to inbox"
+          className="inline-flex items-center gap-1 rounded-sm border border-border-subtle px-2 py-1 text-meta text-text-faint hover:text-text"
+        >
+          <X size={13} aria-hidden="true" /> Back to inbox
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <ReviewPane target={reviewTarget ?? undefined} />
+      </div>
+    </div>
+  ) : null;
+
   return (
+    <>
     <PaletteShell
       label="Inbox"
       placeholder="Filter inbox…"
@@ -342,5 +402,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
         );
       }}
     </PaletteShell>
+    {reviewOverlay}
+    </>
   );
 }

@@ -44,6 +44,7 @@ import type {
   ForgeProbeResult,
   ForgeStatusResult,
   ForgePullRequestResult,
+  ForgeRefTarget,
   ForgeDiffResult,
   ForgeDisconnectResult,
   ForgeRuleRow,
@@ -199,7 +200,7 @@ export interface Api {
   // and the server resolves cwd → origin → repo.
   forgeStatus(): Promise<ForgeStatusResult>;
   forgePullRequest(input: { cwd: string }): Promise<ForgePullRequestResult>;
-  forgeDiff(input: { cwd: string }): Promise<ForgeDiffResult>;
+  forgeDiff(input: ForgeRefTarget): Promise<ForgeDiffResult>;
   // BET-795: the work inbox. Box-side only — three cross-repo SEARCH queries,
   // never per-repo iteration, cached a full 60s on the search bucket.
   forgeInbox(): Promise<ForgeInboxResult>;
@@ -224,7 +225,7 @@ export interface Api {
   // the current draft; draftComment mutates a comment (add/edit/delete) or sets
   // the verdict; draftSubmit flushes the whole draft as ONE review, clearing it
   // only on success.
-  forgeDraftGet(input: { cwd: string }): Promise<ForgeDraftGetResult>;
+  forgeDraftGet(input: ForgeRefTarget): Promise<ForgeDraftGetResult>;
   forgeDraftComment(input: ForgeDraftCommentInput): Promise<ForgeDraftCommentResult>;
   forgeDraftSubmit(input: ForgeDraftSubmitInput): Promise<ForgeDraftSubmitResult>;
 

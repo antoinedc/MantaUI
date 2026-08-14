@@ -20,6 +20,7 @@
 // on here.
 
 import { randomBytes } from "node:crypto";
+import { startPoller } from "../startPoller.mjs";
 
 // The Manta webhook URL under a box's public hostname. `<token>` is the
 // 128-bit capability that resolves to the hook record at ingest.
@@ -221,6 +222,82 @@ export async function healthCheckRepoHook(
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) };
   }
+}
+
+/**
+ * The scheduled health-check loop — the PRODUCTION CALLER that gives
+ * `healthCheckRepoHook`'s re-enable capability a reason to exist (the BET-855
+ * deferral: the capability shipped but nothing called it). GitLab disables a
+ * failing webhook permanently with no auto-recovery, so a box that sleeps / a
+ * hook that hiccups goes silently deaf unless something re-arms it on a
+ * cadence.
+ *
+ * Reuses the shared `startPoller` shape (immediate first tick, inFlight guard,
+ * timer.unref()) exactly as forge/poller.mjs does — this is NOT a hand-rolled
+ * loop. Each tick iterates the injected `listHooks()` records, resolves a forge
+ * credential per host, and runs `checkHook` (the concrete implementer is
+ * `healthCheckRepoHook`). Only GitLab records are checked — GitHub never
+ * auto-disables, so a github hook would be a no-op round-trip.
+ *
+ * `resolveToken(host, hook) -> Promise<string|null>` supplies the box-side forge
+ * credential; `listHooks() -> Array<{kind, host, owner, repo, hookId}>` is the
+ * box's forge hook store. All I/O is injected, so a test never touches the
+ * network or the live store.
+ *
+ * @param {object} deps
+ * @param {() => Promise<Array<{kind: string, host: string, owner: string, repo: string, hookId: any}>>} [deps.listHooks]
+ * @param {(host: string, hook: object) => Promise<string|null>} [deps.resolveToken]
+ * @param {typeof healthCheckRepoHook} [deps.checkHook]
+ * @param {number} [deps.intervalMs]
+ * @param {(msg: string, ...rest: any[]) => void} [deps.log]
+ * @returns {{ stop: () => void }}
+ */
+export function startForgeHealthCheck({
+  listHooks = async () => [],
+  resolveToken = async () => null,
+  checkHook = healthCheckRepoHook,
+  intervalMs = 15 * 60_000,
+  log = console.warn,
+} = {}) {
+  async function tick() {
+    let hooks = [];
+    try {
+      hooks = await listHooks();
+    } catch (e) {
+      log("[forge-health] listHooks failed:", e?.message ?? e);
+      return;
+    }
+    for (const hook of hooks) {
+      if (hook?.kind !== "gitlab") continue; // GitHub never auto-disables; skip.
+      const label = `${hook?.host ?? "?"}/${hook?.owner ?? "?"}/${hook?.repo ?? "?"}`;
+      const token = await resolveToken(hook.host, hook).catch(() => null);
+      if (!token) {
+        log(`[forge-health] no token for ${label} — skipping re-enable check`);
+        continue;
+      }
+      try {
+        const res = await checkHook({
+          kind: "gitlab",
+          host: hook.host,
+          owner: hook.owner,
+          repo: hook.repo,
+          token,
+          hookId: hook.hookId,
+        });
+        if (!res.ok) {
+          log(`[forge-health] hook ${label} check failed:`, res?.error ?? "");
+          continue;
+        }
+        if (res.reenabled) {
+          log(`[forge-health] re-enabled disabled GitLab hook ${label} (${hook.hookId})`);
+        }
+      } catch (e) {
+        log(`[forge-health] hook ${label} check threw:`, e?.message ?? e);
+      }
+    }
+  }
+
+  return startPoller(tick, { intervalMs, label: "forge-health" });
 }
 
 // Default API client — a thin fetch wrapper. Injected as `api` in tests. Shared
