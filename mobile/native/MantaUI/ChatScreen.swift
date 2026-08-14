@@ -805,12 +805,13 @@ private struct ChatScreenContent: View {
 
     // MARK: - Context meter (BET-824)
 
-    /// The context reading from the live stream payload: `.known` with a real
-    /// percentage, `.unknown` when the box has none (nil early in a session,
-    /// and again after a compaction). Never renders 0% for "don't know".
-    private var contextMeterReading: MeterReading {
-        guard let ctx = store.context, ctx.pct.isFinite else { return .unknown }
-        return .known(pct: ctx.pct)
+    /// The context percentage from the live stream payload: a real percentage
+    /// when the box reports one, nil when it has none (nil early in a session,
+    /// and again after a compaction). A missing value renders nothing — never
+    /// a confident 0%.
+    private var contextPct: Double? {
+        guard let ctx = store.context, ctx.pct.isFinite else { return nil }
+        return ctx.pct
     }
 
     /// The active model's own context window — the meter's denominator. Opus
@@ -829,7 +830,7 @@ private struct ChatScreenContent: View {
 
     /// The band colour for the current context reading (strip + sheet).
     private var contextBandColor: Color {
-        if case .known(let pct) = contextMeterReading {
+        if let pct = contextPct {
             return MeterRing.tint(UsageMeters.band(pct), tokens)
         }
         return tokens.tx4
@@ -847,7 +848,7 @@ private struct ChatScreenContent: View {
     /// and VoiceOver announces it so.
     @ViewBuilder
     private var contextStrip: some View {
-        if case .known(let pct) = contextMeterReading {
+        if let pct = contextPct {
             Button { showContextSheet = true } label: {
                 HStack(spacing: Metrics.spacing.sp2) {
                     Text("Context")
@@ -915,7 +916,7 @@ private struct ChatScreenContent: View {
     private var weeklyBanner: some View {
         let weekly = UsageMeters.weeklyWindow(usageStore.snapshots)
         return HStack(spacing: Metrics.spacing.sp2) {
-            MeterRing(color: tokens.danger, diameter: 14, lineWidth: 2.5)
+            MeterRing(pct: weekly?.pct ?? 0, color: tokens.danger, diameter: 14, lineWidth: 2.5, track: tokens.borderSubtle)
             VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
                 Text("Weekly limit \(Int((weekly?.pct ?? 0).rounded()))%")
                     .font(.manta(size: Metrics.type.xs, weight: .semibold))

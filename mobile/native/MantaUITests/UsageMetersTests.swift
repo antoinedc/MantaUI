@@ -3,10 +3,9 @@ import XCTest
 
 // ===========================================================================
 // BET-824 — pure decisions of the plan + context meters (UsageMeters). No view,
-// no HTTP, no box. Tests every boundary exactly: 69.9/70/89.9/90, `unknown`
-// never banding to `ok` (band never fed unknown), `absent` hiding the dot
-// (sessionWindow nil), a snapshot holding only a weekly window, and
-// `formatReset` under and over 24h.
+// no HTTP, no box. Tests every boundary exactly: 69.9/70/89.9/90, a missing
+// value rendering nothing (sessionWindow nil), a snapshot holding only a
+// weekly window, and `formatReset` under and over 24h.
 // ===========================================================================
 
 final class UsageMetersTests: XCTestCase {
@@ -126,5 +125,26 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(UsageMeters.formatTokens(1_000_000), "1M")
         XCTAssertEqual(UsageMeters.formatTokens(500), "500")
         XCTAssertEqual(UsageMeters.formatTokens(nil), "0")
+    }
+
+    // MARK: - MeterRing clamp / isFull (BET-877)
+
+    /// `pct` is clamped to 0...100 before drawing — a provider can report
+    /// over 100, and a negative never wraps around into a full ring.
+    func testMeterRingClampBounds() {
+        XCTAssertEqual(MeterRing.clamp(-5), 0)
+        XCTAssertEqual(MeterRing.clamp(0), 0)
+        XCTAssertEqual(MeterRing.clamp(140), 100)
+        XCTAssertEqual(MeterRing.clamp(100), 100)
+    }
+
+    /// The ≥100 boundary: 99.9 is still a ring (not full); 100 (and anything
+    /// over, once clamped) is a solid disc — a "full" ring would be
+    /// indistinguishable from 99%.
+    func testMeterRingIsFullBoundary() {
+        XCTAssertFalse(MeterRing.isFull(99.9))
+        XCTAssertFalse(MeterRing.isFull(0))
+        XCTAssertTrue(MeterRing.isFull(100))
+        XCTAssertTrue(MeterRing.isFull(120))
     }
 }
