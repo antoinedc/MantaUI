@@ -23,8 +23,8 @@ import {
   usageStale,
   type UsageDialTone,
 } from "./chatUtils";
-import { useClickAway } from "./hooks/useClickAway";
 import { useStore } from "./store";
+import { Popover } from "./Popover";
 
 // Lucide icons render a 24-unit viewBox scaled to size. A stroked circle
 // draws r ± strokeWidth/2 (the stroke straddles the path), so at size 16 the
@@ -83,8 +83,7 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
   // Snapshotted at open time (not a ticking clock) — cheap, deterministic,
   // and accurate enough for a short-lived popover.
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const rootRef = useRef<HTMLDivElement>(null);
-  useClickAway(rootRef, open, () => setOpen(false));
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const snapshot = selectUsageSnapshot(snapshots, providerID);
   const state = usageDialState(snapshot, alwaysShow);
@@ -105,8 +104,9 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
     " · click for details";
 
   return (
-    <div ref={rootRef} className="relative shrink-0">
+    <>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => {
           setNowMs(Date.now());
@@ -164,12 +164,17 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
         </span>
       </button>
 
-      {open && (
-        <div
-          role="dialog"
-          aria-label="Plan usage"
-          className="manta-usage-popover manta-menu-in absolute right-0 bottom-full mb-1 z-30 w-[320px] p-4 rounded-lg border border-border bg-bg-soft shadow-md"
-        >
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={triggerRef}
+        placement="above"
+        align="end"
+        role="dialog"
+        ariaLabel="Plan usage"
+        hook="manta-usage-popover"
+        surfaceClassName="w-[320px] p-4"
+      >
           <div className="flex items-baseline justify-between gap-2 mb-3">
             <span className="text-prose font-semibold text-text">{label}</span>
             {snapshot.planLabel && (
@@ -204,9 +209,8 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
               {formatUpdatedAgo(snapshot.fetchedAt, nowMs)}
             </span>
           </div>
-        </div>
-      )}
-    </div>
+      </Popover>
+    </>
   );
 });
 

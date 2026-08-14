@@ -17,7 +17,6 @@ import { ChevronDown, Sparkles, Zap, ZapOff } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
 import { hideFastSiblingGroups, resolveFastToggle, titleCase } from "./chatUtils";
-import { useClickAway } from "./hooks/useClickAway";
 import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
 import { ModelMenu } from "./ModelMenu";
@@ -73,16 +72,12 @@ export function ModelPicker({
 }) {
   const [modelOpen, setModelOpen] = useState(false);
   const [variantOpen, setVariantOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  // Click-away to dismiss either dropdown. Using mousedown (not click) so we
-  // close before an inner button's onClick re-toggles. The hook closes both
-  // dropdowns on outside-click or Escape; the SplitChip's toggle buttons are
-  // inside rootRef so they don't trigger the dismiss.
-  useClickAway(rootRef, modelOpen || variantOpen, () => {
-    setModelOpen(false);
-    setVariantOpen(false);
-  });
+  // The two dropdowns each anchor to their OWN segment button (the model and
+  // the effort trigger). Each is an independent Popover — clicking one segment
+  // while the other's menu is open closes the other (BET-865's accepted
+  // behaviour: the old shared-root click-away coupling is gone).
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const effortBtnRef = useRef<HTMLButtonElement>(null);
 
   // The models a user may actually switch TO: enabled, not deprecated, not
   // deactivated in Settings. Both the dropdown and the ⚡ toggle read from this
@@ -175,9 +170,11 @@ export function ModelPicker({
   const loading = models === null;
 
   return (
-    <div ref={rootRef} className="overflow-visible min-w-0 relative">
+    <div className="overflow-visible min-w-0">
       <SplitChip
         loading={loading}
+        leftBtnRef={modelBtnRef}
+        rightBtnRef={effortBtnRef}
         left={
           loading ? (
             <span className="flex items-center gap-1">
@@ -277,6 +274,8 @@ export function ModelPicker({
           override; the variant is cleared on model change. */}
       {modelOpen && (
         <ModelMenu
+          open={modelOpen}
+          anchorRef={modelBtnRef}
           groups={groups}
           modelOverride={modelOverride}
           defaultModel={defaultModel}
@@ -289,6 +288,8 @@ export function ModelPicker({
           plus a "Default" (no variant) row, via EffortMenu. */}
       {variantOpen && variants.length > 0 && (
         <EffortMenu
+          open={variantOpen}
+          anchorRef={effortBtnRef}
           variants={variants}
           activeModel={activeModel}
           activeVariantId={activeVariantId}
