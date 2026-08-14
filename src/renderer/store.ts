@@ -848,6 +848,24 @@ export const useStore = create<State>((set, get) => ({
   setSeedPrompt: (p) => set({ seedPrompt: p }),
 
   refresh: async () => {
+    // GUARD (fresh-install deadlock): on an UNPAIRED desktop boot main.tsx
+    // never installs httpApi (desktopHttpClientSeed is null without a
+    // serverUrl + valid boxToken), so `window.api` is still the Electron
+    // preload OS-bridge — which has no `syncSnapshot` (httpApi-only). Calling
+    // it unguarded throws, App's bootstrap classifies the TypeError as a
+    // transient failure and retries every 10s forever, `applyConfig` never
+    // runs, `loaded` stays false — and App's onboarding gate
+    // (`loaded && …resolveTransportMode(…) === "onboarding"`) can therefore
+    // NEVER fire. The user gets an infinite spinner with an empty workspace
+    // list instead of the pairing wizard. `configGet` exists on BOTH
+    // transports, and the local config is the only thing an unpaired app can
+    // (or should) load — there is no box to sync with yet. Onboarding.tsx's
+    // refreshAndInstallTransport documents the same hazard on the post-pair
+    // path; this is the pre-pair half.
+    if (!window.api.syncSnapshot) {
+      get().applyConfig(mergeLocalPairing(await window.api.configGet()));
+      return;
+    }
     // BET-678: single cursor RPC. Pass the last-confirmed cursor so the box
     // returns only the deltas we missed (or a full snapshot when the cursor
     // is absent / a new server generation). ApplySyncPayload routes each

@@ -1063,6 +1063,35 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
     (window as unknown as { api?: unknown }).api = prev;
   });
 
+  // REGRESSION (fresh-install onboarding deadlock): on an unpaired desktop
+  // boot main.tsx never installs httpApi, so window.api is the preload
+  // OS-bridge — which has NO syncSnapshot. refresh() used to call it
+  // unguarded, throw, and leave `loaded` false forever; App gates onboarding
+  // on `loaded`, so the pairing wizard could never render and the app sat on
+  // an infinite spinner with an empty workspace list. refresh() must fall
+  // back to configGet (present on both transports) and still flip `loaded`.
+  it("refresh() falls back to configGet when the transport has no syncSnapshot", async () => {
+    const prev = (window as unknown as { api?: unknown }).api;
+    let configGetCalls = 0;
+    (window as unknown as { api: unknown }).api = {
+      // No syncSnapshot — exactly the unpaired preload bridge's shape.
+      configGet: async () => {
+        configGetCalls++;
+        return { projects: [] };
+      },
+    };
+    useStore.setState({ loaded: false, boxToken: "seed", serverUrl: "seed" });
+    await expect(useStore.getState().refresh()).resolves.toBeUndefined();
+    expect(configGetCalls).toBe(1);
+    const s = useStore.getState();
+    // `loaded` is what unblocks App's onboarding gate.
+    expect(s.loaded).toBe(true);
+    // An unpaired config must resolve to onboarding, not carry stale pairing.
+    expect(s.boxToken).toBe("");
+    expect(s.serverUrl).toBe("");
+    (window as unknown as { api?: unknown }).api = prev;
+  });
+
   // Drive the REAL write path (loadPersistedSnapshot → applySyncPayload →
   // debounced persist), so the fields the snapshot carries are exactly what
   // schedulePersist writes — not a value planted by hand. `boxId` seeds the
