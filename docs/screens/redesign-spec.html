@@ -1219,7 +1219,8 @@ table.spec tr:last-child td{border-bottom:0}
 
 <style>
 .srow.child{padding-left:26px;position:relative}
-.srow.child::after{content:"";position:absolute;left:13px;top:0;bottom:50%;width:1px;background:var(--border)}
+.srow.child::after{content:"";position:absolute;left:13px;top:-4px;bottom:0;width:1px;background:var(--border)}
+.srow.child:last-child::after{bottom:50%}
 .srow.child::before{content:"";position:absolute;left:13px;top:50%;width:7px;height:1px;background:var(--border);transform:none;border-radius:0}
 .srow.child.on::before,.srow.child.on::after{background:var(--accent)}
 .jobwin{border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-lg);
