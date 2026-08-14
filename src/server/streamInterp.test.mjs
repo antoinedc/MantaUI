@@ -343,6 +343,93 @@ test("session.status retry reports running true and carries type retry (parity w
   assert.equal(ev.payload.type, "retry");
 });
 
+// BET-896: the box stamps the idle->busy edge so the phone can count from the
+// real turn start instead of when the phone noticed. `since` is epoch ms or
+// null, and is never restarted by a mid-turn re-emit.
+
+test("session.status busy emits a running frame with a non-null since", () => {
+  const { interp, events } = make(42_000);
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  const ev = events.find((e) => e.sub === "running");
+  assert.ok(ev);
+  assert.equal(ev.payload.running, true);
+  assert.equal(ev.payload.since, 42_000, "stamped from the injectable now()");
+});
+
+test("a second busy while already running emits the SAME since (clock not restarted)", () => {
+  let clock = 100_000;
+  const events = [];
+  const interp = createStreamInterpreter({
+    publish: (e) => events.push(e),
+    now: () => clock,
+  });
+  const busy = () =>
+    interp.interpret({
+      type: "session.status",
+      properties: { sessionID: SID, status: { type: "busy" } },
+    });
+  busy();
+  clock = 300_000; // the turn "has been running" for 200s by the second status
+  busy();
+  const frames = events.filter((e) => e.sub === "running");
+  assert.equal(frames.length, 2);
+  assert.equal(frames[0].payload.since, 100_000);
+  assert.equal(frames[1].payload.since, 100_000, "edge stamp survives a re-emit");
+});
+
+test("session.idle emits turnComplete with running:false and since:null", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  interp.interpret({ type: "session.idle", properties: { sessionID: SID } });
+  const ev = events.find((e) => e.sub === "turnComplete");
+  assert.ok(ev);
+  assert.equal(ev.payload.complete, true);
+  assert.equal(ev.payload.running, false);
+  assert.equal(ev.payload.since, null, "the stamp is cleared when the turn stops");
+});
+
+test("session.error (non-abort) emits turnComplete with since:null", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.error",
+    properties: {
+      sessionID: SID,
+      error: { name: "ApiError", message: "boom" },
+    },
+  });
+  const ev = events.find((e) => e.sub === "turnComplete");
+  assert.ok(ev);
+  assert.equal(ev.payload.running, false);
+  assert.equal(ev.payload.since, null);
+});
+
+test("a message.updated mid-turn emits turnComplete with running:true and the original since", () => {
+  const { interp, events } = make(77_000);
+  interp.interpret({
+    type: "session.status",
+    properties: { sessionID: SID, status: { type: "busy" } },
+  });
+  // An assistant message with no completion time is mid-turn (complete:false).
+  interp.interpret({
+    type: "message.updated",
+    properties: {
+      sessionID: SID,
+      info: { id: "msg1", role: "assistant", sessionID: SID, time: { created: 1 } },
+    },
+  });
+  const ev = events.find((e) => e.sub === "turnComplete");
+  assert.ok(ev);
+  assert.equal(ev.payload.complete, false);
+  assert.equal(ev.payload.running, true, "still running mid-turn");
+  assert.equal(ev.payload.since, 77_000, "original edge stamp still attached");
+});
+
 // ---------------------------------------------------------------------------
 // Real-wire regression tests.
 //

@@ -87,6 +87,7 @@ function newSessionState() {
     lastCompleted: null,
     cachedTokens: 0,
     running: false,
+    runningSince: null,        // epoch ms when the running turn started (idle->busy edge)
     todos: null,               // liveTodos (todo.updated) ; null = not seen
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
@@ -261,6 +262,20 @@ export function createStreamInterpreter({
     publish({ kind: "stream", sub, sessionId: sid, payload });
   }
 
+  // The single place `running` changes. Stamps the idle->busy EDGE only, so a
+  // mid-turn status re-emit cannot restart the clock, and clears the stamp
+  // wherever the turn stops.
+  function setRunning(st, running) {
+    if (running && !st.running) st.runningSince = now();
+    if (!running) st.runningSince = null;
+    st.running = running;
+  }
+
+  function emitTurnComplete(sid, st, complete) {
+    setRunning(st, st.running && !complete);
+    emit(sid, "turnComplete", { complete, running: st.running, since: st.runningSince });
+  }
+
   function interpret(evt) {
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
     const sid = evt.properties?.sessionID;
@@ -417,7 +432,7 @@ export function createStreamInterpreter({
               }
             }
           }
-          emit(sid, "turnComplete", { complete, running: st.running && !complete });
+          emitTurnComplete(sid, st, complete);
           return;
         }
         // `properties.info` IS the message info, not a `{info}` wrapper —
@@ -427,7 +442,7 @@ export function createStreamInterpreter({
         const wrapped = msg?.info ? msg : msg ? { info: msg } : null;
         if (wrapped?.info?.id) st.msgByMsgId.set(wrapped.info.id, wrapped);
         const complete = isAssistantTurnComplete([...st.msgByMsgId.values()]);
-        emit(sid, "turnComplete", { complete, running: st.running && !complete });
+        emitTurnComplete(sid, st, complete);
         return;
       }
       case "session.status": {
@@ -438,18 +453,17 @@ export function createStreamInterpreter({
         // retry is a live turn for the renderer's running indicator (matches
         // pre-S1b renderer semantics) — the box is the single source of truth,
         // so it must report the same value the renderer's raw handler does.
-        st.running = type === "busy" || type === "working" || type === "retry";
+        setRunning(st, type === "busy" || type === "working" || type === "retry");
         // `type` is ADDITIVE, not the indicator: `running` stays the single
         // source of truth for the running boolean, while `type` carries the
         // raw "busy" | "working" | "retry" (or null) so a thin client (iOS)
         // can distinguish a retry from a plain busy spinner without changing
         // what desktop already reads. Desktop ignores the new field.
-        emit(sid, "running", { running: st.running, type });
+        emit(sid, "running", { running: st.running, type, since: st.runningSince });
         return;
       }
       case "session.idle": {
-        st.running = false;
-        emit(sid, "turnComplete", { complete: true, running: false });
+        emitTurnComplete(sid, st, true);
         return;
       }
       case "session.error": {
@@ -461,12 +475,11 @@ export function createStreamInterpreter({
         const err = evt.properties?.error;
         const name = typeof err?.name === "string" ? err.name : null;
         if (name === "MessageAbortedError") return;
-        st.running = false;
         const message =
           typeof err?.data?.message === "string" ? err.data.message :
           typeof err?.message === "string" ? err.message : "The turn failed.";
         emit(sid, "sessionError", { name, message });
-        emit(sid, "turnComplete", { complete: true, running: false });
+        emitTurnComplete(sid, st, true);
         return;
       }
       case "session.next.step.ended": {
