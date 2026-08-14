@@ -23,7 +23,6 @@ import {
   isSafeCut,
   FLUSH_MAX_AGE_MS,
   computeContextBreakdown,
-  resolveContextLimit,
   selectCacheTtlMs,
   computeStaleCache,
   selectLastAssistantCompletion,
@@ -91,6 +90,7 @@ function newSessionState() {
     todos: null,               // liveTodos (todo.updated) ; null = not seen
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
+    contextEmitted: null,      // { totalInput, limit } of the last context emit
   };
 }
 
@@ -226,7 +226,11 @@ function updateToolFrames(st, sid, part, emit) {
  * wrapper over events.mjs). `now()` returns epoch-ms. Returns `{ interpret,
  * getState }`.
  */
-export function createStreamInterpreter({ publish, now = () => Date.now() }) {
+export function createStreamInterpreter({
+  publish,
+  now = () => Date.now(),
+  contextLimitFor = () => null,
+}) {
   const sessions = new Map();
   // The same opencode event is delivered on BOTH the global stream and the
   // per-directory scoped one, so interpret() is called twice for it. Un-deduped
@@ -353,6 +357,44 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         return;
       }
       case "message.updated": {
+        // Context + cache reading from the live token breakdown. The
+        // `session.next.step.ended` event that used to be the only source of
+        // these frames does not fire on the deployed opencode build, so the
+        // iOS context strip had no data. `message.updated` for an assistant
+        // message carries the same token breakdown + model — emit `context`
+        // and `cache` here instead. Deduped per session so the many `updated`
+        // events in a turn do not spam the stream.
+        const msgInfo = evt.properties?.info ?? evt.properties?.message;
+        if (msgInfo?.role === "assistant" && msgInfo?.tokens) {
+          const tokens = msgInfo.tokens;
+          const totalInput =
+            (tokens.input ?? 0) +
+            (tokens.cache?.read ?? 0) +
+            (tokens.cache?.write ?? 0);
+          if (totalInput > 0) {
+            const limit =
+              contextLimitFor(msgInfo.providerID, msgInfo.modelID) ??
+              ASSUMED_CONTEXT_TOKENS;
+            if (
+              !st.contextEmitted ||
+              st.contextEmitted.totalInput !== totalInput ||
+              st.contextEmitted.limit !== limit
+            ) {
+              st.contextEmitted = { totalInput, limit };
+              emit(sid, "context", computeContextBreakdown(tokens, limit));
+              st.cachedTokens =
+                (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) ||
+                st.cachedTokens;
+              emit(sid, "cache", computeStaleCache({
+                lastCompleted: st.lastCompleted,
+                now: now(),
+                ttlMs: selectCacheTtlMs(TTL_DEFAULT),
+                cachedTokens: st.cachedTokens,
+                running: st.running,
+              }));
+            }
+          }
+        }
         // turn-complete detection from the transcript payload when present
         const msg = evt.properties?.message ?? evt.properties?.info;
         if (Array.isArray(evt.properties?.messages)) {
@@ -446,7 +488,9 @@ export function createStreamInterpreter({ publish, now = () => Date.now() }) {
         }
         const tokens = props.tokens ?? props.usage;
         if (tokens) {
-          const limit = resolveContextLimit(props.model) ?? ASSUMED_CONTEXT_TOKENS;
+          const limit =
+            contextLimitFor(props.providerID, props.modelID) ??
+            ASSUMED_CONTEXT_TOKENS;
           emit(sid, "context", computeContextBreakdown(tokens, limit));
           // cache staleness: cachedTokens ~ cached prefix size
           st.cachedTokens =

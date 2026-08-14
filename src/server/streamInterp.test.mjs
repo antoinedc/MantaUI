@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { ASSUMED_CONTEXT_TOKENS } from "../shared/streamInterpretation.mjs";
 
 function make(now = 500_000) {
   const events = [];
@@ -554,4 +555,101 @@ test("live tool frames are additive — running/truncation/sessionError still fi
   interp.interpret(toolPartUpdated({ id: "t1", tool: "bash", status: "running", metaOutput: "hi" }));
   assert.equal(events.filter((e) => e.sub === "toolStarted").length, 1);
   assert.equal(events.filter((e) => e.sub === "toolOutput").length, 1);
+});
+
+// Context/cache reading from message.updated (BET-887). The
+// `session.next.step.ended` event that used to be the only source of these
+// frames never fires on the deployed opencode build, so the interpreter reads
+// the live token breakdown off assistant `message.updated` events instead.
+// All tests inject a stub `contextLimitFor` (never a live box).
+const ASSISTANT_MSG = {
+  id: "msg_000209d3a001K1l3sjt4jY58Sa",
+  role: "assistant",
+  sessionID: "ses_fffe287c0ffeShSHRqaJKxqpNn",
+  providerID: "anthropic",
+  modelID: "claude-opus-5",
+  tokens: {
+    total: 185763,
+    input: 2,
+    output: 2054,
+    reasoning: 0,
+    cache: { write: 1516, read: 182191 },
+  },
+  cost: 0.1519305,
+};
+
+function updatedWith(info) {
+  return { type: "message.updated", properties: { sessionID: SID, info } };
+}
+
+function makeCtx(contextLimitFor) {
+  const events = [];
+  const interp = createStreamInterpreter({
+    publish: (e) => events.push(e),
+    contextLimitFor,
+  });
+  return { interp, events };
+}
+
+test("message.updated with assistant tokens emits a context frame", () => {
+  const { interp, events } = makeCtx(() => 1_000_000);
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  const ctx = events.filter((e) => e.sub === "context");
+  assert.equal(ctx.length, 1);
+  // (2 + 182191 + 1516) / 1_000_000 -> 18.37 -> 18
+  assert.equal(ctx[0].payload.pct, 18);
+});
+
+test("the context denominator comes from the resolver", () => {
+  const calls = [];
+  const { interp, events } = makeCtx((providerID, modelID) => {
+    calls.push([providerID, modelID]);
+    return 200_000;
+  });
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  const ctx = events.filter((e) => e.sub === "context");
+  assert.equal(ctx.length, 1);
+  // (2 + 182191 + 1516) / 200_000 -> 91.85 -> 92
+  assert.equal(ctx[0].payload.pct, 92);
+  assert.deepEqual(calls, [["anthropic", "claude-opus-5"]]);
+});
+
+test("a resolver miss falls back to the assumed window", () => {
+  const { interp, events } = makeCtx(() => null);
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  const ctx = events.filter((e) => e.sub === "context");
+  assert.equal(ctx.length, 1);
+  // (2 + 182191 + 1516) / 200_000 -> 91.85 -> 92
+  assert.equal(ctx[0].payload.pct, Math.round((183709 / ASSUMED_CONTEXT_TOKENS) * 100));
+});
+
+test("repeated message.updated events are deduped per session", () => {
+  const { interp, events } = makeCtx(() => 1_000_000);
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  assert.equal(events.filter((e) => e.sub === "context").length, 1);
+  assert.equal(events.filter((e) => e.sub === "cache").length, 1);
+  // a changed input total is a different reading -> a second frame
+  interp.interpret(updatedWith({ ...ASSISTANT_MSG, tokens: { ...ASSISTANT_MSG.tokens, input: 20 } }));
+  assert.equal(events.filter((e) => e.sub === "context").length, 2);
+});
+
+test("no context frame for a user message, a token-less message, or an all-zero token set", () => {
+  const { interp, events } = makeCtx(() => 1_000_000);
+  // user role -> nothing
+  interp.interpret(updatedWith({ ...ASSISTANT_MSG, role: "user" }));
+  // assistant but no tokens -> nothing
+  interp.interpret(updatedWith({ ...ASSISTANT_MSG, tokens: undefined }));
+  // assistant but all-zero input buckets -> nothing (fabricated-0% guard)
+  interp.interpret(
+    updatedWith({ ...ASSISTANT_MSG, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } } }),
+  );
+  assert.equal(events.filter((e) => e.sub === "context").length, 0);
+});
+
+test("the same event also emits a cache frame", () => {
+  const { interp, events } = makeCtx(() => 1_000_000);
+  interp.interpret(updatedWith(ASSISTANT_MSG));
+  assert.equal(events.filter((e) => e.sub === "cache").length, 1);
 });
