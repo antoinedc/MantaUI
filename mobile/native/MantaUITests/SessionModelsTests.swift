@@ -3,53 +3,56 @@ import XCTest
 
 final class SessionModelsTests: XCTestCase {
 
+    /// Fixed "now" so idle-subtitle recency and the card tests are deterministic.
+    private let now = Date(timeIntervalSince1970: 1_700_000_000)
+
     // MARK: - §7.1a subtitle table
 
     func testSubtitleSubagentsReplacesRunningAndModel() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 3, modelLabel: "opus 4.8")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "3 subagents")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "3 subagents")
     }
 
     func testSubtitleSubagentsSingular() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 1, modelLabel: nil)
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "1 subagent")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "1 subagent")
     }
 
     func testSubtitleRunningShowsModel() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "running · opus 4.8")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "running · opus 4.8")
     }
 
     func testSubtitleRunningWithoutModelFallsBackToRunning() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil)
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "running")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "running")
     }
 
     func testSubtitleNeedsYouWhenBlocked() {
         let s = SessionRowStatus(running: false, attention: true, subagentsRunning: 0, modelLabel: nil)
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "needs you")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "needs you")
     }
 
     // MARK: - §7.1a progress label (BET-791)
 
     func testSubtitleWorkingProgressLabelReplacesRunningAndModel() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8", progressLabel: "Running integration tests")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "Running integration tests")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "Running integration tests")
     }
 
     func testSubtitleWorkingProgressLabelEmptyFallsBackToRunning() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 0, modelLabel: nil, progressLabel: "")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "running")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "running")
     }
 
     func testSubtitleProgressLabelStillLosesToSubagents() {
         let s = SessionRowStatus(running: true, attention: false, subagentsRunning: 2, modelLabel: nil, progressLabel: "Running integration tests")
-        XCTAssertEqual(SessionRowSubtitle.text(for: s), "2 subagents")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "2 subagents")
     }
 
     func testSubtitleIdleIsNil() {
         let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: nil)
-        XCTAssertNil(SessionRowSubtitle.text(for: s))
+        XCTAssertNil(SessionRowSubtitle.text(for: s, now: now))
     }
 
     // MARK: - §7.1 status dot
@@ -69,12 +72,6 @@ final class SessionModelsTests: XCTestCase {
 
     // MARK: - Timer / duration
 
-    func testElapsedCompact() {
-        XCTAssertEqual(SessionTimerFormat.elapsed(5), "5s")
-        XCTAssertEqual(SessionTimerFormat.elapsed(120), "2m")
-        XCTAssertEqual(SessionTimerFormat.elapsed(3720), "1h")
-    }
-
     func testRunningDurationWording() {
         XCTAssertEqual(SessionTimerFormat.runningDuration(36), "36 seconds")
         XCTAssertEqual(SessionTimerFormat.runningDuration(240), "4 minutes")
@@ -87,6 +84,107 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(SessionTimerFormat.liveElapsed(72), "1m 12s")
         XCTAssertEqual(SessionTimerFormat.liveElapsed(60), "1m 0s")
         XCTAssertEqual(SessionTimerFormat.liveElapsed(3725), "1h 2m")
+    }
+
+    // MARK: - BET-897 idle recency
+
+    func testRelativeRecencyBuckets() {
+        XCTAssertEqual(SessionTimerFormat.relative(0), "just now")
+        XCTAssertEqual(SessionTimerFormat.relative(59), "just now")
+        XCTAssertEqual(SessionTimerFormat.relative(60), "1m ago")
+        XCTAssertEqual(SessionTimerFormat.relative(90 * 60), "90m ago")
+        XCTAssertEqual(SessionTimerFormat.relative(25 * 60 * 60), "25h ago")
+        XCTAssertEqual(SessionTimerFormat.relative(3 * 24 * 60 * 60), "3d ago")
+    }
+
+    func testRelativeClampsNegative() {
+        XCTAssertEqual(SessionTimerFormat.relative(-5), "just now")
+    }
+
+    // MARK: - BET-897 idle subtitle (model + recency)
+
+    func testIdleSubtitleModelOnly() {
+        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0, modelLabel: "opus 4.8")
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "opus 4.8")
+    }
+
+    func testIdleSubtitleRecencyOnly() {
+        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+                                 modelLabel: nil, lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "1h ago")
+    }
+
+    func testIdleSubtitleModelAndRecencyOrderAndSeparator() {
+        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+                                 modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "opus 4.8 · 1h ago")
+    }
+
+    func testIdleSubtitleNothingKnownIsNil() {
+        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+                                 modelLabel: nil, lastActivity: nil)
+        XCTAssertNil(SessionRowSubtitle.text(for: s, now: now))
+    }
+
+    func testIdleSubtitleTerminalWinsOverModelAndRecency() {
+        let s = SessionRowStatus(running: false, attention: false, subagentsRunning: 0,
+                                 modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600),
+                                 isTerminal: true)
+        XCTAssertEqual(SessionRowSubtitle.text(for: s, now: now), "terminal")
+    }
+
+    func testIdleSubtitleRunningAttentionSubagentPrecedenceUnchanged() {
+        // Subagents win over an idle model/recency line.
+        let subagents = SessionRowStatus(running: true, attention: false, subagentsRunning: 2,
+                                         modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: subagents, now: now), "2 subagents")
+        // Running wins over the idle tail.
+        let running = SessionRowStatus(running: true, attention: false, subagentsRunning: 0,
+                                       modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: running, now: now), "running · opus 4.8")
+        // Attention wins over the idle tail even with a recency present.
+        let attention = SessionRowStatus(running: false, attention: true, subagentsRunning: 0,
+                                         modelLabel: "opus 4.8", lastActivity: now.addingTimeInterval(-3600))
+        XCTAssertEqual(SessionRowSubtitle.text(for: attention, now: now), "needs you")
+        // A terminal row whose running flag is somehow true still reports running.
+        let terminalRunning = SessionRowStatus(running: true, attention: false, subagentsRunning: 0,
+                                               modelLabel: nil, isTerminal: true)
+        XCTAssertEqual(SessionRowSubtitle.text(for: terminalRunning, now: now), "running")
+    }
+
+    // MARK: - BET-897 card position (corners + separator)
+
+    func testCardPositionSingleRow() {
+        XCTAssertEqual(SessionCardPosition.at(index: 0, count: 1), .only)
+        XCTAssertTrue(SessionCardPosition.only.roundsTop)
+        XCTAssertTrue(SessionCardPosition.only.roundsBottom)
+        XCTAssertFalse(SessionCardPosition.only.showsSeparator)
+    }
+
+    func testCardPositionFirstRowOfTwo() {
+        XCTAssertEqual(SessionCardPosition.at(index: 0, count: 2), .first)
+        XCTAssertTrue(SessionCardPosition.first.roundsTop)
+        XCTAssertFalse(SessionCardPosition.first.roundsBottom)
+        XCTAssertFalse(SessionCardPosition.first.showsSeparator)
+    }
+
+    func testCardPositionLastRowOfTwo() {
+        XCTAssertEqual(SessionCardPosition.at(index: 1, count: 2), .last)
+        XCTAssertFalse(SessionCardPosition.last.roundsTop)
+        XCTAssertTrue(SessionCardPosition.last.roundsBottom)
+        XCTAssertTrue(SessionCardPosition.last.showsSeparator)
+    }
+
+    func testCardPositionMiddleRowOfThree() {
+        XCTAssertEqual(SessionCardPosition.at(index: 1, count: 3), .middle)
+        XCTAssertFalse(SessionCardPosition.middle.roundsTop)
+        XCTAssertFalse(SessionCardPosition.middle.roundsBottom)
+        XCTAssertTrue(SessionCardPosition.middle.showsSeparator)
+    }
+
+    func testCardPositionThreeRowEdges() {
+        XCTAssertEqual(SessionCardPosition.at(index: 0, count: 3), .first)
+        XCTAssertEqual(SessionCardPosition.at(index: 2, count: 3), .last)
     }
 
     // MARK: - Pin identity
