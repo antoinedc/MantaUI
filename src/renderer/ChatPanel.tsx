@@ -88,6 +88,7 @@ import { useTranscriptState } from "./hooks/useTranscriptState";
 import { useSseBus } from "./hooks/useSseBus";
 import { useVoice } from "./hooks/useVoice";
 import { useTypeahead } from "./hooks/useTypeahead";
+import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
@@ -2521,35 +2522,37 @@ export function ChatPanel({
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
-      <Transcript
-        messages={messages}
-        virtuosoRef={virtuosoRef}
-        sessionId={sessionId}
-        setMessages={setMessages}
-        loadedAllRef={loadedAllRef}
-        taskContextValue={taskContextValue}
-        showThinking={showThinking}
-        running={running}
-        liveTurn={liveTurn}
-        progress={liveProgress}
-        isActive={isActive}
-        activeTodos={activeTodos}
-        onDismissTodos={dismissTodos}
-        // BET-418 §D: a job session is read-only — never show its (anyway
-        // impossible) question cards. Defensive: a job's pre-flight ruleset
-        // means it never generates asks.
-        questions={jobOwnership ? [] : questions}
-        turnInfo={turnInfo}
-        finishByMessageId={finishByMessageId}
-        userCommandInfo={userCommandInfo}
-        voiceNoteByMessageId={voiceNoteByMessageId}
-        pendingVoiceNote={pendingVoiceNote}
-        onRetryVoiceNote={retryVoiceNote}
-        onReplyQuestion={replyQuestion}
-        onRejectQuestion={rejectQuestion}
-        onAtBottomChange={onAtBottomChange}
-        motionStateRef={motionStateRef}
-      />
+      <VoicePlaybackProvider active={isActive}>
+        <Transcript
+          messages={messages}
+          virtuosoRef={virtuosoRef}
+          sessionId={sessionId}
+          setMessages={setMessages}
+          loadedAllRef={loadedAllRef}
+          taskContextValue={taskContextValue}
+          showThinking={showThinking}
+          running={running}
+          liveTurn={liveTurn}
+          progress={liveProgress}
+          isActive={isActive}
+          activeTodos={activeTodos}
+          onDismissTodos={dismissTodos}
+          // BET-418 §D: a job session is read-only — never show its (anyway
+          // impossible) question cards. Defensive: a job's pre-flight ruleset
+          // means it never generates asks.
+          questions={jobOwnership ? [] : questions}
+          turnInfo={turnInfo}
+          finishByMessageId={finishByMessageId}
+          userCommandInfo={userCommandInfo}
+          voiceNoteByMessageId={voiceNoteByMessageId}
+          pendingVoiceNote={pendingVoiceNote}
+          onRetryVoiceNote={retryVoiceNote}
+          onReplyQuestion={replyQuestion}
+          onRejectQuestion={rejectQuestion}
+          onAtBottomChange={onAtBottomChange}
+          motionStateRef={motionStateRef}
+        />
+      </VoicePlaybackProvider>
 
       {/* Pinned card stack above the composer (BET-783): blocking always
           above ambient, at most one blocking expanded, at most two ambient

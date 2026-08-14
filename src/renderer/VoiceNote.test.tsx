@@ -11,6 +11,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { VoicePlayerFrame, VoicePlayer } from "./VoiceNote";
+import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import type { VoiceNoteRecord } from "../shared/types";
 
 // 40 non-zero peaks: with bars=40 and progress=0.5 the bar at index i is
@@ -124,7 +125,11 @@ describe("VoicePlayer — 'two players' regression guard", () => {
         expiresAt: null,
         audioAvailable: true,
       };
-      const h = mount(<VoicePlayer note={note} />);
+      const h = mount(
+        <VoicePlaybackProvider active>
+          <VoicePlayer note={note} />
+        </VoicePlaybackProvider>,
+      );
       await h.flush();
       const container = h.container;
       const playControls = Array.from(container.querySelectorAll("button")).filter(
