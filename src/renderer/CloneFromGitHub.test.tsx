@@ -18,7 +18,7 @@
 // existing credential (so the picker renders immediately) and a fixed repo
 // list.
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CloneFromGitHub } from "./CloneFromGitHub";
@@ -44,15 +44,15 @@ const REPOS: Repo[] = [
   { name: "gamma", fullName: "other/gamma", owner: "other", description: "Gamma", pushedAt: 500, defaultBranch: "main", cloneUrl: "https://github.com/other/gamma.git", url: "https://github.com/other/gamma" },
 ];
 
-const CLONE_DONE = {
+const CLONE_IN_PROGRESS = {
   id: "c1",
   name: "alpha",
   url: "https://github.com/me/alpha.git",
   dest: "/root/alpha",
-  percent: 100,
-  bytes: 10,
-  done: true,
-  ok: true,
+  percent: 0,
+  bytes: 0,
+  done: false,
+  ok: false,
   error: null,
   cancelled: false,
 };
@@ -68,7 +68,7 @@ function mountPicker(): void {
     forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
     forgeRepos: () => Promise.resolve({ repos: REPOS, stale: false, error: null }),
     forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-    forgeCloneStatus: () => Promise.resolve(CLONE_DONE),
+    forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
   }));
   container = document.createElement("div");
   document.body.appendChild(container);

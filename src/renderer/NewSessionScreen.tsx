@@ -1038,7 +1038,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               </>
             )}
         </>
-        ))}
+        )}
 
         {error && (
           <Card danger>
