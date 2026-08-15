@@ -3219,6 +3219,28 @@ test("BET-980: the public-path outcome failures are fatal (die), not warn-and-co
   assert.match(src, /install_root_file[\s\S]*?\|\| die/);
 });
 
+test("BET-980: the gateway fatality is gated on SKIP_PUBLIC_TLS, not INGRESS_MODE (macOS/tailscale stay warn)", () => {
+  // The gateway-register B/C block runs on ALL ingress paths (the APNs token
+  // is needed on every path). Its fatal branch must key off SKIP_PUBLIC_TLS —
+  // NOT `INGRESS_MODE == public`. On a macOS box INGRESS_MODE is "public"
+  // (no tailscale up) even though SKIP_PUBLIC_TLS=1, so keying on INGRESS_MODE
+  // wrongly turned a stubbed gateway failure into a fatal on macOS and broke
+  // the macos-install-smoke CI. Regression guard: the no-box-id and
+  // register-POST die branches both gate on SKIP_PUBLIC_TLS.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /\$INGRESS_MODE" = "public"/, "gateway fatality must not key on INGRESS_MODE");
+  assert.match(
+    src,
+    /\[ -z "\$BOX_ID_FOR_GATEWAY" \][\s\S]*?\[ "\$DRY_RUN" != "1" \] && \[ "\$SKIP_PUBLIC_TLS" != "1" \]/,
+    "no-box-id fatality must be gated on SKIP_PUBLIC_TLS (public path only)",
+  );
+  assert.match(
+    src,
+    /if \[ "\$SKIP_PUBLIC_TLS" != "1" \]; then\n[ \t]+die "gateway registration POST failed/,
+    "gateway register-POST fatality must be gated on SKIP_PUBLIC_TLS (public path only)",
+  );
+});
+
 // ----------------------------------------------------------------------------
 // install.sh — step 7.5.E all-or-nothing (BET-980, supersedes BET-205 §3/§4).
 // ----------------------------------------------------------------------------

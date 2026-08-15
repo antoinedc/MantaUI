@@ -1480,7 +1480,7 @@ main() {
   BOX_ID_FOR_GATEWAY="$(wait_for_box_id "$LIB" "$NODE" "$BOX_ID_WAIT_ATTEMPTS" 1 || true)"
 
   if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
-    if [ "$DRY_RUN" != "1" ] && [ "$INGRESS_MODE" = "public" ]; then
+    if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
       die "no box_id in $MANTA_AUTH_FILE after waiting — cannot register the gateway, so this box would have no public HTTPS.
         Start the manta-server at least once ($(supervisor_hint restart server)), then run the installer again.
 
@@ -1521,7 +1521,7 @@ main() {
           warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
         fi
       else
-        if [ "$INGRESS_MODE" = "public" ]; then
+        if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
           die "gateway registration POST failed — this box would have no public HTTPS without it.
             ${MANTA_GATEWAY_BASE:+($MANTA_GATEWAY_BASE) }Fix the gateway/network issue and run the installer again.
 
