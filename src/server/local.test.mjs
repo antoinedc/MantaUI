@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -289,4 +289,25 @@ test("gitPush: explicit remote is honored with setUpstream", async () => {
   const { spawn, calls } = makeSpawn();
   await gitPush({ cwd: "/r", branch: "feat/x", remote: "upstream", setUpstream: true }, { spawn });
   assert.deepEqual(calls[0], ["-C", "/r", "push", "-u", "upstream", "feat/x"]);
+});
+
+test("gitClone: token emits -c BEFORE clone with an HTTP Basic x-access-token header", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitClone({ url: "https://github.com/acme/private.git", dest: "/d", token: "tok_123" }, { spawn });
+  const argv = calls[0];
+  const cIdx = argv.indexOf("-c");
+  const cloneIdx = argv.indexOf("clone");
+  assert.ok(cIdx !== -1 && cloneIdx !== -1, "both -c and clone are present");
+  assert.ok(cIdx < cloneIdx, "-c must precede clone so the credential is not persisted");
+  const header = argv[cIdx + 1];
+  assert.ok(header.startsWith("http.extraheader=Authorization: Basic "), "header uses HTTP Basic");
+  const b64 = header.slice("http.extraheader=Authorization: Basic ".length);
+  assert.equal(Buffer.from(b64, "base64").toString("utf8"), "x-access-token:tok_123");
+});
+
+test("gitClone: no token emits no -c argument at all", async () => {
+  const { spawn, calls } = makeSpawn();
+  await gitClone({ url: "https://github.com/acme/public.git" }, { spawn });
+  assert.ok(!calls[0].includes("-c"), "public clone emits no extraheader");
+  assert.deepEqual(calls[0], ["-C", "/", "clone", "--progress", "https://github.com/acme/public.git"]);
 });

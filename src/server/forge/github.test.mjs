@@ -433,7 +433,7 @@ test("replyToThread POSTs a reply body + reviewed commit to the thread endpoint"
 // ---- listMyRepos (BET-796): the clone picker's remote repo source -----------
 
 test("listMyRepos drops read-only repos and orders most-recently-pushed first", async () => {
-  const url = "https://api.github.com/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member";
+  const url = "https://api.github.com/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member&page=1";
   const adapter = createGithubAdapter(
     fakeRequest({
       [url]: [
@@ -484,6 +484,74 @@ test("listMyRepos drops read-only repos and orders most-recently-pushed first", 
   assert.equal(data[1].defaultBranch, "main");
   assert.equal(data[1].cloneUrl, "https://github.com/octo/manta-skills.git");
   assert.ok(!data.some((r) => r.fullName === "acme/readonly"));
+});
+
+test("listMyRepos paginates until a short page and returns the union", async () => {
+  const page = (n, count) =>
+    Array.from({ length: count }, (_, i) => ({
+      name: `repo-${n}-${i}`,
+      full_name: `acme/repo-${n}-${i}`,
+      owner: { login: "acme" },
+      pushed_at: "2026-08-01T00:00:00Z",
+      default_branch: "main",
+      clone_url: `https://github.com/acme/repo-${n}-${i}.git`,
+      html_url: `https://github.com/acme/repo-${n}-${i}`,
+      permissions: { push: true },
+    }));
+  const requested = [];
+  const request = async (url) => {
+    requested.push(url);
+    const pageNum = Number(new URL(url).searchParams.get("page"));
+    return { data: pageNum === 1 ? page(1, 100) : page(2, 37), stale: false };
+  };
+  const adapter = createGithubAdapter(request);
+  const { data } = await adapter.listMyRepos();
+  assert.equal(requested.length, 2, "a full page then a short page stops after two requests");
+  assert.equal(data.length, 137, "both pages are concatenated before filtering");
+});
+
+test("listMyRepos caps at 5 pages so a pathological account cannot hang the picker", async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({
+    name: `r${i}`,
+    full_name: `acme/r${i}`,
+    owner: { login: "acme" },
+    pushed_at: "2026-08-01T00:00:00Z",
+    default_branch: "main",
+    clone_url: `https://github.com/acme/r${i}.git`,
+    html_url: `https://github.com/acme/r${i}`,
+    permissions: { push: true },
+  }));
+  let count = 0;
+  const request = async () => {
+    count += 1;
+    return { data: full, stale: false };
+  };
+  const adapter = createGithubAdapter(request);
+  const { data } = await adapter.listMyRepos();
+  assert.equal(count, 5, "a full page every time stops at the 5-page cap");
+  assert.equal(data.length, 500);
+});
+
+test("listMyRepos reports stale when any page was stale", async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({
+    name: `r${i}`,
+    full_name: `acme/r${i}`,
+    owner: { login: "acme" },
+    pushed_at: "2026-08-01T00:00:00Z",
+    default_branch: "main",
+    clone_url: `https://github.com/acme/r${i}.git`,
+    html_url: `https://github.com/acme/r${i}`,
+    permissions: { push: true },
+  }));
+  const request = async (url) => {
+    const pageNum = Number(new URL(url).searchParams.get("page"));
+    const data = pageNum === 1 ? full : full.slice(0, 10);
+    return { data, stale: pageNum === 2 };
+  };
+  const adapter = createGithubAdapter(request);
+  const { data, stale } = await adapter.listMyRepos();
+  assert.equal(stale, true, "a stale page 2 marks the whole result stale");
+  assert.ok(data.length > 0);
 });
 
 // ---- getDefaultBranch: the single-repo default-branch read (BET-891) -------

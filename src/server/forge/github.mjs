@@ -732,17 +732,29 @@ export function createGithubAdapter(request, requestWrite, requestText = request
 
     /**
      * GET /user/repos — the repos the connected user can actually PUSH to,
-     * most-recently-pushed first. Filtering to write access is what keeps the
-     * clone picker usable: a read-only repo you cannot push to is noise here,
-     * so it is dropped (from `/user/repos`' per-repo `permissions.push`).
-     * Normalised to a forge-neutral shape; the renderer groups by `owner`.
+     * most-recently-pushed first. Paginates (100 per request) until a page
+     * returns fewer than `per_page` rows, with a hard cap of 5 pages (500
+     * repos) so a pathological account cannot hang the picker. Each page URL
+     * is distinct, so the ETag/single-flight cache keys them separately.
+     * Filtering to write access keeps the clone picker usable: a read-only
+     * repo you cannot push to is noise here, so it is dropped (from
+     * `/user/repos`' per-repo `permissions.push`). Normalised to a
+     * forge-neutral shape; the renderer groups by `owner`.
      *
      * @returns {Promise<{ data: Array<object>, stale: boolean }>}
      */
     async listMyRepos() {
-      const url = `${apiBase}/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member`;
-      const { data, stale } = await request(url);
-      return { data: pushableRepos(data), stale };
+      const raw = [];
+      let stale = false;
+      for (let page = 1; page <= 5; page++) {
+        const url = `${apiBase}/user/repos?sort=pushed&per_page=100&affiliation=owner,collaborator,organization_member&page=${page}`;
+        const { data, stale: pageStale } = await request(url);
+        const rows = Array.isArray(data) ? data : [];
+        if (pageStale) stale = true;
+        raw.push(...rows);
+        if (rows.length < 100) break;
+      }
+      return { data: pushableRepos(raw), stale };
     },
   };
 }
