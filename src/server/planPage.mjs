@@ -31,6 +31,10 @@ import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkRehype from "remark-rehype";
 import rehypeStringify from "rehype-stringify";
+import rehypeSlug from "rehype-slug";
+import rehypeAutolinkHeadings from "rehype-autolink-headings";
+import rehypeHighlight from "rehype-highlight";
+import { visit } from "unist-util-visit";
 import { statePath } from "../shared/paths.mjs";
 import { registerPage } from "./servePage.mjs";
 
@@ -114,6 +118,30 @@ const LIGHT_TOKENS = `
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 `.trim();
 
+// Dark-theme tokens — copied VERBATIM from `[data-theme="dark"]` in
+// `src/renderer/tokens.css` (do not retune). Only the tokens this page uses.
+// Radii (`--r-xs`/`--r-sm`) and the font stacks are theme-independent and stay
+// in `:root` only, so they are not repeated here.
+const DARK_TOKENS = `
+  --canvas: #0B1020;
+  --inset: #070B16;
+  --border-subtle: #222C49;
+  --border: #33406B;
+  --tx1: #E3E8F2;
+  --tx2: #BDC7DB;
+  --tx3: #939FB8;
+  --tx4: #6B7690;
+  --accent-tx: #7BA0FF;
+  --accent-solid: #5A88FF;
+  --fill: rgba(255, 255, 255, .04);
+  --ok: #3DD9A4;
+  --warn: #FACC15;
+  --danger: #FF6B7A;
+  --info: #49D7F5;
+  --diff-add: #12351f;
+  --diff-del: #3a1720;
+`.trim();
+
 // ---------------------------------------------------------------------------
 // Markdown → HTML — pure, self-contained, no JS
 // ---------------------------------------------------------------------------
@@ -138,16 +166,49 @@ export function escapeHtml(s) {
  * plan can never reach the page. Do NOT add `allowDangerousHtml` or
  * `rehype-raw` — that is the whole sanitisation story, and the page's sandbox
  * CSP is a second line, not the first.
+ *
+ * Pipeline order is load-bearing: `rehype-slug` gives every heading a stable
+ * `id`, THEN the collector reads clean heading text (before
+ * `rehype-autolink-headings` wraps it), then autolink makes each heading
+ * text link to its own anchor, then `rehype-highlight` adds `hljs-*` spans to
+ * fenced code.
+ *
+ * @returns {{ html: string, headings: Array<{level:number,id:string,text:string}> }}
+ *   `headings` lists the `h2`/`h3` headings (the page title is `h1`, and
+ *   `h4+` is too fine to list), in document order.
  */
 export function renderPlanMarkdown(markdown) {
-  return String(
+  const headings = [];
+  const html = String(
     unified()
       .use(remarkParse)
       .use(remarkGfm)
       .use(remarkRehype)
+      .use(rehypeSlug)
+      .use(collectHeadings(headings))
+      .use(rehypeAutolinkHeadings, { behavior: "wrap" })
+      .use(rehypeHighlight)
       .use(rehypeStringify)
       .processSync(String(markdown)),
   );
+  return { html, headings };
+}
+
+// Rehype plugin that collects `h2`/`h3` headings into the given array. Runs
+// BEFORE autolink so `text` is the clean, unwrapped heading text.
+function collectHeadings(headings) {
+  return () => (tree) => {
+    visit(tree, "element", (node) => {
+      if (!/^h[23]$/.test(node.tagName ?? "")) return;
+      const id = node.properties?.id;
+      if (!id) return;
+      const text = (node.children ?? [])
+        .map((child) => (typeof child.value === "string" ? child.value : ""))
+        .join("")
+        .trim();
+      headings.push({ level: Number(node.tagName[1]), id, text });
+    });
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -224,12 +285,32 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
   ]
     .filter(Boolean)
     .join(" · ");
-  const body = renderPlanMarkdown(stripFirstHeading(md));
+  const { html: body, headings } = renderPlanMarkdown(stripFirstHeading(md));
   const stamp = formatGeneratedAt(generatedAt);
 
   const metricsHtml = metricsLine
     ? `<p class="metrics">${escapeHtml(metricsLine)}</p>`
     : "";
+  // "On this page" nav — only when there are enough headings that it is not
+  // noise (below 3 it is). Deliberately a static block, not sticky and not a
+  // sidebar: it reads correctly at every width, including a phone, with no
+  // layout machinery.
+  const tocHtml =
+    headings.length >= 3
+      ? `<nav class="toc" aria-label="On this page">
+  <p class="toc-title">On this page</p>
+  <ul>
+${headings
+  .map(
+    (h) =>
+      `    <li${h.level === 3 ? ' class="toc-l3"' : ""}><a href="#${escapeHtml(
+        h.id,
+      )}">${escapeHtml(h.text)}</a></li>`,
+  )
+  .join("\n")}
+  </ul>
+</nav>`
+      : "";
   const pathHtml = path
     ? `<div class="meta"><span class="meta-label">Plan file</span><code>${escapeHtml(
         path,
@@ -242,15 +323,21 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
     : "";
 
   return `<!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
 <title>${escapeHtml(title)}</title>
 <style>
   :root {
     ${LIGHT_TOKENS}
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      ${DARK_TOKENS}
+    }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -375,12 +462,64 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
   }
   .meta code { font-size: 12px; }
   .mono { font-family: var(--mono); }
+  /* Code theme — highlight.js classes mapped onto the app's semantic tokens,
+     so the page needs no third-party stylesheet and follows the colour scheme
+     above without a second theme. */
+  .hljs-comment, .hljs-quote { color: var(--tx4); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-built_in,
+  .hljs-meta, .hljs-doctag { color: var(--accent-tx); }
+  .hljs-string, .hljs-regexp, .hljs-symbol { color: var(--ok); }
+  .hljs-number, .hljs-literal { color: var(--warn); }
+  .hljs-title, .hljs-title.function_, .hljs-title.class_,
+  .hljs-section, .hljs-name { color: var(--info); }
+  .hljs-attr, .hljs-attribute, .hljs-property,
+  .hljs-variable, .hljs-params { color: var(--tx2); }
+  .hljs-addition { color: var(--ok); background: var(--diff-add); }
+  .hljs-deletion { color: var(--danger); background: var(--diff-del); }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: 600; }
+  /* "On this page" nav — a static block above <main>, shown only when there
+     are 3+ headings. */
+  .toc {
+    margin: 0 0 32px;
+    padding: 14px 18px;
+    background: var(--inset);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--r-sm);
+  }
+  .toc-title {
+    margin: 0 0 8px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tx4);
+  }
+  .toc ul { margin: 0; padding: 0; list-style: none; }
+  .toc li { margin: 3px 0; font-size: 13.5px; }
+  .toc-l3 { padding-left: 16px; }
+  .toc a { color: var(--tx2); text-decoration: none; }
+  .toc a:hover { color: var(--accent-tx); text-decoration: underline; }
+  main h1 a, main h2 a, main h3 a,
+  main h4 a, main h5 a, main h6 a { color: inherit; text-decoration: none; }
+  main h1 a:hover, main h2 a:hover, main h3 a:hover,
+  main h4 a:hover, main h5 a:hover, main h6 a:hover { text-decoration: underline; }
+  @media print {
+    .toc, footer { display: none; }
+    body { background: #fff; color: #000; font-size: 11pt; }
+    .wrap { max-width: none; padding: 0; }
+    a { color: #000; text-decoration: underline; }
+    pre, blockquote, table { break-inside: avoid; page-break-inside: avoid; }
+    h1, h2, h3 { break-after: avoid; page-break-after: avoid; }
+    pre { border: 1px solid #ccc; background: #fff; }
+    [class^="hljs-"], [class*=" hljs-"] { color: #000 !important; background: none !important; }
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
     <h1>${escapeHtml(title)}</h1>
     ${metricsHtml}
+    ${tocHtml}
     <main>
 ${body}
     </main>

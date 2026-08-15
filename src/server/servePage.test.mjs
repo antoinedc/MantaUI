@@ -447,7 +447,7 @@ test("planSubdomain returns null for empty / unusable input", () => {
 });
 
 test("renderPlanMarkdown drops raw HTML and escapes entity-like text", () => {
-  const html = renderPlanMarkdown("a <script>alert(1)</script> b & c");
+  const { html } = renderPlanMarkdown("a <script>alert(1)</script> b & c");
   // remark-rehype DROPS raw HTML rather than escaping it: the script tag never
   // appears as markup, but its text content still renders as plain text.
   assert.doesNotMatch(html, /<script/i);
@@ -457,29 +457,34 @@ test("renderPlanMarkdown drops raw HTML and escapes entity-like text", () => {
   assert.match(html, /&amp;|&#x26;|&#38;/);
 });
 
-test("renderPlanMarkdown renders fenced code blocks with monospace pre/code", () => {
-  const html = renderPlanMarkdown('```js\nconst x = "<b>";\n```');
-  assert.match(html, /<pre><code class="language-js">/);
+test("renderPlanMarkdown renders fenced code blocks with hljs-highlighted spans", () => {
+  const { html } = renderPlanMarkdown('```js\nconst x = "<b>";\n```');
+  // rehype-highlight adds the `hljs` marker plus per-token `hljs-*` spans.
+  assert.match(html, /<pre><code class="hljs language-js">/);
+  assert.match(html, /<span class="hljs-keyword">const<\/span>/);
+  assert.match(html, /class="hljs-string"/);
   // The unified pipeline HTML-escapes the source's `<` (as the hex form) so a
   // literal `<b>` can never surface as a tag.
   assert.match(html, /&#x3C;b&gt;|&lt;b&gt;|&#x3C;b>/);
   assert.doesNotMatch(html, /<b>/);
 });
 
-test("renderPlanMarkdown renders ATX headings and inline code", () => {
-  const html = renderPlanMarkdown("# Title\n\nStep: use `src/a.ts`");
-  assert.match(html, /<h1>Title<\/h1>/);
+test("renderPlanMarkdown renders ATX headings with an id and self-anchor link", () => {
+  const { html } = renderPlanMarkdown("# Title\n\nStep: use `src/a.ts`");
+  // rehype-slug adds an id; rehype-autolink-headings (behavior: wrap) makes the
+  // heading's own text the link to its anchor.
+  assert.match(html, /<h1 id="title"><a href="#title">Title<\/a><\/h1>/);
   assert.match(html, /<code>src\/a\.ts<\/code>/);
 });
 
 test("renderPlanMarkdown renders unordered and ordered lists", () => {
-  const html = renderPlanMarkdown("- one\n- two\n\n1. a\n2. b");
+  const { html } = renderPlanMarkdown("- one\n- two\n\n1. a\n2. b");
   assert.match(html, /<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
   assert.match(html, /<ol>\s*<li>a<\/li>\s*<li>b<\/li>\s*<\/ol>/);
 });
 
 test("renderPlanMarkdown nests bullet lists inside their parent item", () => {
-  const html = renderPlanMarkdown("- top\n  - child\n    - grandchild");
+  const { html } = renderPlanMarkdown("- top\n  - child\n    - grandchild");
   assert.match(
     html,
     /<li>top\s*<ul>\s*<li>child\s*<ul>\s*<li>grandchild<\/li>\s*<\/ul>\s*<\/li>\s*<\/ul>\s*<\/li>/,
@@ -487,32 +492,32 @@ test("renderPlanMarkdown nests bullet lists inside their parent item", () => {
 });
 
 test("renderPlanMarkdown renders GFM task lists as disabled checkboxes", () => {
-  const html = renderPlanMarkdown("- [x] done\n- [ ] not done");
+  const { html } = renderPlanMarkdown("- [x] done\n- [ ] not done");
   assert.match(html, /<input type="checkbox" checked disabled>/);
   assert.match(html, /<input type="checkbox" disabled>/);
   assert.match(html, /done/);
 });
 
 test("renderPlanMarkdown renders GFM tables with thead", () => {
-  const html = renderPlanMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
+  const { html } = renderPlanMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
   assert.match(html, /<table>\s*<thead>/);
   assert.match(html, /<th>a<\/th>/);
   assert.match(html, /<td>1<\/td>/);
 });
 
 test("renderPlanMarkdown renders blockquotes", () => {
-  const html = renderPlanMarkdown("> quoted");
+  const { html } = renderPlanMarkdown("> quoted");
   assert.match(html, /<blockquote>/);
   assert.match(html, /quoted/);
 });
 
 test("renderPlanMarkdown renders strikethrough", () => {
-  const html = renderPlanMarkdown("~~x~~");
+  const { html } = renderPlanMarkdown("~~x~~");
   assert.match(html, /<del>x<\/del>/);
 });
 
 test("renderPlanMarkdown auto-links bare URLs", () => {
-  const html = renderPlanMarkdown("see https://example.com/x now");
+  const { html } = renderPlanMarkdown("see https://example.com/x now");
   assert.match(
     html,
     /<a href="https:\/\/example\.com\/x">https:\/\/example\.com\/x<\/a>/,
@@ -520,7 +525,7 @@ test("renderPlanMarkdown auto-links bare URLs", () => {
 });
 
 test("renderPlanMarkdown drops raw HTML (img with onerror) entirely", () => {
-  const html = renderPlanMarkdown("<img src=x onerror=alert(1)>");
+  const { html } = renderPlanMarkdown("<img src=x onerror=alert(1)>");
   assert.doesNotMatch(html, /<img/i);
   assert.doesNotMatch(html, /onerror/i);
 });
@@ -554,6 +559,69 @@ test("renderPlanHtml emits title, metrics, body, path and generated-at in order"
   // The document is self-contained: no external resources, no scripts.
   assert.doesNotMatch(html, /<script/i);
   assert.doesNotMatch(html, /https?:\/\/[^">\s]*\.(css|js)/i);
+});
+
+test("renderPlanMarkdown collects h2/h3 headings with a stable id and clean text", () => {
+  const { html, headings } = renderPlanMarkdown(
+    "# Title\n\n## Step one\n\n### Sub detail\n\n#### Too fine\n\n## Step two with `code`",
+  );
+  // Every h2/h3 gets an id (rehype-slug).
+  assert.match(html, /<h2 id="step-one">/);
+  assert.match(html, /<h3 id="sub-detail">/);
+  assert.match(html, /<h2 id="step-two-with-code">/);
+  // h4 is too fine to list; h1 is the page title.
+  assert.deepEqual(headings, [
+    { level: 2, id: "step-one", text: "Step one" },
+    { level: 3, id: "sub-detail", text: "Sub detail" },
+    { level: 2, id: "step-two-with-code", text: "Step two with" },
+  ]);
+});
+
+test("renderPlanHtml emits a toc nav with 3+ headings and omits it with 2", () => {
+  // The leading `# Title` is stripped as the page title, so the nav counts the
+  // remaining h2/h3 headings.
+  const withNav = renderPlanHtml({
+    title: "A plan",
+    markdown: "# Title\n\n## A\n\n## B\n\n## C",
+    generatedAt: "",
+  });
+  assert.match(withNav, /<nav class="toc" aria-label="On this page">/);
+  assert.match(
+    withNav,
+    /<li><a href="#a">A<\/a><\/li>\s*<li><a href="#b">B<\/a><\/li>\s*<li><a href="#c">C<\/a><\/li>/,
+  );
+
+  const noNav = renderPlanHtml({
+    title: "A plan",
+    markdown: "# Title\n\n## A\n\n## B",
+    generatedAt: "",
+  });
+  assert.doesNotMatch(noNav, /<nav class="toc"/);
+
+  // h3 entries carry the toc-l3 class, h2 entries do not.
+  const withL3 = renderPlanHtml({
+    title: "A plan",
+    markdown: "# Title\n\n## A\n\n## B\n\n### B.1",
+    generatedAt: "",
+  });
+  assert.match(withL3, /<li class="toc-l3"><a href="#b1">B\.1<\/a><\/li>/);
+});
+
+test("renderPlanHtml includes dark-mode media query and print stylesheet", () => {
+  const html = renderPlanHtml({
+    title: "Plan",
+    markdown: "## A\n\n## B\n\n## C",
+    generatedAt: "",
+  });
+  assert.match(html, /@media \(prefers-color-scheme: dark\) \{/);
+  assert.match(html, /--canvas: #0B1020;/);
+  assert.match(html, /@media print \{/);
+  // Dark mode is a media query, not a static data-theme attribute.
+  assert.doesNotMatch(html, /data-theme=/);
+  assert.match(html, /name="color-scheme" content="light dark"/);
+  // Still self-contained: no scripts, no external stylesheet or font URL.
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /https?:\/\/[^">\s]*\.(css|js|woff|woff2)/i);
 });
 
 test("publishPlanPage registers under a valid plan subdomain with a 7-day TTL", async () => {
