@@ -16,6 +16,16 @@ import {
   resolveExpiresAt,
 } from "./servePage.mjs";
 import { STATE_DIRNAME } from "../shared/paths.mjs";
+import {
+  PLAN_TTL_HOURS,
+  planSubdomain,
+  renderPlanHtml,
+  renderPlanMarkdown,
+  escapeHtml,
+  planMetrics,
+  derivePlanTitle,
+  publishPlanPage,
+} from "./planPage.mjs";
 
 // ---------------------------------------------------------------------------
 // isValidSubdomain
@@ -407,4 +417,155 @@ test("pageResponseHeaders includes the opaque-origin sandbox CSP", () => {
   // could read localStorage / send credentialed requests to the box_token's
   // authenticated routes.
   assert.equal(h["Content-Security-Policy"].includes("allow-same-origin"), false);
+});
+
+// ---------------------------------------------------------------------------
+// Plan companion page (BET-954) — pure logic only, no live HTTP
+// ---------------------------------------------------------------------------
+
+test("planSubdomain derives plan-<shortSessionId>, valid per isValidSubdomain", () => {
+  for (const sid of ["ses_01JH4XQp2aBcDeFgHiJkLmNoPqRsTuVwXyZ", "abc", "plan!"]) {
+    const sub = planSubdomain(sid);
+    assert.ok(sub, `expected a subdomain for "${sid}"`);
+    assert.ok(sub.startsWith("plan-"), `must be plan-prefixed, got "${sub}"`);
+    assert.equal(isValidSubdomain(sub), true, `"${sub}" must satisfy isValidSubdomain`);
+  }
+});
+
+test("planSubdomain is stable per session and differs across sessions", () => {
+  const a = "ses_01JAAAA";
+  const b = "ses_01JBBBB";
+  assert.equal(planSubdomain(a), planSubdomain(a), "same session → same subdomain");
+  assert.notEqual(planSubdomain(a), planSubdomain(b), "different sessions differ");
+});
+
+test("planSubdomain returns null for empty / unusable input", () => {
+  assert.equal(planSubdomain(""), null);
+  assert.equal(planSubdomain("   "), null);
+  assert.equal(planSubdomain(123), null); // after lowercase it has no a-z0-9? no — numbers count
+  // 123 is a number, not a string — rejected by the typeof guard.
+});
+
+test("renderPlanMarkdown escapes raw HTML in body", () => {
+  const html = renderPlanMarkdown("a <script>alert(1)</script> b & c");
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&amp;/);
+});
+
+test("renderPlanMarkdown renders fenced code blocks with monospace pre/code", () => {
+  const html = renderPlanMarkdown('```js\nconst x = "<b>";\n```');
+  assert.match(html, /<pre><code class="language-js">/);
+  assert.match(html, /&lt;b&gt;/);
+  assert.doesNotMatch(html, /<b>/);
+});
+
+test("renderPlanMarkdown renders ATX headings and inline code", () => {
+  const html = renderPlanMarkdown("# Title\n\nStep: use `src/a.ts`");
+  assert.match(html, /<h1>Title<\/h1>/);
+  assert.match(html, /<code>src\/a\.ts<\/code>/);
+});
+
+test("renderPlanMarkdown renders unordered and ordered lists", () => {
+  const html = renderPlanMarkdown("- one\n- two\n\n1. a\n2. b");
+  assert.match(html, /<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
+  assert.match(html, /<ol>\s*<li>a<\/li>\s*<li>b<\/li>\s*<\/ol>/);
+});
+
+test("planMetrics derives steps/files and omits absent clauses", () => {
+  assert.deepEqual(planMetrics("# Add login\n\n## Step 1\n- `src/a.ts`\n- `src/b.ts`"), {
+    steps: 1,
+    files: 2,
+  });
+  assert.deepEqual(planMetrics("no structure"), {});
+});
+
+test("derivePlanTitle prefers the first heading then the first line", () => {
+  assert.equal(derivePlanTitle("# Plan title\n\nbody"), "Plan title");
+  assert.equal(derivePlanTitle("first line\nsecond"), "first line");
+  assert.equal(derivePlanTitle(""), "Plan");
+});
+
+test("renderPlanHtml emits title, metrics, body, path and generated-at in order", () => {
+  const html = renderPlanHtml({
+    title: "Add login",
+    markdown: "## Step 1\n- `src/a.ts`",
+    path: "/work/.opencode/plans/p.md",
+    generatedAt: "2026-08-15T00:00:00.000Z",
+  });
+  assert.match(html, /<title>Add login<\/title>/);
+  assert.match(html, /<h1>Add login<\/h1>/);
+  assert.match(html, /1 steps · 1 files/);
+  assert.match(html, /\/work\/\.opencode\/plans\/p\.md/);
+  assert.match(html, /2026-08-15T00:00:00\.000Z/);
+  // The document is self-contained: no external resources, no scripts.
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /https?:\/\/[^">\s]*\.(css|js)/i);
+});
+
+test("publishPlanPage registers under a valid plan subdomain with a 7-day TTL", async () => {
+  const calls = [];
+  const result = await publishPlanPage(
+    { sessionID: "ses_01JAAAA", markdown: "# T\n\n## Step 1\n- `a.ts`", path: "/p.md" },
+    {
+      baseUrl: "https://0123abc.boxes.mantaui.com",
+      srcDir: () => tmpdir(),
+      mkdir: async () => {},
+      writeFile: async () => {},
+      register: async (input, deps) => {
+        calls.push({ input, deps });
+        return {
+          ok: true,
+          url: `${deps.baseUrl}/pages/${input.subdomain}`,
+          subdomain: input.subdomain,
+          expiresAt: Date.now() + PLAN_TTL_HOURS * 3600 * 1000,
+        };
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.ok(result.url.includes("/pages/plan-"));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input.ttlHours, 168, "must use 7-day TTL");
+  assert.equal(isValidSubdomain(calls[0].input.subdomain), true);
+  assert.equal(calls[0].input.sessionID, "ses_01JAAAA");
+  // The page source was written and handed to register as filePath.
+  assert.ok(calls[0].input.filePath.endsWith(".html"));
+});
+
+test("publishPlanPage re-registers the SAME subdomain on revision (replace, not duplicate)", async () => {
+  const calls = [];
+  const register = async (input, deps) => {
+    calls.push(input.subdomain);
+    return { ok: true, url: `${deps.baseUrl}/pages/${input.subdomain}`, subdomain: input.subdomain };
+  };
+  for (const rev of [1, 2]) {
+    await publishPlanPage(
+      { sessionID: "ses_01JAAAA", markdown: `# Rev ${rev}` },
+      {
+        baseUrl: "https://0123abc.boxes.mantaui.com",
+        srcDir: () => tmpdir(),
+        mkdir: async () => {},
+        writeFile: async () => {},
+        register,
+      },
+    );
+  }
+  assert.deepEqual(calls, ["plan-ses01jaaaa", "plan-ses01jaaaa"]);
+});
+
+test("publishPlanPage refuses (writes nothing) when the box has no published hostname", async () => {
+  let wrote = false;
+  const result = await publishPlanPage(
+    { sessionID: "ses_01JAAAA", markdown: "# T" },
+    {
+      baseUrl: "",
+      writeFile: async () => {
+        wrote = true;
+      },
+    },
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /no published public hostname/);
+  assert.equal(wrote, false, "must not write the source file when there is no URL");
 });
