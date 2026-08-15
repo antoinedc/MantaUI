@@ -143,6 +143,12 @@ describe("PlanCard (BET-951)", () => {
     act(() => btn.click());
     expect(fired).toBe(true);
   });
+
+  it("disables the page button when there is no plan path and no live URL", () => {
+    h = render({ data: { ...DATA, path: undefined } });
+    const btn = h.container.querySelector(".manta-plan-open-page") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
 });
 
 describe("QuestionCard still renders an ordinary (non-plan) question (BET-951)", () => {

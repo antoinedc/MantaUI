@@ -655,7 +655,7 @@ export function PlanCard({
         tone="ghost"
         onClick={onOpenInBrowser}
         loading={planPublishing}
-        disabled={planPublishing}
+        disabled={planPublishing || (!planUrl && !data.path)}
         title={
           planUrl
             ? "Open the published plan page"

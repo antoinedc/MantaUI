@@ -2419,15 +2419,20 @@ export function ChatPanel({
   // Eager publish of the plan companion page so the shareable URL shows up in
   // the card BEFORE plan_exit completes. The subdomain is stable per session
   // (`plan-<shortId>`), so re-publishing replaces the snapshot under the same
-  // URL. Fire-and-forget + deduped by path (publish once per plan file) — a
+  // URL. Fire-and-forget + deduped by the plan QUESTION (not the file path) —
+  // a "Keep planning" revision is a NEW question reusing the same path, so it
+  // re-publishes fresh content instead of serving the stale snapshot. A
   // failure is silent and falls back to publish-on-click.
   const [planUrl, setPlanUrl] = useState<string | null>(null);
   const [planPublishing, setPlanPublishing] = useState(false);
-  const publishedPlanPathRef = useRef<string | null>(null);
+  const publishedPlanQuestionRef = useRef<string | null>(null);
   const publishPlanEager = useCallback(
-    (path: string) => {
-      if (!path || publishedPlanPathRef.current === path) return;
-      publishedPlanPathRef.current = path;
+    (qId: string, path: string) => {
+      if (!path || publishedPlanQuestionRef.current === qId) return;
+      publishedPlanQuestionRef.current = qId;
+      // New/revised plan → drop the old URL and show the loading state until
+      // the fresh page is published.
+      setPlanUrl(null);
       setPlanPublishing(true);
       window.api
         .planPublish(sessionId, path)
@@ -2438,14 +2443,17 @@ export function ChatPanel({
     [sessionId],
   );
   useEffect(() => {
+    // Only the panel the user is actually viewing publishes eagerly; a hidden
+    // panel's plan page is published lazily once it becomes active.
+    if (!isActive) return;
     for (const q of planQuestions) {
       const data = planDataByQuestion.get(q.id);
       if (data?.path) {
-        publishPlanEager(data.path);
+        publishPlanEager(q.id, data.path);
         break;
       }
     }
-  }, [planQuestions, planDataByQuestion, publishPlanEager]);
+  }, [planQuestions, planDataByQuestion, publishPlanEager, isActive]);
 
   // Delegate split control (BET-951).
   // Level 3 of the model precedence — "same as current" means the BUILD model,

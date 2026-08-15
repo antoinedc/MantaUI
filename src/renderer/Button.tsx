@@ -80,9 +80,9 @@ export function Button({
    */
   hook?: string;
   /**
-   * A transient resolving state (the action is in flight). Mirrors
-   * SplitButton.loading: the button reads as disabled + `aria-busy` until the
-   * work settles. Presentational — the caller owns the label that announces it.
+   * A transient resolving state (the action is in flight). The button renders
+   * as disabled + `aria-busy` until the work settles. Presentational — the
+   * caller owns the label that announces it.
    */
   loading?: boolean;
 }) {
