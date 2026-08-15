@@ -13,6 +13,7 @@ import {
 } from "./connectPanel";
 
 const base: ConnectInput = {
+  mode: "ssh",
   hostsLoaded: true,
   targetError: null,
   running: false,
@@ -30,7 +31,7 @@ const base: ConnectInput = {
   paired: false,
 };
 
-const status = (patch: Partial<ConnectInput>) => {
+const status = (patch: Partial<Extract<ConnectInput, { mode: "ssh" }>>) => {
   const s = deriveConnectPanel({ ...base, ...patch });
   return { tone: s.status.tone, text: s.status.text, meta: s.status.meta };
 };
@@ -247,5 +248,119 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     expect(deriveConnectPanel({ ...base, claimRunning: true }).targetLocked).toBe(true);
     expect(deriveConnectPanel({ ...base, paired: true }).targetLocked).toBe(true);
     expect(deriveConnectPanel(base).targetLocked).toBe(false);
+  });
+});
+
+// Manual mode (BET-962) — one case per row in the issue's table.
+function manual(patch: Partial<ConnectInput>): ConnectInput {
+  return {
+    mode: "manual",
+    claimError: null,
+    paired: false,
+    prefillPresent: false,
+    canConnect: false,
+    submitting: false,
+    ...patch,
+  } as ConnectInput;
+}
+
+describe("deriveConnectPanel — manual mode rows (BET-962)", () => {
+  it("M1 — prefill present: 'Pairing link ready' + Connect/Discard", () => {
+    const s = deriveConnectPanel(
+      manual({ prefillPresent: true, canConnect: true }),
+    );
+    expect(s.status).toEqual({
+      tone: "idle",
+      text: "Pairing link ready",
+      meta: null,
+      progress: null,
+      sub: null,
+    });
+    expect(s.details.kind).toBe("none");
+    expect(s.actions).toEqual(["connect", "discard"]);
+    expect(s.hint).toBeNull();
+    expect(s.targetLocked).toBe(false);
+  });
+
+  it("M2 — idle manual: 'Enter the 6-digit code from the box' + hint; Connect disabled until canConnect", () => {
+    const idle = deriveConnectPanel(manual({}));
+    expect(idle.status).toEqual({
+      tone: "idle",
+      text: "Enter the 6-digit code from the box",
+      meta: null,
+      progress: null,
+      sub: null,
+    });
+    expect(idle.details).toEqual({
+      kind: "hint",
+      text: "Run `manta pair` on the box to get a code.",
+    });
+    expect(idle.actions).toEqual(["connect"]);
+    expect(idle.disabledActions).toEqual(["connect"]);
+
+    // canConnectSetup passes → Connect enabled (no disabledActions).
+    const ready = deriveConnectPanel(manual({ canConnect: true }));
+    expect(ready.disabledActions).toBeUndefined();
+  });
+
+  it("M3 — submitting: 'Pairing with this app' + cancel, zone A locked", () => {
+    const s = deriveConnectPanel(manual({ submitting: true, canConnect: true }));
+    expect(s.status).toEqual({
+      tone: "running",
+      text: "Pairing with this app",
+      meta: null,
+      progress: null,
+      sub: null,
+    });
+    expect(s.details.kind).toBe("none");
+    expect(s.actions).toEqual(["cancel"]);
+    expect(s.targetLocked).toBe(true);
+  });
+
+  it("M4 — claim failed: the message claimBox returned + Try again", () => {
+    const s = deriveConnectPanel(manual({ claimError: "Claim failed: nope" }));
+    expect(s.status).toEqual({
+      tone: "error",
+      text: "Claim failed: nope",
+      meta: null,
+      progress: null,
+      sub: null,
+    });
+    expect(s.details.kind).toBe("none");
+    expect(s.actions).toEqual(["retry"]);
+    expect(s.targetLocked).toBe(false);
+  });
+
+  it("M5 — claim succeeded: 'Connected — your box is ready' + Next → (same ending as SSH)", () => {
+    const s = deriveConnectPanel(manual({ paired: true }));
+    expect(s.status).toEqual({
+      tone: "ok",
+      text: "Connected — your box is ready",
+      meta: null,
+      progress: null,
+      sub: null,
+    });
+    expect(s.details.kind).toBe("none");
+    expect(s.actions).toEqual(["next"]);
+    expect(s.targetLocked).toBe(true);
+  });
+
+  it("precedence — paired beats a claim error in manual mode", () => {
+    const s = deriveConnectPanel(manual({ paired: true, claimError: "x" }));
+    expect(s.status.text).toBe("Connected — your box is ready");
+    expect(s.actions).toEqual(["next"]);
+  });
+
+  it("precedence — claim error and submitting beat prefill present", () => {
+    expect(
+      deriveConnectPanel(
+        manual({ prefillPresent: true, claimError: "x" }),
+      ).status.text,
+    ).toBe("x");
+    expect(
+      deriveConnectPanel(
+        manual({ prefillPresent: true, submitting: true }),
+      ).status.text,
+    ).toBe("Pairing with this app");
   });
 });

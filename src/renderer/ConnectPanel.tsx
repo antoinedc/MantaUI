@@ -50,6 +50,8 @@ const ACTION_LABEL: Record<ConnectActionId, string> = {
   retry: "Try again",
   editTarget: "Edit target",
   pairManually: "Pair manually",
+  connect: "Connect",
+  discard: "Discard",
 };
 
 function actionLabel(id: ConnectActionId, index: number): string {
@@ -99,7 +101,7 @@ export function ConnectPanel({
   /** Wires the "Copy diagnostics" button (shown only on install failure). */
   onCopyDiagnostics?: () => void | Promise<void>;
 }): JSX.Element {
-  const { status, details, actions, hint } = state;
+  const { status, details, actions, hint, disabledActions } = state;
 
   // Log open/closed toggle, auto-reset to each details phase's defaultOpen.
   const [logOpen, setLogOpen] = useState(
@@ -140,6 +142,10 @@ export function ConnectPanel({
   // one that carries the "takes about a minute" hint and no in-flight meta —
   // that combination is exactly when the button becomes clickable.
   const installDisabled = status.progress === null && !hint;
+
+  const actionDisabled = (id: ConnectActionId): boolean =>
+    (id === "install" && installDisabled) ||
+    Boolean(disabledActions?.includes(id));
 
   const showZoneC = details.kind !== "none" || Boolean(children);
 
@@ -251,7 +257,7 @@ export function ConnectPanel({
             <Button
               key={id}
               tone={i === 0 ? "primary" : "default"}
-              disabled={id === "install" && installDisabled}
+              disabled={actionDisabled(id)}
               onClick={() => onAction(id)}
             >
               {actionLabel(id, i)}
