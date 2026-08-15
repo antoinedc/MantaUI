@@ -135,7 +135,10 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
 
       {showSshPicker && (
         <div className="mb-6">
-          <SshInstallStep onPaired={onPaired} />
+          <SshInstallStep
+            onPaired={onPaired}
+            onPairManually={() => setDisclosureOpen(true)}
+          />
         </div>
       )}
 
