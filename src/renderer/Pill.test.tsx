@@ -123,13 +123,13 @@ describe("Pill migration — ContextPill call site (BET-534 two-adopter rule)", 
     h = null;
   });
 
-  function renderHeader(stale: boolean) {
+  function renderHeader(stale: boolean, staleTokens = 0) {
     return mount(
       <SessionHeader
         branch={null}
         ctxBreakdown={{ freshInput: 1, cacheRead: 1, cacheWrite: 1, totalInput: 100, pct: 12, segments: [] }}
         ctxLimit={200000}
-        staleCache={{ isStale: stale, idleMs: 0, staleTokens: 0, ttlMs: 0 }}
+        staleCache={{ isStale: stale, idleMs: stale ? 3_600_000 : 0, staleTokens, ttlMs: 3_600_000 }}
         modelName={null}
         hasSession
         onFork={() => {}}
@@ -170,6 +170,25 @@ describe("Pill migration — ContextPill call site (BET-534 two-adopter rule)", 
     const pill = pillSpan();
     expect(pill.className).toContain("bg-warn-bg");
     expect(pill.className).toContain("text-warn");
+  });
+
+  it("stale ContextPill carries the cold token count inside the pill (BET-968)", () => {
+    h = renderHeader(true, 344_000);
+    const pill = pillSpan();
+    expect(pill.textContent).toContain("344k cold");
+    // The cold chip inherits the Pill's warn foreground — no inline colour.
+    const cold = [...pill.querySelectorAll("span")].find((s) =>
+      s.textContent?.includes("cold"),
+    ) as HTMLElement;
+    expect(cold).toBeTruthy();
+    expect(cold.textContent).toContain("344k");
+    expect(cold.textContent).toContain("cold");
+  });
+
+  it("non-stale ContextPill does not render a cold chip (BET-968)", () => {
+    h = renderHeader(false, 344_000);
+    const pill = pillSpan();
+    expect(pill.textContent).not.toContain("cold");
   });
 
   it("does not inject arbitrary classes into the migrated context-pill call site", () => {
