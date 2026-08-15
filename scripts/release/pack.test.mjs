@@ -16,19 +16,14 @@ import assert from "node:assert/strict";
 // is cheap — but `main()` runs on import and would fail in this harness.
 // Trick: spawn a sub-node that runs the script with --arch foo, and capture
 // the die() message — that's the test surface for the unknown-arch branch.
-// For the happy-path cases we replicate resolveArch's mapping inline
-// (string switch); since the function is a pure 1:1 lookup the duplication
-// is small and the risk of drift is captured by the dedicated unknown-arch
-// integration test below.
-
+//
+// The happy-path cases used to re-declare resolveArch's mapping inline, which
+// meant the assertions could keep passing after pack.mjs changed. They now run
+// the REAL function, lifted out of the source by `evalFunctionDecl` (defined
+// with the git-commit cases below — a function declaration, so hoisted). Pure
+// 1:1 lookup with no dependencies, so it needs no injected scope.
 function resolveArch(arch) {
-  switch (arch) {
-    case "x64":          return { key: "linux_x64",    file: "linux-x64" };
-    case "arm64":        return { key: "linux_arm64",  file: "linux-arm64" };
-    case "darwin-arm64": return { key: "darwin_arm64", file: "darwin-arm64" };
-    default:
-      throw new Error(`unsupported --arch ${JSON.stringify(arch)} (expected: x64 | arm64 | darwin-arm64)`);
-  }
+  return evalFunctionDecl("resolveArch")(arch);
 }
 
 test("resolveArch(\"x64\") returns linux_x64 / linux-x64", () => {
@@ -157,11 +152,11 @@ test("BET-829: node_modules stays release-owned so the box never rebuilds deps l
 
 // --- resolveGitSha: the release's update identity ---------------------------
 //
-// The box decides "am I already running the published build?" by comparing the
-// commit a release was built from. Before that, it compared `version` alone —
-// a hand-maintained number — so a release cut without a bump was
-// indistinguishable from the installed one and every box silently skipped a
-// real update, reporting "already at <version>" with no error anywhere.
+// Why a release is identified by its commit rather than its version lives on
+// resolveGitSha in pack.mjs and in AGENTS.md; it is deliberately not restated
+// here. These cases pin the resolution order and the two shapes that would
+// break a box: a missing commit (must degrade, not fail) and a malformed one
+// (must never be stamped).
 //
 // Same source-reading harness as the array-literal tests above: pack.mjs can't
 // be imported (main() runs on import and hits the network), so we lift the
