@@ -558,7 +558,13 @@ export function parseCloneProgress(line) {
 // `{ percent, bytes }` snapshot (the latest parseable state) as chunks arrive.
 // An optional `token` is injected as an HTTP extraheader (`git -c
 // http.extraheader`) so private-repo clones authenticate without the token
-// ever appearing in the displayed URL. Injected `spawn`/`parse` seam for tests.
+// ever appearing in the displayed URL. The credential uses GitHub's documented
+// HTTP **Basic** scheme with the token as the password under the
+// `x-access-token` username (server-side GitHub tokens are rejected under
+// `Authorization: Bearer`). `-c` must precede the `clone` subcommand (a
+// git-global option, per `spawnGitLong`'s `["git", "-C", cwd, ...args]` shape)
+// so the credential is applied to the fetch without being persisted into the
+// newly created repo's `.git/config`. Injected `spawn`/`parse` seam for tests.
 export async function gitClone(
   { url, dest, onProgress, timeoutMs = GIT_NET_TIMEOUT_MS, signal, token } = {},
   { spawn = nodeSpawn, parse = parseCloneProgress } = {},
@@ -575,12 +581,15 @@ export async function gitClone(
         }
       : undefined;
   const authArgs = token
-    ? ["-c", `http.extraheader=Authorization: Bearer ${token}`]
+    ? [
+        "-c",
+        `http.extraheader=Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+      ]
     : [];
   return spawnGitLong(
     {
       cwd: "/",
-      args: ["clone", "--progress", ...authArgs, url, ...(dest ? [dest] : [])],
+      args: [...authArgs, "clone", "--progress", url, ...(dest ? [dest] : [])],
       onProgress: emit,
       timeoutMs,
       spawn,
