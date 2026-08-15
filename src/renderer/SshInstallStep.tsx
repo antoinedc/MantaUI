@@ -618,6 +618,7 @@ export function SshInstallStep({
   const connectState = useMemo(
     () =>
       deriveConnectPanel({
+        mode: "ssh",
         hostsLoaded,
         targetError,
         running,
@@ -838,6 +839,17 @@ export function SshInstallStep({
           {targetError}
         </p>
       )}
+
+      {/* BET-962: manual pairing is a MODE of zone A, not a separate form —
+          a plain-text link under the picker switches to code entry. Same link
+          styling the old PairStep disclosure toggle used. */}
+      <button
+        type="button"
+        onClick={onPairManually}
+        className="text-meta text-text-faint hover:text-text-muted underline underline-offset-4 decoration-border-strong transition-colors"
+      >
+        Enter a pairing code instead
+      </button>
     </div>
   );
 
