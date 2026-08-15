@@ -127,6 +127,33 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(UsageMeters.formatTokens(nil), "0")
     }
 
+    // MARK: - staleChipLabel (BET-969)
+
+    private func cache(_ isStale: Bool, staleTokens: Double) -> StreamCachePayload {
+        StreamCachePayload(isStale: isStale, idleMs: 0, staleTokens: staleTokens, ttlMs: 0)
+    }
+
+    func testStaleChipNilWhenNoCache() {
+        XCTAssertNil(UsageMeters.staleChipLabel(nil))
+    }
+
+    /// A warm cache never labels, regardless of size.
+    func testStaleChipNilWhenWarm() {
+        XCTAssertNil(UsageMeters.staleChipLabel(cache(false, staleTokens: 900_000)))
+    }
+
+    func testStaleChipFormatsColdTokens() {
+        XCTAssertEqual(UsageMeters.staleChipLabel(cache(true, staleTokens: 344_000)), "344k cold")
+    }
+
+    /// Proves the chip delegates to `formatTokens` rather than rounding on its
+    /// own: whatever the formatter emits is what the label carries.
+    func testStaleChipDelegatesToFormatTokens() {
+        let value: Double = 148_000
+        let label = UsageMeters.staleChipLabel(cache(true, staleTokens: value))
+        XCTAssertEqual(label, "\(UsageMeters.formatTokens(value)) cold")
+    }
+
     // MARK: - MeterRing clamp / isFull (BET-877)
 
     /// `pct` is clamped to 0...100 before drawing — a provider can report

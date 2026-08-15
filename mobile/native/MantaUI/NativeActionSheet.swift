@@ -75,6 +75,33 @@ struct ConfirmActionSheet: View {
     }
 }
 
+/// The destructive session confirmations, declared ONCE. Clear, Delete and
+/// Compact are each reachable from more than one surface; declaring the copy
+/// here is what stops the two surfaces wording the same question differently.
+enum SessionConfirmCopy {
+    struct Copy {
+        let title: String
+        let message: String
+        let destructiveTitle: String
+    }
+
+    static let clear = Copy(
+        title: "Clear this session?",
+        message: "Starts a fresh session in this window. The transcript stays on the box.",
+        destructiveTitle: "Clear session"
+    )
+    static let delete = Copy(
+        title: "Delete this session?",
+        message: "Removes the session and its window. This cannot be undone.",
+        destructiveTitle: "Delete session"
+    )
+    static let compact = Copy(
+        title: "Compact this session?",
+        message: "Summarises the conversation to free context. The transcript is condensed, not deleted.",
+        destructiveTitle: "Compact session"
+    )
+}
+
 extension View {
     /// Presents a native confirm action sheet (destructive item first, a
     /// separated Cancel at the bottom) over the current screen. The sheet is
@@ -99,6 +126,23 @@ extension View {
                         cancelTitle: cancelTitle
                     )
                 }
+        )
+    }
+
+    /// Presents the same native confirm sheet from a shared copy, so a call
+    /// site names a confirmation rather than restating its wording. Delegates
+    /// to the string-based modifier above — not a fork.
+    func confirmActionSheet(
+        isPresented: Binding<Bool>,
+        copy: SessionConfirmCopy.Copy,
+        destructiveAction: @escaping () -> Void
+    ) -> some View {
+        confirmActionSheet(
+            isPresented: isPresented,
+            title: copy.title,
+            message: copy.message,
+            destructiveTitle: copy.destructiveTitle,
+            destructiveAction: destructiveAction
         )
     }
 }

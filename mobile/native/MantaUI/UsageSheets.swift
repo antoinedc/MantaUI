@@ -83,6 +83,9 @@ struct ContextSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var confirmingClear = false
+    @State private var confirmingCompact = false
+
     var body: some View {
         // A List, not a VStack: the list supplies the card backgrounds, the
         // insets and the platform text sizes. A fixed-height detent around a
@@ -95,8 +98,8 @@ struct ContextSheet: View {
                     segmentedMeter
                 }
                 Section {
-                    actionRow("Compact conversation", systemImage: "arrow.triangle.2.circlepath", onTap: onCompact)
-                    actionRow("Start a fresh session", systemImage: "plus.circle", onTap: onClear)
+                    actionRow("Compact session", systemImage: "arrow.triangle.2.circlepath", onTap: { confirmingCompact = true })
+                    actionRow("Clear session", systemImage: "plus.circle", onTap: { confirmingClear = true })
                 }
             }
             .listStyle(.insetGrouped)
@@ -107,6 +110,12 @@ struct ContextSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+        }
+        .confirmActionSheet(isPresented: $confirmingClear, copy: SessionConfirmCopy.clear) {
+            dismiss(); onClear()
+        }
+        .confirmActionSheet(isPresented: $confirmingCompact, copy: SessionConfirmCopy.compact) {
+            dismiss(); onCompact()
         }
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
@@ -189,11 +198,12 @@ struct ContextSheet: View {
         }
     }
 
-    /// A plain row in the list's action section: compact the conversation, or
-    /// start a fresh session. Both wire to existing session plumbing — nothing
-    /// new. The list styles the row and the system tints the label.
+    /// A plain row in the list's action section: compact the session, or clear
+    /// it. Both arm a confirm sheet (sheet-on-sheet) rather than firing the
+    /// destructive action directly — a blind tap must not reach the store. The
+    /// list styles the row and the system tints the label.
     private func actionRow(_ title: String, systemImage: String, onTap: @escaping () -> Void) -> some View {
-        Button(action: { dismiss(); onTap() }) {
+        Button(action: onTap) {
             Label(title, systemImage: systemImage)
         }
     }
