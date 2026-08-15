@@ -1670,6 +1670,24 @@ export function resolvePin(
   return win ? { project: proj, window: win } : null;
 }
 
+// The project a rail nav key belongs to, or null when it names no project.
+// `group:<session>` → `<session>`; `win:<session>:<idx>` and
+// `job:<session>:<idx>` → `<session>`. `pin:<id>` and any other key → null
+// (the caller resolves pins via `resolvePin`, and a malformed key names
+// nothing). The encoding always ends in a trailing `:<index>`, so the session
+// is everything after the 4-char kind/colon prefix and before the LAST colon
+// — safe even for a session name that itself contains a colon.
+export function projectForNavKey(key: string | null): string | null {
+  if (!key) return null;
+  if (key.startsWith("group:")) return key.slice("group:".length);
+  if (key.startsWith("win:") || key.startsWith("job:")) {
+    const rest = key.slice(4);
+    const colon = rest.lastIndexOf(":");
+    return colon < 0 ? null : rest.slice(0, colon);
+  }
+  return null;
+}
+
 // ⌘K palette fuzzy match. Subsequence match (case-insensitive) across the
 // session (window) name and workspace (project) name. Returns a score > 0
 // when the query matches, 0 when it doesn't. Tighter/earlier matches score

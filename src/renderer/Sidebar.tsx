@@ -20,6 +20,7 @@ import {
   fuzzySessionScore,
   isJobRow,
   resolvePin,
+  projectForNavKey,
   selectCacheTtlMs,
   windowPinId,
   describeProjectClose,
@@ -139,11 +140,20 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   useImperativeHandle(ref, () => ({
     openNewProject: () => onNewProject(),
     openNewSessionInActive: () => {
-      if (activeProjectName) {
-        onNewSessionInProject(activeProjectName);
+      // ⌘T follows rail focus first (BET-937): the project the user is
+      // actually looking at, then the active project, else nothing. A pin
+      // resolves via resolvePin; win/job/group keys name their session
+      // directly.
+      let target: string | null = projectForNavKey(focusedKey);
+      if (!target && focusedKey?.startsWith("pin:")) {
+        target = resolvePin(projects, focusedKey.slice("pin:".length))?.project.tmuxSession ?? null;
+      }
+      target ??= activeProjectName;
+      if (target) {
+        onNewSessionInProject(target);
         setCollapsed((prev) => {
           const next = new Set(prev);
-          next.delete(activeProjectName);
+          next.delete(target);
           return next;
         });
       }
@@ -234,11 +244,48 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
 
   const killProject = async (project: string) => {
     setConfirmDeleteFor(null);
+    // BET-937 Task 2A: honour worktreeCleanOnClose when destroying a project.
+    // Remove every clean worktree the project's sessions owned; a dirty one
+    // is kept (never force-removed, no per-worktree confirm). Do this BEFORE
+    // the tmux kill so a worktree can't be half-destroyed mid-close, but a
+    // failure here must never abort the kill — killing the tmux session is
+    // the user's actual intent and always happens.
+    const proj = projects.find((p) => p.tmuxSession === project);
+    const skipped: string[] = [];
+    if (worktreeCleanOnClose && proj) {
+      const wtPaths = proj.windows
+        .map((w) => w.worktreePath)
+        .filter((p): p is string => p != null);
+      for (const path of wtPaths) {
+        try {
+          const res = await window.api.gitRemoveWorktree({ path, force: false });
+          if (res && res.removed === false && res.reason === "dirty") {
+            skipped.push(path);
+          }
+        } catch (e) {
+          showError(e);
+        }
+      }
+    }
     try {
       await window.api.tmuxKillSession(project);
+      try {
+        // BET-937 Task 2C: drop the project's stored metadata (defaultCwd)
+        // so a later project of the same name can't inherit a stale path.
+        // A failure must not block the refresh — the tmux session is already
+        // gone and a stale config entry is far less bad than a stale rail.
+        await window.api.projectMetaDelete(project);
+      } catch (e) {
+        showError(e);
+      }
       await refresh();
     } catch (e) {
       showError(e);
+    }
+    if (skipped.length === 1) {
+      showNotice(`Kept worktree at ${skipped[0]} — it has uncommitted changes.`);
+    } else if (skipped.length > 1) {
+      showNotice(`Kept ${skipped.length} worktrees with uncommitted changes.`);
     }
   };
 
@@ -470,15 +517,26 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         e.preventDefault();
         renameFocused();
         break;
-      // Backspace alongside Delete: the Mac keyboard's only "delete" key
-      // reports as Backspace in the DOM (there's no forward-delete key on
-      // most Mac keyboards) — binding only "Delete" would leave Mac users
-      // without this path. A focused RenameInput stops propagation on its
-      // own keydown, so this never fires mid-rename.
+      // Home / End jump to the first / last rail row (WAI-ARIA Tree View).
+      case "Home":
+        e.preventDefault();
+        if (navKeys.length) setFocusedKey(navKeys[0]);
+        break;
+      case "End":
+        e.preventDefault();
+        if (navKeys.length) setFocusedKey(navKeys[navKeys.length - 1]);
+        break;
+      // Delete / Backspace are destructive — they require a modifier (⌘ or
+      // Ctrl) to guard against the most reflexive key on the board (BET-937).
+      // Bare Backspace/Delete does nothing at all: no preventDefault, no
+      // confirm. A focused RenameInput stops propagation on its own keydown,
+      // so this never fires mid-rename.
       case "Delete":
       case "Backspace":
-        e.preventDefault();
-        requestDeleteFocused();
+        if (e.metaKey || e.ctrlKey) {
+          e.preventDefault();
+          requestDeleteFocused();
+        }
         break;
       case "ContextMenu":
         e.preventDefault();
@@ -889,9 +947,12 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                 sessionCount: proj?.windows.length ?? 0,
                 runningCount:
                   proj?.windows.filter((w) => statusFor(c.project, w.index)?.running).length ?? 0,
-                // Project close does NOT remove worktrees yet. Workstream 3 adds
-                // that AND flips this to the real count. Do not pass a count here.
-                worktreeCount: 0,
+                // BET-937 Task 2B: the real number of worktrees project close
+                // will remove — every window with a worktree, or 0 when
+                // worktreeCleanOnClose is off.
+                worktreeCount: worktreeCleanOnClose
+                  ? (proj?.windows.filter((w) => w.worktreePath != null).length ?? 0)
+                  : 0,
               });
         return (
           <ConfirmModal
