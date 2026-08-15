@@ -77,6 +77,7 @@ import {
   fastModelId,
   hideFastSiblingGroups,
   resolveFastToggle,
+  selectableModelGroups,
   filterModelGroups,
   moveMenuHighlight,
   MAX_PREVIEW_BYTES,
@@ -2797,6 +2798,64 @@ describe("fast-mode model helpers", () => {
       available: false,
       on: false,
     });
+  });
+});
+
+// ===== selectableModelGroups =====
+
+describe("selectableModelGroups", () => {
+  const M = (
+    providerID: string,
+    id: string,
+    extra: Partial<OpencodeModel> = {},
+  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
+
+  it("returns null for null input (the loading signal)", () => {
+    expect(selectableModelGroups(null, undefined)).toBeNull();
+  });
+
+  it("filters out disabled, deprecated and deactivated models", () => {
+    const models = [
+      M("a", "keep"),
+      M("a", "disabled", { enabled: false }),
+      M("a", "deprecated", { status: "deprecated" }),
+      M("a", "deactivated"),
+    ];
+    const out = selectableModelGroups(models, ["a/deactivated"]);
+    const ids = out![0][1].map((m) => m.id);
+    expect(ids).toEqual(["keep"]);
+  });
+
+  it("groups and sorts by providerID", () => {
+    const models = [
+      M("zetta", "z1"),
+      M("alpha", "a1"),
+      M("alpha", "a2"),
+      M("zetta", "z2"),
+    ];
+    const out = selectableModelGroups(models, undefined)!;
+    expect(out.map(([p]) => p)).toEqual(["alpha", "zetta"]);
+    expect(out[0][1].map((m) => m.id)).toEqual(["a1", "a2"]);
+    expect(out[1][1].map((m) => m.id)).toEqual(["z1", "z2"]);
+  });
+
+  it("folds fast siblings but keeps an orphan whose base is gone", () => {
+    const models = [
+      M("openai", "gpt-5.6"),
+      M("openai", "gpt-5.6-fast"),
+      M("x", "solo-fast"),
+    ];
+    const out = selectableModelGroups(models, undefined)!;
+    const openai = out.find(([p]) => p === "openai")![1].map((m) => m.id);
+    expect(openai).toEqual(["gpt-5.6"]);
+    // The orphan fast model (no base to fold into / reach it by) survives.
+    const x = out.find(([p]) => p === "x")![1].map((m) => m.id);
+    expect(x).toEqual(["solo-fast"]);
+  });
+
+  it("an empty selection yields an empty (not null) grouped list", () => {
+    const models = [M("a", "off", { enabled: false })];
+    expect(selectableModelGroups(models, undefined)).toEqual([]);
   });
 });
 

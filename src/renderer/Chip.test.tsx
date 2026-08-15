@@ -233,4 +233,32 @@ describe("SplitChip", () => {
     expect(pl.getAttribute("aria-haspopup")).toBe("listbox");
     expect(pr.getAttribute("aria-haspopup")).toBe("listbox");
   });
+
+  it("per-segment popup: an object marks only the named segment (BET-948)", () => {
+    // `{ right: true }` — a caller whose LEFT segment is a plain action and
+    // whose RIGHT opens a listbox. The action must not falsely claim
+    // aria-haspopup while the listbox segment stays in the coverage registry.
+    mountSplit({ popup: { right: true } });
+    const [l, r] = buttons();
+    expect(l.hasAttribute("aria-haspopup")).toBe(false);
+    expect(r.getAttribute("aria-haspopup")).toBe("listbox");
+
+    // `{ left: true }` — the mirror case.
+    mountSplit({ popup: { left: true } });
+    const [ml, mr] = buttons();
+    expect(ml.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(mr.hasAttribute("aria-haspopup")).toBe(false);
+
+    // Both segments opted in by object behaves like `true`.
+    mountSplit({ popup: { left: true, right: true } });
+    const [bl, br] = buttons();
+    expect(bl.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(br.getAttribute("aria-haspopup")).toBe("listbox");
+
+    // An all-false object is the non-popup default.
+    mountSplit({ popup: { right: false } });
+    const [fl, fr] = buttons();
+    expect(fl.hasAttribute("aria-haspopup")).toBe(false);
+    expect(fr.hasAttribute("aria-haspopup")).toBe(false);
+  });
 });

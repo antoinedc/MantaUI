@@ -16,7 +16,7 @@ import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles, Zap, ZapOff } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { hideFastSiblingGroups, resolveFastToggle, titleCase } from "./chatUtils";
+import { selectableModelGroups, selectableModelList, resolveFastToggle, titleCase } from "./chatUtils";
 import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
 import { ModelMenu } from "./ModelMenu";
@@ -80,38 +80,25 @@ export function ModelPicker({
   const effortBtnRef = useRef<HTMLButtonElement>(null);
 
   // The models a user may actually switch TO: enabled, not deprecated, not
-  // deactivated in Settings. Both the dropdown and the ⚡ toggle read from this
-  // one set, so a model hidden in Settings can't be reached by either route.
+  // deactivated in Settings. Both the dropdown and the ⚡ toggle read from the
+  // same chatUtils source of truth (the enabled/status/deactivated gate lives
+  // there and nowhere else), so a model hidden in Settings can't be reached by
+  // either route.
   // (`activeModel` below deliberately resolves against the FULL list — an
   // already-selected model must keep displaying its own name even if it was
   // later deactivated.)
-  const selectableModels = useMemo(() => {
-    if (!models) return null;
-    const deactivatedMain = new Set(deactivatedMainModels ?? []);
-    return models.filter(
-      (m) =>
-        m.enabled !== false &&
-        m.status !== "deprecated" &&
-        !deactivatedMain.has(`${m.providerID}/${m.id}`),
-    );
-  }, [models, deactivatedMainModels]);
+  const selectableModels = useMemo(
+    () => selectableModelList(models, deactivatedMainModels),
+    [models, deactivatedMainModels],
+  );
 
-  // Group models by providerID so the list reads e.g. "anthropic" → 3 models.
-  const groups = useMemo(() => {
-    if (!selectableModels) return null;
-    const map = new Map<string, OpencodeModel[]>();
-    for (const m of selectableModels) {
-      const arr = map.get(m.providerID) ?? [];
-      arr.push(m);
-      map.set(m.providerID, arr);
-    }
-    const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-    // "Fast" flavours (`<id>-fast`) are a MODE of their base model, not a
-    // separate choice — they're reached through the ⚡ segment below, so they
-    // don't get a row here. `hideFastSiblingGroups` keeps an orphan whose base
-    // is missing/deactivated, which would otherwise become unreachable.
-    return hideFastSiblingGroups(sorted);
-  }, [selectableModels]);
+  // The dropdown's candidate set: selectable models grouped by provider,
+  // sorted, with `-fast` siblings folded into their base (they're reached
+  // through the ⚡ segment). Shared with the delegate model picker.
+  const groups = useMemo(
+    () => selectableModelGroups(models, deactivatedMainModels),
+    [models, deactivatedMainModels],
+  );
 
   // Resolve the active model object (for the friendly name + variant list).
   // Shared resolution path with ChatPanel (BET-415 duplication gate).

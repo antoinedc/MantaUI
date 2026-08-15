@@ -31,6 +31,7 @@ export function ModelMenu({
   onClose,
   open,
   anchorRef,
+  defaultRow,
 }: {
   groups: Array<[string, OpencodeModel[]]> | null;
   modelOverride: ModelSelection | null;
@@ -39,6 +40,14 @@ export function ModelMenu({
   onClose: () => void;
   open: boolean;
   anchorRef: RefObject<HTMLElement>;
+  /**
+   * Copy override for the pinned top (server-default) row ONLY — the row that
+   * means "no override". A second consumer (the delegate model picker) needs
+   * it to mean "inherit this session's build model" rather than "set in
+   * Settings". Omitted → today's exact strings ("Server default" /
+   * "<model> · set in Settings" / "opencode decides").
+   */
+  defaultRow?: { label?: string; sub?: string };
 }) {
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(-1);
@@ -61,6 +70,10 @@ export function ModelMenu({
     ? `${serverModel.name} · set in Settings`
     : "opencode decides";
   const serverSelected = modelOverride == null;
+  // `defaultRow` overrides ONLY this pinned row's label/sub — the copy that
+  // signals "no override". Omitted, today's exact strings stand.
+  const defaultLabel = defaultRow?.label ?? "Server default";
+  const defaultSub = defaultRow?.sub ?? serverSub;
 
   const filtered = useMemo(
     () => (groups == null ? null : filterModelGroups(groups, query)),
@@ -199,8 +212,8 @@ export function ModelMenu({
           id="server-default"
           selected={serverSelected}
           active={highlight === 0}
-          label="Server default"
-          sub={serverSub}
+          label={defaultLabel}
+          sub={defaultSub}
           onSelect={() => {
             onSelect(null);
             onClose();
