@@ -3197,6 +3197,60 @@ echo "REACHED=yes"
   assert.doesNotMatch(out, /✗ Cannot complete the install/);
 });
 
+test("BET-980: resolve_ingress_mode honors MANTA_INGRESS — public forces public even with Tailscale up", () => {
+  // The reviewer Block: the preflight used to classify the path by raw
+  // Tailscale detection, ignoring the MANTA_INGRESS override. A box forced to
+  // MANTA_INGRESS=public while Tailscale is also running was misclassified as
+  // the (ungated) tailscale path, bypassing the D1 gate. Now the shared
+  // resolve_ingress_mode mocks a running Tailscale and asserts the override
+  // wins.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }   # Tailscale IS up
+MANTA_INGRESS=public
+resolve_ingress_mode node lib
+echo "MODE=$INGRESS_MODE IP=$TAILNET_IP"
+`,
+  });
+  assert.match(out, /MODE=public/);
+  assert.doesNotMatch(out, /IP=100/, "MANTA_INGRESS=public must not pick up the running Tailscale IP");
+});
+
+test("BET-980: MANTA_INGRESS=public + Tailscale up + no root → D1 gate fires (fatal)", () => {
+  // Regression for the reviewer Block: the preflight must classify a
+  // MANTA_INGRESS=public box as the public path even when Tailscale is
+  // running, so "public + no root → fatal before the first mutation" is not
+  // bypassed into a half-installed state.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=public
+resolve_ingress_mode node lib
+_PRE_INGRESS="public"; [ "$INGRESS_MODE" = "tailscale" ] && _PRE_INGRESS="tailscale"
+public_ingress_preflight "$_PRE_INGRESS" 0 yes ubuntu
+echo "SHOULD_NOT_REACH=yes"
+`,
+  });
+  assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
+  assert.match(out, /Nothing has been installed\./);
+  assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
+});
+
+test("BET-980: MANTA_INGRESS=auto + Tailscale up + no root → NOT fatal (tailnet path is ungated)", () => {
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+_PRE_INGRESS="public"; [ "$INGRESS_MODE" = "tailscale" ] && _PRE_INGRESS="tailscale"
+public_ingress_preflight "$_PRE_INGRESS" 0 yes ubuntu
+echo "REACHED=yes"
+`,
+  });
+  assert.match(out, /REACHED=yes/);
+  assert.doesNotMatch(out, /✗ Cannot complete the install/);
+});
+
 test("BET-980: PRIVILEGED_SECTION_SKIP no longer appears in install.sh (degrade path cannot creep back)", () => {
   const src = readFileSync(INSTALL_SH, "utf-8");
   assert.equal(

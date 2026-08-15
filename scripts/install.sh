@@ -510,6 +510,56 @@ public_ingress_preflight() {
 }
 
 # ---------------------------------------------------------------------------
+# Ingress resolution — ONE source of truth for the tailscale/public decision
+# (BET-267). Shared by BOTH the 3.5 capability preflight (which must know
+# whether the D1 gate applies) and step 7 (which persists the decision), so
+# the two can never disagree about which path the install is on. Defined in
+# the always-defined region (before the test-mode guard) so the unit tests can
+# exercise the MANTA_INGRESS logic directly.
+# ---------------------------------------------------------------------------
+
+# detect_tailscale_ip <node> <lib> — wrapper around `tailscale status --json`
+# piped through the lib's `parse-tailscale-status` subcommand. Prints the
+# detected Tailscale IPv4 on stdout, exit 0 — or exit 1 with no output when
+# Tailscale is missing / not running / has no IPv4. Takes the node + lib
+# paths as arguments because it is invoked from both the preflight (which
+# reads them out of the temp $WORK/pkg) and step 7 (which uses $MANTA_HOME).
+# Silent on stderr by design: the absence of tailscale is normal on the
+# public-path install and must not leak a `command not found` warning.
+detect_tailscale_ip() {
+  local node="$1" lib="$2"
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale status --json 2>/dev/null | "$node" "$lib" parse-tailscale-status
+}
+
+# resolve_ingress_mode <node> <lib> — resolve the ingress path honoring the
+# MANTA_INGRESS override (auto | public | tailscale), setting INGRESS_MODE
+# ("public" | "tailscale") and TAILNET_IP. MANTA_INGRESS=public FORCES public
+# even when Tailscale is up (the box wants a public address regardless of a
+# running tailnet); MANTA_INGRESS=tailscale forces tailnet and dies if
+# detection fails; auto picks tailnet iff Tailscale is up. Because the
+# preflight uses this too, a MANTA_INGRESS=public box with no usable root is
+# correctly treated as the public path and gated (BET-980 D1).
+resolve_ingress_mode() {
+  local node="$1" lib="$2"
+  MANTA_INGRESS="${MANTA_INGRESS:-auto}"
+  TAILNET_IP=""
+  case "$MANTA_INGRESS" in
+    public) ;;
+    tailscale)
+      TAILNET_IP="$(detect_tailscale_ip "$node" "$lib")" \
+        || die "MANTA_INGRESS=tailscale but Tailscale is not running (need 'tailscale status' BackendState=Running with an IPv4). Start tailscale, or use MANTA_INGRESS=public."
+      ;;
+    auto)
+      TAILNET_IP="$(detect_tailscale_ip "$node" "$lib" 2>/dev/null || true)"
+      ;;
+    *) die "MANTA_INGRESS must be auto, public, or tailscale (got: $MANTA_INGRESS)" ;;
+  esac
+  INGRESS_MODE="public"
+  if [ -n "$TAILNET_IP" ]; then INGRESS_MODE="tailscale"; fi
+}
+
+# ---------------------------------------------------------------------------
 # Git-aware deploy init. `scripts/self-update.sh` (wired in BET-225.A5) assumes
 # $MANTA_HOME is a git checkout, so the update path can do a `git fetch +
 # reset`. The release tarball ships WITHOUT a .git/ (pack.mjs strips it), so we
@@ -792,14 +842,22 @@ main() {
   _PRE_NODE="$WORK/pkg/runtime/node/bin/node"
   _PRE_LIB="$WORK/pkg/scripts/install-lib.mjs"
 
-  # Resolve the ingress path early (side-effect-free mirror of step 7's
-  # decision): tailscale up → tailscale; macOS → macos; otherwise public.
-  _PRE_INGRESS="public"
+  # Resolve the ingress path via the SAME shared helper step 7 uses, so the
+  # D1 gate and the persisted decision can never diverge. On macOS the gate
+  # never applies (loopback-only; the preflight always passes), so we short-
+  # circuit to "macos" before probing Tailscale. Otherwise resolve_ingress_mode
+  # honors MANTA_INGRESS (auto/public/tailscale): notably MANTA_INGRESS=public
+  # FORCES the public path even when Tailscale is up, so such a box with no
+  # usable root is correctly gated here.
   if [ "$IS_MACOS" = "1" ]; then
     _PRE_INGRESS="macos"
-  elif command -v tailscale >/dev/null 2>&1 && \
-       [ -n "$(tailscale status --json 2>/dev/null | "$_PRE_NODE" "$_PRE_LIB" parse-tailscale-status 2>/dev/null || true)" ]; then
-    _PRE_INGRESS="tailscale"
+  else
+    resolve_ingress_mode "$_PRE_NODE" "$_PRE_LIB"
+    if [ "$INGRESS_MODE" = "tailscale" ]; then
+      _PRE_INGRESS="tailscale"
+    else
+      _PRE_INGRESS="public"
+    fi
   fi
 
   # Root usable: real root, or passwordless sudo. Both read-only.
@@ -1245,54 +1303,18 @@ main() {
   # 7. manta-server systemd --user unit: substitute placeholders and enable.
   # ---------------------------------------------------------------------------
 
-  # detect_tailscale_ip — wrapper around `tailscale status --json` piped
-  # through the lib's `parse-tailscale-status` subcommand. Returns the
-  # detected Tailscale IPv4 on stdout, exit 0 — OR exits 1 with no output
-  # when Tailscale is missing / not running / has no IPv4. install.sh uses
-  # the exit code to drive the INGRESS_MODE decision (BET-267).
-  #
-  # HOISTED ABOVE the mode-resolution block (BET-267 review fix): bash does
-  # NOT forward-reference function definitions within the same function, so
-  # defining this AFTER its call sites (the original placement, near the
-  # box-identity read) silently failed with
-  # `detect_tailscale_ip: command not found` and the auto branch fell through
-  # to public mode even when Tailscale was running. Moving the definition
-  # above the call sites is the minimal fix; `bash -n` parses but does not
-  # execute, so this only shows up under real (or DRY_RUN=1) tracing.
-  #
-  # Silent on stderr by design: install.sh logs the result separately so
-  # we never want a `tailscale: command not found` warning to leak through
-  # the box's user-facing output (the absence of tailscale is normal on
-  # the public-path install).
-  detect_tailscale_ip() {
-    command -v tailscale >/dev/null 2>&1 || return 1
-    tailscale status --json 2>/dev/null | "$NODE" "$LIB" parse-tailscale-status
-  }
-
   # --- Ingress mode (BET-267) ----------------------------------------------
-  # Resolved BEFORE step 7 so the systemd unit template can be rendered
-  # with the correct MANTA_TAILNET_HOST value (empty on public path, the
-  # Tailscale IPv4 on the tailnet path). The decision is persisted to
-  # ~/.manta/ingress.json as the single source of truth for `manta pair`
-  # (which has no access to the install's env vars).
+  # Shared resolve_ingress_mode (defined above main) computes INGRESS_MODE +
+  # TAILNET_IP honoring the MANTA_INGRESS override — the SAME helper the 3.5
+  # preflight uses, so the D1 gate and this persisted decision can never
+  # disagree. Resolved BEFORE the unit render so the systemd template gets the
+  # correct MANTA_TAILNET_HOST value (empty on public path, the Tailscale IPv4
+  # on the tailnet path), then persisted to ~/.manta/ingress.json as the single
+  # source of truth for `manta pair`.
   #
   # MANTA_INGRESS: auto (default — tailnet iff Tailscale is up) | public |
   # tailscale (force tailnet; die if detection fails).
-  MANTA_INGRESS="${MANTA_INGRESS:-auto}"
-  TAILNET_IP=""
-  case "$MANTA_INGRESS" in
-    public) ;;
-    tailscale)
-      TAILNET_IP="$(detect_tailscale_ip)" \
-        || die "MANTA_INGRESS=tailscale but Tailscale is not running (need 'tailscale status' BackendState=Running with an IPv4). Start tailscale, or use MANTA_INGRESS=public."
-      ;;
-    auto)
-      TAILNET_IP="$(detect_tailscale_ip 2>/dev/null || true)"
-      ;;
-    *) die "MANTA_INGRESS must be auto, public, or tailscale (got: $MANTA_INGRESS)" ;;
-  esac
-  INGRESS_MODE="public"
-  if [ -n "$TAILNET_IP" ]; then INGRESS_MODE="tailscale"; fi
+  resolve_ingress_mode "$NODE" "$LIB"
 
   # Persist the decision. write-ingress creates the parent dir if missing
   # and writes 0600 atomically (write <file>.tmp then rename).
