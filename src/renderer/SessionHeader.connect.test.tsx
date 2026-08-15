@@ -67,7 +67,7 @@ describe("SessionHeader connect offer (BET-943)", () => {
   });
 
   it("omitting onConnectForge renders the × but no Connect chip", () => {
-    h = mountDisconnected();
+    h = mountDisconnected({ onDismissForgeConnect: () => {} });
 
     expect(connectButton(h), "expected no Connect chip").toBeUndefined();
     expect(dismissButton(h), "expected the × to still render").toBeTruthy();
