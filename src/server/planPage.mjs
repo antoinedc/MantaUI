@@ -36,6 +36,7 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeHighlight from "rehype-highlight";
 import { visit } from "unist-util-visit";
 import { statePath } from "../shared/paths.mjs";
+import { extractPlanMockups } from "../shared/planMockups.mjs";
 import { registerPage } from "./servePage.mjs";
 
 // 7 days — matching the artifact mailbox, not the 24h serve-page default.
@@ -288,6 +289,8 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
   const { html: body, headings } = renderPlanMarkdown(stripFirstHeading(md));
   const stamp = formatGeneratedAt(generatedAt);
 
+  const mockups = extractPlanMockups(md);
+
   const metricsHtml = metricsLine
     ? `<p class="metrics">${escapeHtml(metricsLine)}</p>`
     : "";
@@ -310,6 +313,23 @@ ${headings
   .join("\n")}
   </ul>
 </nav>`
+      : "";
+  const mockupsHtml =
+    mockups.length > 0
+      ? `<section class="mockups" aria-label="Mockups">
+  <h2 class="mockups-title">Mockups</h2>
+  <div class="mockups-grid">
+${mockups
+  .map(
+    (m) =>
+      `    <a class="mockup-card" href="${escapeHtml(m.url)}" target="_blank" rel="noopener">
+      <span class="mockup-title">${escapeHtml(m.title)}</span>
+      <span class="mockup-open">Open ↗</span>
+    </a>`,
+  )
+  .join("\n")}
+  </div>
+</section>`
       : "";
   const pathHtml = path
     ? `<div class="meta"><span class="meta-label">Plan file</span><code>${escapeHtml(
@@ -499,12 +519,42 @@ ${headings
   .toc-l3 { padding-left: 16px; }
   .toc a { color: var(--tx2); text-decoration: none; }
   .toc a:hover { color: var(--accent-tx); text-decoration: underline; }
+  /* Mockup cards — a titled link per /pages/<sub> reference in the plan,
+     server-side generated (not parsed from the body). */
+  .mockups { margin: 0 0 32px; }
+  .mockups-title {
+    margin: 0 0 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--tx4);
+  }
+  .mockups-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mockup-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--inset);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--r-sm);
+    color: var(--tx1);
+    text-decoration: none;
+  }
+  .mockup-card:hover { border-color: var(--border-strong); }
+  .mockup-title { font-size: 14px; }
+  .mockup-open { font-size: 12px; color: var(--accent-tx); }
   main h1 a, main h2 a, main h3 a,
   main h4 a, main h5 a, main h6 a { color: inherit; text-decoration: none; }
   main h1 a:hover, main h2 a:hover, main h3 a:hover,
   main h4 a:hover, main h5 a:hover, main h6 a:hover { text-decoration: underline; }
   @media print {
-    .toc, footer { display: none; }
+    .toc, .mockups, footer { display: none; }
     body { background: #fff; color: #000; font-size: 11pt; }
     .wrap { max-width: none; padding: 0; }
     a { color: #000; text-decoration: underline; }
@@ -520,6 +570,7 @@ ${headings
     <h1>${escapeHtml(title)}</h1>
     ${metricsHtml}
     ${tocHtml}
+    ${mockupsHtml}
     <main>
 ${body}
     </main>
