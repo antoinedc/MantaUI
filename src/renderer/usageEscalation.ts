@@ -106,7 +106,7 @@ export function shouldWarnStaleCache(
 
 /**
  * The warn (>=90%) toast body — plain, no actions, takes the default 6s TTL.
- * "Claude Session (5h) 93% used — resets in 2h 10m."
+ * "Claude Session (5h) 93% used — resets in 2h10m."
  */
 export function buildWarnMessage(
   providerLabel: string,

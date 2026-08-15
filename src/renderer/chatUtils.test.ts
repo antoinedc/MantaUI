@@ -95,6 +95,7 @@ import {
   formatWindowReset,
   formatResetAt,
   formatResetDistance,
+  formatTimerDuration,
   formatUpdatedAgo,
   usageStale,
   pruneVisitedSessions,
@@ -3525,15 +3526,35 @@ describe("usageDialState", () => {
   });
 });
 
+describe("formatTimerDuration", () => {
+  it("renders the canonical compact ladder with no spaces", () => {
+    expect(formatTimerDuration(45_000)).toBe("45s");
+    expect(formatTimerDuration(59_000)).toBe("59s");
+    expect(formatTimerDuration(60_000)).toBe("1m");
+    expect(formatTimerDuration(57 * 60_000)).toBe("57m");
+    expect(formatTimerDuration(2 * 3_600_000 + 10 * 60_000)).toBe("2h10m");
+    expect(formatTimerDuration(2 * 3_600_000 + 57 * 60_000)).toBe("2h57m");
+    expect(formatTimerDuration(3 * 3_600_000)).toBe("3h");
+  });
+
+  it("drops minutes when zero and handles sub-second and non-finite", () => {
+    expect(formatTimerDuration(3 * 3_600_000)).toBe("3h");
+    expect(formatTimerDuration(0)).toBe("0s");
+    expect(formatTimerDuration(-5)).toBe("0s");
+    expect(formatTimerDuration(NaN)).toBe("0s");
+    expect(formatTimerDuration(999)).toBe("1s");
+  });
+});
+
 describe("formatResetDistance", () => {
   it("covers the whole ladder with exact strings", () => {
     expect(formatResetDistance(30_000)).toBe("under a minute");
     expect(formatResetDistance(45 * 60_000)).toBe("45m");
-    expect(formatResetDistance(2 * 3_600_000 + 10 * 60_000)).toBe("2h 10m");
+    expect(formatResetDistance(2 * 3_600_000 + 10 * 60_000)).toBe("2h10m");
     expect(formatResetDistance(3 * 3_600_000)).toBe("3h"); // drop the zero minutes
-    expect(formatResetDistance(26 * 3_600_000)).toBe("1d 2h");
+    expect(formatResetDistance(26 * 3_600_000)).toBe("1d2h");
     expect(formatResetDistance(48 * 3_600_000)).toBe("2d"); // drop the zero hours
-    expect(formatResetDistance(140 * 3_600_000 + 12 * 60_000)).toBe("5d 20h");
+    expect(formatResetDistance(140 * 3_600_000 + 12 * 60_000)).toBe("5d20h");
   });
 
   it("returns 'now' for a missing, non-finite, or past distance", () => {

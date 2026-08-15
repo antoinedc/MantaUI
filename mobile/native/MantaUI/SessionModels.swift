@@ -200,17 +200,28 @@ enum SessionTimerFormat {
         return "\(m) minute" + (m == 1 ? "" : "s")
     }
 
-    /// Live elapsed for the running row ("12s" / "1m 12s" / "1h 5m"). Unlike the
-    /// compact `elapsed` (the header slot), this keeps the seconds so a running
-    /// turn's elapsed visibly ticks even before the first minute (BET-630, D1).
-    static func liveElapsed(_ interval: TimeInterval) -> String {
+    /// Canonical compact timer format, mirrored 1:1 with the desktop
+    /// `formatTimerDuration` (src/renderer/chatUtils.ts): "2h57m" / "57m" /
+    /// "2h" / "45s". No spaces; seconds only under a minute; hours drop the
+    /// minutes when they are zero. Use THIS for any elapsed/distance timer
+    /// (running row, session list, usage idle text) — the single source of
+    /// truth for the timer shape on iOS.
+    static func compact(_ interval: TimeInterval) -> String {
         let t = Int(interval)
+        guard t > 0 else { return "0s" }
         let s = t % 60
         let m = (t / 60) % 60
         let h = t / 3600
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m \(s)s" }
+        if h > 0 { return m > 0 ? "\(h)h\(m)m" : "\(h)h" }
+        if m > 0 { return "\(m)m" }
         return "\(s)s"
+    }
+
+    /// Live elapsed for the running row ("12s" / "1m" / "1h5m"). Ticks
+    /// per-second under a minute (BET-630, D1) then per-minute; reuses the
+    /// canonical `compact` form so every timer reads identically.
+    static func liveElapsed(_ interval: TimeInterval) -> String {
+        compact(interval)
     }
 
     /// Coarse recency for an idle row (BET-897). Interval-based on purpose — no

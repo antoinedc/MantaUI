@@ -70,7 +70,7 @@ enum UsageMeters {
     }
 
     /// The relative "how far away" reset distance, floored to at most two
-    /// units — "45m" / "2h 10m" / "2d 4h". Mirrors the desktop
+    /// units — "45m" / "2h10m" / "2d4h". Mirrors the desktop
     /// `formatResetDistance` one-to-one so both clients print the same string
     /// for the same input. Pure arithmetic — no locale involvement.
     static func resetDistance(_ seconds: Int) -> String {
@@ -81,11 +81,11 @@ enum UsageMeters {
         let h = m / 60
         let mm = m % 60
         if seconds < 86400 {
-            return mm == 0 ? "\(h)h" : "\(h)h \(mm)m"
+            return mm == 0 ? "\(h)h" : "\(h)h\(mm)m"
         }
         let d = seconds / 86400
         let hh = (seconds % 86400) / 3600
-        return hh == 0 ? "\(d)d" : "\(d)d \(hh)h"
+        return hh == 0 ? "\(d)d" : "\(d)d\(hh)h"
     }
 
     /// The absolute anchor: "09:00" (same local calendar day), "Thu 09:00"
@@ -103,7 +103,7 @@ enum UsageMeters {
     }
 
     /// The sheet/banner reset line (the caller already supplies the "resets "
-    /// prefix): "in 2h 10m", with an absolute anchor appended only when the
+    /// prefix): "in 2h10m", with an absolute anchor appended only when the
     /// reset is NOT on the same local calendar day. A reset instant that has
     /// already passed reads "resetting…" — the dot carries the old number
     /// forward while the provider catches up (BET-965/967). Mirrors the

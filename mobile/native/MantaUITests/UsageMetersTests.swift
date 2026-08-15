@@ -111,11 +111,11 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(UsageMeters.resetDistance(-5), "now")
         XCTAssertEqual(UsageMeters.resetDistance(30), "under a minute")
         XCTAssertEqual(UsageMeters.resetDistance(45 * 60), "45m")
-        XCTAssertEqual(UsageMeters.resetDistance(2 * 3600 + 10 * 60), "2h 10m")
+        XCTAssertEqual(UsageMeters.resetDistance(2 * 3600 + 10 * 60), "2h10m")
         XCTAssertEqual(UsageMeters.resetDistance(3 * 3600), "3h")
-        XCTAssertEqual(UsageMeters.resetDistance(26 * 3600), "1d 2h")
+        XCTAssertEqual(UsageMeters.resetDistance(26 * 3600), "1d2h")
         XCTAssertEqual(UsageMeters.resetDistance(48 * 3600), "2d")
-        XCTAssertEqual(UsageMeters.resetDistance(140 * 3600 + 12 * 60), "5d 20h")
+        XCTAssertEqual(UsageMeters.resetDistance(140 * 3600 + 12 * 60), "5d20h")
     }
 
     // MARK: - resetAt / formatReset (shape only — locale-fixed, BET-967)
