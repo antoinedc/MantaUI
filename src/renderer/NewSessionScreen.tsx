@@ -39,7 +39,6 @@ import { Chip } from "./Chip";
 import { ModelPicker } from "./ModelPicker";
 import { MicButton } from "./ComposerParts";
 import { IconButton } from "./IconButton";
-import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { Checkbox } from "./Checkbox";
@@ -158,9 +157,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
-  // BET-417 §B: fan-out from the folder picker. When set, the picker returned
-  // multiple worktrees and the user chose "One per worktree".
-  const [fanOutWorktrees, setFanOutWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -1062,52 +1058,16 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             setPickerOpen(false);
           }}
           onFanOut={(baseCwd, wts) => {
-            setFanOutWorktrees(wts);
             updateDraft(draftId, { cwd: baseCwd });
             if (isNewProject) setBrowseChosen(true);
-            setPickerOpen(false);
+            // Carry the worktree list straight into the submit — the picker
+            // stays open and OWNS the in-flight state (its buttons disable and
+            // read "Creating…" via fanOutBusy) instead of a second modal.
+            void submitFanOut(baseCwd, wts);
           }}
+          fanOutBusy={sending}
           onCancel={() => setPickerOpen(false)}
         />
-
-      <Modal
-          open={!!fanOutWorktrees}
-          size="md"
-          label="Fan-out confirmed"
-          onDismiss={sending ? undefined : () => setFanOutWorktrees(null)}
-        >
-          <div className="space-y-3">
-            <div className="text-body font-semibold text-text">Fan-out confirmed</div>
-            <div className="text-meta text-text-muted">
-              Creating one session with {fanOutWorktrees?.length ?? 0} windows (one per
-              worktree). The first window gets your prompt.
-            </div>
-            <ul className="text-label text-text-faint space-y-px max-h-40 overflow-y-auto">
-              {(fanOutWorktrees ?? []).map((w) => (
-                <li key={w.path} className="truncate">
-                  <span className="text-text-muted">{worktreeName(w)}</span>
-                  {" "}<span className="text-text-faint">— {w.path}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="flex gap-2">
-              <Button
-                tone="primary"
-                onClick={() => void submitFanOut(draft.cwd, fanOutWorktrees ?? [])}
-                disabled={sending}
-              >
-                {sending ? "Creating…" : "Create"}
-              </Button>
-              <Button
-                tone="ghost"
-                onClick={() => setFanOutWorktrees(null)}
-                disabled={sending}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </Modal>
     </div>
   );
 }

@@ -47,6 +47,11 @@ type Props = {
   // session with one window per worktree, each named worktreeName(w).
   // When omitted, the fan-out question is not offered (mobile can opt out).
   onFanOut?: (cwd: string, worktrees: WorktreeInfo[]) => void;
+  // When a fan-out create is in flight, the picker OWNS the confirmation that
+  // the old second "Fan-out confirmed" modal used to: its three choice buttons
+  // are disabled and the fan-out one reads "Creating…", so the single picker
+  // modal is the whole flow (BET-938).
+  fanOutBusy?: boolean;
   onCancel: () => void;
 };
 
@@ -66,7 +71,7 @@ type FanOut =
   | null
   | { worktrees: WorktreeInfo[]; cwd: string };
 
-export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCancel }: Props) {
+export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOutBusy, onCancel }: Props) {
   const [path, setPath] = useState(initialPath);
   const [suggestion, setSuggestion] = useState<string | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -238,7 +243,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
   const crumbs = breadcrumbs(path);
 
   return (
-    <Modal open={open} size="lg" padded={false} tall onDismiss={onCancel} label="Select folder">
+    <Modal open={open} size="lg" padded={false} tall onDismiss={fanOutBusy ? undefined : onCancel} label="Select folder">
       <div className="manta-folder-picker flex flex-col flex-1 min-h-0">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
@@ -269,18 +274,19 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, onCan
               ))}
             </ul>
             <div className="flex gap-2">
-              <Button tone="default" onClick={() => onSelect(fanOut.cwd)}>
+              <Button tone="default" onClick={() => onSelect(fanOut.cwd)} disabled={fanOutBusy}>
                 Just this folder
               </Button>
               {onFanOut && (
                 <Button
                   tone="primary"
                   onClick={() => onFanOut(fanOut.cwd, fanOut.worktrees)}
+                  disabled={fanOutBusy}
                 >
-                  One per worktree
+                  {fanOutBusy ? "Creating…" : "One per worktree"}
                 </Button>
               )}
-              <Button tone="ghost" onClick={() => setFanOut(null)}>
+              <Button tone="ghost" onClick={() => setFanOut(null)} disabled={fanOutBusy}>
                 Back
               </Button>
             </div>
