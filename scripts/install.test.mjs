@@ -5174,14 +5174,17 @@ test("install.sh writes service-read config files via install_root_file, never `
 // and therefore fired 100% of the time, falsely. Assertions are textual so a
 // regression in either success-print guard is caught here.
 
-test("install.sh prints `ok \"caddy reloaded.\"` only on success (preceded by `else`) (BET-442)", () => {
+test("install.sh prints `ok \"caddy reloaded.\"` only on success (the reload is fatal) (BET-442 / BET-980)", () => {
   const src = readFileSync(INSTALL_SH, "utf-8");
   const matches = src.split("\n").filter((l) => /ok "caddy reloaded\."/.test(l));
   assert.strictEqual(matches.length, 1, "`ok \"caddy reloaded.\"` must appear exactly once");
-  const line = matches[0];
-  const idx = src.indexOf(line);
-  const before = src.slice(0, idx).split("\n").filter((l) => l.trim() !== "").pop();
-  assert.match(before, /^[ \t]*else[ \t]*$/, "`ok \"caddy reloaded.\"` must sit in the `else` branch (only reached on success)");
+  // The reload is `sudo -n systemctl reload caddy … \ || die …`; the `ok`
+  // below it is therefore only reachable when the reload succeeded.
+  assert.match(
+    src,
+    /reload caddy[^\n]*\\\n[ \t]*\|\| die/,
+    "the Caddy reload must be fatal (`|| die`), so `ok \"caddy reloaded.\"` is only printed on success",
+  );
 });
 
 test("install.sh prints `ok \"gateway registration complete.\"` only on success (no `|| warn \"merge-gateway failed`) (BET-442)", () => {
