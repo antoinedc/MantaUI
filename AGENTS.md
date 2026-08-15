@@ -2718,6 +2718,44 @@ the dev box (`dev@157.90.224.92`) or the prod box.
   full-release path — the loop over `linux-x64`/`linux-arm64` covers the same
   arches, and preflight refuses to publish unless BOTH are present.
 
+### A release is identified by its COMMIT, not its version number
+
+**You do not need to bump `package.json` to ship a server release.** A box
+decides whether it is already running the published build by comparing the
+commit that build was made from — `git_sha`, stamped into both `RELEASE.json`
+(what the box is running) and `releases/manta-latest.txt` (what is published).
+Same commit → skip, no download. Different commit → update, even when both
+sides carry the same version string.
+
+This replaced a version-only comparison, which had a silent and expensive
+failure mode: a release cut without a version bump was indistinguishable from
+the installed one, so `self-update.sh` reported `already at <version>` and
+every box skipped a REAL update. Nothing errored, no workflow went red, and
+the only symptom was that the fix never appeared in production — which on
+2026-08-15 read as "the merged PR didn't work" and sent a debugging session
+after application code that was already correct.
+
+Consequences worth knowing:
+
+- **`version` is now purely a human/compatibility concern.** It still drives
+  the desktop↔box compatibility matrix (`src/shared/compatibility.mjs`), so
+  bump it for a real release; just don't rely on it to move code onto boxes.
+- **Two published releases may legitimately share a version.** Log lines
+  therefore print the commit alongside it — `0.0.29 → 0.0.29` alone reads like
+  a no-op.
+- **The decision is `release_is_current` in `scripts/lib/release.sh`** (pure,
+  unit-tested in `release.test.mjs`), not inline in `self-update.sh`. It falls
+  back to comparing versions when EITHER side has no commit — a box installed
+  before stamps existed, or a tarball packed outside a git checkout — so the
+  behaviour is never worse than before.
+- **Never publish a manifest whose `git_sha` covers only some arches.**
+  `merge-manifest.mjs` drops the key entirely unless every sidecar agreed, and
+  hard-fails if two arches report different commits. A partial stamp is worse
+  than none: a box whose own arch shipped unstamped would never match the
+  published sha and would reinstall the same tarball on every check, forever.
+- Two arches built from different commits is now a hard publish error rather
+  than something only a version mismatch could have caught.
+
 ### Verifying a deploy actually landed
 
 Never trust "the workflow was green" alone for the FIRST run of a new pipeline —

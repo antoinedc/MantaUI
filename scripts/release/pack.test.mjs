@@ -154,3 +154,92 @@ test("BET-829: node_modules stays release-owned so the box never rebuilds deps l
     "node_modules must be release-owned — the tarball ships a prebuilt, arch- and ABI-verified tree",
   );
 });
+
+// --- resolveGitSha: the release's update identity ---------------------------
+//
+// The box decides "am I already running the published build?" by comparing the
+// commit a release was built from. Before that, it compared `version` alone —
+// a hand-maintained number — so a release cut without a bump was
+// indistinguishable from the installed one and every box silently skipped a
+// real update, reporting "already at <version>" with no error anywhere.
+//
+// Same source-reading harness as the array-literal tests above: pack.mjs can't
+// be imported (main() runs on import and hits the network), so we lift the
+// function out of the source and evaluate it against injected dependencies.
+
+function evalFunctionDecl(declName, scope = {}) {
+  const m = PACK_SRC.match(new RegExp(`\\nfunction\\s+${declName}\\s*\\([\\s\\S]*?\\n\\}`));
+  assert.ok(m, `could not find function ${declName} in pack.mjs`);
+  return Function(
+    ...Object.keys(scope),
+    `${m[0]}; return ${declName};`,
+  )(...Object.values(scope));
+}
+
+// A spawnSync stub standing in for `git rev-parse HEAD`.
+function gitStub(result) {
+  return () => result;
+}
+
+const NOT_A_REPO = { status: 128, stdout: "" };
+const HEAD = "a".repeat(40);
+
+test("resolveGitSha prefers an explicit override over the checkout", () => {
+  const resolveGitSha = evalFunctionDecl("resolveGitSha", {
+    process: { env: { MANTA_GIT_SHA: "abc1234" } },
+    spawnSync: gitStub({ status: 0, stdout: `${HEAD}\n` }),
+    REPO_ROOT: "/repo",
+  });
+  assert.equal(resolveGitSha(), "abc1234");
+});
+
+test("resolveGitSha falls back to CI's own commit variable", () => {
+  const resolveGitSha = evalFunctionDecl("resolveGitSha", {
+    process: { env: { GITHUB_SHA: HEAD.toUpperCase() } },
+    spawnSync: gitStub(NOT_A_REPO),
+    REPO_ROOT: "/repo",
+  });
+  // Normalized so a manifest value and a RELEASE.json value can be compared
+  // as plain strings on the box, where there is no case-insensitive compare.
+  assert.equal(resolveGitSha(), HEAD);
+});
+
+test("resolveGitSha reads the working checkout when nothing is injected", () => {
+  const resolveGitSha = evalFunctionDecl("resolveGitSha", {
+    process: { env: {} },
+    spawnSync: gitStub({ status: 0, stdout: `${HEAD}\n` }),
+    REPO_ROOT: "/repo",
+  });
+  assert.equal(resolveGitSha(), HEAD);
+});
+
+test("resolveGitSha returns null outside a git checkout rather than failing the pack", () => {
+  // A tarball built from an exported source tree is still a valid release —
+  // it just degrades the box to the old version-only comparison.
+  const resolveGitSha = evalFunctionDecl("resolveGitSha", {
+    process: { env: {} },
+    spawnSync: gitStub(NOT_A_REPO),
+    REPO_ROOT: "/repo",
+  });
+  assert.equal(resolveGitSha(), null);
+});
+
+test("resolveGitSha ignores a malformed override instead of stamping garbage", () => {
+  // A stamped non-sha would never match any box's RELEASE.json, making every
+  // box reinstall the same tarball on every update check.
+  const resolveGitSha = evalFunctionDecl("resolveGitSha", {
+    process: { env: { MANTA_GIT_SHA: "not-a-sha" } },
+    spawnSync: gitStub({ status: 0, stdout: `${HEAD}\n` }),
+    REPO_ROOT: "/repo",
+  });
+  assert.equal(resolveGitSha(), HEAD);
+});
+
+test("the release stamp and the manifest key come from the same resolved value", () => {
+  // RELEASE.json (what the box reports it is running) and the manifest (what
+  // the box compares against) must never disagree about the commit — if they
+  // can drift, the box either skips a real update or reinstalls forever.
+  assert.match(PACK_SRC, /const gitSha = resolveGitSha\(\);/);
+  assert.match(PACK_SRC, /git_sha: gitSha,/);
+  assert.match(PACK_SRC, /gitSha \? `git_sha=\$\{gitSha\}\\n` : ""/);
+});

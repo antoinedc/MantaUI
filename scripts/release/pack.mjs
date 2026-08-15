@@ -82,6 +82,30 @@ function resolveArch(arch) {
   }
 }
 
+// The commit this release was built from — the release's true identity.
+//
+// WHY THIS EXISTS: the box's updater used to decide "am I already running the
+// published release?" by comparing `version` alone. That number is maintained
+// by hand, so a release cut without bumping it was INDISTINGUISHABLE from the
+// one already installed and every box silently skipped a real update — the
+// failure is invisible (the updater cheerfully reports "already at 0.0.29")
+// and lasts until someone notices the fix never shipped. Identifying a build
+// by its commit removes the class of mistake: same commit = genuinely the same
+// code, different commit = a real update, no bookkeeping required.
+//
+// Resolution order: an explicit override, then CI's own commit variable, then
+// the working checkout. Falls back to null OUTSIDE a git checkout (a tarball
+// built from an exported source tree is still valid) — the manifest key is
+// then omitted and the updater degrades to its old version-only comparison.
+function resolveGitSha() {
+  const fromEnv = process.env.MANTA_GIT_SHA || process.env.GITHUB_SHA;
+  if (fromEnv && /^[0-9a-f]{7,40}$/i.test(fromEnv.trim())) return fromEnv.trim().toLowerCase();
+  const r = spawnSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf-8" });
+  const out = (r.stdout || "").trim();
+  if (r.status === 0 && /^[0-9a-f]{40}$/i.test(out)) return out.toLowerCase();
+  return null;
+}
+
 function log(msg) {
   process.stdout.write(`▸ ${msg}\n`);
 }
@@ -347,6 +371,18 @@ async function main() {
   // `ARCH_KEY` is the underscore form (matches install.sh's manifest_get
   // keys). Resolved once here so nothing else in main() re-spells them.
   const { key: ARCH_KEY, file: ARCH } = resolveArch(args.arch);
+
+  // Resolved once, up front, so the RELEASE.json stamp and the manifest key
+  // can never disagree about which commit this tarball came from.
+  const gitSha = resolveGitSha();
+  if (gitSha) {
+    log(`Release commit: ${gitSha}`);
+  } else {
+    log(
+      "⚠ no git commit resolved (not a git checkout and no MANTA_GIT_SHA/GITHUB_SHA) — " +
+        "boxes will fall back to comparing version numbers, so an unbumped release will be skipped",
+    );
+  }
   // nodejs.org's tarball filename token is exactly the hyphen form, so the
   // vendored-node URL + cache key + sha lookup all use this single string.
   const NODE_TARBALL = `node-v${NODE_VERSION}-${ARCH}.tar.gz`;
@@ -412,6 +448,11 @@ async function main() {
       {
         name: "manta",
         version,
+        // The commit this payload was built from. `replace_release_payload`
+        // stamps this file onto the box, so the installed RELEASE.json is how
+        // the box knows which build it is actually running. null only when
+        // packed outside a git checkout.
+        git_sha: gitSha,
         built_at: new Date().toISOString(),
         node: NODE_VERSION,
         arch: ARCH,
@@ -435,12 +476,19 @@ async function main() {
   // 7. Manifest — flat key=value, parseable in bash before any node exists on
   //    the box. install.sh uses this to fetch + verify the tarball. The
   //    sha256 is computed AFTER tar (the tarball is the artifact being verified).
-  //    Keys: version, file_<arch> (underscore form — matches install.sh's
-  //    manifest_get calls), sha256_<arch>.
+  //    Keys: version, git_sha, file_<arch> (underscore form — matches
+  //    install.sh's manifest_get calls), sha256_<arch>.
+  //
+  //    `git_sha` is in the manifest as well as RELEASE.json so the box can
+  //    answer "is this a new build?" from the manifest ALONE — preserving the
+  //    cheap early exit, i.e. no tarball download when nothing changed. It is
+  //    omitted entirely when unresolved rather than written empty, so an older
+  //    box parsing this file sees no key and behaves exactly as before.
   log(`Writing manifest ${outManifest}…`);
   const tarSha = await sha256OfFile(outFile);
   const manifest =
     `version=${version}\n` +
+    (gitSha ? `git_sha=${gitSha}\n` : "") +
     `file_${ARCH_KEY}=${`manta-${version}-${ARCH}.tar.gz`}\n` +
     `sha256_${ARCH_KEY}=${tarSha}\n`;
   await writeFile(outManifest, manifest);

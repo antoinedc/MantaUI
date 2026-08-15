@@ -252,3 +252,43 @@ install_prod_deps() {
   fi
   die "self-update: dependency install failed and there was no previous node_modules to restore — re-run install.sh"
 }
+
+# release_is_current <installed_version> <installed_git_sha> <release_version> <release_git_sha>
+#
+# Answers the one question the updater asks before downloading anything: is
+# this box already running the published build? Returns 0 (skip the update) or
+# 1 (there is something new).
+#
+# WHY THE COMMIT AND NOT THE VERSION: `version` comes from package.json and is
+# maintained by hand. A release cut without bumping it was byte-for-byte
+# indistinguishable from the installed one as far as this check could tell, so
+# every box reported "already at <version>" and silently skipped a real update
+# — no error, no signal, and no way to notice from the outside except that the
+# fix never shipped. The commit a build came from is its true identity and
+# needs no bookkeeping to stay correct.
+#
+# Both sides must supply a commit for it to be authoritative. When either is
+# missing — a box installed before releases carried one, or a release packed
+# outside a git checkout — fall back to comparing versions, which is exactly
+# the previous behaviour and no worse.
+#
+# Pure: no I/O, no globals. Unit-tested in scripts/lib/release.test.mjs.
+release_is_current() {
+  installed_version="$1"
+  installed_sha="$2"
+  release_version="$3"
+  release_sha="$4"
+
+  if [ -n "$installed_sha" ] && [ -n "$release_sha" ]; then
+    [ "$installed_sha" = "$release_sha" ]
+    return $?
+  fi
+
+  # An empty installed version means we could not read RELEASE.json at all —
+  # treat that as "not current" so the box repairs itself by reinstalling
+  # rather than skipping forever on an unreadable stamp.
+  if [ -z "$installed_version" ]; then
+    return 1
+  fi
+  [ "$installed_version" = "$release_version" ]
+}
