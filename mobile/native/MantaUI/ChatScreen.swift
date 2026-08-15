@@ -272,6 +272,15 @@ private struct ChatScreenContent: View {
                 MantaPushRouter.shared.visibleSessionID = nil
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
             }
+            // BET-977: the box mirrors opencode's LOCAL plan_enter/plan_exit via
+            // the `planMode` frame. Route it into the session's ChatModelStore
+            // through `setPlan` — the SAME entry point the Plan chip's tap uses,
+            // so the value is persisted per-session identically and there is no
+            // second persistence path. Published edge-triggers on change, so this
+            // fires once per actual plan-mode switch.
+            .onReceive(store.$planOn) { on in
+                if let on { modelStore.setPlan(on) }
+            }
             // 5s branch poll (desktop cadence) so a terminal-side checkout
             // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
             .task { await pollBranch() }

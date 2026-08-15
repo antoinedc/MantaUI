@@ -309,6 +309,27 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.turnComplete, true)
     }
 
+    // MARK: - Plan-mode mirror (BET-977)
+
+    func testPlanModeFrameToRecordedValue() throws {
+        // The box mirrors opencode's LOCAL plan switch: a completed plan_enter
+        // emits {on:true}, plan_exit {on:false}. The router records whichever
+        // value landed so the per-session store can route it to setPlan.
+        let enter = try MantaStreamFrame.parse(#"{"kind":"stream","sub":"planMode","sessionId":"ses_1","payload":{"on":true}}"#)
+        var state = MantaStreamRouter.applying(enter, to: nil)
+        XCTAssertEqual(state.planOn, true)
+
+        let exit = try MantaStreamFrame.parse(#"{"kind":"stream","sub":"planMode","sessionId":"ses_1","payload":{"on":false}}"#)
+        state = MantaStreamRouter.applying(exit, to: state)
+        XCTAssertEqual(state.planOn, false)
+    }
+
+    func testPlanModeStartsNilUntilAFrameLands() {
+        // A fresh session has no plan-mode fact until the box emits one.
+        let state = MantaSessionStreamState(sessionId: "ses_1")
+        XCTAssertNil(state.planOn)
+    }
+
     // MARK: - Turn-start stamp (BET-896)
 
     /// The box stamps `since` (epoch ms) on the idle->busy edge; the router

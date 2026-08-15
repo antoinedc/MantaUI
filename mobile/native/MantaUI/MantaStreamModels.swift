@@ -262,6 +262,13 @@ struct StreamPermissionsPayload: Codable, Equatable, Sendable {
     var permissions: [PermissionRequest]
 }
 
+/// `sub: "planMode"` — the box mirrors opencode's LOCAL plan_enter/plan_exit
+/// switch so the phone's Plan chip stays honest (BET-977). `on` is the plan
+/// mode the model is now in.
+struct StreamPlanModePayload: Codable, Equatable, Sendable {
+    var on: Bool
+}
+
 /// `sub: "subagent"` — extractSubagentInfo + runningCount.
 struct StreamSubagentPayload: Codable, Equatable, Sendable {
     var childSessionId: String

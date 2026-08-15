@@ -42,6 +42,7 @@ import {
   buildTitleInstruction,
   ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
+import { planModeFromToolPart } from "../shared/planMode.mjs";
 
 const TTL_DEFAULT = "1h";
 
@@ -90,6 +91,7 @@ function newSessionState() {
     runningSince: null,        // epoch ms when the running turn started (idle->busy edge)
     runningType: null,         // last session.status type ("busy"|"working"|"retry"|null); preserved for the connect-time snapshot replay
     todos: null,               // liveTodos (todo.updated) ; null = not seen
+    handledPlanCallIds: new Set(), // callIDs that already emitted a planMode frame
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
     contextEmitted: null,      // { totalInput, limit } of the last context emit
@@ -362,6 +364,28 @@ export function createStreamInterpreter({
         // tool part, so it gets a toolStarted/…/toolEnded pair too — harmless
         // alongside the richer `subagent` frame.
         if (part?.type === "tool") updateToolFrames(st, sid, part, emit);
+        // Plan-mode mirror (BET-977). Plan mode is NOT server state — opencode
+        // switches its agent locally on plan_enter/plan_exit, so the box must
+        // relay the fact for the phone's Plan chip to stay honest. Only a
+        // COMPLETED plan_enter/plan_exit asserts a mode (an errored one,
+        // e.g. "Keep planning" rejecting the exit, changed nothing). De-duped
+        // per callID exactly like the desktop, so the same completed tool part
+        // arriving twice emits one frame.
+        const planNext = planModeFromToolPart(part);
+        if (planNext !== null) {
+          const callID = typeof part?.callID === "string" ? part.callID : "";
+          if (callID && !st.handledPlanCallIds.has(callID)) {
+            st.handledPlanCallIds.add(callID);
+            emit(sid, "planMode", { on: planNext });
+          }
+        }
+        return;
+      }
+      case "session.next.agent.switched": {
+        // Report a switch that already happened (mirrors the desktop's
+        // `session.next.agent.switched` branch). `properties.agent` is
+        // opencode's own agent name — plan mode is exactly agent "plan".
+        emit(sid, "planMode", { on: String(evt.properties?.agent ?? "") === "plan" });
         return;
       }
       case "session.created": {
