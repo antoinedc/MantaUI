@@ -175,6 +175,102 @@ export function checkIdentity(cfg, { exists = existsSync } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Deploy ref — WHICH commit the git checkout at $MANTA_HOME is reset to
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the commit an installed box's git checkout should be reset to,
+ * from the release's own RELEASE.json text.
+ *
+ * WHY THIS EXISTS (BET-978). install.sh extracts a pinned release tarball —
+ * which is where `node_modules/` comes from, because the box deliberately
+ * never builds dependencies itself — and then re-materialises the full source
+ * tree from git. Resetting that tree to `origin/main` mixes two different
+ * builds: TODAY's source against the LAST RELEASE's dependencies. Every
+ * dependency added since the last published tarball is then simply absent, the
+ * server dies on an unresolved import before it can bind, and the installer
+ * reports only a health-check timeout.
+ *
+ * That is not a hypothetical: a plan-page change added four packages, and from
+ * that merge until the next release EVERY clean install on prod and staging
+ * failed exactly this way, while already-installed boxes (which replace source
+ * and dependencies together from one tarball) were fine.
+ *
+ * Pinning the reset to the release's own commit removes the class of failure:
+ * source and dependencies come from the same build by construction, so adding
+ * a dependency can never break a clean install again. New code reaches a box
+ * the same way it always did — by publishing a release, which self-update.sh
+ * then applies wholesale.
+ *
+ * Returns { sha, source }:
+ *   sha=<40-hex>, source="release"  → pin to the release commit (normal).
+ *   sha=null,     source="fallback" → RELEASE.json is missing / has no usable
+ *                                     git_sha (a tarball packed outside a git
+ *                                     checkout, or one built before the stamp
+ *                                     existed). Caller falls back to
+ *                                     origin/main — never worse than before.
+ */
+export function resolveDeployRef(releaseJsonText) {
+  const fallback = (reason) => ({ sha: null, source: "fallback", reason });
+  if (typeof releaseJsonText !== "string" || releaseJsonText.trim() === "") {
+    return fallback("no RELEASE.json");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(releaseJsonText);
+  } catch {
+    return fallback("RELEASE.json is not valid JSON");
+  }
+  const sha = parsed?.git_sha;
+  // A full 40-char hex object name only. A short sha would still resolve, but
+  // the packer always writes the full one, so anything else means the file was
+  // hand-edited or truncated — fall back rather than trust it.
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) {
+    return fallback("RELEASE.json carries no usable git_sha");
+  }
+  return { sha, source: "release", reason: "pinned to the release commit" };
+}
+
+// ---------------------------------------------------------------------------
+// Dependency preflight — catch a source/dependency mismatch before boot
+// ---------------------------------------------------------------------------
+
+/**
+ * List the runtime dependencies declared in package.json that are NOT present
+ * in node_modules.
+ *
+ * The backstop to resolveDeployRef: pinning the checkout makes the common
+ * mismatch unreachable, but a box can still end up with a tree the tarball's
+ * dependencies don't satisfy (a fork via MANTA_REPO_URL, a hand-run `git
+ * pull`, a half-extracted tarball). When that happens the failure surfaces as
+ * a module-not-found crash inside a supervised service — the installer sees
+ * only "server did not become healthy", and the operator gets pointed at
+ * `systemctl status` to discover a missing package. Naming the packages at
+ * install time turns a 60-attempt timeout into one actionable line.
+ *
+ * Injectable `exists` for tests. Scoped shrewdly: `dependencies` only, never
+ * devDependencies (the tarball is built --omit=dev on purpose).
+ */
+export function findMissingDependencies(
+  pkgJsonText,
+  { modulesDir = "node_modules", exists = existsSync, join: joinPath = join } = {},
+) {
+  let parsed;
+  try {
+    parsed = JSON.parse(pkgJsonText ?? "");
+  } catch {
+    // An unreadable package.json is a different (louder) problem, and guessing
+    // at a dependency list from it would be worse than saying nothing.
+    return [];
+  }
+  const deps = parsed?.dependencies;
+  if (!deps || typeof deps !== "object") return [];
+  return Object.keys(deps)
+    .filter((name) => !exists(joinPath(modulesDir, name, "package.json")))
+    .sort();
+}
+
+// ---------------------------------------------------------------------------
 // Health-wait poller
 // ---------------------------------------------------------------------------
 
@@ -1315,6 +1411,38 @@ async function cliMain(argv) {
     process.stderr.write(reason + "\n");
     return 0;
   }
+  if (cmd === "deploy-ref") {
+    // node install-lib.mjs deploy-ref --release <path/to/RELEASE.json>
+    // Prints the commit to reset the deploy checkout to, or nothing when the
+    // release carries no usable stamp (install.sh then falls back to
+    // origin/main). The reason goes to stderr so it can be logged.
+    const path = flags.release || join(resolveConfig().mantaHome ?? ".", "RELEASE.json");
+    let text = "";
+    try {
+      text = readFileSync(path, "utf-8");
+    } catch {
+      text = "";
+    }
+    const { sha, reason } = resolveDeployRef(text);
+    if (sha) process.stdout.write(sha + "\n");
+    process.stderr.write(reason + "\n");
+    return 0;
+  }
+  if (cmd === "check-deps") {
+    // node install-lib.mjs check-deps --home <MANTA_HOME>
+    // Prints one missing dependency name per line; exit 0 either way. The
+    // caller decides how loud to be — this command only reports.
+    const home = flags.home || resolveConfig().mantaHome || ".";
+    let pkg = "";
+    try {
+      pkg = readFileSync(join(home, "package.json"), "utf-8");
+    } catch {
+      pkg = "";
+    }
+    const missing = findMissingDependencies(pkg, { modulesDir: join(home, "node_modules") });
+    if (missing.length) process.stdout.write(missing.join("\n") + "\n");
+    return 0;
+  }
   if (cmd === "merge-opencode-config") {
     // Read raw text from stdin, write the merged text to stdout, and the
     // `corrupt` flag to stderr (so install.sh can branch on it for the
@@ -1698,6 +1826,8 @@ function parseFlags(args) {
     "cli-codex",
     "cli-kimi",
     "connected",
+    "release",
+    "home",
   ]);
   for (let i = 0; i < args.length; i++) {
     const tok = args[i];

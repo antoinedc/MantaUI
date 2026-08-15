@@ -2718,6 +2718,38 @@ the dev box (`dev@157.90.224.92`) or the prod box.
   full-release path — the loop over `linux-x64`/`linux-arm64` covers the same
   arches, and preflight refuses to publish unless BOTH are present.
 
+### A clean install runs the RELEASE's source, not `main`'s
+
+**A box's dependencies come from the release tarball and nowhere else** — it
+has no compiler and never runs an install step of its own. So the source tree
+must be the one those dependencies were built for. `install.sh` extracts the
+tarball, then re-materialises the full source from git at **the release's own
+commit** (`git_sha` in `RELEASE.json`), falling back to `origin/main` only for
+a tarball old enough to carry no stamp.
+
+It used to reset to `origin/main` unconditionally, which paired TODAY's source
+with the LAST RELEASE's dependencies. The consequence is worth stating plainly
+because nothing about it is visible from the repo: **from the moment any PR
+adds a dependency until the next release is published, EVERY clean install is
+broken — on prod as well as staging** — while already-installed boxes are
+perfectly fine, because their update path takes source and dependencies
+together from one tarball. The box dies on an unresolved import before it can
+bind, so the only symptom is the installer's "server did not become healthy"
+timeout pointing at `systemctl status`. That is what happened on 2026-08-15
+(the plan-page work added four packages).
+
+Two consequences to keep in mind:
+
+- **Merging does not ship server code to new boxes; publishing a release
+  does.** That was already true of existing boxes and is now uniformly true.
+- **A dependency added to `package.json` reaches a box only through a new
+  tarball.** No box ever resolves one at runtime.
+
+A preflight (`check_release_dependencies` in install.sh, `findMissingDependencies`
+in install-lib.mjs) backstops the rest of the class — a fork via
+`MANTA_REPO_URL`, a hand-run `git pull`, a half-extracted tarball — by naming
+the missing packages at install time instead of leaving a health timeout.
+
 ### A release is identified by its COMMIT, not its version number
 
 **You do not need to bump `package.json` to ship a server release.** A box

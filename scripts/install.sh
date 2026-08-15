@@ -456,10 +456,93 @@ wait_for_box_id() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Git-aware deploy init. `scripts/self-update.sh` (wired in BET-225.A5) assumes
+# $MANTA_HOME is a git checkout, so the update path can do a `git fetch +
+# reset`. The release tarball ships WITHOUT a .git/ (pack.mjs strips it), so we
+# re-create one here. Idempotent: a re-run on an existing deploy updates the
+# remote URL in place (handles renames) and re-resets, so the tarball and the
+# working tree always agree. Untracked files (runtime/, RELEASE.json) survive —
+# `git reset --hard` only touches tracked paths.
+#
+# WE RESET TO THE RELEASE'S OWN COMMIT, NOT origin/main (BET-978). The tarball
+# is where node_modules comes from — the box never builds dependencies itself —
+# so resetting the source to main pairs TODAY's code with the LAST RELEASE's
+# dependencies. Every package added since that release is then missing, the
+# server dies on an unresolved import before it binds, and the installer can
+# only report a health-check timeout. That broke EVERY clean install on prod
+# and staging for the window between a dependency-adding merge and the next
+# release, while already-installed boxes (which take source and dependencies
+# from one tarball) were fine. Pinning makes the two agree by construction. New
+# code still reaches boxes the normal way: publish a release, self-update
+# applies it wholesale.
+#
+# $1=MANTA_HOME  $2=repo url  $3=node binary  $4=install-lib.mjs
+deploy_git_checkout() {
+  local home="$1" repo_url="$2" node_bin="$3" lib="$4"
+  local deploy_sha deploy_ref="origin/main"
+
+  log "Initialising git checkout at $home (origin=$repo_url)"
+  if [ ! -d "$home/.git" ]; then
+    git -C "$home" init -q -b main \
+      || die "git init failed at $home — install git and retry"
+  fi
+  # `git remote add` fails if the remote already exists (re-run case);
+  # `set-url` is the idempotent override.
+  git -C "$home" remote set-url origin "$repo_url" 2>/dev/null \
+    || git -C "$home" remote add origin "$repo_url"
+  git -C "$home" fetch origin main -q \
+    || die "git fetch origin main failed — check network / MANTA_REPO_URL"
+
+  # Which commit? The release stamps its own into RELEASE.json. Empty output
+  # means this tarball predates the stamp (or was packed outside a git
+  # checkout) — then, and only then, fall back to origin/main.
+  deploy_sha="$("$node_bin" "$lib" deploy-ref --release "$home/RELEASE.json" 2>/dev/null || echo "")"
+  if [ -n "$deploy_sha" ]; then
+    # The release commit is normally an ancestor of main and already local
+    # after the fetch above. If it isn't (a release built from a branch since
+    # force-pushed, say), ask the remote for it directly — and only fall back
+    # if the remote can't serve it either, since a checkout at main is still
+    # better than no checkout at all.
+    if git -C "$home" cat-file -e "${deploy_sha}^{commit}" 2>/dev/null \
+      || git -C "$home" fetch origin "$deploy_sha" -q 2>/dev/null; then
+      deploy_ref="$deploy_sha"
+    else
+      warn "release commit ${deploy_sha} is not fetchable — falling back to origin/main"
+    fi
+  fi
+  git -C "$home" reset --hard "$deploy_ref" -q \
+    || die "git reset --hard $deploy_ref failed at $home"
+  ok "Deploy is git-aware: $(git -C "$home" rev-parse --short HEAD) (ref: $deploy_ref)"
+}
+
+# ---------------------------------------------------------------------------
+# Dependency preflight. The pin above makes the usual source/dependency
+# mismatch unreachable, but a fork via MANTA_REPO_URL, a hand-run `git pull`,
+# or a half-extracted tarball can still leave a tree the shipped node_modules
+# doesn't satisfy. Unchecked, that surfaces as a supervised service
+# crash-looping on a module-not-found: the installer reports only "server did
+# not become healthy" and the operator is sent to read service logs to discover
+# a missing package. Name the packages here instead, while we can still say
+# what's wrong.
+#
+# $1=MANTA_HOME  $2=node binary  $3=install-lib.mjs
+check_release_dependencies() {
+  local home="$1" node_bin="$2" lib="$3" missing
+  missing="$("$node_bin" "$lib" check-deps --home "$home" 2>/dev/null || echo "")"
+  [ -n "$missing" ] || return 0
+  die "this release is inconsistent — its source needs packages its node_modules does not have:
+$(printf '  - %s\n' $missing)
+       The server cannot start like this. This is a release-packaging bug, not
+       a problem with your machine — please report it. Re-running the installer
+       once a fixed release is published will resolve it."
+}
+
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
 # verify_sha256 + resolve_arch + launchd_agent_path +
-# print_provider_detection_summary + read_box_id / wait_for_box_id) are
+# print_provider_detection_summary + read_box_id / wait_for_box_id +
+# deploy_git_checkout / check_release_dependencies) are
 # loaded. The actual install does NOT run. Lets the unit tests exercise
 # the helpers with mocked `uname`/etc. without hitting the network. See
 # scripts/install.test.mjs.
@@ -640,45 +723,25 @@ main() {
        die "could not move extracted tarball into $MANTA_HOME — previous install restored"
     }
 
-  # ---------------------------------------------------------------------------
-  # 4b. Git-aware deploy init. `scripts/self-update.sh` (wired in BET-225.A5)
-  #     assumes $MANTA_HOME is a git checkout pointed at origin/main, so the
-  #     update path can do `git fetch + reset --hard origin/main`. The release
-  #     tarball ships WITHOUT a .git/ (pack.mjs strips it), so we re-create one
-  #     here. Idempotent: a re-run on an existing deploy updates the remote
-  #     URL in place (handles renames) and re-resets to origin/main so the
-  #     tarball + the working tree always agree. Untracked files
-  #     (runtime/, RELEASE.json) survive — `git reset --hard` only touches
-  #     tracked paths.
-  # ---------------------------------------------------------------------------
-  MANTA_REPO_URL="${MANTA_REPO_URL:-https://github.com/antoinedc/MantaUI.git}"
-  if [ "$DRY_RUN" = "1" ]; then
-    dry_log "would init git at $MANTA_HOME, fetch $MANTA_REPO_URL, reset --hard origin/main"
-  else
-    log "Initialising git checkout at $MANTA_HOME (origin=$MANTA_REPO_URL)"
-    if [ ! -d "$MANTA_HOME/.git" ]; then
-      git -C "$MANTA_HOME" init -q -b main \
-        || die "git init failed at $MANTA_HOME — install git and retry"
-    fi
-    # `git remote add` fails if the remote already exists (re-run case);
-    # `set-url` is the idempotent override.
-    git -C "$MANTA_HOME" remote set-url origin "$MANTA_REPO_URL" 2>/dev/null \
-      || git -C "$MANTA_HOME" remote add origin "$MANTA_REPO_URL"
-    git -C "$MANTA_HOME" fetch origin main -q \
-      || die "git fetch origin main failed — check network / MANTA_REPO_URL"
-    git -C "$MANTA_HOME" reset --hard origin/main -q \
-      || die "git reset --hard origin/main failed at $MANTA_HOME"
-    ok "Deploy is git-aware: $(git -C "$MANTA_HOME" rev-parse --short HEAD)"
-  fi
-
   # From here on, EVERY node invocation uses the vendored binary explicitly.
-  # No path lookup, no reliance on a system node.
+  # No path lookup, no reliance on a system node. Resolved BEFORE the git step
+  # below because that step asks the tested lib which commit to pin to.
   NODE="$MANTA_HOME/runtime/node/bin/node"
   export PATH="$MANTA_HOME/runtime/node/bin:$PATH"
 
   # Now use the REAL tested lib for everything downstream.
   LIB="$MANTA_HOME/scripts/install-lib.mjs"
   [ -f "$LIB" ] || die "tarball is missing scripts/install-lib.mjs — bad release?"
+
+  # 4b/4c — see deploy_git_checkout() / check_release_dependencies() above.
+  MANTA_REPO_URL="${MANTA_REPO_URL:-https://github.com/antoinedc/MantaUI.git}"
+  if [ "$DRY_RUN" = "1" ]; then
+    dry_log "would init git at $MANTA_HOME, fetch $MANTA_REPO_URL, reset --hard to the release commit"
+    dry_log "would verify every declared dependency is present in $MANTA_HOME/node_modules"
+  else
+    deploy_git_checkout "$MANTA_HOME" "$MANTA_REPO_URL" "$NODE" "$LIB"
+    check_release_dependencies "$MANTA_HOME" "$NODE" "$LIB"
+  fi
 
   # Resolve the canonical config (exports MANTA_HOME, MANTA_AUTH_FILE, MANTA_PORT,
   # MANTA_HEALTH_URL, …). Version comes from package.json when unset.

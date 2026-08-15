@@ -10,6 +10,8 @@ import {
   resolveConfig,
   parsePort,
   checkIdentity,
+  resolveDeployRef,
+  findMissingDependencies,
   waitForHealth,
   readBoxIdentity,
   formatPairingOutput,
@@ -5572,4 +5574,208 @@ test("BET-446: seeding still merges the plugin when OPENCODE_CLAUDE_AUTH_PLUGIN 
   assert.match(out, /opencode\.jsonc seeded\./, `must print the success line:\n${out}`);
   assert.ok(config !== null, "the merged opencode.jsonc must be written");
   assert.match(config, /opencode-claude-auth@latest/, "the plugin must still be seeded into the config");
+});
+
+// ----------------------------------------------------------------------------
+// BET-978 — a clean install must run the release's OWN source, not main's.
+// ----------------------------------------------------------------------------
+//
+// The failure this locks out: install.sh extracts a pinned release tarball
+// (the only source of node_modules — the box never builds dependencies) and
+// then re-materialises the source tree from git. Resetting that tree to
+// origin/main paired TODAY's source with the LAST RELEASE's dependencies, so
+// every package added since the last publish was missing. The server exited on
+// an unresolved import before binding, and the installer could only report
+// "server did not become healthy". It broke EVERY clean install on prod and
+// staging between a dependency-adding merge and the next release.
+
+test("BET-978: resolveDeployRef pins to the release's own commit", () => {
+  const sha = "d3cb8aceb94540030ca65bb28cf7ea732bd17e73";
+  const got = resolveDeployRef(JSON.stringify({ version: "0.0.30", git_sha: sha }));
+  assert.equal(got.sha, sha);
+  assert.equal(got.source, "release");
+});
+
+test("BET-978: resolveDeployRef falls back when the release carries no usable stamp", () => {
+  // A tarball packed outside a git checkout, or one older than the stamp.
+  for (const text of [
+    "",
+    "not json",
+    JSON.stringify({ version: "0.0.29" }),
+    JSON.stringify({ version: "0.0.29", git_sha: null }),
+    JSON.stringify({ version: "0.0.29", git_sha: "" }),
+    JSON.stringify({ version: "0.0.29", git_sha: "d3cb8ac" }), // short — never written by the packer
+    JSON.stringify({ version: "0.0.29", git_sha: "Z".repeat(40) }),
+  ]) {
+    const got = resolveDeployRef(text);
+    assert.equal(got.sha, null, `must not trust ${JSON.stringify(text)}`);
+    assert.equal(got.source, "fallback");
+  }
+  // …and a non-string input can't throw.
+  assert.equal(resolveDeployRef(undefined).sha, null);
+});
+
+test("BET-978: findMissingDependencies names the packages a release is short of", () => {
+  const pkg = JSON.stringify({
+    dependencies: { unified: "^11", "rehype-stringify": "^10", ws: "^8" },
+    devDependencies: { vitest: "^2" },
+  });
+  const present = new Set(["node_modules/unified/package.json", "node_modules/ws/package.json"]);
+  const missing = findMissingDependencies(pkg, { exists: (p) => present.has(p) });
+  assert.deepEqual(missing, ["rehype-stringify"], "only the absent runtime dependency");
+
+  // devDependencies are never checked — the tarball is built --omit=dev.
+  const allPresent = findMissingDependencies(pkg, {
+    exists: (p) => !p.includes("vitest"),
+  });
+  assert.deepEqual(allPresent, []);
+
+  // Nothing to say about an unreadable or dependency-less package.json.
+  assert.deepEqual(findMissingDependencies("not json", { exists: () => false }), []);
+  assert.deepEqual(findMissingDependencies("{}", { exists: () => false }), []);
+});
+
+// The behavioural half: run the REAL deploy_git_checkout() out of the REAL
+// install.sh against a throwaway git repo, so a regression in the shipped
+// script is what goes red — not a copy of its logic living in the test.
+//
+// Layout mirrors a freshly extracted tarball: $MANTA_HOME holds RELEASE.json
+// and no .git/. `origin` is a local repo with two commits — the "release" one
+// and a later "main" one carrying a file the release doesn't have (standing in
+// for a dependency-adding merge).
+function runDeployGitCheckout({ releaseJson, node = process.execPath }) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-deploy-"));
+  const origin = join(dir, "origin");
+  const home = join(dir, "manta");
+  mkdirSync(origin, { recursive: true });
+  mkdirSync(home, { recursive: true });
+  const git = (args, cwd) =>
+    execSync(`git ${args}`, {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+      },
+    });
+  git("init -q -b main .", origin);
+  writeFileSync(join(origin, "marker.txt"), "release-source\n");
+  git("add -A", origin);
+  git('commit -qm "release commit"', origin);
+  const releaseSha = git("rev-parse HEAD", origin).trim();
+  writeFileSync(join(origin, "marker.txt"), "main-source\n");
+  git("add -A", origin);
+  git('commit -qm "later main commit"', origin);
+  const mainSha = git("rev-parse HEAD", origin).trim();
+
+  if (releaseJson !== null) {
+    writeFileSync(
+      join(home, "RELEASE.json"),
+      typeof releaseJson === "function" ? releaseJson(releaseSha) : releaseJson,
+    );
+  }
+
+  const script = join(dir, "test.sh");
+  writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set +e
+# warn()/die() write to stderr, and runAndCapture only keeps stderr on a
+# non-zero exit — merge so the fallback WARNING is assertable on success too.
+exec 2>&1
+export MANTA_INSTALL_TEST_MODE=1
+source '${INSTALL_SH}'
+deploy_git_checkout '${home}' '${origin}' '${node}' '${join(__dirname, "install-lib.mjs")}'
+echo "HEAD=$(git -C '${home}' rev-parse HEAD)"
+echo "MARKER=$(cat '${home}/marker.txt')"
+`,
+    { mode: 0o755 },
+  );
+  const out = runAndCapture(script);
+  try {
+    return { out, releaseSha, mainSha };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("BET-978: a clean install checks out the RELEASE's commit, not main's", () => {
+  const { out, releaseSha, mainSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+  });
+  assert.match(out, new RegExp(`HEAD=${releaseSha}`), `must land on the release commit:\n${out}`);
+  assert.match(out, /MARKER=release-source/, `working tree must be the release's source:\n${out}`);
+  assert.doesNotMatch(out, new RegExp(`HEAD=${mainSha}`), "must NOT land on main");
+});
+
+test("BET-978: a release with no commit stamp still falls back to main", () => {
+  // Pre-stamp tarballs, or one packed outside a git checkout — never worse
+  // than the old behaviour.
+  for (const releaseJson of [null, JSON.stringify({ version: "0.0.29" })]) {
+    const { out, mainSha } = runDeployGitCheckout({ releaseJson });
+    assert.match(out, new RegExp(`HEAD=${mainSha}`), `must fall back to main:\n${out}`);
+    assert.match(out, /MARKER=main-source/, `${out}`);
+  }
+});
+
+test("BET-978: an unfetchable release commit warns and falls back rather than dying", () => {
+  const { out, mainSha } = runDeployGitCheckout({
+    releaseJson: JSON.stringify({ version: "9.9.9", git_sha: "a".repeat(40) }),
+  });
+  assert.match(out, /is not fetchable — falling back to origin\/main/, `must say why:\n${out}`);
+  assert.match(out, new RegExp(`HEAD=${mainSha}`), `a checkout at main beats no checkout:\n${out}`);
+});
+
+// The dependency preflight, run for real out of the shipped script.
+function runCheckReleaseDependencies({ pkgJson, present = [] }) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-deps-"));
+  const home = join(dir, "manta");
+  mkdirSync(join(home, "node_modules"), { recursive: true });
+  writeFileSync(join(home, "package.json"), pkgJson);
+  for (const name of present) {
+    mkdirSync(join(home, "node_modules", name), { recursive: true });
+    writeFileSync(join(home, "node_modules", name, "package.json"), "{}");
+  }
+  const script = join(dir, "test.sh");
+  writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set +e
+exec 2>&1
+export MANTA_INSTALL_TEST_MODE=1
+source '${INSTALL_SH}'
+check_release_dependencies '${home}' '${process.execPath}' '${join(__dirname, "install-lib.mjs")}'
+echo "EXIT=$?"
+`,
+    { mode: 0o755 },
+  );
+  const out = runAndCapture(script);
+  try {
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("BET-978: the installer names the missing packages instead of timing out on health", () => {
+  const out = runCheckReleaseDependencies({
+    pkgJson: JSON.stringify({
+      dependencies: { ws: "^8", "rehype-stringify": "^10", "highlight.js": "^11" },
+    }),
+    present: ["ws"],
+  });
+  assert.match(out, /this release is inconsistent/, `must state the real cause:\n${out}`);
+  assert.match(out, /rehype-stringify/, "must name the missing package");
+  assert.match(out, /highlight\.js/, "must name every missing package");
+  assert.doesNotMatch(out, /EXIT=0/, "must abort the install, not continue to a doomed start");
+});
+
+test("BET-978: the preflight is silent when the release is consistent", () => {
+  const out = runCheckReleaseDependencies({
+    pkgJson: JSON.stringify({ dependencies: { ws: "^8" }, devDependencies: { vitest: "^2" } }),
+    present: ["ws"],
+  });
+  assert.match(out, /EXIT=0/, `a consistent release must pass:\n${out}`);
+  assert.doesNotMatch(out, /inconsistent/, `${out}`);
 });
