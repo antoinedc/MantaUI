@@ -218,3 +218,203 @@ describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () =>
     expect(focusedHome?.textContent).toContain("proj");
   });
 });
+
+describe("Sidebar — project close worktree-cleanup + toast path (killProject, BET-937)", () => {
+  let h: Harness | null = null;
+
+  function makeWindow(index: number, worktreePath: string | null) {
+    return { index, name: "w" + index, active: index === 0, paneCurrentPath: "/x", opencodeSessionId: null, worktreePath };
+  }
+
+  // `refresh` is the store action killProject awaits last. The default (real)
+  // impl would hit the mocked api and throw inside applySyncPayload, so tests
+  // stub it to a spy — these tests care that it is CALLED, not what it does.
+  let refreshCalls: number;
+
+  beforeEach(() => {
+    localStorage.clear();
+    refreshCalls = 0;
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function mountSidebar(): Harness {
+    h = mount(
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} />,
+    );
+    return h;
+  }
+
+  function keyOnTree(key: string, init: { metaKey?: boolean; ctrlKey?: boolean } = {}) {
+    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
+    act(() => {
+      tree.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+    });
+  }
+
+  // Home focuses navKeys[0] (the "proj" group header), then ⌘⌫ opens the
+  // project-close confirm for that focused group — the same path a user clicks.
+  function openProjectCloseConfirm() {
+    keyOnTree("Home");
+    keyOnTree("Delete", { metaKey: true });
+  }
+
+  function confirmCloseProjectButton(): HTMLButtonElement {
+    const dialog = h!.docQuery('div[role="dialog"]') as HTMLElement;
+    const btn = [...dialog.querySelectorAll("button")].find(
+      (b) => b.textContent === "Close project",
+    ) as HTMLButtonElement;
+    expect(btn, "expected the project-close confirm button").toBeTruthy();
+    return btn;
+  }
+
+  function keepToasts(): string[] {
+    return useStore
+      .getState()
+      .appToasts.filter((t) => String(t.message).includes("Kept worktree"))
+      .map((t) => String(t.message));
+  }
+
+  it("closes a project with two clean worktrees → both removed, no keep-toast", async () => {
+    installMockApi({
+      gitRemoveWorktree: () => Promise.resolve({ removed: true }),
+    });
+    resetStore({
+      worktreeCleanOnClose: true,
+      appToasts: [],
+      refresh: async () => {
+        refreshCalls++;
+      },
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b")],
+        }),
+      ],
+    });
+    mountSidebar();
+    openProjectCloseConfirm();
+    // Confirm body advertises both worktrees being removed.
+    expect(h!.docText()).toContain("2 worktrees will be removed.");
+
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+
+    const calls = api.calls.gitRemoveWorktree ?? [];
+    expect(calls).toHaveLength(2);
+    const paths = calls.map((c) => (c[0] as { path: string }).path).sort();
+    expect(paths).toEqual(["/wt/a", "/wt/b"]);
+    expect(keepToasts()).toHaveLength(0);
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("one dirty worktree survives, tmux session dies, exactly one keep-toast names it", async () => {
+    installMockApi({
+      gitRemoveWorktree: (args: { path: string }) =>
+        Promise.resolve(
+          args.path === "/wt/dirty" ? { removed: false, reason: "dirty" } : { removed: true },
+        ),
+    });
+    resetStore({
+      worktreeCleanOnClose: true,
+      appToasts: [],
+      refresh: async () => {
+        refreshCalls++;
+      },
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [makeWindow(0, "/wt/clean"), makeWindow(1, "/wt/dirty")],
+        }),
+      ],
+    });
+    mountSidebar();
+    openProjectCloseConfirm();
+
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+
+    // Clean worktree removed, tmux session killed.
+    const removeCalls = (api.calls.gitRemoveWorktree ?? []).map((c) => (c[0] as { path: string }).path);
+    expect(removeCalls).toContain("/wt/clean");
+    expect(removeCalls).toContain("/wt/dirty");
+    expect(api.calls.tmuxKillSession).toEqual([["proj"]]);
+    // Dirty worktree survives: exactly one keep-toast, naming it.
+    const keeps = keepToasts();
+    expect(keeps).toHaveLength(1);
+    expect(keeps[0]).toContain("/wt/dirty");
+    expect(keeps[0]).not.toContain("/wt/clean");
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("worktreeCleanOnClose off → no gitRemoveWorktree, no worktree sentence in confirm", async () => {
+    installMockApi({});
+    resetStore({
+      worktreeCleanOnClose: false,
+      appToasts: [],
+      refresh: async () => {
+        refreshCalls++;
+      },
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [makeWindow(0, "/wt/a"), makeWindow(1, "/wt/b")],
+        }),
+      ],
+    });
+    mountSidebar();
+    openProjectCloseConfirm();
+
+    // Body from describeProjectClose with worktreeCount 0 — no worktree copy.
+    expect(h!.docText()).not.toContain("worktree");
+    expect(h!.docText()).toContain('Close “proj”');
+
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+
+    expect(api.calls.gitRemoveWorktree).toBeUndefined();
+    expect(api.calls.tmuxKillSession).toEqual([["proj"]]);
+    expect(keepToasts()).toHaveLength(0);
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("projectMetaDelete runs and a throw there does not block refresh()", async () => {
+    installMockApi({
+      projectMetaDelete: () => Promise.reject(new Error("meta gone")),
+    });
+    resetStore({
+      worktreeCleanOnClose: false,
+      appToasts: [],
+      refresh: async () => {
+        refreshCalls++;
+      },
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [makeWindow(0, "/wt/a")],
+        }),
+      ],
+    });
+    mountSidebar();
+    openProjectCloseConfirm();
+
+    const api = (window as unknown as { api: { calls: Record<string, unknown[][]> } }).api;
+    act(() => confirmCloseProjectButton().click());
+    await h!.flush();
+
+    expect(api.calls.projectMetaDelete).toEqual([["proj"]]);
+    // The reject is swallowed + surfaced as an error toast, but refresh() still runs.
+    expect(refreshCalls).toBe(1);
+    expect(
+      useStore
+        .getState()
+        .appToasts.some((t) => t.tone === "error" && String(t.message).includes("meta gone")),
+    ).toBe(true);
+  });
+});
