@@ -58,6 +58,25 @@ if (typeof window !== "undefined" && !window.matchMedia) {
   });
 }
 
+// Opt-in jsdom stub for HTMLCanvasElement.prototype.getContext (@xterm's WebGL
+// addon probes it at import time; jsdom throws). NOT applied at module scope:
+// components branch on `if (!ctx) return;`, and a truthy ctx for every jsdom
+// test would start an rAF draw loop. Call explicitly BEFORE the import.
+export function installCanvasStub(): void {
+  if (typeof HTMLCanvasElement === "undefined") return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (HTMLCanvasElement.prototype as any).getContext = function (this: any) {
+    const noop = () => {};
+    return {
+      measureText: (text: unknown) => ({ width: String(text ?? "").length }),
+      createLinearGradient: () => ({ addColorStop: noop }),
+      createRadialGradient: () => ({ addColorStop: noop }),
+      canvas: this,
+      getImageData: () => ({ data: new Uint8ClampedArray(0) }),
+    } as unknown as CanvasRenderingContext2D;
+  };
+}
+
 // A subscriber registered via the mocked `window.api.onOpencodeEvent`.
 type EventListener = (ev: OpencodeEvent) => void;
 
@@ -115,7 +134,6 @@ function defaultApiImpl(): Record<string, unknown> {
     secretsDelete: () => Promise.resolve(),
     webhookList: () => Promise.resolve([]),
     webhookDelete: () => Promise.resolve(),
-    onProgressUpdated: () => () => {},
     progressGet: () => Promise.resolve(null),
     // Voice / files — component may probe these on mount.
     getPathForFile: () => "",
@@ -179,6 +197,9 @@ export function installMockApi(
           return (provided as (...a: unknown[]) => unknown)(...args);
         }
         if (provided !== undefined) return provided;
+        // `onX(cb)` subscriptions must synchronously return an unsubscribe fn
+        // (components `return` it from a useEffect); covers current + future.
+        if (/^on[A-Z]/.test(prop)) return () => {};
         return Promise.resolve(undefined);
       };
     },
