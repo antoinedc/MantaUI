@@ -314,14 +314,20 @@ describe("groupByDay", () => {
   const older = new Date(2026, 7, 3, 9, 0).getTime();
 
   it("groups Today / Yesterday / older with item order preserved and newest first", () => {
+    // The older-group label follows the OS locale (Intl), so derive the
+    // expectation rather than hardcoding an en-US string.
+    const olderLabel = new Intl.DateTimeFormat(undefined, {
+      weekday: "short", day: "numeric", month: "short",
+    }).format(older);
     const out = groupByDay(
       [img("/a/today2", today + 1000), img("/a/older", older), img("/a/today1", today), img("/a/yest", yesterday)],
       now,
     );
-    expect(out.map((g) => g.label)).toEqual(["Today", "Yesterday", "Mon 3 Aug"]);
+    expect(out.map((g) => g.label)).toEqual(["Today", "Yesterday", olderLabel]);
     expect(out[0].items.map((a) => a.href)).toEqual(["/a/today2", "/a/today1"]);
     expect(out[1].items.map((a) => a.href)).toEqual(["/a/yest"]);
     expect(out[2].items.map((a) => a.href)).toEqual(["/a/older"]);
+    expect(out[2].label).toContain("3");
   });
 
   it("empty input → empty groups", () => {
