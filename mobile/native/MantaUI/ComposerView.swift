@@ -253,6 +253,16 @@ struct ComposerView: View {
                     .clipped()
             }
 
+            // Plan mode label — one line above the text area so the mode stays
+            // visible where you type (BET-952). Phones lose ambient state
+            // fastest, so plan mode must be readable at a glance.
+            if modelStore.planOn {
+                Label("Plan mode · edits blocked", systemImage: planIcon)
+                    .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.accentTx)
+                    .padding(.bottom, Metrics.spacing.spPx)
+            }
+
             // The message line.
             textArea
 
@@ -287,12 +297,14 @@ struct ComposerView: View {
     private var controlRow: some View {
         HStack(spacing: Metrics.spacing.sp2) {
             // Model + dot + attach sit close together; the dot hugs the model
-            // label. Final order `[modelPill] [dot] [attach]` — the dot is
+            // label. Final order `[modelPill] [dot] [plan] [attach]` — the dot is
             // always present (textless), between the label and the paperclip.
+            // The plan chip sits immediately after the model pill (BET-952).
             HStack(spacing: 0) {
                 modelPill
                 usageDot
             }
+            planToggleChip
             attachButton
             Spacer(minLength: 0)
             if micAvailable {
@@ -333,7 +345,52 @@ struct ComposerView: View {
     /// Accent while a background refetch is in flight, and never while a turn
     /// runs — the two states must not share an indicator (BET-630 D1).
     private var borderColor: Color {
-        store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle
+        // Plan mode tints the whole glass box with the accent tone so the mode
+        // is visible where you type (BET-952). Same tone as the "on" state.
+        if modelStore.planOn { return tokens.accent }
+        return store.refreshing && !store.running ? tokens.accent : tokens.borderSubtle
+    }
+
+    /// The plan-mode capsule in the control row, immediately after the model
+    /// pill (BET-952). Deliberately a per-turn, consequential control, so it
+    /// lives in the composer row — NOT the model sheet. Hidden entirely when
+    /// unavailable-and-off (the iOS convention used for fast on a narrow
+    /// screen), so a box with no plan agent shows no greyed chip.
+    @ViewBuilder
+    private var planToggleChip: some View {
+        let plan = modelStore.planToggle
+        if !plan.available && !plan.on {
+            EmptyView()
+        } else {
+            Button {
+                modelStore.setPlan(!plan.on)
+            } label: {
+                HStack(spacing: Metrics.spacing.sp1) {
+                    Image(systemName: planIcon)
+                        .font(.system(size: Metrics.type.xs, weight: .medium))
+                    Text("Plan")
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                }
+                .foregroundColor(plan.on ? tokens.accentTx : tokens.tx2)
+                .padding(.vertical, Metrics.spacing.sp1)
+                .padding(.horizontal, Metrics.spacing.sp2)
+                .background(plan.on ? tokens.accentSoft : tokens.inset, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            // A lit-but-unavailable chip is honest, not toggleable: the plan
+            // agent vanished mid-toggle, so it must not be clickable to "off".
+            .disabled(!plan.available)
+            .accessibilityLabel("Plan mode")
+            .accessibilityHint(plan.title)
+            .accessibilityIdentifier("plan-mode-toggle")
+        }
+    }
+
+    /// The plan chip glyph — `compass.drawing` (the SF counterpart of the
+    /// desktop `DraftingCompass`), falling back to `pencil.and.ruler` when the
+    /// symbol is unavailable on the deployment target.
+    private var planIcon: String {
+        UIImage(systemName: "compass.drawing") != nil ? "compass.drawing" : "pencil.and.ruler"
     }
 
     /// The message field at the top of the box. It reports its own height so
@@ -893,10 +950,12 @@ struct ComposerView: View {
         }
         let sentText = trimmed
         let mentions = draftMentions.isEmpty ? nil : draftMentions
+        // Send the resolved plan agent only while plan mode is actually on.
+        let agent = modelStore.planToggle.on ? modelStore.planToggle.agent : nil
         Task { @MainActor in
             // On a failed send the store rolled its running state back; restore
             // the user's message so it is never silently lost, and surface why.
-            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model, mentions: mentions)
+            let ok = await store.send(text: sentText, attachments: sendAttachments, model: model, mentions: mentions, agent: agent)
             if !ok {
                 text = sentText
                 surfaceHint("Send failed — message restored")

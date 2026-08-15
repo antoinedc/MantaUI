@@ -171,6 +171,54 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(ChatModel.filteredGroups(g, query: "  ").first?.models.count, 2)
     }
 
+    // MARK: - ChatModel.planToggle (BET-952, mirrors desktop resolvePlanToggle)
+
+    private func agent(_ name: String, mode: String?) -> OpencodeAgent {
+        OpencodeAgent(name: name, description: nil, mode: mode, native: nil, builtIn: nil)
+    }
+
+    func testPlanToggleNilAgentsIsLoading() {
+        let r = ChatModel.planToggle(agents: nil, on: false)
+        XCTAssertTrue(r.loading)
+        XCTAssertFalse(r.available)
+        XCTAssertEqual(r.title, "Loading agents…")
+    }
+
+    func testPlanToggleNoPlanAgentIsUnavailableOff() {
+        let r = ChatModel.planToggle(agents: [agent("build", mode: "primary")], on: false)
+        XCTAssertFalse(r.available)
+        XCTAssertFalse(r.on)
+        XCTAssertEqual(r.title, "This box has no plan agent")
+        XCTAssertNil(r.agent)
+    }
+
+    func testPlanToggleNoPlanAgentButOnStaysLit() {
+        let r = ChatModel.planToggle(agents: [agent("build", mode: "primary")], on: true)
+        XCTAssertFalse(r.available)
+        XCTAssertTrue(r.on)
+        XCTAssertEqual(r.title, "Plan mode on (plan agent unavailable)")
+    }
+
+    func testPlanToggleSubagentNamedPlanDoesNotCount() {
+        let r = ChatModel.planToggle(agents: [agent("plan", mode: "subagent")], on: false)
+        XCTAssertFalse(r.available)
+        XCTAssertEqual(r.title, "This box has no plan agent")
+    }
+
+    func testPlanToggleAvailableOffAndOn() {
+        let agents = [agent("build", mode: "primary"), agent("plan", mode: "primary")]
+        let off = ChatModel.planToggle(agents: agents, on: false)
+        XCTAssertTrue(off.available)
+        XCTAssertFalse(off.on)
+        XCTAssertEqual(off.agent, "plan")
+        XCTAssertEqual(off.title, "Plan mode off — click to plan without editing")
+        let on = ChatModel.planToggle(agents: agents, on: true)
+        XCTAssertTrue(on.available)
+        XCTAssertTrue(on.on)
+        XCTAssertEqual(on.agent, "plan")
+        XCTAssertEqual(on.title, "Plan mode on — edits blocked. Click to build.")
+    }
+
     // MARK: - ChatVoice.mime
 
     func testMimeFromFilenameExtension() {

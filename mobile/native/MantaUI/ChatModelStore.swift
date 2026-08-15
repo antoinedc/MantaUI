@@ -35,16 +35,28 @@ final class ChatModelStore: ObservableObject {
     /// first. Persisted PER BOX (a habit, not a conversation), unlike the
     /// override/variant above which are per-session.
     @Published private(set) var recents: [ModelChoice] = []
+    /// Plan mode is ON for this session (the per-session `manta:chat:<sid>:plan`
+    /// boolean — BET-952). A plain Bool, deliberately NOT folded into the model
+    /// blob: iOS stores that as a distinct "providerID/modelID" string.
+    @Published private(set) var planOn: Bool
+    /// The box's agent list, once fetched (`opencode:agents`). Nil = not loaded
+    /// yet (the plan chip shows a loading placeholder); a list with no `plan`
+    /// primary agent makes the chip unavailable.
+    @Published private(set) var agents: [OpencodeAgent]?
 
     let sessionId: String
     private let catalog: ChatModelCatalog
+    private let api: MantaAPIClient
+    private var didLoadAgents = false
     private var cancellables: Set<AnyCancellable> = []
 
     init(sessionId: String, api: MantaAPIClient, catalog: ChatModelCatalog = .shared) {
         self.sessionId = sessionId
         self.catalog = catalog
+        self.api = api
         self.override = Self.loadOverride(for: sessionId)
         self.variant = UserDefaults.standard.string(forKey: Self.variantKey(for: sessionId))
+        self.planOn = UserDefaults.standard.bool(forKey: Self.planKey(for: sessionId))
 
         // Seed + mirror the shared catalog so the box-wide list and default are
         // published here (keeps every existing caller reading
@@ -75,8 +87,25 @@ final class ChatModelStore: ObservableObject {
         "manta:chat:\(sessionId):variant"
     }
 
+    /// The per-session plan-mode key (BET-952), a plain Bool — never folded
+    /// into the model blob (see the `planOn` doc).
+    static func planKey(for sessionId: String) -> String {
+        "manta:chat:\(sessionId):plan"
+    }
+
     func load() {
         catalog.loadIfNeeded()
+    }
+
+    /// Fetch the box's agent list once (`opencode:agents`) so the plan chip can
+    /// decide availability. Idempotent: a second call does nothing.
+    func loadAgentsIfNeeded() {
+        guard !didLoadAgents else { return }
+        didLoadAgents = true
+        Task {
+            let result = (try? await api.agents()) ?? []
+            await MainActor.run { self.agents = result }
+        }
     }
 
     /// Carry the current override + variant to a NEW session id. Called just
@@ -90,6 +119,9 @@ final class ChatModelStore: ObservableObject {
         }
         if let variant, !variant.isEmpty {
             UserDefaults.standard.set(variant, forKey: Self.variantKey(for: newSessionId))
+        }
+        if planOn {
+            UserDefaults.standard.set(planOn, forKey: Self.planKey(for: newSessionId))
         }
     }
 
@@ -193,6 +225,21 @@ final class ChatModelStore: ObservableObject {
         let currentVariant = variant
         setOverride(OpencodeModelID(providerID: target.providerID, modelID: target.modelID))
         if let currentVariant { setVariant(currentVariant) }
+    }
+
+    // MARK: - Plan mode (BET-952)
+
+    /// The resolved plan toggle for the composer chip: availability from the
+    /// fetched agent list, `on` from the persisted per-session flag, `agent`
+    /// (when on) the value to send on `opencode:prompt`.
+    var planToggle: ChatModel.PlanToggle {
+        ChatModel.planToggle(agents: agents, on: planOn)
+    }
+
+    /// Flip plan mode for this session, persisting the boolean.
+    func setPlan(_ on: Bool) {
+        planOn = on
+        UserDefaults.standard.set(on, forKey: Self.planKey(for: sessionId))
     }
 
     static func loadOverride(for sessionId: String) -> OpencodeModelID? {

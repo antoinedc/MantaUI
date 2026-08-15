@@ -262,6 +262,30 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(source?["end"] as? Int, 18)
     }
 
+    /// A plan-mode prompt carries `agent` onto `opencode:prompt` args (BET-952),
+    /// structurally identical to how `model`/`variant` travel — and omits the
+    /// key entirely when unset, so a build-mode prompt is byte-identical.
+    func testSendPromptCarriesAgentWhenSetAndOmitsWhenNil() async throws {
+        let client = makeClient()
+        _ = try await client.sendPrompt(SendPromptInput(
+            sessionId: "ses_1",
+            text: "plan this",
+            agent: "plan"
+        ))
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:prompt")
+        var args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        var payload = args?.first as? [String: Any]
+        XCTAssertEqual(payload?["agent"] as? String, "plan")
+
+        _ = try await client.sendPrompt(SendPromptInput(
+            sessionId: "ses_1",
+            text: "build this"
+        ))
+        args = CapturingURLProtocol.bodyJSON(CapturingURLProtocol.cache.last!)?["args"] as? [Any]
+        payload = args?.first as? [String: Any]
+        XCTAssertNil(payload?["agent"])
+    }
+
     // MARK: - artifacts / agent-file outbox (BET-750)
 
     /// `outbox:list` is dispatched as `fn(sessionId)` — scoped to the session —

@@ -258,6 +258,7 @@ private struct ChatScreenContent: View {
                 // window/branch lookup.
                 store.start()
                 modelStore.load()
+                modelStore.loadAgentsIfNeeded()
                 Task { await settingsStore.load() }
                 usageStore.start()
                 MantaPushRouter.shared.visibleSessionID = store.sessionId

@@ -237,15 +237,32 @@ struct SendPromptInput: Sendable {
     var model: Model?
     var attachments: [Attachment]?
     var mentions: [Mention]?
+    /// Send the prompt as a named opencode agent (e.g. `"plan"` mode) on
+    /// `opencode:prompt`, structurally identical to the `variant` field. Omitted
+    /// → the body carries no `agent` key (BET-949/BET-952).
+    var agent: String?
 
     init(sessionId: String, text: String, model: Model? = nil,
-         attachments: [Attachment]? = nil, mentions: [Mention]? = nil) {
+         attachments: [Attachment]? = nil, mentions: [Mention]? = nil,
+         agent: String? = nil) {
         self.sessionId = sessionId
         self.text = text
         self.model = model
         self.attachments = attachments
         self.mentions = mentions
+        self.agent = agent
     }
+}
+
+/// A named opencode agent (the `plan` primary agent, subagents, …), mirrored from
+/// the box's `GET /agent` (desktop `OpencodeAgent`). Only the fields the plan
+/// toggle reads are required.
+struct OpencodeAgent: Codable, Equatable, Sendable {
+    var name: String
+    var description: String?
+    var mode: String?
+    var native: Bool?
+    var builtIn: Bool?
 }
 
 enum PermissionReply: String, Sendable {
