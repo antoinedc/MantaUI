@@ -346,11 +346,16 @@ export function deriveArtifacts(
   return dedupeByKey(out).sort((a, b) => b.at - a.at);
 }
 
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+// Locale-driven "older than yesterday" group label — "Mon, 3 Aug" / "Mon, Aug 3"
+// depending on the OS locale. Module-level so the (expensive) Intl object is
+// constructed once, not per group. Mirrors the RESET_*_FMT consts in
+// chatUtils.ts (BET-966). Deliberately no year: the label is a within-recent-
+// history grouping header, and adding a year is a behaviour change, not this task.
+const GROUP_DAY_FMT = new Intl.DateTimeFormat(undefined, {
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+});
 
 // Calendar-day index (days since epoch) in LOCAL time, DST-safe by offsetting
 // the timestamp to UTC before dividing — makes "today/yesterday/older" and
@@ -381,8 +386,7 @@ export function groupByDay(items: Artifact[], now: number): Array<{ label: strin
 function groupLabel(idx: number, today: number, atMs: number): string {
   if (idx === today) return "Today";
   if (idx === today - 1) return "Yesterday";
-  const d = new Date(atMs);
-  return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return GROUP_DAY_FMT.format(atMs);
 }
 
 export type PageState = "live" | "soon" | "expired" | null;
