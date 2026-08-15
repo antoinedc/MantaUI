@@ -65,12 +65,12 @@ import {
   isDrainAbortError,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
-  planModeFromToolPart,
   collectChildSessionIds,
   hydrateQuestion,
   authErrorAdvice,
   fetchTranscriptWithRetry,
 } from "../chatUtils";
+import { planModeFromToolPart } from "../../shared/planMode.mjs";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";

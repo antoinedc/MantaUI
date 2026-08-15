@@ -168,6 +168,7 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var todos: StreamTodosPayload?
     @Published private(set) var questions: [QuestionRequest] = []
     @Published private(set) var permissions: [PermissionRequest] = []
+    @Published private(set) var planOn: Bool?
     @Published private(set) var subagents: [StreamSubagentPayload] = []
     @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
@@ -419,6 +420,7 @@ final class ChatSessionStore: ObservableObject {
         sessionError = s.sessionError
         todos = s.todos
         subagents = s.subagents
+        planOn = s.planOn
 
         // Which frame (if any) just changed this session's stream state. The
         // `$sessionStates` sink fires on every republish, so the stamp only

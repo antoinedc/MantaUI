@@ -77,6 +77,10 @@ struct MantaSessionStreamState: Equatable, Sendable {
     var todos: StreamTodosPayload?
     var questions: StreamQuestionsPayload?
     var permissions: StreamPermissionsPayload?
+    /// The plan-mode state the box last reported for this session (BET-977).
+    /// `nil` until a `planMode` frame arrives — mirrors opencode's local switch
+    /// so the Plan chip turns itself off the moment the model exits planning.
+    var planOn: Bool?
     var subagents: [StreamSubagentPayload] = []
     /// Live tools in flight keyed by their stable tool part id (`idx`), and
     /// the order they started in. A `toolEnded` removes the idx from the order
@@ -230,6 +234,8 @@ enum MantaStreamRouter {
             s.questions = try? frame.decodedPayload(StreamQuestionsPayload.self)
         case "permissions":
             s.permissions = try? frame.decodedPayload(StreamPermissionsPayload.self)
+        case "planMode":
+            s.planOn = try? frame.decodedPayload(StreamPlanModePayload.self)?.on
         case "subagent":
             if let p = try? frame.decodedPayload(StreamSubagentPayload.self) {
                 // Upsert keyed by the subagent's child-session id (BET-672): a

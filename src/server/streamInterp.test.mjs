@@ -882,3 +882,79 @@ test("the same event also emits a cache frame", () => {
   interp.interpret(updatedWith(ASSISTANT_MSG));
   assert.equal(events.filter((e) => e.sub === "cache").length, 1);
 });
+
+test("a completed plan_exit tool part emits one planMode {on:false} frame", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: {
+      sessionID: SID,
+      part: { id: "p1", type: "tool", tool: "plan_exit", callID: "toolu_exit", state: { status: "completed" } },
+    },
+  });
+  const pm = events.filter((e) => e.sub === "planMode");
+  assert.equal(pm.length, 1);
+  assert.equal(pm[0].payload.on, false);
+});
+
+test("a completed plan_enter tool part emits one planMode {on:true} frame", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: {
+      sessionID: SID,
+      part: { id: "p1", type: "tool", tool: "plan_enter", callID: "toolu_enter", state: { status: "completed" } },
+    },
+  });
+  const pm = events.filter((e) => e.sub === "planMode");
+  assert.equal(pm.length, 1);
+  assert.equal(pm[0].payload.on, true);
+});
+
+test("an errored plan_exit tool part emits NOTHING", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "message.part.updated",
+    properties: {
+      sessionID: SID,
+      part: { id: "p1", type: "tool", tool: "plan_exit", callID: "toolu_exit", state: { status: "error" } },
+    },
+  });
+  assert.equal(events.filter((e) => e.sub === "planMode").length, 0);
+});
+
+test("the same planMode callID arriving twice emits once", () => {
+  const { interp, events } = make();
+  const upd = {
+    type: "message.part.updated",
+    properties: {
+      sessionID: SID,
+      part: { id: "p1", type: "tool", tool: "plan_exit", callID: "toolu_exit", state: { status: "completed" } },
+    },
+  };
+  interp.interpret(upd);
+  interp.interpret(upd);
+  assert.equal(events.filter((e) => e.sub === "planMode").length, 1);
+});
+
+test("session.next.agent.switched to plan emits planMode {on:true}", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.next.agent.switched",
+    properties: { sessionID: SID, agent: "plan" },
+  });
+  const pm = events.filter((e) => e.sub === "planMode");
+  assert.equal(pm.length, 1);
+  assert.equal(pm[0].payload.on, true);
+});
+
+test("session.next.agent.switched away from plan emits planMode {on:false}", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    type: "session.next.agent.switched",
+    properties: { sessionID: SID, agent: "build" },
+  });
+  const pm = events.filter((e) => e.sub === "planMode");
+  assert.equal(pm.length, 1);
+  assert.equal(pm[0].payload.on, false);
+});
