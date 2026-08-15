@@ -694,6 +694,32 @@ export async function listSessions(directory) {
 }
 
 /**
+ * Read a single session's active `agent` field (BET-949). Used to seed the
+ * plan-mode toggle from a session already set to plan OUTSIDE MantaUI (e.g.
+ * via opencode's own `plan_enter`/agent endpoint), so the chip matches the
+ * agent the next turn will actually run before the honesty sync's first event.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<string | null>} the agent name (e.g. "plan"), or null when
+ *   absent / the session is unknown / the box errored (best-effort — a failed
+ *   seed falls back to the stored key).
+ */
+export async function getSessionAgent(sessionId) {
+  try {
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
+    const body = await res.json();
+    const agent = typeof body?.agent === "string" ? body.agent : null;
+    return agent && agent.length > 0 ? agent : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does this opencode session still exist?
  *
  * Answered with a DIRECT lookup (`GET /session/{id}`), never by scanning

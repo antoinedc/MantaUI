@@ -5,6 +5,7 @@ import {
   parseSseFrame,
   createSession,
   sendPrompt,
+  getSessionAgent,
   listMessages,
   getMessage,
   slimTranscript,
@@ -306,6 +307,36 @@ test("sendPrompt includes agent when passed and omits it when not", async () => 
   assert.ok(
     bodies.some((b) => !("agent" in b)),
     "expected an agent-less body for the plain prompt",
+  );
+});
+
+test("getSessionAgent returns the session's agent field (or null)", async () => {
+  // BET-949: seeds the plan toggle from a session already set to plan outside
+  // MantaUI. Returns the agent name, and null on absence / non-OK.
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/session/ses_plan")) {
+        return new Response(
+          JSON.stringify({ id: "ses_plan", agent: "plan", directory: "/w" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).includes("/session/ses_build")) {
+        return new Response(
+          JSON.stringify({ id: "ses_build", directory: "/w" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).includes("/session/ses_gone")) {
+        return new Response(null, { status: 404 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      assert.equal(await getSessionAgent("ses_plan"), "plan");
+      assert.equal(await getSessionAgent("ses_build"), null);
+      assert.equal(await getSessionAgent("ses_gone"), null);
+    },
   );
 });
 

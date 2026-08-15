@@ -749,6 +749,10 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.opencodeAgents)  → no args
     "opencode:agents": () => oc.listAgents(),
 
+    // preload: ipcRenderer.invoke(IPC.opencodeSessionAgent, sessionId)
+    // → args[0] = sessionId; opencode.mjs getSessionAgent expects the same
+    "opencode:session-agent": (sessionId) => oc.getSessionAgent(sessionId),
+
     // preload: ipcRenderer.invoke(IPC.opencodeFindFiles, { query, directory })
     // → args[0] = { query, directory }; opencode.mjs findFiles expects same shape
     "opencode:find-files": (input) => oc.findFiles(input),

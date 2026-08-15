@@ -595,6 +595,21 @@ export function ChatPanel({
     setError(null);
     setModelOverride(readSavedModel(sessionId) ?? configDefaultModel ?? null);
     setPlanOn(readPlanSaved(sessionId));
+    // Seed plan mode from the session's own `agent` field when present (BET-949
+    // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
+    // chip off and send the next prompt as build — the stored key alone can't
+    // know. Session.agent takes precedence over the stored key; on failure or
+    // absence we keep the stored-key seed. Guarded like modelCatalog: the
+    // pre-pairing preload subset lacks the method, and calling it throws.
+    const api = window.api as Partial<typeof window.api>;
+    if (api.opencodeSessionAgent) {
+      api.opencodeSessionAgent(sessionId).then((agent) => {
+        if (agent && agent.length > 0) {
+          setPlanOn(agent === "plan");
+          writePlanSaved(sessionId, agent === "plan");
+        }
+      }).catch(() => { /* non-fatal — stored-key seed stands */ });
+    }
     setAttachments([]);
     setAgentMentions([]);
     setSystemNotice(null);

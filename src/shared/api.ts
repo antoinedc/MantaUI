@@ -389,6 +389,9 @@ export interface Api {
     upsert?: SubagentInput[];
     remove?: string[];
   }): Promise<{ ok: boolean; error?: string }>;
+  // BET-949: the session's active agent (e.g. "plan"), or null when absent /
+  // unknown. Seeds the plan-mode toggle before the honesty sync's first event.
+  opencodeSessionAgent(sessionId: string): Promise<string | null>;
   // BET-123: reconcile configured agent blocks against the model list +
   // deactivated set; returns the resulting SubagentDef[].
   opencodeSyncSubagents(input: {
