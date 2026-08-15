@@ -151,6 +151,9 @@ else
   log "self-update: channel=${MANTA_CHANNEL:-prod} release host=$host"
 
   INSTALLED_VERSION="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version)||"")' "$MANTA_HOME/RELEASE.json")"
+  # The commit the installed payload was built from. Empty on a box installed
+  # before releases carried one — handled by the fallback in the skip check.
+  INSTALLED_GIT_SHA="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).git_sha)||"")' "$MANTA_HOME/RELEASE.json" 2>/dev/null || echo "")"
 
   log "self-update: fetching manifest from $host/releases/manta-latest.txt"
   manifest="$(curl -fsSL "$host/releases/manta-latest.txt")" \
@@ -160,14 +163,25 @@ else
   TARBALL_FILE="$(manifest_get "$manifest" "file_${ARCH_KEY}")"
   TARBALL_SHA="$(manifest_get "$manifest" "sha256_${ARCH_KEY}")"
   TARBALL_VERSION="$(manifest_get "$manifest" "version")"
+  TARBALL_GIT_SHA="$(manifest_get "$manifest" "git_sha")"
   if [ -z "$TARBALL_FILE" ] || [ -z "$TARBALL_SHA" ] || [ -z "$TARBALL_VERSION" ]; then
     die "self-update: manifest is malformed or has no ${ARCH_KEY} build"
   fi
 
-  # Cheap early exit when already current — no download, no reinstall, no restart.
-  if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$TARBALL_VERSION" ]; then
-    ok "self-update: already at $TARBALL_VERSION"
+  # Cheap early exit when already current — no download, no reinstall, no
+  # restart. The decision itself lives in scripts/lib/release.sh so it can be
+  # unit-tested; see release_is_current for why it compares the build's commit
+  # rather than its version number.
+  if release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
+    if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
+      ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
+    else
+      ok "self-update: already at $TARBALL_VERSION"
+    fi
     exit 0
+  fi
+  if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
+    log "self-update: new build $INSTALLED_GIT_SHA → $TARBALL_GIT_SHA"
   fi
 
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/manta-update.XXXXXX")"
@@ -200,7 +214,13 @@ else
   # half-written tree — most important for `runtime/`, which the running server
   # executes from. It also stamps RELEASE.json so the box records its version.
   replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
-  ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
+  # Report the commit alongside the version: two releases legitimately share a
+  # version number now, so "0.0.29 → 0.0.29" alone reads like a no-op.
+  if [ -n "$TARBALL_GIT_SHA" ]; then
+    ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION, commit $TARBALL_GIT_SHA)"
+  else
+    ok "self-update: replaced release payload ($INSTALLED_VERSION → $TARBALL_VERSION)"
+  fi
 fi
 
 echo "MANTA_PROGRESS 3/6 Installing dependencies"

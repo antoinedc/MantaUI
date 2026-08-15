@@ -31,7 +31,7 @@ function log(msg) {
 // `archKey` is the underscore form (linux_x64 / linux_arm64 / darwin_arm64).
 // Values may contain `=` — split on the first one only.
 function parseSidecar(body) {
-  const out = { version: null, arches: {} };
+  const out = { version: null, gitSha: null, arches: {} };
   for (const line of body.split(/\r?\n/)) {
     if (!line.includes("=")) continue;
     const eq = line.indexOf("=");
@@ -39,6 +39,12 @@ function parseSidecar(body) {
     const value = line.slice(eq + 1);
     if (key === "version") {
       if (out.version === null) out.version = value;
+      continue;
+    }
+    // The commit the arch was built from — the box's update identity. Absent
+    // when pack.mjs ran outside a git checkout; see the merge rule in main().
+    if (key === "git_sha") {
+      if (out.gitSha === null && value !== "") out.gitSha = value;
       continue;
     }
     // Recognize file_<archkey> + sha256_<archkey>. Drop unknown keys.
@@ -77,6 +83,11 @@ function parseArgs(argv) {
 async function main() {
   const { inputs, outPath } = parseArgs(process.argv.slice(2));
   let version = null;
+  let gitSha = null;
+  // A sidecar built outside a git checkout carries no commit. Tracked
+  // separately from `gitSha` so "nobody reported one" is distinguishable from
+  // "one arch reported one and another didn't" — see the emit rule below.
+  let missingGitSha = false;
   // Order of insertion = order of sidecar args = order in the combined file.
   const arches = {};
   for (const input of inputs) {
@@ -87,11 +98,29 @@ async function main() {
     else if (parsed.version !== version) {
       die(`version mismatch: ${input} has version=${parsed.version}, expected ${version} (sidecar args must come from the same release commit)`);
     }
+    // Two arches built from different commits is the failure this check
+    // exists for — publishing them under one manifest would ship a release
+    // whose halves disagree about what they contain.
+    if (parsed.gitSha === null) missingGitSha = true;
+    else if (gitSha === null) gitSha = parsed.gitSha;
+    else if (parsed.gitSha !== gitSha) {
+      die(`git_sha mismatch: ${input} has git_sha=${parsed.gitSha}, expected ${gitSha} (sidecar args must come from the same release commit)`);
+    }
     for (const [archKey, entry] of Object.entries(parsed.arches)) {
       arches[archKey] = entry;
     }
   }
   const lines = [`version=${version}`];
+  // Emit the commit ONLY when every sidecar agreed on one. A partial answer
+  // would be worse than none: a box whose own arch was built without a commit
+  // stamp would compare its null against the published sha, never match, and
+  // reinstall the same tarball on every single update check — forever. Falling
+  // back to the version-only comparison is the safe degradation.
+  if (gitSha !== null && !missingGitSha) {
+    lines.push(`git_sha=${gitSha}`);
+  } else if (gitSha !== null) {
+    log(`⚠ dropping git_sha — not every sidecar carried one; boxes fall back to comparing versions`);
+  }
   for (const [archKey, { file, sha }] of Object.entries(arches)) {
     lines.push(`file_${archKey}=${file}`);
     lines.push(`sha256_${archKey}=${sha}`);

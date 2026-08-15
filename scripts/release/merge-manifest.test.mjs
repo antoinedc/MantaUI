@@ -134,3 +134,78 @@ test("merges three per-arch sidecars (linux_x64 + linux_arm64 + darwin_arm64)", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- git_sha: the release's update identity -------------------------------
+//
+// The box decides "am I already running this?" by comparing the commit the
+// release was built from, because `version` is maintained by hand and a
+// release cut without a bump used to be indistinguishable from the installed
+// one — every box silently skipped a real update. These cases pin the
+// merger's half of that contract.
+
+test("carries git_sha into the combined manifest, right after version", () => {
+  const dir = fresh();
+  try {
+    const a = writeSidecar(dir, "a.txt", "version=1.2.3\ngit_sha=abc123\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n");
+    const b = writeSidecar(dir, "b.txt", "version=1.2.3\ngit_sha=abc123\nfile_linux_arm64=manta-1.2.3-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\n");
+    const out = join(dir, "combined.txt");
+    runMerge([a, b, "--out", out]);
+    const got = readFileSync(out, "utf-8");
+    assert.equal(
+      got,
+      "version=1.2.3\ngit_sha=abc123\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\nfile_linux_arm64=manta-1.2.3-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\n",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dies when two arches were built from different commits", () => {
+  // Same version, different commits: exactly the case a version-only check
+  // cannot see. Publishing these under one manifest ships a release whose
+  // halves disagree about what they contain.
+  const dir = fresh();
+  try {
+    const a = writeSidecar(dir, "a.txt", "version=1.2.3\ngit_sha=abc123\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n");
+    const b = writeSidecar(dir, "b.txt", "version=1.2.3\ngit_sha=def456\nfile_linux_arm64=manta-1.2.3-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\n");
+    assert.throws(
+      () => runMerge([a, b, "--out", join(dir, "combined.txt")], { stdio: "pipe" }),
+      /git_sha mismatch/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("drops git_sha entirely when only some sidecars carry one", () => {
+  // A partial answer is worse than none: a box whose own arch shipped without
+  // a commit stamp would never match the published sha and would reinstall the
+  // same tarball on every update check, forever.
+  const dir = fresh();
+  try {
+    const a = writeSidecar(dir, "a.txt", "version=1.2.3\ngit_sha=abc123\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n");
+    const b = writeSidecar(dir, "b.txt", "version=1.2.3\nfile_linux_arm64=manta-1.2.3-linux-arm64.tar.gz\nsha256_linux_arm64=bbbb\n");
+    const out = join(dir, "combined.txt");
+    runMerge([a, b, "--out", out], { stdio: "pipe" });
+    const got = readFileSync(out, "utf-8");
+    assert.ok(!got.includes("git_sha"), `expected no git_sha in:\n${got}`);
+    assert.ok(got.startsWith("version=1.2.3\nfile_linux_x64="), got);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a release with no commit anywhere still merges (version-only fallback)", () => {
+  const dir = fresh();
+  try {
+    const a = writeSidecar(dir, "a.txt", "version=1.2.3\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n");
+    const out = join(dir, "combined.txt");
+    runMerge([a, "--out", out]);
+    assert.equal(
+      readFileSync(out, "utf-8"),
+      "version=1.2.3\nfile_linux_x64=manta-1.2.3-linux-x64.tar.gz\nsha256_linux_x64=aaaa\n",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

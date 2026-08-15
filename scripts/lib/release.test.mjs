@@ -377,3 +377,64 @@ test("replace_release_payload: signals when it swapped node_modules from the pay
   rmSync(pkg, { recursive: true, force: true });
   rmSync(dest, { recursive: true, force: true });
 });
+
+// --- release_is_current: the updater's skip decision ------------------------
+//
+// The regression this pins: the check used to compare `version` only, so a
+// release cut without bumping package.json looked identical to the installed
+// build. Every box reported "already at <version>" and skipped a real update
+// — silently, with no error to notice. Identity is now the build's commit.
+
+function isCurrent(installedVersion, installedSha, releaseVersion, releaseSha) {
+  const script = `
+    log() { :; }; ok() { :; }; warn() { :; }; die() { echo "$*" >&2; exit 1; }
+    . "${RELEASE_LIB}"
+    if release_is_current "$1" "$2" "$3" "$4"; then echo current; else echo stale; fi
+  `;
+  const out = execFileSync(
+    "bash",
+    ["-c", script, "bash", installedVersion, installedSha, releaseVersion, releaseSha],
+    { encoding: "utf-8" },
+  );
+  return out.trim() === "current";
+}
+
+test("release_is_current: same commit → skip, even when both sides share a version", () => {
+  assert.equal(isCurrent("0.0.29", "abc123", "0.0.29", "abc123"), true);
+});
+
+test("release_is_current: different commit at the SAME version → update (the regression)", () => {
+  // This is the exact case that shipped nothing: package.json was never
+  // bumped, so a real code change published as 0.0.29 over an installed
+  // 0.0.29 was skipped by every box.
+  assert.equal(isCurrent("0.0.29", "abc123", "0.0.29", "def456"), false);
+});
+
+test("release_is_current: different commit at a different version → update", () => {
+  assert.equal(isCurrent("0.0.29", "abc123", "0.0.30", "def456"), false);
+});
+
+test("release_is_current: no commit on either side falls back to comparing versions", () => {
+  assert.equal(isCurrent("0.0.29", "", "0.0.29", ""), true);
+  assert.equal(isCurrent("0.0.29", "", "0.0.30", ""), false);
+});
+
+test("release_is_current: a box predating commit stamps still updates normally", () => {
+  // Installed RELEASE.json has no git_sha; the published release does. Falls
+  // back to versions rather than treating "" as a mismatch, which would make
+  // the box reinstall the same tarball on every check.
+  assert.equal(isCurrent("0.0.29", "", "0.0.29", "def456"), true);
+  assert.equal(isCurrent("0.0.29", "", "0.0.30", "def456"), false);
+});
+
+test("release_is_current: a release packed outside a checkout falls back to versions", () => {
+  assert.equal(isCurrent("0.0.29", "abc123", "0.0.29", ""), true);
+  assert.equal(isCurrent("0.0.29", "abc123", "0.0.30", ""), false);
+});
+
+test("release_is_current: an unreadable installed stamp is never 'current'", () => {
+  // Skipping forever on a corrupt RELEASE.json would strand the box; letting
+  // it reinstall repairs it.
+  assert.equal(isCurrent("", "", "0.0.29", ""), false);
+  assert.equal(isCurrent("", "", "0.0.29", "def456"), false);
+});
