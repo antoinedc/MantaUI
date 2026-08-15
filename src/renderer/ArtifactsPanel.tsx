@@ -607,6 +607,9 @@ export function ArtifactsPanel({
   // preview-aware artifacts), or null when closed. `previewSourceRef` keeps
   // the row that opened it so focus returns there on close.
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  // Inline panel error — surfaces a publish failure (e.g. no published
+  // hostname) right where the plan rows live, not as a toast/banner.
+  const [planError, setPlanError] = useState<string | null>(null);
   const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
@@ -717,11 +720,12 @@ export function ArtifactsPanel({
   // hand-built. Reused by both the row-body "open" and the plan row's action.
   const openPlanPage = (a: Artifact) => {
     if (!sessionId) return;
+    setPlanError(null);
     void window.api
       .planPublish(sessionId, a.href)
       .then(({ url }) => window.api.openExternal(url))
       .catch((e: unknown) => {
-        console.error("Failed to publish plan page:", e);
+        setPlanError(String((e as Error)?.message ?? e));
       });
   };
 
@@ -923,6 +927,20 @@ export function ArtifactsPanel({
           <ReviewPane sessionId={sessionId ?? ""} cwd={cwd ?? ""} />
         ) : (
         <div className="flex-1 overflow-y-auto min-h-0">
+          {planError && (
+            <div className="manta-artifacts-plan-error shrink-0 mx-3 mt-2 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
+              <span className="min-w-0 flex-1">{planError}</span>
+              <button
+                type="button"
+                onClick={() => setPlanError(null)}
+                className="text-danger hover:text-danger leading-none px-1 inline-flex items-center"
+                title="Dismiss"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {query ? (
