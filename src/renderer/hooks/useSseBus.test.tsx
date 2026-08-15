@@ -882,3 +882,104 @@ describe("useSseBus question.asked refetch gating (BET-418)", () => {
     expect(after).toBe(before);
   });
 });
+
+// BET-973 — the plan-mode mirror must only react to a COMPLETED plan_enter/
+// plan_exit. "Keep planning" answers the plan question "No", which REJECTS the
+// plan_exit tool, so its part lands in `error` — an errored switch did NOT
+// happen and must not flip the chip. The old block reused isToolStepBoundary
+// (which accepts `error` on purpose for the drain), reading an errored
+// plan_exit as a real exit and silently dropping the session out of plan mode.
+// PlanProbe owns useSseBus directly and captures the plan setter so the tests
+// can assert exactly when it is (or isn't) called.
+describe("useSseBus plan-mode mirror (BET-973)", () => {
+  let planCalls: boolean[] | null = null;
+  let h: ReturnType<typeof mount> | null = null;
+  let bus: ReturnType<typeof installMockApi>["bus"];
+
+  beforeEach(() => {
+    ({ bus } = installMockApi());
+    resetStore();
+    planCalls = [];
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function PlanProbe() {
+    const [, setMessages] = useState<OpencodeMessage[] | null>(null);
+    const childSessionIds = useRef<Set<string>>(new Set());
+    const childMessagesRef = useRef<Map<string, OpencodeMessage[]>>(new Map());
+    const expandedTasksRef = useRef<Set<string>>(new Set());
+    const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    const isActiveRef = useRef<boolean>(true);
+    const refetchOwedWhileInactive = useRef<boolean>(false);
+    const submitRef = useRef<() => void>(() => {});
+    useSseBus({
+      sessionId: "ses_test",
+      cwd: "/home/dev/projects/x",
+      setMessages,
+      setRefreshing: () => {},
+      scheduleRefetch: () => {},
+      fetchOpts: () => ({}),
+      spliceMessage: () => {},
+      scheduleChildRefetch: () => {},
+      childSessionIds,
+      childMessagesRef,
+      expandedTasksRef,
+      childRefetchTimers,
+      isActiveRef,
+      refetchOwedWhileInactive,
+      applyStreamFlush: () => 0,
+      providerID: null,
+      setPlanOn: (next: boolean) => { planCalls?.push(next); },
+      submit: () => {},
+      submitRef,
+    });
+    return <div />;
+  }
+
+  const emitToolPart = async (part: unknown, messageID = "msg_1") => {
+    await act(async () => {
+      act(() =>
+        bus.emit({
+          type: "message.part.updated",
+          properties: { sessionID: "ses_test", messageID, part },
+        }),
+      );
+      await Promise.resolve();
+    });
+  };
+
+  it("does not call the plan setter on an errored plan_exit (Keep planning)", async () => {
+    h = mount(<PlanProbe />);
+    await h.flush();
+
+    await emitToolPart({ type: "tool", tool: "plan_exit", callID: "toolu_1", state: { status: "error" } });
+
+    expect(planCalls).toEqual([]);
+  });
+
+  it("does not call the plan setter on an errored plan_enter", async () => {
+    h = mount(<PlanProbe />);
+    await h.flush();
+
+    await emitToolPart({ type: "tool", tool: "plan_enter", callID: "toolu_1", state: { status: "error" } });
+
+    expect(planCalls).toEqual([]);
+  });
+
+  it("calls the plan setter on a completed plan_exit, deduplicating by callID", async () => {
+    h = mount(<PlanProbe />);
+    await h.flush();
+
+    await emitToolPart({ type: "tool", tool: "plan_exit", callID: "toolu_1", state: { status: "completed" } });
+    expect(planCalls).toEqual([false]);
+
+    // A second emission with the SAME callID (opencode re-emits a completed
+    // part) must NOT re-apply — even a plan_enter sharing the id is ignored.
+    await emitToolPart({ type: "tool", tool: "plan_enter", callID: "toolu_1", state: { status: "completed" } });
+    expect(planCalls).toEqual([false]);
+  });
+});

@@ -65,6 +65,7 @@ import {
   isDrainAbortError,
   shouldAbortForQueuedDrain,
   isToolStepBoundary,
+  planModeFromToolPart,
   collectChildSessionIds,
   hydrateQuestion,
   authErrorAdvice,
@@ -572,16 +573,14 @@ export function useSseBus(params: {
       if (ev.type === "session.next.agent.switched") {
         setPlanOnRef.current(String(props.agent ?? "") === "plan");
       }
-      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
-        const part = props.part as {
-          tool?: unknown;
-          callID?: unknown;
-        } | undefined;
-        if (part?.tool === "plan_enter" || part?.tool === "plan_exit") {
-          const callID = String(part.callID ?? "");
+      if (ev.type === "message.part.updated") {
+        const part = props.part as { callID?: unknown } | undefined;
+        const next = planModeFromToolPart(props.part);
+        if (next !== null) {
+          const callID = String(part?.callID ?? "");
           if (callID && !handledPlanCallIdsRef.current.has(callID)) {
             handledPlanCallIdsRef.current.add(callID);
-            setPlanOnRef.current(part.tool === "plan_enter");
+            setPlanOnRef.current(next);
           }
         }
       }
