@@ -5846,3 +5846,24 @@ test("BET-978: the release stamp is read without install-lib, which ships in the
   });
   assert.match(out, new RegExp(`HEAD=${releaseSha}`), `must still pin without a working lib:\n${out}`);
 });
+
+test("install.sh does NOT source the user's ~/.bashrc — it resolves opencode from the well-known dir (fresh-root silent-death regression)", () => {
+  // A stock Debian/Ubuntu ROOT ~/.bashrc opens with `[ -z "$PS1" ] && return`.
+  // install.sh runs under `set -eu`; when it re-sourced .bashrc to pick up the
+  // PATH line opencode appended, that line dereferenced an unbound $PS1 in a
+  // non-interactive shell and ABORTED the whole outer bash (exit 127) BEFORE
+  // control returned to the `|| true` — so a fresh root install died silently
+  // right after the opencode banner with no message and the panel reported
+  // "couldn't install files". The fix is not to harden the source (set +eu) but
+  // to STOP sourcing rc entirely and resolve the binary from $HOME/.opencode/bin
+  // — the pattern nvm/rustup/opencode all use, and which is distro-agnostic
+  // (rc content varies by distro and can also hang/prompt). Static-layout guard
+  // mirrors BET-442's style — bash -n cannot catch a runtime abort.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  // Must NOT source the user's rc to find the binary.
+  assert.doesNotMatch(src, /\. "\$HOME\/\.(bashrc|profile|bash_profile)"/,
+    "must not re-source the user's shell rc during install");
+  // Must resolve from the well-known install dir instead.
+  assert.match(src, /\[ -x "\$HOME\/\.opencode\/bin\/opencode" \]/, 
+    "must probe $HOME/.opencode/bin for the installed binary");
+});
