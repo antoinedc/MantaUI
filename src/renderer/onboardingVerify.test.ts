@@ -5,7 +5,6 @@ import {
   VERIFY_DEFAULT_TIMEOUT_MS,
   verifyStageLabels,
   verifyOnboarding,
-  hasConnectedProvider,
   pickVerifyLabels,
   type VerifyApi,
 } from "./onboardingVerify";
@@ -221,28 +220,6 @@ describe("verifyOnboarding", () => {
       expect(out.message).toContain("didn't reply");
     }
     expect(api.opencodeDeleteSessionRaw).toHaveBeenCalledWith("eph-1");
-  });
-});
-
-describe("hasConnectedProvider", () => {
-  it("returns true when at least one provider is connected", async () => {
-    const api = makeApi({
-      opencodeProviderAuth: (vi.fn(async () => ({
-        action: "status",
-        providers: [{ id: "anthropic", connected: false }, { id: "openai", connected: true }],
-      })) as unknown) as VerifyApi["opencodeProviderAuth"],
-    });
-    expect(await hasConnectedProvider(api)).toBe(true);
-  });
-
-  it("returns false when nothing is connected", async () => {
-    const api = makeApi({
-      opencodeProviderAuth: (vi.fn(async () => ({
-        action: "status",
-        providers: [{ id: "anthropic", connected: false }],
-      })) as unknown) as VerifyApi["opencodeProviderAuth"],
-    });
-    expect(await hasConnectedProvider(api)).toBe(false);
   });
 });
 

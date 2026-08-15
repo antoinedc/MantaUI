@@ -9,9 +9,8 @@
 //
 // Onboarding's responsibilities beyond the step machine:
 //
-//   1. Verify by working (BET-421 §B). After both steps complete (or after
-//      step 1 alone, when step 2 auto-skipped because a provider was already
-//      connected), `verifyOnboarding` spins up an EPHEMERAL opencode session
+//   1. Verify by working (BET-421 §B). After both steps complete,
+//      `verifyOnboarding` spins up an EPHEMERAL opencode session
 //      (no project, no sidebar entry), sends one probe prompt, waits for a
 //      real assistant reply, and deletes the session. Three named stages
 //      drive a ProcessPanel; on failure the user sees which stage failed +
@@ -25,8 +24,8 @@
 // Per-step bodies:
 //   - Step 1 (Connect)          → PairStep.tsx (SSH picker primary, manual
 //                                 disclosure secondary)
-//   - Step 2 (Connect provider) → ProvidersStep.tsx (auto-skips on mount
-//                                 when a provider is already connected)
+//   - Step 2 (Connect provider) → ProvidersStep.tsx (always shown; renders
+//                                 already-connected providers ticked)
 //   - Success                   → this file
 //
 // Those components own their own footers; the shell hides its generic
@@ -46,7 +45,6 @@ import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
 import {
   verifyOnboarding,
-  hasConnectedProvider,
   pickVerifyLabels,
   verifyStageLabels,
   type VerifyProgress,
@@ -209,9 +207,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     });
   }, [refreshAndInstallTransport]);
 
-  // Step 1 → step 2 (provider needed) OR step 1 → runVerify (provider
-  // already connected). Detecting the latter before stepping forward keeps
-  // the user from blinking through an empty step-2 frame.
+  // Step 1 → step 2. The provider step is always shown; on a box that
+  // already has a provider connected, ProvidersStep displays it ticked and
+  // the user chooses to add more or continue.
   //
   // Failures are contained rather than propagated: this is invoked as
   // `void onPaired()`, so a rejection here is silent and freezes the wizard on
@@ -219,19 +217,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   // point, so we advance regardless — ProvidersStep surfaces its own load
   // error if the box is still unreachable.
   const onPaired = useCallback(async () => {
-    let connected = false;
     try {
       await refreshAndInstallTransport();
-      connected = await hasConnectedProvider(window.api);
     } catch (e) {
       console.warn("[manta] post-pair pre-flight failed; advancing anyway:", e);
     }
-    if (connected) {
-      await runVerify();
-    } else {
-      setPos(2);
-    }
-  }, [refreshAndInstallTransport, runVerify]);
+    setPos(2);
+  }, [refreshAndInstallTransport]);
 
   // Step 2 → verify (provider connect just landed → run the verify).
   const onProviderContinue = useCallback(() => {

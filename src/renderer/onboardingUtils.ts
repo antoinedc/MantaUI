@@ -61,10 +61,9 @@ export function prevPosition(pos: OnboardingPosition): OnboardingPosition {
 // onboarding concerns. What we CAN tell from config alone is whether the box
 // is paired. Whether a provider is connected is a live box query, NOT a
 // config field, so we resolve to step 2 whenever paired and let the Provider
-// step's mount effect auto-advance past itself when a provider is already
-// connected. Net: re-entering onboarding on a paired box lands on step 2 for
-// at most one frame, then auto-skips to success — the user sees no flicker
-// because step 2's "ready" path is empty rendering.
+// step hold the screen: it probes the box on mount and renders whatever is
+// already connected, letting the user add more or continue. Net:
+// re-entering onboarding on a paired box always lands on step 2.
 //
 // The 32-hex boxToken gate mirrors the transport-mode detection in
 // `resolveTransportMode`, so a malformed token does not falsely advance the
