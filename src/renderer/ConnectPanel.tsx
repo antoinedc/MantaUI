@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "./Button";
-import type { ConnectActionId, ConnectPanelState } from "./connectPanel";
+import type { ConnectActionId, ConnectPanelState } from "./connectPanelLogic";
 
 // ---- tone -> colour maps: the ONLY place tone becomes colour ----
 const DOT: Record<string, string> = {

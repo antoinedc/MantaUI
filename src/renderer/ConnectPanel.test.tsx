@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
 import { ConnectPanel } from "./ConnectPanel";
-import type { ConnectPanelState } from "./connectPanel";
+import type { ConnectPanelState } from "./connectPanelLogic";
 
 function makeState(patch: Partial<ConnectPanelState> = {}): ConnectPanelState {
   return {

@@ -37,7 +37,7 @@ import {
 } from "./preloadAccess";
 import type { InstallStageId } from "../shared/installStages";
 import { ConnectPanel } from "./ConnectPanel";
-import { deriveConnectPanel, type ConnectActionId } from "./connectPanel";
+import { deriveConnectPanel, type ConnectActionId } from "./connectPanelLogic";
 import {
   CUSTOM_HOST_VALUE,
   resolveInstallTarget,

@@ -38,7 +38,7 @@ import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
 import { ConnectPanel } from "./ConnectPanel";
-import { deriveConnectPanel, type ConnectActionId } from "./connectPanel";
+import { deriveConnectPanel, type ConnectActionId } from "./connectPanelLogic";
 
 const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
