@@ -115,7 +115,7 @@ export function CloneFromGitHub({
     });
   };
 
-  const selected = filtered.filter((r) => checked.has(r.fullName));
+  const selected = repos.filter((r) => checked.has(r.fullName));
 
   // Derive the on-disk destination for a repo: <root>/<name>.
   const destFor = (repo: ForgeRepo) =>
@@ -205,7 +205,7 @@ export function CloneFromGitHub({
     // this is strictly the repo-retry path.
     runClones(
       [
-        ...filtered.filter((r) => checked.has(r.fullName) && r.fullName !== phase.repo?.fullName),
+        ...repos.filter((r) => checked.has(r.fullName) && r.fullName !== phase.repo?.fullName),
         phase.repo,
       ],
       0,
@@ -252,7 +252,7 @@ export function CloneFromGitHub({
               </div>
             }
           />
-          <div className="p-4">
+          <div className="p-4 flex flex-col max-h-[70vh]">
             <Field
               ariaLabel="Search repositories"
               value={search}
@@ -264,7 +264,7 @@ export function CloneFromGitHub({
                 <Callout tone="danger">{reposError}</Callout>
               </div>
             )}
-            <div className="mt-1">
+            <div className="mt-1 flex-1 min-h-0 overflow-y-auto">
               {filtered.map((r) => (
                 <ListRow
                   key={r.fullName}

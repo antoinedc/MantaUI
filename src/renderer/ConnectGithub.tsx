@@ -53,7 +53,7 @@ export function PanelHeader({
 
 // The shared chrome wrapper for every clone-flow panel. One definition, here.
 export const PANEL_CLASS =
-  "w-full max-w-[420px] rounded-lg border border-border bg-bg-elev overflow-hidden";
+  "w-full max-w-[520px] rounded-lg border border-border bg-bg-elev overflow-hidden";
 
 // mm:ss countdown label — mono so it doesn't jitter.
 function countdownLabel(remainingMs: number): string {
