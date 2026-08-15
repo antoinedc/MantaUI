@@ -815,6 +815,10 @@ private struct ChatScreenContent: View {
         return ctx.pct
     }
 
+    /// Whether the prompt cache has gone cold. One read, so the tint, the label
+    /// and the accessibility string cannot disagree.
+    private var cacheIsStale: Bool { store.cache?.isStale == true }
+
     /// The active model's own context window — the meter's denominator. Opus
     /// 4.7 reports 1M against Sonnet's 200k, so it is read per-model, never
     /// hardcoded.
@@ -831,6 +835,7 @@ private struct ChatScreenContent: View {
 
     /// The band colour for the current context reading (strip + sheet).
     private var contextBandColor: Color {
+        if cacheIsStale { return tokens.warn }
         if let pct = contextPct {
             return MeterRing.tint(UsageMeters.band(pct), tokens)
         }
@@ -862,6 +867,11 @@ private struct ChatScreenContent: View {
                     Text("\(Int(pct.rounded()))%")
                         .font(.manta(size: Metrics.type.twoXS, weight: .bold))
                         .foregroundColor(contextBandColor)
+                    if let coldLabel = UsageMeters.staleChipLabel(store.cache) {
+                        Text(coldLabel)
+                            .font(.manta(size: Metrics.type.twoXS, weight: .bold))
+                            .foregroundColor(tokens.warn)
+                    }
                     Image(systemName: "chevron.right")
                         .font(.system(size: Metrics.type.twoXS, weight: .semibold))
                         .foregroundColor(tokens.tx4)
@@ -870,7 +880,11 @@ private struct ChatScreenContent: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Context \(Int(pct.rounded())) percent")
+            .accessibilityLabel(
+                cacheIsStale
+                    ? "Context \(Int(pct.rounded())) percent, cache cold, \(UsageMeters.formatTokens(store.cache?.staleTokens)) tokens re-billed on the next message"
+                    : "Context \(Int(pct.rounded())) percent"
+            )
             .accessibilityIdentifier("context-strip")
             // Context legitimately drops after a compaction; animate that drop
             // rather than snapping it, or it reads as a glitch.

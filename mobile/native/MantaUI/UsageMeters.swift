@@ -93,6 +93,15 @@ enum UsageMeters {
         return "\(Int((tokens / 1_000_000).rounded()))M"
     }
 
+    /// "344k cold" when the box has flagged the prompt cache stale, nil
+    /// otherwise. Pure, so the label is unit-testable and the view renders
+    /// whatever comes back — the staleness DECISION belongs to the box
+    /// (`computeStaleCache`), never to the client.
+    static func staleChipLabel(_ cache: StreamCachePayload?) -> String? {
+        guard let cache, cache.isStale else { return nil }
+        return "\(formatTokens(cache.staleTokens)) cold"
+    }
+
     /// "Thursday 09:00" — absolute, so a multi-day reset reads as a calendar
     /// anchor rather than an arithmetic exercise.
     private static let weekdayTime: DateFormatter = {

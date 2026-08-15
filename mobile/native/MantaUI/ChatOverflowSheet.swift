@@ -133,23 +133,17 @@ struct ChatOverflowSheet: View {
         // Cancel separated at the bottom.
         .confirmActionSheet(
             isPresented: $confirmingClear,
-            title: "Clear this session?",
-            message: "Starts a fresh session in this window. The transcript stays on the box.",
-            destructiveTitle: "Clear session",
+            copy: SessionConfirmCopy.clear,
             destructiveAction: { dismiss(); onClear() }
         )
         .confirmActionSheet(
             isPresented: $confirmingDelete,
-            title: "Delete this session?",
-            message: "Removes the session and its window. This cannot be undone.",
-            destructiveTitle: "Delete session",
+            copy: SessionConfirmCopy.delete,
             destructiveAction: { dismiss(); onDelete() }
         )
         .confirmActionSheet(
             isPresented: $confirmingCompact,
-            title: "Compact this session?",
-            message: "Summarises the conversation to free context. The transcript is condensed, not deleted.",
-            destructiveTitle: "Compact session",
+            copy: SessionConfirmCopy.compact,
             destructiveAction: { dismiss(); onCompact() }
         )
         .presentationDetents([.medium, .large])
