@@ -446,17 +446,23 @@ test("planSubdomain returns null for empty / unusable input", () => {
   // 123 is a number, not a string — rejected by the typeof guard.
 });
 
-test("renderPlanMarkdown escapes raw HTML in body", () => {
+test("renderPlanMarkdown drops raw HTML and escapes entity-like text", () => {
   const html = renderPlanMarkdown("a <script>alert(1)</script> b & c");
-  assert.match(html, /&lt;script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
-  assert.match(html, /&amp;/);
+  // remark-rehype DROPS raw HTML rather than escaping it: the script tag never
+  // appears as markup, but its text content still renders as plain text.
+  assert.doesNotMatch(html, /<script/i);
+  assert.match(html, /alert\(1\)/);
+  assert.doesNotMatch(html, /<\/script>/i);
+  // `&` is still HTML-escaped (the unified pipeline emits the hex form).
+  assert.match(html, /&amp;|&#x26;|&#38;/);
 });
 
 test("renderPlanMarkdown renders fenced code blocks with monospace pre/code", () => {
   const html = renderPlanMarkdown('```js\nconst x = "<b>";\n```');
   assert.match(html, /<pre><code class="language-js">/);
-  assert.match(html, /&lt;b&gt;/);
+  // The unified pipeline HTML-escapes the source's `<` (as the hex form) so a
+  // literal `<b>` can never surface as a tag.
+  assert.match(html, /&#x3C;b&gt;|&lt;b&gt;|&#x3C;b>/);
   assert.doesNotMatch(html, /<b>/);
 });
 
@@ -470,6 +476,53 @@ test("renderPlanMarkdown renders unordered and ordered lists", () => {
   const html = renderPlanMarkdown("- one\n- two\n\n1. a\n2. b");
   assert.match(html, /<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
   assert.match(html, /<ol>\s*<li>a<\/li>\s*<li>b<\/li>\s*<\/ol>/);
+});
+
+test("renderPlanMarkdown nests bullet lists inside their parent item", () => {
+  const html = renderPlanMarkdown("- top\n  - child\n    - grandchild");
+  assert.match(
+    html,
+    /<li>top\s*<ul>\s*<li>child\s*<ul>\s*<li>grandchild<\/li>\s*<\/ul>\s*<\/li>\s*<\/ul>\s*<\/li>/,
+  );
+});
+
+test("renderPlanMarkdown renders GFM task lists as disabled checkboxes", () => {
+  const html = renderPlanMarkdown("- [x] done\n- [ ] not done");
+  assert.match(html, /<input type="checkbox" checked disabled>/);
+  assert.match(html, /<input type="checkbox" disabled>/);
+  assert.match(html, /done/);
+});
+
+test("renderPlanMarkdown renders GFM tables with thead", () => {
+  const html = renderPlanMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
+  assert.match(html, /<table>\s*<thead>/);
+  assert.match(html, /<th>a<\/th>/);
+  assert.match(html, /<td>1<\/td>/);
+});
+
+test("renderPlanMarkdown renders blockquotes", () => {
+  const html = renderPlanMarkdown("> quoted");
+  assert.match(html, /<blockquote>/);
+  assert.match(html, /quoted/);
+});
+
+test("renderPlanMarkdown renders strikethrough", () => {
+  const html = renderPlanMarkdown("~~x~~");
+  assert.match(html, /<del>x<\/del>/);
+});
+
+test("renderPlanMarkdown auto-links bare URLs", () => {
+  const html = renderPlanMarkdown("see https://example.com/x now");
+  assert.match(
+    html,
+    /<a href="https:\/\/example\.com\/x">https:\/\/example\.com\/x<\/a>/,
+  );
+});
+
+test("renderPlanMarkdown drops raw HTML (img with onerror) entirely", () => {
+  const html = renderPlanMarkdown("<img src=x onerror=alert(1)>");
+  assert.doesNotMatch(html, /<img/i);
+  assert.doesNotMatch(html, /onerror/i);
 });
 
 test("planMetrics derives steps/files and omits absent clauses", () => {
