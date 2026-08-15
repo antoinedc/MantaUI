@@ -1,18 +1,17 @@
 // @vitest-environment jsdom
 //
-// Render-harness tests for PairStep (BET-382 §"Tests").
+// Render-harness tests for PairStep (BET-382 §"Tests", rewritten for BET-962).
 //
-// Covers:
-//   1. Deep-link-open — a pending manta://pair prefill opens the manual
-//      form on first paint and pre-fills Box ID + Code, and hides the
-//      SSH picker.
-//   2. Closed-by-default — no pending deep link + no preload, the manual
-//      form is NOT in the DOM until "Pair to an existing box" is pressed;
-//      pressing it mounts the form, and the button flips to "Hide".
-//   3. Submit-stays-disabled — the manual form's Connect button stays
-//      disabled until Box ID + Code are both valid, and is enabled when
-//      they are. Reuses the same canConnectSetup gate the production
-//      component uses — no validation logic is duplicated here.
+// PairStep now owns a single Connect panel whose zone A switches between the
+// SSH host picker (`ssh`) and manual code entry (`manual`). With no SSH
+// installer (the harness forces `__mantaPreload = null`) there is no picker,
+// so manual mode is the default. Covers:
+//   1. Default — manual fields are in the DOM, idle status, mode-switch link.
+//   2. Deep-link — a pending manta://pair prefill forces manual mode, fills
+//      the fields, shows "Pairing link ready" + Discard, and hides the picker.
+//   3. Connect-disabled — the manual panel's Connect stays disabled until
+//      Box ID + Code are both valid (same canConnectSetup gate in use).
+//   4. Mode switch — "Back to the host picker" swaps zone A out of manual.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
@@ -33,15 +32,29 @@ function noopOnPaired() {
   /* swallow — tests assert on DOM, not the callback */
 }
 
-describe("PairStep render harness (BET-382)", () => {
+function buttonByText(container: HTMLElement, text: string): HTMLButtonElement | null {
+  const buttons = Array.from(container.querySelectorAll("button"));
+  return (buttons.find((b) => b.textContent?.trim() === text) as
+    | HTMLButtonElement
+    | undefined) ?? null;
+}
+
+function setInputValue(el: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("PairStep render harness (BET-382 / BET-962)", () => {
   let h: Harness | null = null;
 
   beforeEach(() => {
-    // PairStep renders SshInstallStep when getMantaPreload() is non-null,
-    // which would try to call installerListHosts() on mount. Force the
-    // preload off so the SSH picker path doesn't enter these tests —
-    // the SSH path is its own component (SshInstallStep.tsx) and is
-    // covered by BET-355/383, not here.
+    // Force the SSH installer off so the picker path doesn't enter these
+    // tests — the SSH path is its own component (SshInstallStep.tsx). With
+    // no installer, PairStep enters manual mode by default (BET-962).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__mantaPreload = null;
     installMockApi();
@@ -72,41 +85,24 @@ describe("PairStep render harness (BET-382)", () => {
     expect(h.text()).not.toContain("Advanced");
   });
 
-  it("closed by default — manual form is NOT in the DOM until the button is pressed", () => {
+  it("defaults to manual mode without an installer — fields in the DOM, idle status", () => {
     h = mount(<PairStep onPaired={noopOnPaired} />);
-    // No input rows on first paint (SSH picker is off; the form lives
-    // behind the toggle).
-    expect(h.container.querySelector("#pair-box-id")).toBeNull();
-    expect(h.container.querySelector("#pair-code")).toBeNull();
-    expect(h.container.querySelector("#pair-host")).toBeNull();
-
-    const toggle = h.container.querySelector(
-      "button",
-    ) as HTMLButtonElement | null;
-    expect(toggle).not.toBeNull();
-    expect(toggle?.textContent).toBe("Pair to an existing box");
-
-    // Open it.
-    act(() => toggle?.click());
+    // No pending link + no installer → manual mode is the default (no picker
+    // to show instead). The manual fields render in zone A.
     expect(h.container.querySelector("#pair-box-id")).not.toBeNull();
     expect(h.container.querySelector("#pair-code")).not.toBeNull();
     expect(h.container.querySelector("#pair-host")).not.toBeNull();
-    // Button label flips while open.
-    expect(toggle?.textContent).toBe("Hide");
-
-    // Close again — form unmounts.
-    act(() => toggle?.click());
-    expect(h.container.querySelector("#pair-box-id")).toBeNull();
-    expect(h.container.querySelector("#pair-code")).toBeNull();
+    // Zone B shows the idle manual status; zone A carries the mode-switch link.
+    expect(h.text()).toContain("Enter the 6-digit code from the box");
+    expect(h.text()).toContain("Back to the host picker");
   });
 
-  it("deep-link-open — pending pair link opens the form pre-filled and hides the SSH picker", () => {
+  it("deep-link — pending pair link forces manual mode and pre-fills the fields", () => {
     act(() => {
       useStore.setState({ pendingPairLink: VALID_LINK });
     });
     h = mount(<PairStep onPaired={noopOnPaired} />);
 
-    // Form is open on first paint.
     const boxId = h.container.querySelector(
       "#pair-box-id",
     ) as HTMLInputElement | null;
@@ -118,142 +114,93 @@ describe("PairStep render harness (BET-382)", () => {
     expect(boxId?.value).toBe(VALID_BOX);
     expect(code?.value).toBe(VALID_CODE);
 
-    // Toggle button reads "Hide".
-    const toggle = h.container.querySelector("button");
-    expect(toggle?.textContent).toBe("Hide");
+    // The prefill row: "Pairing link ready" + Connect/Discard.
+    expect(h.text()).toContain("Pairing link ready");
+    expect(h.text()).toContain("Discard");
+    expect(buttonByText(h.container, "Connect")).not.toBeNull();
 
-    // SSH picker must be hidden — no <select id="ssh-host"> (which is what
-    // SshInstallStep renders). This is the same assertion BET-335 already
-    // covers; we re-state it here because the BET-382 dedupe touches the
-    // same showSshPicker branch.
+    // SSH picker must be hidden — no <select id="ssh-host">.
     expect(h.container.querySelector("#ssh-host")).toBeNull();
   });
 
   it("Connect stays disabled until Box ID + Code are both valid", () => {
     h = mount(<PairStep onPaired={noopOnPaired} />);
-    act(() => {
-      (
-        h!.container.querySelector("button") as HTMLButtonElement | null
-      )?.click();
-    });
-    const submit = h.container.querySelector(
-      "button[type=submit]",
-    ) as HTMLButtonElement | null;
-    expect(submit).not.toBeNull();
-    expect(submit?.disabled).toBe(true);
+    const container = h.container;
 
-    const boxId = h.container.querySelector(
+    const connect = () => buttonByText(container, "Connect");
+    expect(connect()).not.toBeNull();
+    expect(connect()?.disabled).toBe(true);
+
+    const boxId = container.querySelector(
       "#pair-box-id",
     ) as HTMLInputElement | null;
-    const code = h.container.querySelector(
+    const code = container.querySelector(
       "#pair-code",
     ) as HTMLInputElement | null;
 
     // Box ID alone — still disabled.
-    act(() => {
-      boxId!.focus();
-      // emulate a React-style input event by setting the native value +
-      // dispatching an input event the React state listens to.
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(boxId, VALID_BOX);
-      boxId!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(submit?.disabled).toBe(true);
+    act(() => setInputValue(boxId!, VALID_BOX));
+    expect(connect()?.disabled).toBe(true);
 
     // Bad code — still disabled.
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(code, "12345");
-      code!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(submit?.disabled).toBe(true);
+    act(() => setInputValue(code!, "12345"));
+    expect(connect()?.disabled).toBe(true);
 
     // Good code — now enabled.
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(code, VALID_CODE);
-      code!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(submit?.disabled).toBe(false);
+    act(() => setInputValue(code!, VALID_CODE));
+    expect(connect()?.disabled).toBe(false);
 
     // Now blank the Box ID — must disable again (gate re-evaluates).
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(boxId, "");
-      boxId!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(submit?.disabled).toBe(true);
+    act(() => setInputValue(boxId!, ""));
+    expect(connect()?.disabled).toBe(true);
   });
 
   it("Host field surfaces the inline server-URL validation error", () => {
     h = mount(<PairStep onPaired={noopOnPaired} />);
-    act(() => {
-      (
-        h!.container.querySelector("button") as HTMLButtonElement | null
-      )?.click();
-    });
     const host = h.container.querySelector(
       "#pair-host",
     ) as HTMLInputElement | null;
     expect(host).not.toBeNull();
 
     // Type a non-http(s) value — should flag invalid.
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(host, "ftp://nope.example.com");
-      host!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    act(() => setInputValue(host!, "ftp://nope.example.com"));
     expect(host?.getAttribute("aria-invalid")).toBe("true");
     expect(h.text()).toContain(
       "Server URL must start with http:// or https://",
     );
 
     // A valid https URL clears it.
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setter?.call(host, "https://box.example.com");
-      host!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    act(() => setInputValue(host!, "https://box.example.com"));
     expect(host?.getAttribute("aria-invalid")).toBe("false");
     expect(h.text()).not.toContain(
       "Server URL must start with http:// or https://",
     );
   });
 
-  it("footer hint mentions `manta pair` and there is no Skip-setup button", () => {
+  it("zone C hint mentions `manta pair` and there is no Skip-setup button", () => {
     h = mount(<PairStep onPaired={noopOnPaired} />);
-    act(() => {
-      (
-        h!.container.querySelector("button") as HTMLButtonElement | null
-      )?.click();
-    });
     expect(h.text()).toContain("manta pair");
-    // The form-footer hint AND the toggle button are the only buttons on
-    // the step when the form is open — no third "Skip setup" anywhere.
-    const buttons = Array.from(h.container.querySelectorAll("button"));
-    const labels = buttons.map((b) => b.textContent?.trim());
+    const labels = Array.from(h.container.querySelectorAll("button")).map((b) =>
+      b.textContent?.trim(),
+    );
     expect(labels.some((l) => l === "Skip setup")).toBe(false);
-    // And the footer hint is in a <p>, not in the per-input help text under
-    // the Code input.
+    // The hint is in zone C, not under the Code input.
     const codeInput = h.container.querySelector("#pair-code");
     expect(codeInput?.parentElement?.querySelector("p")).toBeNull();
+  });
+
+  it("mode switch — 'Back to the host picker' swaps zone A out of manual", () => {
+    h = mount(<PairStep onPaired={noopOnPaired} />);
+    expect(h.container.querySelector("#pair-box-id")).not.toBeNull();
+
+    const back = buttonByText(h.container, "Back to the host picker");
+    expect(back).not.toBeNull();
+    act(() => back!.click());
+
+    // Without an installer, ssh mode renders SshInstallStep's fallback; the
+    // manual fields leave the DOM.
+    expect(h.container.querySelector("#pair-box-id")).toBeNull();
+    expect(h.container.querySelector("#pair-code")).toBeNull();
+    expect(h.text()).toContain("SSH installer");
   });
 });

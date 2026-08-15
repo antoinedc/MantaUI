@@ -1,17 +1,24 @@
-// connectPanel.ts — the single lever that collapses SshInstallStep's many
-// render branches into one four-zone Connect panel (BET-961).
+// connectPanel.ts — the single lever that collapses the onboarding step-1
+// Connect panel's many render branches into one four-zone descriptor (BET-961).
 //
-// SshInstallStep holds ~15 pieces of state (hosts, targetError, running,
-// stage, elapsed, done, installError, preflightFailure, the two prompts, the
-// claim trio, cancelled, paired). Today each combination gets its own ad-hoc
-// branch, so status appears in five vertical positions and errors come in four
-// shapes. This module maps that state onto ONE descriptor — status (tone/text/
-// meta/progress/sub), details (log/failures/hint/none), actions, hint and an
-// A-zone lock — and ConnectPanel.tsx renders that descriptor, so nothing moves
-// between states.
+// PairStep shows ONE Connect panel in two modes (BET-962): `ssh` (the host
+// picker + install) or `manual` (code entry). Both modes share the same four
+// zones — A·target, B·status, C·details, D·actions — and both funnel through
+// this one function, which decides what the panel says from a mode-
+// discriminated input. There is deliberately no second derive function and no
+// mode branch inside ConnectPanel.tsx; the component just renders whatever
+// descriptor this module produces.
+//
+// SshInstallStep feeds the `ssh` branch of `ConnectInput` (its ~15 pieces of
+// install state); the manual code-entry mode feeds the `manual` branch.
+// Today each combination used to get its own ad-hoc branch, so status
+// appeared in five vertical positions and errors in four shapes. This module
+// maps that state onto ONE descriptor — status (tone/text/meta/progress/sub),
+// details (log/failures/hint/none), actions, hint and the zone-A lock — and
+// ConnectPanel.tsx renders that descriptor, so nothing moves between states.
 //
 // Pure, no JSX, no React. The precedence rules below are the acceptance gate:
-// one first-match-wins table, eleven rows, evaluated in exactly this order.
+// one first-match-wins table per mode, rows evaluated in exactly this order.
 //
 // Reused, not reimplemented:
 //   - stage label / index / total -> currentStageInfo (src/shared/installStages.ts)
@@ -34,7 +41,9 @@ export type ConnectActionId =
   | "next"
   | "retry"
   | "editTarget"
-  | "pairManually";
+  | "pairManually"
+  | "connect"
+  | "discard";
 
 export type ConnectPanelState = {
   status: {
@@ -46,28 +55,58 @@ export type ConnectPanelState = {
   };
   details: ConnectDetails;
   actions: ConnectActionId[]; // first is primary, rest secondary
+  /** Action ids whose button must render disabled. The manual mode's Connect
+   *  stays disabled until `canConnectSetup` passes; the ssh mode has its own
+   *  inline gate. Absent/undefined = nothing disabled beyond the panel's own
+   *  install gate. */
+  disabledActions?: ConnectActionId[];
   hint: string | null; // right-aligned text in zone D
   targetLocked: boolean;
 };
+
+/** The claim outcome — shared by both modes. */
+export type SharedConnectFields = {
+  claimError: string | null; // the message claimBox / mint returned on failure
+  paired: boolean; // claim succeeded — the terminal "Connected" row for both modes
+};
+
+/** The SSH-install mode's state (owned by SshInstallStep). */
+export type SshConnectFields = {
+  hostsLoaded: boolean;
+  targetError: string | null;
+  running: boolean;
+  stage: InstallStageId;
+  elapsedSeconds: number;
+  logLineCount: number;
+  done: { ok: boolean; code: number | null; signal: string | null } | null;
+  installError: string | null;
+  preflightFailure: { failures: Array<{ cause: string; action: string }> } | null;
+  awaitingPrompt: boolean; // fingerprintPrompt !== null || passphrasePrompt !== null
+  claimRunning: boolean;
+  claimElapsed: number | null;
+  cancelled: boolean;
+};
+
+/** The manual code-entry mode's state (BET-962). */
+export type ManualConnectFields = {
+  prefillPresent: boolean; // clipboard / deep-link prefill → "Pairing link ready"
+  canConnect: boolean; // canConnectSetup result → Connect disabled until true
+  submitting: boolean; // claim in flight
+};
+
+export type ConnectInput =
+  | ({ mode: "ssh" } & SshConnectFields & SharedConnectFields)
+  | ({ mode: "manual" } & ManualConnectFields & SharedConnectFields);
 
 /** The row-4 pairing-failed hint. `manta pair` is rendered as <code> by
  *  ConnectPanel by splitting the backticks — keep the backticks here. */
 const CLAIM_FAILED_HINT =
   "The box is running. Run `manta pair` on it for a fresh 6-digit code, then enter it here.";
 
-/**
- * Build the thing ConnectPanel renders. `targetLocked` locks zone A (the
- * host picker) — true while an install or claim is in flight, or after
- * pairing succeeded.
- */
-function computeTargetLocked(input: ConnectInput): boolean {
-  return input.running || input.claimRunning || input.paired;
-}
-
 /** `<stage meta>` — `${index} of ${total}` plus the elapsed time while the
  *  operation is actively progressing (install running OR claim retrying).
  *  Matches the mockup: running stages and the claim states both show time. */
-function stageMeta(input: ConnectInput): string {
+function stageMeta(input: Extract<ConnectInput, { mode: "ssh" }>): string {
   const { index, total } = currentStageInfo(input.stage);
   const active = input.running || input.claimRunning;
   return active
@@ -86,33 +125,99 @@ function logDetails(
   return { kind: "log", defaultOpen, showCopyDiagnostics };
 }
 
-export type ConnectInput = {
-  hostsLoaded: boolean;
-  targetError: string | null;
-  running: boolean;
-  stage: InstallStageId;
-  elapsedSeconds: number;
-  logLineCount: number;
-  done: { ok: boolean; code: number | null; signal: string | null } | null;
-  installError: string | null;
-  preflightFailure: { failures: Array<{ cause: string; action: string }> } | null;
-  awaitingPrompt: boolean; // fingerprintPrompt !== null || passphrasePrompt !== null
-  claimRunning: boolean;
-  claimElapsed: number | null;
-  claimError: string | null;
-  cancelled: boolean;
-  paired: boolean;
-};
-
 /**
- * Evaluate the precedence table first-match-wins. The table order in the
- * switch below is load-bearing — never reorder a row. `paired` beats
- * everything (a completed pair must hand off to the provider step); a user
- * `cancelled` beats `done.ok === false` (a cancel surfaces as a neutral
+ * Evaluate the mode's precedence table first-match-wins. The table order in
+ * each block is load-bearing — never reorder a row. In both modes `paired`
+ * beats everything (a completed pair must hand off to the provider step); a
+ * user `cancelled` beats `done.ok === false` (a cancel surfaces as a neutral
  * `done` with SIGTERM, and must not read as a failure).
  */
 export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
-  const targetLocked = computeTargetLocked(input);
+  // ===== manual mode (rows M1–M5, BET-962) =====
+  if (input.mode === "manual") {
+    // M5 — claim succeeded → same terminal row as SSH: Connected + Next →.
+    if (input.paired) {
+      return {
+        status: {
+          tone: "ok",
+          text: "Connected — your box is ready",
+          meta: null,
+          progress: null,
+          sub: null,
+        },
+        details: { kind: "none" },
+        actions: ["next"],
+        hint: null,
+        targetLocked: true,
+      };
+    }
+    // M4 — claim failed: surface the exact message claimBox returned.
+    if (input.claimError) {
+      return {
+        status: {
+          tone: "error",
+          text: input.claimError,
+          meta: null,
+          progress: null,
+          sub: null,
+        },
+        details: { kind: "none" },
+        actions: ["retry"],
+        hint: null,
+        targetLocked: false,
+      };
+    }
+    // M3 — submitting.
+    if (input.submitting) {
+      return {
+        status: {
+          tone: "running",
+          text: "Pairing with this app",
+          meta: null,
+          progress: null,
+          sub: null,
+        },
+        details: { kind: "none" },
+        actions: ["cancel"],
+        hint: null,
+        targetLocked: true,
+      };
+    }
+    // M1 — clipboard / deep-link prefill present: Confirm or discard it.
+    if (input.prefillPresent) {
+      return {
+        status: {
+          tone: "idle",
+          text: "Pairing link ready",
+          meta: null,
+          progress: null,
+          sub: null,
+        },
+        details: { kind: "none" },
+        actions: ["connect", "discard"],
+        hint: null,
+        targetLocked: false,
+      };
+    }
+    // M2 — idle manual (default): the code is typed by hand.
+    return {
+      status: {
+        tone: "idle",
+        text: "Enter the 6-digit code from the box",
+        meta: null,
+        progress: null,
+        sub: null,
+      },
+      details: { kind: "hint", text: "Run `manta pair` on the box to get a code." },
+      actions: ["connect"],
+      disabledActions: input.canConnect ? undefined : ["connect"],
+      hint: null,
+      targetLocked: false,
+    };
+  }
+
+  // ===== SSH install mode (rows 1–11) =====
+  const targetLocked = input.running || input.claimRunning || input.paired;
   const { index, total, label } = currentStageInfo(input.stage);
   const progress = index / total;
 

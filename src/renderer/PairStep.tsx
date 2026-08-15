@@ -1,27 +1,27 @@
 // PairStep.tsx — Step 1 (Connect) of the desktop onboarding shell (BET-356).
 //
-// One heading, one primary action (BET-382). The SSH picker is the primary
-// surface; the manual pairing form sits behind a plain text button labelled
-// "Pair to an existing box" / "Hide" so a box the user can't reach over SSH
-// (corporate VPN, jump host, manual VPS install) still has an escape hatch.
-// The two paths share the same `onPaired` callback so the shell advances
-// identically regardless of which one closed the deal.
+// One Connect panel, two modes (BET-962). Zone A is either the SSH host
+// picker (default — `ssh` mode, rendered by SshInstallStep) or the manual
+// code-entry fields (`manual` mode). A plain text link under zone A toggles
+// between them: "Enter a pairing code instead" ↔ "Back to the host picker".
+// Zones B, C and D behave identically in both modes — both feed the SAME
+// four-zone ConnectPanel through the single deriveConnectPanel descriptor, so
+// there is exactly one function deciding what the panel says.
 //
-// The deep-link manta://pair?box=…&code=… flow (#277, BET-335, BET-336)
-// remains in scope: if a valid pair-link is pending at mount, the SSH
-// picker is hidden and the manual form is pre-filled from it (one row,
-// three fields: Host · Box ID · Code), so a single click on Connect IS the
-// confirmation. The picker returns next time the user re-enters onboarding
-// from a clean state.
+// The manual path:
+//   - A pending deep-link (manta://pair?box=…&code=…) forces manual mode on
+//     mount with the fields pre-filled — one click on Connect confirms.
+//   - A clipboard pair-link (BET-704) switches zone A to manual mode, fills
+//     the fields through the SAME pendingPairLink path (no second prefill
+//     mechanism), and renders a "from clipboard" chip beside the address.
+//   - A successful claim lands on the same "Connected — your box is ready" +
+//     Next → state the SSH path ends on, so both pairing paths converge.
 //
-// Props:
-//   onPaired — successful pair (SSH install + claim OR manual claim). The
-//              shell decides what to do next — usually it runs the
-//              post-pair verification (BET-356 §4 "verify by working").
+// Both modes call `onPaired` when the panel's Next is pressed; the shell
+// decides what to do next (usually post-pair verification, BET-356 §4).
 //
-// Onboarding.tsx's `skip` / store.skipOnboarding are still reachable from
-// Settings ("re-run onboarding" path) and stay wired up — the prop is gone
-// from PairStep but the action is not.
+// Onboarding.tsx's `skip` / store.skipOnboarding stays reachable from
+// Settings and is unaffected.
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -31,13 +31,14 @@ import {
 } from "../shared/setupLogic";
 import { detectPairClipboard } from "../shared/pairPayload";
 import { PairingCodeInput } from "./PairingCodeInput";
-import { Button } from "./Button";
 import { isValidBoxToken } from "../shared/transport.mjs";
 import { claimBox } from "./pairClaim";
 import { useStore } from "./store";
 import { SshInstallStep } from "./SshInstallStep";
 import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
+import { ConnectPanel } from "./ConnectPanel";
+import { deriveConnectPanel, type ConnectActionId } from "./connectPanel";
 
 const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
@@ -64,27 +65,31 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
   const hasSshInstaller = getMantaPreload() !== null;
 
   // Deep-link (BET-335) — if a manta://pair?... URL is pending in the store
-  // at mount, prefill the manual form from it and force the disclosure open
-  // so the user sees the address they're about to pair against. When no
-  // link is pending, show the SSH picker as the primary surface.
+  // at mount, prefill the manual form from it and force manual mode so the
+  // user sees the address they're about to pair against. When no link is
+  // pending and an SSH installer exists, show the picker as the default mode.
   const pendingPairLink = useStore.getState().pendingPairLink;
   const prefill = prefillFromPairLink(pendingPairLink, PAIR_PREFILL_SCHEME);
-  const [disclosureOpen, setDisclosureOpen] = useState(() => Boolean(prefill));
-  // On a renderer without an SSH installer (mobile / web), the picker is
-  // unavailable — surface the manual form immediately rather than render an
-  // empty shell.
-  const showSshPicker = hasSshInstaller && !prefill;
+
+  // Mode of zone A (BET-962). A pending deep-link forces manual mode on
+  // mount; on a renderer without an SSH installer the picker is unavailable,
+  // so manual mode becomes the default. Otherwise the picker is primary.
+  const [mode, setMode] = useState<"ssh" | "manual">(() =>
+    prefill ? "manual" : hasSshInstaller ? "ssh" : "manual",
+  );
+  // Whether the current prefill came from the clipboard (vs a deep-link) —
+  // renders the "from clipboard" chip beside the address.
+  const [fromClipboard, setFromClipboard] = useState(false);
 
   // Clipboard pair-link detection (BET-704): a user who received a pairing
   // link elsewhere (chat message, terminal copy) shouldn't have to retype
   // it. Checked on mount AND on window focus while this step is shown — no
-  // polling/intervals. A hit renders a dismissible banner; "Use it" routes
-  // through the SAME pendingPairLink mechanism the OS deep-link handler
-  // uses (App.tsx's onPairLink → setPendingPairLink → prefillFromPairLink),
-  // so there is exactly one prefill code path. The user still clicks
-  // Connect — this never auto-claims.
+  // polling/intervals. A hit switches zone A to manual mode and routes
+  // through the SAME pendingPairLink mechanism the OS deep-link handler uses
+  // (App.tsx's onPairLink → setPendingPairLink → prefillFromPairLink), so
+  // there is exactly one prefill code path. The user still clicks Connect —
+  // this never auto-claims.
   const lastClipboardRef = useRef<string | null>(null);
-  const [clipboardHit, setClipboardHit] = useState<string | null>(null);
 
   useEffect(() => {
     const preload = getMantaPreload();
@@ -96,12 +101,15 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
         try {
           text = await preload.readClipboardText();
         } catch {
-          return; // clipboard read failed — silently no banner
+          return; // clipboard read failed — silently no-op
         }
         const trimmed = (text ?? "").trim();
         if (!trimmed || trimmed === lastClipboardRef.current) return;
         if (!detectPairClipboard(trimmed, PAIR_PREFILL_SCHEME)) return;
-        setClipboardHit(trimmed);
+        lastClipboardRef.current = trimmed;
+        useStore.getState().setPendingPairLink(trimmed);
+        setFromClipboard(true);
+        setMode("manual");
       })();
     };
 
@@ -109,19 +117,6 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
     window.addEventListener("focus", check);
     return () => window.removeEventListener("focus", check);
   }, []);
-
-  const dismissClipboardHit = () => {
-    lastClipboardRef.current = clipboardHit;
-    setClipboardHit(null);
-  };
-
-  const useClipboardHit = () => {
-    if (!clipboardHit) return;
-    lastClipboardRef.current = clipboardHit;
-    useStore.getState().setPendingPairLink(clipboardHit);
-    setClipboardHit(null);
-    setDisclosureOpen(true);
-  };
 
   return (
     <div>
@@ -133,93 +128,65 @@ export function PairStep({ onPaired }: { onPaired: () => void }) {
         and pairs with this app — no terminal needed.
       </p>
 
-      {showSshPicker && (
+      {mode === "ssh" ? (
         <div className="mb-6">
           <SshInstallStep
             onPaired={onPaired}
-            onPairManually={() => setDisclosureOpen(true)}
+            // BET-962: the picker's "Enter a pairing code instead" link (and
+            // the install-failed "Pair manually" action) switch zone A to
+            // manual mode — there is no separate disclosure any more.
+            onPairManually={() => setMode("manual")}
           />
         </div>
-      )}
-
-      <button
-        type="button"
-        onClick={() => setDisclosureOpen((v) => !v)}
-        className="text-meta text-text-faint hover:text-text-muted underline underline-offset-4 decoration-border-strong transition-colors mt-6"
-      >
-        {disclosureOpen ? "Hide" : "Pair to an existing box"}
-      </button>
-      {clipboardHit && (
-        <div className="mt-3 flex items-center justify-between gap-3 rounded-sm border border-border bg-bg-soft px-3 py-2 text-body text-text">
-          <span>Pairing link detected</span>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={useClipboardHit}
-              className="text-body font-medium text-accent hover:underline"
-            >
-              Use it
-            </button>
-            <button
-              type="button"
-              onClick={dismissClipboardHit}
-              aria-label="Dismiss"
-              className="text-text-faint hover:text-text-muted"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      )}
-      {disclosureOpen && (
+      ) : (
         // Keyed on pendingPairLink so a clipboard "Use it" click prefills a
-        // manual form that is ALREADY open (a fresh mount is the only way
+        // manual panel that is ALREADY open (a fresh mount is the only way
         // this component's useState-seeded fields pick up a new prefill —
-        // the same mechanism the deep-link path already relies on, just
-        // made to also work when the form was open before the link arrived).
-        <ManualPairForm
+        // the same mechanism the deep-link path already relies on).
+        <ManualPairPanel
           key={pendingPairLink ?? "no-prefill"}
           prefill={prefill}
+          fromClipboard={fromClipboard}
           onPaired={onPaired}
+          onBackToPicker={() => setMode("ssh")}
         />
       )}
     </div>
   );
 }
 
-// Manual code-entry form. Extracted from PairStep so the disclosure can
-// mount it as a self-contained block. The pure validation/submit-gate lives
-// in shared/setupLogic.ts (canConnectSetup / normalizeServerUrl);
-// this component is wiring + JSX only — no validation logic is duplicated
-// here (BET-382).
-//
-// Layout (BET-382): one row of three fields on ≥640px (Host · Box ID · Code),
-// stacked to one column under `sm`. The "Host" input replaces the old
-// "Advanced → Server URL" disclosure — the value still flows through
-// `serverUrl` state and the same `Server URL must start with http:// or
-// https://` validation, so the tailnet path (BET-268) and the deep-link
-// prefill (BET-336) keep working unchanged.
-function ManualPairForm({
+// Manual code-entry mode of the Connect panel's zone A (BET-962). Renders the
+// same Host / Box ID / Code grid the old standalone ManualPairForm had —
+// moved unchanged into zone A — but no longer owns status, actions or the
+// footer button: those are the Connect panel's zones B and D, fed by
+// deriveConnectPanel below. Pure validation stays in shared/setupLogic.ts
+// (canConnectSetup / normalizeServerUrl); this component is wiring + JSX only.
+function ManualPairPanel({
   prefill,
+  fromClipboard,
   onPaired,
+  onBackToPicker,
 }: {
   prefill: ReturnType<typeof prefillFromPairLink>;
+  fromClipboard: boolean;
   onPaired: () => void;
+  onBackToPicker: () => void;
 }) {
   const [boxId, setBoxId] = useState(() => prefill?.boxId ?? "");
   const [code, setCode] = useState(() => prefill?.code ?? "");
   const [serverUrl, setServerUrl] = useState(() => prefill?.serverUrl ?? "");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [paired, setPaired] = useState(false);
   const codeRef = useRef<HTMLInputElement>(null);
 
-  // Deep-link failure reason (BET-335). Rendered in the same inline slot
-  // a manual Connect failure uses; consume-on-read so a re-fire still
-  // changes the value.
+  // Deep-link failure reason (BET-335). Rendered as the claim error the
+  // manual panel surfaces; consume-on-read so a re-fire still changes the
+  // value.
   const pairLinkError = useStore((s) => s.pairLinkError);
   useEffect(() => {
     if (!pairLinkError) return;
-    setError(pairLinkError);
+    setClaimError(pairLinkError);
     useStore.getState().setPairLinkError(null);
     codeRef.current?.focus();
   }, [pairLinkError]);
@@ -228,17 +195,26 @@ function ManualPairForm({
   const serverUrlInvalid =
     serverUrlTrimmed !== "" && normalizeServerUrl(serverUrlTrimmed) === null;
 
-  const connectEnabled = canConnectSetup({
+  const canConnect = canConnectSetup({
     boxId,
     code,
     submitting,
     serverUrl: serverUrlTrimmed,
   });
 
+  const connectState = deriveConnectPanel({
+    mode: "manual",
+    paired,
+    claimError,
+    prefillPresent: Boolean(prefill),
+    canConnect,
+    submitting,
+  });
+
   const connect = async () => {
-    if (!connectEnabled) return;
+    if (!canConnect) return;
     setSubmitting(true);
-    setError(null);
+    setClaimError(null);
     const result = await claimBox({
       boxId: boxId.trim(),
       code,
@@ -247,36 +223,67 @@ function ManualPairForm({
     if (result.ok) {
       useStore.getState().setPendingPairLink(null);
       setSubmitting(false);
-      onPaired();
+      // Hold the step on the "Connected" + Next → state (BET-962 converges
+      // the manual path on the SSH path's ending) instead of auto-advancing.
+      setPaired(true);
       return;
     }
     setSubmitting(false);
-    setError(result.message);
+    setClaimError(result.message);
     codeRef.current?.focus();
   };
 
-  const onFormSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    void connect();
-  };
+  function handleAction(id: ConnectActionId) {
+    switch (id) {
+      case "connect":
+        void connect();
+        break;
+      case "discard":
+        // Toss the pending prefill and fall back to idle code entry.
+        useStore.getState().setPendingPairLink(null);
+        setBoxId("");
+        setCode("");
+        setServerUrl("");
+        setClaimError(null);
+        break;
+      case "cancel":
+        setSubmitting(false);
+        break;
+      case "retry":
+        void connect();
+        break;
+      case "next":
+        onPaired();
+        break;
+      default:
+        break;
+    }
+  }
 
   const boxIdLooksBad = boxId.trim() !== "" && !isValidBoxToken(boxId.trim());
+  const locked = connectState.targetLocked;
 
-  return (
-    <form onSubmit={onFormSubmit} className="flex flex-col gap-4 mt-3">
+  // Zone A — the manual code-entry fields, in the same responsive grid the
+  // old standalone form used, plus the mode-switch link back to the picker.
+  const zoneA = (
+    <div className="space-y-2">
       <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr] gap-3 items-end">
-        {/* Host — replaces the old Advanced → Server URL disclosure. The
-            value is still named `serverUrl` and still flows through
-            normalizeServerUrl / canConnectSetup, so the tailnet path
-            (BET-268) and the deep-link server= override (BET-336) work
-            unchanged. The validation error renders inline under this input
-            only (the grid cell wraps input + error). */}
+        {/* Host — the value still flows through `serverUrl` state and the same
+            `Server URL must start with http:// or https://` validation, so the
+            tailnet path (BET-268) and the deep-link server= override (BET-336)
+            keep working unchanged. A clipboard-detected link shows the
+            "from clipboard" chip beside the address. */}
         <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-host"
-            className="text-label font-medium text-text-muted"
+            className="text-label font-medium text-text-muted flex items-center gap-2"
           >
             Host
+            {fromClipboard && (
+              <span className="inline-flex items-center gap-1.5 text-meta rounded-full px-2 py-0.5 bg-accent-bg text-accent border border-accent">
+                from clipboard
+              </span>
+            )}
           </label>
           <input
             id="pair-host"
@@ -285,11 +292,11 @@ function ManualPairForm({
             autoComplete="off"
             spellCheck={false}
             placeholder="https://box.mantaui.com"
-            disabled={submitting}
+            disabled={locked}
             value={serverUrl}
             onChange={(e) => {
               setServerUrl(e.target.value);
-              setError(null);
+              setClaimError(null);
             }}
             aria-invalid={serverUrlInvalid}
             aria-describedby={serverUrlInvalid ? "pair-host-err" : undefined}
@@ -326,11 +333,11 @@ function ManualPairForm({
             autoComplete="off"
             spellCheck={false}
             placeholder="0d5784a7a43451f4ad70dd3d9ee5cf72"
-            disabled={submitting}
+            disabled={locked}
             value={boxId}
             onChange={(e) => {
               setBoxId(e.target.value.trim());
-              setError(null);
+              setClaimError(null);
             }}
             aria-invalid={boxIdLooksBad}
             className="w-full rounded-sm bg-bg border px-3 py-2 text-body font-mono text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
@@ -338,9 +345,7 @@ function ManualPairForm({
           />
         </div>
 
-        {/* Pairing code — 6 digits, monospace, centered. Drops the
-            previous text-2xl + tracking-[0.4em] (oversized); becomes a
-            normal-size input that still reads as "this is a code". */}
+        {/* Pairing code — 6 digits, monospace, centered. */}
         <div className="flex flex-col gap-2">
           <label
             htmlFor="pair-code"
@@ -351,39 +356,35 @@ function ManualPairForm({
           <PairingCodeInput
             id="pair-code"
             ref={codeRef}
-            disabled={submitting}
-            hasError={error != null}
+            disabled={locked}
+            hasError={claimError != null}
             value={code}
             onChange={(v) => {
               setCode(v);
-              setError(null);
+              setClaimError(null);
             }}
             className="w-full rounded-sm bg-bg border border-border px-3 py-2 text-center font-mono tracking-[0.22em] text-text outline-none transition-colors focus:border-accent disabled:opacity-60"
           />
         </div>
       </div>
 
-      {error && (
-        <div role="alert" className="text-body" style={{ color: DANGER }}>
-          {error}
-        </div>
-      )}
+      {/* BET-962: mode switch back to the host picker — zone A link. */}
+      <button
+        type="button"
+        onClick={onBackToPicker}
+        className="text-meta text-text-faint hover:text-text-muted underline underline-offset-4 decoration-border-strong transition-colors"
+      >
+        Back to the host picker
+      </button>
+    </div>
+  );
 
-      {/* Footer: hint (left) + Connect (right). The Skip-setup button was
-          removed in BET-382; `skip` / skipOnboarding remain reachable from
-          Settings for users who need to re-run onboarding. */}
-      <div className="flex items-center justify-between gap-3 pt-1">
-        <p className="text-meta text-text-faint">
-          Run{" "}
-          <code className="rounded-xs bg-bg px-2 py-px text-label font-mono text-text-muted">
-            manta pair
-          </code>{" "}
-          on the box to get a code.
-        </p>
-        <Button tone="primary" type="submit" disabled={!connectEnabled}>
-          {submitting ? "Connecting…" : "Connect"}
-        </Button>
-      </div>
-    </form>
+  return (
+    <ConnectPanel
+      state={connectState}
+      target={zoneA}
+      logLines={[]}
+      onAction={handleAction}
+    />
   );
 }
