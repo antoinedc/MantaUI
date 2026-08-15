@@ -44,6 +44,7 @@ import { Card } from "./Card";
 import { Checkbox } from "./Checkbox";
 import { FolderPickerModal } from "./FolderPickerModal";
 import { ListRow } from "./ListRow";
+import { ScrollFrame } from "./ScrollFrame";
 import { Skeleton } from "./Skeleton";
 import { CloneFromGitHub } from "./CloneFromGitHub";
 import { StatusDot } from "./StatusDot";
@@ -919,30 +920,64 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 </div>
               </>
             ) : (
-              <>
-                <div className="text-center space-y-1 mb-4">
-                  <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
-                  <p className="text-body text-text-faint">
-                    Found {probeRepos.length} {probeRepos.length === 1 ? "repository" : "repositories"} on your box.
-                  </p>
-                </div>
+              <ScrollFrame
+                header={
+                  <>
+                    <div className="text-center space-y-1 mb-4">
+                      <h1 className="text-display font-bold tracking-tight text-text">What's up next?</h1>
+                      <p className="text-body text-text-faint">
+                        Found {probeRepos.length} {probeRepos.length === 1 ? "repository" : "repositories"} on your box.
+                      </p>
+                    </div>
 
-                {cliStatus?.authenticated && (
-                  <div className="flex items-center justify-center gap-[7px] -mt-[6px] mb-3 text-[12px] text-text-faint">
-                    <StatusDot tone="ok" />
-                    <span>
-                      GitHub connected as{" "}
-                      <b className="text-text-muted font-semibold">@{cliStatus.login}</b>
-                    </span>
-                    <span
-                      className="text-[11.5px] text-text-faint underline decoration-dotted cursor-default"
-                      title="Not available yet"
-                    >
-                      use a different account
-                    </span>
+                    {cliStatus?.authenticated && (
+                      <div className="flex items-center justify-center gap-[7px] -mt-[6px] mb-3 text-[12px] text-text-faint">
+                        <StatusDot tone="ok" />
+                        <span>
+                          GitHub connected as{" "}
+                          <b className="text-text-muted font-semibold">@{cliStatus.login}</b>
+                        </span>
+                        <span
+                          className="text-[11.5px] text-text-faint underline decoration-dotted cursor-default"
+                          title="Not available yet"
+                        >
+                          use a different account
+                        </span>
+                      </div>
+                    )}
+                  </>
+                }
+                footer={
+                  <div className="flex items-center flex-wrap gap-2 mt-3">
+                    {batchDone && !sending && hasFailed ? (
+                      <Button tone="primary" onClick={() => void finishSetup()}>
+                        Done
+                      </Button>
+                    ) : batchDone ? (
+                      <span className="text-meta text-text-faint">Setting up workspaces…</span>
+                    ) : (
+                      <>
+                        <Button
+                          tone="primary"
+                          onClick={() => void setupWorkspaces()}
+                          disabled={checked.size === 0}
+                        >
+                          Set up {checked.size} workspace{checked.size === 1 ? "" : "s"}
+                        </Button>
+                        <Button tone="default" onClick={() => setPickerOpen(true)}>
+                          Browse for a folder…
+                        </Button>
+                        <Button
+                          tone="default"
+                          onClick={() => setCloneOpen(true)}
+                        >
+                          Clone from GitHub…
+                        </Button>
+                      </>
+                    )}
                   </div>
-                )}
-
+                }
+              >
                 <div className="space-y-1">
                   {rows.map((r) =>
                     batchDone ? (
@@ -1006,36 +1041,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                     ),
                   )}
                 </div>
-
-                <div className="flex items-center flex-wrap gap-2 mt-3">
-                  {batchDone && !sending && hasFailed ? (
-                    <Button tone="primary" onClick={() => void finishSetup()}>
-                      Done
-                    </Button>
-                  ) : batchDone ? (
-                    <span className="text-meta text-text-faint">Setting up workspaces…</span>
-                  ) : (
-                    <>
-                      <Button
-                        tone="primary"
-                        onClick={() => void setupWorkspaces()}
-                        disabled={checked.size === 0}
-                      >
-                        Set up {checked.size} workspace{checked.size === 1 ? "" : "s"}
-                      </Button>
-                      <Button tone="default" onClick={() => setPickerOpen(true)}>
-                        Browse for a folder…
-                      </Button>
-                      <Button
-                        tone="default"
-                        onClick={() => setCloneOpen(true)}
-                      >
-                        Clone from GitHub…
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </>
+              </ScrollFrame>
             )}
         </>
         )}

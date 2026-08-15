@@ -30,6 +30,7 @@ import { Checkbox } from "./Checkbox";
 import { Field } from "./Field";
 import { ListRow } from "./ListRow";
 import { ProgressBar } from "./ProgressBar";
+import { ScrollFrame } from "./ScrollFrame";
 import { ConnectGithubPanel, PanelHeader, PANEL_CLASS } from "./ConnectGithub";
 import { formatAge, formatBytes, cloneErrorKind, type CloneErrorKind } from "./chatUtils";
 import type {
@@ -262,82 +263,90 @@ export function CloneFromGitHub({
               </div>
             }
           />
-          <div className="p-4 flex flex-col max-h-[70vh]">
-            <Field
-              ariaLabel="Search repositories"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={`Search ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}…`}
-            />
-            {reposError && (
-              <div className="mt-2">
-                <Callout tone="danger">{reposError}</Callout>
-              </div>
-            )}
-            <div className="mt-1 flex-1 min-h-0 overflow-y-auto">
-              {filtered.map((r) => (
-                <ListRow
-                  key={r.fullName}
-                  leading={
-                    <Checkbox
-                      checked={checked.has(r.fullName)}
-                      onChange={(on) => toggleRepo(r.fullName, on)}
-                      ariaLabel={`Clone ${r.name}`}
+          <ScrollFrame
+            className="p-4"
+            header={
+              <>
+                <Field
+                  ariaLabel="Search repositories"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={`Search ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}…`}
+                />
+                {reposError && (
+                  <div className="mt-2">
+                    <Callout tone="danger">{reposError}</Callout>
+                  </div>
+                )}
+              </>
+            }
+            footer={
+              <>
+                <div className="mt-3 text-[12px] text-text-faint">
+                  Clone into{" "}
+                  {editingRoot ? (
+                    <input
+                      autoFocus
+                      value={root}
+                      onChange={(e) => setRoot(e.target.value)}
+                      onBlur={() => setEditingRoot(false)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") setEditingRoot(false);
+                      }}
+                      className="font-mono text-[11.5px] text-text bg-inset border border-border rounded-xs px-1 py-px outline-none"
                     />
-                  }
-                  name={r.name}
-                  secondary={r.description || "—"}
-                  trailing={r.pushedAt != null ? formatAge(Date.now() - r.pushedAt) : "—"}
-                />
-              ))}
-              {filtered.length === 0 && !reposError && (
-                <div className="text-[13px] text-text-faint py-2">No repositories match.</div>
-              )}
-            </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setEditingRoot(true)}
+                      className="font-mono text-[11.5px] text-text-muted hover:text-text cursor-text"
+                      title="Change clone root"
+                    >
+                      {root}
+                    </button>
+                  )}{" "}
+                  {!editingRoot && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingRoot(true)}
+                      className="text-[11.5px] text-text-faint underline decoration-dotted hover:text-text-muted"
+                    >
+                      change
+                    </button>
+                  )}
+                </div>
 
-            <div className="mt-3 text-[12px] text-text-faint">
-              Clone into{" "}
-              {editingRoot ? (
-                <input
-                  autoFocus
-                  value={root}
-                  onChange={(e) => setRoot(e.target.value)}
-                  onBlur={() => setEditingRoot(false)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") setEditingRoot(false);
-                  }}
-                  className="font-mono text-[11.5px] text-text bg-inset border border-border rounded-xs px-1 py-px outline-none"
-                />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setEditingRoot(true)}
-                  className="font-mono text-[11.5px] text-text-muted hover:text-text cursor-text"
-                  title="Change clone root"
-                >
-                  {root}
-                </button>
-              )}{" "}
-              {!editingRoot && (
-                <button
-                  type="button"
-                  onClick={() => setEditingRoot(true)}
-                  className="text-[11.5px] text-text-faint underline decoration-dotted hover:text-text-muted"
-                >
-                  change
-                </button>
-              )}
-            </div>
-
-            <div className="flex gap-2 mt-3">
-              <Button tone="primary" disabled={selected.length === 0} onClick={() => runClones(selected, 0)}>
-                Clone {selected.length} selected
-              </Button>
-              <Button tone="ghost" onClick={onCancel}>
-                Back
-              </Button>
-            </div>
-          </div>
+                <div className="flex gap-2 mt-3">
+                  <Button tone="primary" disabled={selected.length === 0} onClick={() => runClones(selected, 0)}>
+                    Clone {selected.length} selected
+                  </Button>
+                  <Button tone="ghost" onClick={onCancel}>
+                    Back
+                  </Button>
+                </div>
+              </>
+            }
+            bodyClassName="mt-1"
+          >
+            {filtered.map((r) => (
+              <ListRow
+                key={r.fullName}
+                leading={
+                  <Checkbox
+                    checked={checked.has(r.fullName)}
+                    onChange={(on) => toggleRepo(r.fullName, on)}
+                    ariaLabel={`Clone ${r.name}`}
+                  />
+                }
+                name={r.name}
+                secondary={r.description || "—"}
+                trailing={r.pushedAt != null ? formatAge(Date.now() - r.pushedAt) : "—"}
+              />
+            ))}
+            {filtered.length === 0 && !reposError && (
+              <div className="text-[13px] text-text-faint py-2">No repositories match.</div>
+            )}
+          </ScrollFrame>
         </>
       )}
 
