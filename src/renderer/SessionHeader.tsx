@@ -101,6 +101,7 @@ export function SessionHeader({
   onReviewChanges,
   onFillComposer,
   onDismissForgeConnect,
+  onConnectForge,
   onMerge,
   mergeBusy,
   mergeError,
@@ -174,6 +175,10 @@ export function SessionHeader({
   onReviewChanges?: () => void;
   onFillComposer?: (text: string) => void;
   onDismissForgeConnect?: () => void;
+  // BET-943: wires the ConnectOffer's "Connect" chip. When omitted (tests,
+  // non-forge callers), the offer renders the × only — a chip that looks like
+  // a button and does nothing is the bug this issue fixes.
+  onConnectForge?: () => void;
   // BET-867: the branch chip's popover is the ONE git surface. Merge + ship
   // live here now (the pinned forge card is deleted), so ChatPanel threads the
   // ship/merge state + handlers down. All optional so non-forge callers / tests
@@ -449,7 +454,9 @@ export function SessionHeader({
       {/* BET-789 §4.5 [S10]: the one-line contextual connect offer, under the
             header bar (never a modal / toast / Settings badge). Only in a
             forge-origin session while disconnected and not dismissed. */}
-      {offerConnect && <ConnectOffer onDismiss={onDismissForgeConnect} />}
+      {offerConnect && (
+        <ConnectOffer onDismiss={onDismissForgeConnect} onConnect={onConnectForge} />
+      )}
     </>
   );
 }
@@ -1458,11 +1465,18 @@ function ChecksPanel({
 //
 // The ENTIRE visible chrome delta for the project's existing-user acquisition
 // path: one dismissible Callout line under the header, in a forge-origin
-// session while the forge is disconnected. "Connect" is inert (a later issue
-// wires it); the × dismisses permanently, per-box, via the store + configUpdate
+// session while the forge is disconnected. "Connect" opens the device-code
+// modal (wired by ChatPanel's onConnectForge); the × dismisses permanently,
+// per-box, via the store + configUpdate
 // (wired by ChatPanel's onDismissForgeConnect — the offer only re-appears when
 // the config flag is cleared).
-function ConnectOffer({ onDismiss }: { onDismiss?: () => void }) {
+function ConnectOffer({
+  onDismiss,
+  onConnect,
+}: {
+  onDismiss?: () => void;
+  onConnect?: () => void;
+}) {
   return (
     <div className="px-3 pb-2">
       <Callout tone="info">
@@ -1471,8 +1485,7 @@ function ConnectOffer({ onDismiss }: { onDismiss?: () => void }) {
             Connect GitHub to see checks and pull requests for this repo.
           </span>
           <span className="flex items-center gap-2">
-            {/* "Connect" is inert in BET-789. */}
-            <Chip on>Connect</Chip>
+            {onConnect && <Chip onClick={onConnect}>Connect</Chip>}
             {onDismiss && (
               <Chip onClick={onDismiss} title="Dismiss">
                 ×
