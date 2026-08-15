@@ -1077,16 +1077,19 @@ describe("sync snapshot / applySyncPayload (BET-678)", () => {
       // No syncSnapshot — exactly the unpaired preload bridge's shape.
       configGet: async () => {
         configGetCalls++;
-        return { projects: [] };
+        return { serverUrl: "", boxId: "", boxToken: "" };
       },
     };
     useStore.setState({ loaded: false, boxToken: "seed", serverUrl: "seed" });
+    // Must resolve, not throw: the without-guard path would TypeError on the
+    // missing syncSnapshot and leave `loaded` false → infinite spinner.
     await expect(useStore.getState().refresh()).resolves.toBeUndefined();
     expect(configGetCalls).toBe(1);
     const s = useStore.getState();
     // `loaded` is what unblocks App's onboarding gate.
     expect(s.loaded).toBe(true);
-    // An unpaired config must resolve to onboarding, not carry stale pairing.
+    // Raw config applied with no pairing overlay: an unpaired config must
+    // resolve to onboarding, not carry stale pairing.
     expect(s.boxToken).toBe("");
     expect(s.serverUrl).toBe("");
     (window as unknown as { api?: unknown }).api = prev;

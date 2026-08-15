@@ -861,9 +861,11 @@ export const useStore = create<State>((set, get) => ({
     // transports, and the local config is the only thing an unpaired app can
     // (or should) load — there is no box to sync with yet. Onboarding.tsx's
     // refreshAndInstallTransport documents the same hazard on the post-pair
-    // path; this is the pre-pair half.
-    if (!window.api.syncSnapshot) {
-      get().applyConfig(mergeLocalPairing(await window.api.configGet()));
+    // path; this is the pre-pair half. Same `typeof … !== "function"`
+    // capability-probe pattern used in App.tsx (onSyncDelta / onStatusEvent)
+    // and ProvidersStep (opencodeProviderAuth).
+    if (typeof window.api.syncSnapshot !== "function") {
+      get().applyConfig(await window.api.configGet());
       return;
     }
     // BET-678: single cursor RPC. Pass the last-confirmed cursor so the box
