@@ -1619,6 +1619,13 @@ export type UsageWindow = {
   limit?: number; // absolute cap when the provider exposes one
   resetsAt?: number; // epoch ms
   binding?: boolean; // the provider says this window bites first
+  // True when this reading describes a window whose reset instant has already
+  // passed: the provider has not published the new window's numbers yet, so
+  // `pct` still belongs to the window that just ended. Set by the poller
+  // (src/server/usage.mjs), never by an adapter. Consumers must not raise an
+  // alert from a stale window; the dial carries the last reading forward and
+  // labels it "resetting…" rather than blanking.
+  stale?: boolean;
 };
 export type UsageSnapshot = {
   provider: string; // adapter id: "claude" | "codex" | "kimi"

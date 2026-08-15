@@ -35,6 +35,12 @@
  * @property {number} [limit]    Absolute cap when the provider exposes one.
  * @property {number} [resetsAt] Epoch MILLISECONDS.
  * @property {boolean} [binding] The provider says this window bites first.
+ * @property {boolean} [stale] True when this reading describes a window whose
+ *   reset instant has already passed: the provider has not published the new
+ *   window's numbers yet, so `pct` still belongs to the window that just
+ *   ended. Set by the poller (this module), never by an adapter. Consumers
+ *   must not raise an alert from a stale window; the dial carries the last
+ *   reading forward and labels it "resetting…" rather than blanking.
  */
 /**
  * @typedef {Object} UsageSnapshot
@@ -79,6 +85,9 @@ export const ADAPTERS = [claudeAdapter, codexAdapter, kimiAdapter];
 
 // Cache TTL is the poll interval; there is no separate cache layer (per spec).
 const POLL_MS = 180_000; // 3 minutes
+// How long after a tick that first saw an expired window we re-poll, so the
+// carried-forward reading is replaced in seconds rather than up to POLL_MS.
+const STALE_RETRY_MS = 20_000;
 // Default per-adapter backoff on a bare 429 (no usable Retry-After).
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 15 * 60_000; // 15 minutes
 
@@ -100,6 +109,7 @@ function contentKey(results) {
  * @param {typeof fetch} [opts.fetchImpl]
  * @param {() => number} [opts.now]
  * @param {(evt: {kind:string, payload:object}) => void} [opts.publish]
+ * @param {number} [opts.staleRetryMs]
  * @returns {{ tick: () => Promise<void>, stop: () => void, snapshots: UsageSnapshot[] }}
  */
 export function createUsagePoller({
@@ -107,6 +117,7 @@ export function createUsagePoller({
   fetchImpl = fetch,
   now = () => Date.now(),
   publish,
+  staleRetryMs = STALE_RETRY_MS,
 } = {}) {
   let snapshots = [];
   let lastContentKey = null;
@@ -119,6 +130,11 @@ export function createUsagePoller({
   // failure TRANSITION rather than once per tick while a provider stays
   // broken.
   const failing = new Set();
+  // Whether the PREVIOUS tick saw an expired window — the fast re-poll is
+  // armed on the false->true edge only (see the header note on why a
+  // retry-while-stale loop would never terminate for an idle user).
+  let hadStale = false;
+  let staleRetry = null;
 
   function warnOnce(adapterId, e) {
     if (failing.has(adapterId)) return;
@@ -197,6 +213,26 @@ export function createUsagePoller({
       // BUS PUBLISH ("publish … only when the serialized snapshot set
       // actually changed") — it says nothing about the cache, so gating only
       // the publish call below satisfies both with no trade-off.
+      // A window whose reset instant has passed is reporting the OLD window's
+      // numbers. Flag it rather than dropping it — the dial carries the last
+      // reading forward — and never let it drive an alert downstream.
+      let anyStale = false;
+      for (const snap of results) {
+        for (const w of snap.windows) {
+          if (w.resetsAt != null && w.resetsAt <= nowMs) {
+            w.stale = true;
+            anyStale = true;
+          }
+        }
+      }
+      if (anyStale && !hadStale) {
+        console.log(`[usage] window past its reset instant — re-polling in ${staleRetryMs}ms`);
+        clearTimeout(staleRetry);
+        staleRetry = setTimeout(() => void tick(), staleRetryMs);
+        staleRetry?.unref?.();
+      }
+      hadStale = anyStale;
+
       snapshots = results;
       const key = contentKey(results);
       if (key !== lastContentKey) {
@@ -211,6 +247,7 @@ export function createUsagePoller({
   return {
     tick,
     stop() {
+      clearTimeout(staleRetry);
       stopped = true;
     },
     get snapshots() {

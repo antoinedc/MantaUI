@@ -583,3 +583,74 @@ test("kimi adapter: detect() requires a non-empty key", async () => {
   assert.equal(await kimiAdapter.detect({ readKey: async () => null }), false);
   assert.equal(await kimiAdapter.detect({ readKey: async () => "" }), false);
 });
+
+// ----------------------------------------------------------------------------
+// Stale-window handling (BET-965)
+// ----------------------------------------------------------------------------
+
+test("poller: a window past its reset instant is published stale, values carried forward unchanged", async () => {
+  let nowMs = 1000;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({
+      windows: [{ kind: "session", label: "s", pct: 78, used: 78, resetsAt: 500 }],
+    }),
+  });
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
+  await poller.tick();
+  const w = poller.snapshots[0].windows[0];
+  assert.equal(w.stale, true);
+  assert.equal(w.pct, 78, "carry-forward must not alter the pct");
+  assert.equal(w.used, 78, "carry-forward must not alter reported absolutes");
+});
+
+test("poller: a window with resetsAt in the future has no stale key", async () => {
+  let nowMs = 1000;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 50, resetsAt: 5000 }] }),
+  });
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
+  await poller.tick();
+  const w = poller.snapshots[0].windows[0];
+  assert.equal("stale" in w, false, "future resetsAt must not attach stale (only-attach-when-true)");
+});
+
+test("poller: a window with no resetsAt is never marked stale", async () => {
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 50 }] }),
+  });
+  const poller = createUsagePoller({ adapters: [adapter], now: () => 1000 });
+  await poller.tick();
+  const w = poller.snapshots[0].windows[0];
+  assert.equal("stale" in w, false);
+});
+
+test("poller: first stale tick re-polls once; a second consecutive stale tick arms nothing (edge-only)", async () => {
+  let nowMs = 1000;
+  let fetchCalls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      fetchCalls++;
+      return { windows: [{ kind: "session", label: "s", pct: 78, resetsAt: 500 }] };
+    },
+  });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, staleRetryMs: 5 });
+
+  await poller.tick(); // first stale tick → arms one retry
+  assert.equal(fetchCalls, 1);
+
+  await sleep(40); // the armed retry lands
+  assert.equal(fetchCalls, 2, "the false->true edge must trigger exactly one extra re-poll");
+
+  const before = fetchCalls;
+  await poller.tick(); // still stale, but hadStale is already true → no new arm
+  assert.equal(fetchCalls, before + 1, "an explicit tick still runs its fetch");
+  const afterManual = fetchCalls;
+
+  await sleep(40); // nothing was armed — no further fetch
+  assert.equal(fetchCalls, afterManual, "a second consecutive stale tick arms no further retry");
+});

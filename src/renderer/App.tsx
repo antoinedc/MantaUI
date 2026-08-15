@@ -606,7 +606,13 @@ function Shell() {
     window.api
       .usageList()
       .then((snapshots) => {
-        useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
+        const list = Array.isArray(snapshots) ? snapshots : [];
+        useStore.getState().setUsage(list);
+        // Seed the escalation baseline from the SAME payload that primes the
+        // dial. Without this the fire-once memory starts empty, so the first
+        // live update after any launch re-fires for a window that was already
+        // over the threshold when the app opened.
+        usageLevelsRef.current = buildUsageLevels(list, usageLevelsRef.current);
       })
       .catch(() => {
         // Transport blip or an older box that doesn't implement the channel
@@ -776,7 +782,7 @@ function Shell() {
       }
       // Write back the CURRENT levels so a holding level doesn't re-fire and a
       // drop (after reset) re-arms the key for the next crossing.
-      usageLevelsRef.current = buildUsageLevels(next);
+      usageLevelsRef.current = buildUsageLevels(next, usageLevelsRef.current);
     });
     return off;
   }, [apiGeneration, scheduleAtReset, pushAppToastStore, dismissAppToastStore]);

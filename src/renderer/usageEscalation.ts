@@ -12,6 +12,11 @@
 // (i.e. after the window resets). The previous-level map lives in a ref held
 // by the subscriber; this module is pure.
 //
+// Stale rule: a window whose reset instant has already passed (`stale: true`)
+// is reporting the OLD window's numbers. It must never raise an alert — the
+// key carries its previous level forward instead of re-arming (a re-arm at the
+// boundary is precisely what lets the same limit fire twice across a reset).
+//
 // There is deliberately no React and no provider-name branching here beyond
 // the exact strings the spec dictates.
 
@@ -35,11 +40,18 @@ export function usageAlertLevel(pct: number): UsageAlertLevel {
  *  Windows absent from the snapshots are absent from the record — the
  *  subscriber writes this back into its prev map after each event, which is
  *  what re-arms a key once a window resets and drops below the threshold. */
-export function buildUsageLevels(snapshots: UsageSnapshot[] | null | undefined): Record<string, UsageAlertLevel> {
+export function buildUsageLevels(
+  snapshots: UsageSnapshot[] | null | undefined,
+  prev: Record<string, UsageAlertLevel> = {},
+): Record<string, UsageAlertLevel> {
   const out: Record<string, UsageAlertLevel> = {};
   for (const snap of snapshots ?? []) {
     for (const win of snap.windows ?? []) {
-      out[`${snap.provider}:${win.kind}`] = usageAlertLevel(win.pct);
+      const key = `${snap.provider}:${win.kind}`;
+      // A stale window's pct belongs to the window that just ended. Carrying
+      // the level forward keeps fire-once intact across the boundary: the key
+      // neither re-arms (which would re-fire the same limit) nor disappears.
+      out[key] = win.stale ? (prev[key] ?? "none") : usageAlertLevel(win.pct);
     }
   }
   return out;
@@ -66,6 +78,7 @@ export function shouldFireUsageAlert(
   const fired: UsageAlert[] = [];
   for (const snap of next ?? []) {
     for (const win of snap.windows ?? []) {
+      if (win.stale) continue;
       const key = `${snap.provider}:${win.kind}`;
       const newLevel = usageAlertLevel(win.pct);
       const oldLevel = prev[key] ?? "none";

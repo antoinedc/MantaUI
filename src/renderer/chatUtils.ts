@@ -2906,15 +2906,18 @@ export function usageDialState(
 // "resets in 2h 10m" / "resets in 45m" — the popover's per-window reset
 // line. When the reset is more than 12h out, the absolute clock time is
 // appended (reuses formatClockTime, above) so a far-off reset isn't only
-// relative. Floors to the minute; returns null for a missing/past timestamp
-// so the caller omits the line rather than showing a negative duration.
+// relative. Floors to the minute. Returns null only for a missing/non-finite
+// timestamp; once the reset instant has passed it returns "resetting…".
 export function formatWindowReset(
   resetsAt: number | null | undefined,
   nowMs: number,
 ): string | null {
   if (resetsAt == null || !Number.isFinite(resetsAt)) return null;
   const deltaMs = resetsAt - nowMs;
-  if (deltaMs <= 0) return null;
+  // The reset instant has passed but the provider has not published the new
+  // window yet (server marks the window `stale`). The dial carries the old
+  // number forward, so say why it looks wrong instead of showing no line.
+  if (deltaMs <= 0) return "resetting…";
   const totalMin = Math.floor(deltaMs / 60_000);
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
