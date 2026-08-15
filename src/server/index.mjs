@@ -229,9 +229,10 @@ async function autoPublishPlan({ sessionID, part }) {
   }
 }
 
-// The plan path the client (the `plan_exit` tool) reported. Mirrors the
-// renderer's `extractPlanData` precedence (chatUtils.ts): planPath, then path,
-// then filePath.
+// The plan path the client (the `plan_exit` tool) reported. Superset of the
+// renderer's `extractPlanData` precedence (chatUtils.ts: planPath ?? path); the
+// extra `filePath` fallback is harmless — readPlanMarkdown still confines to
+// the session dir and requires `.md`.
 function planPathFromPart(part) {
   const input = part?.state?.input;
   const p = input?.planPath ?? input?.path ?? input?.filePath;

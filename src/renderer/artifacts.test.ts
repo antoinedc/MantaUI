@@ -469,10 +469,41 @@ describe("plan artifacts", () => {
     ];
     const pages = [page({ subdomain: planSubdomain("ses_a")!, url: "https://box/pages/plan-sesa" })];
     const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
-    // The live page also appears as a Link artifact; find the PLAN artifact.
-    const plan = out.find((a) => a.kind === "plan")!;
-    expect(plan).toBeTruthy();
+    expect(out).toHaveLength(1);
+    const plan = out[0];
+    expect(plan.kind).toBe("plan");
     expect(plan.pageUrl).toBe("https://box/pages/plan-sesa");
+  });
+
+  it("the auto-published plan page is NOT ALSO filed under Links (one artifact, not two)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    const pages = [page({ subdomain: planSubdomain("ses_a")!, url: "https://box/pages/plan-sesa" })];
+    const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
+    expect(out.map((a) => a.kind)).toEqual(["plan"]);
+  });
+
+  it("an unrelated (non-plan) served page still appears as a Link", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    const pages = [page({ subdomain: "preview", url: "https://box/pages/preview" })];
+    const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
+    expect(out.map((a) => a.kind).sort()).toEqual(["link", "plan"]);
+  });
+
+  it("a read tool pointed at a plan path does NOT mint a plan artifact (no authoring signal)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "read", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    expect(deriveArtifacts(messages, [], "ses_a", [], "/proj")).toEqual([]);
   });
 
   it("leaves pageUrl null when no plan page is live for the session", () => {

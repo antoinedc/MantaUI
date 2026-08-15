@@ -209,6 +209,12 @@ function joinHref(cwd: string | null, rel: string): string {
   return cwd.endsWith("/") ? cwd + rel : cwd + "/" + rel;
 }
 
+// Only these tools set a plan path in their input because they AUTHOR the plan
+// file (or confirm it at plan_exit). A `read` tool pointed at a plan path is a
+// reference, not an authoring signal, and must not mint a plan artifact on its
+// own — the write/plan tool (or a prose mention) already does.
+const PLAN_AUTHORING_TOOLS = new Set(["write", "edit", "multiEdit", "patch", "plan", "plan_exit"]);
+
 // Plan paths live in different part shapes depending on how the plan was
 // authored. The classic announcing message mentions the path in PROSE (a text
 // part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool,
@@ -217,19 +223,22 @@ function joinHref(cwd: string | null, rel: string): string {
 // reaches a text part. Scanning only text parts therefore missed every plan
 // created via the plan tool (BET-975/976 landed plan mode; this restores it).
 // Returns every distinct `.opencode/plans/*.md` reference found across text,
-// tool-input, and patch-file surfaces. Cheap by design: we never scan tool
-// output or file content, only path fields and prose.
+// plan-authoring tool-input, and patch-file surfaces. Cheap by design: we never
+// scan tool output or file content, only path fields and prose.
 function planRefsFromPart(part: OpencodePart): string[] {
   const out: string[] = [];
   const candidates: string[] = [];
   if (typeof part.text === "string") candidates.push(part.text);
   const raw = part as Record<string, unknown>;
-  const input = (raw.state as { input?: Record<string, unknown> } | undefined)?.input
-    ?? (raw.input as Record<string, unknown> | undefined);
-  if (input) {
-    for (const key of ["filePath", "path", "planPath"]) {
-      const v = input[key];
-      if (typeof v === "string") candidates.push(v);
+  const isTool = raw.type === "tool";
+  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
+    const input = (raw.state as { input?: Record<string, unknown> } | undefined)?.input
+      ?? (raw.input as Record<string, unknown> | undefined);
+    if (input) {
+      for (const key of ["filePath", "path", "planPath"]) {
+        const v = input[key];
+        if (typeof v === "string") candidates.push(v);
+      }
     }
   }
   if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
@@ -264,9 +273,12 @@ function derivePlanArtifact(
   const rel = path.replace(/^\.\//, "");
   const label = planTitleFromPath(lastPathSegment(rel));
   // The published companion page, when it is live under this session's stable
-  // plan subdomain.
+  // plan subdomain AND belongs to this session (the 20-char slug truncates the
+  // session id, so two sessions sharing a long id prefix must not cross-link).
   const sub = planSubdomain(sessionId);
-  const pageUrl = sub ? (pages.find((p) => p.subdomain === sub)?.url ?? null) : null;
+  const pageUrl = sub
+    ? (pages.find((p) => p.subdomain === sub && p.sessionID === sessionId)?.url ?? null)
+    : null;
   return {
     id: "plan:" + rel.toLowerCase(),
     kind: "plan",
@@ -407,6 +419,11 @@ export function deriveArtifacts(
 
   for (const page of pages) {
     if (page.sessionID !== sessionId) continue;
+    // The auto-published plan page is already represented BY its Plan artifact
+    // (which carries `pageUrl`) — do not ALSO file it under Links. Without this,
+    // every completed plan polluted the Links tab + link-count badge with a
+    // `plan-<slug>` row (the plan-mode write made auto-publish the common path).
+    if (page.subdomain === planSubdomain(sessionId)) continue;
     out.push(derivePageArtifact(page, newestAnnouncingMessage(messages, page.url)));
   }
 
