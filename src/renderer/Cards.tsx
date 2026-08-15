@@ -13,7 +13,7 @@
 // badge, plain-language titles, checkbox question options and a button ladder.
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown } from "lucide-react";
+import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown, ArrowUpRight } from "lucide-react";
 import type { PermissionRequest, ProgressRecord, QuestionRequest, OpencodeModel } from "../shared/types";
 import {
   buildQuestionAnswers,
@@ -529,6 +529,7 @@ export function PlanCard({
   onKeepPlanning,
   onStartDelegate,
   onRememberDelegateModel,
+  onOpenInBrowser,
 }: {
   data: { title: string; path?: string; metrics: { steps?: number; files?: number } };
   models: Array<[string, OpencodeModel[]]> | null;
@@ -538,6 +539,7 @@ export function PlanCard({
   atDelegateCap: boolean;
   onBuildHere: (feedback: string) => void;
   onKeepPlanning: (feedback: string) => void;
+  onOpenInBrowser: () => void;
   onStartDelegate: (
     model: import("./chatShared").ModelSelection | null,
     feedback: string,
@@ -602,9 +604,7 @@ export function PlanCard({
     </>
   );
 
-  // Actions, in order: [Build here] [Delegate ▾] spacer [Keep planning].
-  // "See in browser ↗" is intentionally ABSENT — BET-954 (its data source) has
-  // not merged, so shipping it would be shipping a dead button.
+  // Actions, in order: [Build here] [Delegate ▾] [See in browser ↗] spacer [Keep planning].
   const splitTitle = busy
     ? "Too many background jobs running (5)"
     : "Start a background job in its own worktree";
@@ -633,6 +633,16 @@ export function PlanCard({
         disabled={busy}
         loading={models === null}
       />
+      <Button
+        tone="ghost"
+        onClick={onOpenInBrowser}
+        disabled={!data.path}
+        title={data.path ? "Publish this plan to a shareable page and open it" : undefined}
+        hook="manta-plan-open-page"
+      >
+        See in browser
+        <ArrowUpRight size={14} aria-hidden="true" />
+      </Button>
       <div className="flex-1" />
       <Button tone="ghost" onClick={() => onKeepPlanning(feedback)}>
         Keep planning

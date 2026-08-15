@@ -28,7 +28,6 @@ export type Artifact = {
   // never stored) — the row's status/step-count/actions read these.
   planStatus?: PlanStatus;
   planStepCount?: number | null;
-  planPageUrl?: string | null; // hosted page URL when BET-954 has landed; null today
   planJobSessionId?: string | null; // the job's child session; null until a plan is linked to a job
 };
 
@@ -227,7 +226,6 @@ function derivePlanArtifact(
     expiresAt: null,
     planStatus: planStatus({}),
     planStepCount: planStepCount(messageText(msg)),
-    planPageUrl: null, // BET-954 will carry the hosted page URL here
     planJobSessionId: null, // set once a plan is linked to its implementing job
   };
 }

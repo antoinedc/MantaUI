@@ -2524,6 +2524,18 @@ export function ChatPanel({
     [buildPlanPrompt, sessionId, cwd],
   );
 
+  const openPlanInBrowser = useCallback(
+    (path: string) => {
+      void window.api
+        .planPublish(sessionId, path)
+        .then(({ url }) => window.api.openExternal(url))
+        .catch((e: unknown) => {
+          setSendError(String((e as Error)?.message ?? e));
+        });
+    },
+    [sessionId],
+  );
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
@@ -2597,6 +2609,9 @@ export function ChatPanel({
             onKeepPlanning={(fb) => void keepPlanning(q, fb)}
             onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
             onRememberDelegateModel={rememberDelegateModel}
+            onOpenInBrowser={() => {
+              if (data.path) openPlanInBrowser(data.path);
+            }}
           />,
         ));
       });
@@ -2687,7 +2702,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress, planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress, planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, openPlanInBrowser]);
 
 
   if (error || transcriptLoadError) {

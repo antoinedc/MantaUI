@@ -491,9 +491,10 @@ function PlanStatusPill({ status }: { status: PlanStatus }) {
 
 // A plan is BOTH a file and a link, so it is not filed under either — it gets
 // its own row with its own actions: Open page · Open file · Delegate (focus
-// the job building it). `onOpenPage` / `onDelegate` are null when the linked
-// data (hosted page URL, implementing job) is unavailable — the affordance is
-// then omitted rather than rendered as a dead control.
+// the job building it). `onOpenPage` publishes-then-opens the plan's companion
+// page (always available — the server publishes on demand). `onDelegate` is
+// null when the linked job is unavailable — that affordance is then omitted
+// rather than rendered as a dead control.
 function PlanRow({
   artifact,
   onOpen,
@@ -606,6 +607,9 @@ export function ArtifactsPanel({
   // preview-aware artifacts), or null when closed. `previewSourceRef` keeps
   // the row that opened it so focus returns there on close.
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  // Inline panel error — surfaces a publish failure (e.g. no published
+  // hostname) right where the plan rows live, not as a toast/banner.
+  const [planError, setPlanError] = useState<string | null>(null);
   const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
@@ -710,13 +714,31 @@ export function ArtifactsPanel({
     previewSourceRef.current = null;
   };
 
+  // Publish-then-open a plan's companion page (BET-974): ONE gesture publishes
+  // the page on demand and opens the returned URL. The server reads the plan
+  // file itself (never the renderer); the URL comes from the response — never
+  // hand-built. Reused by both the row-body "open" and the plan row's action.
+  const openPlanPage = (a: Artifact) => {
+    if (!sessionId) return;
+    setPlanError(null);
+    void window.api
+      .planPublish(sessionId, a.href)
+      .then(({ url }) => window.api.openExternal(url))
+      .catch((e: unknown) => {
+        setPlanError(String((e as Error)?.message ?? e));
+      });
+  };
+
   // Row-body "open". Previewables (image/PDF/text) open the BET-661 overlay;
   // links open externally (no in-app web renderer); everything else downloads.
-  // A plan's row "open" opens its published page when one exists (BET-954),
-  // else its file (preview/download).
+  // A plan's row "open" publishes then opens its companion page (BET-974).
   const openRow = (a: Artifact, el: HTMLElement) => {
-    if (a.kind === "link" || (a.kind === "plan" && a.planPageUrl)) {
-      void window.api.openExternal(a.planPageUrl ?? a.href);
+    if (a.kind === "link") {
+      void window.api.openExternal(a.href);
+      return;
+    }
+    if (a.kind === "plan") {
+      openPlanPage(a);
       return;
     }
     const pi = previewable.findIndex((p) => p.id === a.id);
@@ -905,6 +927,20 @@ export function ArtifactsPanel({
           <ReviewPane sessionId={sessionId ?? ""} cwd={cwd ?? ""} />
         ) : (
         <div className="flex-1 overflow-y-auto min-h-0">
+          {planError && (
+            <div className="manta-artifacts-plan-error shrink-0 mx-3 mt-2 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
+              <span className="min-w-0 flex-1">{planError}</span>
+              <button
+                type="button"
+                onClick={() => setPlanError(null)}
+                className="text-danger hover:text-danger leading-none px-1 inline-flex items-center"
+                title="Dismiss"
+                aria-label="Dismiss error"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {query ? (
@@ -941,7 +977,7 @@ export function ArtifactsPanel({
                         key={a.id}
                         artifact={a}
                         onOpen={(el) => openRow(a, el)}
-                        onOpenPage={a.planPageUrl ? () => void window.api.openExternal(a.planPageUrl!) : null}
+                        onOpenPage={() => openPlanPage(a)}
                         // No plan→job linkage today — the affordance is omitted
                         // rather than rendered dead (per the spec).
                         onDelegate={null}

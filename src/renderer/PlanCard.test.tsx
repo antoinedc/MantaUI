@@ -63,6 +63,7 @@ describe("PlanCard (BET-951)", () => {
         onKeepPlanning={() => {}}
         onStartDelegate={() => {}}
         onRememberDelegateModel={() => {}}
+        onOpenInBrowser={() => {}}
         {...props}
       />,
     );

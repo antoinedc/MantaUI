@@ -82,7 +82,7 @@ import {
   pageResponseHeaders,
   isValidSubdomain,
 } from "./servePage.mjs";
-import { publishPlanPage } from "./planPage.mjs";
+import { publishPlanPage, readPlanMarkdown } from "./planPage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
@@ -2244,10 +2244,21 @@ const handleRequest = async (req, res) => {
       const baseUrl = publicBaseUrl();
       if (req.method === "POST") {
         const body = await readJsonBody(req);
+        const sessionID = body?.sessionID;
+        let markdown = body?.markdown;
+        if (typeof markdown !== "string" && typeof body?.path === "string") {
+          const sessionDir = await oc.getSessionDirectory(sessionID);
+          const loaded = await readPlanMarkdown({ path: body.path, sessionDir }, {});
+          if (!loaded.ok) {
+            respondJson(res, 400, { error: loaded.error });
+            return;
+          }
+          markdown = loaded.markdown;
+        }
         const result = await publishPlanPage(
           {
-            sessionID: body?.sessionID,
-            markdown: body?.markdown,
+            sessionID,
+            markdown,
             path: body?.path,
             title: body?.title,
             generatedAt: body?.generatedAt,

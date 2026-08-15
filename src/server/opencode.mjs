@@ -720,6 +720,29 @@ export async function getSessionAgent(sessionId) {
 }
 
 /**
+ * A session's working directory, as opencode recorded it at creation. Used to
+ * resolve (and confine) a plan file path server-side. Returns null when the
+ * session is unknown or carries no directory.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<string | null>}
+ */
+export async function getSessionDirectory(sessionId) {
+  try {
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
+    const body = await res.json();
+    const dir = typeof body?.directory === "string" ? body.directory.trim() : "";
+    return dir.length > 0 ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Does this opencode session still exist?
  *
  * Answered with a DIRECT lookup (`GET /session/{id}`), never by scanning
