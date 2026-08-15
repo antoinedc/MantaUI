@@ -29,14 +29,15 @@
 // pure src/shared/sshTarget.ts target resolver). This component is React
 // state + per-event dispatch + JSX, nothing more.
 
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import {
   getMantaPreload,
   type InstallerEvent,
   type PreflightFailure,
 } from "./preloadAccess";
-import { currentStageInfo, INSTALL_STAGES, type InstallStageId } from "../shared/installStages";
-import { ProcessPanel } from "./ProcessPanel";
+import type { InstallStageId } from "../shared/installStages";
+import { ConnectPanel } from "./ConnectPanel";
+import { deriveConnectPanel, type ConnectActionId } from "./connectPanel";
 import {
   CUSTOM_HOST_VALUE,
   resolveInstallTarget,
@@ -44,9 +45,9 @@ import {
   type HostFieldSelection,
 } from "../shared/sshTarget";
 import { claimWithRetry } from "./claimRetry";
+import { Button } from "./Button";
 
 const ACCENT = "var(--accent)";
-const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409 AA)
 const DANGER = "var(--danger)";
 
 // Keep the last N log lines only — main already caps its own tail at 200
@@ -60,19 +61,20 @@ const LOG_LINES_MAX = 500;
 const JUST_REFRESHED_DECAY_MS = 60_000;
 
 const INITIAL_STAGE: InstallStageId = "preflight";
-const INITIAL_STAGE_INFO = currentStageInfo(INITIAL_STAGE);
-
-// The installer's ProcessPanel stages — the ordered INSTALL_STAGES labels.
-// `currentStageInfo` is 1-based, so the panel's 0-based activeIndex is
-// `stageIndex - 1`. Using all six entries preserves the original "N of 6"
-// counter (the SSH installer always showed six steps).
-const INSTALL_STAGE_LABELS: string[] = INSTALL_STAGES.map((s) => s.label);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
+export function SshInstallStep({
+  onPaired,
+  onPairManually,
+}: {
+  onPaired: () => void;
+  /** BET-961: the pairing-failed "Enter code manually" action — PairStep
+   *  wires it to opening its existing manual-pairing disclosure. */
+  onPairManually?: () => void;
+}) {
   // The preload bridge — null on mobile/web (the issue's "SSH is installer-
   // only" rule means this UI never renders without a preload). Render an
   // explicit fallback instead of silently failing — mirrors how PairStep
@@ -116,7 +118,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   const [running, setRunning] = useState(false);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
   const [stage, setStage] = useState<InstallStageId>(INITIAL_STAGE);
-  const [stageIndex, setStageIndex] = useState(INITIAL_STAGE_INFO.index);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<
@@ -154,6 +155,10 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
   // True after the user cancels an install, until the next install starts —
   // renders a neutral "Install cancelled." card instead of a failure one.
   const [cancelled, setCancelled] = useState(false);
+  // BET-961: true once install + auto-claim both succeed. The consolidated
+  // panel then shows a real "Connected" state with a Next button (instead of
+  // auto-advancing invisibly); Next calls onPaired() → onboarding step 2.
+  const [paired, setPaired] = useState(false);
 
   // BET-705 a: handles whose install is over (cancelled, or finished) and must
   // never affect the UI again. Guards against a late `done`/`error` from an
@@ -264,7 +269,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         setRunning(true);
         setActiveHandle(s.trustHandleId);
         setStage(INITIAL_STAGE);
-        setStageIndex(INITIAL_STAGE_INFO.index);
         setFingerprintPrompt({
           handleId: s.trustHandleId,
           algo: s.pendingFingerprint.algo,
@@ -277,7 +281,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         setRunning(true);
         setActiveHandle(s.passphraseHandleId);
         setStage(INITIAL_STAGE);
-        setStageIndex(INITIAL_STAGE_INFO.index);
         setPassphrasePrompt({
           handleId: s.passphraseHandleId,
           prompt: "Enter the passphrase for your SSH key:",
@@ -286,14 +289,12 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
         return;
       }
       if (s.active) {
-        const info = currentStageInfo(s.stage);
         setRunning(true);
         // BET-705 b: restore the active handle so Cancel works after a
         // renderer remount (previously this was never restored, so cancel
         // no-opped).
         setActiveHandle(s.activeHandleId);
         setStage(s.stage);
-        setStageIndex(info.index);
         setLines(s.logTail);
       } else if (s.preflight && !s.preflight.ok) {
         setPreflightFailure({ failures: s.preflight.failures });
@@ -324,12 +325,9 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
               : next;
           });
           break;
-        case "stage": {
-          const info = currentStageInfo(evt.stage);
+        case "stage":
           setStage(evt.stage);
-          setStageIndex(info.index);
           break;
-        }
         case "preflight-failed":
           // Nothing was written to the box — the progress panel never
           // shows for this case.
@@ -452,7 +450,6 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     // filtering against a prior, now-dead handle.
     setActiveHandle(null);
     setStage(INITIAL_STAGE);
-    setStageIndex(INITIAL_STAGE_INFO.index);
     setElapsedSeconds(0);
     // Mount the progress panel immediately on click — no gap before the
     // main process's response comes back.
@@ -557,9 +554,11 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       // yet) every few seconds up to a 45s budget, with a visible countdown.
       const { outcome } = await claimWithRetry(attempt, { sleep, now: Date.now });
       if (outcome.ok) {
-        // Mirror the manual PairStep onPaired — advances onboarding to
-        // step 2 exactly as a typed pairing code would.
-        onPaired();
+        // Mirror the manual PairStep onPaired — but hold the step on a real
+        // "Connected" state instead of advancing: the user confirms with the
+        // panel's Next button (BET-961), which stops the provider step from
+        // being skipped (BET-960).
+        setPaired(true);
         return;
       }
       // Non-transient failure, or the retry budget exhausted → the real error.
@@ -588,9 +587,73 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
     await navigator.clipboard.writeText(r);
   }
 
+  // BET-961: the consolidated panel's actions dispatch onto the exact same
+  // functions the old per-branch buttons called.
+  function handleAction(id: ConnectActionId) {
+    switch (id) {
+      case "install":
+        void startInstall();
+        break;
+      case "cancel":
+        void cancelInstall();
+        break;
+      case "next":
+        onPaired();
+        break;
+      case "retry":
+        void startInstall();
+        break;
+      case "editTarget":
+        setPreflightFailure(null);
+        break;
+      case "pairManually":
+        onPairManually?.();
+        break;
+    }
+  }
+
   // ---------- Render ----------
-  const installDisabled =
-    running || claimRunning || !resolveInstallTarget(currentSelection()).ok;
+  const targetLocked = running || claimRunning || paired;
+
+  const connectState = useMemo(
+    () =>
+      deriveConnectPanel({
+        hostsLoaded,
+        targetError,
+        running,
+        stage,
+        elapsedSeconds,
+        logLineCount: lines.length,
+        done,
+        installError,
+        preflightFailure,
+        awaitingPrompt: fingerprintPrompt !== null || passphrasePrompt !== null,
+        claimRunning,
+        claimElapsed,
+        claimError,
+        cancelled,
+        paired,
+      }),
+    [
+      hostsLoaded,
+      targetError,
+      running,
+      stage,
+      elapsedSeconds,
+      lines.length,
+      done,
+      installError,
+      preflightFailure,
+      fingerprintPrompt,
+      passphrasePrompt,
+      claimRunning,
+      claimElapsed,
+      claimError,
+      cancelled,
+      paired,
+    ],
+  );
+
   const hostCountLabel = hostsLoading
     ? "reading ~/.ssh/config…"
     : !hostsLoaded
@@ -598,415 +661,273 @@ export function SshInstallStep({ onPaired }: { onPaired: () => void }) {
       : hosts.length === 0
         ? "No hosts in ~/.ssh/config"
         : `${hosts.length} hosts from ~/.ssh/config${justRefreshed ? " · just now" : ""}`;
-  // Keep the panel (status line + log) mounted through an install error too
-  // — that's the log line the user needs most ("is it stuck, or just
-  // slow?"). Only the preflight-failure card excludes it (nothing was
-  // written to the box, so there's no install log to show).
-  const showProgress =
-    !preflightFailure &&
-    (running || done !== null || (installError !== null && lines.length > 0));
+
+  // Zone A — the host picker (header + select + refresh + custom-host panel
+  // + inline target validation error). ConnectPanel owns the four-zone panel
+  // chrome; this node is its zone-A body. `disabled` follows `targetLocked`
+  // so the picker is frozen while an install/claim is in flight or after
+  // pairing succeeds (BET-961).
+  const zoneA = (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <label
+          className="text-label font-medium text-text-muted"
+          htmlFor="ssh-host"
+        >
+          Box address
+        </label>
+        <span className="text-meta text-text-quiet">{hostCountLabel}</span>
+      </div>
+      <div className="flex gap-2">
+        <select
+          id="ssh-host"
+          value={alias}
+          onChange={(e) => {
+            setAlias(e.target.value);
+            setTargetError(null);
+          }}
+          disabled={targetLocked}
+          className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+        >
+          {hosts.map((h) => (
+            <option key={h.alias} value={h.alias}>
+              {h.alias}
+              {h.patterns.length > 1 ? ` (${h.patterns.join(", ")})` : ""}
+            </option>
+          ))}
+          <option value={CUSTOM_HOST_VALUE}>Custom host…</option>
+        </select>
+        <button
+          type="button"
+          onClick={() => void loadHosts({ manual: true })}
+          disabled={hostsLoading || targetLocked}
+          aria-label="Refresh host list"
+          title="Re-read ~/.ssh/config"
+          className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-sm bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={`w-3.5 h-3.5${hostsLoading ? " animate-spin" : ""}`}
+            aria-hidden
+          >
+            <path d="M21 12a9 9 0 1 1-2.6-6.4" />
+            <path d="M21 3v6h-6" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Custom host panel — only rendered for the custom sentinel once the
+          host list has settled (see the original BET-384 comment above). */}
+      {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
+        <div className="rounded-sm border border-border bg-bg-soft p-4 space-y-3">
+          <div className="grid grid-cols-[1fr_90px] gap-3">
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-label font-medium text-text-muted"
+                htmlFor="ssh-custom-host"
+              >
+                Host or IP
+              </label>
+              <input
+                id="ssh-custom-host"
+                type="text"
+                placeholder="box.example.com"
+                value={customHost}
+                onChange={(e) => {
+                  setCustomHost(e.target.value);
+                  setTargetError(null);
+                }}
+                disabled={targetLocked}
+                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-label font-medium text-text-muted"
+                htmlFor="ssh-custom-port"
+              >
+                Port
+              </label>
+              <input
+                id="ssh-custom-port"
+                type="text"
+                inputMode="numeric"
+                placeholder="22"
+                value={customPort}
+                onChange={(e) => {
+                  setCustomPort(e.target.value);
+                  setTargetError(null);
+                }}
+                disabled={targetLocked}
+                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-label font-medium text-text-muted"
+                htmlFor="ssh-custom-user"
+              >
+                User
+              </label>
+              <input
+                id="ssh-custom-user"
+                type="text"
+                placeholder="root"
+                value={customUser}
+                onChange={(e) => {
+                  setCustomUser(e.target.value);
+                  setTargetError(null);
+                }}
+                disabled={targetLocked}
+                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label
+                className="text-label font-medium text-text-muted"
+                htmlFor="ssh-custom-identity"
+              >
+                Identity file
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="ssh-custom-identity"
+                  type="text"
+                  placeholder="~/.ssh/id_ed25519"
+                  value={customIdentityFile}
+                  onChange={(e) => {
+                    setCustomIdentityFile(e.target.value);
+                    setTargetError(null);
+                  }}
+                  disabled={targetLocked}
+                  className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const result = await preload.dialogShowOpenFile();
+                    if (!result.canceled) {
+                      setCustomIdentityFile(result.path);
+                      setTargetError(null);
+                    }
+                  }}
+                  disabled={targetLocked}
+                  className="shrink-0 px-3 py-2 rounded-sm text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+          </div>
+          <p className="text-meta text-text-faint">
+            Leave a field empty to let OpenSSH decide. These are used for
+            this box only — your ~/.ssh/config is never written to.
+          </p>
+        </div>
+      )}
+
+      {targetError && (
+        <p className="text-meta" style={{ color: DANGER }}>
+          {targetError}
+        </p>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-5">
-      {/* Host picker — PairStep owns the step-level heading + intro
-          (BET-382); this component drops straight into the picker.
-          BET-384: exactly one host control, always a <select> — "Custom
-          host…" is a permanent last option, present whether or not the
-          config has entries, never a second input rendered alongside it. */}
-      <section className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <label className="text-body font-medium" htmlFor="ssh-host">
-            Host
-          </label>
-          <span className="text-meta text-text-faint">{hostCountLabel}</span>
-        </div>
-        <div className="flex gap-2">
-          <select
-            id="ssh-host"
-            value={alias}
-            onChange={(e) => {
-              setAlias(e.target.value);
-              setTargetError(null);
-            }}
-            disabled={running || claimRunning}
-            className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+      <ConnectPanel
+        state={connectState}
+        target={zoneA}
+        logLines={lines}
+        onAction={handleAction}
+        onCopyDiagnostics={copyDiagnostics}
+      >
+        {/* BET-361: inline fingerprint prompt — zone-C children. The install
+            is paused, so the card takes the place of attention until the
+            user answers. */}
+        {fingerprintPrompt ? (
+          <div
+            className="rounded-sm p-4 space-y-3"
+            style={{ border: `1px solid ${ACCENT}` }}
           >
-            {hosts.map((h) => (
-              <option key={h.alias} value={h.alias}>
-                {h.alias}
-                {h.patterns.length > 1 ? ` (${h.patterns.join(", ")})` : ""}
-              </option>
-            ))}
-            <option value={CUSTOM_HOST_VALUE}>Custom host…</option>
-          </select>
-          <button
-            type="button"
-            onClick={() => void loadHosts({ manual: true })}
-            disabled={hostsLoading || running || claimRunning}
-            aria-label="Refresh host list"
-            title="Re-read ~/.ssh/config"
-            className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-sm bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={`w-3.5 h-3.5${hostsLoading ? " animate-spin" : ""}`}
-              aria-hidden
-            >
-              <path d="M21 12a9 9 0 1 1-2.6-6.4" />
-              <path d="M21 3v6h-6" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Custom host panel — only rendered for the custom sentinel, AND
-            only once the host load has settled (review cycle 1 Block):
-            `alias` starts on the sentinel so the <select> always has a
-            valid selected option before installerListHosts() resolves,
-            but painting the panel during that window means a populated
-            ~/.ssh/config flashes the full four-field panel open and then
-            collapses once the real alias list lands. Gating on
-            `hostsLoaded` too keeps decision #3 intact — hostsLoaded is
-            true in both loadHosts' success and catch paths, so the
-            empty-config case still opens the panel pre-selected, exactly
-            as required — while a populated config never shows it before
-            the list is ready. No second host control ever coexists with
-            the select either way. */}
-        {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
-          <div className="rounded-sm border border-border bg-bg-soft p-4 space-y-3">
-            <div className="grid grid-cols-[1fr_90px] gap-3">
-              <div className="flex flex-col gap-1">
-                <label
-                  className="text-label font-medium text-text-muted"
-                  htmlFor="ssh-custom-host"
-                >
-                  Host or IP
-                </label>
-                <input
-                  id="ssh-custom-host"
-                  type="text"
-                  placeholder="box.example.com"
-                  value={customHost}
-                  onChange={(e) => {
-                    setCustomHost(e.target.value);
-                    setTargetError(null);
-                  }}
-                  disabled={running || claimRunning}
-                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label
-                  className="text-label font-medium text-text-muted"
-                  htmlFor="ssh-custom-port"
-                >
-                  Port
-                </label>
-                <input
-                  id="ssh-custom-port"
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="22"
-                  value={customPort}
-                  onChange={(e) => {
-                    setCustomPort(e.target.value);
-                    setTargetError(null);
-                  }}
-                  disabled={running || claimRunning}
-                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-                />
-              </div>
-            </div>
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <label
-                  className="text-label font-medium text-text-muted"
-                  htmlFor="ssh-custom-user"
-                >
-                  User
-                </label>
-                <input
-                  id="ssh-custom-user"
-                  type="text"
-                  placeholder="root"
-                  value={customUser}
-                  onChange={(e) => {
-                    setCustomUser(e.target.value);
-                    setTargetError(null);
-                  }}
-                  disabled={running || claimRunning}
-                  className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label
-                  className="text-label font-medium text-text-muted"
-                  htmlFor="ssh-custom-identity"
-                >
-                  Identity file
-                </label>
-                {/* BET-387: Browse button opens the native file picker via
-                    the preload's dialogShowOpenFile bridge (defaults to
-                    ~/.ssh/). A plain text input remains the fallback —
-                    typing a path directly still works, and the field is
-                    fully usable on mobile/web where the bridge is absent
-                    (the button is hidden there). */}
-                <div className="flex gap-2">
-                  <input
-                    id="ssh-custom-identity"
-                    type="text"
-                    placeholder="~/.ssh/id_ed25519"
-                    value={customIdentityFile}
-                    onChange={(e) => {
-                      setCustomIdentityFile(e.target.value);
-                      setTargetError(null);
-                    }}
-                    disabled={running || claimRunning}
-                    className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-                  />
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const result = await preload.dialogShowOpenFile();
-                      if (!result.canceled) {
-                        setCustomIdentityFile(result.path);
-                        setTargetError(null);
-                      }
-                    }}
-                    disabled={running || claimRunning}
-                    className="shrink-0 px-3 py-2 rounded-sm text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
-                  >
-                    Browse
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p className="text-meta text-text-faint">
-              Leave a field empty to let OpenSSH decide. These are used for
-              this box only — your ~/.ssh/config is never written to.
+            <div className="text-body font-medium">Trust this host?</div>
+            <p className="text-meta text-text-muted">
+              The host's identity can't be verified yet. Its{" "}
+              {fingerprintPrompt.algo} key fingerprint is:
             </p>
+            <code
+              className="block text-meta font-mono break-all rounded-xs px-2 py-2 bg-bg-elev"
+              style={{ color: ACCENT }}
+            >
+              {fingerprintPrompt.sha256}
+            </code>
+            <p className="text-meta text-text-faint">
+              Only trust this if you recognize the fingerprint (for example,
+              from your VPS console). The key is saved to
+              ~/.ssh/known_hosts so future connections skip this prompt.
+            </p>
+            <div className="flex gap-2 pt-px">
+              <Button tone="primary" onClick={() => void trustHostDecision(true)}>
+                Trust &amp; continue
+              </Button>
+              <Button tone="danger" onClick={() => void trustHostDecision(false)}>
+                Don't trust
+              </Button>
+            </div>
           </div>
-        )}
-
-        {/* Hoisted out of the custom panel (review cycle 1 nit): the panel
-            only renders for the custom branch, but resolveInstallTarget
-            can also reject the alias branch (defensive — unreachable
-            through this UI today since the <select>'s only values are a
-            parsed alias or the sentinel, but resolveInstallTarget is a
-            shared pure function and must not silently swallow a future
-            caller's bad input). Rendering the error here, outside the
-            panel, means it's never lost regardless of which branch
-            produced it. */}
-        {targetError && (
-          <p className="text-meta" style={{ color: DANGER }}>
-            {targetError}
-          </p>
-        )}
-
-        <div className="flex gap-2 pt-2">
-          <button
-            onClick={startInstall}
-            disabled={installDisabled}
-            className="px-4 py-2 rounded-sm text-body font-medium disabled:opacity-50"
-            style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
+        ) : passphrasePrompt ? (
+          /* BET-360: inline passphrase prompt — zone-C children. The install
+             is paused; the user enters the passphrase once. */
+          <div
+            className="rounded-sm p-4 space-y-3"
+            style={{ border: `1px solid ${ACCENT}` }}
           >
-            {running ? "Installing…" : "Install & pair"}
-          </button>
-          {running && (
-            <button
-              onClick={cancelInstall}
-              className="px-4 py-2 rounded-sm text-body font-medium"
-              style={{ border: `1px solid ${DANGER}`, color: DANGER }}
+            <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
+            <p className="text-meta text-text-muted">
+              Your SSH key is passphrase-protected and not loaded in
+              ssh-agent. Enter the passphrase to decrypt it for this
+              install — it is used only in-memory and never stored.
+            </p>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitPassphrase(passphraseInput.length > 0);
+              }}
+              className="space-y-2"
             >
-              Cancel
-            </button>
-          )}
-        </div>
-      </section>
-
-      {/* Preflight failure — checks ran before any write; must not read as
-          a failed install. Never shown alongside the progress panel. */}
-      {preflightFailure && (
-        <section className="space-y-2 text-body">
-          <ul className="space-y-1">
-            {preflightFailure.failures.map((f, i) => (
-              <li
-                key={i}
-                className="rounded-sm px-3 py-2"
-                style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-              >
-                <div className="font-medium">{f.cause}</div>
-                <div className="text-meta mt-px opacity-80">{f.action}</div>
-              </li>
-            ))}
-          </ul>
-          <p className="text-meta text-text-muted">
-            Nothing was installed or changed on the box — the checks run
-            before any write.
-          </p>
-        </section>
-      )}
-
-      {/* Status line + progress bar + live log — mounted on click, streams,
-          auto-scrolls, collapses to the single line on success. The shared
-          ProcessPanel (BET-421 §A) renders the chrome; the fingerprint and
-          passphrase prompts pass as children so they render between the bar
-          and the log, exactly where they lived before the extraction. */}
-      {showProgress && (
-        <ProcessPanel
-          stages={INSTALL_STAGE_LABELS}
-          activeIndex={Math.max(0, stageIndex - 1)}
-          status={
-            done ? (done.ok ? "done" : "error") : installError ? "error" : "running"
-          }
-          elapsedSeconds={elapsedSeconds}
-          logLines={lines}
-          onCopyDiagnostics={copyDiagnostics}
-        >
-          {/* BET-361: inline fingerprint prompt. The install is paused — the
-              log has nothing new to show, so the card takes the place of
-              attention until the user answers. */}
-          {fingerprintPrompt && (
-            <div
-              className="rounded-sm p-4 space-y-3"
-              style={{ border: `1px solid ${ACCENT}` }}
-            >
-              <div className="text-body font-medium">Trust this host?</div>
-              <p className="text-meta text-text-muted">
-                The host's identity can't be verified yet. Its{" "}
-                {fingerprintPrompt.algo} key fingerprint is:
-              </p>
-              <code
-                className="block text-meta font-mono break-all rounded-xs px-2 py-2 bg-bg-elev"
-                style={{ color: ACCENT }}
-              >
-                {fingerprintPrompt.sha256}
-              </code>
-              <p className="text-meta text-text-faint">
-                Only trust this if you recognize the fingerprint (for example,
-                from your VPS console). The key is saved to
-                ~/.ssh/known_hosts so future connections skip this prompt.
-              </p>
+              <input
+                type="password"
+                value={passphraseInput}
+                onChange={(e) => setPassphraseInput(e.target.value)}
+                autoFocus
+                placeholder="Passphrase"
+                className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
+                style={{ border: `1px solid ${ACCENT}` }}
+              />
               <div className="flex gap-2 pt-px">
-                <button
-                  onClick={() => void trustHostDecision(true)}
-                  className="px-3 py-2 rounded-sm text-body font-medium"
-                  style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
+                <Button
+                  type="submit"
+                  tone="primary"
+                  disabled={passphraseInput.length === 0}
                 >
-                  Trust &amp; continue
-                </button>
-                <button
-                  onClick={() => void trustHostDecision(false)}
-                  className="px-3 py-2 rounded-sm text-body font-medium"
-                  style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-                >
-                  Don't trust
-                </button>
+                  Unlock &amp; continue
+                </Button>
+                <Button tone="danger" onClick={() => void submitPassphrase(false)}>
+                  Cancel
+                </Button>
               </div>
-            </div>
-          )}
-          {/* BET-360: inline passphrase prompt. The install is paused —
-              the key is passphrase-protected and not in ssh-agent. The
-              user enters the passphrase once; main caches it in a temp
-              file for every ssh invocation in the rest of the flow. */}
-          {passphrasePrompt && (
-            <div
-              className="rounded-sm p-4 space-y-3"
-              style={{ border: `1px solid ${ACCENT}` }}
-            >
-              <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
-              <p className="text-meta text-text-muted">
-                Your SSH key is passphrase-protected and not loaded in
-                ssh-agent. Enter the passphrase to decrypt it for this
-                install — it is used only in-memory and never stored.
-              </p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void submitPassphrase(passphraseInput.length > 0);
-                }}
-                className="space-y-2"
-              >
-                <input
-                  type="password"
-                  value={passphraseInput}
-                  onChange={(e) => setPassphraseInput(e.target.value)}
-                  autoFocus
-                  placeholder="Passphrase"
-                  className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
-                  style={{ border: `1px solid ${ACCENT}` }}
-                />
-                <div className="flex gap-2 pt-px">
-                  <button
-                    type="submit"
-                    disabled={passphraseInput.length === 0}
-                    className="px-3 py-2 rounded-sm text-body font-medium disabled:opacity-40"
-                    style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
-                  >
-                    Unlock &amp; continue
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void submitPassphrase(false)}
-                    className="px-3 py-2 rounded-sm text-body font-medium"
-                    style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-        </ProcessPanel>
-      )}
-
-      {/* In-flight claim only. There is no success message: a successful
-          claim advances onboarding to step 2, which unmounts this step.
-          BET-705 c: while retrying a transient failure we show the elapsed
-          countdown ("the box is starting up"). */}
-      {claimRunning && (
-        <section className="text-body">
-          {claimElapsed !== null && claimElapsed > 0
-            ? `Pairing… the box is starting up (${claimElapsed}s)`
-            : "Pairing…"}
-        </section>
-      )}
-      {/* BET-705 d: a user cancel is not a failure — render a neutral card and
-          let the normal "Install & pair" affordance reset the flow. */}
-      {cancelled && <section className="text-body">Install cancelled.</section>}
-      {done && !done.ok && !cancelled && (
-        <section
-          className="text-body space-y-2"
-          style={{ color: DANGER }}
-        >
-          {/* No Copy diagnostics button here: ProcessPanel renders exactly one
-              on error, directly under the failed stage. This section used to
-              render a second copy of it. */}
-          <div>
-            Install failed (exit code {done.code ?? "—"}
-            {done.signal ? `, signal ${done.signal}` : ""}).
+            </form>
           </div>
-        </section>
-      )}
-      {installError && (
-        <section className="text-body" style={{ color: DANGER }}>
-          {installError}
-        </section>
-      )}
-      {claimError && (
-        <section className="text-body space-y-1" style={{ color: DANGER }}>
-          <div>{claimError}</div>
-          <div>
-            Pair manually: run <code>manta pair</code> on the box for a fresh
-            6-digit code, then open the "Pair to an existing box" form on this
-            page and enter it.
-          </div>
-        </section>
-      )}
+        ) : null}
+      </ConnectPanel>
     </div>
   );
 }
