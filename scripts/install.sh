@@ -53,16 +53,16 @@
 # "SUDO EXCEPTION (BET-205)" section in docs/launch-e2e.md for the
 # rationale (BET-198 changed requirements: direct-connection needs
 # public TLS, which is inherently a root concern; industry norm is sudo
-# + distro package manager for this step). The privileged section is
-# gated three ways so the install degrades cleanly without sudo:
-#   (a) Distro must be Debian/Ubuntu (v1 scope).
-#   (b) `sudo` must be installed.
-#   (c) `sudo -n true` must succeed (passwordless sudo).
-# If any of those fail we print the exact bring-your-own-proxy commands
-# and continue with the rest of the install — the loopback server +
-# pairing code are unaffected. Every privileged call uses `sudo -n`
-# (non-interactive) so it fails fast with a clear hint instead of
-# hanging on a password prompt.
+# + distro package manager for this step).
+#
+# ALL-OR-NOTHING (BET-980): the public path is gated up front (step 3.5)
+# on (a) a Debian/Ubuntu-family distro and (b) the ability to run commands
+# as root (real root or `sudo -n true`). If either is missing the installer
+# dies BEFORE the first mutation — nothing is written, nothing to roll back.
+# There is no degraded success: an install that would finish unreachable
+# refuses to start. Every privileged call uses `sudo -n` (non-interactive)
+# so it fails fast instead of hanging on a password prompt. The tailscale
+# and macOS paths never need root or a specific distro and are unaffected.
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
@@ -457,6 +457,59 @@ wait_for_box_id() {
 }
 
 # ---------------------------------------------------------------------------
+# BET-980 capability preflight: the PUBLIC ingress path is all-or-nothing.
+#
+# An install either completes its chosen ingress path fully, or it fails —
+# there is NO degraded success. A box that prints "Installed." while being
+# unreachable is worse than an install that refused to start. The public
+# path needs (a) a Debian/Ubuntu-family distro and (b) the ability to run
+# commands as root (passwordless sudo, or an actual root shell); without
+# both we `die` BEFORE the first mutation, so nothing has been written and
+# there is nothing to roll back.
+#
+# The tailscale and macOS paths never need root or a specific distro, so
+# they are never gated here — pass their mode and this returns 0.
+#
+# Takes the resolved, side-effect-free inputs so the decision + message are
+# unit-testable in isolation (via runBootstrap in install.test.mjs):
+#   $1  ingress path mode: "public" | "tailscale" | "macos"
+#   $2  root usable: "1" (uid 0 or `sudo -n true` succeeds) | "0"
+#   $3  distro supported: "yes" | "no" | "unknown" | ""   (from detect-distro)
+#   $4  distro id (for the message; may be "")
+# Dies (exit 1) only when the mode is "public" and a capability is missing.
+# ---------------------------------------------------------------------------
+public_ingress_preflight() {
+  local mode="$1" root_usable="$2" distro_supported="$3" distro_id="$4"
+  [ "$mode" = "public" ] || return 0
+
+  if [ "$distro_supported" != "yes" ]; then
+    die "Cannot complete the install: distro ${distro_id:-unknown} is not in the v1 supported list (debian / ubuntu / ID_LIKE=debian).
+      This installer only manages Caddy + the gateway registration on Debian/Ubuntu.
+      bring your own proxy: point any reverse proxy at 127.0.0.1:8787 and serve your own TLS.
+
+      Nothing has been installed."
+  fi
+
+  if [ "$root_usable" != "1" ]; then
+    die "Cannot complete the install: giving this box a public HTTPS address needs to run
+      three commands as root (install Caddy, write its site config, reload it), and
+      this user cannot run commands as root without a password.
+
+      Nothing has been installed. Choose one of these and run the installer again:
+
+        * Install as root
+            ssh root@$(hostname)   then run the same install command
+
+        * Use Tailscale — MantaUI then needs no root at all
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo tailscale up
+            then run the same install command
+
+        * Grant this user sudo access on the box, then run the installer again."
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Git-aware deploy init. `scripts/self-update.sh` (wired in BET-225.A5) assumes
 # $MANTA_HOME is a git checkout, so the update path can do a `git fetch +
 # reset`. The release tarball ships WITHOUT a .git/ (pack.mjs strips it), so we
@@ -720,6 +773,65 @@ main() {
   [ -f "$WORK/pkg/src/server/index.mjs" ] \
     || die "bad release tarball — missing src/server/index.mjs"
   ok "Release tarball looks self-contained."
+
+  # ---------------------------------------------------------------------------
+  # 3.5 CAPABILITY PREFLIGHT — ALL-OR-NOTHING (BET-980).
+  #
+  # The PUBLIC ingress path needs a Debian/Ubuntu-family distro and the ability
+  # to run commands as root. Before the FIRST mutation (the atomic swap into
+  # $MANTA_HOME, the systemd units, the box identity, gateway registration) we
+  # interrogate the machine for both and die on a missing capability — so a
+  # box that would otherwise finish with an unreachable "Installed." state
+  # instead refuses to start. The tarball is only extracted into $WORK (a
+  # temp dir cleaned by the EXIT trap), so nothing persistent has been written:
+  # failing here leaves a clean box. The vendored node + lib are read straight
+  # out of $WORK/pkg — the same runtime step 7.5 uses, before the swap.
+  #
+  # Dry-run just reports the verdict; it never dies (a preview shows the plan,
+  # and by definition has installed nothing).
+  _PRE_NODE="$WORK/pkg/runtime/node/bin/node"
+  _PRE_LIB="$WORK/pkg/scripts/install-lib.mjs"
+
+  # Resolve the ingress path early (side-effect-free mirror of step 7's
+  # decision): tailscale up → tailscale; macOS → macos; otherwise public.
+  _PRE_INGRESS="public"
+  if [ "$IS_MACOS" = "1" ]; then
+    _PRE_INGRESS="macos"
+  elif command -v tailscale >/dev/null 2>&1 && \
+       [ -n "$(tailscale status --json 2>/dev/null | "$_PRE_NODE" "$_PRE_LIB" parse-tailscale-status 2>/dev/null || true)" ]; then
+    _PRE_INGRESS="tailscale"
+  fi
+
+  # Root usable: real root, or passwordless sudo. Both read-only.
+  _PRE_ROOT="0"
+  if [ "$(id -u)" = "0" ] || sudo -n true 2>/dev/null; then
+    _PRE_ROOT="1"
+  fi
+
+  # Distro supported: probe detect-distro (the same subcommand step 7.5 uses).
+  _PRE_DISTRO_STATUS="$("$_PRE_NODE" "$_PRE_LIB" detect-distro 2>/dev/null || echo "")"
+  _PRE_DISTRO_SUPPORTED="$(printf '%s' "$_PRE_DISTRO_STATUS" | "$_PRE_NODE" -e '
+      let s = "";
+      process.stdin.on("data", (c) => { s += c; });
+      process.stdin.on("end", () => {
+        try { process.stdout.write(JSON.parse(s).supported ? "yes" : "no"); }
+        catch { process.stdout.write("unknown"); }
+      });
+    ' 2>/dev/null || echo unknown)"
+  _PRE_DISTRO_ID="$(printf '%s' "$_PRE_DISTRO_STATUS" | "$_PRE_NODE" -e '
+      let s = "";
+      process.stdin.on("data", (c) => { s += c; });
+      process.stdin.on("end", () => {
+        try { process.stdout.write(JSON.parse(s).id ?? ""); }
+        catch { process.stdout.write(""); }
+      });
+    ' 2>/dev/null || true)"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    dry_log "capability preflight: ingress=$_PRE_INGRESS root=${_PRE_ROOT} distro_supported=$_PRE_DISTRO_SUPPORTED"
+  else
+    public_ingress_preflight "$_PRE_INGRESS" "$_PRE_ROOT" "$_PRE_DISTRO_SUPPORTED" "$_PRE_DISTRO_ID"
+  fi
 
   # ---------------------------------------------------------------------------
   # 4. Atomic swap. .prev preserves the previous install in case anything in
@@ -1309,92 +1421,30 @@ main() {
   # skip the public TLS path; gateway-register (B/C) still runs in both
   # because it's user-space and the gateway_token is still needed for
   # APNs push. Computed once, used by every guard below.
+  #
+  # NOTE — this is ALWAYS a legitimate, complete outcome. It is NOT the
+  # removed BET-980 degrader (the old degraded-success flag is gone): the
+  # only way A/D/E/reload are skipped is that the chosen ingress path
+  # (tailscale / macOS) genuinely has no public TLS. A public-path install
+  # reaches this code with root + a supported distro already verified by
+  # the preflight.
   SKIP_PUBLIC_TLS=0
   if [ "$INGRESS_MODE" = "tailscale" ] || [ "$IS_MACOS" = "1" ]; then
     SKIP_PUBLIC_TLS=1
   fi
 
-  # Gate the section. In dry-run mode we always show what we would do
-  # (the dry_log lines are below). In real mode we bail with a clear
-  # bring-your-own-proxy hint when distro isn't Debian/Ubuntu or sudo
-  # isn't usable.
-  #
-  # Tailscale path (BET-267) AND macOS path (BET-276): distro / sudo checks
-  # are irrelevant — no sudo is needed at all on either path (the whole
-  # point is "skip Caddy + public DNS"). PRIVILEGED_SECTION_SKIP is left
-  # at 0 so sub-steps B + C (gateway register + merge-gateway) still run —
-  # they are user-space and the gateway_token is still needed for APNs
-  # push. A/D/E/reload are gated on SKIP_PUBLIC_TLS further
-  # down.
-  PRIVILEGED_SECTION_SKIP=0
-  if [ "$DRY_RUN" != "1" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
-    # Distro check (Debian/Ubuntu only for v1 — see reviewer guidance §4).
-    DISTRO_STATUS="$("$NODE" "$LIB" detect-distro 2>/dev/null || echo "")"
-    DISTRO_SUPPORTED="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
-      let s = "";
-      process.stdin.on("data", (c) => { s += c; });
-      process.stdin.on("end", () => {
-        try { process.stdout.write(JSON.parse(s).supported ? "yes" : "no"); }
-        catch { process.stdout.write("unknown"); }
-      });
-    ' 2>/dev/null || echo unknown)"
-    DISTRO_ID="$(printf '%s' "$DISTRO_STATUS" | "$NODE" -e '
-      let s = "";
-      process.stdin.on("data", (c) => { s += c; });
-      process.stdin.on("end", () => {
-        try { process.stdout.write(JSON.parse(s).id ?? ""); }
-        catch { process.stdout.write(""); }
-      });
-    ' 2>/dev/null || true)"
-    case "$DISTRO_SUPPORTED" in
-      yes)
-        # supported; continue
-        ;;
-      no|unknown|"")
-        warn "Caddy/gateway section skipped: distro ${DISTRO_ID:-unknown} is not in the v1 supported list (debian / ubuntu / ID_LIKE=debian)."
-        warn "  this installer only manages Caddy + the gateway registration on Debian/Ubuntu."
-        warn "  bring-your-own-proxy: point any reverse proxy at 127.0.0.1:$MANTA_PORT and serve your own TLS."
-        warn "  once Caddy (or another reverse proxy) is serving the box, re-run the installer to finish gateway registration."
-        PRIVILEGED_SECTION_SKIP=1
-        ;;
-    esac
-
-    # Sudo check — bail cleanly if sudo is missing or non-interactive.
-    # We use `sudo -n true` as the gate (non-interactive; never prompts).
-    # Passwordless sudo is required because the install runs unattended
-    # from `curl | bash`.
-    if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
-      if [ "$(id -u)" = "0" ]; then
-        # Root needs no sudo. Every privileged call in this section is
-        # `sudo -n <cmd>`; as root the `-n` flag is meaningless and the sudo
-        # binary may be absent entirely (minimal VPS). When it's missing,
-        # shim sudo to drop the leading `-n` and run the command bare — zero
-        # changes to the commands below.
-        if ! command -v sudo >/dev/null 2>&1; then
-          sudo() {
-            if [ "${1:-}" = "-n" ]; then shift; fi
-            "$@"
-          }
-        fi
-      else
-        if ! command -v sudo >/dev/null 2>&1; then
-          warn "Caddy/gateway section skipped: \`sudo\` is not installed."
-          warn "  install sudo + grant $USER passwordless sudo, or run the
-  install with sudo available. To finish this section by hand:"
-          warn "    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl"
-          warn "    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
-          warn "    echo 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main' | sudo tee /etc/apt/sources.list.d/caddy-stable.list"
-          warn "    sudo apt update && sudo apt install caddy"
-          warn "  then re-run the installer (the gateway + DNS + Caddyfile steps re-run cleanly)."
-          PRIVILEGED_SECTION_SKIP=1
-        elif ! sudo -n true 2>/dev/null; then
-          warn "Caddy/gateway section skipped: passwordless sudo is not configured for $USER."
-          warn "  either configure \`$USER ALL=(ALL) NOPASSWD:ALL\` in /etc/sudoers.d/ and re-run,"
-          warn "  or install Caddy by hand (commands in the previous message) and re-run the installer."
-          PRIVILEGED_SECTION_SKIP=1
-        fi
-      fi
-    fi
+  # The capability gates (distro + root) now run in the 3.5 PREFLIGHT, before
+  # the first mutation, and die there on a missing public-path capability —
+  # so step 7.5 no longer has a "degraded success" branch. On the public path
+  # root has already been verified usable. As ROOT the `sudo` binary may be
+  # absent entirely (minimal VPS); shim it to drop the leading `-n` and run
+  # the command bare, so every `sudo -n <cmd>` below still works with zero
+  # changes to the commands.
+  if [ "$(id -u)" = "0" ] && ! command -v sudo >/dev/null 2>&1; then
+    sudo() {
+      if [ "${1:-}" = "-n" ]; then shift; fi
+      "$@"
+    }
   fi
 
   if [ "$INGRESS_MODE" = "tailscale" ]; then
@@ -1409,8 +1459,6 @@ main() {
     # Issue C will wire that up via LaunchAgents). B/C (gateway register
     # + merge-gateway) still run below for the APNs push token.
     log "macOS detected — skipping Caddy/apt/DNS/vhost; box is loopback-only. Use Tailscale to reach this box off-network."
-  elif [ "$PRIVILEGED_SECTION_SKIP" = "1" ]; then
-    log "Skipping public-TLS step (bring-your-own-proxy keeps the rest of the install working)."
   else
     log "Configuring public TLS via Caddy + gateway registration (privileged)…"
   fi
@@ -1419,57 +1467,67 @@ main() {
   # B (POST /register) and C (merge-gateway into auth.json) are user-space and
   # run in BOTH ingress modes. On tailscale the gateway records an A record
   # that is unused but harmless; the persisted gateway_token is still the
-  # APNs push credential (BET-198). Skipped entirely only on distro/sudo
-  # failure (PRIVILEGED_SECTION_SKIP=1) where the rest of the section is
-  # being skipped.
-  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ]; then
-    # The server mints the identity asynchronously on its first start, so on a
-    # fresh box this read races the mint — poll for up to ~60s rather than
-    # taking the first empty answer as final (see wait_for_box_id's comment for
-    # the failure this caused). Dry-run never waits: one probe and move on.
-    BOX_ID_WAIT_ATTEMPTS=60
-    if [ "$DRY_RUN" = "1" ]; then BOX_ID_WAIT_ATTEMPTS=1; fi
-    BOX_ID_FOR_GATEWAY="$(wait_for_box_id "$LIB" "$NODE" "$BOX_ID_WAIT_ATTEMPTS" 1 || true)"
+  # APNs push credential (BET-198). On the PUBLIC path a registration failure
+  # is fatal (there is no public ingress without it); on tailscale / macOS it
+  # stays a warn — the server re-registers on every restart and the APNs token
+  # is best-effort at install time.
+  # The server mints the identity asynchronously on its first start, so on a
+  # fresh box this read races the mint — poll for up to ~60s rather than
+  # taking the first empty answer as final (see wait_for_box_id's comment for
+  # the failure this caused). Dry-run never waits: one probe and move on.
+  BOX_ID_WAIT_ATTEMPTS=60
+  if [ "$DRY_RUN" = "1" ]; then BOX_ID_WAIT_ATTEMPTS=1; fi
+  BOX_ID_FOR_GATEWAY="$(wait_for_box_id "$LIB" "$NODE" "$BOX_ID_WAIT_ATTEMPTS" 1 || true)"
 
-    if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
-      warn "no box_id in $MANTA_AUTH_FILE after waiting — skipping gateway registration."
-      warn "  start the manta-server at least once ($(supervisor_hint restart server)) and re-run."
+  if [ -z "$BOX_ID_FOR_GATEWAY" ]; then
+    if [ "$DRY_RUN" != "1" ] && [ "$INGRESS_MODE" = "public" ]; then
+      die "no box_id in $MANTA_AUTH_FILE after waiting — cannot register the gateway, so this box would have no public HTTPS.
+        Start the manta-server at least once ($(supervisor_hint restart server)), then run the installer again.
+
+        Fix the above and run the installer again — re-running is safe and preserves your box identity."
+    fi
+    warn "no box_id in $MANTA_AUTH_FILE after waiting — skipping gateway registration."
+    warn "  start the manta-server at least once ($(supervisor_hint restart server)) and re-run."
+  else
+    GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
+    # Use the existing gateway_token if present so re-registration is an
+    # idempotent IP refresh; otherwise POST /register with no auth and the
+    # gateway returns a fresh token + host. The gateway response always
+    # carries {host}; the token is only present on first registration.
+    PRIOR_TOKEN="$("$NODE" -e '
+      const fs = require("node:fs");
+      try {
+        const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
+        process.stdout.write(typeof a?.gateway_token === "string" ? a.gateway_token : "");
+      } catch { process.stdout.write(""); }
+    ' 2>/dev/null || true)"
+
+    if [ "$DRY_RUN" = "1" ]; then
+      dry_log "would POST $GATEWAY_BASE/register with box_id=$BOX_ID_FOR_GATEWAY (prior_token=${PRIOR_TOKEN:+set})"
+      dry_log "would persist gateway response into $MANTA_AUTH_FILE via merge-gateway"
     else
-      GATEWAY_BASE="${MANTA_GATEWAY_BASE:-https://gateway.mantaui.com}"
-      # Use the existing gateway_token if present so re-registration is an
-      # idempotent IP refresh; otherwise POST /register with no auth and the
-      # gateway returns a fresh token + host. The gateway response always
-      # carries {host}; the token is only present on first registration.
-      PRIOR_TOKEN="$("$NODE" -e '
-        const fs = require("node:fs");
-        try {
-          const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
-          process.stdout.write(typeof a?.gateway_token === "string" ? a.gateway_token : "");
-        } catch { process.stdout.write(""); }
-      ' 2>/dev/null || true)"
-
-      if [ "$DRY_RUN" = "1" ]; then
-        dry_log "would POST $GATEWAY_BASE/register with box_id=$BOX_ID_FOR_GATEWAY (prior_token=${PRIOR_TOKEN:+set})"
-        dry_log "would persist gateway response into $MANTA_AUTH_FILE via merge-gateway"
+      log "Registering with gateway $GATEWAY_BASE/register…"
+      REGISTER_ARGS=(-fsSL -X POST -H "content-type: application/json" --data "$(printf '{"box_id":"%s"}' "$BOX_ID_FOR_GATEWAY")")
+      if [ -n "$PRIOR_TOKEN" ]; then
+        REGISTER_ARGS+=(-H "authorization: Bearer $PRIOR_TOKEN")
+      fi
+      if GW_RESP="$(curl "${REGISTER_ARGS[@]}" "$GATEWAY_BASE/register")"; then
+        # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
+        # auth.json write is atomic temp-rename + 0600, preserving
+        # box_id / box_token / created_at.
+        if printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err; then
+          ok "gateway registration complete."
+        else
+          warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
+        fi
       else
-        log "Registering with gateway $GATEWAY_BASE/register…"
-        REGISTER_ARGS=(-fsSL -X POST -H "content-type: application/json" --data "$(printf '{"box_id":"%s"}' "$BOX_ID_FOR_GATEWAY")")
-        if [ -n "$PRIOR_TOKEN" ]; then
-          REGISTER_ARGS+=(-H "authorization: Bearer $PRIOR_TOKEN")
+        if [ "$INGRESS_MODE" = "public" ]; then
+          die "gateway registration POST failed — this box would have no public HTTPS without it.
+            ${MANTA_GATEWAY_BASE:+($MANTA_GATEWAY_BASE) }Fix the gateway/network issue and run the installer again.
+
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
         fi
-        GW_RESP="$(curl "${REGISTER_ARGS[@]}" "$GATEWAY_BASE/register")" \
-          || { warn "gateway registration POST failed — the box will retry on every server restart.
-            Pair the device via SSH port-forward or use a non-gateway ingress until this works."; GW_RESP=""; }
-        if [ -n "$GW_RESP" ]; then
-          # Pipe the JSON to merge-gateway via stdin (lib subcommand) so the
-          # auth.json write is atomic temp-rename + 0600, preserving
-          # box_id / box_token / created_at.
-          if printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err; then
-            ok "gateway registration complete."
-          else
-            warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
-          fi
-        fi
+        warn "gateway registration POST failed — the box will retry on every server restart."
       fi
     fi
   fi
@@ -1479,7 +1537,7 @@ main() {
   # tailscale path AND the macOS path (BET-276) never bind :80/:443, never
   # write a Caddy vhost, never wait on DNS, never reload Caddy. Gated via
   # SKIP_PUBLIC_TLS which merges both cases into one predicate.
-  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
+  if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
     if command -v caddy >/dev/null 2>&1; then
       ok "caddy already installed ($(caddy version 2>/dev/null || echo unknown))."
     elif [ "$DRY_RUN" = "1" ]; then
@@ -1551,74 +1609,70 @@ main() {
 
   # --- D. Poll DNS until <box_id>.boxes.mantaui.com resolves to us -------
   # Public path only (BET-267 + BET-276); the tailnet path AND the macOS
-  # path have no DNS wait. Gated via SKIP_PUBLIC_TLS.
-  if [ "$PRIVILEGED_SECTION_SKIP" = "0" ] && [ "$SKIP_PUBLIC_TLS" != "1" ]; then
-    # Re-read gateway_host (or default to the canonical pattern if the
-    # gateway didn't return one yet) for the polling target.
-    GATEWAY_HOST="$("$NODE" -e '
-      const fs = require("node:fs");
-      try {
-        const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
-        process.stdout.write(typeof a?.gateway_host === "string" ? a.gateway_host : "");
-      } catch { process.stdout.write(""); }
-    ' 2>/dev/null || true)"
-    if [ -z "$GATEWAY_HOST" ]; then
-      GATEWAY_HOST="$BOX_ID_FOR_GATEWAY.boxes.mantaui.com"
-    fi
-
-    # Detect this box's public IP via the gateway's source-IP report —
-    # fall back to `hostname -I` if the gateway response didn't include it
-    # (or in dry-run mode). We MUST use the public IP, not loopback —
-    # otherwise the DNS check trivially passes on every box.
-    BOX_PUBLIC_IP="$("$NODE" -e '
-      const https = require("node:https");
-      const opts = { hostname: "api.ipify.org", path: "/", method: "GET", timeout: 5000 };
-      const req = https.request(opts, (res) => {
-        let body = "";
-        res.on("data", (c) => body += c);
-        res.on("end", () => process.stdout.write(body.trim()));
-      });
-      req.on("error", () => process.stdout.write(""));
-      req.end();
-    ' 2>/dev/null || true)"
-    if [ -z "$BOX_PUBLIC_IP" ]; then
-      BOX_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-    fi
-
-    if [ -z "$BOX_PUBLIC_IP" ]; then
-      warn "could not determine the box's public IP — skipping DNS wait + Caddy setup."
-      warn "  the box will retry on every server restart."
+  # path have no DNS wait. Gated via SKIP_PUBLIC_TLS. Under the BET-980
+  # all-or-nothing rule, every public-path failure here is FATAL (progress
+  # has already been made, but a box that can't be reached must be reported
+  # as failed, not dressed as success). Dry-run just shows the plan.
+  if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      dry_log "would determine the box's public IP and poll DNS for $GATEWAY_HOST (up to 90s)"
+      dry_log "would render + install the Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
+      dry_log "would run: systemctl reload caddy"
     else
-      # DNS_TIMED_OUT gates step E below: if the box hostname hasn't
-      # propagated yet, writing the Caddy vhost is pointless (Let's Encrypt
-      # HTTP-01 would fail cert issuance against an unresolvable name), so we
-      # skip it and let the operator re-run once DNS is live.
-      DNS_TIMED_OUT=0
-      if [ "$DRY_RUN" = "1" ]; then
-        dry_log "would poll DNS for $GATEWAY_HOST (expecting $BOX_PUBLIC_IP) for up to 90 seconds"
-      else
-        # Bounded at ~90s (18 × 5s) rather than 5 min. A fresh gateway
-        # registration normally propagates in well under a minute; a longer
-        # wait just looks like a hang. On timeout we WARN (never die) so the
-        # installer still reaches the pair-code print — the box re-registers
-        # + retries DNS on every server restart, and re-running the installer
-        # picks up step E cleanly once the name resolves.
-        log "Waiting for $GATEWAY_HOST to resolve to $BOX_PUBLIC_IP (up to 90 seconds)…"
-        if ! "$NODE" "$LIB" wait-for-dns \
-            --hostname "$GATEWAY_HOST" \
-            --expected-ip "$BOX_PUBLIC_IP" \
-            --max-attempts 18 \
-            --interval-ms 5000; then
-          warn "$GATEWAY_HOST did not resolve to $BOX_PUBLIC_IP within 90s — skipping the Caddy vhost for now."
-          warn "  DNS propagation can lag; the box re-registers on every server restart."
-          warn "  Once it resolves, re-run the installer (or: sudo systemctl reload caddy) to finish public TLS."
-          warn "  Check: curl -fsS $GATEWAY_BASE/healthz"
-          warn "  And:   journalctl --user -u manta-server -n 50 (for the gateway-register lines)"
-          DNS_TIMED_OUT=1
-        else
-          ok "DNS resolved."
-        fi
+      # Re-read gateway_host (or default to the canonical pattern if the
+      # gateway didn't return one yet) for the polling target.
+      GATEWAY_HOST="$("$NODE" -e '
+        const fs = require("node:fs");
+        try {
+          const a = JSON.parse(fs.readFileSync(process.env.MANTA_AUTH_FILE, "utf-8"));
+          process.stdout.write(typeof a?.gateway_host === "string" ? a.gateway_host : "");
+        } catch { process.stdout.write(""); }
+      ' 2>/dev/null || true)"
+      if [ -z "$GATEWAY_HOST" ]; then
+        GATEWAY_HOST="$BOX_ID_FOR_GATEWAY.boxes.mantaui.com"
       fi
+
+      # Detect this box's public IP via api.ipify.org — fall back to
+      # `hostname -I`. We MUST use the public IP, not loopback — otherwise
+      # the DNS check trivially passes on every box.
+      BOX_PUBLIC_IP="$("$NODE" -e '
+        const https = require("node:https");
+        const opts = { hostname: "api.ipify.org", path: "/", method: "GET", timeout: 5000 };
+        const req = https.request(opts, (res) => {
+          let body = "";
+          res.on("data", (c) => body += c);
+          res.on("end", () => process.stdout.write(body.trim()));
+        });
+        req.on("error", () => process.stdout.write(""));
+        req.end();
+      ' 2>/dev/null || true)"
+      if [ -z "$BOX_PUBLIC_IP" ]; then
+        BOX_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+      fi
+      if [ -z "$BOX_PUBLIC_IP" ]; then
+        die "could not determine the box's public IP — cannot complete the public path.
+          Fix your network/egress so api.ipify.org (or hostname -I) reports a public address, then run the installer again.
+
+          Fix the above and run the installer again — re-running is safe and preserves your box identity."
+      fi
+
+      # Bounded at ~90s (18 × 5s). A fresh gateway registration normally
+      # propagates in well under a minute; a longer wait just looks like a
+      # hang. On timeout we DIE — a public-path box whose hostname never
+      # resolves has no HTTPS and must be reported as failed.
+      log "Waiting for $GATEWAY_HOST to resolve to $BOX_PUBLIC_IP (up to 90 seconds)…"
+      "$NODE" "$LIB" wait-for-dns \
+          --hostname "$GATEWAY_HOST" \
+          --expected-ip "$BOX_PUBLIC_IP" \
+          --max-attempts 18 \
+          --interval-ms 5000 \
+        || die "$GATEWAY_HOST did not resolve to $BOX_PUBLIC_IP within 90s.
+          DNS propagation can lag after a fresh gateway registration.
+          Check: curl -fsS $GATEWAY_BASE/healthz
+          And:   journalctl --user -u manta-server -n 50 (for the gateway-register lines)
+
+          Fix the above and run the installer again — re-running is safe and preserves your box identity."
+      ok "DNS resolved."
 
       # --- E. Write the Caddy vhost and reload ----------------------------
       # /etc/caddy/Caddyfile.d/ is the convention used by the official
@@ -1627,107 +1681,69 @@ main() {
       # with marked-block append is for distros that install Caddy without
       # the conf.d import (we test for the directory's existence).
       #
-      # GrACEful DEGRADATION: every privileged call here can fail (sudo
-      # tee / sudo mv / sudo systemctl), and the design-guidance §3
-      # contract says we MUST let the install reach the pair-code print
-      # even when the Caddyfile write fails. We track failures with a
-      # local CADDY_E_SKIP flag — any privileged call that returns
-      # non-zero sets the flag, and the rest of 7.5.E is skipped. The
-      # pair-code step (8) below runs regardless.
-      #
-      # Seed the flag from the DNS wait: if the box hostname didn't resolve,
-      # skip the vhost write entirely (cert issuance would fail against an
-      # unresolvable name). DRY_RUN never times out, so this is a no-op there.
-      CADDY_E_SKIP="${DNS_TIMED_OUT:-0}"
-      # Second seed: no box_id ⇒ nothing to name the vhost after. Without this
-      # guard the renderer below was invoked with an empty --box-id and failed
-      # ("render-caddy-vhost: --box-id <32hex> required") — noisy in the
-      # conf.d path and FATAL in the inline path (a failed command
-      # substitution under `set -e` kills the install before the pair code is
-      # printed). wait_for_box_id above makes this unreachable in practice;
-      # keep it as the belt to that braces.
-      if [ "$DRY_RUN" != "1" ] && [ -z "${BOX_ID_FOR_GATEWAY:-}" ]; then
-        warn "no box_id available — skipping the Caddy vhost write (nothing to point the hostname at)."
-        warn "  re-run the installer once the server has minted an identity ($(supervisor_hint status server))."
-        CADDY_E_SKIP=1
-      fi
+      # ALL-OR-NOTHING (BET-980): every failure here is FATAL. A vhost that
+      # isn't written/live means no public TLS, so the install stops rather
+      # than printing "Installed." for an unreachable box. Re-running is safe
+      # and idempotent.
       CADDY_DIR_D="/etc/caddy/Caddyfile.d"
-      if [ "$DRY_RUN" = "1" ]; then
-        dry_log "would render Caddy vhost (box_id=$BOX_ID_FOR_GATEWAY, port=$MANTA_PORT)"
-        dry_log "would write the snippet to $CADDY_DIR_D/manta.caddy"
-        dry_log "would run: systemctl reload caddy"
-      elif [ "$CADDY_E_SKIP" != "0" ]; then
-        # DNS didn't resolve above — skip the vhost write; the reload guard
-        # below (CADDY_E_SKIP != 0) will also be skipped. Re-run once DNS is live.
-        :
+      if [ -d "$CADDY_DIR_D" ]; then
+        # Caddyfile.d exists → write the snippet as a separate file.
+        # Render to a temp file FIRST, then install(1) it atomically. A
+        # direct `render | sudo tee` truncates the destination BEFORE the
+        # renderer's exit status is known, so a failed re-run replaces a
+        # working vhost with an empty file. Same staging rationale as the
+        # apt .list write above.
+        _caddy_snippet_tmp="$(mktemp)"
+        if ! "$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode snippet \
+            > "$_caddy_snippet_tmp" 2>/tmp/manta-caddy-render.err; then
+          die "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err).
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
+        fi
+        install_root_file "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err \
+          || die "failed to write $CADDY_DIR_D/manta.caddy (sudo install failed — see /tmp/manta-caddy-tee.err).
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
+        rm -f "$_caddy_snippet_tmp"
       else
-        if [ -d "$CADDY_DIR_D" ]; then
-          # Caddyfile.d exists → write the snippet as a separate file.
-          # Render to a temp file FIRST, then install(1) it atomically. A
-          # direct `render | sudo tee` truncates the destination BEFORE the
-          # renderer's exit status is known, so a failed re-run replaces a
-          # working vhost with an empty file. Same staging rationale as the
-          # apt .list write above.
-          _caddy_snippet_tmp="$(mktemp)"
-          if ! "$NODE" "$LIB" render-caddy-vhost --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" --mode snippet \
-              > "$_caddy_snippet_tmp" 2>/tmp/manta-caddy-render.err; then
-            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
-            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
-            CADDY_E_SKIP=1
-          elif ! install_root_file "$_caddy_snippet_tmp" "$CADDY_DIR_D/manta.caddy" 2>/tmp/manta-caddy-tee.err; then
-            warn "failed to write $CADDY_DIR_D/manta.caddy (sudo install failed — see /tmp/manta-caddy-tee.err)"
-            warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
-            CADDY_E_SKIP=1
-          fi
-          rm -f "$_caddy_snippet_tmp"
-        else
-          # conf.d missing → keep exactly one marker-bracketed block inside
-          # the main Caddyfile. All the block editing lives in install-lib.mjs
-          # (pure + unit-tested); this shell path only stages a temp file and
-          # installs it. `cat` of a missing file yields empty stdin, which the
-          # subcommand treats as "no Caddyfile yet" — so create/append/replace
-          # are one code path, not three.
-          #
-          # The `( cat ... || true )` group is pipefail-load-bearing: without
-          # it, a missing Caddyfile makes `cat` exit non-zero and `set -o
-          # pipefail` fails the whole pipeline, routing to the warn/skip branch
-          # below instead of reaching install_root_file — so the create-from-
-          # scratch case (the box has Caddy but no main Caddyfile) would never
-          # write a vhost. `|| true` yields empty stdin + exit 0 while node's
-          # own render/validation exit code still propagates.
-          CADDYFILE="/etc/caddy/Caddyfile"
-          _caddyfile_tmp="$(mktemp)"
-          if ! ( cat "$CADDYFILE" 2>/dev/null || true ) \
-              | "$NODE" "$LIB" upsert-caddy-block --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" \
-              > "$_caddyfile_tmp" 2>/tmp/manta-caddy-render.err; then
-            warn "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err)"
-            warn "  the rest of the install will proceed; re-run to write the Caddy vhost."
-            CADDY_E_SKIP=1
-          elif ! install_root_file "$_caddyfile_tmp" "$CADDYFILE" 2>/tmp/manta-caddy-write.err; then
-            warn "could not update $CADDYFILE (sudo install failed — see /tmp/manta-caddy-write.err)"
-            warn "  the rest of the install will proceed; re-run after fixing sudo to write the Caddy vhost."
-            CADDY_E_SKIP=1
-          fi
-          rm -f "$_caddyfile_tmp"
+        # conf.d missing → keep exactly one marker-bracketed block inside
+        # the main Caddyfile. All the block editing lives in install-lib.mjs
+        # (pure + unit-tested); this shell path only stages a temp file and
+        # installs it. `cat` of a missing file yields empty stdin, which the
+        # subcommand treats as "no Caddyfile yet" — so create/append/replace
+        # are one code path, not three.
+        #
+        # The `( cat ... || true )` group is pipefail-load-bearing: without
+        # it, a missing Caddyfile makes `cat` exit non-zero and `set -o
+        # pipefail` fails the whole pipeline, routing to the die branch
+        # below instead of reaching install_root_file — so the create-from-
+        # scratch case (the box has Caddy but no main Caddyfile) would never
+        # write a vhost. `|| true` yields empty stdin + exit 0 while node's
+        # own render/validation exit code still propagates.
+        CADDYFILE="/etc/caddy/Caddyfile"
+        _caddyfile_tmp="$(mktemp)"
+        if ! ( cat "$CADDYFILE" 2>/dev/null || true ) \
+            | "$NODE" "$LIB" upsert-caddy-block --box-id "$BOX_ID_FOR_GATEWAY" --port "$MANTA_PORT" \
+            > "$_caddyfile_tmp" 2>/tmp/manta-caddy-render.err; then
+          die "failed to render the Caddy vhost (see /tmp/manta-caddy-render.err).
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
         fi
+        install_root_file "$_caddyfile_tmp" "$CADDYFILE" 2>/tmp/manta-caddy-write.err \
+          || die "could not update $CADDYFILE (sudo install failed — see /tmp/manta-caddy-write.err).
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
+        rm -f "$_caddyfile_tmp"
+      fi
 
-        # Sub-tasks below depend on the Caddyfile being on disk; skip them
-        # if any write above failed (CADDY_E_SKIP=1). The pair-code step
-        # (8) still runs regardless.
-        if [ "$CADDY_E_SKIP" = "0" ]; then
-          if command -v systemctl >/dev/null 2>&1; then
-            if ! sudo -n systemctl reload caddy 2>/tmp/manta-caddy-reload.err; then
-              warn "systemctl reload caddy failed — see /tmp/manta-caddy-reload.err"
-              warn "  the vhost is on disk but NOT live: no certificate will be issued until the reload succeeds."
-            else
-              ok "caddy reloaded."
-            fi
-          else
-            warn "systemctl not found — reload caddy manually with: sudo caddy reload --config /etc/caddy/Caddyfile"
-          fi
-        else
-          warn "Caddy vhost write was skipped — skipping systemctl reload too."
-        fi
+      # The vhost is on disk; make Caddy live. Without a successful reload no
+      # certificate is issued — fatal on the public path.
+      if command -v systemctl >/dev/null 2>&1; then
+        sudo -n systemctl reload caddy 2>/tmp/manta-caddy-reload.err \
+          || die "systemctl reload caddy failed — the vhost is on disk but NOT live, so no certificate will be issued.
+            See /tmp/manta-caddy-reload.err
+            Fix the above and run the installer again — re-running is safe and preserves your box identity."
+        ok "caddy reloaded."
+      else
+        die "systemctl not found — cannot reload Caddy, so the vhost would not become live.
+          Install systemd (or reload Caddy manually: sudo caddy reload --config /etc/caddy/Caddyfile).
+          Fix the above and run the installer again — re-running is safe and preserves your box identity."
       fi
     fi
   fi
