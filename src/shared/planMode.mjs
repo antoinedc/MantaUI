@@ -22,3 +22,11 @@ export function planModeFromToolPart(part) {
   if (p.tool === "plan_exit") return false;
   return null;
 }
+
+/**
+ * Whether `name` is a plan-mode agent, so manta-plan is recognized uniformly.
+ */
+export function isPlanAgent(name) {
+  if (name === undefined || name === null || typeof name !== "string") return false;
+  return name === "plan" || name === "manta-plan";
+}

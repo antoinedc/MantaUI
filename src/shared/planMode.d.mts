@@ -13,3 +13,9 @@
  * purpose, must not be reused here.)
  */
 export function planModeFromToolPart(part: unknown): boolean | null;
+
+/**
+ * Whether `name` is a plan-mode agent (`"plan"` or `"manta-plan"`). Non-strings
+ * (undefined, null, numbers, objects) and empty strings are false.
+ */
+export function isPlanAgent(name: unknown): boolean;

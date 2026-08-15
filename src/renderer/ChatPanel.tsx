@@ -64,6 +64,7 @@ import {
   extractPlanData,
   selectableModelGroups,
 } from "./chatUtils";
+import { isPlanAgent } from "../shared/planMode.mjs";
 import {
   appendPromptHistory,
   copySavedModels,
@@ -624,7 +625,7 @@ export function ChatPanel({
     if (api.opencodeSessionAgent) {
       api.opencodeSessionAgent(sessionId).then((agent) => {
         if (agent && agent.length > 0) {
-          const planNow = agent === "plan";
+          const planNow = isPlanAgent(agent);
           setPlanOn(planNow);
           writePlanSaved(sessionId, planNow);
           setModelOverride(

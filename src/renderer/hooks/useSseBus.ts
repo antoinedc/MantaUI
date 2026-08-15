@@ -70,7 +70,7 @@ import {
   authErrorAdvice,
   fetchTranscriptWithRetry,
 } from "../chatUtils";
-import { planModeFromToolPart } from "../../shared/planMode.mjs";
+import { planModeFromToolPart, isPlanAgent } from "../../shared/planMode.mjs";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
@@ -571,7 +571,7 @@ export function useSseBus(params: {
       // server-side state doing it, so MantaUI must mirror it or the chip
       // claims plan mode while the next turn runs as build.
       if (ev.type === "session.next.agent.switched") {
-        setPlanOnRef.current(String(props.agent ?? "") === "plan");
+        setPlanOnRef.current(isPlanAgent(String(props.agent ?? "")));
       }
       if (ev.type === "message.part.updated") {
         const part = props.part as { callID?: unknown } | undefined;
