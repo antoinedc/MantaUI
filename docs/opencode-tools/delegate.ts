@@ -109,8 +109,10 @@ export const delegate = tool({
       .string()
       .optional()
       .describe(
-        "Optional free-text model id for the job's session, passed straight " +
-          "through to the box. When omitted the job uses the box's default model. " +
+        "Optional model id for the job's session, as free text.\u200b " +
+          "When omitted the job uses the box's default model. The value must be " +
+          "a model id the box knows (matched by the box, not freeform): a bad " +
+          "value fails loudly rather than silently picking a different model. " +
           "Not validated client-side.",
       ),
     tools: z

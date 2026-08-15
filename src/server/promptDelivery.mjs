@@ -31,13 +31,19 @@
  * Build the shared prompt-delivery engine.
  *
  * @param {object} deps
- * @param {(args:{sessionId:string, text:string})=>Promise<unknown>} deps.sendPrompt
+ * @param {(args:{sessionId:string, text:string, model?:{providerID:string, modelID:string, variant?:string}})=>Promise<unknown>} deps.sendPrompt
  *        The underlying opencode prompt injector (oc.sendPrompt).
- * @returns {{deliver: (args:{sessionId:string, text:string})=>Promise<{delivered:boolean, queued:boolean, rejected?:boolean}>, observeEvent:(evt:unknown)=>void, isBusy:(sessionId:string)=>boolean}}
+ * @returns {{deliver: (args:{sessionId:string, text:string, model?:{providerID:string, modelID:string, variant?:string}})=>Promise<{delivered:boolean, queued:boolean, rejected?:boolean}>, observeEvent:(evt:unknown)=>void, isBusy:(sessionId:string)=>boolean}}
  */
 export function createPromptDelivery({ sendPrompt }) {
   const busy = new Set(); // sessionIds currently running a turn
-  const pending = new Map(); // sessionId -> [text, ...] queued while busy
+  const pending = new Map(); // sessionId -> [{text, model}, ...] queued while busy
+
+  // Build the sendPrompt argument, including `model` only when one was given —
+  // an omitted model must leave the call byte-identical to the pre-model engine.
+  function withModel(sessionId, text, model) {
+    return model ? { sessionId, text, model } : { sessionId, text };
+  }
 
   // Upper bound on deferred prompts per session (BET-772). Chosen well above
   // what a realistic burst needs but small enough that a flood cannot balloon
@@ -53,9 +59,9 @@ export function createPromptDelivery({ sendPrompt }) {
     // itself (e.g. a second webhook arriving while we flush) is not lost —
     // it lands in a fresh queue rather than being iterated mid-flush.
     pending.delete(sessionId);
-    for (const text of queue) {
+    for (const { text, model } of queue) {
       try {
-        await sendPrompt({ sessionId, text });
+        await sendPrompt(withModel(sessionId, text, model));
       } catch (e) {
         // Warn and continue: one wedged delivery must not strand the rest of
         // the queued prompts behind it.
@@ -94,7 +100,7 @@ export function createPromptDelivery({ sendPrompt }) {
     return busy.has(sessionId);
   }
 
-  async function deliver({ sessionId, text }) {
+  async function deliver({ sessionId, text, model }) {
     if (busy.has(sessionId)) {
       const q = pending.get(sessionId) ?? [];
       if (q.length >= MAX_PENDING_PER_SESSION) {
@@ -107,12 +113,12 @@ export function createPromptDelivery({ sendPrompt }) {
         );
         return { delivered: false, queued: false, rejected: true };
       }
-      q.push(text);
+      q.push({ text, model });
       pending.set(sessionId, q);
       return { delivered: false, queued: true };
     }
     try {
-      await sendPrompt({ sessionId, text });
+      await sendPrompt(withModel(sessionId, text, model));
       return { delivered: true, queued: false };
     } catch (e) {
       // Never reject: callers swallow errors and a rejection would surface as

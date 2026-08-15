@@ -207,3 +207,34 @@ test("11. bounding is per-session: a full queue for one session does not reject 
   assert.equal(s2.queued, true);
   assert.equal(s2.rejected, undefined);
 });
+
+test("12. idle deliver with a model forwards it; without one omits the key (BET-947)", async () => {
+  const { engine, calls } = makeEngine();
+  const model = { providerID: "anthropic", modelID: "claude-opus-4-5" };
+  const withModel = await engine.deliver({ sessionId: "s1", text: "hi", model });
+  assert.equal(withModel.delivered, true);
+  assert.deepEqual(calls[0], { sessionId: "s1", text: "hi", model });
+});
+
+test("13. deliver without a model leaves sendPrompt byte-identical to pre-model (BET-947)", async () => {
+  const { engine, calls } = makeEngine();
+  const res = await engine.deliver({ sessionId: "s1", text: "hi" });
+  assert.equal(res.delivered, true);
+  assert.deepEqual(calls[0], { sessionId: "s1", text: "hi" });
+  assert.equal("model" in calls[0], false, "no model key when one was not given");
+});
+
+test("14. deferred delivery preserves the model across the busy drain (BET-947)", async () => {
+  const { engine, calls } = makeEngine();
+  engine.observeEvent({
+    type: "session.status",
+    properties: { sessionID: "s1", status: { type: "busy" } },
+  });
+  const model = { providerID: "deepseek", modelID: "deepseek-chat" };
+  const res = await engine.deliver({ sessionId: "s1", text: "deferred", model });
+  assert.equal(res.queued, true);
+  engine.observeEvent({ type: "session.idle", properties: { sessionID: "s1" } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { sessionId: "s1", text: "deferred", model });
+});

@@ -442,6 +442,99 @@ test("startJob leaves the link null when none is provided", async () => {
   assert.equal(job.link, null);
 });
 
+// ----------------------------------------------------------------------------
+// BET-947 — startJob model threading (structured, free text, no-match, none)
+// ----------------------------------------------------------------------------
+
+function mockModels() {
+  return [
+    { providerID: "anthropic", id: "claude-opus-4-5", name: "Claude Opus 4.5" },
+    { providerID: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+    { providerID: "deepseek", id: "deepseek-chat", name: "DeepSeek Chat" },
+  ];
+}
+
+function startHarness(childSessionId) {
+  const h = harness([]);
+  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
+  h.deps.listProjects = async () => [
+    { tmuxSession: "s", windows: [{ index: 1, opencodeSessionId: "parent", paneCurrentPath: "/repo" }] },
+  ];
+  h.deps.newWindow = async () => ({ sessionId: childSessionId, windowIndex: 1 });
+  return h;
+}
+
+test("startJob with a structured model passes it to deliver and records requestedModel (BET-947)", async () => {
+  const h = startHarness("child_struct");
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
+      model: { providerID: "anthropic", modelID: "claude-opus-4-5" } },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+  const job = h.jobs.find((j) => j.childSessionID === "child_struct");
+  assert.equal(job.requestedModel, "anthropic/claude-opus-4-5");
+});
+
+test("startJob resolves free text matching a known model and passes it (BET-947)", async () => {
+  const h = startHarness("child_freetext");
+  h.deps.listModels = async () => mockModels();
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", model: "opus" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+  const job = h.jobs.find((j) => j.childSessionID === "child_freetext");
+  assert.equal(job.requestedModel, "anthropic/claude-opus-4-5");
+});
+
+test("startJob with unmatchable free text rejects and names candidates (BET-947)", async () => {
+  const h = harness([]);
+  h.deps.listModels = async () => mockModels();
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", model: "claude zzz" },
+    h.deps,
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.error, /No model matched "claude zzz"/);
+  assert.match(res.error, /Closest models: /);
+  assert.match(res.error, /anthropic\/claude-/);
+  assert.equal(h.delivered.length, 0, "no prompt delivered on a bad model");
+  assert.equal(h.jobs.length, 0, "no job persisted on a bad model");
+});
+
+test("startJob with no model calls deliver without a model key (BET-947 regression)", async () => {
+  const h = startHarness("child_default");
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.equal("model" in h.delivered[0], false, "no model key on the default path");
+  const job = h.jobs.find((j) => j.childSessionID === "child_default");
+  assert.equal(job.requestedModel, null);
+});
+
+test("requestedModel survives a tickActivity that rewrites job.model (BET-947)", async () => {
+  const running = runningJob(0);
+  running.requestedModel = "anthropic/claude-opus-4-5";
+  running.model = "anthropic/claude-opus-4-5";
+  running.activity = null;
+  const h = harness([running]);
+  h.deps.listMessages = async () => [
+    modelMessage("anthropic", "claude-sonnet-4-6"), // observed differs from requested
+  ];
+  await tickActivity(h.deps);
+  const job = h.jobs[0];
+  assert.equal(job.model, "anthropic/claude-sonnet-4-6", "job.model reflects the OBSERVED model");
+  assert.equal(job.requestedModel, "anthropic/claude-opus-4-5", "requestedModel is never overwritten");
+});
+
 test("startJob refuses nesting when parentSessionID is a live job's childSessionID", async () => {
   const live = { ...runningJob(0), childSessionID: "child_live", status: "running" };
   const h = harness([live]);

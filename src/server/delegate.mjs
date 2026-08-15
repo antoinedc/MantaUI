@@ -40,6 +40,7 @@ import {
   describeChatActivity,
 } from "./peers.mjs";
 import { extractSubagentInfo } from "../shared/streamInterpretation.mjs";
+import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -325,6 +326,7 @@ async function registerJob(
     name,
     prompt,
     model,
+    requestedModel,
     cwd,
     worktree,
     branch,
@@ -391,6 +393,10 @@ async function registerJob(
     name,
     prompt,
     model: model ?? null,
+    // What was ASKED for (canonical "providerID/modelID" string or null).
+    // Never overwritten — distinct from `job.model`, which tickActivity stamps
+    // with the model OBSERVED in the child's own transcript (BET-947).
+    requestedModel: requestedModel ?? null,
     parentSessionID,
     parentDirectory,
     childSessionID,
@@ -427,16 +433,79 @@ async function registerJob(
 }
 
 /**
- * @param {{prompt:string, model?:string, parentSessionID:string, parentDirectory:string,
+ * Resolve a delegate `model` argument to the structured shape deliver() and
+ * sendPrompt() accept ({providerID, modelID, variant?}).
+ *
+ * A structured `{providerID, modelID, variant?}` value is accepted as-is
+ * (skips matching — the renderer sends this shape). Free text is matched
+ * against the box's known models with the SHARED fuzzy matcher
+ * (src/shared/modelGuide.mjs — the same one app-control uses for
+ * manta_switch_model; do not write a second matcher). No match → {ok:false}
+ * naming the closest candidates, so a bad value fails loudly instead of
+ * silently falling back to opencode's default.
+ *
+ * `requested` is the canonical "providerID/modelID" string recorded on the job
+ * as `requestedModel` (what was asked for, never overwritten).
+ *
+ * @param {unknown} model
+ * @param {Array<object>} models oc.listModels() output
+ * @returns {{ok:true, model:{providerID:string, modelID:string, variant?:string}|null, requested:string|null}|{ok:false, error:string}}
+ */
+export function resolveRequestedModel(model, models) {
+  if (model && typeof model === "object" && !Array.isArray(model)) {
+    if (
+      typeof model.providerID === "string" &&
+      model.providerID &&
+      typeof model.modelID === "string" &&
+      model.modelID
+    ) {
+      const structured = { providerID: model.providerID, modelID: model.modelID };
+      if (typeof model.variant === "string" && model.variant) {
+        structured.variant = model.variant;
+      }
+      return {
+        ok: true,
+        model: structured,
+        requested: `${model.providerID}/${model.modelID}`,
+      };
+    }
+    return { ok: false, error: "model must be free text or an object with string providerID and modelID." };
+  }
+  const query = typeof model === "string" ? model.trim() : "";
+  if (!query) {
+    // No model requested — byte-identical to today: the box's default applies.
+    return { ok: true, model: null, requested: null };
+  }
+  const resolved = fuzzyMatchModel(query, models);
+  if (!resolved) {
+    const suggestions = suggestModels(query, models, 3);
+    const hint = suggestions.length
+      ? ` Closest models: ${suggestions.map((s) => `${s.providerID}/${s.id}`).join(", ")}.`
+      : " No models are currently available on this box.";
+    return { ok: false, error: `No model matched "${model}".${hint}` };
+  }
+  return {
+    ok: true,
+    model: { providerID: resolved.providerID, modelID: resolved.id },
+    requested: `${resolved.providerID}/${resolved.id}`,
+  };
+}
+
+/**
+ * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, parentSessionID:string, parentDirectory:string,
  *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
+ *        `model` (BET-947) — optional model for the job's session: free text
+ *        resolved via the shared fuzzy matcher, or a structured
+ *        {providerID, modelID, variant?} used as-is. Unmatchable free text
+ *        fails the delegation loudly naming candidates.
  *        `link` (BET-844) — the optional session link (at most one issue + one
  *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
  *        progress sink addresses the linked issue/PR. Stored on the job record.
  * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
- *        newWindow/gitAddWorktree/gitRun/oc listMessages/now)
+ *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now)
  */
 export async function startJob(input, deps = {}) {
-  const { deliver } = deps;
+  const { deliver, listModels } = deps;
 
   const prompt = String(input?.prompt ?? "");
   const parentSessionID = input?.parentSessionID;
@@ -444,6 +513,21 @@ export async function startJob(input, deps = {}) {
 
   if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
   if (!parentDirectory) return { ok: false, error: "parentDirectory is required" };
+
+  // Resolve the requested model once, up front. A structured model is used
+  // as-is; free text is matched against the box's known models via the shared
+  // fuzzy matcher, and an unmatchable value fails the delegation loudly
+  // (naming candidates) rather than silently falling back to the default. A
+  // missing input model leaves both null — the box default, byte-identical to
+  // today. Only fetch the model list when a model was actually requested.
+  let requestedModel = null;
+  let deliverModel = null;
+  if (input?.model) {
+    const resolved = resolveRequestedModel(input.model, listModels ? await listModels() : []);
+    if (!resolved.ok) return resolved;
+    requestedModel = resolved.requested;
+    deliverModel = resolved.model;
+  }
 
   // The whole creation — nesting + cap checks, worktree, window, record append —
   // runs inside the jobs-store lock so a concurrent `delegate` POST cannot pass
@@ -515,7 +599,8 @@ export async function startJob(input, deps = {}) {
         parentDirectory,
         name,
         prompt,
-        model: input?.model,
+        model: requestedModel,
+        requestedModel,
         cwd,
         worktree,
         branch,
@@ -531,11 +616,14 @@ export async function startJob(input, deps = {}) {
 
   if (!reg.ok) return reg;
 
-  // 8. Send the opening prompt via the shared delivery module's deliver.
+  // 8. Send the opening prompt via the shared delivery module's deliver. The
+  //    requested model (resolved above) is threaded through so a delegate that
+  //    asked for a specific model actually runs on it; omitted → the default.
   try {
     await deliver({
       sessionId: reg.job.childSessionID,
       text: buildJobPrompt({ prompt, worktree: reg.job.worktree, branch: reg.job.branch }),
+      ...(deliverModel ? { model: deliverModel } : {}),
     });
   } catch (e) {
     // deliver never rejects in production, but guard anyway — the job is
@@ -597,6 +685,7 @@ export async function adoptSubagentJob(
         name,
         prompt,
         model,
+        requestedModel: null,
         cwd: parentDirectory,
         worktree: null,
         branch: null,
