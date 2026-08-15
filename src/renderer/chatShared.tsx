@@ -326,6 +326,35 @@ export function writePlanSaved(sessionId: string, on: boolean): void {
   } catch { /* quota / disabled storage */ }
 }
 
+// Per-project remembered DELEGATION model (BET-951). Written ONLY on an
+// explicit user pick from the plan card's delegate split (never promoted from
+// an inherited default — that would pin whatever happened to be current the
+// first time). Level 2 of resolveDelegateModel's precedence.
+export function delegateModelKey(projectKey: string): string {
+  return `manta:delegate:${projectKey}:model`;
+}
+
+export function readSavedDelegateModel(projectKey: string): ModelSelection | null {
+  try {
+    const raw = localStorage.getItem(delegateModelKey(projectKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.providerID === "string" && typeof parsed.modelID === "string") {
+      return parsed as ModelSelection;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSavedDelegateModel(projectKey: string, m: ModelSelection | null): void {
+  try {
+    if (m) localStorage.setItem(delegateModelKey(projectKey), JSON.stringify(m));
+    else localStorage.removeItem(delegateModelKey(projectKey));
+  } catch { /* quota / disabled storage */ }
+}
+
 // Resolve the active OpencodeModel for the NEXT prompt from the available
 // model list + the per-session override + the server default. modelOverride
 // wins; otherwise the server default's provider/model is looked up. Returns
