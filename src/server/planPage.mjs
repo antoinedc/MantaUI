@@ -26,6 +26,11 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkGfm from "remark-gfm";
+import remarkRehype from "remark-rehype";
+import rehypeStringify from "rehype-stringify";
 import { statePath } from "../shared/paths.mjs";
 import { registerPage } from "./servePage.mjs";
 
@@ -70,6 +75,8 @@ export function planSubdomain(sessionID) {
 // ---------------------------------------------------------------------------
 
 const LIGHT_TOKENS = `
+  --r-xs: 4px;
+  --r-sm: 6px;
   --canvas: #FAF9F7;
   --panel: #F2F0EC;
   --card: #FFFFFF;
@@ -119,131 +126,28 @@ export function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-// Inline formatting for a single line's inner text: HTML is escaped FIRST (so
-// raw tags in the source can never survive as markup), then code spans (so
-// backticks shield their content from bold/italic), then links, bold, italic.
-function renderInline(text) {
-  let out = escapeHtml(text);
-  // Code spans — content already escaped by the pass above.
-  out = out.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
-  // Links: [label](url) — url already attribute-escaped above.
-  out = out.replace(
-    /\[([^\]\n]+)\]\(([^)\s]+)\)/g,
-    (_, label, url) => `<a href="${url}">${label}</a>`,
-  );
-  // Bold.
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  // Italic.
-  out = out.replace(/(^|[^*])\*([^*\n]+)\*(?![*])/g, "$1<em>$2</em>");
-  return out;
-}
-
-function isCodeFence(line) {
-  const m = /^```/.exec(line);
-  if (!m) return null;
-  const lang = line.replace(/^```/, "").trim();
-  return lang;
-}
-
 /**
- * Render plan markdown to HTML `<body>` inner markup. Pure: no side effects.
- * Handles fenced code blocks (monospace, surfaced), ATX headings 1-6, bullet &
- * ordered lists, and inline code / links / bold / italic. Runs only inside
- * renderPlanHtml (never user-controlled substitution beyond what it escapes).
+ * Render plan markdown to HTML `<body>` inner markup.
+ *
+ * The SAME engine the in-app transcript uses (react-markdown is remark/rehype,
+ * with the same remark-gfm), so a plan reads identically in the chat panel and
+ * on its shared page. Pure and synchronous — `renderPlanHtml` is a pure
+ * function and its tests depend on that.
+ *
+ * SECURITY: `remark-rehype` DROPS raw HTML by default, so markup embedded in a
+ * plan can never reach the page. Do NOT add `allowDangerousHtml` or
+ * `rehype-raw` — that is the whole sanitisation story, and the page's sandbox
+ * CSP is a second line, not the first.
  */
 export function renderPlanMarkdown(markdown) {
-  const lines = String(markdown).split("\n");
-  const out = [];
-  let i = 0;
-  let inCode = false;
-  let codeLang = "";
-  let codeBuf = [];
-
-  const flushCode = () => {
-    const langAttr = codeLang ? ` class="language-${escapeHtml(codeLang)}"` : "";
-    out.push(
-      `<pre><code${langAttr}>${codeBuf.map(escapeHtml).join("\n")}</code></pre>`,
-    );
-    codeBuf = [];
-    codeLang = "";
-    inCode = false;
-  };
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    if (!inCode && isCodeFence(line) !== null) {
-      inCode = true;
-      codeLang = isCodeFence(line);
-      i += 1;
-      continue;
-    }
-    if (inCode) {
-      if (isCodeFence(line) !== null) {
-        flushCode();
-        i += 1;
-        continue;
-      }
-      codeBuf.push(line);
-      i += 1;
-      continue;
-    }
-
-    const trimmed = line.trim();
-    const heading = /^(#{1,6})[ \t]+(.*)$/.exec(line);
-    const hr = /^-{3,}$/.test(trimmed);
-    const listItem = /^([ \t]*)[-*+][ \t]+(.*)$/.exec(line);
-    const orderedItem = /^([ \t]*)\d+[.)][ \t]+(.*)$/.exec(line);
-
-    if (heading) {
-      const level = Math.min(heading[1].length, 6);
-      out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-      i += 1;
-      continue;
-    }
-    if (hr) {
-      out.push("<hr>");
-      i += 1;
-      continue;
-    }
-
-    // Lists: collect a run of consecutive list items into ONE <ul>/<ol>.
-    if (listItem || orderedItem) {
-      const ordered = Boolean(orderedItem);
-      const tag = ordered ? "ol" : "ul";
-      const items = [];
-      while (i < lines.length) {
-        const li = /^([ \t]*)[-*+][ \t]+(.*)$/.exec(lines[i]);
-        const oli = /^([ \t]*)\d+[.)][ \t]+(.*)$/.exec(lines[i]);
-        if (ordered) {
-          if (!oli) break;
-          items.push(oli[2]);
-        } else {
-          if (!li) break;
-          items.push(li[2]);
-        }
-        i += 1;
-      }
-      const lis = items.map((t) => `<li>${renderInline(t)}</li>`).join("\n");
-      out.push(`<${tag}>\n${lis}\n</${tag}>`);
-      continue;
-    }
-
-    // Paragraph: collect consecutive non-empty lines.
-    const para = [];
-    while (i < lines.length && lines[i].trim() !== "") {
-      para.push(lines[i]);
-      i += 1;
-    }
-    if (para.length) {
-      out.push(`<p>${para.map(renderInline).join("\n")}</p>`);
-    }
-    // skip blank separator
-    if (lines[i]?.trim() === "") i += 1;
-  }
-
-  if (inCode) flushCode();
-  return out.join("\n");
+  return String(
+    unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkRehype)
+      .use(rehypeStringify)
+      .processSync(String(markdown)),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -390,14 +294,14 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
     font-size: 0.9em;
     background: var(--inset);
     border: 1px solid var(--border-subtle);
-    border-radius: 4px;
+    border-radius: var(--r-xs);
     padding: 0.1em 0.35em;
     color: var(--tx2);
   }
   pre {
     background: var(--inset);
     border: 1px solid var(--border-subtle);
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     padding: 14px 16px;
     overflow-x: auto;
     margin: 0.8em 0;
@@ -411,6 +315,43 @@ export function renderPlanHtml({ title: titleIn, markdown, path, generatedAt }) 
     font-size: 12.5px;
     line-height: 1.5;
   }
+  main blockquote {
+    margin: 0.8em 0;
+    padding: 0.1em 0 0.1em 14px;
+    border-left: 2px solid var(--border);
+    color: var(--tx3);
+  }
+  main ul ul, main ul ol, main ol ul, main ol ol { margin: 0.25em 0; }
+  main li > p { margin: 0.25em 0; }
+  /* GFM task list: the checkbox replaces the marker, so the item un-indents
+     back to the list's own left edge. */
+  main li:has(> input[type="checkbox"]) {
+    list-style: none;
+    margin-left: -1.4em;
+  }
+  main li > input[type="checkbox"] {
+    margin: 0 6px 0 0;
+    vertical-align: baseline;
+    accent-color: var(--accent-solid);
+  }
+  main del { color: var(--tx4); }
+  main img { max-width: 100%; height: auto; border-radius: var(--r-sm); }
+  main table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+    border-collapse: collapse;
+    margin: 0.9em 0;
+    font-size: 13.5px;
+  }
+  main th, main td {
+    border: 1px solid var(--border-subtle);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  main th { background: var(--inset); color: var(--tx2); font-weight: 600; }
+  main tr:nth-child(even) td { background: var(--fill); }
   footer {
     margin-top: 48px;
     padding-top: 20px;
