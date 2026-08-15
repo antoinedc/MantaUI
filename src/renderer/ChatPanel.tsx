@@ -2416,6 +2416,45 @@ export function ChatPanel({
     [planQuestions, messages],
   );
 
+  // Eager publish of the plan companion page so the shareable URL shows up in
+  // the card BEFORE plan_exit completes. The subdomain is stable per session
+  // (`plan-<shortId>`), so re-publishing replaces the snapshot under the same
+  // URL. Fire-and-forget + deduped by the plan QUESTION (not the file path) —
+  // a "Keep planning" revision is a NEW question reusing the same path, so it
+  // re-publishes fresh content instead of serving the stale snapshot. A
+  // failure is silent and falls back to publish-on-click.
+  const [planUrl, setPlanUrl] = useState<string | null>(null);
+  const [planPublishing, setPlanPublishing] = useState(false);
+  const publishedPlanQuestionRef = useRef<string | null>(null);
+  const publishPlanEager = useCallback(
+    (qId: string, path: string) => {
+      if (!path || publishedPlanQuestionRef.current === qId) return;
+      publishedPlanQuestionRef.current = qId;
+      // New/revised plan → drop the old URL and show the loading state until
+      // the fresh page is published.
+      setPlanUrl(null);
+      setPlanPublishing(true);
+      window.api
+        .planPublish(sessionId, path)
+        .then(({ url }) => setPlanUrl(url))
+        .catch(() => { /* fall back to publish-on-click */ })
+        .finally(() => setPlanPublishing(false));
+    },
+    [sessionId],
+  );
+  useEffect(() => {
+    // Only the panel the user is actually viewing publishes eagerly; a hidden
+    // panel's plan page is published lazily once it becomes active.
+    if (!isActive) return;
+    for (const q of planQuestions) {
+      const data = planDataByQuestion.get(q.id);
+      if (data?.path) {
+        publishPlanEager(q.id, data.path);
+        break;
+      }
+    }
+  }, [planQuestions, planDataByQuestion, publishPlanEager, isActive]);
+
   // Delegate split control (BET-951).
   // Level 3 of the model precedence — "same as current" means the BUILD model,
   // not the plan model the composer chip may be showing while plan mode is on.
@@ -2536,6 +2575,44 @@ export function ChatPanel({
     [sessionId],
   );
 
+  // The plan_exit card, built here and mounted in the transcript tail the SAME
+  // way the questions are (it used to be pinned in the CardStack). Building the
+  // element here keeps the closures over the plan data + the eager-published
+  // URL; Transcript just mounts it. The stable `key={q.id}` preserves the
+  // card's internal state (feedback / open model menu) across updates.
+  const planCard = useMemo(() => {
+    for (const q of planQuestions) {
+      const data = planDataByQuestion.get(q.id);
+      if (!data) continue;
+      return (
+        <PlanCard
+          key={q.id}
+          data={data}
+          models={delegateSelectable}
+          remembered={rememberedDelegateModel}
+          sessionModel={sessionModel}
+          buildModelName={activeModel?.name ?? ""}
+          atDelegateCap={atDelegateCap}
+          onBuildHere={(fb) => void buildHere(q, fb)}
+          onKeepPlanning={(fb) => void keepPlanning(q, fb)}
+          onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
+          onRememberDelegateModel={rememberDelegateModel}
+          planUrl={planUrl}
+          planPublishing={planPublishing}
+          onOpenInBrowser={() => {
+            // Live page already published → just open it (no re-publish).
+            if (planUrl) {
+              void window.api.openExternal(planUrl).catch(() => { /* best-effort */ });
+              return;
+            }
+            if (data.path) openPlanInBrowser(data.path);
+          }}
+        />
+      );
+    }
+    return null;
+  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planUrl, planPublishing, openPlanInBrowser]);
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
@@ -2588,33 +2665,9 @@ export function ChatPanel({
           <BlockedProgressCard progress={liveProgress} />,
         ));
       }
-      // Plan card (BET-951): the plan_exit question, blocking tier — it is an
-      // unanswered ask, beside permission, never below an ambient card. The
-      // delegate split reuses SplitChip + the existing ModelMenu (no new
-      // split/dropdown surface).
-      planQuestions.forEach((q) => {
-        const data = planDataByQuestion.get(q.id);
-        if (!data) return;
-        list.push(block(
-          `plan-${q.id}`, blockOrder(`plan-${q.id}`),
-          <PlanCard
-            key={q.id}
-            data={data}
-            models={delegateSelectable}
-            remembered={rememberedDelegateModel}
-            sessionModel={sessionModel}
-            buildModelName={activeModel?.name ?? ""}
-            atDelegateCap={atDelegateCap}
-            onBuildHere={(fb) => void buildHere(q, fb)}
-            onKeepPlanning={(fb) => void keepPlanning(q, fb)}
-            onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
-            onRememberDelegateModel={rememberDelegateModel}
-            onOpenInBrowser={() => {
-              if (data.path) openPlanInBrowser(data.path);
-            }}
-          />,
-        ));
-      });
+      // NOTE: the plan_exit card (PlanCard) is intentionally NOT here any more
+      // — it now renders in the transcript tail, mounted the same way as the
+      // question cards (see `planCard`, passed to <Transcript>).
     }
     // Ambient tier — fixed priority, independent of arrival order.
     if (retryInfo) list.push(amb("retry",
@@ -2702,7 +2755,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress, planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, openPlanInBrowser]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -2849,6 +2902,7 @@ export function ChatPanel({
             onRetryVoiceNote={retryVoiceNote}
             onReplyQuestion={replyQuestion}
             onRejectQuestion={rejectQuestion}
+            planCard={planCard}
             scrollerElRef={scrollerElRef}
             followingRef={followingRef}
             onFollowingChange={setFollowing}

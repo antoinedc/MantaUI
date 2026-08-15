@@ -66,6 +66,10 @@ export type TranscriptContext = {
   questions: QuestionRequest[];
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
+  // The plan_exit card (the Build/Delegate/Keep-planning ask), rendered in the
+  // tail the same way as question cards. Built by ChatPanel (closures over the
+  // plan data + session); Transcript just mounts it.
+  planCard?: React.ReactNode;
   // BET-837: the pending voice-note row (upload/transcribe in flight) renders
   // here — after the message list, before the working indicator. When it
   // resolves into a real note it lands as a VoicePlayer on its message row.
@@ -301,6 +305,14 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
           ))}
         </div>
       )}
+      {/* The plan_exit card renders in the tail exactly like the question cards
+          above — same chrome, same scroll-with-the-conversation placement (it
+          used to be pinned in the card stack). */}
+      {context.planCard && (
+        <ErrorBoundary>
+          {context.planCard}
+        </ErrorBoundary>
+      )}
     </div>
   );
 }
@@ -346,6 +358,8 @@ export type TranscriptProps = {
   onRetryVoiceNote: (noteId: string) => void;
   onReplyQuestion: (q: QuestionRequest, answers: string[][]) => void;
   onRejectQuestion: (q: QuestionRequest) => void;
+  // The plan_exit card, mounted in the tail (see TranscriptContext.planCard).
+  planCard?: React.ReactNode;
   // The Virtuoso scroll container, published upward so ChatPanel's
   // scrollToTail can address the real bottom (Footer included).
   scrollerElRef: React.MutableRefObject<HTMLElement | null>;
@@ -383,6 +397,7 @@ export function Transcript({
   onRetryVoiceNote,
   onReplyQuestion,
   onRejectQuestion,
+  planCard,
   scrollerElRef,
   followingRef,
   onFollowingChange,
@@ -457,6 +472,7 @@ export function Transcript({
     questions,
     onReplyQuestion,
     onRejectQuestion,
+    planCard,
     pendingVoiceNote,
     onRetryVoiceNote,
   };

@@ -13,7 +13,7 @@
 // badge, plain-language titles, checkbox question options and a button ladder.
 
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown, ArrowUpRight } from "lucide-react";
+import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown, ArrowUpRight, Link2 } from "lucide-react";
 import type { PermissionRequest, ProgressRecord, QuestionRequest, OpencodeModel } from "../shared/types";
 import {
   buildQuestionAnswers,
@@ -511,8 +511,9 @@ export function QuestionCard({
 //
 // Upgrades the plan_exit question (detected EXACTLY via isPlanExitQuestion —
 // the matching `plan_exit` tool callID, never the question text) into a
-// dedicated card in the pinned card stack. Blocking tier: it is an unanswered
-// ask, rendered beside permission/question, never below an ambient card.
+// dedicated card. Rendered in the transcript TAIL, the same way the question
+// cards are (it used to be pinned in the card stack). It is an unanswered ask
+// like the questions beside it, never below an ambient card.
 //
 // The delegate split reuses the shared split control (SplitButton — the Button
 // chrome brother of SplitChip) fed by the EXISTING ModelMenu; model precedence
@@ -530,6 +531,8 @@ export function PlanCard({
   onStartDelegate,
   onRememberDelegateModel,
   onOpenInBrowser,
+  planUrl = null,
+  planPublishing = false,
 }: {
   data: { title: string; path?: string; metrics: { steps?: number; files?: number } };
   models: Array<[string, OpencodeModel[]]> | null;
@@ -545,6 +548,10 @@ export function PlanCard({
     feedback: string,
   ) => void;
   onRememberDelegateModel: (model: import("./chatShared").ModelSelection | null) => void;
+  /** Eagerly-published shareable page URL for this session's plan (before plan_exit). */
+  planUrl?: string | null;
+  /** True while the page is being published. */
+  planPublishing?: boolean;
 }) {
   // Level 1 of the model precedence — an explicit pick made on THIS card wins
   // while it is open. Written through to the remembered key on pick (see
@@ -601,6 +608,17 @@ export function PlanCard({
           className="flex-1 min-w-0 bg-transparent border-0 outline-none text-meta text-text placeholder:text-text-faint"
         />
       </div>
+      {/* Once the page is published (eager, before plan_exit) surface the URL so
+          the reader can open/share it without clicking anything. */}
+      {planUrl && (
+        <div
+          className="flex items-center gap-1 text-meta text-text-quiet mt-2 truncate"
+          title={planUrl}
+        >
+          <Link2 size={13} aria-hidden="true" className="shrink-0" />
+          <span className="truncate">{planUrl}</span>
+        </div>
+      )}
     </>
   );
 
@@ -636,11 +654,18 @@ export function PlanCard({
       <Button
         tone="ghost"
         onClick={onOpenInBrowser}
-        disabled={!data.path}
-        title={data.path ? "Publish this plan to a shareable page and open it" : undefined}
+        loading={planPublishing}
+        disabled={planPublishing || (!planUrl && !data.path)}
+        title={
+          planUrl
+            ? "Open the published plan page"
+            : data.path
+              ? "Publish this plan to a shareable page and open it"
+              : undefined
+        }
         hook="manta-plan-open-page"
       >
-        See in browser
+        {planUrl ? "Open page" : planPublishing ? "Publishing…" : "See in browser"}
         <ArrowUpRight size={14} aria-hidden="true" />
       </Button>
       <div className="flex-1" />
