@@ -1,4 +1,4 @@
-// connectPanel.test.ts — deriveConnectPanel precedence-table tests (BET-961).
+// connectPanelLogic.test.ts — deriveConnectPanel precedence-table tests (BET-961).
 //
 // One case per precedence row (11 rows), asserting tone / text / meta /
 // progress / details.kind / actions, plus the two invariants the acceptance
@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import {
   deriveConnectPanel,
   type ConnectInput,
-} from "./connectPanel";
+} from "./connectPanelLogic";
 
 const base: ConnectInput = {
   hostsLoaded: true,
