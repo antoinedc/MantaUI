@@ -6,7 +6,7 @@
 // — extract them here so each test file just imports what it needs.
 
 import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { vi } from "vitest";
 import type { SpawnFn } from "./runner.js";
 
@@ -62,6 +62,53 @@ export function makeFakeChild(): FakeChildHandle {
     fireExit: (code, signal) => fake.emit("exit", code, signal ?? null),
     fireError: (err) => fake.emit("error", err),
     killCount: () => (fake.kill as ReturnType<typeof vi.fn>).mock.calls.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// makeStdinCapturingChild — a child whose stdin is an open pipe that captures
+// every write, so tests can assert a secret was delivered over stdin (and,
+// via the caller's args capture, never in the ssh argv). Shared by the
+// BET-979 stdin tests in runner.test.ts + sudoPass.test.ts — ONE source so
+// jscpd doesn't flag the duplication.
+// ---------------------------------------------------------------------------
+
+export type StdinCapturingChildHandle = {
+  child: ReturnType<SpawnFn>;
+  /** The caller's captured object is mutated in place: it must carry
+   *  `wrote: string[]` and `ended: boolean` (the caller may add `args` too). */
+  fireExit: (code: number | null) => void;
+};
+
+export function makeStdinCapturingChild(captured: {
+  wrote: string[];
+  ended: boolean;
+}): StdinCapturingChildHandle {
+  const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
+  const stdin = new Writable({
+    write(chunk, _enc, cb) {
+      captured.wrote.push(chunk.toString("utf8"));
+      cb();
+    },
+    final(cb) {
+      captured.ended = true;
+      cb();
+    },
+  });
+  const emitter = new EventEmitter();
+  const child: any = {
+    stdin,
+    stdout,
+    stderr,
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    emit: emitter.emit.bind(emitter),
+    kill: vi.fn(),
+  };
+  return {
+    child,
+    fireExit: (code) => emitter.emit("exit", code, null),
   };
 }
 

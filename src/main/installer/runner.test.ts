@@ -1,9 +1,7 @@
 // runner.test.ts — execRemote / streamRemote / probeSshG unit tests with a
 // stubbed spawn. No real SSH connection is ever opened.
 
-import { describe, it, expect, vi } from "vitest";
-import { Readable, Writable } from "node:stream";
-import { EventEmitter } from "node:events";
+import { describe, it, expect } from "vitest";
 import {
   execRemote,
   streamRemote,
@@ -11,7 +9,7 @@ import {
   type SpawnFn,
   SSH_BIN,
 } from "./runner.js";
-import { makeFakeChild } from "./_testFixtures.js";
+import { makeFakeChild, makeStdinCapturingChild } from "./_testFixtures.js";
 
 // ---------------------------------------------------------------------------
 // execRemote
@@ -164,36 +162,6 @@ describe("execRemote", () => {
 // via the `stdin` option — never in the ssh argv (invisible to `ps` on the
 // box). When `stdin` is absent the child's stdio[0] must stay `"ignore"`,
 // byte-identical to today.
-
-function makeStdinCapturingChild(captured: {
-  args: string[];
-  wrote: string[];
-  ended: boolean;
-}): { child: any; fireExit: (code: number) => void } {
-  const stdout = new Readable({ read() {} });
-  const stderr = new Readable({ read() {} });
-  const stdin = new Writable({
-    write(chunk, _enc, cb) {
-      captured.wrote.push(chunk.toString("utf8"));
-      cb();
-    },
-    final(cb) {
-      captured.ended = true;
-      cb();
-    },
-  });
-  const emitter = new EventEmitter();
-  const child: any = {
-    stdin,
-    stdout,
-    stderr,
-    on: emitter.on.bind(emitter),
-    once: emitter.once.bind(emitter),
-    emit: emitter.emit.bind(emitter),
-    kill: vi.fn(),
-  };
-  return { child, fireExit: (code) => emitter.emit("exit", code, null) };
-}
 
 describe("execRemote — stdin (BET-979)", () => {
   it("opens stdin as a pipe, writes the string + newline, and ends it", async () => {

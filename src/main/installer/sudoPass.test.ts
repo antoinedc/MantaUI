@@ -6,43 +6,15 @@
 // fail an otherwise-good install). Both commands are constants so they live
 // in exactly one place and are pinned here.
 
-import { describe, it, expect, vi } from "vitest";
-import { Readable, Writable } from "node:stream";
-import { EventEmitter } from "node:events";
+import { describe, it, expect } from "vitest";
 import type { SpawnFn } from "./runner.js";
+import { makeStdinCapturingChild } from "./_testFixtures.js";
 import {
   WRITE_SUDO_PASS_CMD,
   CLEAR_SUDO_PASS_CMD,
   writeSudoPass,
   clearSudoPass,
 } from "./sudoPass.js";
-
-// A fake child that captures every stdin write + the ssh argv, so the tests
-// can assert both "the password went in via stdin" and "it is NOT in argv".
-function makeStdinCapturingChild(captured: { args: string[]; wrote: string[] }) {
-  const stdout = new Readable({ read() {} });
-  const stderr = new Readable({ read() {} });
-  const stdin = new Writable({
-    write(chunk, _enc, cb) {
-      captured.wrote.push(chunk.toString("utf8"));
-      cb();
-    },
-    final(cb) {
-      cb();
-    },
-  });
-  const emitter = new EventEmitter();
-  const child: any = {
-    stdin,
-    stdout,
-    stderr,
-    on: emitter.on.bind(emitter),
-    once: emitter.once.bind(emitter),
-    emit: emitter.emit.bind(emitter),
-    kill: vi.fn(),
-  };
-  return { child, fireExit: (code: number) => emitter.emit("exit", code, null) };
-}
 
 describe("sudo password command constants (BET-979 D7)", () => {
   it("WRITE_SUDO_PASS_CMD is exactly the D1 step 1 command", () => {
@@ -58,7 +30,7 @@ describe("sudo password command constants (BET-979 D7)", () => {
 
 describe("writeSudoPass", () => {
   it("passes the password via stdin and NEVER in the command/argv", async () => {
-    const captured: { args: string[]; wrote: string[] } = { args: [], wrote: [] };
+    const captured: { args: string[]; wrote: string[]; ended: boolean } = { args: [], wrote: [], ended: false };
     const { child, fireExit } = makeStdinCapturingChild(captured);
     const spawn: SpawnFn = (_c, args) => {
       captured.args = args;
@@ -75,7 +47,7 @@ describe("writeSudoPass", () => {
   });
 
   it("returns false when the write exits non-zero", async () => {
-    const captured: { args: string[]; wrote: string[] } = { args: [], wrote: [] };
+    const captured: { args: string[]; wrote: string[]; ended: boolean } = { args: [], wrote: [], ended: false };
     const { child, fireExit } = makeStdinCapturingChild(captured);
     const p = writeSudoPass("dev", "pw", { spawn: () => child });
     setImmediate(() => fireExit(1));
@@ -94,7 +66,7 @@ describe("clearSudoPass", () => {
   });
 
   it("resolves on a normal successful clear", async () => {
-    const captured: { args: string[]; wrote: string[] } = { args: [], wrote: [] };
+    const captured: { args: string[]; wrote: string[]; ended: boolean } = { args: [], wrote: [], ended: false };
     const { child, fireExit } = makeStdinCapturingChild(captured);
     const p = clearSudoPass("dev", { spawn: () => child });
     setImmediate(() => fireExit(0));
