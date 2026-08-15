@@ -18,7 +18,13 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { act } from "react";
-import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
+import {
+  installCanvasStub,
+  installMockApi,
+  resetStore,
+  mount,
+  type Harness,
+} from "./testHarness";
 import { useStore } from "./store";
 
 // App.tsx reads `__MANTA_CHANNEL__` at module top level (a build-time define
@@ -28,25 +34,11 @@ import { useStore } from "./store";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).__MANTA_CHANNEL__ = "prod";
 
-// The full shell imports @xterm's WebGL addon, which probes
-// HTMLCanvasElement.getContext at module-load time. jsdom has no canvas
-// implementation and throws "Not implemented" on every getContext call unless
-// we stub it. Return a minimal 2D-context-shaped object so xterm's WebGL probe
-// sees an unsupported context and falls back instead of throwing.
-if (typeof HTMLCanvasElement !== "undefined") {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (HTMLCanvasElement.prototype as any).getContext = function (this: any, ..._args: unknown[]) {
-    const noop = () => {};
-    return {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      measureText: (text: any) => ({ width: (text as string)?.length ?? 0 }),
-      createLinearGradient: () => ({ addColorStop: noop }),
-      createRadialGradient: () => ({ addColorStop: noop }),
-      canvas: this,
-      getImageData: () => ({ data: new Uint8ClampedArray(0) }),
-    } as unknown as CanvasRenderingContext2D;
-  };
-}
+// The full shell imports @xterm's WebGL addon, which probes the canvas
+// 2D context at module-load time. jsdom has no canvas implementation and
+// throws "Not implemented" on every such probe unless we stub it. MUST run
+// before App.tsx (and therefore xterm) evaluates.
+installCanvasStub();
 
 const { App } = await import("./App");
 
@@ -81,26 +73,7 @@ describe("App — onboarding flips on after the shell's first render (BET-959)",
     // manual/disclosure form (same guard PairStep.test.tsx uses).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (window as any).__mantaPreload = null;
-    installMockApi({
-      // The shell registers ~13 `window.api.on*` subscriptions. testHarness's
-      // default proxy resolves an unprovided method to a Promise, which the
-      // effects then `return ...` as their cleanup → React throws "destroy is
-      // not a function" on mount. Supply every subscription with a real
-      // cleanup-returning impl so the shell actually mounts.
-      onOpencodeEvent: () => () => {},
-      onSyncDelta: () => () => {},
-      onStatusEvent: () => () => {},
-      onDelegateUpdated: () => () => {},
-      onUsageUpdated: () => () => {},
-      onAgentFileReady: () => () => {},
-      onAppControl: () => () => {},
-      onAutoUpdateDownloaded: () => () => {},
-      onAutoUpdateError: () => () => {},
-      onDesktopNotify: () => () => {},
-      onProgressUpdated: () => () => {},
-      onServerUpdateAvailable: () => () => {},
-      onServerUpdateProgress: () => () => {},
-    });
+    installMockApi();
     resetStore();
     pairShell();
   });
