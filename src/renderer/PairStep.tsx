@@ -280,7 +280,7 @@ function ManualPairPanel({
           >
             Host
             {fromClipboard && (
-              <span className="inline-flex items-center gap-1.5 text-meta rounded-full px-2 py-0.5 bg-accent-bg text-accent border border-accent">
+              <span className="inline-flex items-center gap-2 text-meta rounded-full px-2 py-1 bg-accent-bg text-accent border border-accent">
                 from clipboard
               </span>
             )}
