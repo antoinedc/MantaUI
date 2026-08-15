@@ -87,6 +87,7 @@ import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./pee
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
+import { ensureMantaPlanAgent } from "./providers.mjs";
 import {
   createWebhookEngine,
   createHook,
@@ -815,6 +816,13 @@ const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
 // Cleanup sweep for expired pages (runs every 5 min).
 // eslint-disable-next-line no-unused-vars
 const { stop: stopServePageCleanup } = startCleanupPoller();
+
+// Best-effort install of the MantaUI-owned `manta-plan` primary agent (BET-984).
+// Reads ~/.config/opencode/opencode.jsonc; writes the manta-plan agent block
+// (mode "primary", plan_enter/plan_exit allow) via the existing writer and
+// restarts opencode only when the config changed. Idempotent + fire-and-forget
+// so a failure here never blocks or fails server startup.
+void ensureMantaPlanAgent().catch((e) => console.error("[manta-plan] ensure failed:", e));
 
 // Sweep expired artifact-mailbox files (TTL past) every 5 min — non-destructive
 // otherwise: downloads do not delete, the sweep is what reclaims disk.

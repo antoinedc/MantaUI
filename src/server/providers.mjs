@@ -14,8 +14,10 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
+import { restartOpencode } from "./opencodeAdmin.mjs";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (ported from src/main/providers.ts)
@@ -208,16 +210,22 @@ export function findStoredApiKey(cfg, baseURL) {
 // Subagent block manipulation (pure)
 // ---------------------------------------------------------------------------
 
-// Insert or replace a single named subagent. Only the `agent` key is touched;
-// every other key in `cfg` is preserved by spread. `mode` is always forced to
-// "subagent" (the only config-writable agent type manta manages).
+// Insert or replace a single named agent. Only the `agent` key is touched;
+// every other key in `cfg` is preserved by spread. `mode` defaults to
+// "subagent" (the only config-writable agent type manta manages for the
+// SubagentsCard). `permission` and `prompt` are carried through only when
+// supplied — the BET-984 `manta-plan` primary agent needs both (a custom
+// agent merges its own `permission` block AFTER opencode's deny-by-default
+// `plan_enter`/`plan_exit`, so last-match wins and plan hand-off works).
 export function upsertAgentBlock(cfg, input) {
   const agents = getAgentMap(cfg);
   agents[input.name] = {
     model: input.model,
     description: input.description,
-    mode: "subagent",
+    mode: input.mode ?? "subagent",
   };
+  if (input.permission !== undefined) agents[input.name].permission = input.permission;
+  if (input.prompt !== undefined) agents[input.name].prompt = input.prompt;
   return { ...cfg, agent: agents };
 }
 
@@ -459,4 +467,100 @@ export async function syncSubagents(
   for (const name of remove) byName.delete(name);
   for (const a of upsert) byName.set(a.name, a);
   return [...byName.values()];
+}
+
+// ---------------------------------------------------------------------------
+// manta-plan — the MantaUI-owned primary planning agent (BET-984)
+// ---------------------------------------------------------------------------
+
+export const MANTA_PLAN_AGENT_NAME = "manta-plan";
+
+// The planning prompt ships in the repo (committed under docs/), so it exists
+// at the same relative location in a dev checkout and a release tarball (both
+// of which re-materialize the full source tree on the box). The opencode
+// config references it by absolute path; resolved from this module's own URL
+// (src/server/providers.mjs → ../../ → repo root) like opencodeAdmin does for
+// scripts/self-update.sh.
+const MANTA_PLAN_PROMPT_REL = "../../docs/opencode/skills/manta-plan/prompt.md";
+
+export function mantaPlanPromptPath(fromMetaUrl = import.meta.url) {
+  return fileURLToPath(new URL(MANTA_PLAN_PROMPT_REL, fromMetaUrl));
+}
+
+export function mantaPlanAgentBlock(promptPath) {
+  return {
+    name: MANTA_PLAN_AGENT_NAME,
+    // mode primary (NOT subagent) — BET-983 only offers `mode !== "subagent"`
+    // agents in the composer's Plan target selection.
+    mode: "primary",
+    description: "Research a request and produce a structured, buildable plan.",
+    // opencode merges each agent's permission block AFTER its shared defaults
+    // (which deny plan_enter/plan_exit for every agent); these allows are what
+    // make the plan-exit → build hand-off possible.
+    permission: {
+      plan_exit: "allow",
+      plan_enter: "allow",
+      edit: { "*": "ask", ".opencode/plans/**": "allow" },
+      bash: "ask",
+    },
+    // model deliberately unset → inherit the session default.
+    prompt: `{file:${promptPath}}`,
+  };
+}
+
+/**
+ * Best-effort installer/ensurer for the box-side `manta-plan` primary agent
+ * block in opencode.jsonc. Idempotent:
+ *  - If a `manta-plan` block already exists, does nothing (no write, no
+ *    restart) — a no-op diff against the existing config.
+ *  - Otherwise upserts the block via the EXISTING setSubagents writer and
+ *    restarts opencode ONLY because the config changed.
+ * Never throws — any I/O or restart failure logs and returns
+ * `{ ok: false, ... }` so the startup wire-in can fire-and-forget.
+ *
+ * `readConfig`/`applySubagents`/`restart`/`promptPath` are injectable for
+ * tests; defaults hit the real box (readRemoteConfig, setSubagents,
+ * restartOpencode) exactly like production.
+ *
+ * @param {object} [deps]
+ * @param {() => Promise<object>} [deps.readConfig]
+ * @param {(ops) => Promise<{ok: boolean, error?: string}>} [deps.applySubagents]
+ * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @param {string} [deps.promptPath]
+ * @param {{warn?: Function, error?: Function}} [deps.log]
+ * @returns {Promise<{ok: boolean, changed: boolean, reason?: string, error?: string}>}
+ */
+export async function ensureMantaPlanAgent(deps = {}) {
+  const {
+    readConfig = readRemoteConfig,
+    applySubagents = setSubagents,
+    restart = restartOpencode,
+    promptPath = mantaPlanPromptPath(),
+    log = console,
+  } = deps;
+  try {
+    let cfg;
+    try {
+      cfg = await readConfig();
+    } catch (e) {
+      log.warn?.("[providers] manta-plan: config unreadable, skipping install:", e);
+      return { ok: false, changed: false, reason: "unreadable" };
+    }
+    if (cfg?.agent?.[MANTA_PLAN_AGENT_NAME]) {
+      return { ok: true, changed: false };
+    }
+    const result = await applySubagents({ upsert: [mantaPlanAgentBlock(promptPath)] });
+    if (!result.ok) {
+      log.warn?.("[providers] manta-plan: write failed:", result.error);
+      return { ok: false, changed: false, error: result.error };
+    }
+    const restartResult = await restart();
+    if (!restartResult.ok) {
+      log.warn?.("[providers] manta-plan: restart after install failed:", restartResult.error);
+    }
+    return { ok: true, changed: true };
+  } catch (e) {
+    log.error?.("[providers] ensureMantaPlanAgent failed:", e);
+    return { ok: false, changed: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }

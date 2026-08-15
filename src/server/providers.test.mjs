@@ -21,6 +21,8 @@ import {
   getSubagents,
   setSubagents,
   syncSubagents,
+  mantaPlanAgentBlock,
+  ensureMantaPlanAgent,
 } from "./providers.mjs";
 
 // ---------------------------------------------------------------------------
@@ -939,5 +941,118 @@ describe("syncSubagents", () => {
     const second = await syncSubagents({ models: [haiku, opus] }, async () => cfg, applySubagents2);
     assert.equal(secondCalled, false);
     assert.equal(second.length, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upsertAgentBlock — manta-plan (BET-984): a custom primary agent must keep
+// mode "primary" AND its plan-exit/plan-enter allows (opencode merges an
+// agent's own permission block AFTER the shared deny-by-default plan flags,
+// so last match wins), with a prompt referencing the {file:...} prompt file.
+// ---------------------------------------------------------------------------
+
+describe("upsertAgentBlock — manta-plan", () => {
+  it("keeps mode primary, plan_exit/plan_enter allow, and a {file:...} prompt", () => {
+    const cfg = {};
+    const result = upsertAgentBlock(cfg, mantaPlanAgentBlock("/box/docs/opencode/skills/manta-plan/prompt.md"));
+    const block = result.agent["manta-plan"];
+    assert.equal(block.mode, "primary");
+    assert.equal(block.permission.plan_exit, "allow");
+    assert.equal(block.permission.plan_enter, "allow");
+    assert.equal(block.permission.bash, "ask");
+    assert.equal(block.permission.edit[".opencode/plans/**"], "allow");
+    assert.equal(block.permission.edit["*"], "ask");
+    assert.match(block.prompt, /^\{file:.*prompt\.md\}$/);
+  });
+
+  it("does not clobber unrelated keys in config", () => {
+    const cfg = { provider: { openai: {} }, other: "data" };
+    const result = upsertAgentBlock(cfg, mantaPlanAgentBlock("/box/prompt.md"));
+    assert.deepEqual(result.provider, { openai: {} });
+    assert.equal(result.other, "data");
+    assert.equal(result.agent["manta-plan"].mode, "primary");
+  });
+
+  it("defaults mode to subagent for ordinary blocks (prompt/permission omitted)", () => {
+    const cfg = {};
+    const result = upsertAgentBlock(cfg, {
+      name: "fast",
+      model: "anthropic/claude-haiku-4",
+      description: "Fast",
+    });
+    assert.equal(result.agent.fast.mode, "subagent");
+    assert.equal(result.agent.fast.permission, undefined);
+    assert.equal(result.agent.fast.prompt, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ensureMantaPlanAgent (BET-984) — readConfig/applySubagents/restart/promptPath
+// are all injectable, so these never touch the real opencode.jsonc or spawn a
+// systemctl restart.
+// ---------------------------------------------------------------------------
+
+describe("ensureMantaPlanAgent", () => {
+  it("is a no-op (no write, no restart) when a manta-plan block already exists", async () => {
+    let applied = false;
+    let restarted = false;
+    const existingCfg = {
+      agent: { "manta-plan": { mode: "primary", description: "X", permission: {}, prompt: "{file:/x.md}" } },
+    };
+    const result = await ensureMantaPlanAgent({
+      readConfig: async () => existingCfg,
+      applySubagents: async () => { applied = true; return { ok: true }; },
+      restart: async () => { restarted = true; return { ok: true }; },
+      promptPath: "/box/prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, false);
+    assert.equal(applied, false);
+    assert.equal(restarted, false);
+  });
+
+  it("upserts the block with exact fields and restarts when absent", async () => {
+    const applied = [];
+    const restarts = [];
+    const result = await ensureMantaPlanAgent({
+      readConfig: async () => ({}),
+      applySubagents: async (ops) => { applied.push(ops); return { ok: true }; },
+      restart: async () => { restarts.push(1); return { ok: true }; },
+      promptPath: "/box/docs/opencode/skills/manta-plan/prompt.md",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.changed, true);
+    assert.equal(applied.length, 1);
+    assert.equal(restarts.length, 1);
+    const upsert = applied[0].upsert[0];
+    assert.equal(upsert.name, "manta-plan");
+    assert.equal(upsert.mode, "primary");
+    assert.equal(upsert.permission.plan_exit, "allow");
+    assert.equal(upsert.permission.plan_enter, "allow");
+    assert.equal(upsert.prompt, "{file:/box/docs/opencode/skills/manta-plan/prompt.md}");
+    assert.equal(upsert.model, undefined, "model must stay unset (inherit)");
+  });
+
+  it("does not restart when the write fails", async () => {
+    let restarted = false;
+    const result = await ensureMantaPlanAgent({
+      readConfig: async () => ({}),
+      applySubagents: async () => ({ ok: false, error: "disk full" }),
+      restart: async () => { restarted = true; return { ok: true }; },
+      promptPath: "/box/prompt.md",
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.changed, false);
+    assert.equal(restarted, false);
+  });
+
+  it("does not throw on an unreadable config (non-fatal)", async () => {
+    const result = await ensureMantaPlanAgent({
+      readConfig: async () => { throw new Error("boom"); },
+      applySubagents: async () => { throw new Error("must not be called"); },
+      restart: async () => { throw new Error("must not be called"); },
+      promptPath: "/box/prompt.md",
+    });
+    assert.equal(result.ok, false);
   });
 });
