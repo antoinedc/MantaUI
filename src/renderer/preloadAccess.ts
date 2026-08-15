@@ -155,12 +155,14 @@ export interface MantaPreload {
   // host key to ~/.ssh/known_hosts and resumes; trust=false aborts.
   installerTrustHost(input: { handleId: string; trust: boolean }): Promise<void>;
 
-  // BET-360: answer a paused `passphrase` event. passphrase=non-empty →
-  // main creates an SSH_ASKPASS session and re-runs preflight; passphrase=
-  // null → the user cancelled → the install aborts.
+  // BET-360/979: answer a paused `secret` event (an SSH key passphrase OR
+  // the box's sudo password — the kind tells main which). secret=non-empty
+  // → main acts on it (creates an SSH_ASKPASS session + re-runs preflight
+  // for a passphrase; stages ~/.manta-sudo-pass for a sudo password);
+  // secret=null → the user cancelled → the install aborts.
   installerAskpassRespond(input: {
     handleId: string;
-    passphrase: string | null;
+    secret: string | null;
   }): Promise<void>;
 
   // Mint a fresh pairing code over the existing SSH connection + claim it

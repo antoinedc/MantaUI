@@ -1,7 +1,9 @@
 // runner.test.ts — execRemote / streamRemote / probeSshG unit tests with a
 // stubbed spawn. No real SSH connection is ever opened.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { Readable, Writable } from "node:stream";
+import { EventEmitter } from "node:events";
 import {
   execRemote,
   streamRemote,
@@ -152,6 +154,82 @@ describe("execRemote", () => {
     const r = await p;
     expect(r.code).toBe(-1);
     expect(r.stderr).toMatch(/\[spawn error: ENOENT ssh\]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// execRemote — stdin option (BET-979)
+// ---------------------------------------------------------------------------
+// The sudo password (any secret) is delivered over a SEPARATE, short ssh call
+// via the `stdin` option — never in the ssh argv (invisible to `ps` on the
+// box). When `stdin` is absent the child's stdio[0] must stay `"ignore"`,
+// byte-identical to today.
+
+function makeStdinCapturingChild(captured: {
+  args: string[];
+  wrote: string[];
+  ended: boolean;
+}): { child: any; fireExit: (code: number) => void } {
+  const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
+  const stdin = new Writable({
+    write(chunk, _enc, cb) {
+      captured.wrote.push(chunk.toString("utf8"));
+      cb();
+    },
+    final(cb) {
+      captured.ended = true;
+      cb();
+    },
+  });
+  const emitter = new EventEmitter();
+  const child: any = {
+    stdin,
+    stdout,
+    stderr,
+    on: emitter.on.bind(emitter),
+    once: emitter.once.bind(emitter),
+    emit: emitter.emit.bind(emitter),
+    kill: vi.fn(),
+  };
+  return { child, fireExit: (code) => emitter.emit("exit", code, null) };
+}
+
+describe("execRemote — stdin (BET-979)", () => {
+  it("opens stdin as a pipe, writes the string + newline, and ends it", async () => {
+    const captured: { args: string[]; wrote: string[]; ended: boolean } = {
+      args: [],
+      wrote: [],
+      ended: false,
+    };
+    const { child, fireExit } = makeStdinCapturingChild(captured);
+    const p = execRemote("dev", "bash -lc 'cat > x'", {
+      spawn: (_c, args) => {
+        captured.args = args;
+        return child;
+      },
+      stdin: "hunter2",
+    });
+    setImmediate(() => fireExit(0));
+    const r = await p;
+    expect(r.code).toBe(0);
+    expect(captured.wrote).toEqual(["hunter2\n"]);
+    expect(captured.ended).toBe(true);
+    // The secret must never appear in the ssh argv (ps visibility).
+    expect(captured.args.join(" ")).not.toContain("hunter2");
+  });
+
+  it("keeps stdio[0] as ignore when stdin is absent (byte-identical)", async () => {
+    let spawnStdio: unknown = null;
+    const fake = makeFakeChild();
+    const spawn: SpawnFn = (_c, _a, options) => {
+      spawnStdio = options?.stdio;
+      return fake.child as any;
+    };
+    const p = execRemote("dev", "true", { spawn });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    expect(spawnStdio).toEqual(["ignore", "pipe", "pipe"]);
   });
 });
 

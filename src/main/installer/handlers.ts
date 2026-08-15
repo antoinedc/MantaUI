@@ -26,10 +26,11 @@ import {
 import { buildDiagnostics, type DiagnosticsInput } from "./diagnostics.js";
 import { trustHost } from "./knownHosts.js";
 import { createAskpassSession, type AskpassSession } from "./askpass.js";
+import { writeSudoPass, clearSudoPass } from "./sudoPass.js";
 import type { InstallStageId } from "./stageMapper.js";
 import type { PreflightResult } from "./preflight.js";
 import type { HostFingerprint } from "./fingerprint.js";
-import { isEmptySshTarget, type SshTarget } from "../../shared/sshTarget.js";
+import { isEmptySshTarget, sshTargetLabel, type SshTarget } from "../../shared/sshTarget.js";
 
 // ---------------------------------------------------------------------------
 // Per-install state (single-active; the renderer can re-mount and recover)
@@ -68,17 +69,24 @@ let trustDeferred: {
 // that a forgotten tab doesn't hold the single-active slot forever.
 const TRUST_WAIT_TIMEOUT_MS = 5 * 60_000;
 
-// BET-360: when preflight (BatchMode=yes) returns auth-failed because the
-// key is passphrase-protected and not in ssh-agent, the install PAUSES here
-// waiting for the renderer's passphrase input. The deferred is resolved by
-// the installerAskpassRespond handler (passphrase string) or rejected by
-// installerCancel / a timeout (both → null = cancelled). `waitingForPassphrase`
+// BET-360/BET-979: when the install needs a secret the user must type (an SSH
+// key passphrase, OR — BET-979 — the box's sudo password), the install PAUSES
+// here waiting for the renderer's input. The deferred is resolved by the
+// installerAskpassRespond handler (secret string) or rejected by
+// installerCancel / a timeout (both → null = cancelled). `waitingForSecret`
 // is mirrored into installerState so a renderer remount re-shows the prompt.
-let waitingForPassphrase: { handleId: string; prompt: string } | null = null;
-let passphraseDeferred: {
-  resolve: (passphrase: string | null) => void;
+// The kind distinguishes the two secrets, so ONE deferred + ONE renderer card
+// serve both (they differ only in copy; see D5).
+type WaitingSecret = {
+  handleId: string;
+  secretKind: "passphrase" | "sudo-password";
+  prompt: string;
+};
+let waitingForSecret: WaitingSecret | null = null;
+let secretDeferred: {
+  resolve: (secret: string | null) => void;
 } | null = null;
-const PASSPHRASE_WAIT_TIMEOUT_MS = 5 * 60_000;
+const SECRET_WAIT_TIMEOUT_MS = 5 * 60_000;
 
 // The active askpass session (temp dir + helper script + passphrase file).
 // Created when the user enters a passphrase; persists through the preflight
@@ -92,6 +100,16 @@ function cleanupAskpass(): void {
     activeAskpass.cleanup();
     activeAskpass = null;
   }
+}
+
+// cleanupSudoPass — BET-979 D1 step 2: delete ~/.manta-sudo-pass from the
+// box. Runs after the install regardless of outcome (success, failure,
+// cancel, decline, renderer disconnect) so the staged password never
+// outlives the install. Best-effort: clearSudoPass never throws. Uses the
+// most recent install target (the host writeSudoPass staged against).
+function cleanupSudoPass(): void {
+  if (!lastInstallTarget) return;
+  void clearSudoPass(lastInstallTarget);
 }
 
 function pushTail(line: string): void {
@@ -131,30 +149,33 @@ async function awaitTrustDecision(
   });
 }
 
-// awaitPassphrase — pause the install while the renderer shows a passphrase
-// input. Resolves with the passphrase string, or null if the user cancelled
-// / the wait timed out. A null resolution is rejection-free so the caller
-// has a single path: null → abort with the original auth-failed guidance.
-async function awaitPassphrase(
+// awaitSecret — pause the install while the renderer shows a secret input
+// (an SSH key passphrase or — BET-979 — the box's sudo password). Resolves
+// with the secret string, or null if the user cancelled / the wait timed out.
+// A null resolution is rejection-free so the caller has a single path:
+// null → abort with the original guidance. `kind` is carried on the emitted
+// event + the status payload so ONE renderer card switches copy on it (D5).
+async function awaitSecret(
   handleId: string,
+  secretKind: "passphrase" | "sudo-password",
   prompt: string,
   send: (payload: unknown) => void,
 ): Promise<string | null> {
-  waitingForPassphrase = { handleId, prompt };
-  send({ kind: "passphrase", handleId, prompt });
+  waitingForSecret = { handleId, secretKind, prompt };
+  send({ kind: "secret", handleId, secretKind, prompt });
   return new Promise<string | null>((resolve) => {
     let settled = false;
-    const finish = (passphrase: string | null) => {
+    const finish = (secret: string | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      waitingForPassphrase = null;
-      passphraseDeferred = null;
-      resolve(passphrase);
+      waitingForSecret = null;
+      secretDeferred = null;
+      resolve(secret);
     };
-    const timer = setTimeout(() => finish(null), PASSPHRASE_WAIT_TIMEOUT_MS);
-    passphraseDeferred = {
-      resolve: (p) => finish(p),
+    const timer = setTimeout(() => finish(null), SECRET_WAIT_TIMEOUT_MS);
+    secretDeferred = {
+      resolve: (s) => finish(s),
     };
   });
 }
@@ -191,17 +212,19 @@ export function registerInstallerHandlers(
     waitingForTrust: waitingForTrust !== null,
     trustHandleId: waitingForTrust?.handleId ?? null,
     pendingFingerprint: waitingForTrust?.fingerprint ?? null,
-    // BET-360: mirror the passphrase-pause so a renderer remount re-shows
-    // the passphrase prompt.
-    waitingForPassphrase: waitingForPassphrase !== null,
-    passphraseHandleId: waitingForPassphrase?.handleId ?? null,
+    // BET-360/979: mirror the secret-pause (key passphrase OR sudo password)
+    // so a renderer remount re-shows the right prompt and routes its answer
+    // to the right handle.
+    waitingForSecret: waitingForSecret !== null,
+    secretHandleId: waitingForSecret?.handleId ?? null,
+    secretKind: waitingForSecret?.secretKind ?? null,
   }));
 
   ipcMain.handle(IPC.installerStart, async (_e, input: { alias: SshTarget }) => {
-    if (activeHandle !== null || waitingForTrust !== null || waitingForPassphrase !== null) {
+    if (activeHandle !== null || waitingForTrust !== null || waitingForSecret !== null) {
       // Single-active constraint — refuse to start a second install. The
-      // trust-pause and passphrase-pause both count as "in progress": a
-      // paused install holds the slot until the user answers (BET-361/360).
+      // trust-pause and secret-pause both count as "in progress": a
+      // paused install holds the slot until the user answers (BET-361/360/979).
       throw new Error("an install is already in progress");
     }
     if (input?.alias === undefined || isEmptySshTarget(input.alias)) {
@@ -209,7 +232,9 @@ export function registerInstallerHandlers(
     }
     // Clear any stale askpass session from a previous (failed/cancelled)
     // install — the passphrase temp file must not survive across installs.
+    // Also clear any staged sudo password (D1 step 2) from a prior run.
     cleanupAskpass();
+    cleanupSudoPass();
     // Alias branch stays a trimmed string (unchanged); a custom target
     // (BET-384) is already normalized by resolveInstallTarget on the
     // renderer side, so there's nothing further to trim on an object.
@@ -279,8 +304,9 @@ export function registerInstallerHandlers(
     // nothing was written to the box. We do NOT loop: a second auth-failed
     // after askpass (wrong passphrase) is a normal preflight-failed.
     if (!preflight.ok && preflight.probes.reachability === "auth-failed") {
-      const passphrase = await awaitPassphrase(
+      const passphrase = await awaitSecret(
         handleId,
+        "passphrase",
         "Enter the passphrase for your SSH key:",
         send,
       );
@@ -312,6 +338,39 @@ export function registerInstallerHandlers(
       return { handleId };
     }
 
+    // BET-979 D6: the box has password-sudo (sudoAccess === "password").
+    // Ask for the password in a modal BEFORE the install starts (nothing has
+    // been written to the box yet). Declining — or a cancelled wait (null) —
+    // reports a preflight-style failure and STOPS: this is the same
+    // all-or-nothing rule BET-980 establishes, enforced one layer up. There
+    // is no "Skip" outcome; the run ends before runInstall with the box
+    // untouched. On accept, the password is staged via a SEPARATE short ssh
+    // call (never through the install stream), then the install proceeds.
+    if (preflight.probes.sudoAccess === "password") {
+      const password = await awaitSecret(
+        handleId,
+        "sudo-password",
+        `Administrator password needed on ${sshLabel(alias)}`,
+        send,
+      );
+      if (password === null) {
+        cleanupSudoPass();
+        send({
+          kind: "preflight-failed",
+          handleId,
+          failures: [
+            {
+              cause: "This box needs a password to run commands as root, and none was given.",
+              action:
+                "Connect as root instead, or install Tailscale on the box, then run the installer again.",
+            },
+          ],
+        });
+        return { handleId };
+      }
+      await writeSudoPass(alias, password); // D1 step 1 — stage the password
+    }
+
     const handle = runInstall(
       alias,
       {
@@ -332,6 +391,10 @@ export function registerInstallerHandlers(
     // are reported as { kind: "error", message } events.
     handle.done
       .then((r) => {
+        // BET-979 D1 step 2: the staged sudo password is consumed by the
+        // install's privileged section — delete it now the install is over
+        // (success OR failure). Best-effort, idempotent.
+        cleanupSudoPass();
         send({
           kind: "done",
           handleId,
@@ -346,6 +409,7 @@ export function registerInstallerHandlers(
         if (r.code !== 0) cleanupAskpass();
       })
       .catch((err: unknown) => {
+        cleanupSudoPass();
         send({
           kind: "error",
           handleId,
@@ -367,11 +431,11 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(IPC.installerCancel, (_e, input: { handleId: string }) => {
     if (typeof input?.handleId !== "string" || input.handleId === "") return;
-    // BET-360: cancel during the passphrase-pause aborts the wait (treated
-    // as "cancelled" → null passphrase → the install aborts with the
-    // original auth-failed guidance). No child to SIGTERM yet.
-    if (waitingForPassphrase?.handleId === input.handleId && passphraseDeferred) {
-      passphraseDeferred.resolve(null);
+    // BET-360/979: cancel during the secret-pause aborts the wait (treated
+    // as "cancelled" → null secret → the install aborts with the original
+    // guidance). No child to SIGTERM yet.
+    if (waitingForSecret?.handleId === input.handleId && secretDeferred) {
+      secretDeferred.resolve(null);
       return;
     }
     // BET-361: cancel during the trust-pause aborts the wait (treated as
@@ -384,6 +448,7 @@ export function registerInstallerHandlers(
     if (activeHandle?.handleId === input.handleId) {
       activeHandle.cancel();
       cleanupAskpass();
+      cleanupSudoPass();
     }
     // If handleId doesn't match the active handle (already done / cancelled
     // / a stale renderer): no-op. cancel is idempotent by design.
@@ -400,15 +465,16 @@ export function registerInstallerHandlers(
 
   ipcMain.handle(
     IPC.installerAskpassRespond,
-    (_e, input: { handleId: string; passphrase: string | null }) => {
+    (_e, input: { handleId: string; secret: string | null }) => {
       if (typeof input?.handleId !== "string" || input.handleId === "") return;
-      // No paused passphrase prompt, or a stale renderer: no-op.
-      if (!waitingForPassphrase || !passphraseDeferred) return;
-      if (waitingForPassphrase.handleId !== input.handleId) return;
+      // No paused secret prompt, or a stale renderer: no-op.
+      if (!waitingForSecret || !secretDeferred) return;
+      if (waitingForSecret.handleId !== input.handleId) return;
       // null or empty string → user cancelled. A non-empty string → the
-      // passphrase to decrypt the SSH key.
-      const pw = input.passphrase;
-      passphraseDeferred.resolve(pw && pw.length > 0 ? pw : null);
+      // secret (the SSH key passphrase, or the box's sudo password) to hand
+      // to the paused awaitSecret.
+      const secret = input.secret;
+      secretDeferred.resolve(secret && secret.length > 0 ? secret : null);
     },
   );
 
@@ -431,9 +497,14 @@ export function registerInstallerHandlers(
     });
     // After a successful claim the SSH connection is no longer needed —
     // the app switches to HTTP. Clean up the askpass session (temp dir +
-    // passphrase file). On failure, keep it so the user can retry the
-    // claim without re-entering the passphrase.
-    if (result.ok) cleanupAskpass();
+    // passphrase file) and any staged sudo password. On failure, keep the
+    // askpass session so the user can retry the claim without re-entering
+    // the passphrase (cleanupSudoPass() is also run from handle.done; the
+    // extra call here is idempotent).
+    if (result.ok) {
+      cleanupAskpass();
+      cleanupSudoPass();
+    }
     return result;
   });
 

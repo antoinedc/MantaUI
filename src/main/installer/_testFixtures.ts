@@ -140,7 +140,7 @@ export function happyLinuxProbes(
   const r = emptyProbes();
   r[PROBE_KEYS.REACHABILITY] = { code: 0, stdout: "ok" };
   r[PROBE_KEYS.OS] = { code: 0, stdout: "Linux\nx86_64\n6.5.0\n" };
-  r[PROBE_KEYS.SUDO] = { code: 0, stdout: "0\n" };
+  r[PROBE_KEYS.SUDO] = { code: 0, stdout: "nopasswd\n" };
   r[PROBE_KEYS.TAILSCALE] = { code: 1, stdout: "" };
   r[PROBE_KEYS.CLOCK] = {
     code: 0,

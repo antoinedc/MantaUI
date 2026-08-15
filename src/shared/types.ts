@@ -874,15 +874,17 @@ export type InstallerEvent =
       handleId: string;
       fingerprint: HostFingerprint;
     }
-  // Preflight (BatchMode=yes) returned auth-failed: the key is passphrase-
-  // protected and not in ssh-agent. The install PAUSES here — the renderer
-  // shows a passphrase input; the user's answer comes back via
-  // installerAskpassRespond. On submit, main re-runs preflight with
-  // SSH_ASKPASS enabled (BET-360). A cancel / timeout aborts like a
-  // declined trust prompt.
+  // BET-360/BET-979: a paused install is waiting for a secret the user must
+  // type in — an SSH key passphrase, OR the box's sudo password. The kind is
+  // carried on the event so ONE renderer card switches its copy. The user's
+  // answer comes back via installerAskpassRespond. On submit, main either
+  // creates an SSH_ASKPASS session (passphrase) and re-runs preflight, or
+  // stages the sudo password (~/.manta-sudo-pass) and continues. A cancel /
+  // timeout aborts like a declined trust prompt.
   | {
-      kind: "passphrase";
+      kind: "secret";
       handleId: string;
+      secretKind: "passphrase" | "sudo-password";
       prompt: string;
     }
   | {
@@ -911,12 +913,15 @@ export type InstallerState = {
   // The fingerprint being awaited, or null. Mirrors the `fingerprint` event
   // payload so a remount recovers the prompt without a re-send.
   pendingFingerprint: HostFingerprint | null;
-  // BET-360: True while the install is PAUSED waiting for the user to enter
-  // an SSH key passphrase. The renderer re-shows the passphrase prompt on
-  // remount when this is set (mirrors waitingForTrust).
-  waitingForPassphrase: boolean;
-  // The handle id the paused passphrase prompt belongs to, or null.
-  passphraseHandleId: string | null;
+  // BET-360/BET-979: True while the install is PAUSED waiting for the user to
+  // enter a secret — an SSH key passphrase or the box's sudo password. The
+  // renderer re-shows the matching prompt on remount when this is set
+  // (mirrors waitingForTrust). `secretKind` tells it which card to draw.
+  waitingForSecret: boolean;
+  // The handle id the paused secret prompt belongs to, or null.
+  secretHandleId: string | null;
+  // Which secret is being awaited: "passphrase" | "sudo-password".
+  secretKind: "passphrase" | "sudo-password" | null;
   // BET-705 b: the currently-active install's handle id, or null. The renderer
   // restores `activeHandle` from this on remount so Cancel still works after a
   // page refresh (previously activeHandle was never recovered).
@@ -1493,7 +1498,7 @@ export const IPC = {
   //   { kind: "stage", handleId, stage }
   //   { kind: "preflight-failed", handleId, failures }
   //   { kind: "fingerprint", handleId, fingerprint }   (BET-361 — pause for trust)
-  //   { kind: "passphrase", handleId, prompt }         (BET-360 — pause for key passphrase)
+  //   { kind: "secret", handleId, secretKind, prompt } (BET-360/979 — pause for key passphrase or sudo password)
   //   { kind: "done", handleId, code, signal }
   //   { kind: "error", handleId, message }
   installerEvent: "installer:event",

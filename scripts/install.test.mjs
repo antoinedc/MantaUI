@@ -76,7 +76,7 @@ const HEX32 = "0123456789abcdef0123456789abcdef";
  * the error and returns the captured output (with BOOTSTRAP_EXIT=NNN
  * appended) so the test can assert on the message + exit code together.
  */
-function runBootstrap({ preBody = "", func = ":" } = {}) {
+function runBootstrap({ preBody = "", func = ":", env = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "manta-bootstrap-"));
   const script = join(dir, "test.sh");
   writeFileSync(
@@ -93,7 +93,7 @@ exit $rc
 `,
     { mode: 0o755 },
   );
-  return runAndCapture(script);
+  return runAndCapture(script, env);
 }
 
 // Source install.sh in REAL mode (so `main` is defined and the argument
@@ -195,12 +195,12 @@ exit $rc
 // Extracted as a helper so the two callers don't drift — the
 // install.test.mjs file's strict duplication-gate caught a 23-line
 // clone here (BET-205 cycle 2 review).
-function runAndCapture(scriptPath) {
+function runAndCapture(scriptPath, env = {}) {
   const dir = dirname(scriptPath);
   try {
     try {
       return execSync(`bash ${scriptPath}`, {
-        env: { ...process.env, PATH: process.env.PATH },
+        env: { ...process.env, PATH: process.env.PATH, ...env },
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -211,6 +211,29 @@ function runAndCapture(scriptPath) {
       // the message AND the BOOTSTRAP_EXIT / MAIN_EXIT=N marker.
       const out = (e.stdout ?? "") + (e.stderr ?? "");
       // execSync's stdout/stderr are string when encoding is set.
+      return out;
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// runAndCaptureTty — like runAndCapture but runs the script under a
+// pseudo-tty (`script`), so `[ -t 0 ]` / `[ -t 1 ]` are true inside it.
+// Used by the BET-979 tty-sudo-strategy test — the interactive-tty branch
+// of resolve_sudo_strategy is only reachable when the process owns a
+// terminal, which the pipe-based runAndCapture never provides.
+function runAndCaptureTty(scriptPath) {
+  const dir = dirname(scriptPath);
+  try {
+    try {
+      return execSync(`script -qec "bash ${scriptPath}" /dev/null`, {
+        env: { ...process.env, PATH: process.env.PATH },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      const out = (e.stdout ?? "") + (e.stderr ?? "");
       return out;
     }
   } finally {
@@ -3234,6 +3257,177 @@ echo "SHOULD_NOT_REACH=yes"
   assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
   assert.match(out, /Nothing has been installed\./);
   assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
+});
+
+// --------------------------------------------------------------- BET-979 ----
+// The sudo strategy machine. `SUDO_STRATEGY` is resolved ONCE (strategy 3.5,
+// before any mutation) by resolve_sudo_strategy; every privileged call in the
+// install dispatches through `sudo_priv`. Row 5 (`none`) on the public path
+// is the BET-980 fatal — pinned here so this issue cannot regress it into a
+// degraded install.
+
+test("BET-979: resolve_sudo_strategy row 1 — uid 0 → root", () => {
+  const out = runBootstrap({
+    preBody: `
+id() { echo "0"; }
+resolve_sudo_strategy
+echo "STRATEGY=$SUDO_STRATEGY"
+`,
+  });
+  assert.match(out, /STRATEGY=root/);
+});
+
+test("BET-979: resolve_sudo_strategy row 2 — staged ~/.manta-sudo-pass → askpass", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-askpass-"));
+  writeFileSync(join(dir, ".manta-sudo-pass"), "hunter2", { mode: 0o600 });
+  try {
+    const out = runBootstrap({
+      env: { HOME: dir },
+      preBody: `
+id() { echo "1000"; }
+unset MANTA_NONINTERACTIVE
+resolve_sudo_strategy
+echo "STRATEGY=$SUDO_STRATEGY"
+`,
+    });
+    assert.match(out, /STRATEGY=askpass/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BET-979: resolve_sudo_strategy row 3 — passwordless sudo → nopasswd", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-nopasswd-"));
+  try {
+    const out = runBootstrap({
+      env: { HOME: dir },
+      preBody: `
+id() { echo "1000"; }
+sudo() { if [ "$1" = "-n" ] && [ "$2" = "true" ]; then return 0; fi; return 1; }
+resolve_sudo_strategy
+echo "STRATEGY=$SUDO_STRATEGY"
+`,
+    });
+    assert.match(out, /STRATEGY=nopasswd/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BET-979: resolve_sudo_strategy row 4 — interactive tty + password-sudo + no staged password → tty", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-tty-"));
+  const script = join(dir, "t.sh");
+  writeFileSync(script, `#!/usr/bin/env bash
+set +e
+export MANTA_INSTALL_TEST_MODE=1
+source '${INSTALL_SH}'
+id() { echo "1000"; }
+sudo() { return 1; }
+unset MANTA_NONINTERACTIVE
+resolve_sudo_strategy
+echo "STRATEGY=$SUDO_STRATEGY"
+exit 0
+`, { mode: 0o755 });
+  try {
+    const out = runAndCaptureTty(script);
+    assert.match(out, /STRATEGY=tty/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BET-979: resolve_sudo_strategy row 5 — non-interactive + password-sudo + no staged password → none", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-none-"));
+  try {
+    const out = runBootstrap({
+      env: { HOME: dir },
+      preBody: `
+id() { echo "1000"; }
+sudo() { return 1; }
+MANTA_NONINTERACTIVE=1
+resolve_sudo_strategy
+echo "STRATEGY=$SUDO_STRATEGY"
+`,
+    });
+    assert.match(out, /STRATEGY=none/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("BET-979: sudo_priv root strategy runs the command bare (no sudo)", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=root
+sudo_priv true && echo "ROOT_RAN=yes"
+`,
+  });
+  assert.match(out, /ROOT_RAN=yes/);
+});
+
+test("BET-979: sudo_priv askpass strategy invokes sudo -A", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=askpass
+sudo() { echo "SUDO_ARGS=$*"; }
+sudo_priv install -m 0644 a b
+`,
+  });
+  assert.match(out, /SUDO_ARGS=-A install -m 0644 a b/);
+});
+
+test("BET-979: sudo_priv nopasswd strategy invokes sudo -n", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=nopasswd
+sudo() { echo "SUDO_ARGS=$*"; }
+sudo_priv apt-get update
+`,
+  });
+  assert.match(out, /SUDO_ARGS=-n apt-get update/);
+});
+
+test("BET-979: sudo_priv tty strategy invokes plain sudo", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=tty
+sudo() { echo "SUDO_ARGS=$*"; }
+sudo_priv systemctl reload caddy
+`,
+  });
+  assert.match(out, /SUDO_ARGS=systemctl reload caddy/);
+});
+
+test("BET-979: sudo_priv none strategy dies (the BET-980 fatal, cannot regress)", () => {
+  const out = runBootstrap({
+    preBody: `
+SUDO_STRATEGY=none
+sudo_priv true
+echo "SHOULD_NOT_REACH=yes"
+`,
+  });
+  assert.match(out, /Cannot run commands as root/);
+  assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
+});
+
+test("BET-979: setup_askpass creates the SUDO_ASKPASS helper and exports it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-setupask-"));
+  try {
+    const out = runBootstrap({
+      env: { HOME: dir },
+      preBody: `
+setup_askpass
+echo "ASKPASS=$SUDO_ASKPASS"
+echo "HELPER_CONTENT=$([ -f "$SUDO_ASKPASS" ] && cat "$SUDO_ASKPASS" || echo missing)"
+`,
+    });
+    assert.match(out, /ASKPASS=.*\/askpass\.sh/);
+    assert.match(out, /HELPER_CONTENT=.*\.manta-sudo-pass/);
+    // The helper must be executable (sudo execs it).
+    assert.match(out, /ASKPASS=.+/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("BET-980: MANTA_INGRESS=auto + Tailscale up + no root → NOT fatal (tailnet path is ungated)", () => {

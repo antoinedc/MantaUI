@@ -102,7 +102,8 @@ export const DEFAULT_SSH_CONFIG_PATH = join(homedir(), ".ssh", "config");
 const PROBE_OS_CMD = "bash -lc 'uname -s; uname -m; uname -r'";
 const PROBE_REACHABILITY_CMD =
   "bash -lc 'command -v true >/dev/null 2>&1 && echo ok || echo no-true'";
-const PROBE_SUDO_CMD = "bash -lc 'sudo -n true 2>/dev/null; echo $?'";
+const PROBE_SUDO_CMD =
+  "bash -lc 'if [ \"$(id -u)\" = 0 ]; then echo root; elif ! command -v sudo >/dev/null 2>&1; then echo none; elif sudo -n true 2>/dev/null; then echo nopasswd; else echo password; fi'";
 const PROBE_TAILSCALE_CMD =
   "bash -lc 'command -v tailscale >/dev/null 2>&1 || exit 1; tailscale status --json 2>/dev/null'";
 const PROBE_CLOCK_CMD = "bash -lc 'date -u +%s'";
@@ -129,8 +130,15 @@ const PROBE_AUTH_FILE_CMD =
 // always manta://. Same env-var-at-invocation pattern as MANTA_RELEASE_HOST,
 // same channel record — no new plumbing needed on the box side beyond what
 // scripts/install-lib.mjs's resolveConfig() already reads.
+//
+// MANTA_NONINTERACTIVE=1 (BET-979): the desktop drives the install with no
+// human at a terminal, so install.sh must never fall into the interactive-
+// tty sudo strategy (D2 row 4). It only ever uses passwordless sudo,
+// askpass (staged password), or root. The password arrives through a
+// separate ssh call (never through this stream), so the install itself stays
+// byte-identical — no stdin plumbing, no prompt scraping.
 function buildInstallCommand(installShUrl: string, releaseHost: string, channel: string): string {
-  return `bash -lc 'curl -fsSL ${installShUrl} | MANTA_RELEASE_HOST=${releaseHost} MANTA_CHANNEL=${channel} bash'`;
+  return `bash -lc 'curl -fsSL ${installShUrl} | MANTA_RELEASE_HOST=${releaseHost} MANTA_CHANNEL=${channel} MANTA_NONINTERACTIVE=1 bash'`;
 }
 
 // ===========================================================================
@@ -215,7 +223,7 @@ export async function preflightBox(
     reachability: reach.reachability,
     hostFingerprint: reach.fingerprint,
     os: osRes,
-    passwordlessSudo: sudoRes,
+    sudoAccess: sudoRes,
     tailscale: tsRes,
     clockSkewSeconds: clockRes,
     alreadyInstalled: authFileRes,
@@ -305,12 +313,16 @@ async function probeOs(alias: SshTarget, opts: ProbeOpts): Promise<PreflightProb
   };
 }
 
-async function probeSudo(alias: SshTarget, opts: ProbeOpts): Promise<boolean> {
+async function probeSudo(alias: SshTarget, opts: ProbeOpts): Promise<PreflightProbes["sudoAccess"]> {
   const r = await execRemote(alias, PROBE_SUDO_CMD, probeExecOpts(opts, 10_000));
-  // `sudo -n true` exit 0 + no password prompt → passwordless sudo.
-  // Anything else (exit != 0, or "password" in stderr) → not available.
-  if (r.code === 0) return !/password/i.test(r.stderr);
-  return false;
+  // The probe prints exactly one word: root / nopasswd / password / none.
+  // Any unparseable output (non-zero exit, empty/scrambled stdout) is
+  // "none" — fail closed so an unknown state never shows as usable root.
+  const word = r.stdout.trim();
+  if (word === "root" || word === "nopasswd" || word === "password" || word === "none") {
+    return word;
+  }
+  return "none";
 }
 
 async function probeTailscale(alias: SshTarget, opts: ProbeOpts): Promise<PreflightProbes["tailscale"]> {

@@ -86,7 +86,7 @@ const installerState = vi.hoisted(() => ({
       reachability: "ok" as const,
       hostFingerprint: null,
       os: { id: "linux" as const, arch: "x64" as const, release: "6.5.0" },
-      passwordlessSudo: true,
+      sudoAccess: "nopasswd",
       tailscale: { running: false, ipv4: null },
       clockSkewSeconds: 0,
       alreadyInstalled: false,
@@ -130,6 +130,14 @@ const askpassState = vi.hoisted(() => ({
   })),
 }));
 
+// BET-979: sudo-password staging (writeSudoPass / clearSudoPass) — stubbed
+// so the handler test never opens an ssh call. Spies assert the write fires
+// on the sudo-password prompt path and the clear fires on every terminal path.
+const sudoPassState = vi.hoisted(() => ({
+  writeSudoPass: vi.fn(async () => true),
+  clearSudoPass: vi.fn(async () => {}),
+}));
+
 /** Flush the microtask queue so handlers.ts's fire-and-forget
  * `handle.done.then(...).finally(...)` chain (which resets module state)
  * has actually run before the next assertion/test. */
@@ -153,6 +161,11 @@ vi.mock("./askpass.js", () => ({
   createAskpassSession: askpassState.createAskpassSession,
 }));
 
+vi.mock("./sudoPass.js", () => ({
+  writeSudoPass: sudoPassState.writeSudoPass,
+  clearSudoPass: sudoPassState.clearSudoPass,
+}));
+
 // Also stub the small support module the handlers pull in but never call
 // during the mint-and-claim path. handlers.ts only imports a type from
 // stageMapper.js now (erased at compile time), so no mock needed for it.
@@ -171,6 +184,8 @@ beforeEach(() => {
   installerState.runInstall.mockClear();
   knownHostsState.trustHost.mockClear();
   askpassState.createAskpassSession.mockClear();
+  sudoPassState.writeSudoPass.mockClear();
+  sudoPassState.clearSudoPass.mockClear();
 });
 
 describe("registerInstallerHandlers — mint-and-claim (BET-372)", () => {
@@ -250,7 +265,7 @@ function failedPreflightFixture(cause: string): PreflightResult {
       reachability: "unreachable",
       hostFingerprint: null,
       os: { id: "unknown", arch: "unknown", release: null },
-      passwordlessSudo: false,
+      sudoAccess: "none",
       tailscale: { running: false, ipv4: null },
       clockSkewSeconds: 0,
       alreadyInstalled: false,
@@ -367,7 +382,7 @@ describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () 
           sha256: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=",
         },
         os: { id: "unknown", arch: "unknown", release: null },
-        passwordlessSudo: false,
+        sudoAccess: "none",
         tailscale: { running: false, ipv4: null },
         clockSkewSeconds: 0,
         alreadyInstalled: false,
@@ -398,7 +413,7 @@ describe("registerInstallerHandlers — fingerprint pause/resume (BET-361)", () 
           reachability: "ok",
           hostFingerprint: null,
           os: { id: "linux", arch: "x64", release: "6.5.0" },
-          passwordlessSudo: true,
+          sudoAccess: "nopasswd",
           tailscale: { running: false, ipv4: null },
           clockSkewSeconds: 0,
           alreadyInstalled: false,
@@ -547,7 +562,7 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
         reachability: "auth-failed",
         hostFingerprint: null,
         os: { id: "unknown", arch: "unknown", release: null },
-        passwordlessSudo: false,
+        sudoAccess: "none",
         tailscale: { running: false, ipv4: null },
         clockSkewSeconds: 0,
         alreadyInstalled: false,
@@ -573,7 +588,7 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
         reachability: "ok",
         hostFingerprint: null,
         os: { id: "linux", arch: "x64", release: "6.5.0" },
-        passwordlessSudo: true,
+        sudoAccess: "nopasswd",
         tailscale: { running: false, ipv4: null },
         clockSkewSeconds: 0,
         alreadyInstalled: false,
@@ -601,17 +616,19 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     await flushMicrotasks();
     await flushMicrotasks();
 
-    // While paused, installerState reports the passphrase wait.
+    // While paused, installerState reports the secret wait + its kind.
     const paused = (await stateHandler!(null, undefined)) as {
-      waitingForPassphrase: boolean;
-      passphraseHandleId: string | null;
+      waitingForSecret: boolean;
+      secretHandleId: string | null;
+      secretKind: string | null;
     };
-    expect(paused.waitingForPassphrase).toBe(true);
-    expect(paused.passphraseHandleId).toMatch(/^install-/);
+    expect(paused.waitingForSecret).toBe(true);
+    expect(paused.secretKind).toBe("passphrase");
+    expect(paused.secretHandleId).toMatch(/^install-/);
 
     // A passphrase event was pushed to the renderer.
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string; prompt: string }];
     expect(pwEvent).toBeDefined();
     expect(pwEvent[1].prompt).toMatch(/passphrase/i);
@@ -621,7 +638,7 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     expect(installerState.runInstall).not.toHaveBeenCalled();
 
     // User enters a passphrase and submits.
-    await respondHandler!(null, { handleId, passphrase: "hunter2" });
+    await respondHandler!(null, { handleId, secret: "hunter2" });
     await startP;
 
     // An askpass session was created with the user's passphrase.
@@ -639,8 +656,8 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     expect(installDeps).toEqual({ askpassEnv: expect.objectContaining({ SSH_ASKPASS_REQUIRE: "force" }) });
 
     // The passphrase wait is cleared.
-    const after = (await stateHandler!(null, undefined)) as { waitingForPassphrase: boolean };
-    expect(after.waitingForPassphrase).toBe(false);
+    const after = (await stateHandler!(null, undefined)) as { waitingForSecret: boolean };
+    expect(after.waitingForSecret).toBe(false);
 
     await flushMicrotasks();
   });
@@ -657,9 +674,9 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     await flushMicrotasks();
 
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string }];
-    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: null });
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, secret: null });
     await startP;
 
     expect(askpassState.createAskpassSession).not.toHaveBeenCalled();
@@ -685,9 +702,9 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     await flushMicrotasks();
 
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string }];
-    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: "wrong" });
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, secret: "wrong" });
     await startP;
 
     // Session was created but then cleaned up (preflight still failed).
@@ -708,7 +725,7 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     await flushMicrotasks();
     await flushMicrotasks();
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string }];
 
     await cancelHandler!(null, { handleId: pwEvent[1].handleId });
@@ -739,9 +756,9 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
 
     // Clean up: answer the paused prompt.
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string }];
-    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: null });
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, secret: null });
     await flushMicrotasks();
   });
 
@@ -761,9 +778,9 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
     await flushMicrotasks();
     await flushMicrotasks();
     const pwEvent = win.webContents.send.mock.calls.find(
-      (c) => (c[1] as { kind: string }).kind === "passphrase",
+      (c) => (c[1] as { kind: string; secretKind?: string }).kind === "secret" && (c[1] as { kind: string; secretKind?: string }).secretKind === "passphrase",
     ) as [string, { kind: string; handleId: string }];
-    await respondHandler!(null, { handleId: pwEvent[1].handleId, passphrase: "hunter2" });
+    await respondHandler!(null, { handleId: pwEvent[1].handleId, secret: "hunter2" });
     await startP;
 
     // The askpass session is active.
@@ -782,6 +799,157 @@ describe("registerInstallerHandlers — passphrase pause/resume (BET-360)", () =
   });
 });
 
+// BET-979: a box with password-sudo (sudoAccess === "password") pauses the
+// install BEFORE runInstall for the password, stages it via a SEPARATE ssh
+// call (writeSudoPass), then starts the install. Declining (Cancel) must
+// report a preflight-failed and NEVER start the install — there is no
+// Skip/degraded path (the same all-or-nothing rule BET-980 establishes, one
+// layer up). The staged password is cleared on every terminal path.
+describe("registerInstallerHandlers — sudo-password pause/resume (BET-979)", () => {
+  function passwordSudoPreflight(): PreflightResult {
+    return {
+      ok: true,
+      ingressMode: "public-tls",
+      probes: {
+        reachability: "ok",
+        hostFingerprint: null,
+        os: { id: "linux", arch: "x64", release: "6.5.0" },
+        sudoAccess: "password",
+        tailscale: { running: false, ipv4: null },
+        clockSkewSeconds: 0,
+        alreadyInstalled: false,
+        windowsAgent: "not-windows",
+        keyFormat: "not-windows",
+      },
+      failures: [],
+      unknownHost: null,
+    };
+  }
+
+  function findSudoEvent(win: { webContents: { send: ReturnType<typeof vi.fn> } }) {
+    return win.webContents.send.mock.calls.find(
+      (c) =>
+        (c[1] as { kind: string; secretKind?: string }).kind === "secret" &&
+        (c[1] as { kind: string; secretKind?: string }).secretKind === "sudo-password",
+    ) as [string, { kind: string; handleId: string; secretKind: string; prompt: string }] | undefined;
+  }
+
+  it("emits a sudo-password secret event, stages the password, and starts the install", async () => {
+    installerState.preflightBox.mockResolvedValue(passwordSudoPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+    const stateHandler = ipcState.handlers.get(IPC.installerState);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // While paused, installerState reports the sudo-password kind.
+    const paused = (await stateHandler!(null, undefined)) as {
+      waitingForSecret: boolean;
+      secretKind: string | null;
+      secretHandleId: string | null;
+    };
+    expect(paused.waitingForSecret).toBe(true);
+    expect(paused.secretKind).toBe("sudo-password");
+    expect(paused.secretHandleId).toMatch(/^install-/);
+
+    // A sudo-password secret event was pushed; the install is still paused.
+    const pwEvent = findSudoEvent(win);
+    expect(pwEvent).toBeDefined();
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+
+    // User enters the password and continues.
+    await respondHandler!(null, { handleId: pwEvent![1].handleId, secret: "pw123" });
+    await startP;
+
+    // The password was staged via writeSudoPass (NOT through the install
+    // stream), then the install started.
+    expect(sudoPassState.writeSudoPass).toHaveBeenCalledTimes(1);
+    expect(sudoPassState.writeSudoPass).toHaveBeenCalledWith("dev", "pw123");
+    expect(installerState.runInstall).toHaveBeenCalledTimes(1);
+
+    // On install success the staged password is cleared (done.then).
+    await flushMicrotasks();
+    expect(sudoPassState.clearSudoPass).toHaveBeenCalled();
+  });
+
+  it("declining (secret null) reports preflight-failed and NEVER starts the install or stages the password", async () => {
+    installerState.preflightBox.mockResolvedValue(passwordSudoPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const pwEvent = findSudoEvent(win);
+    await respondHandler!(null, { handleId: pwEvent![1].handleId, secret: null });
+    await startP;
+
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    expect(sudoPassState.writeSudoPass).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    ) as [string, { kind: string; failures: { cause: string }[] }];
+    expect(failed).toBeDefined();
+    expect(failed[1].failures[0].cause).toMatch(/needs a password to run commands as root/);
+    // The decline path still clears (idempotent — nothing was actually staged).
+    await flushMicrotasks();
+    expect(sudoPassState.clearSudoPass).toHaveBeenCalled();
+  });
+
+  it("installerCancel during the sudo-password pause aborts the wait without starting the install", async () => {
+    installerState.preflightBox.mockResolvedValue(passwordSudoPreflight());
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const cancelHandler = ipcState.handlers.get(IPC.installerCancel);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const pwEvent = findSudoEvent(win);
+    await cancelHandler!(null, { handleId: pwEvent![1].handleId });
+    await startP;
+
+    expect(installerState.runInstall).not.toHaveBeenCalled();
+    expect(sudoPassState.writeSudoPass).not.toHaveBeenCalled();
+    const failed = win.webContents.send.mock.calls.find(
+      (c) => (c[1] as { kind: string }).kind === "preflight-failed",
+    );
+    expect(failed).toBeDefined();
+    await flushMicrotasks();
+  });
+
+  it("clears the staged sudo password when the install fails", async () => {
+    installerState.preflightBox.mockResolvedValue(passwordSudoPreflight());
+    installerState.runInstall.mockImplementationOnce(() => ({
+      done: Promise.resolve({ code: 1, signal: null }),
+      cancel: vi.fn(),
+    }));
+    const win = { isDestroyed: () => false, webContents: { send: vi.fn() } };
+    registerInstallerHandlers(() => win as never, vi.fn());
+    const startHandler = ipcState.handlers.get(IPC.installerStart);
+    const respondHandler = ipcState.handlers.get(IPC.installerAskpassRespond);
+
+    const startP = startHandler!(null, { alias: "dev" }) as Promise<{ handleId: string }>;
+    await flushMicrotasks();
+    await flushMicrotasks();
+    const pwEvent = findSudoEvent(win);
+    await respondHandler!(null, { handleId: pwEvent![1].handleId, secret: "pw" });
+    await startP;
+    expect(installerState.runInstall).toHaveBeenCalledTimes(1);
+
+    await flushMicrotasks();
+    expect(sudoPassState.clearSudoPass).toHaveBeenCalled();
+  });
+});
 
 // Source-level guard: the handlers.ts file MUST NOT pull main's index.js
 // back into the installer module's require graph. This catches a future

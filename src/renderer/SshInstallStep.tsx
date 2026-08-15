@@ -66,6 +66,122 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// SecretPrompt — the ONE inline card for every paused-secret prompt (BET-360
+// for the SSH key passphrase, BET-979 for the box's sudo password). The two
+// secrets differ ONLY in copy; the component switches on `kind`. Uses the
+// same design tokens as the old passphrase card (rounded-sm p-4 space-y-3 +
+// accent border, mono command snippets, password input).
+function SecretPrompt({
+  host,
+  kind,
+  value,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  host: string;
+  kind: "passphrase" | "sudo-password";
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: (submit: boolean) => void;
+  onCancel: () => void;
+}) {
+  const isSudo = kind === "sudo-password";
+  const hostLabel = host || "this box";
+  const heading = isSudo
+    ? `Administrator password needed on ${hostLabel}`
+    : "Unlock your SSH key";
+  const placeholder = isSudo ? `Password for ${hostLabel}` : "Passphrase";
+  const primaryLabel = isSudo ? "Continue" : "Unlock & continue";
+  const cancelLabel = isSudo ? "Cancel install" : "Cancel";
+  return (
+    <div
+      className="rounded-sm p-4 space-y-3"
+      style={{ border: `1px solid ${ACCENT}` }}
+    >
+      <div className="text-body font-medium">{heading}</div>
+      <p className="text-meta text-text-muted">
+        {isSudo ? (
+          <>
+            MantaUI needs to run three commands as root to give this box a
+            public HTTPS address: install Caddy from the official
+            Debian/Ubuntu package repository, write the Caddy site config for
+            your box's hostname, and reload the Caddy service. Nothing else on
+            this install needs root.
+            <br />
+            <br />
+            Your password is sent to the box over the SSH connection you are
+            already using, stored in a file only your user can read, used for
+            this install only, and deleted when it finishes. MantaUI never
+            saves it.
+          </>
+        ) : (
+          <>
+            Your SSH key is passphrase-protected and not loaded in ssh-agent.
+            Enter the passphrase to decrypt it for this install — it is used
+            only in-memory and never stored.
+          </>
+        )}
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSubmit(value.length > 0);
+        }}
+        className="space-y-2"
+      >
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          autoFocus
+          placeholder={placeholder}
+          className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
+          style={{ border: `1px solid ${ACCENT}` }}
+        />
+        <div className="flex gap-2 pt-px">
+          <Button type="submit" tone="primary" disabled={value.length === 0}>
+            {primaryLabel}
+          </Button>
+          <Button tone="danger" onClick={onCancel}>
+            {cancelLabel}
+          </Button>
+        </div>
+      </form>
+      {isSudo && (
+        <div className="pt-1 space-y-1 border-t border-border">
+          <div className="text-meta text-text-muted">
+            Prefer not to enter it? Cancel and use one of these instead:
+          </div>
+          <ul className="text-meta text-text-muted list-disc list-inside space-y-1">
+            <li>
+              <span className="font-medium">Install as root</span> — connect
+              as <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">{`root@${hostLabel}`}</code>{" "}
+              and run the installer again. No password needed.
+            </li>
+            <li>
+              <span className="font-medium">Use Tailscale</span> — MantaUI
+              then needs no root at all. On the box, run:{" "}
+              <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">
+                curl -fsSL https://tailscale.com/install.sh | sh
+              </code>{" "}
+              then{" "}
+              <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">
+                sudo tailscale up
+              </code>
+              , then run the installer again.
+            </li>
+            <li>
+              <span className="font-medium">Grant this user sudo access</span>{" "}
+              on the box, then run the installer again.
+            </li>
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SshInstallStep({
   onPaired,
   onPairManually,
@@ -138,14 +254,20 @@ export function SshInstallStep({
     algo: string;
     sha256: string;
   } | null>(null);
-  // BET-360: a passphrase-protected key (not in ssh-agent) paused the
-  // install for a passphrase. Rendered INLINE in the progress panel (same
-  // pattern as the fingerprint card) — a password input + Submit/Cancel.
-  const [passphrasePrompt, setPassphrasePrompt] = useState<{
+  // BET-360/979: a paused install is waiting for a secret the user must
+  // type — an SSH key passphrase OR the box's sudo password. Rendered INLINE
+  // in the progress panel via the shared SecretPrompt card (one component
+  // that switches its copy on secretKind). A single value + submit handler
+  // serve both secrets; they differ only in copy.
+  const [secretPrompt, setSecretPrompt] = useState<{
     handleId: string;
+    secretKind: "passphrase" | "sudo-password";
     prompt: string;
   } | null>(null);
-  const [passphraseInput, setPassphraseInput] = useState("");
+  const [secretInput, setSecretInput] = useState("");
+  // Host label used by the sudo-password card copy ({host}); captured at
+  // install start from the resolved SshTarget.
+  const [installHostLabel, setInstallHostLabel] = useState("");
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   // BET-705 c: while the auto-claim is retrying a transient failure, how many
@@ -276,16 +398,22 @@ export function SshInstallStep({
         });
         return;
       }
-      // BET-360: recover a paused passphrase prompt on remount.
-      if (s.waitingForPassphrase && s.passphraseHandleId) {
+      // BET-360/979: recover a paused secret prompt on remount (key
+      // passphrase or sudo password — the kind picks the card copy).
+      if (s.waitingForSecret && s.secretHandleId) {
         setRunning(true);
-        setActiveHandle(s.passphraseHandleId);
+        setActiveHandle(s.secretHandleId);
         setStage(INITIAL_STAGE);
-        setPassphrasePrompt({
-          handleId: s.passphraseHandleId,
-          prompt: "Enter the passphrase for your SSH key:",
+        const kind = s.secretKind ?? "passphrase";
+        setSecretPrompt({
+          handleId: s.secretHandleId,
+          secretKind: kind,
+          prompt:
+            kind === "sudo-password"
+              ? `Administrator password needed on ${installHostLabel || "this box"}`
+              : "Enter the passphrase for your SSH key:",
         });
-        setPassphraseInput("");
+        setSecretInput("");
         return;
       }
       if (s.active) {
@@ -335,8 +463,8 @@ export function SshInstallStep({
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
-          setPassphrasePrompt(null);
-          setPassphraseInput("");
+          setSecretPrompt(null);
+          setSecretInput("");
           // A finished handle can't speak again (BET-705 a).
           deadHandlesRef.current.add(evt.handleId);
           break;
@@ -351,11 +479,16 @@ export function SshInstallStep({
             sha256: evt.fingerprint.sha256,
           });
           break;
-        case "passphrase":
-          // BET-360: the install is paused waiting for the SSH key
-          // passphrase — show the passphrase input card inline.
-          setPassphrasePrompt({ handleId: evt.handleId, prompt: evt.prompt });
-          setPassphraseInput("");
+        case "secret":
+          // BET-360/979: the install is paused waiting for a secret — the
+          // SSH key passphrase OR the box's sudo password. Show the shared
+          // SecretPrompt card inline (copy switches on evt.secretKind).
+          setSecretPrompt({
+            handleId: evt.handleId,
+            secretKind: evt.secretKind,
+            prompt: evt.prompt,
+          });
+          setSecretInput("");
           break;
         case "done":
           // BET-705 d: a cancel surfaces as a done with !ok and the
@@ -368,8 +501,8 @@ export function SshInstallStep({
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
-          setPassphrasePrompt(null);
-          setPassphraseInput("");
+          setSecretPrompt(null);
+          setSecretInput("");
           // A finished handle can't speak again (BET-705 a).
           deadHandlesRef.current.add(evt.handleId);
           if (evt.ok && !cancelRequestedRef.current) {
@@ -383,8 +516,8 @@ export function SshInstallStep({
           setRunning(false);
           setActiveHandle(null);
           setFingerprintPrompt(null);
-          setPassphrasePrompt(null);
-          setPassphraseInput("");
+          setSecretPrompt(null);
+          setSecretInput("");
           // A finished handle can't speak again (BET-705 a).
           deadHandlesRef.current.add(evt.handleId);
           break;
@@ -436,8 +569,10 @@ export function SshInstallStep({
     setInstallError(null);
     setPreflightFailure(null);
     setFingerprintPrompt(null);
-    setPassphrasePrompt(null);
-    setPassphraseInput("");
+    setSecretPrompt(null);
+    setSecretInput("");
+    // BET-979: capture the host label for the sudo-password card copy.
+    setInstallHostLabel(sshTargetLabel(resolved.target));
     setLines([]);
     setDone(null);
     setClaimError(null);
@@ -464,12 +599,12 @@ export function SshInstallStep({
   }
 
   async function cancelInstall() {
-    // During the fingerprint trust pause OR the passphrase pause,
-    // activeHandle is still null (installerStart hasn't returned) — but the
-    // install IS in flight and the Cancel button is visible. Route through
-    // the paused prompt's handleId so installerCancel reaches the main-
-    // process abort instead of silently no-oping (BET-361/360).
-    const handleId = activeHandle ?? fingerprintPrompt?.handleId ?? passphrasePrompt?.handleId;
+    // During the fingerprint trust pause OR the secret pause, activeHandle
+    // is still null (installerStart hasn't returned) — but the install IS in
+    // flight and the Cancel button is visible. Route through the paused
+    // prompt's handleId so installerCancel reaches the main-process abort
+    // instead of silently no-oping (BET-361/360/979).
+    const handleId = activeHandle ?? fingerprintPrompt?.handleId ?? secretPrompt?.handleId;
     if (!handleId) return;
     // BET-705 d: this is a user-initiated cancel, not a real failure — a
     // late `done` from the SIGTERM must render "Install cancelled." not the
@@ -484,8 +619,8 @@ export function SshInstallStep({
     setRunning(false);
     setActiveHandle(null);
     setFingerprintPrompt(null);
-    setPassphrasePrompt(null);
-    setPassphraseInput("");
+    setSecretPrompt(null);
+    setSecretInput("");
     setCancelled(true);
     await preload.installerCancel({ handleId });
   }
@@ -510,22 +645,23 @@ export function SshInstallStep({
     }
   }
 
-  // BET-360: submit the entered passphrase (or cancel). Submit → main
-  // creates an SSH_ASKPASS session and re-runs preflight; the install
-  // resumes streaming. Cancel → main aborts with a preflight-failed event;
-  // we drop the spinner immediately.
-  async function submitPassphrase(submit: boolean) {
-    if (!passphrasePrompt) return;
-    const handleId = passphrasePrompt.handleId;
-    const pw = submit ? passphraseInput : null;
-    setPassphrasePrompt(null);
-    setPassphraseInput("");
+  // BET-360/979: submit the entered secret (or cancel) for the paused
+  // prompt. A passphrase → main creates an SSH_ASKPASS session and re-runs
+  // preflight; a sudo password → main stages ~/.manta-sudo-pass and starts
+  // the install. Cancel → main aborts with a preflight-failed event; we
+  // drop the spinner immediately.
+  async function submitSecret(submit: boolean) {
+    if (!secretPrompt) return;
+    const handleId = secretPrompt.handleId;
+    const secret = submit ? secretInput : null;
+    setSecretPrompt(null);
+    setSecretInput("");
     if (!submit) {
       setRunning(false);
       setActiveHandle(null);
     }
     try {
-      await preload.installerAskpassRespond({ handleId, passphrase: pw });
+      await preload.installerAskpassRespond({ handleId, secret });
     } catch (e) {
       setInstallError(e instanceof Error ? e.message : String(e));
     }
@@ -628,7 +764,7 @@ export function SshInstallStep({
         done,
         installError,
         preflightFailure,
-        awaitingPrompt: fingerprintPrompt !== null || passphrasePrompt !== null,
+        awaitingPrompt: fingerprintPrompt !== null || secretPrompt !== null,
         claimRunning,
         claimElapsed,
         claimError,
@@ -646,7 +782,8 @@ export function SshInstallStep({
       installError,
       preflightFailure,
       fingerprintPrompt,
-      passphrasePrompt,
+      secretPrompt,
+      secretInput,
       claimRunning,
       claimElapsed,
       claimError,
@@ -895,49 +1032,18 @@ export function SshInstallStep({
               </Button>
             </div>
           </div>
-        ) : passphrasePrompt ? (
-          /* BET-360: inline passphrase prompt — zone-C children. The install
-             is paused; the user enters the passphrase once. */
-          <div
-            className="rounded-sm p-4 space-y-3"
-            style={{ border: `1px solid ${ACCENT}` }}
-          >
-            <div className="text-body font-medium">{passphrasePrompt.prompt}</div>
-            <p className="text-meta text-text-muted">
-              Your SSH key is passphrase-protected and not loaded in
-              ssh-agent. Enter the passphrase to decrypt it for this
-              install — it is used only in-memory and never stored.
-            </p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                void submitPassphrase(passphraseInput.length > 0);
-              }}
-              className="space-y-2"
-            >
-              <input
-                type="password"
-                value={passphraseInput}
-                onChange={(e) => setPassphraseInput(e.target.value)}
-                autoFocus
-                placeholder="Passphrase"
-                className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
-                style={{ border: `1px solid ${ACCENT}` }}
-              />
-              <div className="flex gap-2 pt-px">
-                <Button
-                  type="submit"
-                  tone="primary"
-                  disabled={passphraseInput.length === 0}
-                >
-                  Unlock &amp; continue
-                </Button>
-                <Button tone="danger" onClick={() => void submitPassphrase(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          </div>
+        ) : secretPrompt ? (
+          /* BET-360/979: inline secret prompt (SSH key passphrase OR sudo
+             password) — zone-C children. The install is paused; the user
+             enters the secret once. One component, copy switches on kind. */
+          <SecretPrompt
+            host={installHostLabel}
+            kind={secretPrompt.secretKind}
+            value={secretInput}
+            onChange={setSecretInput}
+            onSubmit={(submit) => void submitSecret(submit)}
+            onCancel={() => void submitSecret(false)}
+          />
         ) : null}
       </ConnectPanel>
     </div>

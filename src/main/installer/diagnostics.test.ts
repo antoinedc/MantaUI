@@ -13,7 +13,7 @@ function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
     reachability: "ok",
     hostFingerprint: null,
     os: { id: "linux", arch: "x64", release: "6.5.0" },
-    passwordlessSudo: true,
+    sudoAccess: "nopasswd",
     tailscale: { running: false, ipv4: null },
     clockSkewSeconds: 0,
     alreadyInstalled: false,

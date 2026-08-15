@@ -55,14 +55,23 @@
 # public TLS, which is inherently a root concern; industry norm is sudo
 # + distro package manager for this step).
 #
-# ALL-OR-NOTHING (BET-980): the public path is gated up front (step 3.5)
+# ALL-OR-NOTHING (BET-980/979): the public path is gated up front (step 3.5)
 # on (a) a Debian/Ubuntu-family distro and (b) the ability to run commands
-# as root (real root or `sudo -n true`). If either is missing the installer
-# dies BEFORE the first mutation — nothing is written, nothing to roll back.
-# There is no degraded success: an install that would finish unreachable
-# refuses to start. Every privileged call uses `sudo -n` (non-interactive)
-# so it fails fast instead of hanging on a password prompt. The tailscale
-# and macOS paths never need root or a specific distro and are unaffected.
+# as root. "Run as root" is resolved ONCE into one of five strategies before
+# the first mutation:
+#   1. root      — already uid 0 (privileged commands run bare)
+#   2. askpass   — a sudo password was staged at ~/.manta-sudo-pass (a
+#                  separate, short ssh call; install.sh builds the SUDO_ASKPASS
+#                  helper that echoes it for `sudo -A`)
+#   3. nopasswd  — passwordless sudo (sudo succeeds non-interactively)
+#   4. tty       — an interactive terminal (human `curl … | bash`); sudo
+#                  reads the password from /dev/tty
+#   5. none      — cannot run as root → the public install refuses to start
+# If the public path needs root and none of 1-4 apply, the installer dies
+# BEFORE the first mutation — nothing is written, nothing to roll back.
+# There is no degraded success: every privileged call goes through `sudo_priv`,
+# which dispatches on the resolved strategy. The tailscale and macOS paths
+# never need root or a specific distro and are unaffected.
 #
 # Release resolution:
 #   1. Fetch `${MANTA_RELEASE_HOST:-https://mantaui.com}/releases/manta-${MANTA_VERSION:-latest}.txt`
@@ -128,7 +137,84 @@ die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 #
 #   $1 = staged source path   $2 = destination path
 install_root_file() {
-  sudo -n install -m 0644 -o root -g root "$1" "$2"
+  sudo_priv install -m 0644 -o root -g root "$1" "$2"
+}
+
+# ---------------------------------------------------------------------------
+# Sudo strategy resolution (BET-979) — THE rule for every privileged call.
+#
+# All privileged commands in this script go through `sudo_priv`, which
+# dispatches on the single resolved `SUDO_STRATEGY`. The strategy is resolved
+# EXACTLY ONCE, inside the 3.5 capability preflight (step 3.5, BEFORE the
+# first mutation), so a box that cannot satisfy the public path's root
+# requirement is refused while nothing has been written — see
+# public_ingress_preflight. Defined here (the always-defined region) so
+# install.test.mjs can exercise resolution + dispatch via runBootstrap.
+#
+# The five strategies (the D2 table):
+#   1. root       — uid 0: run privileged commands bare
+#   2. askpass    — a sudo password was staged at ~/.manta-sudo-pass by the
+#                   desktop installer; sudo fetches it via SUDO_ASKPASS + -A
+#   3. nopasswd   — passwordless sudo (sudo succeeds non-interactively)
+#   4. tty        — a HUMAN's interactive terminal (curl … | bash): sudo
+#                   reads the password from /dev/tty. NEVER used by the
+#                   desktop, which sets MANTA_NONINTERACTIVE=1.
+#   5. none       — cannot run as root → the public path refuses to start
+# ---------------------------------------------------------------------------
+resolve_sudo_strategy() {
+  if [ "$(id -u)" = "0" ]; then
+    SUDO_STRATEGY="root"
+  elif [ -f "$HOME/.manta-sudo-pass" ]; then
+    SUDO_STRATEGY="askpass"
+  elif sudo -n true 2>/dev/null; then
+    SUDO_STRATEGY="nopasswd"
+  elif [ "${MANTA_NONINTERACTIVE:-0}" != "1" ] \
+      && command -v sudo >/dev/null 2>&1 \
+      && { [ -t 0 ] || [ -t 1 ]; }; then
+    SUDO_STRATEGY="tty"
+  else
+    SUDO_STRATEGY="none"
+  fi
+}
+
+# sudo_priv — run one privileged command using the resolved strategy. The
+# ONLY place in the script that invokes sudo (nopasswd / askpass / tty) or
+# runs the command bare (root). `sudo -A` (NOT bare `sudo`) is load-bearing
+# for askpass: the install stream forces a remote pty (-tt), so plain sudo
+# would prefer the tty prompt and hang; `-A` forces the SUDO_ASKPASS path.
+# Strategy `none` is unreachable on the public path (the preflight dies
+# first) but kept as a hard guard.
+sudo_priv() {
+  case "$SUDO_STRATEGY" in
+    root)     "$@" ;;
+    askpass)  sudo -A "$@" ;;
+    nopasswd) sudo -n "$@" ;;
+    tty)      sudo "$@" ;;
+    none)
+      die "Cannot run commands as root on this box — giving it a public HTTPS address is impossible without root.
+        Choose one of these and run the installer again:
+        * Install as root  — ssh root@$(hostname) then run the same install command
+        * Use Tailscale    — curl -fsSL https://tailscale.com/install.sh | sh; sudo tailscale up; then run the installer again
+        * Grant this user sudo access on the box, then run the installer again."
+      ;;
+  esac
+}
+
+# setup_askpass — strategy 2: create the SUDO_ASKPASS helper that echoes the
+# staged password, export it, and arrange cleanup on exit (the temp helper
+# dir AND the staged password file are both removed). The desktop installer
+# stages the password at ~/.manta-sudo-pass via a SEPARATE short ssh call —
+# never through the install stream, so it can never leak into the install
+# log; install.sh owns the helper so the quoting stays readable.
+setup_askpass() {
+  SUDO_ASKPASS_DIR="$(mktemp -d)"
+  cat > "$SUDO_ASKPASS_DIR/askpass.sh" <<'ASKPASS'
+#!/bin/sh
+cat "$HOME/.manta-sudo-pass"
+ASKPASS
+  chmod 700 "$SUDO_ASKPASS_DIR/askpass.sh"
+  export SUDO_ASKPASS="$SUDO_ASKPASS_DIR/askpass.sh"
+  trap 'rm -rf "$SUDO_ASKPASS_DIR"; rm -f "$HOME/.manta-sudo-pass"' EXIT
 }
 
 # --- Shared release-resolution helpers (BET-640) -----------------------------
@@ -473,7 +559,7 @@ wait_for_box_id() {
 # Takes the resolved, side-effect-free inputs so the decision + message are
 # unit-testable in isolation (via runBootstrap in install.test.mjs):
 #   $1  ingress path mode: "public" | "tailscale" | "macos"
-#   $2  root usable: "1" (uid 0 or `sudo -n true` succeeds) | "0"
+#   $2  root usable: "1" (uid 0, or sudo available non-interactively) | "0"
 #   $3  distro supported: "yes" | "no" | "unknown" | ""   (from detect-distro)
 #   $4  distro id (for the message; may be "")
 # Dies (exit 1) only when the mode is "public" and a capability is missing.
@@ -860,11 +946,18 @@ main() {
     fi
   fi
 
-  # Root usable: real root, or passwordless sudo. Both read-only.
+  # Resolve the sudo strategy ONCE here, before any mutation (D2). This is
+  # load-bearing: a box that cannot satisfy the public path's root requirement
+  # is refused while nothing has been written, and every later privileged call
+  # (via sudo_priv, step 7.5) uses the SAME resolved value — the decision can
+  # never diverge between the gate and the privileged section.
+  resolve_sudo_strategy
+
+  # Root usable for the preflight = any strategy other than `none` (a box
+  # with password-sudo that the desktop can satisfy via askpass, or root, or
+  # passwordless sudo, or an interactive tty, all count as usable).
   _PRE_ROOT="0"
-  if [ "$(id -u)" = "0" ] || sudo -n true 2>/dev/null; then
-    _PRE_ROOT="1"
-  fi
+  [ "$SUDO_STRATEGY" != "none" ] && _PRE_ROOT="1"
 
   # Distro supported: probe detect-distro (the same subcommand step 7.5 uses).
   _PRE_DISTRO_STATUS="$("$_PRE_NODE" "$_PRE_LIB" detect-distro 2>/dev/null || echo "")"
@@ -886,9 +979,15 @@ main() {
     ' 2>/dev/null || true)"
 
   if [ "$DRY_RUN" = "1" ]; then
-    dry_log "capability preflight: ingress=$_PRE_INGRESS root=${_PRE_ROOT} distro_supported=$_PRE_DISTRO_SUPPORTED"
+    dry_log "capability preflight: ingress=$_PRE_INGRESS root=${_PRE_ROOT} strategy=${SUDO_STRATEGY:-} distro_supported=$_PRE_DISTRO_SUPPORTED"
   else
     public_ingress_preflight "$_PRE_INGRESS" "$_PRE_ROOT" "$_PRE_DISTRO_SUPPORTED" "$_PRE_DISTRO_ID"
+    # The public path may need the sudo-askpass helper (strategy 2). This runs
+    # only AFTER the preflight passed, so a box that can't complete the public
+    # path never touches / creates the askpass machinery.
+    if [ "$_PRE_INGRESS" = "public" ] && [ "$SUDO_STRATEGY" = "askpass" ]; then
+      setup_askpass
+    fi
   fi
 
   # ---------------------------------------------------------------------------
@@ -1403,11 +1502,11 @@ main() {
   #
   #     This section runs the gateway registration + DNS wait + Caddy
   #     install + Caddyfile write + caddy reload. Every privileged call
-  #     below uses `sudo -n` (non-interactive) and the whole section
+  #     goes through `sudo_priv` (resolved once in the 3.5 preflight into a
+  #     strategy: root / askpass / nopasswd / tty) and the whole section
   #     bails cleanly (warn + skip) on:
   #       a. Distro not in {debian, ubuntu, ID_LIKE=debian} (v1 scope)
-  #       b. `sudo` missing
-  #       c. `sudo -n true` failing (non-passwordless sudo)
+  #       b. root unusable (SUDO_STRATEGY=none — refused in the 3.5 preflight)
   #     In any of those cases we print the exact commands the user
   #     should run to bring their own proxy (or install Caddy manually)
   #     and continue with the rest of the install — the loopback
@@ -1458,16 +1557,10 @@ main() {
   # The capability gates (distro + root) now run in the 3.5 PREFLIGHT, before
   # the first mutation, and die there on a missing public-path capability —
   # so step 7.5 no longer has a "degraded success" branch. On the public path
-  # root has already been verified usable. As ROOT the `sudo` binary may be
-  # absent entirely (minimal VPS); shim it to drop the leading `-n` and run
-  # the command bare, so every `sudo -n <cmd>` below still works with zero
-  # changes to the commands.
-  if [ "$(id -u)" = "0" ] && ! command -v sudo >/dev/null 2>&1; then
-    sudo() {
-      if [ "${1:-}" = "-n" ]; then shift; fi
-      "$@"
-    }
-  fi
+  # root has already been verified usable (SUDO_STRATEGY resolved once in the
+  # preflight); every privileged call below goes through `sudo_priv`, which
+  # dispatches on that strategy — bare for root, -n for passwordless, -A for
+  # the staged-password askpass helper, plain sudo for an interactive tty.
 
   if [ "$INGRESS_MODE" = "tailscale" ]; then
     # Tailscale path (BET-267): skip Caddy install + DNS wait + vhost write +
@@ -1571,18 +1664,18 @@ main() {
       # We use sudo because Caddy must run as a system service (binds
       # :80/:443 for Let's Encrypt HTTP-01). The installer is otherwise
       # 100% user-space — this is the only privileged step (and it has
-      # already been gated at the top of step 7.5: distro is
-      # Debian/Ubuntu and `sudo -n true` has been verified to succeed).
+      # already been gated in the 3.5 preflight: distro is
+      # Debian/Ubuntu and root is usable (SUDO_STRATEGY resolved).
       # Refresh apt lists first — on a fresh box the package index can be
       # empty/stale, which makes `apt-get install debian-keyring …` fail with
       # "Unable to locate package". The Caddy docs run `apt update` up front
       # for exactly this reason.
-      sudo -n apt-get update \
+      sudo_priv apt-get update \
         || die "apt-get update failed"
-      sudo -n apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
+      sudo_priv apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         || die "apt-get install prerequisites for Caddy failed"
       curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
-        | sudo -n gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        | sudo_priv gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
         || die "failed to download Caddy GPG key"
       # Write the apt repo line DIRECTLY with a resolved, known-good codename
       # instead of piping Cloudsmith's config.deb.txt. That script probes
@@ -1621,9 +1714,9 @@ main() {
       install_root_file "$_caddy_list_tmp" /etc/apt/sources.list.d/caddy-stable.list \
         || { rm -f "$_caddy_list_tmp"; die "failed to add Caddy apt repo"; }
       rm -f "$_caddy_list_tmp"
-      sudo -n apt-get update \
+      sudo_priv apt-get update \
         || die "apt-get update failed"
-      sudo -n apt-get install -y caddy \
+      sudo_priv apt-get install -y caddy \
         || die "apt-get install caddy failed"
       ok "caddy installed ($(caddy version 2>/dev/null || echo unknown))."
     fi
@@ -1757,7 +1850,7 @@ main() {
       # The vhost is on disk; make Caddy live. Without a successful reload no
       # certificate is issued — fatal on the public path.
       if command -v systemctl >/dev/null 2>&1; then
-        sudo -n systemctl reload caddy 2>/tmp/manta-caddy-reload.err \
+        sudo_priv systemctl reload caddy 2>/tmp/manta-caddy-reload.err \
           || die "systemctl reload caddy failed — the vhost is on disk but NOT live, so no certificate will be issued.
             See /tmp/manta-caddy-reload.err
             Fix the above and run the installer again — re-running is safe and preserves your box identity."
