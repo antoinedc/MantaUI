@@ -190,6 +190,75 @@ describe("preflightBox", () => {
 });
 
 // ===========================================================================
+// preflightBox — sudo probe parsing (BET-979 D3)
+// ==========================================================================
+// The sudo probe returns ONE word (root | nopasswd | password | none) and is
+// mapped onto PreflightProbes.sudoAccess. Any unparseable output → "none"
+// (fail closed).
+
+describe("preflightBox — sudo probe parses all four states (BET-979)", () => {
+  it("maps 'root' → sudoAccess root (public-tls)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 0, stdout: "root\n" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("root");
+    expect(r.ingressMode).toBe("public-tls");
+  });
+
+  it("maps 'nopasswd' → sudoAccess nopasswd (public-tls)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 0, stdout: "nopasswd\n" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("nopasswd");
+    expect(r.ingressMode).toBe("public-tls");
+  });
+
+  it("maps 'password' → sudoAccess password (public-tls — desktop will ask)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 0, stdout: "password\n" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("password");
+    expect(r.ingressMode).toBe("public-tls");
+  });
+
+  it("maps 'none' → sudoAccess none (no-root)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 0, stdout: "none\n" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("none");
+    expect(r.ingressMode).toBe("no-root");
+  });
+
+  it("maps unknown/unparseable output → none (fail closed)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 0, stdout: "??\n" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("none");
+    expect(r.ingressMode).toBe("no-root");
+  });
+
+  it("maps a non-zero sudo exit (empty stdout) → none (fail closed)", async () => {
+    const r = await preflightBox("dev", {
+      spawn: makeProbeSpawn(
+        happyLinuxProbes({ [PROBE_KEYS.SUDO]: { code: 1, stdout: "" } }),
+      ),
+    });
+    expect(r.probes.sudoAccess).toBe("none");
+    expect(r.ingressMode).toBe("no-root");
+  });
+});
+
+// ===========================================================================
 // preflightBox — Windows client-side probes (BET-362)
 // ===========================================================================
 
@@ -384,6 +453,9 @@ describe("runInstall", () => {
     // pair-link scheme. Test env falls through to dev (see the BET-370
     // comment above) — channelConfig("dev").id is "dev".
     expect(captured.args[captured.args.length - 1]).toMatch(/MANTA_CHANNEL=dev/);
+    // BET-979 D4: the desktop sets MANTA_NONINTERACTIVE=1 so install.sh
+    // never falls into the interactive-tty sudo strategy.
+    expect(captured.args[captured.args.length - 1]).toMatch(/MANTA_NONINTERACTIVE=1/);
     expect(captured.args[captured.args.length - 1]).toMatch(/\sbash'$/);
   });
 

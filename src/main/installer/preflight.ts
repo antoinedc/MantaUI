@@ -74,8 +74,14 @@ export type PreflightProbes = {
    *  probeReachability from the ssh stderr block (fingerprint.ts). */
   hostFingerprint: HostFingerprint | null;
   os: OsInfo;
-  /** `sudo -n true` exited 0 over the SSH connection. */
-  passwordlessSudo: boolean;
+  /** How the box can run commands as root, over the SSH connection (BET-979):
+   *   - "root"     — already uid 0
+   *   - "nopasswd" — passwordless sudo (`sudo -n true` succeeded)
+   *   - "password" — sudo is present but needs a password (the desktop asks
+   *                  for it in a modal and stages it at ~/.manta-sudo-pass)
+   *   - "none"     — no usable root (fails the public-path preflight)
+   *  Any unparseable probe output is "none" (fail closed). */
+  sudoAccess: "root" | "nopasswd" | "password" | "none";
   /** `tailscale status --json` parsed cleanly with BackendState=Running. */
   tailscale: TailscaleState;
   /** Local clock − remote clock, in seconds (rounded). Negative = remote ahead. */
@@ -119,7 +125,10 @@ export type IngressMode =
 export function decideIngressMode(probes: PreflightProbes): IngressMode {
   if (probes.tailscale.running) return "tailscale";
   if (probes.os.id === "darwin") return "macos-loopback";
-  if (probes.passwordlessSudo) return "public-tls";
+  // The public-tls path needs usable root. "password" sudo qualifies — the
+  // installer asks for the password in a modal (BET-979) — so only "none"
+  // falls through to no-root.
+  if (probes.sudoAccess !== "none") return "public-tls";
   return "no-root";
 }
 

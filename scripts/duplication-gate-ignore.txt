@@ -13,3 +13,10 @@ src/renderer/api/httpApi.ts
 # 10s delegateList() job poll is shared by both transports (identical call).
 src/renderer/App.tsx
 src/renderer/mobile/MobileApp.tsx
+# BET-979: the SSH-installer IPC harness suite. Its ~30 tests repeat the
+# registerInstallerHandlers/ipcState wiring + event-lookup boilerplate jscpd
+# flags as self-clones (intrinsic to the harness, not production duplication).
+# Proposed by reviewer on BET-979 cycle-2 (ignore-list offered as the dedupe
+# alternative) — the shared runner<->sudoPass stdin fixture WAS extracted to
+# _testFixtures.ts for real; only this one harness-heavy test file is exempted.
+src/main/installer/handlers.test.ts

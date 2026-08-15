@@ -38,7 +38,7 @@ function makeProbes(overrides: Partial<PreflightProbes> = {}): PreflightProbes {
     reachability: "ok",
     hostFingerprint: null,
     os: OK_OS_LINUX_X64,
-    passwordlessSudo: true,
+    sudoAccess: "nopasswd",
     tailscale: { running: false, ipv4: null },
     clockSkewSeconds: 0,
     alreadyInstalled: false,
@@ -102,19 +102,43 @@ describe("decideIngressMode — mirrors install.sh:1160 predicate", () => {
       decideIngressMode(
         makeProbes({
           os: OK_OS_LINUX_X64,
-          passwordlessSudo: true,
+          sudoAccess: "nopasswd",
           tailscale: { running: false, ipv4: null },
         }),
       ),
     ).toBe("public-tls");
   });
 
-  it("Linux + NO passwordless sudo + no tailscale → 'no-root'", () => {
+  it("Linux + password-sudo + no tailscale → 'public-tls' (the desktop asks for the password — BET-979)", () => {
     expect(
       decideIngressMode(
         makeProbes({
           os: OK_OS_LINUX_X64,
-          passwordlessSudo: false,
+          sudoAccess: "password",
+          tailscale: { running: false, ipv4: null },
+        }),
+      ),
+    ).toBe("public-tls");
+  });
+
+  it("Linux + real root (uid 0) + no tailscale → 'public-tls'", () => {
+    expect(
+      decideIngressMode(
+        makeProbes({
+          os: OK_OS_LINUX_X64,
+          sudoAccess: "root",
+          tailscale: { running: false, ipv4: null },
+        }),
+      ),
+    ).toBe("public-tls");
+  });
+
+  it("Linux + NO usable root (sudoAccess none) + no tailscale → 'no-root'", () => {
+    expect(
+      decideIngressMode(
+        makeProbes({
+          os: OK_OS_LINUX_X64,
+          sudoAccess: "none",
         }),
       ),
     ).toBe("no-root");
@@ -136,7 +160,7 @@ describe("decideIngressMode — mirrors install.sh:1160 predicate", () => {
       decideIngressMode(
         makeProbes({
           os: OK_OS_DARWIN_ARM64,
-          passwordlessSudo: true,
+          sudoAccess: "nopasswd",
         }),
       ),
     ).toBe("macos-loopback");
@@ -153,7 +177,7 @@ describe("classifyPreflight", () => {
 
   it("happy-path macOS arm64 → ok + macos-loopback", () => {
     const r = classifyPreflight(
-      makeProbes({ os: OK_OS_DARWIN_ARM64, passwordlessSudo: false }),
+      makeProbes({ os: OK_OS_DARWIN_ARM64, sudoAccess: "none" }),
     );
     expect(r.ok).toBe(true);
     expect(r.ingressMode).toBe("macos-loopback");
@@ -163,7 +187,7 @@ describe("classifyPreflight", () => {
     const r = classifyPreflight(
       makeProbes({
         tailscale: { running: true, ipv4: "100.64.1.2" },
-        passwordlessSudo: false,
+        sudoAccess: "none",
       }),
     );
     expect(r.ok).toBe(true);

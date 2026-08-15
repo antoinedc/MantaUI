@@ -9,7 +9,7 @@ import {
   type SpawnFn,
   SSH_BIN,
 } from "./runner.js";
-import { makeFakeChild } from "./_testFixtures.js";
+import { makeFakeChild, makeStdinCapturingChild } from "./_testFixtures.js";
 
 // ---------------------------------------------------------------------------
 // execRemote
@@ -152,6 +152,52 @@ describe("execRemote", () => {
     const r = await p;
     expect(r.code).toBe(-1);
     expect(r.stderr).toMatch(/\[spawn error: ENOENT ssh\]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// execRemote — stdin option (BET-979)
+// ---------------------------------------------------------------------------
+// The sudo password (any secret) is delivered over a SEPARATE, short ssh call
+// via the `stdin` option — never in the ssh argv (invisible to `ps` on the
+// box). When `stdin` is absent the child's stdio[0] must stay `"ignore"`,
+// byte-identical to today.
+
+describe("execRemote — stdin (BET-979)", () => {
+  it("opens stdin as a pipe, writes the string + newline, and ends it", async () => {
+    const captured: { args: string[]; wrote: string[]; ended: boolean } = {
+      args: [],
+      wrote: [],
+      ended: false,
+    };
+    const { child, fireExit } = makeStdinCapturingChild(captured);
+    const p = execRemote("dev", "bash -lc 'cat > x'", {
+      spawn: (_c, args) => {
+        captured.args = args;
+        return child;
+      },
+      stdin: "hunter2",
+    });
+    setImmediate(() => fireExit(0));
+    const r = await p;
+    expect(r.code).toBe(0);
+    expect(captured.wrote).toEqual(["hunter2\n"]);
+    expect(captured.ended).toBe(true);
+    // The secret must never appear in the ssh argv (ps visibility).
+    expect(captured.args.join(" ")).not.toContain("hunter2");
+  });
+
+  it("keeps stdio[0] as ignore when stdin is absent (byte-identical)", async () => {
+    let spawnStdio: unknown = null;
+    const fake = makeFakeChild();
+    const spawn: SpawnFn = (_c, _a, options) => {
+      spawnStdio = options?.stdio;
+      return fake.child as any;
+    };
+    const p = execRemote("dev", "true", { spawn });
+    setImmediate(() => fake.fireExit(0));
+    await p;
+    expect(spawnStdio).toEqual(["ignore", "pipe", "pipe"]);
   });
 });
 

@@ -2765,6 +2765,40 @@ write/reload) are all fatal too — `die`, never warn-and-continue — so the
 complete install. Do not reintroduce a degrade-and-continue flag (the old
 degraded-success handling was deleted with this rule).
 
+### The sudo strategy machine + `~/.manta-sudo-pass` contract (BET-979)
+
+**How the installer runs commands as root.** All privileged calls in
+`scripts/install.sh` go through `sudo_priv`, which dispatches on a single
+`SUDO_STRATEGY` resolved ONCE in the 3.5 preflight (before the first
+mutation) by `resolve_sudo_strategy`:
+
+| Strategy | Condition |
+|---|---|
+| `root` | already `uid 0` — commands run bare |
+| `askpass` | `~/.manta-sudo-pass` exists — `sudo -A` ($SUDO_ASKPASS echoes the staged password) |
+| `nopasswd` | `sudo -n true` succeeds — `sudo -n` |
+| `tty` | a human's interactive terminal (`curl … \| bash`) — `sudo` reads the password from `/dev/tty` |
+| `none` | nothing usable — the public path refuses to start (BET-980's fatal) |
+
+The desktop installs with `MANTA_NONINTERACTIVE=1`, so strategy 4 (tty) is
+never taken from the app — it only ever uses root / askpass / nopasswd. The
+desktop's TS side mirrors this as `PreflightProbes.sudoAccess` (`root` |
+`nopasswd` | `password` | `none`); `password` means the desktop shows the
+sudo modal.
+
+**`~/.manta-sudo-pass` is a cross-process contract** between the desktop and
+install.sh — never persist it on the desktop, never log it, never put it in a
+`send()` payload. Flow: the desktop stages the password to the box over a
+**separate, short ssh call** (`WRITE_SUDO_PASS_CMD`, delivered via stdin, not
+argv so it is invisible to `ps`), then runs the install (`sudo_priv` →
+`askpass` sidesteps the forced-pty so sudo doesn't hang on a tty prompt via
+`-A`), then deletes it (`CLEAR_SUDO_PASS_CMD`, always — success, failure,
+cancel, decline, renderer disconnect). install.sh owns the SUDO_ASKPASS
+helper itself and also removes the file on an EXIT trap. The desktop never
+recreates the privileged call sites; `sudo_priv` is the only place that
+invokes sudo (plus the `sudo -n true` capability probe in the strategy
+resolver).
+
 ### A release is identified by its COMMIT, not its version number
 
 **You do not need to bump `package.json` to ship a server release.** A box

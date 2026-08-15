@@ -95,7 +95,7 @@ export function redactLine(line: string): string {
  *   probes:
  *     reachability: <…>
  *     os: linux/x64 release=…
- *     passwordlessSudo: …
+ *     sudoAccess: root|nopasswd|password|none
  *     tailscale: running=false ipv4=null
  *     clockSkewSeconds: …
  *     alreadyInstalled: …
@@ -131,7 +131,7 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
   }
   const probes = p.probes;
   out.push(
-    `probes: reachability=${probes.reachability} os=${probes.os.id}/${probes.os.arch} release=${probes.os.release ?? "unknown"} passwordlessSudo=${probes.passwordlessSudo} tailscale=running=${probes.tailscale.running} ipv4=${probes.tailscale.ipv4 ?? "null"} clockSkewSeconds=${probes.clockSkewSeconds} alreadyInstalled=${probes.alreadyInstalled} windowsAgent=${probes.windowsAgent} keyFormat=${probes.keyFormat}`,
+    `probes: reachability=${probes.reachability} os=${probes.os.id}/${probes.os.arch} release=${probes.os.release ?? "unknown"} sudoAccess=${probes.sudoAccess} tailscale=running=${probes.tailscale.running} ipv4=${probes.tailscale.ipv4 ?? "null"} clockSkewSeconds=${probes.clockSkewSeconds} alreadyInstalled=${probes.alreadyInstalled} windowsAgent=${probes.windowsAgent} keyFormat=${probes.keyFormat}`,
   );
   out.push("## Install log (tail)");
   if (input.logTail.length === 0) {

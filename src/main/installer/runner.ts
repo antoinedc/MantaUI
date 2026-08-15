@@ -69,6 +69,13 @@ export type RemoteOptions = {
    *  a passphrase prompt the user can't see. Only the askpass retry path
    *  (preflight returned auth-failed, user entered a passphrase) sets this. */
   allowPrompt?: boolean;
+  /** When set, the ssh child's stdin is opened as a pipe and this string
+   *  followed by `\n` is written and ended after spawn (BET-979). Used to
+   *  deliver the sudo password to the box over a SEPARATE one-shot ssh call,
+   *  so the password never appears in the ssh argv (invisible to `ps` on the
+   *  box). When absent, stdio[0] stays `"ignore"` — byte-identical to today.
+   *  Only meaningful for execRemote (streamRemote never sets it). */
+  stdin?: string;
 };
 
 // execRemote — run one remote command and return its outcome.
@@ -106,6 +113,13 @@ export async function execRemote(
   const spawn = options.spawn ?? nodeSpawn;
   const args: string[] = buildArgs(alias, command, options);
   const child = spawn(SSH_BIN, args, buildSpawnOptions(options));
+  // BET-979: deliver the sudo password (or any secret) via stdin, never in
+  // argv. `\n` is appended because ssh forwards stdin to the remote
+  // `cat > ~/.manta-sudo-pass`, and `cat` needs the terminating newline.
+  if (options.stdin !== undefined && child.stdin) {
+    child.stdin.write(options.stdin + "\n");
+    child.stdin.end();
+  }
   return collectChild(child, options.timeoutMs ?? 30_000);
 }
 
@@ -314,7 +328,11 @@ function buildArgs(alias: SshTarget, command: string, opts: RemoteOptions): stri
 // Without the spread, Node's spawn replaces the env entirely when `env` is set
 // (e.g. PATH would be lost) — we always overlay, never replace.
 function buildSpawnOptions(opts: RemoteOptions): Parameters<typeof nodeSpawn>[2] {
-  const base: Parameters<typeof nodeSpawn>[2] = { stdio: ["ignore", "pipe", "pipe"] };
+  // BET-979: with stdin, open a pipe so execRemote can write the secret to
+  // the child; without it, stdio[0] stays `"ignore"` (byte-identical).
+  const base: Parameters<typeof nodeSpawn>[2] = {
+    stdio: opts.stdin !== undefined ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+  };
   if (opts.env) {
     base.env = { ...process.env, ...opts.env };
   }
