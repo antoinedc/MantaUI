@@ -52,6 +52,7 @@ export function Chip({
   title,
   children,
   hook,
+  disabled = false,
 }: {
   /** The "on"/active state — accent border + accent-bg surface. Default off. */
   on?: boolean;
@@ -67,10 +68,29 @@ export function Chip({
    * chrome, so it is not the `className` escape hatch the epic forbids.
    */
   hook?: string;
+  /**
+   * The control is unavailable (e.g. plan mode when the box has no `plan`
+   * agent). Follows SplitChip's `extraDisabled` recipe: dimmed, no hover,
+   * `cursor-not-allowed`, not clickable. Tone is resolved BEFORE the disabled
+   * check so an on-but-frozen control keeps its accent and dims instead of
+   * flattening to grey and lying about its state.
+   */
+  disabled?: boolean;
 }) {
-  const className = `${hook ? `${hook} ` : ""}${CHIP_SHELL} ${CHIP_PAD} ${on ? CHIP_ON : `${CHIP_REST} ${CHIP_HOVER}`}`;
+  const tone = disabled
+    ? `${on ? CHIP_ON : CHIP_REST} opacity-50 cursor-not-allowed`
+    : on
+      ? CHIP_ON
+      : `${CHIP_REST} ${CHIP_HOVER}`;
+  const className = `${hook ? `${hook} ` : ""}${CHIP_SHELL} ${CHIP_PAD} ${tone}`;
   return (
-    <button type="button" onClick={onClick} title={title} className={className}>
+    <button
+      type="button"
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      title={title}
+      className={className}
+    >
       {children}
     </button>
   );

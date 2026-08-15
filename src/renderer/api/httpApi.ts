@@ -981,8 +981,8 @@ export const httpApi: Api = {
    *   ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
    * We mirror that packing exactly.
    */
-  opencodePrompt: (sessionId, text, model, attachments, mentions) =>
-    rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions }),
+  opencodePrompt: (sessionId, text, model, attachments, mentions, agent) =>
+    rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions, agent }),
 
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
   opencodePermissions: (sessionId) =>

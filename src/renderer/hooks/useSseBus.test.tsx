@@ -753,6 +753,7 @@ describe("useSseBus running settle on turnComplete (BET-692)", () => {
       refetchOwedWhileInactive,
       applyStreamFlush: () => 0,
       providerID: null,
+      setPlanOn: () => {},
       submit: () => {},
       submitRef,
     });

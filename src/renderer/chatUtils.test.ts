@@ -77,6 +77,7 @@ import {
   fastModelId,
   hideFastSiblingGroups,
   resolveFastToggle,
+  resolvePlanToggle,
   selectableModelGroups,
   filterModelGroups,
   moveMenuHighlight,
@@ -130,7 +131,7 @@ import {
   describeProjectClose,
 } from "./chatUtils";
 
-import type { OpencodeModel, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem } from "../shared/types";
 
 
 
@@ -2798,6 +2799,49 @@ describe("fast-mode model helpers", () => {
       available: false,
       on: false,
     });
+  });
+});
+
+// ===== resolvePlanToggle =====
+
+describe("resolvePlanToggle", () => {
+  const A = (name: string, mode?: string): OpencodeAgent =>
+    ({ name, mode } as OpencodeAgent);
+
+  it("null agents → loading, unavailable, carries the requested on state", () => {
+    expect(resolvePlanToggle(null, true)).toMatchObject({
+      available: false,
+      on: true,
+      loading: true,
+    });
+    expect(resolvePlanToggle(null, false).loading).toBe(true);
+  });
+
+  it("no plan agent → unavailable, off", () => {
+    const r = resolvePlanToggle([A("build", "primary"), A("x", "subagent")], false);
+    expect(r).toMatchObject({ available: false, on: false });
+    expect(r.title).toContain("no plan agent");
+  });
+
+  it("no plan agent but on → unavailable but stays lit (honest frozen control)", () => {
+    const r = resolvePlanToggle([A("build", "primary")], true);
+    expect(r).toMatchObject({ available: false, on: true });
+    expect(r.title).toContain("Plan mode on");
+  });
+
+  it("plan agent → available, off, agent resolved", () => {
+    const r = resolvePlanToggle([A("build", "primary"), A("plan", "primary")], false);
+    expect(r).toMatchObject({ available: true, on: false, agent: "plan" });
+  });
+
+  it("plan agent → available, on", () => {
+    const r = resolvePlanToggle([A("plan", "primary")], true);
+    expect(r).toMatchObject({ available: true, on: true, agent: "plan" });
+  });
+
+  it("a plan agent that is a subagent does not count", () => {
+    const r = resolvePlanToggle([A("plan", "subagent")], false);
+    expect(r.available).toBe(false);
   });
 });
 

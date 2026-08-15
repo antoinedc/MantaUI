@@ -186,6 +186,10 @@ export function useSseBus(params: {
   providerID: string | null;
   submit: () => void;
   submitRef: React.RefObject<(textOverride?: string) => void>;
+  // Plan-mode honesty sync (BET-949). Called when opencode reports its own
+  // agent switching (plan_enter/plan_exit tool parts, session.next.agent.
+  // switched) so the composer chip never claims a mode the next turn won't run.
+  setPlanOn: (on: boolean) => void;
 }): SseBus {
   const {
     sessionId,
@@ -203,6 +207,7 @@ export function useSseBus(params: {
     providerID,
     submit,
     submitRef,
+    setPlanOn,
   } = params;
 
   const [running, setRunning] = useState(false);
@@ -231,6 +236,14 @@ export function useSseBus(params: {
   // provider/model mid-session leaves the banner keyed to the old provider.
   const providerIDRef = useRef(providerID);
   providerIDRef.current = providerID;
+  // Ref mirror of setPlanOn so the SSE handler (deps [sessionId]) always syncs
+  // against the CURRENT session's setter, not the one captured at mount.
+  const setPlanOnRef = useRef(setPlanOn);
+  setPlanOnRef.current = setPlanOn;
+  // Re-entrancy guard for the plan_enter/plan_exit tool parts: the same tool
+  // part arrives repeatedly as it streams (like the drain abort), so act once
+  // per callID. Mirrors drainAbortRef's guard pattern.
+  const handledPlanCallIdsRef = useRef<Set<string>>(new Set());
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
   const [compactionState, setCompactionState] = useState<{
     reason: string;
@@ -550,6 +563,27 @@ export function useSseBus(params: {
         }
         // Truncation classification moved to the box → stream.truncation
         // (consumed below); finishByMessageId is stamped there, not here.
+      }
+
+      // Plan-mode honesty (BET-949). opencode's OWN client does the mode switch
+      // locally (`plan_exit` → build, `plan_enter` → plan); there is no
+      // server-side state doing it, so MantaUI must mirror it or the chip
+      // claims plan mode while the next turn runs as build.
+      if (ev.type === "session.next.agent.switched") {
+        setPlanOnRef.current(String(props.agent ?? "") === "plan");
+      }
+      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
+        const part = props.part as {
+          tool?: unknown;
+          callID?: unknown;
+        } | undefined;
+        if (part?.tool === "plan_enter" || part?.tool === "plan_exit") {
+          const callID = String(part.callID ?? "");
+          if (callID && !handledPlanCallIdsRef.current.has(callID)) {
+            handledPlanCallIdsRef.current.add(callID);
+            setPlanOnRef.current(part.tool === "plan_enter");
+          }
+        }
       }
 
       if (ev.type.startsWith("session.next.compaction.")) {

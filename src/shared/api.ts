@@ -352,6 +352,7 @@ export interface Api {
     model?: PromptModel,
     attachments?: PromptAttachment[],
     mentions?: PromptAgentMention[],
+    agent?: string,
   ): Promise<void>;
   opencodeAbort(sessionId: string): Promise<void>;
   // `sessionId` scopes the list to the session's workspace directory —
@@ -578,6 +579,7 @@ export interface Api {
     command: string;
     arguments: string;
     model?: PromptModel;
+    agent?: string;
     attachments?: PromptAttachment[];
   }): Promise<void>;
 

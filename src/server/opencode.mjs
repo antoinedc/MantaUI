@@ -619,9 +619,9 @@ export async function getMessage(sessionId, messageId) {
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
  */
-export async function sendPrompt({ sessionId, text, model, attachments, mentions }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions }) {
   // Scope tools + events to the session's worktree. The matching per-directory
   // subscription in subscribeEvents below ensures the events still reach
   // listeners (the global /event subscription wouldn't see them otherwise).
@@ -650,6 +650,7 @@ export async function sendPrompt({ sessionId, text, model, attachments, mentions
     body.model = { providerID: model.providerID, modelID: model.modelID };
     if (model.variant) body.variant = model.variant;
   }
+  if (agent) body.agent = agent;
 
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
@@ -1715,9 +1716,9 @@ export async function findFiles({ query, directory }) {
  * Invoke a slash command inside a session.
  * model is serialised as "providerID/modelID" string (unlike prompt_async's object).
  *
- * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string } }} opts
+ * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model }) {
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent }) {
   const dirQ = await getSessionDirectoryQuery(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
   const parts = [];
@@ -1736,6 +1737,7 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     body.model = `${model.providerID}/${model.modelID}`;
     if (model.variant) body.variant = model.variant;
   }
+  if (agent) body.agent = agent;
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },

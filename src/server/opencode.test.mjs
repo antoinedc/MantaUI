@@ -275,6 +275,40 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   );
 });
 
+test("sendPrompt includes agent when passed and omits it when not", async () => {
+  // BET-949: the plan-mode chip must drive `agent:"plan"` on the prompt_async
+  // body; an omitted agent keeps today's body byte-identical.
+  _resetSessionDirectoryCache();
+  const bodies = [];
+  await withMockFetch(
+    async (url, opts) => {
+      if (String(url).includes("/ses_a/prompt_async")) {
+        bodies.push(opts.body ? JSON.parse(String(opts.body)) : {});
+        return new Response(null, { status: 204 });
+      }
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(
+          JSON.stringify({ id: "ses_a", title: "t", directory: "/w", projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await sendPrompt({ sessionId: "ses_a", text: "plan it", agent: "plan" });
+      await sendPrompt({ sessionId: "ses_a", text: "build it" });
+    },
+  );
+  assert.ok(
+    bodies.some((b) => b.agent === "plan"),
+    "expected an agent:plan body for the plan-mode prompt",
+  );
+  assert.ok(
+    bodies.some((b) => !("agent" in b)),
+    "expected an agent-less body for the plain prompt",
+  );
+});
+
 test("createSession expands a leading ~ before POSTing (no /home/$USER/~ corruption)", async () => {
   // Regression: resolveProjectCwd (/clear, /fork) returns raw `~/projects/x`.
   // createSession passed it straight to opencode, which resolves the tilde
