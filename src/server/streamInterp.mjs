@@ -234,6 +234,7 @@ export function createStreamInterpreter({
   publish,
   now = () => Date.now(),
   contextLimitFor = () => null,
+  autoPublishPlan = () => {},
 }) {
   const sessions = new Map();
   // The same opencode event is delivered on BOTH the global stream and the
@@ -377,6 +378,11 @@ export function createStreamInterpreter({
           if (callID && !st.handledPlanCallIds.has(callID)) {
             st.handledPlanCallIds.add(callID);
             emit(sid, "planMode", { on: planNext });
+            // A COMPLETED plan_exit (mode off) publishes the plan companion page
+            // automatically — best-effort, fire-and-forget, never-awaited here so
+            // the prompt stream is not blocked. plan_enter never publishes. The
+            // same callID dedup above means one publish per exit.
+            if (planNext === false) void autoPublishPlan({ sessionID: sid, part });
           }
         }
         return;

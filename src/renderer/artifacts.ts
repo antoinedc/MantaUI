@@ -29,6 +29,11 @@ export type Artifact = {
   planStatus?: PlanStatus;
   planStepCount?: number | null;
   planJobSessionId?: string | null; // the job's child session; null until a plan is linked to a job
+  // The hosted companion page URL for this plan, when one is live under the
+  // session's stable `plan-<shortSessionId>` subdomain. Auto-published on
+  // plan_exit (BET-977+); the Plans-row "Open published page" action opens it
+  // directly when present instead of publish-on-click.
+  pageUrl?: string | null;
 };
 
 const URL_RE = /https?:\/\/[^\s<>]+/g;
@@ -204,13 +209,76 @@ function joinHref(cwd: string | null, rel: string): string {
   return cwd.endsWith("/") ? cwd + rel : cwd + "/" + rel;
 }
 
+// Only these tools set a plan path in their input because they AUTHOR the plan
+// file (or confirm it at plan_exit). A `read` tool pointed at a plan path is a
+// reference, not an authoring signal, and must not mint a plan artifact on its
+// own — the write/plan tool (or a prose mention) already does.
+const PLAN_AUTHORING_TOOLS = new Set(["write", "edit", "multiEdit", "patch", "plan", "plan_exit"]);
+
+// Plan paths live in different part shapes depending on how the plan was
+// authored. The classic announcing message mentions the path in PROSE (a text
+// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool,
+// which records the path in `state.input.filePath` (and sometimes
+// `planPath`/`path`) plus a `patch` part listing the file — the path never
+// reaches a text part. Scanning only text parts therefore missed every plan
+// created via the plan tool (BET-975/976 landed plan mode; this restores it).
+// Returns every distinct `.opencode/plans/*.md` reference found across text,
+// plan-authoring tool-input, and patch-file surfaces. Cheap by design: we never
+// scan tool output or file content, only path fields and prose.
+function planRefsFromPart(part: OpencodePart): string[] {
+  const out: string[] = [];
+  const candidates: string[] = [];
+  if (typeof part.text === "string") candidates.push(part.text);
+  const raw = part as Record<string, unknown>;
+  const isTool = raw.type === "tool";
+  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
+    const input = (raw.state as { input?: Record<string, unknown> } | undefined)?.input
+      ?? (raw.input as Record<string, unknown> | undefined);
+    if (input) {
+      for (const key of ["filePath", "path", "planPath"]) {
+        const v = input[key];
+        if (typeof v === "string") candidates.push(v);
+      }
+    }
+  }
+  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
+  for (const c of candidates) {
+    for (const m of c.matchAll(PLAN_REF_RE)) {
+      if (!out.includes(m[0])) out.push(m[0]);
+    }
+  }
+  return out;
+}
+
+// The stable subdomain a session's plan page is published under. MUST mirror
+// `planSubdomain` in src/server/planPage.mjs (PlanShortIdLen = 20) exactly —
+// the renderer uses it to match the served-pages registry to a plan artifact.
+// Deliberately duplicated rather than imported (it is a server module).
+const PLAN_SHORT_ID_LEN = 20;
+export function planSubdomain(sessionID: string | null | undefined): string | null {
+  if (typeof sessionID !== "string" || !sessionID) return null;
+  const slug = sessionID.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, PLAN_SHORT_ID_LEN);
+  if (!slug) return null;
+  return `plan-${slug}`;
+}
+
 function derivePlanArtifact(
   msg: OpencodeMessage,
   path: string,
   cwd: string | null,
+  announceText: string | null = null,
+  pages: ServedPageMeta[] = [],
+  sessionId: string | null = null,
 ): Artifact {
   const rel = path.replace(/^\.\//, "");
   const label = planTitleFromPath(lastPathSegment(rel));
+  // The published companion page, when it is live under this session's stable
+  // plan subdomain AND belongs to this session (the 20-char slug truncates the
+  // session id, so two sessions sharing a long id prefix must not cross-link).
+  const sub = planSubdomain(sessionId);
+  const pageUrl = sub
+    ? (pages.find((p) => p.subdomain === sub && p.sessionID === sessionId)?.url ?? null)
+    : null;
   return {
     id: "plan:" + rel.toLowerCase(),
     kind: "plan",
@@ -225,9 +293,28 @@ function derivePlanArtifact(
     context: null,
     expiresAt: null,
     planStatus: planStatus({}),
-    planStepCount: planStepCount(messageText(msg)),
+    // Step count comes from the markdown where we found the plan: the
+    // message's prose when it announces the plan, else the write/plan tool's
+    // `content` when it authored the file (a tool-only message has no text
+    // part to derive from).
+    planStepCount: planStepCount(announceText ?? messageText(msg)),
     planJobSessionId: null, // set once a plan is linked to its implementing job
+    pageUrl,
   };
+}
+
+// The plan markdown for step-count derivation: the part's own prose, else the
+// tool-input `content` of the write/plan part that authored the file. Returns
+// null when the part carries neither.
+function partAnnounceText(part: OpencodePart): string | null {
+  if (typeof part.text === "string" && part.text.trim()) return part.text;
+  const raw = part as Record<string, unknown>;
+  const input = (raw.state as { input?: Record<string, unknown> } | undefined)?.input
+    ?? (raw.input as Record<string, unknown> | undefined);
+  if (input && typeof input.content === "string" && input.content.trim()) {
+    return input.content;
+  }
+  return null;
 }
 
 function derivePageArtifact(page: ServedPageMeta, matched: OpencodeMessage | null): Artifact {
@@ -313,16 +400,16 @@ export function deriveArtifacts(
     }
   }
 
-  // Plan artifacts: any text part (any role) may reference a plan file. The
-  // `.md` path is never an `https?://` URL and never a `file:` part, so a
-  // plan is never ALSO emitted as a link or a file (no double-counting).
+  // Plan artifacts: any part (text mention, or the write/plan tool + its patch)
+  // may carry a `.opencode/plans/*.md` path. The plan path is never an
+  // `https?://` URL and never a `file:` part, so a plan is never ALSO emitted
+  // as a link or a file (no double-counting).
   const plansByKey = new Map<string, Artifact>();
   for (const msg of messages) {
     for (const part of msg.parts) {
-      if (part.type !== "text") continue;
       if (part.synthetic || part.ignored) continue;
-      for (const m of (part.text ?? "").matchAll(PLAN_REF_RE)) {
-        const a = derivePlanArtifact(msg, m[0], cwd);
+      for (const ref of planRefsFromPart(part)) {
+        const a = derivePlanArtifact(msg, ref, cwd, partAnnounceText(part), pages, sessionId);
         const existing = plansByKey.get(a.key);
         if (!existing || a.at > existing.at) plansByKey.set(a.key, a);
       }
@@ -332,6 +419,11 @@ export function deriveArtifacts(
 
   for (const page of pages) {
     if (page.sessionID !== sessionId) continue;
+    // The auto-published plan page is already represented BY its Plan artifact
+    // (which carries `pageUrl`) — do not ALSO file it under Links. Without this,
+    // every completed plan polluted the Links tab + link-count badge with a
+    // `plan-<slug>` row (the plan-mode write made auto-publish the common path).
+    if (page.subdomain === planSubdomain(sessionId)) continue;
     out.push(derivePageArtifact(page, newestAnnouncingMessage(messages, page.url)));
   }
 

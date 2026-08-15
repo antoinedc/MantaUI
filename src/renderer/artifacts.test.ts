@@ -7,6 +7,7 @@ import {
   countByKind,
   planStepCount,
   planStatus,
+  planSubdomain,
   type Artifact,
 } from "./artifacts";
 
@@ -418,6 +419,101 @@ describe("plan artifacts", () => {
   it("does not create a plan artifact from a plain .md path outside plans/", () => {
     const messages = [msg("a", "assistant", [textPart("wrote ./notes/ideas.md")], 1000)];
     expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);
+  });
+
+  it("derives a plan artifact from a write-tool part carrying the plan filePath (plan-mode flow)", () => {
+    // Plan mode writes the plan with the write tool (no prose mention), so the
+    // path lives in state.input.filePath, not a text part.
+    const messages = [
+      msg("a", "assistant", [
+        {
+          type: "tool",
+          tool: "write",
+          state: {
+            status: "completed",
+            input: {
+              filePath: "/proj/.opencode/plans/2026-08-15-auto-publish.md",
+              content: "# Auto-publish\n## Step one\n## Step two\n",
+            },
+          },
+        },
+      ], 5000),
+    ];
+    const out = deriveArtifacts(messages, [], "ses_a", [], "/proj");
+    expect(out).toHaveLength(1);
+    const plan = out[0];
+    expect(plan.kind).toBe("plan");
+    expect(plan.label).toBe("auto publish");
+    expect(plan.href).toBe("/proj/.opencode/plans/2026-08-15-auto-publish.md");
+    expect(plan.messageId).toBe("a");
+    expect(plan.planStepCount).toBe(2);
+    expect(plan.planStatus).toBe("draft");
+  });
+
+  it("does not emit plan + file artifacts for the same write part (no double-counting)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    const out = deriveArtifacts(messages, [], "ses_a", [], "/proj");
+    expect(out.map((a) => a.kind)).toEqual(["plan"]);
+    expect(out.filter((a) => a.kind === "file")).toHaveLength(0);
+  });
+
+  it("populates pageUrl when a live plan page exists under the session's plan subdomain", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/2026-08-15-x.md" } } },
+      ], 5000),
+    ];
+    const pages = [page({ subdomain: planSubdomain("ses_a")!, url: "https://box/pages/plan-sesa" })];
+    const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
+    expect(out).toHaveLength(1);
+    const plan = out[0];
+    expect(plan.kind).toBe("plan");
+    expect(plan.pageUrl).toBe("https://box/pages/plan-sesa");
+  });
+
+  it("the auto-published plan page is NOT ALSO filed under Links (one artifact, not two)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    const pages = [page({ subdomain: planSubdomain("ses_a")!, url: "https://box/pages/plan-sesa" })];
+    const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
+    expect(out.map((a) => a.kind)).toEqual(["plan"]);
+  });
+
+  it("an unrelated (non-plan) served page still appears as a Link", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "write", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    const pages = [page({ subdomain: "preview", url: "https://box/pages/preview" })];
+    const out = deriveArtifacts(messages, pages, "ses_a", [], "/proj");
+    expect(out.map((a) => a.kind).sort()).toEqual(["link", "plan"]);
+  });
+
+  it("a read tool pointed at a plan path does NOT mint a plan artifact (no authoring signal)", () => {
+    const messages = [
+      msg("a", "assistant", [
+        { type: "tool", tool: "read", state: { status: "completed", input: { filePath: "/proj/.opencode/plans/x.md" } } },
+      ], 5000),
+    ];
+    expect(deriveArtifacts(messages, [], "ses_a", [], "/proj")).toEqual([]);
+  });
+
+  it("leaves pageUrl null when no plan page is live for the session", () => {
+    const messages = [msg("a", "assistant", [textPart(".opencode/plans/2026-08-15-x.md")], 1000)];
+    const out = deriveArtifacts(
+      messages,
+      [page({ subdomain: "unrelated", url: "https://box/pages/unrelated" })],
+      "ses_a",
+    );
+    expect(out[0].pageUrl).toBeNull();
   });
 
   it("no plan refs → panel-equivalent empty list", () => {
