@@ -585,6 +585,26 @@ export function isToolStepBoundary(part: unknown): boolean {
 }
 
 /**
+ * The plan-mode state a tool part asserts, or `null` if it asserts nothing.
+ *
+ * Only a COMPLETED plan_enter/plan_exit counts. An ERRORED one is a switch that
+ * did NOT happen — most importantly the plan card's "Keep planning", which
+ * answers the plan question "No" and so rejects the `plan_exit` tool. Reading
+ * that as an exit dropped the session out of plan mode behind the user's back.
+ * (This is why the drain's `isToolStepBoundary`, which accepts `error` on
+ * purpose, must not be reused here.)
+ */
+export function planModeFromToolPart(part: unknown): boolean | null {
+  if (!part || typeof part !== "object") return null;
+  const p = part as { type?: unknown; tool?: unknown; state?: { status?: unknown } };
+  if (p.type !== "tool") return null;
+  if (p.state?.status !== "completed") return null;
+  if (p.tool === "plan_enter") return true;
+  if (p.tool === "plan_exit") return false;
+  return null;
+}
+
+/**
  * Should a step boundary trigger a drain-abort? True when at least one prompt
  * is queued AND we have not already issued a drain-abort for the current turn
  * (`alreadyDraining` guards re-entrancy against the multiple boundary events
