@@ -227,6 +227,11 @@ export function SessionHeader({
   // BET-724 §D7: the confirm dialogs for Delete/Clear name the session — the
   // window name reads better than the full "project / window" breadcrumb.
   const sessionName = breadcrumb?.window ?? breadcrumb?.project ?? "this session";
+  // BET-968: the single confirm-dialog state. Clear has TWO triggers (the
+  // context pill's stale-cache block and the ⋯ menu) and Delete has one — both
+  // dialogs are hoisted here so SessionMenu stops owning dialog state and the
+  // stale-cache "Clear session" path (previously instant) now confirms.
+  const [confirm, setConfirm] = useState<"clear" | "delete" | null>(null);
 
   // BET-789: the checks chip is the ONE new status item, registered only when
   // there is a PR with checks and a non-empty rollup. No PR / no checks / forge
@@ -327,7 +332,7 @@ export function SessionHeader({
           cacheWrite={cacheWrite}
           modelName={modelName}
           staleCache={staleCache}
-          onClear={onClear}
+          onRequestClear={() => setConfirm("clear")}
         />
       ),
     });
@@ -361,9 +366,8 @@ export function SessionHeader({
           availableLaunchers={availableLaunchers}
           onFork={onFork}
           onCompact={onCompact}
-          onClear={onClear}
-          onDelete={onDelete}
-          sessionName={sessionName}
+          onRequestClear={() => setConfirm("clear")}
+          onRequestDelete={() => setConfirm("delete")}
         />
       ),
     });
@@ -457,6 +461,28 @@ export function SessionHeader({
       {offerConnect && (
         <ConnectOffer onDismiss={onDismissForgeConnect} onConnect={onConnectForge} />
       )}
+      <ConfirmModal
+        open={confirm === "delete"}
+        title="Delete this session?"
+        body={`“${sessionName}” and its tmux window will be killed on the box. This can't be undone.`}
+        confirmLabel="Delete session"
+        onConfirm={() => {
+          setConfirm(null);
+          onDelete();
+        }}
+        onCancel={() => setConfirm(null)}
+      />
+      <ConfirmModal
+        open={confirm === "clear"}
+        title="Clear this conversation?"
+        body="The session keeps running but its context is gone."
+        confirmLabel="Clear"
+        onConfirm={() => {
+          setConfirm(null);
+          onClear();
+        }}
+        onCancel={() => setConfirm(null)}
+      />
     </>
   );
 }
@@ -561,7 +587,7 @@ function ContextPill({
   cacheWrite,
   modelName,
   staleCache,
-  onClear,
+  onRequestClear,
 }: {
   pct: number;
   segments: ContextBreakdown["segments"];
@@ -574,7 +600,7 @@ function ContextPill({
   cacheWrite: number;
   modelName: string | null;
   staleCache: StaleCacheResult;
-  onClear: () => void;
+  onRequestClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -600,7 +626,11 @@ function ContextPill({
         }
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={stale ? "Context stale — click for details" : "Context usage — click for details"}
+        title={
+          stale
+            ? `Cache cold — ${formatTokensCompact(staleCache.staleTokens)} tokens re-billed on your next message. Click for details`
+            : "Context usage — click for details"
+        }
       >
         <Pill tone={stale ? "warn" : "neutral"}>
           {/* Mini segmented bar inside the pill — same segment order/colors as
@@ -616,6 +646,11 @@ function ContextPill({
           >
             {pct}%
           </span>
+          {stale && (
+            <span className="tabular-nums font-mono font-semibold">
+              {formatTokensCompact(staleCache.staleTokens)} cold
+            </span>
+          )}
         </Pill>
       </button>
 
@@ -702,7 +737,7 @@ function ContextPill({
                   block
                   onClick={() => {
                     setOpen(false);
-                    onClear();
+                    onRequestClear();
                   }}
                 >
                   Clear session
@@ -765,27 +800,18 @@ function SessionMenu({
   availableLaunchers,
   onFork,
   onCompact,
-  onClear,
-  onDelete,
-  sessionName,
+  onRequestClear,
+  onRequestDelete,
 }: {
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
   availableLaunchers?: AvailableLauncher[];
   onFork: () => void;
   onCompact: () => void;
-  onClear: () => void;
-  onDelete: () => void;
-  // BET-724 §D7: names the session in the Delete confirm's body copy.
-  sessionName: string;
+  onRequestClear: () => void;
+  onRequestDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  // BET-724 §D7: Delete/Clear from this menu now confirm first, matching the
-  // sidebar's inline delete confirm — previously both fired instantly.
-  const [confirm, setConfirm] = useState<"delete" | "clear" | null>(null);
-  // The trigger button is the anchor (positioning + Escape focus-restoration).
-  // The menu surface itself is portalled to <body> by Popover, so keyboard
-  // roving rests on a ref to that portalled surface, not the trigger.
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -975,38 +1001,16 @@ function SessionMenu({
         {item(
           <Eraser size={14} aria-hidden="true" />,
           "Clear session",
-          () => setConfirm("clear"),
+          onRequestClear,
         )}
         <div className="my-1 border-t border-border-subtle" role="separator" />
         {item(
           <Trash2 size={14} aria-hidden="true" />,
           "Delete session",
-          () => setConfirm("delete"),
+          onRequestDelete,
           true,
         )}
       </Dropdown>
-      <ConfirmModal
-        open={confirm === "delete"}
-        title="Delete this session?"
-        body={`“${sessionName}” and its tmux window will be killed on the box. This can't be undone.`}
-        confirmLabel="Delete session"
-        onConfirm={() => {
-          setConfirm(null);
-          onDelete();
-        }}
-        onCancel={() => setConfirm(null)}
-      />
-      <ConfirmModal
-        open={confirm === "clear"}
-        title="Clear this conversation?"
-        body="The session keeps running but its context is gone."
-        confirmLabel="Clear"
-        onConfirm={() => {
-          setConfirm(null);
-          onClear();
-        }}
-        onCancel={() => setConfirm(null)}
-      />
     </>
   );
 }
