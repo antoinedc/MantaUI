@@ -10,6 +10,7 @@ import {
   resolveConfig,
   parsePort,
   checkIdentity,
+  findMissingDependencies,
   waitForHealth,
   readBoxIdentity,
   formatPairingOutput,
@@ -48,6 +49,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // duplication gate over its token threshold.
 const scriptFile = (...parts) => readFileSync(join(__dirname, ...parts), "utf-8");
 const INSTALL_SH = join(__dirname, "install.sh");
+const LIB_MJS = join(__dirname, "install-lib.mjs");
+// warn()/die() write to stderr, and runAndCapture only keeps stderr on a
+// non-zero exit — merge so a WARNING is assertable on the success path too.
+const STDERR_TO_STDOUT = "exec 2>&1";
 
 // A canonical 32-lowercase-hex token — mirrors the test constants in
 // src/main/auth.test.ts and src/shared/transport.test.ts so the install
@@ -1406,6 +1411,21 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   }
 });
 
+// Scan install.sh's non-comment lines for a forbidden pattern, returning
+// "line N: <text>" for each offender. Three static guards below share this:
+// they differ only in the regex and the failure message, and inlining the
+// scan in each is what tipped the duplication gate over its token threshold.
+function scanInstallSh(pattern) {
+  const lines = readFileSync(INSTALL_SH, "utf-8").split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    if (pattern.test(line)) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  return offenders;
+}
+
 test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-319 regression)", () => {
   // install.sh runs under `set -euo pipefail`. The first BET-319 iteration
   // referenced $MANTA_CLAUDE_AUTH_PLUGIN directly inside `[ -n "$VAR" ]`,
@@ -1416,18 +1436,10 @@ test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-3
   // static guard pins the fix: every NON-COMMENT reference to the var must
   // use the `${VAR:-}` default-expansion form (or be inside a branch that is
   // only reached after a `:-` guard already proved it set).
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"`
-    // (no `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
-    // We detect a bare expansion as `$VAR` NOT immediately followed by `{`.
-    const bare = /\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"` (no
+  // `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
+  // A bare expansion is `$VAR` NOT immediately followed by `{`.
+  const offenders = scanInstallSh(/\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/);
   assert.deepEqual(
     offenders,
     [],
@@ -1445,15 +1457,7 @@ test("install.sh guards every OPENCODE_CLAUDE_AUTH_PLUGIN use against set -u (BE
   // unset var is a hard abort mid-install — the same class of failure
   // BET-319 fixed for the override. This static guard pins the fix: every
   // non-comment reference must use the `${VAR:-}` default-expansion form.
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    const bare = /\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  const offenders = scanInstallSh(/\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/);
   assert.deepEqual(
     offenders,
     [],
@@ -1473,18 +1477,10 @@ test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319
   // We flag any non-comment line where `$IDENT` (not `${IDENT}`) is
   // immediately followed by `…` — i.e. a bare expansion abutting the
   // ellipsis with no brace or other delimiter between them.
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
-    // underscore) and the `$` is NOT immediately followed by `{`. The `…`
-    // must directly follow the identifier with no intervening delimiter.
-    const bare = /\$([A-Za-z_][A-Za-z0-9_]*)…/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
+  // underscore) and the `$` is NOT immediately followed by `{`. The `…` must
+  // directly follow the identifier with no intervening delimiter.
+  const offenders = scanInstallSh(/\$([A-Za-z_][A-Za-z0-9_]*)…/);
   assert.deepEqual(
     offenders,
     [],
@@ -5572,4 +5568,196 @@ test("BET-446: seeding still merges the plugin when OPENCODE_CLAUDE_AUTH_PLUGIN 
   assert.match(out, /opencode\.jsonc seeded\./, `must print the success line:\n${out}`);
   assert.ok(config !== null, "the merged opencode.jsonc must be written");
   assert.match(config, /opencode-claude-auth@latest/, "the plugin must still be seeded into the config");
+});
+
+// ----------------------------------------------------------------------------
+// BET-978 — a clean install must run the release's OWN source, not main's.
+// ----------------------------------------------------------------------------
+//
+// The failure this locks out: install.sh extracts a pinned release tarball
+// (the only source of node_modules — the box never builds dependencies) and
+// then re-materialises the source tree from git. Resetting that tree to
+// origin/main paired TODAY's source with the LAST RELEASE's dependencies, so
+// every package added since the last publish was missing. The server exited on
+// an unresolved import before binding, and the installer could only report
+// "server did not become healthy". It broke EVERY clean install on prod and
+// staging between a dependency-adding merge and the next release.
+
+test("BET-978: findMissingDependencies names the packages a release is short of", () => {
+  const pkg = JSON.stringify({
+    dependencies: { unified: "^11", "rehype-stringify": "^10", ws: "^8" },
+    devDependencies: { vitest: "^2" },
+  });
+  const present = new Set(["node_modules/unified/package.json", "node_modules/ws/package.json"]);
+  const missing = findMissingDependencies(pkg, { exists: (p) => present.has(p) });
+  assert.deepEqual(missing, ["rehype-stringify"], "only the absent runtime dependency");
+
+  // devDependencies are never checked — the tarball is built --omit=dev.
+  const allPresent = findMissingDependencies(pkg, {
+    exists: (p) => !p.includes("vitest"),
+  });
+  assert.deepEqual(allPresent, []);
+
+  // Nothing to say about an unreadable or dependency-less package.json.
+  assert.deepEqual(findMissingDependencies("not json", { exists: () => false }), []);
+  assert.deepEqual(findMissingDependencies("{}", { exists: () => false }), []);
+});
+
+// The behavioural half: run the REAL deploy_git_checkout() out of the REAL
+// install.sh against a throwaway git repo, so a regression in the shipped
+// script is what goes red — not a copy of its logic living in the test.
+//
+// Layout mirrors a freshly extracted tarball: $MANTA_HOME holds RELEASE.json
+// and no .git/. `origin` is a local repo with two commits — the "release" one
+// and a later "main" one carrying a file the release doesn't have (standing in
+// for a dependency-adding merge).
+function runDeployGitCheckout({ releaseJson, deployRef = "", node = process.execPath }) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-deploy-"));
+  const origin = join(dir, "origin");
+  const home = join(dir, "manta");
+  mkdirSync(origin, { recursive: true });
+  mkdirSync(home, { recursive: true });
+  const git = (args, cwd) =>
+    execSync(`git ${args}`, {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
+        GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+      },
+    });
+  git("init -q -b main .", origin);
+  writeFileSync(join(origin, "marker.txt"), "release-source\n");
+  git("add -A", origin);
+  git('commit -qm "release commit"', origin);
+  const releaseSha = git("rev-parse HEAD", origin).trim();
+  writeFileSync(join(origin, "marker.txt"), "main-source\n");
+  git("add -A", origin);
+  git('commit -qm "later main commit"', origin);
+  const mainSha = git("rev-parse HEAD", origin).trim();
+
+  if (releaseJson !== null) {
+    writeFileSync(
+      join(home, "RELEASE.json"),
+      typeof releaseJson === "function" ? releaseJson(releaseSha) : releaseJson,
+    );
+  }
+
+  try {
+    const out = runBootstrap({
+      preBody: `${STDERR_TO_STDOUT}\n${deployRef ? `export MANTA_DEPLOY_REF='${deployRef}'` : ""}`,
+      func: `deploy_git_checkout '${home}' '${origin}' '${node}' '${LIB_MJS}'
+echo "HEAD=$(git -C '${home}' rev-parse HEAD)"
+echo "MARKER=$(cat '${home}/marker.txt')"`,
+    });
+    return { out, releaseSha, mainSha };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("BET-978: a clean install checks out the RELEASE's commit, not main's", () => {
+  const { out, releaseSha, mainSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+  });
+  assert.match(out, new RegExp(`HEAD=${releaseSha}`), `must land on the release commit:\n${out}`);
+  assert.match(out, /MARKER=release-source/, `working tree must be the release's source:\n${out}`);
+  assert.doesNotMatch(out, new RegExp(`HEAD=${mainSha}`), "must NOT land on main");
+});
+
+test("BET-978: a release with no commit stamp still falls back to main", () => {
+  // Pre-stamp tarballs, or one packed outside a git checkout — never worse
+  // than the old behaviour.
+  for (const releaseJson of [
+    null,                                                     // no RELEASE.json at all
+    "not json",                                               // unparseable
+    JSON.stringify({ version: "0.0.29" }),                    // packed before the stamp
+    JSON.stringify({ version: "0.0.29", git_sha: null }),
+    JSON.stringify({ version: "0.0.29", git_sha: "" }),
+    JSON.stringify({ version: "0.0.29", git_sha: "d3cb8ac" }), // short — never written by the packer
+    JSON.stringify({ version: "0.0.29", git_sha: "Z".repeat(40) }), // not hex
+  ]) {
+    const { out, mainSha } = runDeployGitCheckout({ releaseJson });
+    assert.match(out, new RegExp(`HEAD=${mainSha}`), `must fall back to main:\n${out}`);
+    assert.match(out, /MARKER=main-source/, `${out}`);
+  }
+});
+
+test("BET-978: an unfetchable release commit warns and falls back rather than dying", () => {
+  const { out, mainSha } = runDeployGitCheckout({
+    releaseJson: JSON.stringify({ version: "9.9.9", git_sha: "a".repeat(40) }),
+  });
+  assert.match(out, /is not fetchable — falling back to origin\/main/, `must say why:\n${out}`);
+  assert.match(out, new RegExp(`HEAD=${mainSha}`), `a checkout at main beats no checkout:\n${out}`);
+});
+
+// The dependency preflight, run for real out of the shipped script.
+function runCheckReleaseDependencies({ pkgJson, present = [] }) {
+  const dir = mkdtempSync(join(tmpdir(), "manta-deps-"));
+  const home = join(dir, "manta");
+  mkdirSync(join(home, "node_modules"), { recursive: true });
+  writeFileSync(join(home, "package.json"), pkgJson);
+  for (const name of present) {
+    mkdirSync(join(home, "node_modules", name), { recursive: true });
+    writeFileSync(join(home, "node_modules", name, "package.json"), "{}");
+  }
+  try {
+    return runBootstrap({
+      preBody: STDERR_TO_STDOUT,
+      func: `check_release_dependencies '${home}' '${process.execPath}' '${LIB_MJS}'`,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("BET-978: the installer names the missing packages instead of timing out on health", () => {
+  const out = runCheckReleaseDependencies({
+    pkgJson: JSON.stringify({
+      dependencies: { ws: "^8", "rehype-stringify": "^10", "highlight.js": "^11" },
+    }),
+    present: ["ws"],
+  });
+  assert.match(out, /this release is inconsistent/, `must state the real cause:\n${out}`);
+  assert.match(out, /rehype-stringify/, "must name the missing package");
+  assert.match(out, /highlight\.js/, "must name every missing package");
+  assert.doesNotMatch(out, /BOOTSTRAP_EXIT=0/, "must abort the install, not continue to a doomed start");
+});
+
+test("BET-978: the preflight is silent when the release is consistent", () => {
+  const out = runCheckReleaseDependencies({
+    pkgJson: JSON.stringify({ dependencies: { ws: "^8" }, devDependencies: { vitest: "^2" } }),
+    present: ["ws"],
+  });
+  assert.match(out, /BOOTSTRAP_EXIT=0/, `a consistent release must pass:\n${out}`);
+  assert.doesNotMatch(out, /inconsistent/, `${out}`);
+});
+
+test("BET-978: MANTA_DEPLOY_REF overrides the pin, so a branch can be deployed on purpose", () => {
+  // The escape hatch the macOS install smoke uses: install the last published
+  // tarball but deploy THIS branch's source, so a PR's server/plist changes
+  // are what gets exercised. Without it, pinning would silently make that
+  // workflow test main instead of the PR.
+  const { out, releaseSha, mainSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+    deployRef: "origin/main",
+  });
+  assert.match(out, /pinned by MANTA_DEPLOY_REF/, `must say the override won:\n${out}`);
+  assert.match(out, new RegExp(`HEAD=${mainSha}`), `override beats the release stamp:\n${out}`);
+  assert.doesNotMatch(out, new RegExp(`HEAD=${releaseSha}`), "must not use the release commit");
+});
+
+test("BET-978: the release stamp is read without install-lib, which ships in the OLDER tarball", () => {
+  // install.sh is served fresh from the website; install-lib.mjs comes from the
+  // extracted tarball and cannot know a subcommand added after it was packed.
+  // Reading the stamp through the lib made the pin silently unavailable on
+  // exactly the installs that need it (the macOS smoke fell back to
+  // origin/main against the 0.0.30 lib). Passing a node binary that fails on
+  // sight proves the decision no longer depends on it.
+  const { out, releaseSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+    node: "/nonexistent/node",
+  });
+  assert.match(out, new RegExp(`HEAD=${releaseSha}`), `must still pin without a working lib:\n${out}`);
 });

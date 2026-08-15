@@ -175,6 +175,46 @@ export function checkIdentity(cfg, { exists = existsSync } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency preflight — catch a source/dependency mismatch before boot
+// ---------------------------------------------------------------------------
+
+/**
+ * List the runtime dependencies declared in package.json that are NOT present
+ * in node_modules.
+ *
+ * The backstop to install.sh's release-commit pin: pinning the checkout makes
+ * the common
+ * mismatch unreachable, but a box can still end up with a tree the tarball's
+ * dependencies don't satisfy (a fork via MANTA_REPO_URL, a hand-run `git
+ * pull`, a half-extracted tarball). When that happens the failure surfaces as
+ * a module-not-found crash inside a supervised service — the installer sees
+ * only "server did not become healthy", and the operator gets pointed at
+ * `systemctl status` to discover a missing package. Naming the packages at
+ * install time turns a 60-attempt timeout into one actionable line.
+ *
+ * Injectable `exists` for tests. Scoped shrewdly: `dependencies` only, never
+ * devDependencies (the tarball is built --omit=dev on purpose).
+ */
+export function findMissingDependencies(
+  pkgJsonText,
+  { modulesDir = "node_modules", exists = existsSync, join: joinPath = join } = {},
+) {
+  let parsed;
+  try {
+    parsed = JSON.parse(pkgJsonText ?? "");
+  } catch {
+    // An unreadable package.json is a different (louder) problem, and guessing
+    // at a dependency list from it would be worse than saying nothing.
+    return [];
+  }
+  const deps = parsed?.dependencies;
+  if (!deps || typeof deps !== "object") return [];
+  return Object.keys(deps)
+    .filter((name) => !exists(joinPath(modulesDir, name, "package.json")))
+    .sort();
+}
+
+// ---------------------------------------------------------------------------
 // Health-wait poller
 // ---------------------------------------------------------------------------
 
@@ -1315,6 +1355,21 @@ async function cliMain(argv) {
     process.stderr.write(reason + "\n");
     return 0;
   }
+  if (cmd === "check-deps") {
+    // node install-lib.mjs check-deps --home <MANTA_HOME>
+    // Prints one missing dependency name per line; exit 0 either way. The
+    // caller decides how loud to be — this command only reports.
+    const home = flags.home || resolveConfig().mantaHome || ".";
+    let pkg = "";
+    try {
+      pkg = readFileSync(join(home, "package.json"), "utf-8");
+    } catch {
+      pkg = "";
+    }
+    const missing = findMissingDependencies(pkg, { modulesDir: join(home, "node_modules") });
+    if (missing.length) process.stdout.write(missing.join("\n") + "\n");
+    return 0;
+  }
   if (cmd === "merge-opencode-config") {
     // Read raw text from stdin, write the merged text to stdout, and the
     // `corrupt` flag to stderr (so install.sh can branch on it for the
@@ -1698,6 +1753,7 @@ function parseFlags(args) {
     "cli-codex",
     "cli-kimi",
     "connected",
+    "home",
   ]);
   for (let i = 0; i < args.length; i++) {
     const tok = args[i];
