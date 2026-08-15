@@ -14,7 +14,7 @@ import { mount, type Harness } from "./testHarness";
 import { Button } from "./Button";
 
 const CHROME =
-  "inline-flex items-center gap-[6px] h-8 px-[14px] rounded-md border text-[12.5px] font-medium leading-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed";
+  "inline-flex items-center h-8 rounded-md border text-[12.5px] font-medium leading-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed gap-[6px] px-[14px]";
 
 const TONE = {
   default: "border-border bg-bg text-text hover:bg-raised hover:border-border-strong",

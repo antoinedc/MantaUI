@@ -29,13 +29,15 @@
 // than as a `w-full` at the call site precisely because that would be the
 // className escape hatch by another name.
 
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 
-const BUTTON_BASE =
-  "inline-flex items-center gap-[6px] h-8 px-[14px] rounded-md border " +
+const BUTTON_CHROME =
+  "inline-flex items-center h-8 rounded-md border " +
   "text-[12.5px] font-medium leading-none transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
   "disabled:opacity-50 disabled:cursor-not-allowed";
+const BUTTON_PAD = "gap-[6px] px-[14px]";
+const BUTTON_BASE = `${BUTTON_CHROME} ${BUTTON_PAD}`;
 
 const BUTTON_TONE = {
   default: "border-border bg-bg text-text hover:bg-raised hover:border-border-strong",
@@ -90,5 +92,103 @@ export function Button({
     >
       {children}
     </button>
+  );
+}
+
+// M527.SplitButton — a two-segment ACTION with Button chrome (BET-951 follow-up).
+//
+// Same relationship to `Button` that `SplitChip` has to `Chip`: one shell, two
+// segments, a `border-l` divider, and the split rule from BET-634 — the shell
+// border is left alone on hover and the HOVERED SEGMENT fills
+// (`hover:bg-fill-hover`), so you can tell which half you are about to click.
+//
+// It exists because a split control in a row of `Button`s must be a `Button`:
+// `SplitChip` is 29px/regular-weight and reads as a status readout beside
+// 32px/medium actions. There is deliberately NO `tone` prop — the split form is
+// only ever the default tone (a primary split would put two accent surfaces in
+// one control), and no `extra` third segment (that is the composer's ⚡ toggle,
+// which is a Chip concern).
+const SPLIT_BUTTON_TONE = "border-border bg-bg text-text";
+
+export function SplitButton({
+  left,
+  right,
+  onLeftClick,
+  onRightClick,
+  rightAccent = false,
+  leftTitle,
+  rightTitle,
+  leftHook,
+  rightHook,
+  rightExpanded,
+  rightBtnRef,
+  disabled = false,
+  loading = false,
+}: {
+  /** Left-segment content — the action label. */
+  left: ReactNode;
+  /** Right-segment content — what the action will run against (e.g. a model). */
+  right: ReactNode;
+  onLeftClick: () => void;
+  onRightClick: () => void;
+  /** Accent the right segment (`--accent-tx`). Colour only — never weight. */
+  rightAccent?: boolean;
+  leftTitle?: string;
+  rightTitle?: string;
+  /** Stable `manta-*` identity class for the LEFT segment button. */
+  leftHook?: string;
+  /**
+   * Stable `manta-*` identity class for the RIGHT segment button. The right
+   * segment always carries `aria-haspopup="listbox"`, so the popup coverage
+   * registry keys on THIS hook, not on the shell.
+   */
+  rightHook?: string;
+  /** `aria-expanded` for the right segment — whether its listbox is open. */
+  rightExpanded?: boolean;
+  /** Forwarded to the RIGHT segment button (the dropdown's anchor). */
+  rightBtnRef?: RefObject<HTMLButtonElement>;
+  /** Both segments become native-`disabled` (dimmed, not clickable). */
+  disabled?: boolean;
+  /**
+   * The control is still resolving what it describes (e.g. the model catalog
+   * has not loaded). Presentational only, mirroring SplitChip.loading: both
+   * segments drop their hover affordance and the shell reports `aria-busy`.
+   */
+  loading?: boolean;
+}) {
+  const inert = disabled || loading;
+  const segBase = `inline-flex items-center ${BUTTON_PAD} h-full transition-colors`;
+  const hover = inert ? "" : " hover:bg-fill-hover";
+  const leftClass = `${leftHook ? `${leftHook} ` : ""}${segBase}${hover}`;
+  const rightClass =
+    `${rightHook ? `${rightHook} ` : ""}${segBase} border-l border-border${hover}` +
+    (rightAccent && !inert ? " text-accent-tx" : "");
+  return (
+    <div
+      className={`${BUTTON_CHROME} p-0 overflow-hidden ${SPLIT_BUTTON_TONE}`}
+      aria-busy={loading || undefined}
+    >
+      <button
+        type="button"
+        onClick={onLeftClick}
+        disabled={disabled}
+        title={leftTitle}
+        className={leftClass}
+      >
+        {left}
+      </button>
+      <button
+        ref={rightBtnRef}
+        type="button"
+        onClick={onRightClick}
+        disabled={disabled}
+        title={rightTitle}
+        aria-haspopup="listbox"
+        aria-expanded={rightExpanded}
+        className={rightClass}
+      >
+        {right}
+      </button>
+    </div>
   );
 }
