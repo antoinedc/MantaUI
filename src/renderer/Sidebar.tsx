@@ -105,11 +105,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     pushAppToast({ tone: "info", message: msg });
   };
 
-  // When a new-session DRAFT is the foreground view, no real session should
-  // read as "active" in the rail — the draft row is the highlighted one
-  // (e.g. creating a session over a chat must not leave the old chat lit up).
-  const draftForeground = activeDraftId != null;
-
   const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
 
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<ConfirmDeleteFor>(null);
@@ -648,49 +643,26 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         onKeyDown={onRailKeyDown}
       >
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
-        {/* New-session drafts (BET draft model): in-memory composers for
-            sessions that don't exist yet. Shown at the TOP of the rail, not
-            nested under any project — a draft is a bare "new session" until it
-            commits. Clicking one makes it the active view (renders the
-            composer); the X abandons it (dismisses, prompt not yet sent). */}
-        {drafts.length > 0 && (
+        {/* New-session drafts whose mode is "new-project" live directly beneath
+            the New workspace row that created them — they belong to no project.
+            Project-scoped drafts ({ projectName }) render inside their project's
+            window list below instead (see the projects.map below). A draft is a
+            bare "new session" until it commits; clicking one makes it the active
+            view (renders the composer); the X abandons it (dismisses, prompt not
+            yet sent). */}
+        {drafts.filter((d) => d.mode === "new-project").length > 0 && (
           <div className="mb-3 space-y-px">
-            {drafts.map((d) => {
-              const isActive = activeDraftId === d.id;
-              const target =
-                d.mode === "new-project"
-                  ? "will create a new project"
-                  : `will open in "${d.mode.projectName}"`;
-              const hint = d.input.trim()
-                ? `"${d.input.trim().slice(0, 40)}" · ${target}`
-                : target;
-              return (
-                <RailSessionRow
+            {drafts
+              .filter((d) => d.mode === "new-project")
+              .map((d) => (
+                <DraftRow
                   key={d.id}
-                  // A draft is never running/blocking — the at-rest "default"
-                  // dot keeps the row chrome identical to a resting session.
-                  status="default"
-                  selected={isActive}
-                  name={<span className="italic">new session</span>}
-                  title={`New session — ${hint}`}
-                  ariaSelected={isActive}
-                  onClick={() => setActiveDraft(d.id)}
-                  trailing={
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        dismissDraft(d.id);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
-                      aria-label="Discard this new session"
-                      title="Discard this new session"
-                    >
-                      <X size={13} aria-hidden="true" />
-                    </button>
-                  }
+                  draft={d}
+                  isActive={activeDraftId === d.id}
+                  onActivate={() => setActiveDraft(d.id)}
+                  onDismiss={() => dismissDraft(d.id)}
                 />
-              );
-            })}
+              ))}
           </div>
         )}
 
@@ -713,7 +685,6 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   project={r.project}
                   window={r.window}
                   isActive={
-                    !draftForeground &&
                     activeProjectName === r.project.tmuxSession &&
                     activeWindowByProject[r.project.tmuxSession] === r.window.index
                   }
@@ -756,7 +727,14 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         {projects.map((p) => {
           const isCollapsed = collapsed.has(p.tmuxSession);
           const activeWinIdx = activeWindowByProject[p.tmuxSession];
-          const isProjectActive = !draftForeground && activeProjectName === p.tmuxSession;
+          const isProjectActive = activeProjectName === p.tmuxSession;
+          // Project-scoped drafts render as the LAST child of this project's
+          // window list, and replace its "New session" create row (never stack
+          // with it). A project may hold more than one draft; render them all
+          // and still suppress the create row.
+          const projectDrafts = drafts.filter(
+            (d) => d.mode !== "new-project" && d.mode.projectName === p.tmuxSession,
+          );
           const n = nesting.get(p.tmuxSession)!;
           const topWindows = p.windows.filter(
             (w) =>
@@ -853,11 +831,23 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                     );
                   })}
 
-                  <RailCreateRow
-                    label="New session"
-                    shortcut={`${MOD_KEY}T`}
-                    onClick={() => onNewSessionInProject(p.tmuxSession)}
-                  />
+                  {projectDrafts.length > 0 ? (
+                    projectDrafts.map((d) => (
+                      <DraftRow
+                        key={d.id}
+                        draft={d}
+                        isActive={activeDraftId === d.id}
+                        onActivate={() => setActiveDraft(d.id)}
+                        onDismiss={() => dismissDraft(d.id)}
+                      />
+                    ))
+                  ) : (
+                    <RailCreateRow
+                      label="New session"
+                      shortcut={`${MOD_KEY}T`}
+                      onClick={() => onNewSessionInProject(p.tmuxSession)}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -1304,6 +1294,56 @@ function RailCreateRow({
         {shortcut}
       </span>
     </button>
+  );
+}
+
+// A rail row for an in-memory new-session DRAFT. One component reused at both
+// nest sites: at the top of the rail for a new-project draft (directly beneath
+// "New workspace"), and as the last row of a project's window list for a
+// project-scoped draft (where it replaces the "New session" create row). It is
+// a RailSessionRow with an italic name and a trailing dismiss ✕.
+function DraftRow({
+  draft,
+  isActive,
+  onActivate,
+  onDismiss,
+}: {
+  draft: NewSessionDraft;
+  isActive: boolean;
+  onActivate: () => void;
+  onDismiss: () => void;
+}) {
+  const target =
+    draft.mode === "new-project"
+      ? "will create a new project"
+      : `will open in "${draft.mode.projectName}"`;
+  const hint = draft.input.trim()
+    ? `"${draft.input.trim().slice(0, 40)}" · ${target}`
+    : target;
+  return (
+    <RailSessionRow
+      // A draft is never running/blocking — the at-rest "default" dot keeps
+      // the row chrome identical to a resting session.
+      status="default"
+      selected={isActive}
+      name={<span className="italic">new session</span>}
+      title={`New session — ${hint}`}
+      ariaSelected={isActive}
+      onClick={onActivate}
+      trailing={
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss();
+          }}
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-text-faint hover:text-danger leading-none inline-flex items-center"
+          aria-label="Discard this new session"
+          title="Discard this new session"
+        >
+          <X size={13} aria-hidden="true" />
+        </button>
+      }
+    />
   );
 }
 
