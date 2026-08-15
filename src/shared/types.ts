@@ -137,6 +137,11 @@ export type AppConfig = {
   // Rides the generic configGet/configUpdate channel like every other
   // AppConfig field.
   forgeConnectOfferDismissed?: boolean;
+  // BET-942: set by Settings → Forge → Disconnect. While true the box's forge
+  // credential ladder resolves nothing, even if the gh CLI / env var / stored
+  // secret would match. Cleared by a successful device sign-in. Rides the
+  // generic configGet/configUpdate channel like the field above.
+  forgeDisconnected?: boolean;
   // Global default model for all new and cleared chat sessions. Stored as
   // { providerID, modelID } so the per-session localStorage override and
   // this setting use the same shape. When absent, opencode picks its own

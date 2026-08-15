@@ -35,6 +35,7 @@
 import { randomBytes } from "node:crypto";
 import { runLoginShell } from "../launchers.mjs";
 import { resolveSecret, loadSecrets, setSecret } from "../secrets.mjs";
+import { configGet, configUpdate } from "../local.mjs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -187,14 +188,26 @@ function storedToken(host, loadSecretsFn) {
  * `invalidateToken` clears a host's entry for the rotation case.
  *
  * @param {string} host
- * @param {{ shell?: (cmd: string) => Promise<{stdout: string}>, loadSecretsFn?: () => unknown, env?: NodeJS.ProcessEnv, now?: () => number }} [opts]
+ * @param {{ shell?: (cmd: string) => Promise<{stdout: string}>, loadSecretsFn?: () => unknown, env?: NodeJS.ProcessEnv, now?: () => number, getConfig?: () => Promise<{ forgeDisconnected?: boolean }> }} [opts]
  * @returns {Promise<{ token: string, source: "env" | "cli" | "stored" } | null>}
  */
 export async function resolveToken(
   host,
-  { shell = runLoginShell, loadSecretsFn = loadSecrets, env = process.env, now = Date.now, readFile, home } = {},
+  { shell = runLoginShell, loadSecretsFn = loadSecrets, env = process.env, now = Date.now, readFile, home, getConfig = configGet } = {},
 ) {
   if (typeof host !== "string" || !host) return null;
+
+  // BET-942: an explicit Disconnect opt-out short-circuits the whole ladder
+  // before the cache and before any rung — even if the env var / gh CLI /
+  // stored secret would match. The read is best-effort: an unreadable config
+  // is treated as NOT disconnected, so a corrupt config can't lock the user
+  // out of their own forge.
+  try {
+    const cfg = await getConfig();
+    if (cfg?.forgeDisconnected === true) return null;
+  } catch {
+    /* unreadable config → not disconnected */
+  }
 
   const hit = CACHE.get(host);
   if (hit && now() - hit.at < TTL_MS) {
@@ -257,6 +270,15 @@ export async function rotateOauthPair(refresh, persistPair) {
  */
 export function invalidateToken(host) {
   CACHE.delete(host);
+}
+
+/**
+ * Clear the persisted disconnect opt-out (a successful sign-in reconnects).
+ * Rides the same box config writer every config field uses.
+ * @param {{ update?: (patch: object) => Promise<unknown> }} [opts]
+ */
+export async function clearDisconnect({ update = configUpdate } = {}) {
+  await update({ forgeDisconnected: false });
 }
 
 // ===========================================================================
@@ -419,12 +441,12 @@ export function cancelDeviceGrant(grantId) {
  * when it's absent/invalid); `expired_token` throws ExpiredCodeError ([E2]).
  *
  * @param {string} grantId
- * @param {{ clientId?: string, fetch?: typeof fetch, now?: () => number, storeToken?: (token: string) => Promise<{ ok: boolean, error?: string }> }} [opts]
+ * @param {{ clientId?: string, fetch?: typeof fetch, now?: () => number, storeToken?: (token: string) => Promise<{ ok: boolean, error?: string }>, clearDisconnect?: () => Promise<unknown> }} [opts]
  * @returns {Promise<{ status: "pending" | "done", pollInterval?: number }>}
  */
 export async function pollDeviceGrant(
   grantId,
-  { clientId = DEVICE_CLIENT_ID, fetch: fetchFn = globalThis.fetch, now = Date.now, storeToken = defaultStoreToken } = {},
+  { clientId = DEVICE_CLIENT_ID, fetch: fetchFn = globalThis.fetch, now = Date.now, storeToken = defaultStoreToken, clearDisconnect: clearDisconnectFn = clearDisconnect } = {},
 ) {
   const grant = ACTIVE_GRANTS.get(grantId);
   if (!grant) {
@@ -468,6 +490,7 @@ export async function pollDeviceGrant(
   const stored = await storeToken(raw.access_token);
   if (!stored.ok) throw new Error(stored.error || "couldn't store the token");
   ACTIVE_GRANTS.delete(grantId);
+  await clearDisconnectFn();
   invalidateToken(GITHUB_CLI_HOST);
   return { status: "done" };
 }
