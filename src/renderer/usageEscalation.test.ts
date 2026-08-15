@@ -4,11 +4,10 @@ import {
   buildUsageLevels,
   shouldFireUsageAlert,
   shouldWarnStaleCache,
-  formatResetClock,
-  describeResetDistance,
   buildWarnMessage,
   buildLimitMessage,
 } from "./usageEscalation";
+import { formatResetDistance } from "./chatUtils";
 import type { UsageSnapshot } from "../shared/types";
 
 function snap(
@@ -216,50 +215,25 @@ describe("shouldWarnStaleCache", () => {
   });
 });
 
-describe("formatResetClock", () => {
-  it("renders 12-hour time, optionally with a weekday", () => {
-    // 2026-08-18 09:00 local → "Tue 9:00 am" / "9:00 am"
-    const d = new Date(2026, 7, 18, 9, 0).getTime();
-    expect(formatResetClock(d, true)).toBe("Tue 9:00 am");
-    expect(formatResetClock(d, false)).toBe("9:00 am");
-  });
-
-  it("renders afternoon times with pm and no leading zero on the hour", () => {
-    const d = new Date(2026, 7, 18, 15, 5).getTime();
-    expect(formatResetClock(d, false)).toBe("3:05 pm");
-  });
-
-  it("returns '' for a missing or invalid timestamp", () => {
-    expect(formatResetClock(undefined, false)).toBe("");
-    expect(formatResetClock(null, true)).toBe("");
-    expect(formatResetClock(Number.NaN, false)).toBe("");
-  });
-});
-
 describe("message builders", () => {
-  it("buildWarnMessage matches the spec copy", () => {
-    expect(buildWarnMessage("Claude", "Session (5h)", 93, RESET)).toBe(
-      "Claude Session (5h) 93% used — resets " + formatResetClock(RESET, false) + ".",
-    );
+  // 2026-08-18 06:00 local — same calendar day as RESET, three hours earlier,
+  // so formatWindowReset yields a pure relative distance ("resets in 3h").
+  const NOW = new Date(2026, 7, 18, 6, 0, 0).getTime();
+
+  it("buildWarnMessage carries the formatWindowReset distance (shape, not a literal clock)", () => {
+    const msg = buildWarnMessage("Claude", "Session (5h)", 93, RESET, NOW);
+    expect(msg).toMatch(/^Claude Session \(5h\) 93% used — resets in /);
+    expect(msg).toContain(formatResetDistance(RESET - NOW));
   });
 
-  it("buildLimitMessage matches the spec copy (weekday form)", () => {
-    expect(buildLimitMessage("Claude", "Weekly", RESET)).toBe(
-      "Weekly limit reached on Claude — resets " + formatResetClock(RESET, true) + ".",
-    );
+  it("buildLimitMessage carries the formatWindowReset distance (shape, not a literal clock)", () => {
+    const msg = buildLimitMessage("Claude", "Weekly", RESET, NOW);
+    expect(msg).toMatch(/^Weekly limit reached on Claude — resets in /);
+    expect(msg).toContain(formatResetDistance(RESET - NOW));
   });
 
   it("message builders omit the resets clause when resetsAt is missing", () => {
-    expect(buildWarnMessage("Claude", "Session (5h)", 93, undefined)).toBe("Claude Session (5h) 93% used.");
-    expect(buildLimitMessage("Claude", "Weekly", undefined)).toBe("Weekly limit reached on Claude.");
-  });
-});
-
-describe("describeResetDistance", () => {
-  it("uses the coarsest whole unit", () => {
-    expect(describeResetDistance(4 * 86_400_000)).toBe("4 days");
-    expect(describeResetDistance(2 * 3_600_000)).toBe("2 hours");
-    expect(describeResetDistance(45 * 60_000)).toBe("45 minutes");
-    expect(describeResetDistance(30_000)).toBe("less than a minute");
+    expect(buildWarnMessage("Claude", "Session (5h)", 93, undefined, NOW)).toBe("Claude Session (5h) 93% used.");
+    expect(buildLimitMessage("Claude", "Weekly", undefined, NOW)).toBe("Weekly limit reached on Claude.");
   });
 });

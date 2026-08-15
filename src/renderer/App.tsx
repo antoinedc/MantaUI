@@ -24,7 +24,7 @@ import {
   resolveLauncherFlags,
 } from "./chatShared";
 import type { SyncPayload } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, formatResetAt, formatResetDistance, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -40,8 +40,6 @@ import {
   buildLimitMessage,
   buildUsageLevels,
   buildWarnMessage,
-  describeResetDistance,
-  formatResetClock,
   shouldFireUsageAlert,
   shouldWarnStaleCache,
   type UsageAlertLevel,
@@ -684,7 +682,7 @@ function Shell() {
     pushAppToastStore(
       res.ok && res.job
         ? {
-            message: toastLine(Send, `“Keep going” will be sent ${formatResetClock(fireAt, true)}.`),
+            message: toastLine(Send, `“Keep going” will be sent ${formatResetAt(fireAt, Date.now())}.`),
             actions: [
               {
                 label: "Undo",
@@ -721,7 +719,7 @@ function Shell() {
           pushAppToastStore({
             id: toastId,
             tone: "error",
-            message: buildLimitMessage(label, windowLabel, resetsAt),
+            message: buildLimitMessage(label, windowLabel, resetsAt, Date.now()),
             actions: hasActions
               ? [
                   {
@@ -740,7 +738,7 @@ function Shell() {
                         if (res.ok && res.job) {
                           const jobId = res.job.id;
                           pushAppToastStore({
-                            message: toastLine(Bell, `Reminder set for ${formatResetClock(fireAt, true)}.`),
+                            message: toastLine(Bell, `Reminder set for ${formatResetAt(fireAt, Date.now())}.`),
                             actions: [
                               {
                                 label: "Undo",
@@ -776,7 +774,7 @@ function Shell() {
           });
         } else {
           pushAppToastStore({
-            message: buildWarnMessage(label, windowLabel, alert.window.pct, resetsAt),
+            message: buildWarnMessage(label, windowLabel, alert.window.pct, resetsAt, Date.now()),
           });
         }
       }
@@ -1795,12 +1793,12 @@ function Shell() {
           confirmTone="primary"
           body={
             <>
-              At {formatResetClock(keepGoing.fireAt, true)} MantaUI will send “Keep going” to this
+              At {formatResetAt(keepGoing.fireAt, Date.now())} MantaUI will send “Keep going” to this
               session on your behalf and the agent will resume unattended. You can cancel it any
               time from ⏰ scheduled tasks.
               {shouldWarnStaleCache(keepGoing.fireAt, Date.now(), cacheTtl) && (
                 <Callout tone="warn">
-                  The reset is {describeResetDistance(keepGoing.fireAt - Date.now())} away — well past
+                  The reset is {formatResetDistance(keepGoing.fireAt - Date.now())} away — well past
                   your {cacheTtl === "5m" ? "5 minute" : "1 hour"} prompt-cache window. The whole
                   conversation will be re-sent and re-billed as fresh input, which costs significantly
                   more than a reply now.
