@@ -2110,7 +2110,9 @@ export function resolvePlanToggle(
   on: boolean,
 ): PlanToggleState {
   if (!agents) return { available: false, on, loading: true, title: "Loading agents…" };
-  const plan = agents.find((a) => a.name === "plan" && a.mode !== "subagent");
+  const plan = ["manta-plan", "plan"]
+    .map((name) => agents.find((a) => a.name === name && a.mode !== "subagent"))
+    .find((a) => !!a);
   if (!plan)
     return on
       ? { available: false, on: true, title: "Plan mode on (plan agent unavailable)" }

@@ -2854,6 +2854,45 @@ describe("resolvePlanToggle", () => {
   });
 });
 
+describe("resolvePlanToggle — agent preference", () => {
+  const A = (name: string, mode?: string): OpencodeAgent =>
+    ({ name, mode } as OpencodeAgent);
+
+  it("both plan and manta-plan present → prefers manta-plan", () => {
+    const r = resolvePlanToggle(
+      [A("plan", "primary"), A("manta-plan", "primary")],
+      false,
+    );
+    expect(r.agent).toBe("manta-plan");
+  });
+
+  it("only plan present → falls back to plan", () => {
+    const r = resolvePlanToggle([A("plan", "primary")], false);
+    expect(r.agent).toBe("plan");
+  });
+
+  it("only manta-plan present → selects manta-plan", () => {
+    const r = resolvePlanToggle([A("manta-plan", "primary")], false);
+    expect(r.agent).toBe("manta-plan");
+  });
+
+  it("neither present / only subagents → unavailable", () => {
+    const r = resolvePlanToggle(
+      [A("build", "primary"), A("manta-plan", "subagent")],
+      false,
+    );
+    expect(r.available).toBe(false);
+  });
+
+  it("a manta-plan subagent is not picked; primary plan is preferred", () => {
+    const r = resolvePlanToggle(
+      [A("plan", "primary"), A("manta-plan", "subagent")],
+      false,
+    );
+    expect(r.agent).toBe("plan");
+  });
+});
+
 // ===== selectableModelGroups =====
 
 describe("selectableModelGroups", () => {
