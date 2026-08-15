@@ -3422,7 +3422,7 @@ echo "HELPER_CONTENT=$([ -f "$SUDO_ASKPASS" ] && cat "$SUDO_ASKPASS" || echo mis
 `,
     });
     assert.match(out, /ASKPASS=.*\/askpass\.sh/);
-    assert.match(out, /HELPER_CONTENT=.*\.manta-sudo-pass/);
+    assert.match(out, /HELPER_CONTENT=[\s\S]*\.manta-sudo-pass/);
     // The helper must be executable (sudo execs it).
     assert.match(out, /ASKPASS=.+/);
   } finally {

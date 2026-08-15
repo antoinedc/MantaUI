@@ -350,7 +350,7 @@ export function registerInstallerHandlers(
       const password = await awaitSecret(
         handleId,
         "sudo-password",
-        `Administrator password needed on ${sshLabel(alias)}`,
+        `Administrator password needed on ${sshTargetLabel(alias)}`,
         send,
       );
       if (password === null) {
