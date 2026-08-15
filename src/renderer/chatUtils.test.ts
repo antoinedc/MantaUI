@@ -3541,11 +3541,15 @@ describe("formatWindowReset", () => {
     expect(result).toMatch(/^resets in 13h 0m \(\d{2}:\d{2}\)$/);
   });
 
-  it("returns null for a missing or past timestamp", () => {
+  it("returns null for a missing or non-finite timestamp", () => {
     expect(formatWindowReset(null, 0)).toBeNull();
     expect(formatWindowReset(undefined, 0)).toBeNull();
-    expect(formatWindowReset(-1, 0)).toBeNull();
     expect(formatWindowReset(NaN, 0)).toBeNull();
+  });
+
+  it("returns 'resetting…' once the reset instant has passed", () => {
+    expect(formatWindowReset(-1, 0)).toBe("resetting…");
+    expect(formatWindowReset(0, 0)).toBe("resetting…");
   });
 });
 

@@ -13,13 +13,16 @@ import type { UsageSnapshot } from "../shared/types";
 
 function snap(
   provider: string,
-  windows: Array<{ kind: string; label: string; pct: number; resetsAt?: number }>,
+  windows: Array<{ kind: string; label: string; pct: number; resetsAt?: number; stale?: boolean }>,
 ): UsageSnapshot {
   return {
     provider,
     providerIDs: [provider],
     fetchedAt: 0,
-    windows: windows.map((w) => ({ kind: w.kind, label: w.label, pct: w.pct, resetsAt: w.resetsAt })),
+    windows: windows.map((w) => {
+      const base = { kind: w.kind, label: w.label, pct: w.pct, resetsAt: w.resetsAt };
+      return w.stale ? { ...base, stale: true } : base;
+    }),
   };
 }
 
@@ -56,6 +59,16 @@ describe("buildUsageLevels", () => {
     expect(buildUsageLevels(null)).toEqual({});
     expect(buildUsageLevels(undefined)).toEqual({});
     expect(buildUsageLevels([])).toEqual({});
+  });
+
+  it("carries a stale window's previous level forward and does not read its pct", () => {
+    const prev = { "claude:session": "limit" as const };
+    const staleLow = [snap("claude", [{ kind: "session", label: "S", pct: 0, stale: true }])];
+    const levels = buildUsageLevels(staleLow, prev);
+    expect(levels["claude:session"]).toBe("limit");
+    // A fresh window still reads its pct — the stale carry is not a blanket hold.
+    const freshLow = [snap("claude", [{ kind: "session", label: "S", pct: 0 }])];
+    expect(buildUsageLevels(freshLow, prev)["claude:session"]).toBe("none");
   });
 });
 
@@ -133,6 +146,36 @@ describe("shouldFireUsageAlert — fire-once semantics", () => {
     const fired = shouldFireUsageAlert(prev, weeklyUp);
     expect(fired).toHaveLength(1);
     expect(fired[0].key).toBe("claude:weekly");
+  });
+
+  it("fires nothing for a stale window even at 100%", () => {
+    const prev = buildUsageLevels([snap("claude", [{ kind: "session", label: "S", pct: 40 }])]);
+    const stale = [snap("claude", [{ kind: "session", label: "S", pct: 100, stale: true }])];
+    expect(shouldFireUsageAlert(prev, stale)).toHaveLength(0);
+  });
+
+  it("never fires or re-arms across a stale boundary (100 → stale 100 → 0 → 100)", () => {
+    let prev: Record<string, ReturnType<typeof usageAlertLevel>> = {};
+    const atLimit = [snap("claude", [{ kind: "session", label: "S", pct: 100 }])];
+
+    let fired = shouldFireUsageAlert(prev, atLimit);
+    expect(fired).toHaveLength(1);
+    expect(fired[0].level).toBe("limit");
+    prev = buildUsageLevels(atLimit, prev); // { "claude:session": "limit" }
+
+    const stale = [snap("claude", [{ kind: "session", label: "S", pct: 100, stale: true }])];
+    expect(shouldFireUsageAlert(prev, stale)).toHaveLength(0);
+    prev = buildUsageLevels(stale, prev);
+    expect(prev["claude:session"]).toBe("limit");
+
+    const reset = [snap("claude", [{ kind: "session", label: "S", pct: 0 }])];
+    expect(shouldFireUsageAlert(prev, reset)).toHaveLength(0);
+    prev = buildUsageLevels(reset, prev);
+    expect(prev["claude:session"]).toBe("none");
+
+    fired = shouldFireUsageAlert(prev, atLimit);
+    expect(fired).toHaveLength(1);
+    expect(fired[0].level).toBe("limit");
   });
 
   it("tracks two providers independently", () => {
