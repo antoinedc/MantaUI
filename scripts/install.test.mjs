@@ -1609,7 +1609,7 @@ echo "ID=[\$id] RC=\$rc"
 });
 
 test("install.sh waits for the box id before rendering the Caddy vhost (first-run regression)", () => {
-  // Static-layout guard: the value handed to `render-caddy-vhost --box-id`
+  // Static-layout guard: the value handed to the gateway + `render-caddy-vhost`
   // must come from the POLLING read, not the one-shot one. A regression here
   // is invisible on a re-install (auth.json already exists) and only bites the
   // very first run on a fresh box — exactly the case nobody re-tests.
@@ -1619,11 +1619,13 @@ test("install.sh waits for the box id before rendering the Caddy vhost (first-ru
     /BOX_ID_FOR_GATEWAY="\$\(wait_for_box_id /,
     "BOX_ID_FOR_GATEWAY must be populated by wait_for_box_id (bounded poll), not a single read",
   );
-  // And the renderer must never be reachable with an empty id.
+  // The renderer must never be reachable with an empty id. Under BET-980 the
+  // no-box-id case is now FATAL on the public path (the old degrade-to-skip
+  // guard was deleted), so assert that instead of a silent-skip branch.
   assert.match(
     src,
-    /\[ -z "\$\{BOX_ID_FOR_GATEWAY:-\}" \]/,
-    "step 7.5.E must skip the Caddy vhost write when no box_id is available",
+    /no box_id in \$MANTA_AUTH_FILE after waiting — cannot register the gateway/,
+    "a missing box id on the public path must be fatal (die), not a silent skip",
   );
 });
 
@@ -3125,299 +3127,185 @@ async function runDetectDistro(osReleaseContent) {
 }
 
 // ----------------------------------------------------------------------------
-// install.sh — privileged-section gates (BET-205 reviewer guidance §3 + §4).
+// install.sh — BET-980 capability preflight (all-or-nothing ingress).
 // ----------------------------------------------------------------------------
 //
-// Step 7.5 ("PRIVILEGED SECTION") is gated on:
-//   (a) distro in {debian, ubuntu, ID_LIKE=debian} (or DRY_RUN)
-//   (b) `sudo` installed (or DRY_RUN)
-//   (c) `sudo -n true` succeeds (passwordless sudo)
-// We can't run the install body end-to-end in a unit test (it would
-// touch the network + apt + systemd), so these tests source install.sh
-// in REAL mode + override `main` with a stub that runs ONLY the
-// privileged-section gate logic, asserting on the gate's verdicts.
+// The PUBLIC ingress path is all-or-nothing: it needs a Debian/Ubuntu-family
+// distro AND the ability to run commands as root. The gate lives in the
+// top-level `public_ingress_preflight` helper in install.sh and is exercised
+// here via runBootstrap — install.sh is sourced in test mode, so the helper
+// (which uses the always-defined `die`) is directly callable. Passing the
+// resolved inputs (path mode, root-usable, distro-supported/id) as arguments
+// keeps the decision + messages unit-testable without touching the machine.
 //
-// The gate logic itself lives at the top of step 7.5 — we replicate it
-// inline here so the test is independent of the install body. If the
-// install.sh gate diverges from this test, both will need updating.
+// The tailscale and macOS paths never need root or a specific distro, so the
+// gate returns 0 for them even when root is unavailable.
 
-test("install.sh privileged section: distro not Debian/Ubuntu → SKIP (issue §4)", () => {
-  // A non-Debian distro (here: fedora) must trigger the gate's skip
-  // branch. We stub `main` to a script that ONLY runs the gate and
-  // records the gate's verdict + the warning text the install would
-  // print.
-  const out = runMain({
+test("BET-980 preflight: public path + unsupported distro → fatal (die)", () => {
+  const out = runBootstrap({
     preBody: `
-PRIVILEGED_SECTION_SKIP=0
-DRY_RUN=0
-# Mock \`node\` to a script that emits a non-Debian JSON status.
-NODE() {
-  printf '{"id":"fedora","idLike":"rhel fedora","debianLike":false,"supported":false,"reason":"distro fedora is not in the v1 supported list (debian, ubuntu, or ID_LIKE=debian)"}\\n'
-}
-export -f NODE
-# Stub the JSON parsing inner-loop too: we skip the complex printf |
-# node -e pipe by using a tiny inline awk-like extractor.
-_parse() { printf '%s' "$1" | grep -q '"supported":true' && echo yes || echo no; }
-DISTRO_STATUS="$(NODE 2>/dev/null)"
-DISTRO_SUPPORTED="$(_parse "$DISTRO_STATUS")"
-DISTRO_ID="$(printf '%s' "$DISTRO_STATUS" | sed -n 's/.*"id":"\\([^"]*\\).*/\\1/p')"
-if [ "$DISTRO_SUPPORTED" = "no" ]; then
-  echo "GATE_VERDICT=skip-distro"
-  echo "GATE_REASON=$DISTRO_ID"
-  PRIVILEGED_SECTION_SKIP=1
-else
-  echo "GATE_VERDICT=run"
-fi
-echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+public_ingress_preflight public 1 no fedora
+echo "SHOULD_NOT_REACH=yes"
 `,
   });
-  assert.match(out, /GATE_VERDICT=skip-distro/);
-  assert.match(out, /GATE_REASON=fedora/);
-  assert.match(out, /FINAL_SKIP=1/);
+  // die() exits 1; the tail message must be the "Nothing has been installed."
+  // distro wording.
+  assert.match(out, /Cannot complete the install: distro fedora is not in the v1 supported list/);
+  assert.match(out, /Nothing has been installed\./);
+  assert.match(out, /bring your own proxy/);
+  assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
 });
 
-test("install.sh privileged section: sudo missing → SKIP (issue §3)", () => {
-  // When \`sudo\` is not on PATH (e.g. minimal container, custom VPS),
-  // the gate must bail with a clear bring-your-own-proxy hint rather
-  // than half-installing. We mock \`command\` to hide \`sudo\` and
-  // \`node\` (which only runs the distro check first).
-  const out = runMain({
-    stubs: `
-# Hide sudo from \`command -v\`.
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 1; fi
-  builtin command "$@"
-}
-export -f command
-`,
+test("BET-980 preflight: public path + no root → fatal (die) and names all three alternatives", () => {
+  const out = runBootstrap({
     preBody: `
-PRIVILEGED_SECTION_SKIP=0
-DRY_RUN=0
-# Pretend distro check passed (ubuntu), so the gate proceeds to the sudo check.
-NODE() { printf '{"id":"ubuntu","idLike":"debian","debianLike":true,"supported":true,"reason":"supported Debian/Ubuntu family"}\\n'; }
-export -f NODE
-# (The distro check would set PRIVILEGED_SECTION_SKIP=0; we simulate that.)
-if ! command -v sudo >/dev/null 2>&1; then
-  echo "GATE_VERDICT=skip-no-sudo"
-  PRIVILEGED_SECTION_SKIP=1
-fi
-echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+public_ingress_preflight public 0 yes ubuntu
+echo "SHOULD_NOT_REACH=yes"
 `,
   });
-  assert.match(out, /GATE_VERDICT=skip-no-sudo/);
-  assert.match(out, /FINAL_SKIP=1/);
+  assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
+  assert.match(out, /Nothing has been installed\./);
+  // All three recovery alternatives must be named (D3).
+  assert.match(out, /Install as root/);
+  assert.match(out, /ssh root@/);
+  assert.match(out, /Use Tailscale/);
+  assert.match(out, /sudo tailscale up/);
+  assert.match(out, /Grant this user sudo access/);
+  assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
 });
 
-test("install.sh privileged section: sudo -n true fails → SKIP (issue §3)", () => {
-  // sudo IS installed but \`sudo -n true\` exits non-zero (no
-  // passwordless rule for the current user). The gate must bail
-  // cleanly without half-installing.
-  const out = runMain({
-    stubs: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 0; fi
-  builtin command "$@"
-}
-sudo() {
-  # Pretend every sudo invocation fails (interactive password prompt).
-  return 1
-}
-export -f command sudo
-`,
+test("BET-980 preflight: tailscale path + no root → NOT fatal (gate passes)", () => {
+  const out = runBootstrap({
     preBody: `
-PRIVILEGED_SECTION_SKIP=0
-DRY_RUN=0
-# Pretend distro check passed.
-NODE() { printf '{"id":"ubuntu","idLike":"debian","debianLike":true,"supported":true,"reason":"supported Debian/Ubuntu family"}\\n'; }
-export -f NODE
-if ! sudo -n true 2>/dev/null; then
-  echo "GATE_VERDICT=skip-no-passwordless-sudo"
-  PRIVILEGED_SECTION_SKIP=1
-fi
-echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+public_ingress_preflight tailscale 0 no unknown
+echo "REACHED=yes"
 `,
   });
-  assert.match(out, /GATE_VERDICT=skip-no-passwordless-sudo/);
-  assert.match(out, /FINAL_SKIP=1/);
+  assert.match(out, /REACHED=yes/);
+  // No die message: the install must be able to proceed without root.
+  assert.doesNotMatch(out, /✗ Cannot complete the install/);
 });
 
-test("install.sh privileged section: DRY_RUN=1 skips the gates (always shows the plan)", () => {
-  // --dry-run must show every step's `[dry-run] would …` line, regardless
-  // of distro / sudo. We mock both \`command -v sudo\` (returns 1) and
-  // \`node\` (returns a non-Debian distro) and assert the gate is
-  // BYPASSED (i.e. PRIVILEGED_SECTION_SKIP stays 0).
-  const out = runMain({
-    stubs: `
-command() {
-  if [ "$1" = "-v" ] && [ "$2" = "sudo" ]; then return 1; fi
-  builtin command "$@"
-}
-export -f command
-`,
+test("BET-980 preflight: macOS path + no root → NOT fatal (gate passes)", () => {
+  const out = runBootstrap({
     preBody: `
-DRY_RUN=1
-PRIVILEGED_SECTION_SKIP=0
-# In dry-run mode the gate block is wrapped in \`if [ "$DRY_RUN" != "1" ]\`,
-# so the gate's commands don't run. Simulate by just asserting the
-# branch behavior directly.
-if [ "$DRY_RUN" != "1" ]; then
-  echo "GATE_BRANCH=running"
-else
-  echo "GATE_BRANCH=skipped-in-dry-run"
-  PRIVILEGED_SECTION_SKIP=0
-fi
-echo "FINAL_SKIP=$PRIVILEGED_SECTION_SKIP"
+public_ingress_preflight macos 0 no unknown
+echo "REACHED=yes"
 `,
   });
-  assert.match(out, /GATE_BRANCH=skipped-in-dry-run/);
-  assert.match(out, /FINAL_SKIP=0/);
+  assert.match(out, /REACHED=yes/);
+  assert.doesNotMatch(out, /✗ Cannot complete the install/);
+});
+
+test("BET-980: resolve_ingress_mode honors MANTA_INGRESS — public forces public even with Tailscale up", () => {
+  // The reviewer Block: the preflight used to classify the path by raw
+  // Tailscale detection, ignoring the MANTA_INGRESS override. A box forced to
+  // MANTA_INGRESS=public while Tailscale is also running was misclassified as
+  // the (ungated) tailscale path, bypassing the D1 gate. Now the shared
+  // resolve_ingress_mode mocks a running Tailscale and asserts the override
+  // wins.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }   # Tailscale IS up
+MANTA_INGRESS=public
+resolve_ingress_mode node lib
+echo "MODE=$INGRESS_MODE IP=$TAILNET_IP"
+`,
+  });
+  assert.match(out, /MODE=public/);
+  assert.doesNotMatch(out, /IP=100/, "MANTA_INGRESS=public must not pick up the running Tailscale IP");
+});
+
+test("BET-980: MANTA_INGRESS=public + Tailscale up + no root → D1 gate fires (fatal)", () => {
+  // Regression for the reviewer Block: the preflight must classify a
+  // MANTA_INGRESS=public box as the public path even when Tailscale is
+  // running, so "public + no root → fatal before the first mutation" is not
+  // bypassed into a half-installed state.
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=public
+resolve_ingress_mode node lib
+_PRE_INGRESS="public"; [ "$INGRESS_MODE" = "tailscale" ] && _PRE_INGRESS="tailscale"
+public_ingress_preflight "$_PRE_INGRESS" 0 yes ubuntu
+echo "SHOULD_NOT_REACH=yes"
+`,
+  });
+  assert.match(out, /Cannot complete the install: giving this box a public HTTPS address/);
+  assert.match(out, /Nothing has been installed\./);
+  assert.doesNotMatch(out, /SHOULD_NOT_REACH=yes/);
+});
+
+test("BET-980: MANTA_INGRESS=auto + Tailscale up + no root → NOT fatal (tailnet path is ungated)", () => {
+  const out = runBootstrap({
+    preBody: `
+detect_tailscale_ip() { printf '%s' '100.64.1.5'; }
+MANTA_INGRESS=auto
+resolve_ingress_mode node lib
+_PRE_INGRESS="public"; [ "$INGRESS_MODE" = "tailscale" ] && _PRE_INGRESS="tailscale"
+public_ingress_preflight "$_PRE_INGRESS" 0 yes ubuntu
+echo "REACHED=yes"
+`,
+  });
+  assert.match(out, /REACHED=yes/);
+  assert.doesNotMatch(out, /✗ Cannot complete the install/);
+});
+
+test("BET-980: PRIVILEGED_SECTION_SKIP no longer appears in install.sh (degrade path cannot creep back)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.equal(
+    src.split("PRIVILEGED_SECTION_SKIP").length - 1,
+    0,
+    "the degraded-success flag and its guard sites must be fully removed from install.sh",
+  );
+});
+
+test("BET-980: the public-path outcome failures are fatal (die), not warn-and-continue", () => {
+  // D4 + the all-or-nothing rule: DNS timeout, Caddy vhost write failure, and
+  // the Caddy reload all DIE on the public path — the CADDY_E_SKIP /
+  // DNS_TIMED_OUT warn-and-continue machinery is gone. Static guard so the
+  // degraded-success shape can't silently return.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /CADDY_E_SKIP/);
+  assert.doesNotMatch(src, /DNS_TIMED_OUT/);
+  assert.match(src, /wait-for-dns[\s\S]*?\|\| die/);
+  assert.match(src, /reload caddy[\s\S]*?\|\| die/);
+  assert.match(src, /install_root_file[\s\S]*?\|\| die/);
+});
+
+test("BET-980: the gateway fatality is gated on SKIP_PUBLIC_TLS, not INGRESS_MODE (macOS/tailscale stay warn)", () => {
+  // The gateway-register B/C block runs on ALL ingress paths (the APNs token
+  // is needed on every path). Its fatal branch must key off SKIP_PUBLIC_TLS —
+  // NOT `INGRESS_MODE == public`. On a macOS box INGRESS_MODE is "public"
+  // (no tailscale up) even though SKIP_PUBLIC_TLS=1, so keying on INGRESS_MODE
+  // wrongly turned a stubbed gateway failure into a fatal on macOS and broke
+  // the macos-install-smoke CI. Regression guard: the no-box-id and
+  // register-POST die branches both gate on SKIP_PUBLIC_TLS.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.doesNotMatch(src, /\$INGRESS_MODE" = "public"/, "gateway fatality must not key on INGRESS_MODE");
+  assert.match(
+    src,
+    /\[ -z "\$BOX_ID_FOR_GATEWAY" \][\s\S]*?\[ "\$DRY_RUN" != "1" \] && \[ "\$SKIP_PUBLIC_TLS" != "1" \]/,
+    "no-box-id fatality must be gated on SKIP_PUBLIC_TLS (public path only)",
+  );
+  assert.match(
+    src,
+    /if \[ "\$SKIP_PUBLIC_TLS" != "1" \]; then\n[ \t]+die "gateway registration POST failed/,
+    "gateway register-POST fatality must be gated on SKIP_PUBLIC_TLS (public path only)",
+  );
 });
 
 // ----------------------------------------------------------------------------
-// install.sh — step 7.5.E mid-way sudo failure (Block 1 follow-up).
+// install.sh — step 7.5.E all-or-nothing (BET-980, supersedes BET-205 §3/§4).
 // ----------------------------------------------------------------------------
 //
-// The reviewer found that step 7.5.E's privileged calls (sudo -n tee /
-// sudo -n mv / sudo -n bash / sudo -n systemctl reload) all `die()` on
-// failure, which breaks the bring-your-own-proxy path (Block 1 of the
-// review). The follow-up replaced those die calls with a CADDY_E_SKIP
-// flag that warns + skips the rest of 7.5.E so the install reaches the
-// pair-code print (step 8) regardless of mid-way sudo failures.
-//
-// These tests replicate the step 7.5.E control flow inline (we can't run
-// the install body end-to-end without root). They assert that:
-//   (a) When sudo -n tee to /etc/caddy/Caddyfile.d/manta.caddy fails,
-//       CADDY_E_SKIP=1 is set (no die).
-//   (b) When CADDY_E_SKIP=1, the systemctl reload sub-task is skipped
-//       (the port-check that used to run here was deleted in BET-442).
-//   (c) The install proceeds to the pair-code step (step 8) regardless.
-
-test("install.sh step 7.5.E: sudo -n tee fails → CADDY_E_SKIP=1 (no die, continue to step 8)", () => {
-  // Mirror the install.sh step 7.5.E control flow exactly. We replace
-  // `sudo -n tee` with a failing stub and verify the install reaches
-  // the pair-code step. We use a temp dir for CADDY_DIR_D so the test
-  // works without root (real install paths use /etc/caddy/Caddyfile.d
-  // but the control flow is identical).
-  const out = runMain({
-    stubs: `
-# Allow sudo -n true to pass the upfront gate.
-sudo() {
-  if [ "$1" = "-n" ] && [ "$2" = "true" ]; then return 0; fi
-  return 1
-}
-export -f sudo
-# Create a temp CADDY_DIR_D the test owns.
-CADDY_DIR_D="$(mktemp -d)/Caddyfile.d"
-mkdir -p "$CADDY_DIR_D"
-export CADDY_DIR_D
-`,
-    preBody: `
-PRIVILEGED_SECTION_SKIP=0
-BOX_ID_FOR_GATEWAY="0123456789abcdef0123456789abcdef"
-CADDY_E_SKIP=0
-# Note: CADDY_DIR_D is exported by the stubs section above.
-if [ -d "$CADDY_DIR_D" ]; then
-  if ! NODE=true sudo -n tee "$CADDY_DIR_D/manta.caddy" >/dev/null; then
-    echo "STEP_RESULT=warn-and-skip"
-    CADDY_E_SKIP=1
-  else
-    echo "STEP_RESULT=ok"
-  fi
-else
-  echo "STEP_RESULT=conf.d-missing"
-fi
-echo "FINAL_CADDY_E_SKIP=$CADDY_E_SKIP"
-echo "STEP_8_REACHED=yes"
-`,
-  });
-  assert.match(out, /STEP_RESULT=warn-and-skip/);
-  assert.match(out, /FINAL_CADDY_E_SKIP=1/);
-  assert.match(out, /STEP_8_REACHED=yes/);
-});
-
-test("install.sh step 7.5.E: conf.d missing + sudo bash append fails → CADDY_E_SKIP=1", () => {
-  // Companion test: when /etc/caddy/Caddyfile.d doesn't exist (the
-  // "conf.d missing" branch on a non-standard Caddy install), and the
-  // inline-mode `sudo -n bash` append fails, the install must still
-  // skip the rest of step 7.5.E (not die) and reach step 8. We use
-  // a temp dir to avoid touching /etc/caddy (root required).
-  const out = runMain({
-    stubs: `
-sudo() {
-  if [ "$1" = "-n" ] && [ "$2" = "true" ]; then return 0; fi
-  return 1
-}
-export -f sudo
-CADDY_DIR_D="$(mktemp -d)/Caddyfile.d"
-CADDY_DIR_PARENT="$(mktemp -d)"
-CADDYFILE="$CADDY_DIR_PARENT/Caddyfile"
-export CADDY_DIR_D CADDYFILE
-`,
-    preBody: `
-PRIVILEGED_SECTION_SKIP=0
-BOX_ID_FOR_GATEWAY="0123456789abcdef0123456789abcdef"
-CADDY_E_SKIP=0
-if [ -d "$CADDY_DIR_D" ]; then
-  echo "STEP_RESULT=conf.d-exists"
-else
-  # Inline branch: append a marker-bracketed block to the main Caddyfile.
-  if [ -f "$CADDYFILE" ] && grep -q '^# >>> manta >>>' "$CADDYFILE"; then
-    echo "STEP_RESULT=replace-block"
-  elif [ -f "$CADDYFILE" ]; then
-    if ! sudo -n bash -c "echo hello" -- "$CADDYFILE" >/dev/null 2>&1; then
-      echo "STEP_RESULT=append-failed"
-      CADDY_E_SKIP=1
-    fi
-  else
-    echo "STEP_RESULT=create-new"
-  fi
-fi
-echo "FINAL_CADDY_E_SKIP=$CADDY_E_SKIP"
-echo "STEP_8_REACHED=yes"
-`,
-  });
-  // We don't pin STEP_RESULT (the test env may or may not have the
-  // Caddyfile pre-existing) — we DO pin that the install reaches step
-  // 8 without dying, which is the core contract.
-  assert.match(out, /STEP_8_REACHED=yes/);
-});
-
-test("install.sh step 7.5.E: CADDY_E_SKIP=1 skips the systemctl reload sub-task", () => {
-  // Once CADDY_E_SKIP=1 is set, step 7.5.E must NOT run the sudo -n
-  // systemctl reload caddy call. The port-check that used to run here was
-  // deleted (BET-442) — only the reload remains, and it stays under the
-  // guard. We assert the guard's branch behavior inline.
-  const out = runMain({
-    preBody: `
-# Simulate the guard: when CADDY_E_SKIP=1, skip the sub-task.
-CADDY_E_SKIP=1
-RELOAD_RAN=0
-if [ "$CADDY_E_SKIP" = "0" ]; then
-  RELOAD_RAN=1
-else
-  RELOAD_RAN=0
-fi
-echo "RELOAD_RAN=$RELOAD_RAN"
-`,
-  });
-  assert.match(out, /RELOAD_RAN=0/);
-});
-
-test("install.sh step 7.5.E: CADDY_E_SKIP=0 (no failure) runs the systemctl reload", () => {
-  // Companion test: when the Caddyfile write succeeds (CADDY_E_SKIP=0),
-  // the systemctl reload sub-task DOES run. Pins the happy-path contract.
-  const out = runMain({
-    preBody: `
-CADDY_E_SKIP=0
-RELOAD_RAN=0
-if [ "$CADDY_E_SKIP" = "0" ]; then
-  RELOAD_RAN=1
-fi
-echo "RELOAD_RAN=$RELOAD_RAN"
-`,
-  });
-  assert.match(out, /RELOAD_RAN=1/);
-});
+// The old "warn + CADDY_E_SKIP + continue to step 8" degrade machinery is
+// deleted. The static guards in "BET-980: the public-path outcome failures
+// are fatal" above pin that every public-path failure in step 7.5.E now
+// `die`s, so the unreachable "Installed."/pairing output on a failing box is
+// impossible by construction. No inline replication of the control flow is
+// needed (or possible) any more — the earlier inline tests mirrored a manual
+// flow that no longer exists.
 
 // ----------------------------------------------------------------------------
 // Tailscale ingress path (BET-267)
@@ -5362,14 +5250,17 @@ test("install.sh writes service-read config files via install_root_file, never `
 // and therefore fired 100% of the time, falsely. Assertions are textual so a
 // regression in either success-print guard is caught here.
 
-test("install.sh prints `ok \"caddy reloaded.\"` only on success (preceded by `else`) (BET-442)", () => {
+test("install.sh prints `ok \"caddy reloaded.\"` only on success (the reload is fatal) (BET-442 / BET-980)", () => {
   const src = readFileSync(INSTALL_SH, "utf-8");
   const matches = src.split("\n").filter((l) => /ok "caddy reloaded\."/.test(l));
   assert.strictEqual(matches.length, 1, "`ok \"caddy reloaded.\"` must appear exactly once");
-  const line = matches[0];
-  const idx = src.indexOf(line);
-  const before = src.slice(0, idx).split("\n").filter((l) => l.trim() !== "").pop();
-  assert.match(before, /^[ \t]*else[ \t]*$/, "`ok \"caddy reloaded.\"` must sit in the `else` branch (only reached on success)");
+  // The reload is `sudo -n systemctl reload caddy … \ || die …`; the `ok`
+  // below it is therefore only reachable when the reload succeeded.
+  assert.match(
+    src,
+    /reload caddy[^\n]*\\\n[ \t]*\|\| die/,
+    "the Caddy reload must be fatal (`|| die`), so `ok \"caddy reloaded.\"` is only printed on success",
+  );
 });
 
 test("install.sh prints `ok \"gateway registration complete.\"` only on success (no `|| warn \"merge-gateway failed`) (BET-442)", () => {
