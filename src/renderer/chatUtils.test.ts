@@ -135,10 +135,12 @@ import {
   isPlanExitQuestion,
   planMetrics,
   extractPlanData,
+  planPathsFromMessages,
+  planRefsFromPart,
   resolveDelegateModel,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem, QuestionRequest } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest } from "../shared/types";
 
 
 
@@ -5121,6 +5123,92 @@ describe("extractPlanData", () => {
     expect(d.title).toBe("Build Agent");
     expect(d.metrics).toEqual({});
     expect(d.path).toBeUndefined();
+  });
+
+  it("resolves the plan path from the authoring tool when the plan_exit input is empty", () => {
+    // plan_exit (opencode's built-in) carries NO input — the path only lives in
+    // the `plan`-authoring tool that wrote the file. The tolerant fallback must
+    // surface it so the plan card can publish the companion page.
+    const q = planq("call-exit");
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        {
+          type: "tool",
+          id: "p-write",
+          messageID: "m1",
+          callID: "call-write",
+          tool: "plan",
+          state: { status: "completed", input: { filePath: ".opencode/plans/2026-08-15-fix.md" } },
+        },
+        {
+          type: "tool",
+          id: "p-exit",
+          messageID: "m2",
+          callID: "call-exit",
+          tool: "plan_exit",
+          state: { status: "completed", input: {} },
+        },
+      ],
+    };
+    const d = extractPlanData(q, [msg]);
+    expect(d.title).toBe("Plan complete");
+    expect(d.path).toBe(".opencode/plans/2026-08-15-fix.md");
+  });
+
+  it("plan_exit input wins over the transcript fallback", () => {
+    const q = planq("call-exit");
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        { type: "tool", id: "p-write", messageID: "m1", callID: "c-w", tool: "plan", state: { status: "completed", input: { filePath: ".opencode/plans/older.md" } } },
+        { type: "tool", id: "p-exit", messageID: "m2", callID: "call-exit", tool: "plan_exit", state: { status: "completed", input: { planPath: ".opencode/plans/newer.md" } } },
+      ],
+    };
+    const d = extractPlanData(q, [msg]);
+    expect(d.path).toBe(".opencode/plans/newer.md");
+  });
+});
+
+describe("planPathsFromMessages", () => {
+  const part = (over: Record<string, unknown>): OpencodePart =>
+    ({ type: "tool", id: "p", messageID: "m", ...over }) as OpencodePart;
+
+  it("collects .opencode/plans refs across text, tool input, and patch files", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        part({ type: "text", text: "Plan: .opencode/plans/a.md" }),
+        part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } }),
+        part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }),
+        part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } }),
+      ],
+    };
+    expect(planPathsFromMessages([msg]).sort()).toEqual([
+      ".opencode/plans/a.md",
+      ".opencode/plans/b.md",
+      ".opencode/plans/c.md",
+    ]);
+  });
+
+  it("does not treat a read reference as an authoring signal", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })],
+    };
+    expect(planPathsFromMessages([msg])).toEqual([]);
+    expect(planRefsFromPart(msg.parts[0])).toEqual([]);
+  });
+
+  it("deduplicates identical refs", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        part({ tool: "plan", state: { status: "completed", input: { path: ".opencode/plans/same.md" } } }),
+        part({ type: "text", text: ".opencode/plans/same.md" }),
+      ],
+    };
+    expect(planPathsFromMessages([msg])).toEqual([".opencode/plans/same.md"]);
   });
 });
 
