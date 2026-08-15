@@ -93,6 +93,8 @@ import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
 import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
+import { Modal } from "./Modal";
+import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap } from "./chatUtils";
 import type { VoiceNoteRecord } from "../shared/types";
 import type { PendingVoiceNote } from "./VoiceNote";
@@ -720,6 +722,13 @@ export function ChatPanel({
       // persistent across restarts is best-effort; the optimistic hide stands.
     }
   }, []);
+
+  // BET-943: the ConnectOffer's "Connect" chip opens the device-code modal.
+  // The modal stays MOUNTED and gated by this flag (that is how `Modal` plays
+  // its exit animation). onConnected closes it and re-reads forgeStatus so the
+  // offer disappears and the checks/PR chips appear — no second refresh path.
+  const [connectGithubOpen, setConnectGithubOpen] = useState(false);
+  const openConnectGithub = useCallback(() => setConnectGithubOpen(true), []);
 
   // Branch indicator: poll every 5s while this session is visible. Gated on
   // isActive — hidden panels stop polling; the effect re-fires (one
@@ -2526,6 +2535,7 @@ export function ChatPanel({
         }
         onFillComposer={updateInputWithHistoryReset}
         onDismissForgeConnect={dismissForgeConnect}
+        onConnectForge={openConnectGithub}
         onMerge={() => void doMerge()}
         mergeBusy={mergeBusy}
         mergeError={mergeError}
@@ -2721,6 +2731,26 @@ export function ChatPanel({
         onPaste={onPaste}
       />
       )}
+
+      {/* BET-943: "Connect GitHub" device-code modal, opened from the session
+          header's connect offer. Kept MOUNTED + gated by `open` (how `Modal`
+          plays its exit animation). onConnected closes it and re-reads
+          forgeStatus so the offer disappears and the checks/PR chips appear. */}
+      <Modal
+        open={connectGithubOpen}
+        onDismiss={() => setConnectGithubOpen(false)}
+        size="sm"
+        padded={false}
+        label="Connect GitHub"
+      >
+        <ConnectGithubPanel
+          onConnected={() => {
+            setConnectGithubOpen(false);
+            if (cwd) void refreshForge(cwd);
+          }}
+          onCancel={() => setConnectGithubOpen(false)}
+        />
+      </Modal>
     </div>
   );
 }
