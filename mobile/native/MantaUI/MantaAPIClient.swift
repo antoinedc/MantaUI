@@ -69,6 +69,9 @@ final class MantaAPIClient: Sendable {
             }
             argsDict["model"] = modelDict
         }
+        if let agent = input.agent {
+            argsDict["agent"] = agent
+        }
         if let attachments = input.attachments {
             argsDict["attachments"] = attachments.map { attachment in
                 var dict: [String: Any] = [
@@ -273,6 +276,12 @@ final class MantaAPIClient: Sendable {
     /// opencode picks its own.
     func defaultModel() async throws -> OpencodeModelID? {
         try await call("opencode:default-model", args: [], as: OpencodeModelID.self)
+    }
+
+    /// `opencode:agents` — the box's named agents (plan primary agent, etc).
+    /// Feeds the plan-mode toggle's availability (BET-952).
+    func agents() async throws -> [OpencodeAgent] {
+        try await call("opencode:agents", args: [], as: [OpencodeAgent].self) ?? []
     }
 
     /// `opencode:compact-session` — free context for the voice `compact` action.

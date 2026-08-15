@@ -87,6 +87,51 @@ enum ChatModel {
         )
     }
 
+    // MARK: - Plan-mode toggle (desktop `resolvePlanToggle` port)
+
+    /// The plan-mode toggle state (BET-952). Plan mode is a per-turn decision,
+    /// not a model property, so availability is purely "does this box expose a
+    /// `plan` primary agent". Mirrors the desktop `resolvePlanToggle` three
+    /// states; `agent` is the resolved agent name to send on `opencode:prompt`.
+    struct PlanToggle {
+        /// The toggle can be clicked (a `plan` agent exists on the box).
+        let available: Bool
+        /// Plan mode is ON (persisted per session).
+        let on: Bool
+        /// True while the agents list hasn't arrived yet (the chip is a loading
+        /// placeholder). Omitted (false) in the resolved states, mirroring TS.
+        let loading: Bool
+        /// The resolved agent name to send, nil when unavailable.
+        let agent: String?
+        /// Human copy explaining the current state.
+        let title: String
+    }
+
+    /// Resolve the plan toggle for the box's agent list. `nil` agents = still
+    /// loading. An explicit `on:true, available:false` (a plan agent vanished
+    /// mid-toggle) stays LIT — a control that flips itself to "off" lies.
+    /// Titles are byte-identical to the TS `resolvePlanToggle`.
+    static func planToggle(agents: [OpencodeAgent]?, on: Bool) -> PlanToggle {
+        guard let agents else {
+            return PlanToggle(available: false, on: on, loading: true, agent: nil, title: "Loading agents…")
+        }
+        let plan = agents.first { $0.name == "plan" && $0.mode != "subagent" }
+        guard let plan else {
+            return on
+                ? PlanToggle(available: false, on: true, loading: false, agent: nil, title: "Plan mode on (plan agent unavailable)")
+                : PlanToggle(available: false, on: false, loading: false, agent: nil, title: "This box has no plan agent")
+        }
+        return PlanToggle(
+            available: true,
+            on: on,
+            loading: false,
+            agent: plan.name,
+            title: on
+                ? "Plan mode on — edits blocked. Click to build."
+                : "Plan mode off — click to plan without editing"
+        )
+    }
+
     // MARK: - Grouping & filtering (desktop `groups` + `filterModelGroups`)
 
     /// Group models by provider, providers ordered alphabetically (matching
