@@ -14,14 +14,10 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
 import { Chip, SplitChip } from "./Chip";
 
-const CHIP_BASE =
-  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta leading-none transition-colors";
-// Single chip = medium (a labelled action). Split chip = regular (a status
-// readout). The divergence is deliberate — see Chip.tsx's header.
-const CHIP_SHELL = `${CHIP_BASE} font-medium`;
-const SPLIT_SHELL = `${CHIP_BASE} font-normal`;
+const CHIP_SHELL =
+  "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta font-normal leading-none transition-colors";
 const CHIP_REST = "border-border bg-bg-soft text-text-muted";
-const CHIP_HOVER = "hover:border-border-strong hover:text-text";
+const CHIP_HOVER = "hover:bg-fill-hover hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
 const CHIP_PAD = "gap-[6px] px-[11px]";
 
@@ -110,21 +106,29 @@ describe("SplitChip", () => {
 
   it("renders the split shell (rest chrome, no padding) around two segments", () => {
     const shell = mountSplit();
-    expect(shell.className).toBe(`${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
+    expect(shell.className).toBe(`${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`);
     const [l, r] = buttons();
     expect(l.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full hover:bg-fill-hover hover:text-text`);
     expect(r.className).toBe(`inline-flex items-center ${CHIP_PAD} h-full border-l border-border hover:bg-fill-hover`);
   });
 
-  it("fills the hovered segment, not the shell — Chip keeps the outline hover, SplitChip does not (BET-634)", () => {
-    // A single Chip's shell still darkens its outline on hover.
+  it("renders the SAME shell class as a single Chip — the two can never silently diverge again", () => {
     h = mount(<Chip>Hello</Chip>);
-    expect(button(h).className).toContain("hover:border-border-strong");
-
-    // The split control's shell carries NO outline hover; both segments fill.
+    const chipShell = button(h).className.slice(0, CHIP_SHELL.length);
+    expect(chipShell).toBe(CHIP_SHELL);
     const shell = mountSplit();
-    expect(shell.className).not.toContain("hover:border-border-strong");
-    expect(shell.className).not.toContain("hover:text-text");
+    expect(shell.className.slice(0, CHIP_SHELL.length)).toBe(CHIP_SHELL);
+  });
+
+  it("hovers by filling — on the whole chip for Chip, on the hovered segment for SplitChip (BET-634)", () => {
+    // A single Chip fills its whole shell on hover — no outline hover any more.
+    h = mount(<Chip>Hello</Chip>);
+    expect(button(h).className).toContain("hover:bg-fill-hover");
+    expect(button(h).className).not.toContain("hover:border-border-strong");
+
+    // The split control's shell carries no hover; only the segments fill.
+    const shell = mountSplit();
+    expect(shell.className).not.toContain("hover:");
     const [l, r] = buttons();
     expect(l.className).toContain("hover:bg-fill-hover");
     expect(r.className).toContain("hover:bg-fill-hover");

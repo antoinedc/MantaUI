@@ -11,20 +11,16 @@
 // Chrome contract (BET-529 inventory): 29px hit area (`h-[29px]`), `--r-md`
 // radius (`rounded-md`), 11px inline padding (`px-[11px]`) and a 6px gap
 // (`gap-[6px]`) — the two off-grid px this primitive carries — plus `text-meta`
-// chrome. Weight is the one place the two diverge: `Chip` is medium (it is a
-// labelled ACTION), `SplitChip` is regular (it is a status readout you glance
-// at). `Chip` toggles between the rest tone (`CHIP_REST`, a bordered soft chip)
-// and the "on" tone (`CHIP_ON`, accent border on an accent-bg surface — e.g. an
-// enabled worktree). `SplitChip` takes the rest tone for its shell and divides
-// it with a `border-l` divider; `rightAccent` colours the right segment with
-// `--accent-tx` (colour only — no weight change).
+// chrome. Both chips run at `font-normal`. `Chip` toggles between the rest
+// tone (`CHIP_REST`, a bordered soft chip) and the "on" tone (`CHIP_ON`, accent
+// border on an accent-bg surface — e.g. an enabled worktree). `SplitChip`
+// takes the rest tone for its shell and divides it with a `border-l` divider;
+// `rightAccent` colours the right segment with `--accent-tx` (colour only — no
+// weight change).
 //
-// Split rule (BET-634): the shell hover is the SINGLE chip's (`hover:border
-// -border-strong hover:text-text`) — a split control leaves its shell border
-// untouched and instead fills the HOVERED SEGMENT (`hover:bg-fill-hover`), so
-// you can tell which half you're about to click. `Chip` keeps both rest-tone +
-// hover classes; `SplitChip` uses `CHIP_REST` alone on its shell and applies
-// the fill to the segments.
+// Split rule (BET-634): hover is a fill on BOTH (`hover:bg-fill-hover`). On
+// `Chip` the whole chip fills; on `SplitChip` only the hovered segment does,
+// so a split control still tells you which half you're about to click.
 //
 // Icons are the caller's job (a lucide icon at `size={13}`); the primitive does
 // not style children beyond reserving the gap. There is deliberately no size
@@ -32,17 +28,11 @@
 
 import type { ReactNode, RefObject } from "react";
 
-const CHIP_BASE =
+const CHIP_SHELL =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap " +
-  "text-meta leading-none transition-colors";
-const CHIP_SHELL = `${CHIP_BASE} font-medium`;
-// The SPLIT shell runs one weight lighter than the single chip. A split
-// control is a STATUS readout you change occasionally (the model you're on,
-// the effort it runs at), not a labelled action, and at medium it competed
-// with the transcript for attention every time your eye crossed the composer.
-const SPLIT_SHELL = `${CHIP_BASE} font-normal`;
+  "text-meta font-normal leading-none transition-colors";
 const CHIP_REST = "border-border bg-bg-soft text-text-muted";
-const CHIP_HOVER = "hover:border-border-strong hover:text-text";
+const CHIP_HOVER = "hover:bg-fill-hover hover:text-text";
 const CHIP_ON = "border-accent bg-accent-bg text-accent-tx";
 const CHIP_PAD = "gap-[6px] px-[11px]";
 
@@ -262,7 +252,7 @@ export function SplitChip({
     `${extraTone} ${extraInteraction}`;
   return (
     <div
-      className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}
+      className={`${hook ? `${hook} ` : ""}${CHIP_SHELL} p-0 overflow-hidden ${CHIP_REST}`}
       aria-busy={loading || undefined}
     >
       <button ref={leftBtnRef} type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...leftListbox} {...leftAria}>
