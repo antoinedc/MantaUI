@@ -2,18 +2,14 @@
 // shell (BET-49-T4, BET-315, BET-356). Mounts into Onboarding.tsx's step-2
 // slot.
 //
-// BET-356 behaviour: this step auto-skips when the box already has a
-// connected provider. On mount, the step probes `opencodeProviderAuth
-// ({action: "status"})`; if any row reports `connected: true` it calls
-// `onContinue()` immediately and renders nothing. The user sees step 2
-// for at most one frame on a resumed flow with a pre-connected box.
-//
-// When zero providers are connected, the step renders the registry-driven
+// The provider step is always shown. On mount, the step probes
+// `opencodeProviderAuth ({action: "status"})` and renders the registry-driven
 // connect list (one row per provider declared in
-// src/server/subscriptionProviders.mjs). Each Connect delegates to the
-// shared <ConnectProvider> card (BET-312, BET-354) — same component the
-// Settings → Subscriptions card consumes, so an in-app Anthropic sign-in
-// works identically here and there.
+// src/server/subscriptionProviders.mjs). A box that already has a connected
+// provider shows that row ticked with "connected"; the user can add more or
+// continue. Each Connect delegates to the shared <ConnectProvider> card
+// (BET-312, BET-354) — same component the Settings → Subscriptions card
+// consumes, so an in-app Anthropic sign-in works identically here and there.
 //
 // Helpers (canContinueProviders) used to live in `providersStepLogic.ts`;
 // they're now inlined because that file became dead weight after the model
@@ -25,7 +21,7 @@
 // `canContinueProviders(statuses)` is still the Continue gate — a
 // subscription connected seconds ago counts immediately because the same
 // `status` action drives the row badges and the gate, by construction
-// (BET-315). The shell's auto-skip on mount relies on the same probe.
+// (BET-315).
 //
 // Props:
 //   onBack     — go to the previous step (Connect).
@@ -61,16 +57,11 @@ export function ProvidersStep({
 }) {
   const [statuses, setStatuses] = useState<SubscriptionStatus[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [autoSkipped, setAutoSkipped] = useState(false);
   // Exactly one row can be mid-mutation at a time.
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [showCustom, setShowCustom] = useState(false);
 
-  // Refresh + auto-skip on mount. The auto-skip path calls `onContinue`
-  // exactly once (latched via `autoSkipped`) so a late-arriving status
-  // response after the auto-skip fires cannot double-advance the shell.
-  // The shell's own progress dot math already collapses a "step 2 for
-  // one frame" jump — the user sees no flicker.
+  // Refresh on mount (and after a custom provider save / connect done).
   const refresh = useCallback(async () => {
     setLoadError(null);
     if (typeof window.api.opencodeProviderAuth !== "function") {
@@ -86,18 +77,11 @@ export function ProvidersStep({
         return;
       }
       setStatuses(res.providers);
-      // Auto-skip: with at least one provider connected, this step is
-      // done before the user sees it. Latch so a re-fetch (e.g. after a
-      // custom provider save) cannot fire onContinue a second time.
-      if (!autoSkipped && res.providers.some((p) => p.connected)) {
-        setAutoSkipped(true);
-        onContinue();
-      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
       setStatuses([]);
     }
-  }, [autoSkipped, onContinue]);
+  }, [onContinue]);
 
   useEffect(() => {
     void refresh();
@@ -112,11 +96,6 @@ export function ProvidersStep({
     },
     [refresh],
   );
-
-  // Render nothing while the auto-skip path is in flight (the shell will
-  // have already advanced). Returning null here is what keeps the user
-  // from seeing a flash of the provider list before onContinue fires.
-  if (autoSkipped) return null;
 
   return (
     <div>
@@ -137,6 +116,10 @@ export function ProvidersStep({
             Retry
           </button>
         </div>
+      )}
+
+      {statuses === null && !loadError && (
+        <div className="text-body text-text-faint">Checking connected providers…</div>
       )}
 
       {/* Subscriptions — one row per provider from the registry. */}

@@ -181,29 +181,6 @@ export async function verifyOnboarding(deps: {
   }
 }
 
-// ---------- pre-connect provider check ----------
-
-// Quick `is there at least one provider connected` probe — used by the
-// Connect step to decide whether to skip step 2 entirely. Same source
-// (`opencodeProviderAuth({action:"status"})`) that ProvidersStep consumes
-// for its Continue gate, so the two paths agree by construction.
-export async function hasConnectedProvider(api: VerifyApi): Promise<boolean> {
-  try {
-    const res = await api.opencodeProviderAuth({ action: "status" });
-    if (!res || typeof res !== "object") return false;
-    const providers = (res as { providers?: unknown }).providers;
-    if (!Array.isArray(providers)) return false;
-    return providers.some(
-      (p) =>
-        typeof p === "object" &&
-        p !== null &&
-        (p as { connected?: unknown }).connected === true,
-    );
-  } catch {
-    return false;
-  }
-}
-
 // Resolve a (providerLabel, modelLabel) pair for the stage labels from the
 // status probe. The first connected provider's label + the configured
 // default model. Pure so the test can assert; returns nulls when nothing
