@@ -5,8 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir, writeFile, rm } from "node:fs/promises";
-import {
+import { mkdir, writeFile, rm } from "node:fs/promises";import {
   isValidSubdomain,
   pageUrl,
   registerPage,
@@ -25,6 +24,7 @@ import {
   planMetrics,
   derivePlanTitle,
   publishPlanPage,
+  readPlanMarkdown,
 } from "./planPage.mjs";
 
 // ---------------------------------------------------------------------------
@@ -689,4 +689,133 @@ test("publishPlanPage refuses (writes nothing) when the box has no published hos
   assert.equal(result.ok, false);
   assert.match(result.error, /no published public hostname/);
   assert.equal(wrote, false, "must not write the source file when there is no URL");
+});
+
+// ---------------------------------------------------------------------------
+// readPlanMarkdown — server-side, confined plan file reads (BET-974)
+// ---------------------------------------------------------------------------
+
+test("readPlanMarkdown reads a relative .md path inside the session dir", async () => {
+  const dir = join(tmpdir(), "session-a");
+  await mkdir(join(dir, ".opencode", "plans"), { recursive: true });
+  await writeFile(join(dir, ".opencode", "plans", "p.md"), "# My plan");
+  try {
+    const result = await readPlanMarkdown(
+      { path: ".opencode/plans/p.md", sessionDir: dir },
+      {},
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.markdown, "# My plan");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown reads an absolute .md path inside the session dir", async () => {
+  const dir = join(tmpdir(), "session-b");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "plan.md"), "# Abs plan");
+  try {
+    const result = await readPlanMarkdown(
+      { path: join(dir, "plan.md"), sessionDir: dir },
+      {},
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.markdown, "# Abs plan");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown refuses a path escaping the session dir (../../etc/passwd)", async () => {
+  const dir = join(tmpdir(), "session-c");
+  await mkdir(dir, { recursive: true });
+  try {
+    const result = await readPlanMarkdown(
+      { path: "../../../etc/passwd", sessionDir: dir },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.ok(result.error.length > 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown refuses a sibling dir that merely shares a name prefix", async () => {
+  // sessionDir=/work; an absolute path into /work-evil must NOT pass just
+  // because "/work-evil" starts with "/work".
+  const work = join(tmpdir(), "work");
+  const evil = join(tmpdir(), "work-evil");
+  await mkdir(work, { recursive: true });
+  await mkdir(evil, { recursive: true });
+  await writeFile(join(evil, "x.md"), "# Evil");
+  try {
+    const result = await readPlanMarkdown(
+      { path: join(evil, "x.md"), sessionDir: work },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /outside the session directory/);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+    await rm(evil, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown refuses non-.md paths", async () => {
+  const dir = join(tmpdir(), "session-d");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "x.txt"), "not a plan");
+  try {
+    const result = await readPlanMarkdown(
+      { path: "x.txt", sessionDir: dir },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /\.md/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown refuses when the file is missing, with the read error", async () => {
+  const dir = join(tmpdir(), "session-e");
+  await mkdir(dir, { recursive: true });
+  try {
+    const result = await readPlanMarkdown(
+      { path: "nope.md", sessionDir: dir },
+      {},
+    );
+    assert.equal(result.ok, false);
+    assert.ok(result.error.length > 0);
+    assert.match(result.error, /ENOENT/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readPlanMarkdown refuses a missing session dir", async () => {
+  const result = await readPlanMarkdown(
+    { path: "x.md", sessionDir: null },
+    {},
+  );
+  assert.equal(result.ok, false);
+  assert.match(result.error, /directory/);
+});
+
+test("readPlanMarkdown refuses a missing or non-string path", async () => {
+  const dir = join(tmpdir(), "session-f");
+  await mkdir(dir, { recursive: true });
+  try {
+    const noPath = await readPlanMarkdown({ sessionDir: dir }, {});
+    assert.equal(noPath.ok, false);
+    const notString = await readPlanMarkdown(
+      { path: 42, sessionDir: dir },
+      {},
+    );
+    assert.equal(notString.ok, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

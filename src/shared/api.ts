@@ -304,6 +304,12 @@ export interface Api {
 
   peekRemoteFile(remotePath: string): Promise<void>;
   openExternal(url: string): Promise<void>;
+  /**
+   * Publish (or refresh) the hosted companion page for a session's plan and
+   * return its public URL. The server reads the plan file itself; `path` is
+   * the plan's path as reported by the plan_exit tool.
+   */
+  planPublish(sessionID: string, path: string): Promise<{ url: string }>;
 
   // Agent → laptop file push (outbox). `onAgentFileReady` fires when a file
   // appears in the remote ~/.manta-outbox/. `agentPullFile` pulls it to the

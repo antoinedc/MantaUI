@@ -24,8 +24,8 @@
 //     weaken the CSP. No external fonts, no CDN scripts, no JavaScript —
 //     inline CSS only, a self-contained document.
 
-import { mkdir, writeFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, dirname, resolve, sep } from "node:path";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
@@ -600,3 +600,47 @@ export async function publishPlanPage(
 
 const writeFileImpl = writeFile;
 const mkdirImpl = mkdir;
+const readFileImpl = readFile;
+
+// ---------------------------------------------------------------------------
+// Reading the plan markdown off disk (server-side file resolution)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a plan's markdown off disk, confined to the session's own directory.
+ *
+ * The path comes from the client (the `plan_exit` tool's input), so it is
+ * UNTRUSTED: it is resolved against the session directory — which makes both
+ * a relative `.opencode/plans/x.md` and an absolute path inside the project
+ * work — and then rejected unless the result is still inside that directory.
+ * `.md` only. Returns `{ ok, markdown }` | `{ ok:false, error }`.
+ *
+ * @param {{ path?: unknown, sessionDir?: unknown }} input
+ * @param {object} [deps]
+ * @param {Function} [deps.readFile] - defaults to node:fs/promises readFile.
+ */
+export async function readPlanMarkdown(
+  { path, sessionDir },
+  { readFile: readFileDep = readFileImpl } = {},
+) {
+  if (!sessionDir || typeof sessionDir !== "string" || sessionDir.length === 0) {
+    return { ok: false, error: "A session directory is required to read the plan file." };
+  }
+  if (typeof path !== "string" || path.length === 0) {
+    return { ok: false, error: "A plan file path is required." };
+  }
+  if (!path.endsWith(".md")) {
+    return { ok: false, error: "Only .md plan files can be published." };
+  }
+  const abs = resolve(sessionDir, path);
+  const root = resolve(sessionDir) + sep;
+  if (abs !== resolve(sessionDir) && !abs.startsWith(root)) {
+    return { ok: false, error: "Plan file path is outside the session directory." };
+  }
+  try {
+    const markdown = await readFileDep(abs, "utf8");
+    return { ok: true, markdown };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
