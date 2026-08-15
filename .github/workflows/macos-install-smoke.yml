@@ -124,19 +124,29 @@ jobs:
         if: env.INSTALLER == 'branch'
         run: |
           set -euo pipefail
-          # install.sh re-creates $MANTA_HOME as a git checkout and does
-          # `fetch origin main && reset --hard origin/main` (step 4b) so
-          # self-update.sh has something to pull. Left alone, that would deploy
-          # `main`'s server code even though we are testing a PR — the branch's
+          # install.sh re-creates $MANTA_HOME as a git checkout and resets it to
+          # the RELEASE's own commit (BET-978), so self-update.sh has something
+          # to pull and so a box never runs source its shipped node_modules
+          # can't satisfy. Left alone, that would deploy the released tarball's
+          # server code even though we are testing a PR — the branch's
           # install.sh would run, but every file it deploys (src/server/**, the
-          # launchd templates) would come from main. Publishing HEAD as `main`
-          # in a local bare repo makes the deploy the PR's code, so a change to
-          # a plist or to the server is actually exercised on the Mac.
+          # launchd templates) would come from the release. Publishing HEAD as
+          # `main` in a local bare repo and pointing the pin at it with
+          # MANTA_DEPLOY_REF makes the deploy the PR's code, so a change to a
+          # plist or to the server is actually exercised on the Mac.
           # (node_modules + runtime/ still come from the released tarball —
           # untracked paths survive `reset --hard`.)
+          #
+          # CONSEQUENCE, and it is the point: the PR's source is then paired
+          # with the LAST RELEASE's dependencies, so this job goes red whenever
+          # a PR adds a dependency that no published tarball carries yet. That
+          # is a true statement about clean installs, not a flake — it is the
+          # exact failure BET-978 was opened for. Clear it by publishing a
+          # server release, not by loosening the check.
           git init --bare -q "$RUNNER_TEMP/manta.git"
           git push -q "$RUNNER_TEMP/manta.git" "HEAD:refs/heads/main"
           echo "MANTA_REPO_URL=file://$RUNNER_TEMP/manta.git" >> "$GITHUB_ENV"
+          echo "MANTA_DEPLOY_REF=origin/main" >> "$GITHUB_ENV"
           echo "deploy source: this PR ($(git rev-parse --short HEAD))"
 
       - name: Install box prerequisites (tmux)

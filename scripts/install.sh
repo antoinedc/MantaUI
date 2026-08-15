@@ -477,6 +477,20 @@ wait_for_box_id() {
 # code still reaches boxes the normal way: publish a release, self-update
 # applies it wholesale.
 #
+# `MANTA_DEPLOY_REF` overrides the pin with any ref (e.g. `origin/main`, a
+# branch, a sha). That is how you deploy a branch to a box on purpose — and how
+# the macOS install smoke keeps exercising a PR's own server/plist code while
+# installing the last published tarball.
+#
+# The stamp is read HERE, in bash, and NOT through install-lib.mjs. install.sh
+# is served fresh from the website, but the lib comes from the extracted
+# TARBALL — which is by definition an older release and need not know any
+# subcommand added since. Asking it would make this decision silently
+# unavailable on exactly the installs that need it (verified: the macOS smoke
+# fell back to origin/main because the 0.0.30 lib had no `deploy-ref`). The
+# pattern doubles as the validation: only a full 40-char hex matches, so a
+# truncated or hand-edited stamp yields nothing and falls back.
+#
 # $1=MANTA_HOME  $2=repo url  $3=node binary  $4=install-lib.mjs
 deploy_git_checkout() {
   local home="$1" repo_url="$2" node_bin="$3" lib="$4"
@@ -494,10 +508,20 @@ deploy_git_checkout() {
   git -C "$home" fetch origin main -q \
     || die "git fetch origin main failed — check network / MANTA_REPO_URL"
 
-  # Which commit? The release stamps its own into RELEASE.json. Empty output
-  # means this tarball predates the stamp (or was packed outside a git
-  # checkout) — then, and only then, fall back to origin/main.
-  deploy_sha="$("$node_bin" "$lib" deploy-ref --release "$home/RELEASE.json" 2>/dev/null || echo "")"
+  # An explicit override wins outright — deploying a branch is a deliberate act.
+  if [ -n "${MANTA_DEPLOY_REF:-}" ]; then
+    git -C "$home" fetch origin "$MANTA_DEPLOY_REF" -q 2>/dev/null || true
+    git -C "$home" reset --hard "$MANTA_DEPLOY_REF" -q \
+      || die "git reset --hard $MANTA_DEPLOY_REF failed at $home (MANTA_DEPLOY_REF)"
+    ok "Deploy pinned by MANTA_DEPLOY_REF: $(git -C "$home" rev-parse --short HEAD) ($MANTA_DEPLOY_REF)"
+    return 0
+  fi
+
+  # Which commit? The release stamps its own into RELEASE.json. Empty means
+  # this tarball predates the stamp (or was packed outside a git checkout) —
+  # then, and only then, fall back to origin/main.
+  deploy_sha="$(sed -n 's/.*"git_sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' \
+    "$home/RELEASE.json" 2>/dev/null | head -1)"
   if [ -n "$deploy_sha" ]; then
     # The release commit is normally an ancestor of main and already local
     # after the fetch above. If it isn't (a release built from a branch since

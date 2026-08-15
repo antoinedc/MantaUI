@@ -10,7 +10,6 @@ import {
   resolveConfig,
   parsePort,
   checkIdentity,
-  resolveDeployRef,
   findMissingDependencies,
   waitForHealth,
   readBoxIdentity,
@@ -5589,32 +5588,6 @@ test("BET-446: seeding still merges the plugin when OPENCODE_CLAUDE_AUTH_PLUGIN 
 // "server did not become healthy". It broke EVERY clean install on prod and
 // staging between a dependency-adding merge and the next release.
 
-test("BET-978: resolveDeployRef pins to the release's own commit", () => {
-  const sha = "d3cb8aceb94540030ca65bb28cf7ea732bd17e73";
-  const got = resolveDeployRef(JSON.stringify({ version: "0.0.30", git_sha: sha }));
-  assert.equal(got.sha, sha);
-  assert.equal(got.source, "release");
-});
-
-test("BET-978: resolveDeployRef falls back when the release carries no usable stamp", () => {
-  // A tarball packed outside a git checkout, or one older than the stamp.
-  for (const text of [
-    "",
-    "not json",
-    JSON.stringify({ version: "0.0.29" }),
-    JSON.stringify({ version: "0.0.29", git_sha: null }),
-    JSON.stringify({ version: "0.0.29", git_sha: "" }),
-    JSON.stringify({ version: "0.0.29", git_sha: "d3cb8ac" }), // short — never written by the packer
-    JSON.stringify({ version: "0.0.29", git_sha: "Z".repeat(40) }),
-  ]) {
-    const got = resolveDeployRef(text);
-    assert.equal(got.sha, null, `must not trust ${JSON.stringify(text)}`);
-    assert.equal(got.source, "fallback");
-  }
-  // …and a non-string input can't throw.
-  assert.equal(resolveDeployRef(undefined).sha, null);
-});
-
 test("BET-978: findMissingDependencies names the packages a release is short of", () => {
   const pkg = JSON.stringify({
     dependencies: { unified: "^11", "rehype-stringify": "^10", ws: "^8" },
@@ -5643,7 +5616,7 @@ test("BET-978: findMissingDependencies names the packages a release is short of"
 // and no .git/. `origin` is a local repo with two commits — the "release" one
 // and a later "main" one carrying a file the release doesn't have (standing in
 // for a dependency-adding merge).
-function runDeployGitCheckout({ releaseJson, node = process.execPath }) {
+function runDeployGitCheckout({ releaseJson, deployRef = "", node = process.execPath }) {
   const dir = mkdtempSync(join(tmpdir(), "manta-deploy-"));
   const origin = join(dir, "origin");
   const home = join(dir, "manta");
@@ -5685,6 +5658,7 @@ set +e
 # non-zero exit — merge so the fallback WARNING is assertable on success too.
 exec 2>&1
 export MANTA_INSTALL_TEST_MODE=1
+${deployRef ? `export MANTA_DEPLOY_REF='${deployRef}'` : ""}
 source '${INSTALL_SH}'
 deploy_git_checkout '${home}' '${origin}' '${node}' '${join(__dirname, "install-lib.mjs")}'
 echo "HEAD=$(git -C '${home}' rev-parse HEAD)"
@@ -5712,7 +5686,15 @@ test("BET-978: a clean install checks out the RELEASE's commit, not main's", () 
 test("BET-978: a release with no commit stamp still falls back to main", () => {
   // Pre-stamp tarballs, or one packed outside a git checkout — never worse
   // than the old behaviour.
-  for (const releaseJson of [null, JSON.stringify({ version: "0.0.29" })]) {
+  for (const releaseJson of [
+    null,                                                     // no RELEASE.json at all
+    "not json",                                               // unparseable
+    JSON.stringify({ version: "0.0.29" }),                    // packed before the stamp
+    JSON.stringify({ version: "0.0.29", git_sha: null }),
+    JSON.stringify({ version: "0.0.29", git_sha: "" }),
+    JSON.stringify({ version: "0.0.29", git_sha: "d3cb8ac" }), // short — never written by the packer
+    JSON.stringify({ version: "0.0.29", git_sha: "Z".repeat(40) }), // not hex
+  ]) {
     const { out, mainSha } = runDeployGitCheckout({ releaseJson });
     assert.match(out, new RegExp(`HEAD=${mainSha}`), `must fall back to main:\n${out}`);
     assert.match(out, /MARKER=main-source/, `${out}`);
@@ -5778,4 +5760,32 @@ test("BET-978: the preflight is silent when the release is consistent", () => {
   });
   assert.match(out, /EXIT=0/, `a consistent release must pass:\n${out}`);
   assert.doesNotMatch(out, /inconsistent/, `${out}`);
+});
+
+test("BET-978: MANTA_DEPLOY_REF overrides the pin, so a branch can be deployed on purpose", () => {
+  // The escape hatch the macOS install smoke uses: install the last published
+  // tarball but deploy THIS branch's source, so a PR's server/plist changes
+  // are what gets exercised. Without it, pinning would silently make that
+  // workflow test main instead of the PR.
+  const { out, releaseSha, mainSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+    deployRef: "origin/main",
+  });
+  assert.match(out, /pinned by MANTA_DEPLOY_REF/, `must say the override won:\n${out}`);
+  assert.match(out, new RegExp(`HEAD=${mainSha}`), `override beats the release stamp:\n${out}`);
+  assert.doesNotMatch(out, new RegExp(`HEAD=${releaseSha}`), "must not use the release commit");
+});
+
+test("BET-978: the release stamp is read without install-lib, which ships in the OLDER tarball", () => {
+  // install.sh is served fresh from the website; install-lib.mjs comes from the
+  // extracted tarball and cannot know a subcommand added after it was packed.
+  // Reading the stamp through the lib made the pin silently unavailable on
+  // exactly the installs that need it (the macOS smoke fell back to
+  // origin/main against the 0.0.30 lib). Passing a node binary that fails on
+  // sight proves the decision no longer depends on it.
+  const { out, releaseSha } = runDeployGitCheckout({
+    releaseJson: (sha) => JSON.stringify({ version: "0.0.30", git_sha: sha }),
+    node: "/nonexistent/node",
+  });
+  assert.match(out, new RegExp(`HEAD=${releaseSha}`), `must still pin without a working lib:\n${out}`);
 });
