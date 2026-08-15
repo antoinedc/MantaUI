@@ -146,34 +146,18 @@ export function App() {
   );
 }
 
+// BET-959: the onboarding branch must never sit above a hook: a
+// conditional early return above a hook is React #300. Keeping AppInner
+// free of hooks apart from the latch makes that structurally impossible.
 function AppInner() {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders this whole component tree (incl. every mounted
   // ChatPanel) on EVERY store write, e.g. each streaming transcript splice
   // (setChatMessages ~4Hz) and the 2s status poller.
   const loaded = useStore((s) => s.loaded);
-  const projects = useStore((s) => s.projects);
-  const activeProjectName = useStore((s) => s.activeProjectName);
-  const activeWindowByProject = useStore((s) => s.activeWindowByProject);
-  const setActive = useStore((s) => s.setActive);
-  const refresh = useStore((s) => s.refresh);
-  const applyStatusBatch = useStore((s) => s.applyStatusBatch);
   const onboardingForced = useStore((s) => s.onboardingForced);
   const finishOnboarding = useStore((s) => s.finishOnboarding);
   const configSnapshot = useStore((s) => s.configSnapshot);
-  const updatePrompt = useStore((s) => s.updatePrompt);
-  const updateError = useStore((s) => s.updateError);
-  const setUpdateError = useStore((s) => s.setUpdateError);
-  const boxIncompatible = useStore((s) => s.boxIncompatible);
-  const setBoxIncompatible = useStore((s) => s.setBoxIncompatible);
-  const serverUpdatePrompt = useStore((s) => s.serverUpdatePrompt);
-  const setServerUpdatePrompt = useStore((s) => s.setServerUpdatePrompt);
-  const serverUpdateProgress = useStore((s) => s.serverUpdateProgress);
-  const connectionState = useStore((s) => s.connectionState);
-  const launcherFlags = useStore((s) => s.launcherFlags);
-  const createDraft = useStore((s) => s.createDraft);
-  const boxStale = useStore((s) => s.boxStale);
-
   // Entry gating: a fresh config (no host, no boxToken, not skipped) resolves
   // to "onboarding" → show the full-screen flow instead of the normal shell.
   // "Run setup again" (Settings) sets onboardingForced to re-show it even for
@@ -191,7 +175,49 @@ function AppInner() {
   useEffect(() => {
     if (enterOnboarding && !onboardingLatched) setOnboardingLatched(true);
   }, [enterOnboarding, onboardingLatched]);
+  const showOnboarding = enterOnboarding || onboardingLatched;
+  if (showOnboarding) {
+    return (
+      <Onboarding
+        onDone={() => {
+          // Clear the latch first so App drops to the normal shell once
+          // finishOnboarding re-reads config (or skipOnboarding persisted the
+          // opt-out). Both paths route through onDone.
+          setOnboardingLatched(false);
+          void finishOnboarding();
+        }}
+      />
+    );
+  }
+  return <Shell />;
+}
 
+function Shell() {
+  // BET-959: the shell JSX below references `showOnboarding` in a few
+  // `!showOnboarding && …` guards. Those are structurally always true
+  // here — AppInner only mounts Shell when it is NOT showing onboarding —
+  // so the name is kept to preserve the moved JSX verbatim.
+  const showOnboarding = false;
+
+  const loaded = useStore((s) => s.loaded);
+  const projects = useStore((s) => s.projects);
+  const activeProjectName = useStore((s) => s.activeProjectName);
+  const activeWindowByProject = useStore((s) => s.activeWindowByProject);
+  const setActive = useStore((s) => s.setActive);
+  const refresh = useStore((s) => s.refresh);
+  const applyStatusBatch = useStore((s) => s.applyStatusBatch);
+  const updatePrompt = useStore((s) => s.updatePrompt);
+  const updateError = useStore((s) => s.updateError);
+  const setUpdateError = useStore((s) => s.setUpdateError);
+  const boxIncompatible = useStore((s) => s.boxIncompatible);
+  const setBoxIncompatible = useStore((s) => s.setBoxIncompatible);
+  const serverUpdatePrompt = useStore((s) => s.serverUpdatePrompt);
+  const setServerUpdatePrompt = useStore((s) => s.setServerUpdatePrompt);
+  const serverUpdateProgress = useStore((s) => s.serverUpdateProgress);
+  const connectionState = useStore((s) => s.connectionState);
+  const launcherFlags = useStore((s) => s.launcherFlags);
+  const createDraft = useStore((s) => s.createDraft);
+  const boxStale = useStore((s) => s.boxStale);
   // BET-708: first-time pairing swaps window.api in place with no reload
   // (transportInstall), so an app-level effect that guards on an httpApi-only
   // method (onSyncDelta, onStatusEvent, onOpencodeEvent,
@@ -205,7 +231,6 @@ function AppInner() {
     window.addEventListener("manta-api-installed", bump);
     return () => window.removeEventListener("manta-api-installed", bump);
   }, []);
-  const showOnboarding = enterOnboarding || onboardingLatched;
   const [settingsOpen, setSettingsOpen] = useState(false);
   // ⌘F conversation search palette (SearchPalette). Only reachable in chat
   // mode with an active session (see the keydown handler).
@@ -1284,19 +1309,6 @@ function AppInner() {
   // Full-screen onboarding replaces the entire shell (no sidebar/header/footer).
   // finishOnboarding clears the force flag + re-reads config → normal shell,
   // no app restart.
-  if (showOnboarding) {
-    return (
-      <Onboarding
-        onDone={() => {
-          // Clear the latch first so App drops to the normal shell once
-          // finishOnboarding re-reads config (or skipOnboarding persisted the
-          // opt-out). Both paths route through onDone.
-          setOnboardingLatched(false);
-          void finishOnboarding();
-        }}
-      />
-    );
-  }
 
   // ===== Banner collapse (BET-416 §E) =====
   //
