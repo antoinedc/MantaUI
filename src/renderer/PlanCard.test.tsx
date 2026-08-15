@@ -115,6 +115,34 @@ describe("PlanCard (BET-951)", () => {
     h = render({ remembered });
     expect(h.text()).toContain("Claude");
   });
+
+  it("shows a loading state on the page button while the page is publishing", () => {
+    h = render({ planPublishing: true });
+    expect(h.text()).toContain("Publishing…");
+    const btn = h.container.querySelector(".manta-plan-open-page") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("renders the published URL and an 'Open page' action once the page is live", () => {
+    h = render({ planUrl: "https://box/pages/plan-sesa" });
+    expect(h.text()).toContain("https://box/pages/plan-sesa");
+    expect(h.text()).toContain("Open page");
+    const btn = h.container.querySelector(".manta-plan-open-page") as HTMLButtonElement;
+    expect(btn.getAttribute("title")).toMatch(/published plan page/);
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("falls back to publish-on-click 'See in browser' when no page is live yet", () => {
+    let fired = false;
+    h = render({ onOpenInBrowser: () => { fired = true; } });
+    expect(h.text()).toContain("See in browser");
+    expect(h.container.querySelector(".manta-plan-open-page")).toBeTruthy();
+    const btn = h.container.querySelector(".manta-plan-open-page") as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    act(() => btn.click());
+    expect(fired).toBe(true);
+  });
 });
 
 describe("QuestionCard still renders an ordinary (non-plan) question (BET-951)", () => {

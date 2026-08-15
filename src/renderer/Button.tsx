@@ -57,6 +57,7 @@ export function Button({
   title,
   children,
   hook,
+  loading = false,
 }: {
   /** The visual tone. REQUIRED — the bare base is abstract (C4), so there is no safe default. */
   tone: keyof typeof BUTTON_TONE;
@@ -78,16 +79,24 @@ export function Button({
    * chrome, so it is not the `className` escape hatch the epic forbids.
    */
   hook?: string;
+  /**
+   * A transient resolving state (the action is in flight). Mirrors
+   * SplitButton.loading: the button reads as disabled + `aria-busy` until the
+   * work settles. Presentational — the caller owns the label that announces it.
+   */
+  loading?: boolean;
 }) {
+  const inert = disabled || loading;
   const className =
     `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_TONE[tone]}` +
     (block ? ` ${BUTTON_BLOCK}` : "");
   return (
     <button
       type={type}
-      disabled={disabled}
+      disabled={inert}
       onClick={onClick}
       title={title}
+      aria-busy={loading || undefined}
       className={className}
     >
       {children}
