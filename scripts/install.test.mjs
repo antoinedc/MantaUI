@@ -49,6 +49,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // duplication gate over its token threshold.
 const scriptFile = (...parts) => readFileSync(join(__dirname, ...parts), "utf-8");
 const INSTALL_SH = join(__dirname, "install.sh");
+const LIB_MJS = join(__dirname, "install-lib.mjs");
+// warn()/die() write to stderr, and runAndCapture only keeps stderr on a
+// non-zero exit — merge so a WARNING is assertable on the success path too.
+const STDERR_TO_STDOUT = "exec 2>&1";
 
 // A canonical 32-lowercase-hex token — mirrors the test constants in
 // src/main/auth.test.ts and src/shared/transport.test.ts so the install
@@ -1407,6 +1411,21 @@ test("install.sh is bash-syntax-clean (bash -n)", () => {
   }
 });
 
+// Scan install.sh's non-comment lines for a forbidden pattern, returning
+// "line N: <text>" for each offender. Three static guards below share this:
+// they differ only in the regex and the failure message, and inlining the
+// scan in each is what tipped the duplication gate over its token threshold.
+function scanInstallSh(pattern) {
+  const lines = readFileSync(INSTALL_SH, "utf-8").split("\n");
+  const offenders = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*#/.test(line)) continue; // skip comment lines
+    if (pattern.test(line)) offenders.push(`line ${i + 1}: ${line.trim()}`);
+  }
+  return offenders;
+}
+
 test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-319 regression)", () => {
   // install.sh runs under `set -euo pipefail`. The first BET-319 iteration
   // referenced $MANTA_CLAUDE_AUTH_PLUGIN directly inside `[ -n "$VAR" ]`,
@@ -1417,18 +1436,10 @@ test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-3
   // static guard pins the fix: every NON-COMMENT reference to the var must
   // use the `${VAR:-}` default-expansion form (or be inside a branch that is
   // only reached after a `:-` guard already proved it set).
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"`
-    // (no `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
-    // We detect a bare expansion as `$VAR` NOT immediately followed by `{`.
-    const bare = /\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"` (no
+  // `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
+  // A bare expansion is `$VAR` NOT immediately followed by `{`.
+  const offenders = scanInstallSh(/\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/);
   assert.deepEqual(
     offenders,
     [],
@@ -1446,15 +1457,7 @@ test("install.sh guards every OPENCODE_CLAUDE_AUTH_PLUGIN use against set -u (BE
   // unset var is a hard abort mid-install — the same class of failure
   // BET-319 fixed for the override. This static guard pins the fix: every
   // non-comment reference must use the `${VAR:-}` default-expansion form.
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    const bare = /\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  const offenders = scanInstallSh(/\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/);
   assert.deepEqual(
     offenders,
     [],
@@ -1474,18 +1477,10 @@ test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319
   // We flag any non-comment line where `$IDENT` (not `${IDENT}`) is
   // immediately followed by `…` — i.e. a bare expansion abutting the
   // ellipsis with no brace or other delimiter between them.
-  const src = readFileSync(INSTALL_SH, "utf-8");
-  const lines = src.split("\n");
-  const offenders = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*#/.test(line)) continue; // skip comment lines
-    // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
-    // underscore) and the `$` is NOT immediately followed by `{`. The `…`
-    // must directly follow the identifier with no intervening delimiter.
-    const bare = /\$([A-Za-z_][A-Za-z0-9_]*)…/.test(line);
-    if (bare) offenders.push(`line ${i + 1}: ${line.trim()}`);
-  }
+  // Match `$IDENT…` where IDENT is a bash identifier (letters, digits,
+  // underscore) and the `$` is NOT immediately followed by `{`. The `…` must
+  // directly follow the identifier with no intervening delimiter.
+  const offenders = scanInstallSh(/\$([A-Za-z_][A-Za-z0-9_]*)…/);
   assert.deepEqual(
     offenders,
     [],
@@ -5649,25 +5644,13 @@ function runDeployGitCheckout({ releaseJson, deployRef = "", node = process.exec
     );
   }
 
-  const script = join(dir, "test.sh");
-  writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set +e
-# warn()/die() write to stderr, and runAndCapture only keeps stderr on a
-# non-zero exit — merge so the fallback WARNING is assertable on success too.
-exec 2>&1
-export MANTA_INSTALL_TEST_MODE=1
-${deployRef ? `export MANTA_DEPLOY_REF='${deployRef}'` : ""}
-source '${INSTALL_SH}'
-deploy_git_checkout '${home}' '${origin}' '${node}' '${join(__dirname, "install-lib.mjs")}'
-echo "HEAD=$(git -C '${home}' rev-parse HEAD)"
-echo "MARKER=$(cat '${home}/marker.txt')"
-`,
-    { mode: 0o755 },
-  );
-  const out = runAndCapture(script);
   try {
+    const out = runBootstrap({
+      preBody: `${STDERR_TO_STDOUT}\n${deployRef ? `export MANTA_DEPLOY_REF='${deployRef}'` : ""}`,
+      func: `deploy_git_checkout '${home}' '${origin}' '${node}' '${LIB_MJS}'
+echo "HEAD=$(git -C '${home}' rev-parse HEAD)"
+echo "MARKER=$(cat '${home}/marker.txt')"`,
+    });
     return { out, releaseSha, mainSha };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -5719,22 +5702,11 @@ function runCheckReleaseDependencies({ pkgJson, present = [] }) {
     mkdirSync(join(home, "node_modules", name), { recursive: true });
     writeFileSync(join(home, "node_modules", name, "package.json"), "{}");
   }
-  const script = join(dir, "test.sh");
-  writeFileSync(
-    script,
-    `#!/usr/bin/env bash
-set +e
-exec 2>&1
-export MANTA_INSTALL_TEST_MODE=1
-source '${INSTALL_SH}'
-check_release_dependencies '${home}' '${process.execPath}' '${join(__dirname, "install-lib.mjs")}'
-echo "EXIT=$?"
-`,
-    { mode: 0o755 },
-  );
-  const out = runAndCapture(script);
   try {
-    return out;
+    return runBootstrap({
+      preBody: STDERR_TO_STDOUT,
+      func: `check_release_dependencies '${home}' '${process.execPath}' '${LIB_MJS}'`,
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -5750,7 +5722,7 @@ test("BET-978: the installer names the missing packages instead of timing out on
   assert.match(out, /this release is inconsistent/, `must state the real cause:\n${out}`);
   assert.match(out, /rehype-stringify/, "must name the missing package");
   assert.match(out, /highlight\.js/, "must name every missing package");
-  assert.doesNotMatch(out, /EXIT=0/, "must abort the install, not continue to a doomed start");
+  assert.doesNotMatch(out, /BOOTSTRAP_EXIT=0/, "must abort the install, not continue to a doomed start");
 });
 
 test("BET-978: the preflight is silent when the release is consistent", () => {
@@ -5758,7 +5730,7 @@ test("BET-978: the preflight is silent when the release is consistent", () => {
     pkgJson: JSON.stringify({ dependencies: { ws: "^8" }, devDependencies: { vitest: "^2" } }),
     present: ["ws"],
   });
-  assert.match(out, /EXIT=0/, `a consistent release must pass:\n${out}`);
+  assert.match(out, /BOOTSTRAP_EXIT=0/, `a consistent release must pass:\n${out}`);
   assert.doesNotMatch(out, /inconsistent/, `${out}`);
 });
 
