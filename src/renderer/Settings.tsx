@@ -510,11 +510,13 @@ export function Settings({
     }
   };
   const disconnectForge = async () => {
-    const prev = forgeStatus;
     try {
       const r = await window.api.forgeDisconnect();
       if (r?.ok) setForgeStatus({ connected: false });
-      push({ id: `forge-dc-${Date.now()}`, message: "Disconnected the GitHub account on this box.", actions: [{ label: "Undo", onClick: () => setForgeStatus(prev) }] });
+      // No Undo action here — Undo was a lie (it only restored local state
+      // while the box stayed disconnected). The box now ignores the gh CLI
+      // until a successful device sign-in clears the flag (BET-942).
+      push({ id: `forge-dc-${Date.now()}`, message: "Disconnected GitHub. Your gh CLI is untouched — Manta will ignore it until you reconnect." });
     } catch (e) {
       push({ id: `err-forge-dc-${Date.now()}`, message: errorDisclosure("Couldn't disconnect GitHub.", e) });
     }
@@ -816,7 +818,7 @@ export function Settings({
               <ListRow
                 leading={<StatusDot tone="idle" />}
                 name="GitHub"
-                secondary="Not connected — authenticate the gh CLI on this box to register forge webhooks."
+                secondary="Not connected."
               />
             )}
             {/* Divider — the mockup's border-top between connection and rules. */}

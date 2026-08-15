@@ -19,6 +19,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { Settings } from "./Settings";
+import { useStore } from "./store";
 
 // The confirm used for test 1. "Reset all settings?" (confirmReset) opens from
 // the default General tab's Danger zone.
@@ -153,5 +154,66 @@ describe("Settings — Escape + nested-confirm ownership (BET-724 regression)", 
     // Wrapped to the confirm's first control (Cancel) — still inside it.
     expect(document.activeElement).toBe(focusables[0]);
     expect(confirm!.contains(document.activeElement)).toBe(true);
+  });
+});
+
+// BET-942: Settings → Forge → Disconnect now persists a real opt-out on the
+// box, so the toast deliberately has NO Undo action (Undo only restored local
+// state while the box stayed connected — a lie). The disconnect is one RPC
+// call, and the connected row flips to not-connected.
+describe("Settings — Forge Disconnect (BET-942)", () => {
+  let h: Harness | null = null;
+
+  const stubApi = (forgeDisconnectMock: () => void) =>
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      pluginsRegistry: () => Promise.resolve([]),
+      launchersList: () => Promise.resolve([]),
+      forgeStatus: () =>
+        Promise.resolve({
+          connected: true,
+          login: "octocat",
+          kind: "github",
+          source: "cli",
+        }),
+      forgeRulesList: () => Promise.resolve([]),
+      forgeDisconnect: () => Promise.resolve({ ok: true }).then(forgeDisconnectMock),
+    });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [] });
+  });
+
+  it("clicking Disconnect calls forgeDisconnect once and the toast has no Undo action", async () => {
+    const calls: string[] = [];
+    const { api } = stubApi(() => {
+      calls.push("disconnect");
+    });
+    h = mount(<Settings onClose={() => {}} initialSection="extensions" />);
+    await h.flush();
+    await h.flush();
+
+    const disconnect = [...h.container.querySelectorAll("button")].find(
+      (b) => (b.textContent ?? "").trim() === "Disconnect",
+    );
+    expect(disconnect, "the Disconnect button on the connected row").toBeTruthy();
+    act(() => (disconnect as HTMLButtonElement).click());
+    await h.flush();
+
+    expect(api.calls.forgeDisconnect ?? []).toHaveLength(1);
+    expect(calls).toEqual(["disconnect"]);
+
+    const toast = useStore
+      .getState()
+      .appToasts.find((t) => String(t.message).includes("Disconnected GitHub"));
+    expect(toast, "the disconnect confirmation toast").toBeTruthy();
+    expect(toast!.message).toContain(
+      "Your gh CLI is untouched — Manta will ignore it until you reconnect.",
+    );
+    expect(toast!.actions, "no Undo action — reconnect only via device sign-in").toBeUndefined();
   });
 });

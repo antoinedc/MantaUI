@@ -130,6 +130,52 @@ test("resolveToken: CLI failure (gh missing) falls through to stored", async () 
   assert.deepEqual(r, { token: "ghp_stored", source: "stored" });
 });
 
+test("resolveToken: persisted disconnect flag returns null even when every rung matches", async () => {
+  // Env var AND gh CLI AND a stored secret would all match — but the box has
+  // been explicitly disconnected, so the ladder resolves nothing.
+  const r = await resolveToken("github.com", {
+    env: { MANTA_GITHUB_TOKEN: "ghp_env" },
+    shell: shellReturning("ghp_cli\n"),
+    loadSecretsFn: loadWith(STORED),
+    getConfig: async () => ({ forgeDisconnected: true }),
+  });
+  assert.equal(r, null);
+});
+
+test("resolveToken: disconnected flag resolves null without invoking the shell or secrets", async () => {
+  let shellCalls = 0;
+  const r = await resolveToken("github.com", {
+    env: { MANTA_GITHUB_TOKEN: "ghp_env" },
+    shell: async () => (shellCalls++, { stdout: "ghp_cli\n" }),
+    loadSecretsFn: loadWith(STORED),
+    getConfig: async () => ({ forgeDisconnected: true }),
+  });
+  assert.equal(r, null);
+  assert.equal(shellCalls, 0, "disconnect short-circuits before the CLI rung");
+});
+
+test("resolveToken: absent/other config leaves the ladder unchanged", async () => {
+  const r = await resolveToken("github.com", {
+    env: NO_ENV,
+    shell: shellReturning("ghp_cli\n"),
+    loadSecretsFn: loadWith([]),
+    getConfig: async () => ({}),
+  });
+  assert.deepEqual(r, { token: "ghp_cli", source: "cli" });
+});
+
+test("resolveToken: an unreadable config resolves normally (not treated as disconnected)", async () => {
+  const r = await resolveToken("github.com", {
+    env: NO_ENV,
+    shell: shellReturning("ghp_cli\n"),
+    loadSecretsFn: loadWith([]),
+    getConfig: async () => {
+      throw new Error("corrupt config");
+    },
+  });
+  assert.deepEqual(r, { token: "ghp_cli", source: "cli" });
+});
+
 test("resolveToken: cached hit within TTL does not re-invoke the shell", async () => {
   const clock = makeClock();
   const seen = [];
@@ -211,9 +257,9 @@ test("device grant: happy path returns a RENDERER-SAFE shape and stores the toke
   assert.equal(typeof started.grantId, "string");
 
   let stored = null;
-  const pending = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: async (t) => (stored = t, { ok: true }) });
+  const pending = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: async (t) => (stored = t, { ok: true }), clearDisconnect: async () => {} });
   assert.deepEqual(pending, { status: "pending", pollInterval: 5 });
-  const done = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: async (t) => (stored = t, { ok: true }) });
+  const done = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: async (t) => (stored = t, { ok: true }), clearDisconnect: async () => {} });
   assert.deepEqual(done, { status: "done" });
   assert.equal(stored, "ghp_device_ok", "token stored under GITHUB_TOKEN");
   // The device_code used on the wire is the box-side secret, never surfaced.
@@ -289,6 +335,25 @@ test("device grant: token is reused at next boot (stored secret resolves)", asyn
   });
   assert.deepEqual(r, { token: "ghp_device_ok", source: "stored" });
   invalidateToken("github.com");
+});
+
+test("device grant: success path clears the persisted disconnect flag (reconnect)", async () => {
+  // A box that was disconnected stays disconnected until a successful device
+  // sign-in — which must clear the opt-out so the ladder resolves again.
+  const clock = makeClock();
+  let cleared = 0;
+  const fetchFn = makeFetch(async () => ({ access_token: "ghp_reconnect", token_type: "bearer" }));
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
+  const done = await pollDeviceGrant(started.grantId, {
+    fetch: fetchFn,
+    now: clock.now,
+    storeToken: okStore,
+    clearDisconnect: async () => {
+      cleared++;
+    },
+  });
+  assert.deepEqual(done, { status: "done" });
+  assert.equal(cleared, 1, "a successful device sign-in reconnects by clearing the flag");
 });
 
 test("normalizeUserCode strips dashes/whitespace and uppercases", () => {

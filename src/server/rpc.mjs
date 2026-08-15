@@ -346,7 +346,17 @@ export function buildHandlers({
       }));
     },
     // preload: ipcRenderer.invoke(IPC.forgeDisconnect) → no args
-    "forge:disconnect": () => {
+    // BET-942: Disconnect is now a PERSISTED opt-out, not a 60s-cache clear.
+    // While the flag is set the credential ladder (auth.mjs resolveToken)
+    // resolves nothing regardless of env/CLI/secret — so the gh CLI is NOT
+    // logged out (not ours to touch) but the box ignores it. We also delete
+    // the shared GITHUB_TOKEN secret Manta's own device flow wrote (a missing
+    // secret is not an error). A successful device sign-in clears the flag.
+    "forge:disconnect": async () => {
+      await local.configUpdate({ forgeDisconnected: true });
+      const secrets = secretsListStore({ includeAll: true });
+      const ghToken = secrets.find((s) => s.key === "GITHUB_TOKEN" && s.scope === "shared");
+      if (ghToken) await secretsDeleteStore(ghToken.id);
       invalidateForgeToken(GH_HOST);
       return { ok: true };
     },
