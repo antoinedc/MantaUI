@@ -5,6 +5,7 @@ import {
   parseSseFrame,
   createSession,
   sendPrompt,
+  getSessionAgent,
   listMessages,
   getMessage,
   slimTranscript,
@@ -272,6 +273,70 @@ test("createSession primes directory cache; sendPrompt then appends ?directory="
   assert.ok(
     prompt.url.includes("directory=%2Fwork%2Fproj"),
     `prompt URL missing scoped directory: ${prompt.url}`,
+  );
+});
+
+test("sendPrompt includes agent when passed and omits it when not", async () => {
+  // BET-949: the plan-mode chip must drive `agent:"plan"` on the prompt_async
+  // body; an omitted agent keeps today's body byte-identical.
+  _resetSessionDirectoryCache();
+  const bodies = [];
+  await withMockFetch(
+    async (url, opts) => {
+      if (String(url).includes("/ses_a/prompt_async")) {
+        bodies.push(opts.body ? JSON.parse(String(opts.body)) : {});
+        return new Response(null, { status: 204 });
+      }
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(
+          JSON.stringify({ id: "ses_a", title: "t", directory: "/w", projectID: "p" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await sendPrompt({ sessionId: "ses_a", text: "plan it", agent: "plan" });
+      await sendPrompt({ sessionId: "ses_a", text: "build it" });
+    },
+  );
+  assert.ok(
+    bodies.some((b) => b.agent === "plan"),
+    "expected an agent:plan body for the plan-mode prompt",
+  );
+  assert.ok(
+    bodies.some((b) => !("agent" in b)),
+    "expected an agent-less body for the plain prompt",
+  );
+});
+
+test("getSessionAgent returns the session's agent field (or null)", async () => {
+  // BET-949: seeds the plan toggle from a session already set to plan outside
+  // MantaUI. Returns the agent name, and null on absence / non-OK.
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/session/ses_plan")) {
+        return new Response(
+          JSON.stringify({ id: "ses_plan", agent: "plan", directory: "/w" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).includes("/session/ses_build")) {
+        return new Response(
+          JSON.stringify({ id: "ses_build", directory: "/w" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(url).includes("/session/ses_gone")) {
+        return new Response(null, { status: 404 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      assert.equal(await getSessionAgent("ses_plan"), "plan");
+      assert.equal(await getSessionAgent("ses_build"), null);
+      assert.equal(await getSessionAgent("ses_gone"), null);
+    },
   );
 });
 

@@ -1177,6 +1177,11 @@ export const IPC = {
   opencodeForkSession: "opencode:fork-session",     // returns new sessionId
   opencodeCompactSession: "opencode:compact-session",
   opencodeDeleteSession: "opencode:delete-session",
+  // BET-949: read a single session's `agent` field (GET /session/{id}) so the
+  // plan-mode toggle can seed from a session already set to plan outside
+  // MantaUI, before the honesty sync's first event. Returns the agent name or
+  // null when absent/unknown.
+  opencodeSessionAgent: "opencode:session-agent",
   // Typeahead sources for the input area (@-mention files/agents, /-commands).
   opencodeCommands: "opencode:commands",
   opencodeAgents: "opencode:agents",

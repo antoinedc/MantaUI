@@ -619,9 +619,9 @@ export async function getMessage(sessionId, messageId) {
  * Send a user message (prompt_async — returns 204 immediately; response
  * streams via SSE). Model is per-prompt; omit to use opencode's default.
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }> }} opts
  */
-export async function sendPrompt({ sessionId, text, model, attachments, mentions }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions }) {
   // Scope tools + events to the session's worktree. The matching per-directory
   // subscription in subscribeEvents below ensures the events still reach
   // listeners (the global /event subscription wouldn't see them otherwise).
@@ -650,6 +650,7 @@ export async function sendPrompt({ sessionId, text, model, attachments, mentions
     body.model = { providerID: model.providerID, modelID: model.modelID };
     if (model.variant) body.variant = model.variant;
   }
+  if (agent) body.agent = agent;
 
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
@@ -690,6 +691,32 @@ export async function listSessions(directory) {
     throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
   }
   return res.json();
+}
+
+/**
+ * Read a single session's active `agent` field (BET-949). Used to seed the
+ * plan-mode toggle from a session already set to plan OUTSIDE MantaUI (e.g.
+ * via opencode's own `plan_enter`/agent endpoint), so the chip matches the
+ * agent the next turn will actually run before the honesty sync's first event.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<string | null>} the agent name (e.g. "plan"), or null when
+ *   absent / the session is unknown / the box errored (best-effort — a failed
+ *   seed falls back to the stored key).
+ */
+export async function getSessionAgent(sessionId) {
+  try {
+    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
+    const body = await res.json();
+    const agent = typeof body?.agent === "string" ? body.agent : null;
+    return agent && agent.length > 0 ? agent : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1715,9 +1742,9 @@ export async function findFiles({ query, directory }) {
  * Invoke a slash command inside a session.
  * model is serialised as "providerID/modelID" string (unlike prompt_async's object).
  *
- * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string } }} opts
+ * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model }) {
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent }) {
   const dirQ = await getSessionDirectoryQuery(sessionId);
   const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
   const parts = [];
@@ -1736,6 +1763,7 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     body.model = `${model.providerID}/${model.modelID}`;
     if (model.variant) body.variant = model.variant;
   }
+  if (agent) body.agent = agent;
   const res = await ocFetch(apiUrl(url), {
     method: "POST",
     headers: { "content-type": "application/json" },

@@ -59,6 +59,7 @@ import {
   parseModelRef,
   describeMergeFailure,
   progressAttentionKind,
+  resolvePlanToggle,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -68,6 +69,8 @@ import {
   modelSupportsAttachments,
   readSavedModel,
   writeSavedModel,
+  readPlanSaved,
+  writePlanSaved,
   resolveActiveModel,
   type AgentMention,
   type Attachment,
@@ -77,6 +80,7 @@ import {
   type TokenUsage,
 } from "./chatShared";
 import { useModelCatalog } from "./modelCatalog";
+import { useAgentCatalog } from "./agentCatalog";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { BlockedProgressCard, CompactionCard, PermissionCard, RetryCard } from "./Cards";
@@ -416,6 +420,33 @@ export function ChatPanel({
     [modelOverride, configDefaultModel],
   );
 
+  // ===== Per-session plan mode (BET-949) =====
+  // Local on/off, seeded from the per-session storage key (the `Session.agent`
+  // seed falls back to this). The honesty handlers in useSseBus sync this from
+  // opencode's own agent-switch events (plan_enter/plan_exit / agent.switched),
+  // so the chip never claims plan mode while the next turn would run as build.
+  const [planOn, setPlanOn] = useState<boolean>(() => readPlanSaved(sessionId));
+  // The `plan` agent availability comes from the shared box-level catalog.
+  const { agents } = useAgentCatalog();
+  const plan = useMemo(
+    () => resolvePlanToggle(agents, planOn),
+    [agents, planOn],
+  );
+  const togglePlan = useCallback(() => {
+    setPlanOn((prev) => {
+      const next = !prev;
+      writePlanSaved(sessionId, next);
+      return next;
+    });
+  }, [sessionId]);
+  // Honesty sync from useSseBus: opencode's OWN agent switches (plan_enter /
+  // plan_exit / agent.switched) drive this so the chip never lies about the
+  // agent the next turn will run as. Also persists so a re-mount seeds right.
+  const syncPlan = useCallback((next: boolean) => {
+    setPlanOn(next);
+    writePlanSaved(sessionId, next);
+  }, [sessionId]);
+
   // ===== SSE bus state (extracted to useSseBus) =====
   const {
     running,
@@ -482,6 +513,7 @@ export function ChatPanel({
     refetchOwedWhileInactive,
     applyStreamFlush,
     providerID,
+    setPlanOn: syncPlan,
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
   });
@@ -562,6 +594,22 @@ export function ChatPanel({
   useEffect(() => {
     setError(null);
     setModelOverride(readSavedModel(sessionId) ?? configDefaultModel ?? null);
+    setPlanOn(readPlanSaved(sessionId));
+    // Seed plan mode from the session's own `agent` field when present (BET-949
+    // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
+    // chip off and send the next prompt as build — the stored key alone can't
+    // know. Session.agent takes precedence over the stored key; on failure or
+    // absence we keep the stored-key seed. Guarded like modelCatalog: the
+    // pre-pairing preload subset lacks the method, and calling it throws.
+    const api = window.api as Partial<typeof window.api>;
+    if (api.opencodeSessionAgent) {
+      api.opencodeSessionAgent(sessionId).then((agent) => {
+        if (agent && agent.length > 0) {
+          setPlanOn(agent === "plan");
+          writePlanSaved(sessionId, agent === "plan");
+        }
+      }).catch(() => { /* non-fatal — stored-key seed stands */ });
+    }
     setAttachments([]);
     setAgentMentions([]);
     setSystemNotice(null);
@@ -981,6 +1029,10 @@ export function ChatPanel({
     const typed = (textOverride ?? input).trim();
     const text = pathRefText ? (typed ? `${typed} ${pathRefText}` : pathRefText) : typed;
     if (!text) return;
+    // Resolve the agent at SUBMIT time (not queue time) — a mode flipped
+    // mid-turn must apply to the turn that actually runs (BET-949). Only send
+    // it when plan is genuinely available AND on.
+    const planAgent = plan.available && plan.on ? plan.agent : undefined;
     // Record the prompt into the per-window localStorage list BEFORE the
     // running-queue early-return so queued prompts also persist (a queued
     // prompt still belongs to this tmux window — `/clear` shouldn't lose it).
@@ -1113,6 +1165,7 @@ export function ChatPanel({
           command: cmdName!,
           arguments: slashMatch[2] ?? "",
           model: modelOverride ?? undefined,
+          agent: planAgent,
           attachments: readyAttachments,
         });
       } else {
@@ -1148,6 +1201,7 @@ export function ChatPanel({
           modelOverride ?? undefined,
           readyAttachments,
           resolvedMentions.length > 0 ? resolvedMentions : undefined,
+          planAgent,
         );
       }
       setAttachments([]);
@@ -1167,7 +1221,7 @@ export function ChatPanel({
     // (clear/fork/compact) are read via their ref mirror below (declared after
     // submit in this file — the established commandsRef pattern) so submit
     // always sees their current value without them re-rotating this callback.
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex]);
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -1456,11 +1510,14 @@ export function ChatPanel({
       if (cleared?.newSessionId && modelOverride) {
         writeSavedModel(cleared.newSessionId, modelOverride);
       }
+      if (cleared?.newSessionId && planOn) {
+        writePlanSaved(cleared.newSessionId, true);
+      }
       await refresh();
     } catch (e) {
       setSendError(String((e as Error)?.message ?? e));
     }
-  }, [tmuxSession, windowIndex, cwd, modelOverride, refresh]);
+  }, [tmuxSession, windowIndex, cwd, modelOverride, planOn, refresh]);
 
   // Current-value ref mirrors for `submit` — declared AFTER submit in this file
   // (the established commandsRef pattern), so submit reads these instead of
@@ -2681,6 +2738,8 @@ export function ChatPanel({
         models={models}
         modelOverride={modelOverride}
         defaultModel={defaultModel}
+        plan={plan}
+        onTogglePlan={togglePlan}
         activeProviderID={activeModel?.providerID ?? null}
         deactivatedMainModels={deactivatedMainModels}
         onOpenModels={ensureModels}

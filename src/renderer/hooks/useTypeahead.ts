@@ -19,13 +19,14 @@
 // verbatim on selection.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { OpencodeAgent, OpencodeCommand } from "../../shared/types";
+import type { OpencodeCommand } from "../../shared/types";
 import {
   filterCommands,
   dedupeAgainstBuiltins,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
 } from "../chatUtils";
+import { useAgentCatalog, refreshAgentCatalog } from "../agentCatalog";
 import type {
   TypeaheadState,
   TypeaheadRow,
@@ -82,7 +83,9 @@ export function useTypeahead(params: {
 
   const [typeahead, setTypeahead] = useState<TypeaheadState | null>(null);
   const [commands, setCommands] = useState<OpencodeCommand[] | null>(null);
-  const [agents, setAgents] = useState<OpencodeAgent[] | null>(null);
+  // Agents come from the shared box-level catalog (BET-949) — the same single
+  // fetch that powers the plan-mode chip. No per-typeahead copy.
+  const { agents } = useAgentCatalog();
   const [fileResults, setFileResults] = useState<string[]>([]);
   const fileSearchSeqRef = useRef(0);
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -94,14 +97,6 @@ export function useTypeahead(params: {
       setCommands(c);
     } catch { /* non-fatal */ }
   }, [commands]);
-
-  const ensureAgents = useCallback(async () => {
-    if (agents) return;
-    try {
-      const a = await window.api.opencodeAgents();
-      setAgents(a);
-    } catch { /* non-fatal */ }
-  }, [agents]);
 
   // File search: sequence-tracked so stale responses don't clobber the
   // latest. Empty query is passed through — opencode's /find/file returns a
@@ -178,11 +173,11 @@ export function useTypeahead(params: {
       setTypeahead(t);
       if (t) {
         if (t.mode === "command") void ensureCommands();
-        else if (t.mode === "agent") void ensureAgents();
+        else if (t.mode === "agent" && agents == null) refreshAgentCatalog();
         else if (t.mode === "file") void searchFiles(t.query);
       }
     },
-    [detectTypeahead, ensureCommands, ensureAgents, searchFiles],
+    [detectTypeahead, ensureCommands, agents, searchFiles],
   );
 
   // Build the active typeahead's filtered result list.

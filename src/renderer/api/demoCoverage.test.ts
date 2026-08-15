@@ -109,6 +109,7 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeRestart",
   "opencodeRunCommand",
   "opencodeSearchMessages",
+  "opencodeSessionAgent",
   "opencodeSetProviders",
   "opencodeSetSubagents",
   "opencodeSyncSubagents",

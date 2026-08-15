@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -2068,6 +2068,42 @@ export function resolveFastToggle(
       ...(variantId === undefined ? {} : { variant: variantId }),
     },
     title: on ? "Fast mode on — click for the standard model" : "Fast mode off — click for the faster model",
+  };
+}
+
+// ===== resolvePlanToggle =====
+//
+// The composer's Plan-mode chip (BET-949). Same three-state shape as the fast
+// toggle above and the same "unavailable gets its own glyph" philosophy: a
+// lit-but-frozen control is honest; a control that flips itself to "off" lies.
+// The `plan` primary agent is native opencode — plan mode REMOVES the edit
+// tools from the model's toolbelt, so it raises no permission cards. The chip
+// is usable only when the box actually exposes a `plan` agent.
+export type PlanToggleState = {
+  available: boolean;
+  on: boolean;
+  loading?: boolean;
+  agent?: string;
+  title: string;
+};
+
+export function resolvePlanToggle(
+  agents: OpencodeAgent[] | null,
+  on: boolean,
+): PlanToggleState {
+  if (!agents) return { available: false, on, loading: true, title: "Loading agents…" };
+  const plan = agents.find((a) => a.name === "plan" && a.mode !== "subagent");
+  if (!plan)
+    return on
+      ? { available: false, on: true, title: "Plan mode on (plan agent unavailable)" }
+      : { available: false, on: false, title: "This box has no plan agent" };
+  return {
+    available: true,
+    on,
+    agent: plan.name,
+    title: on
+      ? "Plan mode on — edits blocked. Click to build."
+      : "Plan mode off — click to plan without editing",
   };
 }
 

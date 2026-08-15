@@ -275,6 +275,27 @@ export function writeSavedModel(sessionId: string, m: ModelSelection | null): vo
   } catch { /* quota / disabled storage */ }
 }
 
+// Per-session plan-mode override (BET-949). Deliberately its OWN storage key —
+// NOT folded into the `manta:chat:<sid>:model` JSON blob (that blob is a model
+// selection and the native iOS client stores it in an incompatible format).
+// Value is the literal "1" when on, absent otherwise.
+export function planKey(sessionId: string): string {
+  return `manta:chat:${sessionId}:plan`;
+}
+
+export function readPlanSaved(sessionId: string): boolean {
+  try {
+    return localStorage.getItem(planKey(sessionId)) === "1";
+  } catch { /* disabled storage */ return false; }
+}
+
+export function writePlanSaved(sessionId: string, on: boolean): void {
+  try {
+    if (on) localStorage.setItem(planKey(sessionId), "1");
+    else localStorage.removeItem(planKey(sessionId));
+  } catch { /* quota / disabled storage */ }
+}
+
 // Resolve the active OpencodeModel for the NEXT prompt from the available
 // model list + the per-session override + the server default. modelOverride
 // wins; otherwise the server default's provider/model is looked up. Returns
