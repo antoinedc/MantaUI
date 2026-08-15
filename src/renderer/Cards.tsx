@@ -15,14 +15,18 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown } from "lucide-react";
 import type { PermissionRequest, ProgressRecord, QuestionRequest, OpencodeModel } from "../shared/types";
-import { buildQuestionAnswers, canSubmitQuestion, resolveDelegateModel } from "./chatUtils";
+import {
+  buildQuestionAnswers,
+  canSubmitQuestion,
+  resolveDelegateModel,
+  shortModelName,
+} from "./chatUtils";
 import { resolveActiveModel } from "./chatShared";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
 import { OutputWell } from "./OutputWell";
-import { Button } from "./Button";
+import { Button, SplitButton } from "./Button";
 import { StatusDot } from "./StatusDot";
-import { SplitChip } from "./Chip";
 import { ModelMenu } from "./ModelMenu";
 import { renderMarkdown } from "./MarkdownBody";
 
@@ -510,9 +514,9 @@ export function QuestionCard({
 // dedicated card in the pinned card stack. Blocking tier: it is an unanswered
 // ask, rendered beside permission/question, never below an ambient card.
 //
-// The delegate split reuses SplitChip (no new split control) fed by the
-// EXISTING ModelMenu; model precedence lives in resolveDelegateModel (a pure
-// chatUtils helper), never inline here.
+// The delegate split reuses the shared split control (SplitButton — the Button
+// chrome brother of SplitChip) fed by the EXISTING ModelMenu; model precedence
+// lives in resolveDelegateModel (a pure chatUtils helper), never inline here.
 
 export function PlanCard({
   data,
@@ -558,10 +562,12 @@ export function PlanCard({
     () => resolveActiveModel(allModels, delegateModel, null),
     [allModels, delegateModel],
   );
-  // The right segment truncates to the model family name before anything else
-  // shrinks (BET-951).
-  const familyLabel =
-    resolvedOpencode?.family ?? resolvedOpencode?.providerID ?? delegateModel?.modelID ?? "model";
+  // The right segment names the model the way every other picker does — the
+  // human name, shortened past its brand prefix exactly as the composer chip
+  // shortens it (shortModelName). The raw modelID is the LAST resort, for a
+  // model that is not in the loaded catalog at all.
+  const modelLabel =
+    shortModelName(resolvedOpencode?.name) ?? delegateModel?.modelID ?? "model";
 
   // `N steps · N files` — each clause omitted (never `0`) when not derivable.
   const metricsLine = [
@@ -607,21 +613,16 @@ export function PlanCard({
       <Button tone="primary" onClick={() => onBuildHere(feedback)}>
         Build here
       </Button>
-      <SplitChip
-        left={<span className={busy ? "opacity-50" : undefined}>Delegate</span>}
+      <SplitButton
+        left="Delegate"
         right={
-          <span className={"flex items-center gap-1 truncate" + (busy ? " opacity-50" : "")}>
-            <span className="truncate max-w-[80px]">{familyLabel}</span>
+          <span className="flex items-center gap-1 truncate">
+            <span className="truncate max-w-[110px]">{modelLabel}</span>
             <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
           </span>
         }
-        onLeftClick={() => {
-          if (!busy) onStartDelegate(delegateModel, feedback);
-        }}
-        onRightClick={() => {
-          if (!busy) setMenuOpen((o) => !o);
-        }}
-        popup={{ right: true }}
+        onLeftClick={() => onStartDelegate(delegateModel, feedback)}
+        onRightClick={() => setMenuOpen((o) => !o)}
         rightAccent={resolution.overridden}
         rightExpanded={menuOpen}
         rightBtnRef={modelBtnRef}
@@ -629,6 +630,7 @@ export function PlanCard({
         rightHook="manta-plan-delegate-model-btn"
         leftTitle={splitTitle}
         rightTitle={busy ? splitTitle : "Model this background job will run on"}
+        disabled={busy}
         loading={models === null}
       />
       <div className="flex-1" />
