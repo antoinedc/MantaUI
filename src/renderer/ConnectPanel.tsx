@@ -70,7 +70,7 @@ function renderHintSegments(text: string) {
       return (
         <code
           key={i}
-          className="font-mono text-label bg-inset rounded-xs px-1.5 py-px text-text-muted"
+          className="font-mono text-label bg-bg rounded-xs px-2 py-px text-text-muted"
         >
           {part.slice(1, -1)}
         </code>
@@ -165,7 +165,7 @@ export function ConnectPanel({
           )}
         </div>
         {status.progress !== null && (
-          <div className="h-[3px] rounded-full bg-border-subtle mt-2.5 overflow-hidden">
+          <div className="h-[3px] rounded-full bg-border-subtle mt-3 overflow-hidden">
             <div
               className="h-full rounded-full transition-[width] duration-300"
               style={{
@@ -202,7 +202,7 @@ export function ConnectPanel({
                 {logOpen && (
                   <div
                     ref={logRef}
-                    className="mt-2 bg-inset border border-border-subtle rounded-sm px-3 py-2 font-mono text-meta text-text-faint overflow-y-auto"
+                    className="mt-2 bg-bg-elev border border-border-subtle rounded-sm px-3 py-2 font-mono text-meta text-text-faint overflow-y-auto"
                     style={{ maxHeight: 172 }}
                   >
                     {logLines.map((l, i) => (
