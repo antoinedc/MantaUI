@@ -714,13 +714,22 @@ export function ArtifactsPanel({
     previewSourceRef.current = null;
   };
 
-  // Publish-then-open a plan's companion page (BET-974): ONE gesture publishes
-  // the page on demand and opens the returned URL. The server reads the plan
-  // file itself (never the renderer); the URL comes from the response — never
-  // hand-built. Reused by both the row-body "open" and the plan row's action.
+  // Open a plan's companion page. When the page is already live (auto-published
+  // on plan_exit, so `pageUrl` is set on the artifact) just open it — no
+  // re-publish. Otherwise fall back to BET-974's publish-then-open: ONE gesture
+  // publishes the page on demand and opens the returned URL. The server reads
+  // the plan file itself (never the renderer); the URL comes from the response
+  // or the artifact — never hand-built. Reused by both the row-body "open" and
+  // the plan row's action.
   const openPlanPage = (a: Artifact) => {
     if (!sessionId) return;
     setPlanError(null);
+    if (a.pageUrl) {
+      void window.api.openExternal(a.pageUrl!).catch((e: unknown) => {
+        setPlanError(String((e as Error)?.message ?? e));
+      });
+      return;
+    }
     void window.api
       .planPublish(sessionId, a.href)
       .then(({ url }) => window.api.openExternal(url))
