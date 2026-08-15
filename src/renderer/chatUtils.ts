@@ -2185,6 +2185,70 @@ export function planMetrics(text: string): { steps?: number; files?: number } {
   return out;
 }
 
+// ---- Plan-file discovery (tolerant of how the plan was authored) ----
+//
+// Plan paths live in different part shapes depending on how the plan was
+// authored. The classic announcing message mentions the path in PROSE (a text
+// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool —
+// which records the path in `state.input.filePath` (and sometimes
+// `planPath`/`path`) plus a `patch` part listing the file — so the path never
+// reaches a text part, and `plan_exit` sometimes doesn't echo it either.
+// Scanning only one surface (e.g. only the plan_exit input) misses plans
+// authored via the plan tool. So we scan text, authoring-tool input, and
+// patch-file lists for any `.opencode/plans/*.md` reference. Cheap by design:
+// we never read tool output or file content, only path fields and prose.
+
+const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
+
+// Tools that AUTHOR the plan file (or confirm it at plan_exit). A `read` tool
+// pointed at a plan path is a reference, not an authoring signal, and must not
+// resolve as the plan — the write/plan tool (or a prose mention) already does.
+const PLAN_AUTHORING_TOOLS = new Set([
+  "write", "edit", "multiEdit", "patch", "plan", "plan_exit",
+]);
+
+/** Every distinct `.opencode/plans/*.md` reference a single part carries. */
+export function planRefsFromPart(part: OpencodePart): string[] {
+  const out: string[] = [];
+  const candidates: string[] = [];
+  if (typeof part.text === "string") candidates.push(part.text);
+  const raw = part as Record<string, unknown>;
+  const isTool = raw.type === "tool";
+  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
+    const input =
+      (raw.state as { input?: Record<string, unknown> } | undefined)?.input ??
+      (raw.input as Record<string, unknown> | undefined);
+    if (input) {
+      for (const key of ["filePath", "path", "planPath"]) {
+        const v = input[key];
+        if (typeof v === "string") candidates.push(v);
+      }
+    }
+  }
+  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
+  for (const c of candidates) {
+    for (const m of c.matchAll(PLAN_REF_RE)) {
+      if (!out.includes(m[0])) out.push(m[0]);
+    }
+  }
+  return out;
+}
+
+/** Every distinct `.opencode/plans/*.md` reference across a transcript. */
+export function planPathsFromMessages(
+  messages: OpencodeMessage[] | null,
+): string[] {
+  const out: string[] = [];
+  for (const msg of messages ?? []) {
+    for (const part of msg.parts) {
+      for (const ref of planRefsFromPart(part)) {
+        if (!out.includes(ref)) out.push(ref);
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * The plan card's display data: the title (first markdown heading of the plan
  * text, falling back to the question header), the plan file path when known,
@@ -2220,6 +2284,13 @@ export function extractPlanData(
       break;
     }
   }
+  // The plan_exit input often carries no path (opencode's plan_exit tool takes
+  // no arguments). Fall back to tolerant discovery across the transcript so
+  // the plan's `.opencode/plans/*.md` path (found in the `write`/`plan` tool
+  // that authored it, or a prose mention) still resolves — this is what lets
+  // the plan card publish the companion page even before plan_exit completes.
+  // Most recent plan wins (`at(-1)`): messages are append-ordered.
+  if (!path) path = planPathsFromMessages(messages).at(-1) ?? "";
   const firstHeading = text.match(/^#{1,6}[ \t]+(.+)$/m)?.[1]?.trim();
   const firstLine = text.split("\n").find((l) => l.trim())?.trim();
   const title =

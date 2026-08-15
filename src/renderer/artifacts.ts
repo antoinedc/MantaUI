@@ -1,4 +1,5 @@
 import type { OpencodeMessage, OpencodePart, OutboxFile, ServedPageMeta } from "../shared/types";
+import { planRefsFromPart } from "./chatUtils";
 
 export type ArtifactKind = "link" | "image" | "file" | "plan";
 export type ArtifactOrigin = "user" | "agent";
@@ -166,11 +167,9 @@ function deriveOutboxArtifact(row: OutboxFile): Artifact {
 
 // A plan is genuinely BOTH a file and a link, so it gets its own kind rather
 // than being filed under either. Plan artifacts are derived from a plan file
-// path (`.opencode/plans/<created>-<slug>.md`) referenced in the session
-// transcript — opencode writes plans there when the session runs in plan mode.
-// Matches `.opencode/plans/<name>.md` wherever it appears (`./.opencode/...`
-// and absolute-prefixed paths both match from the `.opencode` segment).
-const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
+// path (`.opencode/plans/<created>-<slug>.md`, matched by `planRefsFromPart` in
+// chatUtils) referenced in the session transcript — opencode writes plans there
+// when the session runs in plan mode.
 
 // Readable plan title from a plan filename: strip `.md` and the leading
 // `<YYYY-MM-DD>-` created-stamp opencode writes, then un-slug.
@@ -207,47 +206,6 @@ export function planStatus(opts: {
 function joinHref(cwd: string | null, rel: string): string {
   if (!cwd) return rel;
   return cwd.endsWith("/") ? cwd + rel : cwd + "/" + rel;
-}
-
-// Only these tools set a plan path in their input because they AUTHOR the plan
-// file (or confirm it at plan_exit). A `read` tool pointed at a plan path is a
-// reference, not an authoring signal, and must not mint a plan artifact on its
-// own — the write/plan tool (or a prose mention) already does.
-const PLAN_AUTHORING_TOOLS = new Set(["write", "edit", "multiEdit", "patch", "plan", "plan_exit"]);
-
-// Plan paths live in different part shapes depending on how the plan was
-// authored. The classic announcing message mentions the path in PROSE (a text
-// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool,
-// which records the path in `state.input.filePath` (and sometimes
-// `planPath`/`path`) plus a `patch` part listing the file — the path never
-// reaches a text part. Scanning only text parts therefore missed every plan
-// created via the plan tool (BET-975/976 landed plan mode; this restores it).
-// Returns every distinct `.opencode/plans/*.md` reference found across text,
-// plan-authoring tool-input, and patch-file surfaces. Cheap by design: we never
-// scan tool output or file content, only path fields and prose.
-function planRefsFromPart(part: OpencodePart): string[] {
-  const out: string[] = [];
-  const candidates: string[] = [];
-  if (typeof part.text === "string") candidates.push(part.text);
-  const raw = part as Record<string, unknown>;
-  const isTool = raw.type === "tool";
-  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
-    const input = (raw.state as { input?: Record<string, unknown> } | undefined)?.input
-      ?? (raw.input as Record<string, unknown> | undefined);
-    if (input) {
-      for (const key of ["filePath", "path", "planPath"]) {
-        const v = input[key];
-        if (typeof v === "string") candidates.push(v);
-      }
-    }
-  }
-  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
-  for (const c of candidates) {
-    for (const m of c.matchAll(PLAN_REF_RE)) {
-      if (!out.includes(m[0])) out.push(m[0]);
-    }
-  }
-  return out;
 }
 
 // The stable subdomain a session's plan page is published under. MUST mirror
