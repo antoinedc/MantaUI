@@ -81,8 +81,8 @@ export function ModelPicker({
 
   // The models a user may actually switch TO: enabled, not deprecated, not
   // deactivated in Settings. Both the dropdown and the ⚡ toggle read from the
-  // same chatUtils source of truth (the `enabled !== false` filter lives there
-  // and nowhere else), so a model hidden in Settings can't be reached by
+  // same chatUtils source of truth (the enabled/status/deactivated gate lives
+  // there and nowhere else), so a model hidden in Settings can't be reached by
   // either route.
   // (`activeModel` below deliberately resolves against the FULL list — an
   // already-selected model must keep displaying its own name even if it was
