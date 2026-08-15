@@ -176,7 +176,17 @@ export function CloneFromGitHub({
         if (st.done) {
           if (st.ok) {
             clonedPathsRef.current.push(dest);
-            setPhase({ kind: "clone", queue, index: phase.index + 1 });
+            const nextIndex = phase.index + 1;
+            if (nextIndex >= queue.length) {
+              // Last repo in the queue finished — hand off to the batch
+              // workspace creation NOW, synchronously. Advancing the index
+              // past the end would render `destFor(queue[index])` with an
+              // out-of-range index and throw on `undefined.name` before the
+              // effect's completion guard could run (BET-945).
+              onCloned(clonedPathsRef.current);
+            } else {
+              setPhase({ kind: "clone", queue, index: nextIndex });
+            }
           } else {
             setPhase({ kind: "failed", repo, message: st.error || "Clone failed", errorKind: cloneErrorKind(st.error || "") });
           }

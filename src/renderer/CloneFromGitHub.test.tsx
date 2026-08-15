@@ -23,6 +23,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CloneFromGitHub } from "./CloneFromGitHub";
 import { installMockApi, type MockApi } from "./testHarness";
+import type { ForgeCloneStatus } from "../shared/types";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -61,21 +62,31 @@ let container: HTMLElement | null = null;
 let root: Root | null = null;
 let api: MockApi;
 
-function mountPicker(): void {
+type MountOverrides = {
+  forgeCloneStatus?: () => Promise<ForgeCloneStatus | null>;
+  onCloned?: (paths: string[]) => void;
+};
+
+function mountPicker(overrides: MountOverrides = {}): void {
   ({ api } = installMockApi({
     // Existing credential — the picker renders immediately, skipping the
     // device-connect screen.
     forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
     forgeRepos: () => Promise.resolve({ repos: REPOS, stale: false, error: null }),
     forgeCloneStart: () => Promise.resolve({ id: "c1" }),
-    forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    forgeCloneStatus:
+      overrides.forgeCloneStatus ?? (() => Promise.resolve(CLONE_IN_PROGRESS)),
   }));
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
+      <CloneFromGitHub
+        defaultRoot="/root"
+        onCancel={() => {}}
+        onCloned={overrides.onCloned ?? (() => {})}
+      />,
     );
   });
 }
@@ -176,5 +187,39 @@ describe("CloneFromGitHub picker", () => {
     // not class-string matching on the whole tree).
     expect(scroller!.contains(cloneButtonFor("0 selected"))).toBe(false);
     expect(scroller!.contains(searchInput())).toBe(false);
+  });
+
+  it("hands off to onCloned when the last (single) repo completes without a render throw", async () => {
+    // Regression for BET-945: driving the final repo to `done:true, ok:true`
+    // used to advance the clone index past the end of the queue, so the very
+    // next render called destFor(queue[index]) on `undefined` and threw
+    // before the effect's completion guard could call onCloned — blanking
+    // the panel instead of handing off.
+    const clonedPaths: string[] = [];
+    mountPicker({
+      onCloned: (paths) => clonedPaths.push(...paths),
+      // Complete the clone on the first status poll.
+      forgeCloneStatus: () =>
+        Promise.resolve({ ...CLONE_IN_PROGRESS, done: true, ok: true, percent: 100 }),
+    });
+    await flushMicro();
+
+    const alphaBox = container!.querySelector(
+      'input[aria-label="Clone alpha"]',
+    ) as HTMLInputElement;
+    expect(alphaBox).toBeTruthy();
+    act(() => {
+      alphaBox.click();
+    });
+    act(() => {
+      cloneButtonFor("1 selected").click();
+    });
+
+    // Drive the poll loop to completion. If the crash regressed, the render
+    // throws here and the act() wrapper rethrows it — the test fails red.
+    await flushMicro();
+    await flushMicro();
+
+    expect(clonedPaths).toEqual(["/root/alpha"]);
   });
 });
