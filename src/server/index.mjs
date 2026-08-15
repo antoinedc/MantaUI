@@ -406,6 +406,7 @@ const delegateEngine = createDelegateEngine({
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
   gitRun: (args) => tmux.run("git", args),
   listMessages: (sid) => oc.listMessages(sid),
+  listModels: (overrides) => oc.listModels(overrides),
   abortSession: (sid) => oc.abortSession(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
