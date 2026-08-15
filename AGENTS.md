@@ -2750,6 +2750,21 @@ in install-lib.mjs) backstops the rest of the class — a fork via
 `MANTA_REPO_URL`, a hand-run `git pull`, a half-extracted tarball — by naming
 the missing packages at install time instead of leaving a health timeout.
 
+### The public install path is all-or-nothing (BET-980)
+
+**An install either completes its chosen ingress path fully, or it fails —
+there is no degraded success.** A public-path box needs a Debian/Ubuntu-family
+distro AND the ability to run commands as root (real root or `sudo -n true`).
+Those two capability checks run in a **preflight (scripts/install.sh step 3.5)
+BEFORE the first mutation**, so a box that would finish unreachable instead
+refuses to start with nothing written and nothing to roll back. The tailscale
+and macOS paths never need root or a specific distro and are unaffected. Mid-
+path public failures (gateway registration, the DNS poll, the Caddy vhost
+write/reload) are all fatal too — `die`, never warn-and-continue — so the
+"Installed." banner and pairing block are only reachable on a genuinely
+complete install. Do not reintroduce a degrade-and-continue flag (the old
+degraded-success handling was deleted with this rule).
+
 ### A release is identified by its COMMIT, not its version number
 
 **You do not need to bump `package.json` to ship a server release.** A box
