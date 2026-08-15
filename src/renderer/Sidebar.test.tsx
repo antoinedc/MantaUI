@@ -125,3 +125,96 @@ describe("Sidebar — nested-control keydown guard (BET-726 review cycle 1 Block
     expect((renameInput as HTMLInputElement).value).toBe("win");
   });
 });
+
+describe("Sidebar — destructive-key modifier gate + Home/End (BET-937)", () => {
+  let h: Harness | null = null;
+
+  beforeEach(() => {
+    // localStorage persists across tests in this file; clear it so the
+    // sidebar's collapse/pin state can't leak in from an earlier test and
+    // change the nav-order this block asserts on.
+    localStorage.clear();
+    installMockApi({
+      configUpdate: (patch: Record<string, unknown>) =>
+        Promise.resolve({ pinnedWindows: (patch as { pinnedWindows?: string[] }).pinnedWindows ?? [] }),
+    });
+    resetStore({
+      // pinnedWindows must be empty: a prior test toggles a pin and zustand
+      // keeps it across tests otherwise, which would change navKeys ordering.
+      pinnedWindows: [],
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [
+            { index: 0, name: "win", active: true, paneCurrentPath: "/x", opencodeSessionId: null },
+          ],
+        }),
+      ],
+    });
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function mountSidebar(): Harness {
+    h = mount(
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} />,
+    );
+    return h;
+  }
+
+  function focusWindowRow() {
+    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
+    act(() => {
+      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    act(() => {
+      tree.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+  }
+
+  function keyOnTree(key: string, init: { metaKey?: boolean; ctrlKey?: boolean } = {}) {
+    const tree = h!.container.querySelector('[role="tree"]') as HTMLElement;
+    act(() => {
+      tree.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, ...init }));
+    });
+  }
+
+  it("bare Backspace/Delete on a focused row does nothing (no confirm)", () => {
+    mountSidebar();
+    focusWindowRow();
+    keyOnTree("Backspace");
+    keyOnTree("Delete");
+    // The delete confirm renders through a portal to document.body.
+    expect(h!.docText()).not.toContain("Close session");
+  });
+
+  it("⌘⌫ opens the confirm for the focused row", () => {
+    mountSidebar();
+    focusWindowRow();
+    keyOnTree("Backspace", { metaKey: true });
+    expect(h!.docText()).toContain("Close session");
+  });
+
+  it("Ctrl+Delete opens the confirm for the focused row", () => {
+    mountSidebar();
+    focusWindowRow();
+    keyOnTree("Delete", { ctrlKey: true });
+    expect(h!.docText()).toContain("Close session");
+  });
+
+  it("Home and End jump to the first / last rail row", () => {
+    mountSidebar();
+    keyOnTree("End");
+    const endItems = h!.container.querySelectorAll('[role="treeitem"]');
+    const focusedEnd = [...endItems].find((el) => el.getAttribute("tabindex") === "0");
+    expect(focusedEnd?.textContent).toContain("win");
+
+    keyOnTree("Home");
+    const homeItems = h!.container.querySelectorAll('[role="treeitem"]');
+    const focusedHome = [...homeItems].find((el) => el.getAttribute("tabindex") === "0");
+    expect(focusedHome?.textContent).toContain("proj");
+  });
+});

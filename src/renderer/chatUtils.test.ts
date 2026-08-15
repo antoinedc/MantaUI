@@ -64,6 +64,7 @@ import {
   windowPinId,
   parsePinId,
   resolvePin,
+  projectForNavKey,
   fuzzySessionScore,
   computeJobNesting,
   shouldResyncWindowsForJobs,
@@ -2318,6 +2319,34 @@ describe("windowPinId / parsePinId / resolvePin", () => {
     expect(resolvePin(projects, "p/2")?.window.index).toBe(2);
     expect(resolvePin(projects, "p/9")).toBeNull();
     expect(resolvePin(projects, "missing/2")).toBeNull();
+  });
+});
+
+describe("projectForNavKey", () => {
+  it("resolves a group key to its session", () => {
+    expect(projectForNavKey("group:better-ui")).toBe("better-ui");
+  });
+
+  it("resolves window and job keys to their session", () => {
+    expect(projectForNavKey("win:better-ui:3")).toBe("better-ui");
+    expect(projectForNavKey("job:better-ui:4")).toBe("better-ui");
+  });
+
+  it("returns null for pin keys (the caller resolves pins)", () => {
+    expect(projectForNavKey("pin:anything")).toBeNull();
+  });
+
+  it("returns null for null and garbage", () => {
+    expect(projectForNavKey(null)).toBeNull();
+    expect(projectForNavKey("garbage")).toBeNull();
+    expect(projectForNavKey("")).toBeNull();
+    expect(projectForNavKey("win:")).toBeNull();
+  });
+
+  it("resolves a session name containing a colon", () => {
+    expect(projectForNavKey("group:a:b")).toBe("a:b");
+    expect(projectForNavKey("win:a:b:3")).toBe("a:b");
+    expect(projectForNavKey("job:a:b:7")).toBe("a:b");
   });
 });
 
