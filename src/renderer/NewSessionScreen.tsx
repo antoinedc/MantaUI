@@ -721,6 +721,13 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     // scripts/visual/screens.mjs). One stable attribute per screen root, so
     // the harness never depends on a class name or DOM position.
     <div data-screen="welcome" className="h-full flex flex-col items-center justify-center px-8">
+      {cloneOpen ? (
+        <CloneFromGitHub
+          defaultRoot={proposedCloneRoot}
+          onCancel={() => setCloneOpen(false)}
+          onCloned={(paths) => void setupCloned(paths)}
+        />
+      ) : (
       <div className="w-full max-w-[720px] rounded-xl border border-border-subtle bg-bg-elev px-6 py-10 flex flex-col gap-2">
         {showComposer ? (
         <>
@@ -856,15 +863,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
             )}
         </div>
         </>
-        ) : (
-        cloneOpen ? (
-          <div className="flex justify-center">
-            <CloneFromGitHub
-              defaultRoot={proposedCloneRoot}
-              onCancel={() => setCloneOpen(false)}
-              onCloned={(paths) => void setupCloned(paths)}
-            />
-          </div>
         ) : (
         <>
             {zeroState === "scanning" ? (
@@ -1040,7 +1038,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
               </>
             )}
         </>
-        ))}
+        )}
 
         {error && (
           <Card danger>
@@ -1048,6 +1046,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           </Card>
         )}
       </div>
+      )}
 
       <FolderPickerModal
           open={pickerOpen}
