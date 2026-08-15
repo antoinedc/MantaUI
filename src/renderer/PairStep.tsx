@@ -279,7 +279,7 @@ function ManualPairPanel({
             className="text-label font-medium text-text-muted flex items-center gap-2"
           >
             Host
-            {fromClipboard && (
+            {fromClipboard && prefill && (
               <span className="inline-flex items-center gap-2 text-meta rounded-full px-2 py-1 bg-accent-bg text-accent border border-accent">
                 from clipboard
               </span>
