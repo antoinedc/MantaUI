@@ -1,15 +1,19 @@
 import type { OpencodeMessage, OpencodePart, OutboxFile, ServedPageMeta } from "../shared/types";
 
-export type ArtifactKind = "link" | "image" | "file";
+export type ArtifactKind = "link" | "image" | "file" | "plan";
 export type ArtifactOrigin = "user" | "agent";
 
+// Derived plan lifecycle, never stored — emulates `pageState`'s pattern of a
+// pure row-state derivation (see `planStatus` below).
+export type PlanStatus = "draft" | "approved" | "building" | "done";
+
 export type Artifact = {
-  id: string; // stable: the part id (suffixed .0/.1/... when a text part yields many links), or "page:<subdomain>"
+  id: string; // stable: the part id (suffixed .0/.1/... when a text part yields many links), or "page:<subdomain>" / "plan:<path>"
   kind: ArtifactKind;
   origin: ArtifactOrigin;
   key: string; // dedupe key
-  label: string; // filename, page title, or URL host+path
-  href: string; // absolute box path for files/images, URL for links
+  label: string; // filename, page title, URL host+path, or plan title
+  href: string; // absolute box path for files/images, URL for links, plan file path
   mime: string | null; // null for links
   size: number | null; // byte size for files/images when known (formatBytes), null otherwise
   at: number; // epoch ms, for sorting and day grouping
@@ -20,6 +24,12 @@ export type Artifact = {
   // `expiresAt` so a hosted page with no expiry (ttlHours:0) still gets the
   // expiry chip — external/pasted links never do.
   isHosted?: boolean;
+  // Plan-kind fields. Present only on `kind === "plan"` artifacts (derived,
+  // never stored) — the row's status/step-count/actions read these.
+  planStatus?: PlanStatus;
+  planStepCount?: number | null;
+  planPageUrl?: string | null; // hosted page URL when BET-954 has landed; null today
+  planJobSessionId?: string | null; // the job's child session; null until a plan is linked to a job
 };
 
 const URL_RE = /https?:\/\/[^\s<>]+/g;
@@ -150,6 +160,78 @@ function deriveOutboxArtifact(row: OutboxFile): Artifact {
   };
 }
 
+// A plan is genuinely BOTH a file and a link, so it gets its own kind rather
+// than being filed under either. Plan artifacts are derived from a plan file
+// path (`.opencode/plans/<created>-<slug>.md`) referenced in the session
+// transcript — opencode writes plans there when the session runs in plan mode.
+// Matches `.opencode/plans/<name>.md` wherever it appears (`./.opencode/...`
+// and absolute-prefixed paths both match from the `.opencode` segment).
+const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
+
+// Readable plan title from a plan filename: strip `.md` and the leading
+// `<YYYY-MM-DD>-` created-stamp opencode writes, then un-slug.
+function planTitleFromPath(file: string): string {
+  let base = file.replace(/\.md$/i, "");
+  base = base.replace(/^\d{4}-\d{2}-\d{2}-/, "");
+  const title = base.replace(/[-_]+/g, " ").trim();
+  return title || base;
+}
+
+// A plan's step count is *derived* from its announcing message — the markdown
+// step headings (`##`/`###`) the agent wrote alongside the `.md` reference.
+// 0 means "no steps derivable from the message" (the row then omits it).
+export function planStepCount(text: string | null): number {
+  if (!text) return 0;
+  return text.match(/^#{2,3}\s+.+$/gm)?.length ?? 0;
+}
+
+// Derived plan lifecycle, never stored (parallels `pageState`). Precedence:
+// a completed build is `done`, an in-flight build is `building`, an approved
+// (but not yet built) plan is `approved`, anything else — or a rejected /
+// failed build — falls back to `draft`.
+export function planStatus(opts: {
+  completed?: boolean;
+  running?: boolean;
+  approved?: boolean;
+}): PlanStatus {
+  if (opts.completed) return "done";
+  if (opts.running) return "building";
+  if (opts.approved) return "approved";
+  return "draft";
+}
+
+function joinHref(cwd: string | null, rel: string): string {
+  if (!cwd) return rel;
+  return cwd.endsWith("/") ? cwd + rel : cwd + "/" + rel;
+}
+
+function derivePlanArtifact(
+  msg: OpencodeMessage,
+  path: string,
+  cwd: string | null,
+): Artifact {
+  const rel = path.replace(/^\.\//, "");
+  const label = planTitleFromPath(lastPathSegment(rel));
+  return {
+    id: "plan:" + rel.toLowerCase(),
+    kind: "plan",
+    origin: "agent",
+    key: rel.toLowerCase(),
+    label,
+    href: joinHref(cwd, rel),
+    mime: "text/markdown",
+    size: null,
+    at: messageCreated(msg),
+    messageId: msg.info.id,
+    context: null,
+    expiresAt: null,
+    planStatus: planStatus({}),
+    planStepCount: planStepCount(messageText(msg)),
+    planPageUrl: null, // BET-954 will carry the hosted page URL here
+    planJobSessionId: null, // set once a plan is linked to its implementing job
+  };
+}
+
 function derivePageArtifact(page: ServedPageMeta, matched: OpencodeMessage | null): Artifact {
   return {
     id: "page:" + page.subdomain,
@@ -202,6 +284,7 @@ export function deriveArtifacts(
   pages: ServedPageMeta[],
   sessionId: string,
   outbox: OutboxFile[] = [],
+  cwd: string | null = null,
 ): Artifact[] {
   const out: Artifact[] = [];
 
@@ -231,6 +314,23 @@ export function deriveArtifacts(
       }
     }
   }
+
+  // Plan artifacts: any text part (any role) may reference a plan file. The
+  // `.md` path is never an `https?://` URL and never a `file:` part, so a
+  // plan is never ALSO emitted as a link or a file (no double-counting).
+  const plansByKey = new Map<string, Artifact>();
+  for (const msg of messages) {
+    for (const part of msg.parts) {
+      if (part.type !== "text") continue;
+      if (part.synthetic || part.ignored) continue;
+      for (const m of (part.text ?? "").matchAll(PLAN_REF_RE)) {
+        const a = derivePlanArtifact(msg, m[0], cwd);
+        const existing = plansByKey.get(a.key);
+        if (!existing || a.at > existing.at) plansByKey.set(a.key, a);
+      }
+    }
+  }
+  out.push(...plansByKey.values());
 
   for (const page of pages) {
     if (page.sessionID !== sessionId) continue;
@@ -295,8 +395,13 @@ export function pageState(expiresAt: number | null, now: number): PageState {
   return expiresAt - now <= SIX_HOURS_MS ? "soon" : "live";
 }
 
-export function countByKind(items: Artifact[]): { link: number; image: number; file: number } {
-  const counts = { link: 0, image: 0, file: 0 };
+export function countByKind(items: Artifact[]): {
+  link: number;
+  image: number;
+  file: number;
+  plan: number;
+} {
+  const counts = { link: 0, image: 0, file: 0, plan: 0 };
   for (const item of items) {
     counts[item.kind]++;
   }

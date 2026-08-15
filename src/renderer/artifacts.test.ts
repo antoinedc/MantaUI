@@ -5,6 +5,8 @@ import {
   groupByDay,
   pageState,
   countByKind,
+  planStepCount,
+  planStatus,
   type Artifact,
 } from "./artifacts";
 
@@ -349,6 +351,105 @@ describe("pageState", () => {
   });
 });
 
+// ── plan artifacts ──────────────────────────────────────────────────────────
+
+describe("plan artifacts", () => {
+  it("derives a plan artifact from a .opencode/plans path in the transcript", () => {
+    const messages = [
+      msg("a", "assistant", [
+        textPart(
+          "Here's the plan I wrote:\n## Step one\n## Step two\n### Step two.a\nSee .opencode/plans/2026-08-15-ship-the-thing.md",
+        ),
+      ], 5000),
+    ];
+    const out = deriveArtifacts(messages, [], "ses_a", [], "/proj");
+    expect(out).toHaveLength(1);
+    const plan = out[0];
+    expect(plan.kind).toBe("plan");
+    expect(plan.origin).toBe("agent");
+    expect(plan.label).toBe("ship the thing");
+    expect(plan.href).toBe("/proj/.opencode/plans/2026-08-15-ship-the-thing.md");
+    expect(plan.mime).toBe("text/markdown");
+    expect(plan.messageId).toBe("a");
+    // Step count is derived from the announcing message's markdown headings.
+    expect(plan.planStepCount).toBe(3);
+    expect(plan.planStatus).toBe("draft");
+  });
+
+  it("handles a leading ./, keeps the relative href without a cwd", () => {
+    const messages = [
+      msg("a", "assistant", [textPart("wrote ./.opencode/plans/2026-08-15-foo.md")], 1000),
+    ];
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out[0].kind).toBe("plan");
+    expect(out[0].href).toBe(".opencode/plans/2026-08-15-foo.md");
+  });
+
+  it("a plan is NOT also emitted as a file or a link (no double-counting)", () => {
+    // The same message references a plan path AND a real URL: the plan path is
+    // never an https URL, so each yields exactly one artifact of its own kind.
+    const messages = [
+      msg("a", "assistant", [textPart("plan: .opencode/plans/2026-08-15-foo.md and https://example.com/x")], 1000),
+    ];
+    // The URL is in ASSISTANT text, so it yields no link; the plan ref does.
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out.map((a) => a.kind)).toEqual(["plan"]);
+    expect(out.filter((a) => a.kind === "file")).toHaveLength(0);
+    expect(out.filter((a) => a.kind === "link")).toHaveLength(0);
+  });
+
+  it("dedupes plan refs to the same path, keeping the newest message", () => {
+    const messages = [
+      msg("a", "assistant", [textPart(".opencode/plans/x.md")], 100),
+      msg("a2", "assistant", [textPart(".opencode/plans/x.md")], 900),
+    ];
+    const out = deriveArtifacts(messages, [], "ses_a");
+    expect(out).toHaveLength(1);
+    expect(out[0].at).toBe(900);
+    expect(out[0].messageId).toBe("a2");
+  });
+
+  it("does not create a plan artifact from a plain .md path outside plans/", () => {
+    const messages = [msg("a", "assistant", [textPart("wrote ./notes/ideas.md")], 1000)];
+    expect(deriveArtifacts(messages, [], "ses_a")).toEqual([]);
+  });
+
+  it("no plan refs → panel-equivalent empty list", () => {
+    expect(
+      deriveArtifacts(
+        [msg("u", "user", [textPart("just a message")])],
+        [],
+        "ses_a",
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("planStepCount", () => {
+  it("counts ## and ### step headings, ignores body text", () => {
+    expect(
+      planStepCount("intro\n## Step one\n## Step two\n### sub\nbody\n## Step three"),
+    ).toBe(4);
+  });
+  it("returns 0 for null or heading-less text", () => {
+    expect(planStepCount(null)).toBe(0);
+    expect(planStepCount("no headings here")).toBe(0);
+  });
+});
+
+describe("planStatus", () => {
+  it("maps the lifecycle: draft → approved → building → done", () => {
+    expect(planStatus({})).toBe("draft");
+    expect(planStatus({ approved: true })).toBe("approved");
+    expect(planStatus({ running: true })).toBe("building");
+    expect(planStatus({ completed: true })).toBe("done");
+  });
+  it("completed wins over running/approved", () => {
+    expect(planStatus({ completed: true, running: true, approved: true })).toBe("done");
+    expect(planStatus({ running: true, approved: true })).toBe("building");
+  });
+});
+
 // ── counts ──────────────────────────────────────────────────────────────────
 
 describe("countByKind", () => {
@@ -358,11 +459,17 @@ describe("countByKind", () => {
       fileArtifact({ kind: "image" }),
       fileArtifact({ kind: "image" }),
       fileArtifact({ kind: "file" }),
+      fileArtifact({ kind: "plan" }),
     ]);
-    expect(out).toEqual({ link: 1, image: 2, file: 1 });
+    expect(out).toEqual({ link: 1, image: 2, file: 1, plan: 1 });
+  });
+
+  it("includes plans in the count", () => {
+    const out = countByKind([fileArtifact({ kind: "plan" }), fileArtifact({ kind: "plan" })]);
+    expect(out.plan).toBe(2);
   });
 
   it("empty input → zeroed counts", () => {
-    expect(countByKind([])).toEqual({ link: 0, image: 0, file: 0 });
+    expect(countByKind([])).toEqual({ link: 0, image: 0, file: 0, plan: 0 });
   });
 });

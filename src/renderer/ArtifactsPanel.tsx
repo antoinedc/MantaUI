@@ -21,8 +21,11 @@ import {
   ArrowDown,
   ArrowUp,
   ChevronRight,
+  ClipboardList,
   Download,
+  ExternalLink,
   FileText,
+  Focus,
   Link2,
   Paperclip,
   Search,
@@ -37,6 +40,7 @@ import {
   type Artifact,
   type ArtifactKind,
   type ArtifactOrigin,
+  type PlanStatus,
 } from "./artifacts";
 import { decodeDataUri, expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
 import { IconButton } from "./IconButton";
@@ -127,17 +131,23 @@ const MAX_WIDTH = 520;
 const DEFAULT_WIDTH = 340;
 const POLL_MS = 30_000;
 
-// BET-792: the artifacts panel hosts the review pane as a fourth tab — the
-// same resizable, ⌘I-toggled, width-persisted side surface, sharing the layout
-// shell. The first three are artifact kinds; "review" is a mode (the PR diff +
-// comment gutter) that shares the shell but not the artifact grammar.
-type PanelTab = ArtifactKind | "review";
-const TABS: PanelTab[] = ["link", "image", "file", "review"];
-const TAB_LABEL: Record<PanelTab, string> = {
+// BET-792: the artifacts panel hosts the review pane as a MODE — a two-value
+// segmented switch (`Artifacts | Review`) above the kind tabs. Review is not
+// an artifact kind (it is the PR diff + comment gutter that branches out of
+// the shared render path entirely), so it gets its own switch rather than a
+// fifth labelled+counted slice. The kind tab bar below is four homogeneous
+// kinds (Links · Images · Files · Plans), all with counts, all day-grouped.
+type PanelMode = "artifacts" | "review";
+const MODE_LABEL: Record<PanelMode, string> = {
+  artifacts: "Artifacts",
+  review: "Review",
+};
+const TABS: ArtifactKind[] = ["link", "image", "file", "plan"];
+const TAB_LABEL: Record<ArtifactKind, string> = {
   link: "Links",
   image: "Images",
   file: "Files",
-  review: "Review",
+  plan: "Plans",
 };
 
 // Device-local width, clamped to 280-520. Wrapped in try/catch (repo
@@ -168,13 +178,15 @@ function persistWidth(width: number) {
 function emptyBig(kind: ArtifactKind): string {
   if (kind === "link") return "No links yet";
   if (kind === "image") return "No images yet";
+  if (kind === "plan") return "No plans yet";
   return "No files yet";
 }
 
-function emptySub(kind: ArtifactKind, counts: { link: number; image: number; file: number }): string {
-  if (kind === "link") return `${counts.image} images, ${counts.file} files`;
-  if (kind === "image") return `${counts.link} links, ${counts.file} files`;
-  return `${counts.link} links, ${counts.image} images`;
+function emptySub(kind: ArtifactKind, counts: { link: number; image: number; file: number; plan: number }): string {
+  if (kind === "link") return `${counts.image} images, ${counts.file} files, ${counts.plan} plans`;
+  if (kind === "image") return `${counts.link} links, ${counts.file} files, ${counts.plan} plans`;
+  if (kind === "plan") return `${counts.link} links, ${counts.image} images, ${counts.file} files`;
+  return `${counts.link} links, ${counts.image} images, ${counts.plan} plans`;
 }
 
 // Direction glyph — the ONLY direction affordance (there is no direction
@@ -457,6 +469,102 @@ function FileRow({
   );
 }
 
+// ===== Tab 4 — Plans ========================================================
+
+function PlanStatusPill({ status }: { status: PlanStatus }) {
+  const cls =
+    status === "done"
+      ? "bg-ok-bg text-ok"
+      : status === "building"
+        ? "bg-accent-bg text-accent-tx"
+        : status === "approved"
+          ? "bg-warn-bg text-warn"
+          : "bg-fill text-text-faint";
+  return (
+    <span
+      className={`ml-1 inline-flex shrink-0 items-center gap-1 rounded-full px-[6px] py-[2px] text-micro font-semibold align-middle ${cls}`}
+    >
+      {status}
+    </span>
+  );
+}
+
+// A plan is BOTH a file and a link, so it is not filed under either — it gets
+// its own row with its own actions: Open page · Open file · Delegate (focus
+// the job building it). `onOpenPage` / `onDelegate` are null when the linked
+// data (hosted page URL, implementing job) is unavailable — the affordance is
+// then omitted rather than rendered as a dead control.
+function PlanRow({
+  artifact,
+  onOpen,
+  onOpenPage,
+  onDelegate,
+}: {
+  artifact: Artifact;
+  onOpen: (el: HTMLElement) => void;
+  onOpenPage: (() => void) | null;
+  onDelegate: (() => void) | null;
+}) {
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const steps = artifact.planStepCount ?? null;
+  const openFile = () => {
+    if (rowRef.current) onOpen(rowRef.current);
+  };
+  return (
+    <div
+      ref={rowRef}
+      className="group flex items-center gap-[9px] rounded-sm px-2 py-[7px] hover:bg-fill-hover"
+    >
+      <button
+        type="button"
+        onClick={openFile}
+        className="grid h-[30px] w-[30px] flex-none place-items-center rounded-sm border border-border-subtle bg-inset"
+        aria-label="Open plan file"
+      >
+        <ClipboardList className="h-3.5 w-3.5 text-accent" style={{ strokeWidth: 1.7 }} />
+      </button>
+      <button type="button" onClick={openFile} className="min-w-0 flex-1 text-left">
+        {/* Title + status pill on ONE line: the label truncates; the pill is a
+            shrink-0 sibling so status never wraps below the name. */}
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 flex-1 truncate font-mono text-meta text-text">{artifact.label}</span>
+          <PlanStatusPill status={artifact.planStatus ?? "draft"} />
+        </div>
+        <div className="mt-px flex items-center gap-[5px] text-micro text-text-quiet">
+          <DirectionGlyph origin={artifact.origin} />
+          <span>
+            {steps != null && steps > 0 ? `${steps} ${steps === 1 ? "step" : "steps"}` : "plan"}
+          </span>
+        </div>
+      </button>
+      <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
+        {onOpenPage && (
+          <ActionButton
+            icon={<ExternalLink className="h-3.5 w-3.5" />}
+            label="Open published page"
+            title="Open published page"
+            onClick={onOpenPage}
+          />
+        )}
+        <ActionButton
+          icon={<FileText className="h-3.5 w-3.5" />}
+          label="Open plan file"
+          title="Open plan file"
+          onClick={openFile}
+        />
+        {onDelegate && (
+          <ActionButton
+            icon={<Focus className="h-3.5 w-3.5" />}
+            label="Open implementing session"
+            title="Open the job building this plan"
+            onClick={onDelegate}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ArtifactsPanel({
   sessionId,
   cwd,
@@ -475,7 +583,10 @@ export function ArtifactsPanel({
   const widthRef = useRef(width);
   widthRef.current = width;
 
-  const [tab, setTab] = useState<PanelTab>("link");
+  const [tab, setTab] = useState<ArtifactKind>("link");
+  // BET-792: Review is a mode, not a kind — a two-segment switch above the
+  // kind tab bar (`Artifacts | Review`). The kind tab is `link` by default.
+  const [mode, setMode] = useState<PanelMode>("artifacts");
   // BET-726 Task 3.2: arrow-key nav on the tab bar — the exact pattern
   // Settings.tsx's section rail already uses (`onRailKeyDown` there: move
   // the active tab state AND DOM focus, on Left/Right). Note this is NOT a
@@ -483,11 +594,11 @@ export function ArtifactsPanel({
   // `tabIndex` — every tab stays in the normal Tab order); only the active
   // tab and focus move on arrow keys. Refs keyed by kind so ArrowLeft/Right
   // can call `.focus()` on the tab it moves to.
-  const tabRefs = useRef<Record<PanelTab, HTMLButtonElement | null>>({
+  const tabRefs = useRef<Record<ArtifactKind, HTMLButtonElement | null>>({
     link: null,
     image: null,
     file: null,
-    review: null,
+    plan: null,
   });
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -530,6 +641,7 @@ export function ArtifactsPanel({
   // change so the panel follows the active chat pane cleanly. Also close any
   // open preview (its artifacts belong to the old session).
   useEffect(() => {
+    setMode("artifacts");
     setTab("link");
     setSearchOpen(false);
     setQuery("");
@@ -537,18 +649,18 @@ export function ArtifactsPanel({
   }, [sessionId]);
 
   // BET-869: the "Review changes" button in the branch popover opens this panel
-  // on its Review tab (App.tsx separately flips the panel open). Same
+  // on its Review mode (App.tsx separately flips the panel open). Same
   // window-CustomEvent convention as the manta-open-* bridges.
   useEffect(() => {
-    const handler = () => setTab("review");
+    const handler = () => setMode("review");
     window.addEventListener("manta-open-review", handler);
     return () => window.removeEventListener("manta-open-review", handler);
   }, []);
 
   const now = useMemo(() => Date.now(), []);
   const artifacts = useMemo(
-    () => deriveArtifacts(messages, pages, sessionId ?? "", outbox),
-    [messages, pages, outbox, sessionId],
+    () => deriveArtifacts(messages, pages, sessionId ?? "", outbox, cwd),
+    [messages, pages, outbox, sessionId, cwd],
   );
   const counts = useMemo(() => countByKind(artifacts), [artifacts]);
   const tabArtifacts = useMemo(
@@ -583,6 +695,7 @@ export function ArtifactsPanel({
       link: artifacts.filter((a) => a.kind === "link" && matches(a)).length,
       image: 0,
       file: artifacts.filter((a) => a.kind === "file" && matches(a)).length,
+      plan: artifacts.filter((a) => a.kind === "plan" && matches(a)).length,
     };
   }, [artifacts, query, counts]);
 
@@ -599,9 +712,11 @@ export function ArtifactsPanel({
 
   // Row-body "open". Previewables (image/PDF/text) open the BET-661 overlay;
   // links open externally (no in-app web renderer); everything else downloads.
+  // A plan's row "open" opens its published page when one exists (BET-954),
+  // else its file (preview/download).
   const openRow = (a: Artifact, el: HTMLElement) => {
-    if (a.kind === "link") {
-      void window.api.openExternal(a.href);
+    if (a.kind === "link" || (a.kind === "plan" && a.planPageUrl)) {
+      void window.api.openExternal(a.planPageUrl ?? a.href);
       return;
     }
     const pi = previewable.findIndex((p) => p.id === a.id);
@@ -701,11 +816,42 @@ export function ArtifactsPanel({
             />
           )}
 
-          {/* Tab bar: Links / Images / Files with counts, Links always the
-              default per the design `.mk-tabs`. The SELECTED highlight is a
-              sliding pill that animates across the three equal-width tabs via a
+          {/* Mode switch: Artifacts | Review. Review is a mode (the PR diff +
+              comment gutter, wholly outside the artifact grammar), so it gets
+              its own two-segment switch above the kind tabs — not a fifth
+              labelled+counted slice. Segmented-toggle precedent: the Settings
+              segmented rows (aria-pressed + raised active segment). */}
+          <div
+            className="mb-2 flex p-1 bg-inset border border-border-subtle rounded-md"
+            role="group"
+            aria-label="Artifacts panel mode"
+          >
+            {(Object.keys(MODE_LABEL) as PanelMode[]).map((m) => {
+              const active = mode === m;
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setMode(m)}
+                  className={
+                    "relative z-10 flex-1 inline-flex items-center justify-center gap-1 px-2 py-1 rounded-sm text-meta font-medium " +
+                    "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+                    (active ? "bg-raised shadow-sm text-text" : "text-text-faint hover:text-text")
+                  }
+                >
+                  {MODE_LABEL[m]}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Tab bar: Links / Images / Files / Plans with counts, Links always
+              the default per the design `.mk-tabs`. The SELECTED highlight is a
+              sliding pill that animates across the four equal-width tabs via a
               transform transition on the indicator — so switching sections
-              reads as the highlight gliding, not the content swapping. */}
+              reads as the highlight gliding, not the content swapping. Every
+              kind is homogeneous (all counted, all day-grouped). */}
           <div
             className="relative flex p-1 bg-inset border border-border-subtle rounded-md"
             role="tablist"
@@ -715,7 +861,7 @@ export function ArtifactsPanel({
               className="manta-artifacts-tab-indicator absolute left-1 top-1 bottom-1 rounded-sm bg-raised shadow-sm"
               style={{
                 // One tab's width: the content row is 100% minus the p-1 (0.5rem)
-                // horizontal padding, split across the three flush flex-1 tabs.
+                // horizontal padding, split across the four flush flex-1 tabs.
                 width: `calc((100% - 0.5rem) / ${TABS.length})`,
                 transform: `translateX(${TABS.indexOf(tab) * 100}%)`,
               }}
@@ -738,17 +884,14 @@ export function ArtifactsPanel({
                   }
                 >
                   {TAB_LABEL[k]}
-                  {/* The Review tab has no count — it is a mode, not a kind. */}
-                  {k !== "review" && (
-                    <span
-                      className={
-                        "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
-                        (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
-                      }
-                    >
-                      {displayCounts[k as ArtifactKind]}
-                    </span>
-                  )}
+                  <span
+                    className={
+                      "tabular-nums inline-flex items-center justify-center min-w-[15px] h-[15px] px-1 rounded-full text-micro " +
+                      (active ? "bg-accent-bg text-accent-tx" : "bg-fill text-text-faint")
+                    }
+                  >
+                    {displayCounts[k]}
+                  </span>
                 </button>
               );
             })}
@@ -756,9 +899,9 @@ export function ArtifactsPanel({
         </div>{/* close the px-3 pt-[11px] header wrapper */}
 
         {/* Body: day-grouped, sticky headers, newest first, one renderer per
-            tab — except Review, which is a mode (the PR diff + comment gutter)
-            and owns its own scroll. */}
-        {tab === "review" ? (
+            kind tab — except Review, which is a mode (the PR diff + comment
+            gutter) and owns its own scroll. */}
+        {mode === "review" ? (
           <ReviewPane sessionId={sessionId ?? ""} cwd={cwd ?? ""} />
         ) : (
         <div className="flex-1 overflow-y-auto min-h-0">
@@ -768,8 +911,8 @@ export function ArtifactsPanel({
                 <div className="text-label text-text-muted">No matches for “{query}”</div>
               ) : (
                 <>
-                  <div className="text-label text-text-faint">{emptyBig(tab as ArtifactKind)}</div>
-                  <div className="mt-1 text-micro text-text-faint">{emptySub(tab as ArtifactKind, counts)}</div>
+                  <div className="text-label text-text-faint">{emptyBig(tab)}</div>
+                  <div className="mt-1 text-micro text-text-faint">{emptySub(tab, counts)}</div>
                 </>
               )}
             </div>
@@ -788,6 +931,20 @@ export function ArtifactsPanel({
                         now={now}
                         onOpen={(el) => openRow(a, el)}
                         onJump={() => jumpToMessage(a)}
+                      />
+                    ))}
+                  </div>
+                ) : tab === "plan" ? (
+                  <div className="px-2 pb-3">
+                    {g.items.map((a) => (
+                      <PlanRow
+                        key={a.id}
+                        artifact={a}
+                        onOpen={(el) => openRow(a, el)}
+                        onOpenPage={a.planPageUrl ? () => void window.api.openExternal(a.planPageUrl!) : null}
+                        // No plan→job linkage today — the affordance is omitted
+                        // rather than rendered dead (per the spec).
+                        onDelegate={null}
                       />
                     ))}
                   </div>
