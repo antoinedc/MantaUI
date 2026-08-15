@@ -281,9 +281,9 @@ export function invalidateToken(host) {
 //   2. `user_code` is NOT baked into the verification URL (no query string) —
 //      that would lengthen what the user types and remove our ability to
 //      highlight a typo.
-//   3. `slow_down` adds 5s PERMANENTLY to the poll interval (GitHub's
-//      directive); `authorization_pending` keeps polling; `expired_token` is a
-//      typed ExpiredCodeError ([E2]).
+//   3. `slow_down` trusts GitHub's authoritative `interval` when present and
+//      falls back to +5s (GitHub's own directive); `authorization_pending`
+//      keeps polling; `expired_token` is a typed ExpiredCodeError ([E2]).
 //   4. normalizeUserCode strips dashes/whitespace and uppercases before any
 //      comparison, so `wdjb-mjht ` matches `WDJBMJHT`.
 //   5. The code is copied to the clipboard automatically (the renderer does
@@ -415,8 +415,8 @@ export function cancelDeviceGrant(grantId) {
  * in the secrets vault under `GITHUB_TOKEN` (shared scope) via storeToken and
  * the ladder's resolution cache is invalidated so the stored secret is picked
  * up next boot. `authorization_pending` returns `{ status: "pending" }`;
- * `slow_down` bumps the poll interval +5s permanently; `expired_token` throws
- * ExpiredCodeError ([E2]).
+ * `slow_down` trusts GitHub's authoritative `interval` (falling back to +5s
+ * when it's absent/invalid); `expired_token` throws ExpiredCodeError ([E2]).
  *
  * @param {string} grantId
  * @param {{ clientId?: string, fetch?: typeof fetch, now?: () => number, storeToken?: (token: string) => Promise<{ ok: boolean, error?: string }> }} [opts]
@@ -454,7 +454,8 @@ export async function pollDeviceGrant(
   }
   if (raw.error === "authorization_pending") return { status: "pending", pollInterval: grant.intervalSec };
   if (raw.error === "slow_down") {
-    grant.intervalSec += 5;
+    const next = Number(raw.interval);
+    grant.intervalSec = Number.isFinite(next) && next > 0 ? next : grant.intervalSec + 5;
     return { status: "pending", pollInterval: grant.intervalSec };
   }
   if (raw.error === "expired_token") {
