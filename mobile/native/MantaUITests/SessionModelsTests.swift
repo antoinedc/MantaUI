@@ -79,11 +79,22 @@ final class SessionModelsTests: XCTestCase {
         XCTAssertEqual(SessionTimerFormat.runningDuration(1), "1 second")
     }
 
-    func testLiveElapsedKeepsSeconds() {
+    func testLiveElapsedCompactNoSpaces() {
         XCTAssertEqual(SessionTimerFormat.liveElapsed(5), "5s")
-        XCTAssertEqual(SessionTimerFormat.liveElapsed(72), "1m 12s")
-        XCTAssertEqual(SessionTimerFormat.liveElapsed(60), "1m 0s")
-        XCTAssertEqual(SessionTimerFormat.liveElapsed(3725), "1h 2m")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(72), "1m")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(60), "1m")
+        XCTAssertEqual(SessionTimerFormat.liveElapsed(3725), "1h2m")
+    }
+
+    func testCompactCanonicalLadder() {
+        XCTAssertEqual(SessionTimerFormat.compact(0), "0s")
+        XCTAssertEqual(SessionTimerFormat.compact(45), "45s")
+        XCTAssertEqual(SessionTimerFormat.compact(59), "59s")
+        XCTAssertEqual(SessionTimerFormat.compact(60), "1m")
+        XCTAssertEqual(SessionTimerFormat.compact(3_420), "57m")
+        XCTAssertEqual(SessionTimerFormat.compact(7_800), "2h10m")
+        XCTAssertEqual(SessionTimerFormat.compact(10_620), "2h57m")
+        XCTAssertEqual(SessionTimerFormat.compact(10_800), "3h")
     }
 
     // MARK: - BET-897 idle recency

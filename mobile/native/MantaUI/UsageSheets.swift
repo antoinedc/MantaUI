@@ -186,7 +186,7 @@ struct ContextSheet: View {
         context.segments.first { $0.kind == kind }?.pct ?? 0
     }
 
-    /// "Idle 1h 12m — the cache has gone cold. Clearing now saves re-billing
+    /// "Idle 1h12m — the cache has gone cold. Clearing now saves re-billing
     /// 584k tokens." — driven by idleMs + staleTokens. The warn colour IS the
     /// warning, so it is kept; the font is the platform's footnote.
     @ViewBuilder
@@ -209,11 +209,9 @@ struct ContextSheet: View {
     }
 
     private func idleText(_ ms: Double) -> String {
-        let total = Int(ms / 1000)
-        let hours = total / 3600
-        let minutes = (total % 3600) / 60
-        if hours >= 1 { return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h" }
-        return "\(max(1, minutes))m"
+        // Canonical compact timer form ("2h57m"/"57m"/"45s"), shared with the
+        // running row and the desktop — pass ms/1000 since `compact` takes seconds.
+        SessionTimerFormat.compact(ms / 1000)
     }
 }
 

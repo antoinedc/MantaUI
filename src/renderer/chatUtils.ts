@@ -254,6 +254,24 @@ export function formatDuration(ms: number): string {
   return `${s}s`;
 }
 
+// Canonical compact timer format shared across the app (and mirrored 1:1 by the
+// iOS `SessionTimerFormat.compact`): "2h57m" / "57m" / "2h" / "45s". No spaces,
+// h/m/s abbreviations; seconds shown only under a minute; hours drop the
+// minutes when they're zero. Use THIS for any elapsed/distance timer (reset
+// distances, idle text, running rows) instead of hand-rolling another shape.
+// This is the compact *timer* ladder — see `formatDuration` above for the
+// seconds-precise task/turn form ("1m44s", "2h3m4s"), which is a distinct thing.
+export function formatTimerDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return m > 0 ? `${h}h${m}m` : `${h}h`;
+  if (m > 0) return `${m}m`;
+  return `${s}s`;
+}
+
 // Wall-clock time for the subtle per-message timestamp gutter. Renders a
 // 24-hour "HH:MM" from an epoch-ms value. Returns "" for null/undefined or
 // non-finite input so the caller can render nothing without extra guards.
@@ -2929,21 +2947,16 @@ function isSameLocalDay(a: number, b: number): boolean {
 }
 
 /** The relative "how far away" distance, floored to at most two units:
- *  "45m" / "2h 10m" / "2d 4h". Covers the whole ladder. Pure arithmetic —
- *  no locale involvement. */
+ *  "45m" / "2h10m" / "2d4h". Reuses `formatTimerDuration` for the sub-day
+ *  ladder so h/m timers read identically everywhere. Pure arithmetic — no
+ *  locale involvement. */
 export function formatResetDistance(deltaMs: number): string {
   if (!Number.isFinite(deltaMs) || deltaMs <= 0) return "now";
   if (deltaMs < 60_000) return "under a minute";
-  const m = Math.floor(deltaMs / 60_000);
-  if (deltaMs < 3_600_000) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
-  if (deltaMs < 86_400_000) {
-    return mm === 0 ? `${h}h` : `${h}h ${mm}m`;
-  }
+  if (deltaMs < 86_400_000) return formatTimerDuration(deltaMs);
   const d = Math.floor(deltaMs / 86_400_000);
   const hh = Math.floor((deltaMs % 86_400_000) / 3_600_000);
-  return hh === 0 ? `${d}d` : `${d}d ${hh}h`;
+  return hh === 0 ? `${d}d` : `${d}d${hh}h`;
 }
 
 /** The absolute anchor: "09:00" (same local day), "Thu 09:00" (<7 days), or
@@ -2960,7 +2973,7 @@ export function formatResetAt(
   return RESET_DATE_TIME_FMT.format(resetsAt);
 }
 
-// "resets in 2h 10m" / "resets in 45m" / "resets in 5d 20h (Thu, 21 Aug, 09:00)"
+// "resets in 2h10m" / "resets in 45m" / "resets in 5d20h (Thu, 21 Aug, 09:00)"
 // — the popover's per-window reset line. The absolute anchor is appended only
 // when the reset is NOT on the same local calendar day as `now` (a same-day
 // reset is unambiguous from the relative time alone). Returns null only for a
