@@ -449,6 +449,12 @@ struct UsageWindow: Codable, Equatable, Sendable {
     /// Epoch milliseconds of the reset.
     var resetsAt: Double? = nil
     var binding: Bool? = nil
+    /// True when this reading describes a window whose reset instant has already
+    /// passed — the provider has not published the new window's numbers yet, so
+    /// `pct` still belongs to the window that just ended. Set by the box's usage
+    /// poller (src/server/usage.mjs). Never raise a warning from a stale window;
+    /// carry the last reading forward and label it.
+    var stale: Bool? = nil
 }
 
 /// One provider's full `usage:list` snapshot.

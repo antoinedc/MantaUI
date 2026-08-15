@@ -60,26 +60,62 @@ enum UsageMeters {
     /// Whether the one-per-session weekly warning banner should show: the
     /// weekly window exists AND is ≥ 90% AND has not already been shown this
     /// session. It is the only thing standing between a green 5-hour dot and
-    /// a multi-day lockout the user did not see coming.
+    /// a multi-day lockout the user did not see coming. A STALE window (whose
+    /// reset instant has already passed) never raises the ≥90% banner — the
+    /// numbers still belong to a window that has ended.
     static func shouldShowWeeklyBanner(_ weekly: UsageWindow?, alreadyShown: Bool) -> Bool {
         guard let weekly, !alreadyShown else { return false }
+        if weekly.stale == true { return false }
         return weekly.pct >= 90
     }
 
-    /// Compact reset label under 24h ("in 4h 12m"); absolute weekday + time
-    /// ("Thursday 09:00") at 24h and beyond — the format the sheet and the
-    /// banner both use, the caller supplying cap/case.
+    /// The relative "how far away" reset distance, floored to at most two
+    /// units — "45m" / "2h 10m" / "2d 4h". Mirrors the desktop
+    /// `formatResetDistance` one-to-one so both clients print the same string
+    /// for the same input. Pure arithmetic — no locale involvement.
+    static func resetDistance(_ seconds: Int) -> String {
+        if seconds <= 0 { return "now" }
+        if seconds < 60 { return "under a minute" }
+        let m = seconds / 60
+        if seconds < 3600 { return "\(m)m" }
+        let h = m / 60
+        let mm = m % 60
+        if seconds < 86400 {
+            return mm == 0 ? "\(h)h" : "\(h)h \(mm)m"
+        }
+        let d = seconds / 86400
+        let hh = (seconds % 86400) / 3600
+        return hh == 0 ? "\(d)d" : "\(d)d \(hh)h"
+    }
+
+    /// The absolute anchor: "09:00" (same local calendar day), "Thu 09:00"
+    /// (< 7 days away), or "Thu 21 Aug 09:00" otherwise — device locale, never
+    /// a hardcoded pattern. Mirrors the desktop `formatResetAt`.
+    static func resetAt(_ resetsAt: Date, now: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDate(resetsAt, inSameDayAs: now) {
+            return Self.resetTimeFmt.string(from: resetsAt)
+        }
+        if resetsAt.timeIntervalSince(now) < 7 * 86400 {
+            return Self.resetDayTimeFmt.string(from: resetsAt)
+        }
+        return Self.resetDateTimeFmt.string(from: resetsAt)
+    }
+
+    /// The sheet/banner reset line (the caller already supplies the "resets "
+    /// prefix): "in 2h 10m", with an absolute anchor appended only when the
+    /// reset is NOT on the same local calendar day. A reset instant that has
+    /// already passed reads "resetting…" — the dot carries the old number
+    /// forward while the provider catches up (BET-965/967). Mirrors the
+    /// desktop `formatWindowReset`.
     static func formatReset(_ resetsAt: Date, now: Date) -> String {
         let seconds = Int(resetsAt.timeIntervalSince(now))
-        if seconds > 0 && seconds < 24 * 3600 {
-            let hours = seconds / 3600
-            let minutes = (seconds % 3600) / 60
-            if hours >= 1 {
-                return minutes > 0 ? "in \(hours)h \(minutes)m" : "in \(hours)h"
-            }
-            return "in \(max(1, minutes))m"
+        if seconds <= 0 { return "resetting…" }
+        let line = "in " + resetDistance(seconds)
+        if Calendar.current.isDate(resetsAt, inSameDayAs: now) {
+            return line
         }
-        return Self.weekdayTime.string(from: resetsAt)
+        return line + " (" + resetAt(resetsAt, now: now) + ")"
     }
 
     /// "824k" / "1M" / "148k" — the compact token-count display for the
@@ -102,12 +138,20 @@ enum UsageMeters {
         return "\(formatTokens(cache.staleTokens)) cold"
     }
 
-    /// "Thursday 09:00" — absolute, so a multi-day reset reads as a calendar
-    /// anchor rather than an arithmetic exercise.
-    private static let weekdayTime: DateFormatter = {
+    // MARK: - Reset-time absolute formatters (BET-967)
+
+    // OS locale on purpose (autoupdatingCurrent), and the TEMPLATE chooses
+    // 12- vs 24-hour from the device — never a literal "HH:mm" pattern and
+    // never a fixed POSIX locale. That single rule is what stops iOS
+    // contradicting the desktop reset line.
+    private static let resetTimeFmt: DateFormatter = Self.makeFmt(template: "jmm")
+    private static let resetDayTimeFmt: DateFormatter = Self.makeFmt(template: "Ejmm")
+    private static let resetDateTimeFmt: DateFormatter = Self.makeFmt(template: "EMMMdjmm")
+
+    private static func makeFmt(template: String) -> DateFormatter {
         let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEEE HH:mm"
+        f.locale = Locale.autoupdatingCurrent
+        f.setLocalizedDateFormatFromTemplate(template)
         return f
-    }()
+    }
 }

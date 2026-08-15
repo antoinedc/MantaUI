@@ -5,7 +5,8 @@ import XCTest
 // BET-824 — pure decisions of the plan + context meters (UsageMeters). No view,
 // no HTTP, no box. Tests every boundary exactly: 69.9/70/89.9/90, a missing
 // value rendering nothing (sessionWindow nil), a snapshot holding only a
-// weekly window, and `formatReset` under and over 24h.
+// weekly window, the reset-distance ladder (BET-967) and the stale-window
+// banner gate (BET-965/967).
 // ===========================================================================
 
 final class UsageMetersTests: XCTestCase {
@@ -86,35 +87,72 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertFalse(UsageMeters.shouldShowWeeklyBanner(nil, alreadyShown: false))
     }
 
-    // MARK: - formatReset (under / over 24h)
-
-    func testFormatResetUnder24h() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let resetsAt = now.addingTimeInterval(4 * 3600 + 12 * 60)
-        XCTAssertEqual(UsageMeters.formatReset(resetsAt, now: now), "in 4h 12m")
+    /// A STALE weekly window (reset instant already passed, provider hasn't
+    /// published the new numbers yet) must not raise the ≥90% banner — the pct
+    /// still belongs to the window that just ended (BET-965/967).
+    func testBannerHiddenWhenWeeklyStale() {
+        var weekly = window("weekly", pct: 95)
+        weekly.stale = true
+        XCTAssertFalse(UsageMeters.shouldShowWeeklyBanner(weekly, alreadyShown: false))
     }
 
-    func testFormatResetUnderAnHour() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let resetsAt = now.addingTimeInterval(45 * 60)
-        XCTAssertEqual(UsageMeters.formatReset(resetsAt, now: now), "in 45m")
+    /// Sanity: a FRESH 95% window still raises the banner even at the same pct.
+    func testBannerShownWhenWeeklyFresh() {
+        let weekly = window("weekly", pct: 95)
+        XCTAssertTrue(UsageMeters.shouldShowWeeklyBanner(weekly, alreadyShown: false))
     }
 
-    /// Exactly 24h is NOT under 24h — it flips to the absolute weekday form.
-    func testFormatResetAt24hIsAbsolute() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let resetsAt = now.addingTimeInterval(24 * 3600)
+    // MARK: - resetDistance (exact desktop ladder — BET-966/967)
+
+    /// Exact strings, mirroring the desktop `formatResetDistance` table
+    /// including the drop-zero and the motivating 140h 12m cases.
+    func testResetDistanceExactLadder() {
+        XCTAssertEqual(UsageMeters.resetDistance(0), "now")
+        XCTAssertEqual(UsageMeters.resetDistance(-5), "now")
+        XCTAssertEqual(UsageMeters.resetDistance(30), "under a minute")
+        XCTAssertEqual(UsageMeters.resetDistance(45 * 60), "45m")
+        XCTAssertEqual(UsageMeters.resetDistance(2 * 3600 + 10 * 60), "2h 10m")
+        XCTAssertEqual(UsageMeters.resetDistance(3 * 3600), "3h")
+        XCTAssertEqual(UsageMeters.resetDistance(26 * 3600), "1d 2h")
+        XCTAssertEqual(UsageMeters.resetDistance(48 * 3600), "2d")
+        XCTAssertEqual(UsageMeters.resetDistance(140 * 3600 + 12 * 60), "5d 20h")
+    }
+
+    // MARK: - resetAt / formatReset (shape only — locale-fixed, BET-967)
+
+    /// The absolute anchor is device-locale: all three tiers render non-empty,
+    /// and the same-day tier carries no calendar date.
+    func testResetAtTiersNonEmpty() {
+        let now = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        XCTAssertFalse(UsageMeters.resetAt(now.addingTimeInterval(2 * 3600), now: now).isEmpty)
+        XCTAssertFalse(UsageMeters.resetAt(now.addingTimeInterval(24 * 3600), now: now).isEmpty)
+        XCTAssertFalse(UsageMeters.resetAt(now.addingTimeInterval(10 * 24 * 3600), now: now).isEmpty)
+    }
+
+    /// A same-local-day reset has no anchor — no "(" — and reads "in <distance>".
+    func testFormatResetSameDayNoAnchor() {
+        let now = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        let resetsAt = now.addingTimeInterval(2 * 3600)
         let result = UsageMeters.formatReset(resetsAt, now: now)
-        XCTAssertFalse(result.hasPrefix("in "), "24h+ must be an absolute weekday, not a relative countdown")
-        XCTAssertTrue(result.contains(":"), "weekday form is 'Thursday 09:00'")
+        XCTAssertFalse(result.contains("("), "same-day reset must not append an anchor, got: \(result)")
+        XCTAssertTrue(result.contains(UsageMeters.resetDistance(Int(resetsAt.timeIntervalSince(now)))))
     }
 
-    func testFormatResetBeyond24h() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
+    /// A cross-day reset appends " (…)" and still contains the distance.
+    func testFormatResetCrossDayHasAnchor() {
+        let now = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
         let resetsAt = now.addingTimeInterval(3 * 24 * 3600)
         let result = UsageMeters.formatReset(resetsAt, now: now)
-        XCTAssertFalse(result.hasPrefix("in "))
-        XCTAssertTrue(result.contains(":"))
+        XCTAssertTrue(result.contains("("), "cross-day reset must append an anchor, got: \(result)")
+        XCTAssertTrue(result.contains(")"))
+        XCTAssertTrue(result.contains(UsageMeters.resetDistance(Int(resetsAt.timeIntervalSince(now)))))
+    }
+
+    /// A reset instant that has already passed reads exactly "resetting…".
+    func testFormatResetPastIsResetting() {
+        let now = Date()
+        let resetsAt = now.addingTimeInterval(-60)
+        XCTAssertEqual(UsageMeters.formatReset(resetsAt, now: now), "resetting…")
     }
 
     // MARK: - formatTokens
