@@ -1106,15 +1106,19 @@ main() {
     bash "$_oc_installer" </dev/null \
       || die "opencode install failed — install manually: https://opencode.ai"
     rm -f "$_oc_installer"
-    # Refresh PATH from .bashrc if the installer wrote there, then also
-    # probe the well-known install location as a safety net.
-    if [ -f "$HOME/.bashrc" ]; then
-      # shellcheck disable=SC1090
-      set +e
-      # shellcheck disable=SC1090
-      . "$HOME/.bashrc" 2>/dev/null || true
-      set -e
-    fi
+    # Resolve the freshly-installed binary deterministically from its WELL-KNOWN
+    # install dir — do NOT re-source the user's ~/.bashrc (or ~/.profile) to pick
+    # up the PATH line the installer appended. Installers (nvm, rustup, and
+    # opencode's own installer) never source the user's rc file; they write a
+    # PATH line and probe the known dir. Sourcing rc is both fragile and
+    # distro-dependent: a stock Debian/Ubuntu ROOT ~/.bashrc opens with
+    # `[ -z "$PS1" ] && return`, which dereferences an unbound $PS1 in a
+    # non-interactive shell and — under this script's `set -eu` — aborts the
+    # whole outer bash (exit 127) before control returns to the `|| true`; the
+    # fresh-root install died silently right here with no message. On other
+    # distros rc can prompt (hang), `read` stdin, or execute arbitrary user
+    # code. The opencode installer always installs to $HOME/.opencode/bin, so
+    # probing that path is both sufficient and portable.
     if [ -x "$HOME/.opencode/bin/opencode" ]; then
       export PATH="$HOME/.opencode/bin:$PATH"
     fi

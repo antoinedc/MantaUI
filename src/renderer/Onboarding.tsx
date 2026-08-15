@@ -7,19 +7,16 @@
 // The user-visible flow is two steps (Connect → Connect a provider). Model is
 // global config (edited in Settings); no dedicated onboarding step for it.
 //
-// Onboarding's responsibilities beyond the step machine:
+// Onboarding's responsibility beyond the step machine:
 //
-//   1. Verify by working (BET-421 §B). After both steps complete,
-//      `verifyOnboarding` spins up an EPHEMERAL opencode session
-//      (no project, no sidebar entry), sends one probe prompt, waits for a
-//      real assistant reply, and deletes the session. Three named stages
-//      drive a ProcessPanel; on failure the user sees which stage failed +
-//      Try again / Back to the provider step / Copy diagnostics. No "continue
-//      anyway" — a working model is mandatory.
+//   Failure and resumption. Every failure shows a plain-language cause +
+//   one way forward. The shell re-derives the resume point from config so
+//   a quit-mid-flow reopens at the first incomplete step.
 //
-//   2. Failure and resumption. Every failure shows a plain-language cause +
-//      one way forward. The shell re-derives the resume point from config so
-//      a quit-mid-flow reopens at the first incomplete step.
+// There is NO model probe: onboarding installs the box (Step 1) and connects
+// a provider (Step 2), then hands off. It never opens an ephemeral session or
+// sends a probe prompt, so it never hangs on a slow/cold model or bills a
+// turn before the user has done anything.
 //
 // Per-step bodies:
 //   - Step 1 (Connect)          → PairStep.tsx (SSH picker primary, manual
@@ -43,24 +40,14 @@ import {
 import { useStore } from "./store";
 import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
-import {
-  verifyOnboarding,
-  pickVerifyLabels,
-  verifyStageLabels,
-  type VerifyProgress,
-  type VerifyStageIndex,
-} from "./onboardingVerify";
 import { installHttpTransport } from "./transportInstall";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
 import { ArrowRight, CheckIcon } from "./onboardingUi";
 import { Button } from "./Button";
-import { ProcessPanel } from "./ProcessPanel";
-import { Callout } from "./Callout";
 import mantaMark from "./assets/manta-mark-128.png";
 
 const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409: darker in light for AA)
-const DANGER = "var(--danger)";
 
 // Progress rail — one dot + connector per step. Reads every numbered step as
 // completed on the success screen.
@@ -130,16 +117,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       : resolveInitialStep(useStore.getState().configSnapshot()),
   );
 
-  // Verification state (BET-421 §B). The ProcessPanel is driven by
-  // `verifyProgress`; a failure populates `verifyError` with the stage +
-  // message so the failure card can render the three actions.
-  const [verifyProgress, setVerifyProgress] = useState<VerifyProgress | null>(null);
-  const [verifyError, setVerifyError] = useState<{
-    failedStage: VerifyStageIndex;
-    message: string;
-    labels: [string, string, string];
-  } | null>(null);
-  const [verifyElapsed, setVerifyElapsed] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   // Pre-flight for everything that runs AFTER a successful pair.
@@ -160,53 +137,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     await useStore.getState().refresh();
   }, []);
 
-  // The post-pair verify. Runs an ephemeral opencode session through three
-  // named stages; on success the shell advances to "success", on failure
-  // the failure card renders with Try again / Back to the provider step /
-  // Copy diagnostics.
-  const runVerify = useCallback(async () => {
-    await refreshAndInstallTransport();
-    // Resolve the connected provider label + the configured default model
-    // so the stage labels name them. If the status probe fails or nothing
-    // is connected, fall back to generic labels — the verify still runs.
-    let providerLabel = "your provider";
-    let modelLabel: string | undefined;
-    try {
-      const status = await window.api.opencodeProviderAuth({
-        action: "status",
-      });
-      const cfg = useStore.getState().configSnapshot();
-      const labels = pickVerifyLabels(status, cfg.defaultModel ?? null);
-      if (labels) {
-        providerLabel = labels.providerLabel;
-        modelLabel = labels.modelLabel;
-      }
-    } catch {
-      /* best-effort — verify with generic labels */
-    }
-    const stages = verifyStageLabels(providerLabel, modelLabel);
-    setVerifyError(null);
-    setVerifyElapsed(0);
-    setVerifyProgress({ stage: 0, status: "running" });
-    const outcome = await verifyOnboarding({
-      api: window.api,
-      providerLabel,
-      modelLabel,
-      onProgress: (p) => setVerifyProgress(p),
-    });
-    if (outcome.ok) {
-      setVerifyProgress(null);
-      setPos("success");
-      return;
-    }
-    setVerifyProgress({ stage: outcome.failedStage, status: "error" });
-    setVerifyError({
-      failedStage: outcome.failedStage,
-      message: outcome.message,
-      labels: stages,
-    });
-  }, [refreshAndInstallTransport]);
-
   // Step 1 → step 2. The provider step is always shown; on a box that
   // already has a provider connected, ProvidersStep displays it ticked and
   // the user chooses to add more or continue.
@@ -225,10 +155,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setPos(2);
   }, [refreshAndInstallTransport]);
 
-  // Step 2 → verify (provider connect just landed → run the verify).
+  // Step 2 → success. Connecting a provider completes onboarding — there is
+  // no model probe, so we advance straight to the success screen.
   const onProviderContinue = useCallback(() => {
-    void runVerify();
-  }, [runVerify]);
+    setPos("success");
+  }, []);
 
   const goBack = () => setPos((p) => prevPosition(p));
 
@@ -248,39 +179,14 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   // <h2>; we focus the first heading inside the step body so a screen
   // reader / keyboard user lands on the new step's title.
   useEffect(() => {
-    if (verifyProgress) return; // verify overlay owns focus while running
     const h2 = bodyRef.current?.querySelector("h2");
     if (h2 instanceof HTMLHeadingElement) {
       h2.setAttribute("tabindex", "-1");
       h2.focus();
     }
-  }, [pos, verifyProgress]);
-
-  // Tick the verify elapsed-time display once a second while running.
-  useEffect(() => {
-    if (!verifyProgress || verifyProgress.status !== "running") return;
-    const t = setInterval(() => setVerifyElapsed((s) => s + 1), 1000);
-    return () => clearInterval(t);
-  }, [verifyProgress]);
+  }, [pos]);
 
   const isSuccess = pos === "success";
-  const isVerifying = verifyProgress !== null && !verifyError;
-
-  const copyVerifyDiagnostics = useCallback(async () => {
-    if (!verifyError) return;
-    const stageLabel = verifyError.labels[verifyError.failedStage] ?? "verification";
-    const text = [
-      "Manta onboarding verification failed",
-      `Stage: ${verifyError.failedStage + 1} of ${verifyError.labels.length} — ${stageLabel}`,
-      `Elapsed: ${verifyElapsed}s`,
-      `Error: ${verifyError.message}`,
-    ].join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard may be unavailable; the text is also shown inline */
-    }
-  }, [verifyError, verifyElapsed]);
 
   return (
     <div className="fixed inset-0 z-50 bg-bg text-text flex items-center justify-center overflow-y-auto">
@@ -322,63 +228,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
           </div>
         </div>
 
-        {/* Verification panel (BET-421 §B). Sits below the step body so it
-            doesn't obscure the active step's controls. Mounted mid-verify
-            and on failure; cleared on success. */}
-        {verifyProgress && verifyError && (
-          <div className="mt-6 space-y-4">
-            <ProcessPanel
-              stages={verifyError.labels}
-              activeIndex={verifyError.failedStage}
-              status="error"
-              elapsedSeconds={verifyElapsed}
-              logLines={[]}
-              onCopyDiagnostics={copyVerifyDiagnostics}
-            />
-            <Callout tone="danger">{verifyError.message}</Callout>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => void runVerify()}
-                className="px-4 py-2 rounded-sm text-body font-medium"
-                style={{ background: ACCENT_SOLID, color: "var(--on-accent)" }}
-              >
-                Try again
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setVerifyProgress(null);
-                  setVerifyError(null);
-                  setPos(2);
-                }}
-                className="px-4 py-2 rounded-sm text-body font-medium"
-                style={{ border: `1px solid ${ACCENT}`, color: ACCENT }}
-              >
-                Back to the provider step
-              </button>
-              <button
-                type="button"
-                onClick={() => void copyVerifyDiagnostics()}
-                className="px-4 py-2 rounded-sm text-body font-medium"
-                style={{ border: `1px solid ${DANGER}`, color: DANGER }}
-              >
-                Copy diagnostics
-              </button>
-            </div>
-          </div>
-        )}
-        {isVerifying && verifyProgress && (
-          <div className="mt-6">
-            <ProcessPanel
-              stages={verifyStageLabels("your provider")}
-              activeIndex={verifyProgress.stage}
-              status={verifyProgress.status}
-              elapsedSeconds={verifyElapsed}
-              logLines={[]}
-            />
-          </div>
-        )}
       </div>
     </div>
   );
