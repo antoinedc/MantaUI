@@ -129,9 +129,13 @@ import {
   FOLLOW_THRESHOLD_PX,
   describeSessionClose,
   describeProjectClose,
+  isPlanExitQuestion,
+  planMetrics,
+  extractPlanData,
+  resolveDelegateModel,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem, QuestionRequest } from "../shared/types";
 
 
 
@@ -4920,5 +4924,184 @@ describe("describeProjectClose", () => {
       worktreeCount: 0,
     });
     expect(r.body).not.toContain("worktree");
+  });
+});
+
+describe("isPlanExitQuestion", () => {
+  const planq = (callID?: string): QuestionRequest =>
+    ({
+      id: "q1",
+      sessionID: "s1",
+      questions: [],
+      tool: callID ? { messageID: "m1", callID } : undefined,
+    }) as QuestionRequest;
+
+  const part = (tool: string, callID: string) =>
+    ({ type: "tool", id: "p", messageID: "m1", tool, callID });
+
+  it("true when a transcript tool part named plan_exit carries the question's callID", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        part("read", "call-read"),
+        part("plan_exit", "call-exit"),
+      ],
+    };
+    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
+  });
+
+  it("false when the matching callID belongs to a DIFFERENT tool", () => {
+    const msg: OpencodeMessage = { info: {} as never, parts: [part("edit", "call-exit")] };
+    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
+  });
+
+  it("false for an ordinary question with no tool call", () => {
+    expect(isPlanExitQuestion(planq(undefined), null)).toBe(false);
+  });
+
+  it("false when no part matches the callID even if a plan_exit part exists", () => {
+    const msg: OpencodeMessage = { info: {} as never, parts: [part("plan_exit", "other")] };
+    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
+  });
+
+  it("matches a nested state.input.tool shape (reconciled transcript part)", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        {
+          type: "tool",
+          id: "p",
+          messageID: "m1",
+          callID: "call-exit",
+          state: { status: "completed", input: { tool: "plan_exit", planPath: "/x/plan.md" } },
+        },
+      ],
+    };
+    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
+  });
+});
+
+describe("planMetrics", () => {
+  it("omits steps and files when nothing is derivable", () => {
+    expect(planMetrics("Just prose.")).toEqual({});
+  });
+
+  it("counts 'Step N' headings as steps", () => {
+    const r = planMetrics("## Step 1\nx\n## Step 2\ny\n## Step 3\nz");
+    expect(r.steps).toBe(3);
+  });
+
+  it("counts numbered headings as steps", () => {
+    const r = planMetrics("## 1. first\n## 2. second");
+    expect(r.steps).toBe(2);
+  });
+
+  it("counts backticked file bullets as files", () => {
+    const r = planMetrics("- `src/a.ts`\n- `src/b.ts`\n");
+    expect(r.files).toBe(2);
+  });
+
+  it("does not print 0 for an absent clause", () => {
+    const r = planMetrics("### Do x\n- `src/a.ts`");
+    expect(r.steps).toBeUndefined();
+    expect(r.files).toBe(1);
+  });
+});
+
+describe("extractPlanData", () => {
+  const planq = (callID: string): QuestionRequest =>
+    ({ id: "q1", sessionID: "s1", questions: [], tool: { messageID: "m1", callID } }) as QuestionRequest;
+
+  it("title from first heading, path + metrics from the tool input", () => {
+    const msg: OpencodeMessage = {
+      info: {} as never,
+      parts: [
+        {
+          type: "tool",
+          id: "p",
+          messageID: "m1",
+          callID: "call-exit",
+          state: { status: "completed", input: { tool: "plan_exit", planPath: "/work/plan.md", plan: "# Add login\n## Step 1\n- `src/a.ts`" } },
+        },
+      ],
+    };
+    const d = extractPlanData(planq("call-exit"), [msg]);
+    expect(d.title).toBe("Add login");
+    expect(d.path).toBe("/work/plan.md");
+    expect(d.metrics).toEqual({ steps: 1, files: 1 });
+  });
+
+  it("falls back to the question header when no plan text is present", () => {
+    const q = planq("call-exit");
+    q.questions = [{ question: "Plan at /p is complete. Would you like to switch?", header: "Build Agent", options: [] }];
+    const d = extractPlanData(q, []);
+    expect(d.title).toBe("Build Agent");
+    expect(d.metrics).toEqual({});
+    expect(d.path).toBeUndefined();
+  });
+});
+
+describe("resolveDelegateModel", () => {
+  const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
+    ({ providerID, modelID });
+  const groups = (ids: Array<[string, string]>): Array<[string, OpencodeModel[]]> =>
+    [...new Set(ids.map(([p]) => p))].map((p) => [
+      p,
+      ids.filter(([pp]) => pp === p).map(([, id]) => ({ id, providerID: p, name: id }) as OpencodeModel),
+    ]);
+
+  it("level 1: an explicit pick wins while open", () => {
+    const r = resolveDelegateModel({
+      picked: sel("anthropic", "opus"),
+      remembered: sel("anthropic", "sonnet"),
+      sessionModel: sel("anthropic", "haiku"),
+      selectable: groups([["anthropic", "opus"], ["anthropic", "sonnet"], ["anthropic", "haiku"]]),
+    });
+    expect(r.model).toEqual(sel("anthropic", "opus"));
+    expect(r.overridden).toBe(true);
+  });
+
+  it("level 2: the remembered override is used when no explicit pick", () => {
+    const r = resolveDelegateModel({
+      picked: null,
+      remembered: sel("anthropic", "sonnet"),
+      sessionModel: sel("anthropic", "haiku"),
+      selectable: groups([["anthropic", "sonnet"], ["anthropic", "haiku"]]),
+    });
+    expect(r.model).toEqual(sel("anthropic", "sonnet"));
+    expect(r.overridden).toBe(true);
+  });
+
+  it("level 3: falls through to the build/session model when neither pick nor remember", () => {
+    const r = resolveDelegateModel({
+      picked: null,
+      remembered: null,
+      sessionModel: sel("anthropic", "haiku"),
+      selectable: groups([["anthropic", "haiku"]]),
+    });
+    expect(r.model).toEqual(sel("anthropic", "haiku"));
+    expect(r.overridden).toBe(false);
+  });
+
+  it("falls through to level 3 when the remembered model is deactivated (not selectable)", () => {
+    const r = resolveDelegateModel({
+      picked: null,
+      remembered: sel("anthropic", "sonnet"),
+      sessionModel: sel("anthropic", "haiku"),
+      selectable: groups([["anthropic", "haiku"]]), // sonnet deactivated
+    });
+    expect(r.model).toEqual(sel("anthropic", "haiku"));
+    expect(r.overridden).toBe(false);
+  });
+
+  it("keeps the remembered pick (not silently falling through) while models are still loading", () => {
+    const r = resolveDelegateModel({
+      picked: null,
+      remembered: sel("anthropic", "sonnet"),
+      sessionModel: sel("anthropic", "haiku"),
+      selectable: null, // loading — cannot validate
+    });
+    expect(r.model).toEqual(sel("anthropic", "sonnet"));
+    expect(r.overridden).toBe(true);
   });
 });

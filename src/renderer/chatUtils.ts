@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, SubscriptionStatus, TmuxWindow, UsageSnapshot, UsageWindow } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -2105,6 +2105,175 @@ export function resolvePlanToggle(
       ? "Plan mode on — edits blocked. Click to build."
       : "Plan mode off — click to plan without editing",
   };
+}
+
+// ===== Plan card data (BET-951) =====
+//
+// The plan_exit question is upgraded into a plan card in the pinned card
+// stack. Its title ("the plan's title/first heading"), the metrics line
+// (`N steps · N files`) and the plan path are all derived from the plan text
+// the `plan_exit` tool call carried. Detection is EXACT, never heuristic: the
+// question's `tool.callID` links back to the `plan_exit` tool part in the
+// transcript — match on that, never on the question text.
+
+// A tool part may surface its name/callID directly (the live `message.part.*`
+// event shape used by useSseBus) or nested under `state.input` (the reconciled
+// transcript shape Toolkit parts carry). Read both tolerantly.
+function toolPartName(part: OpencodePart): string {
+  const direct = part.tool;
+  if (typeof direct === "string" && direct) return direct;
+  const state = part.state as { input?: { tool?: unknown } } | undefined;
+  const nested = state?.input?.tool;
+  return typeof nested === "string" ? nested : "";
+}
+
+/**
+ * Is `question` the plan_exit ask? True iff a transcript tool part named
+ * `plan_exit` carries the SAME `callID` as `question.tool.callID`. A callID is
+ * required (an orphaned/recovered question without one can never be matched)
+ * and the match must be exact — the question text is never consulted.
+ */
+export function isPlanExitQuestion(
+  question: QuestionRequest,
+  messages: OpencodeMessage[] | null,
+): boolean {
+  const qCallID = question.tool?.callID;
+  if (!qCallID) return false;
+  for (const msg of messages ?? []) {
+    for (const part of msg.parts) {
+      if (part.type !== "tool") continue;
+      if (part.callID !== qCallID) continue;
+      if (toolPartName(part) === "plan_exit") return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The metrics line for the plan card: `N steps · N files`, derived from the
+ * plan text. A clause is OMITTED (not `0`) when it cannot be derived — the
+ * card never prints `0 steps`. `steps` counts step/labelled-numbered headings;
+ * `files` counts bullet list items whose text is a backticked path (the
+ * conventional `- \`path\`` file listing). Empty / no-match → `{}`.
+ */
+export function planMetrics(text: string): { steps?: number; files?: number } {
+  const out: { steps?: number; files?: number } = {};
+  const stepHeading = text.match(/^#{1,6}[ \t]+step[ \t]+/gim)?.length ?? 0;
+  const numberedHeading = text.match(/^#{1,6}[ \t]+\d+[.)]/gm)?.length ?? 0;
+  const steps = stepHeading || numberedHeading;
+  if (steps > 0) out.steps = steps;
+  const files = text.match(/^[ \t]*[-*][ \t]+`[^`]+`[ \t]*$/gm)?.length ?? 0;
+  if (files > 0) out.files = files;
+  return out;
+}
+
+/**
+ * The plan card's display data: the title (first markdown heading of the plan
+ * text, falling back to the question header), the plan file path when known,
+ * the metrics, and the FULL plan text (what "Build here" resubmits as the next
+ * prompt with the build model). Everything is tolerant — when the `plan_exit`
+ * part's input carries no plan text the card still renders, just with the
+ * question's header as the title and no metrics.
+ */
+export function extractPlanData(
+  question: QuestionRequest,
+  messages: OpencodeMessage[] | null,
+): {
+  title: string;
+  path?: string;
+  metrics: { steps?: number; files?: number };
+  text: string;
+} {
+  let text = "";
+  let path = "";
+  for (const msg of messages ?? []) {
+    for (const part of msg.parts) {
+      if (part.type !== "tool") continue;
+      if (part.callID !== question.tool?.callID) continue;
+      if (toolPartName(part) !== "plan_exit") continue;
+      const state = part.state as { input?: Record<string, unknown> } | undefined;
+      const input = (state?.input ?? part.input) as
+        | Record<string, unknown>
+        | undefined;
+      const t = input?.plan ?? input?.content ?? input?.text;
+      const p = input?.planPath ?? input?.path;
+      if (typeof t === "string") text = t;
+      if (typeof p === "string") path = p;
+      break;
+    }
+  }
+  const firstHeading = text.match(/^#{1,6}[ \t]+(.+)$/m)?.[1]?.trim();
+  const firstLine = text.split("\n").find((l) => l.trim())?.trim();
+  const title =
+    firstHeading ??
+    firstLine ??
+    question.questions[0]?.header ??
+    "Plan complete";
+  return {
+    title,
+    path: path || undefined,
+    metrics: planMetrics(text),
+    text,
+  };
+}
+
+// ===== resolveDelegateModel (BET-951) =====
+//
+// The delegate split control's model precedence — implement EXACTLY this
+// order, in a pure helper:
+//   1. An explicit pick made on the card (component state) — wins while open.
+//   2. The last model EXPLICITLY overridden for a delegation in this project
+//      (the `manta:delegate:<projectKey>:model` key). Never promote an
+//      inherited default into a remembered one — the memory would just pin
+//      whatever happened to be current the first time.
+//   3. The session's BUILD-side model.
+//
+// "Same as current" means the BUILD model — NOT whatever the composer chip is
+// showing (plan mode may be on, so the chip could show the plan model).
+// Sending a background job to the planning model is the bug this order exists
+// to prevent. Until per-mode models land there is only one model per session
+// and (3) is simply that model; the lookup keeps working when they arrive.
+//
+// If a remembered model is no longer selectable (deactivated in Settings or
+// gone from the catalog), fall through to (3) silently — never render a dead
+// label. Carries the full `{providerID, modelID, variant?}` shape.
+//
+// `overridden` reports whether an explicit override (level 1 or 2) is in
+// effect — the split control's right-segment accent.
+export type DelegateModelResolution = {
+  model: import("./chatShared").ModelSelection | null;
+  overridden: boolean;
+};
+
+function selectionKey(s: { providerID: string; modelID: string }): string {
+  return `${s.providerID}/${s.modelID}`;
+}
+
+export function resolveDelegateModel(input: {
+  picked: import("./chatShared").ModelSelection | null;
+  remembered: import("./chatShared").ModelSelection | null;
+  sessionModel: import("./chatShared").ModelSelection | null;
+  selectable: Array<[string, OpencodeModel[]]> | null;
+}): DelegateModelResolution {
+  const { picked, remembered, sessionModel, selectable } = input;
+  // While models are still loading we cannot validate, so a remembered or
+  // picked selection must not be discarded just because the catalogue isn't
+  // in yet — the live session model is a fine stand-in until it re-resolves.
+  const selectableKeys =
+    selectable === null
+      ? null
+      : new Set(
+          selectable
+            .flatMap(([, ms]) => ms)
+            .map((m) => `${m.providerID}/${m.id}`),
+        );
+  const usable = (s: import("./chatShared").ModelSelection | null): boolean =>
+    !!s && (selectableKeys === null || selectableKeys.has(selectionKey(s)));
+  if (usable(picked) && picked)
+    return { model: { ...picked }, overridden: true };
+  if (usable(remembered) && remembered)
+    return { model: { ...remembered }, overridden: true };
+  return { model: sessionModel ? { ...sessionModel } : null, overridden: false };
 }
 
 // ===== Transcript entry motion =====

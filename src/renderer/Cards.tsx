@@ -12,15 +12,18 @@
 // one shared AskCardShell below (BET-458). BET-415 gave them the 30px icon
 // badge, plain-language titles, checkbox question options and a button ladder.
 
-import { useState, type ReactNode } from "react";
-import { Shield, HelpCircle, Check, Send } from "lucide-react";
-import type { PermissionRequest, ProgressRecord, QuestionRequest } from "../shared/types";
-import { buildQuestionAnswers, canSubmitQuestion } from "./chatUtils";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { DraftingCompass, Shield, HelpCircle, Check, Send, ChevronDown } from "lucide-react";
+import type { PermissionRequest, ProgressRecord, QuestionRequest, OpencodeModel } from "../shared/types";
+import { buildQuestionAnswers, canSubmitQuestion, resolveDelegateModel } from "./chatUtils";
+import { resolveActiveModel } from "./chatShared";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
 import { OutputWell } from "./OutputWell";
 import { Button } from "./Button";
 import { StatusDot } from "./StatusDot";
+import { SplitChip } from "./Chip";
+import { ModelMenu } from "./ModelMenu";
 import { renderMarkdown } from "./MarkdownBody";
 
 // ===== Shared ask-card shell (BET-458) =====
@@ -497,6 +500,176 @@ export function QuestionCard({
         </>
       }
     />
+  );
+}
+
+// ===== Plan card (BET-951) =====
+//
+// Upgrades the plan_exit question (detected EXACTLY via isPlanExitQuestion —
+// the matching `plan_exit` tool callID, never the question text) into a
+// dedicated card in the pinned card stack. Blocking tier: it is an unanswered
+// ask, rendered beside permission/question, never below an ambient card.
+//
+// The delegate split reuses SplitChip (no new split control) fed by the
+// EXISTING ModelMenu; model precedence lives in resolveDelegateModel (a pure
+// chatUtils helper), never inline here.
+
+export function PlanCard({
+  data,
+  models,
+  remembered,
+  sessionModel,
+  buildModelName,
+  atDelegateCap,
+  onBuildHere,
+  onKeepPlanning,
+  onStartDelegate,
+  onRememberDelegateModel,
+}: {
+  data: { title: string; path?: string; metrics: { steps?: number; files?: number } };
+  models: Array<[string, OpencodeModel[]]> | null;
+  remembered: import("./chatShared").ModelSelection | null;
+  sessionModel: import("./chatShared").ModelSelection | null;
+  buildModelName: string;
+  atDelegateCap: boolean;
+  onBuildHere: (feedback: string) => void;
+  onKeepPlanning: (feedback: string) => void;
+  onStartDelegate: (
+    model: import("./chatShared").ModelSelection | null,
+    feedback: string,
+  ) => void;
+  onRememberDelegateModel: (model: import("./chatShared").ModelSelection | null) => void;
+}) {
+  // Level 1 of the model precedence — an explicit pick made on THIS card wins
+  // while it is open. Written through to the remembered key on pick (see
+  // onRememberDelegateModel) so it survives reopening.
+  const [picked, setPicked] = useState<import("./chatShared").ModelSelection | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
+
+  const resolution = useMemo(
+    () => resolveDelegateModel({ picked, remembered, sessionModel, selectable: models }),
+    [picked, remembered, sessionModel, models],
+  );
+  const delegateModel = resolution.model;
+  const allModels = useMemo(() => models?.flatMap(([, ms]) => ms) ?? [], [models]);
+  const resolvedOpencode = useMemo(
+    () => resolveActiveModel(allModels, delegateModel, null),
+    [allModels, delegateModel],
+  );
+  // The right segment truncates to the model family name before anything else
+  // shrinks (BET-951).
+  const familyLabel =
+    resolvedOpencode?.family ?? resolvedOpencode?.providerID ?? delegateModel?.modelID ?? "model";
+
+  // `N steps · N files` — each clause omitted (never `0`) when not derivable.
+  const metricsLine = [
+    data.metrics.steps ? `${data.metrics.steps} steps` : null,
+    data.metrics.files ? `${data.metrics.files} files` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const busy = atDelegateCap;
+
+  const body = (
+    <>
+      {(metricsLine || data.path) && (
+        <div className="text-text-faint mb-px">
+          {metricsLine}
+          {metricsLine && data.path ? " · " : ""}
+          {data.path && <span className="text-text-quiet">{data.path}</span>}
+        </div>
+      )}
+      {/* Free-text feedback — QuestionCard's field recipe verbatim. */}
+      <div className="flex items-center gap-2 border border-border rounded-md bg-bg px-3 py-2 mt-2">
+        <Send size={14} aria-hidden="true" className="text-text-quiet shrink-0" />
+        <input
+          type="text"
+          placeholder="Anything to change before we start?"
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none text-meta text-text placeholder:text-text-faint"
+        />
+      </div>
+    </>
+  );
+
+  // Actions, in order: [Build here] [Delegate ▾] spacer [Keep planning].
+  // "See in browser ↗" is intentionally ABSENT — BET-954 (its data source) has
+  // not merged, so shipping it would be shipping a dead button.
+  const splitTitle = busy
+    ? "Too many background jobs running (5)"
+    : "Start a background job in its own worktree";
+  const actions = (
+    <>
+      <Button tone="primary" onClick={() => onBuildHere(feedback)}>
+        Build here
+      </Button>
+      <SplitChip
+        left={<span className={busy ? "opacity-50" : undefined}>Delegate</span>}
+        right={
+          <span className={"flex items-center gap-1 truncate" + (busy ? " opacity-50" : "")}>
+            <span className="truncate max-w-[80px]">{familyLabel}</span>
+            <ChevronDown size={13} aria-hidden="true" className="shrink-0 text-text-faint" />
+          </span>
+        }
+        onLeftClick={() => {
+          if (!busy) onStartDelegate(delegateModel, feedback);
+        }}
+        onRightClick={() => {
+          if (!busy) setMenuOpen((o) => !o);
+        }}
+        popup={{ right: true }}
+        rightAccent={resolution.overridden}
+        rightExpanded={menuOpen}
+        rightBtnRef={modelBtnRef}
+        leftHook="manta-plan-delegate-btn"
+        rightHook="manta-plan-delegate-model-btn"
+        leftTitle={splitTitle}
+        rightTitle={busy ? splitTitle : "Model this background job will run on"}
+        loading={models === null}
+      />
+      <div className="flex-1" />
+      <Button tone="ghost" onClick={() => onKeepPlanning(feedback)}>
+        Keep planning
+      </Button>
+    </>
+  );
+
+  return (
+    <>
+      <AskCardShell
+        badge={<DraftingCompass size={16} aria-hidden="true" />}
+        badgeBg="var(--accent-bg)"
+        badgeColor="var(--accent-tx)"
+        title={data.title}
+        subtitle={buildModelName ? `Ready to build · ${buildModelName}` : "Ready to build"}
+        body={body}
+        actions={actions}
+      />
+      {menuOpen && (
+        <ModelMenu
+          open={menuOpen}
+          anchorRef={modelBtnRef}
+          groups={models}
+          modelOverride={delegateModel}
+          defaultModel={null}
+          // "Same as current" = the session's BUILD model — never the plan
+          // model (the composer chip may be showing the plan model while plan
+          // mode is on). Sending a background job to the planning model is the
+          // bug the precedence order exists to prevent.
+          defaultRow={{ label: "Same as this session", sub: buildModelName }}
+          onSelect={(m) => {
+            setPicked(m);
+            onRememberDelegateModel(m);
+            setMenuOpen(false);
+          }}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
+    </>
   );
 }
 

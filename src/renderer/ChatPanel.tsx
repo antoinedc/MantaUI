@@ -60,6 +60,9 @@ import {
   describeMergeFailure,
   progressAttentionKind,
   resolvePlanToggle,
+  isPlanExitQuestion,
+  extractPlanData,
+  selectableModelGroups,
 } from "./chatUtils";
 import {
   appendPromptHistory,
@@ -71,6 +74,8 @@ import {
   writeSavedModel,
   readPlanSaved,
   writePlanSaved,
+  readSavedDelegateModel,
+  writeSavedDelegateModel,
   resolveActiveModel,
   type AgentMention,
   type Attachment,
@@ -83,7 +88,7 @@ import { useModelCatalog } from "./modelCatalog";
 import { useAgentCatalog } from "./agentCatalog";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
-import { BlockedProgressCard, CompactionCard, PermissionCard, RetryCard } from "./Cards";
+import { BlockedProgressCard, CompactionCard, PermissionCard, PlanCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
@@ -2353,6 +2358,131 @@ export function ChatPanel({
   // (second pass finds the id already present) and the per-session-instance
   // lifetime (ChatPanel is keyed by session id in App) makes it self-resetting.
   const blockingArrival = useRef<Map<string, number>>(new Map());
+
+  // ===== Plan card (BET-951) =====
+  // The plan_exit question is upgraded into a blocking plan card in the pinned
+  // card stack. Detection is EXACT — `isPlanExitQuestion` matches the question's
+  // `tool.callID` against a `plan_exit` tool part in the transcript, never the
+  // question text. These are also EXCLUDED from the inline transcript question
+  // rendering below so they never appear twice (once inline as a generic
+  // QuestionCard, once in the stack).
+  const planQuestions = useMemo(
+    () => questions.filter((q) => isPlanExitQuestion(q, messages)),
+    [questions, messages],
+  );
+  const planDataByQuestion = useMemo(
+    () => new Map(planQuestions.map((q) => [q.id, extractPlanData(q, messages)])),
+    [planQuestions, messages],
+  );
+
+  // Delegate split control (BET-951).
+  // Level 3 of the model precedence — "same as current" means the BUILD model,
+  // not the plan model the composer chip may be showing while plan mode is on.
+  // Until per-mode models land there is only one model per session and this is
+  // simply the active model, but the lookup keeps working when they arrive.
+  const sessionModel = useMemo<ModelSelection | null>(
+    () =>
+      modelOverride ??
+      (defaultModel
+        ? { providerID: defaultModel.providerID, modelID: defaultModel.modelID }
+        : null),
+    [modelOverride, defaultModel],
+  );
+  const delegateSelectable = useMemo(
+    () => selectableModelGroups(models, deactivatedMainModels),
+    [models, deactivatedMainModels],
+  );
+  // Level 2 — the remembered delegation model for this project (written ONLY on
+  // an explicit pick; an inherited default is never promoted into it).
+  const delegateProjectKey = tmuxSession ?? sessionId;
+  const rememberedDelegateModel = useMemo(
+    () => readSavedDelegateModel(delegateProjectKey),
+    [delegateProjectKey],
+  );
+  // Hard cap of five concurrent background jobs, box-wide (MAX_RUNNING_JOBS in
+  // src/server/delegate.mjs). At the cap the split control is disabled with a
+  // title saying so, rather than accepting the click and failing after.
+  const runningDelegates = useMemo(
+    () => Object.values(jobs).filter((j) => j.status === "running").length,
+    [jobs],
+  );
+  const atDelegateCap = runningDelegates >= 5;
+
+  const rememberDelegateModel = useCallback(
+    (m: ModelSelection | null) => writeSavedDelegateModel(delegateProjectKey, m),
+    [delegateProjectKey],
+  );
+
+  const buildPlanPrompt = useCallback(
+    (q: QuestionRequest, feedback: string) => {
+      const text = extractPlanData(q, messages).text;
+      const trimmed = feedback.trim();
+      return trimmed ? `${text}\n\n${trimmed}` : text;
+    },
+    [messages],
+  );
+
+  const buildHere = useCallback(
+    async (q: QuestionRequest, feedback: string) => {
+      // Answer "Yes" so opencode switches to the build agent...
+      await replyQuestion(q, [["Yes"]]);
+      // ...then re-send the plan text ourselves WITH the BUILD model. opencode's
+      // "Yes" path stamps the injected build turn with the model of the last
+      // user message — which, because MantaUI sends the model per prompt, is the
+      // PLAN model. That is exactly why this is a resubmit, not a toggle.
+      setPlanOn(false);
+      writePlanSaved(sessionId, false);
+      try {
+        await window.api.opencodePrompt(
+          sessionId,
+          buildPlanPrompt(q, feedback),
+          sessionModel ?? undefined,
+          [],
+          undefined,
+          undefined,
+        );
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+      }
+    },
+    [replyQuestion, sessionId, sessionModel, buildPlanPrompt, setPlanOn],
+  );
+
+  const keepPlanning = useCallback(
+    async (q: QuestionRequest, feedback: string) => {
+      // Answer "No" → RejectedError, plan mode STAYS ON.
+      await replyQuestion(q, [["No"]]);
+      // If the user asked for a change, hand that back to the plan agent so it
+      // refines the plan (still in plan mode — no edits).
+      const trimmed = feedback.trim();
+      if (trimmed) {
+        const planAgent = plan.available && plan.on ? plan.agent : undefined;
+        try {
+          await window.api.opencodePrompt(sessionId, trimmed, undefined, [], undefined, planAgent);
+        } catch (e) {
+          setSendError(String((e as Error)?.message ?? e));
+        }
+      }
+    },
+    [replyQuestion, sessionId, plan],
+  );
+
+  const startPlanDelegate = useCallback(
+    (q: QuestionRequest, m: ModelSelection | null, feedback: string) => {
+      void window.api
+        .delegateStart({
+          prompt: buildPlanPrompt(q, feedback),
+          sessionID: sessionId,
+          directory: cwd,
+          model: m ? { providerID: m.providerID, modelID: m.modelID } : undefined,
+        })
+        .catch((e: unknown) => {
+          setSendError(String((e as Error)?.message ?? e));
+        });
+    },
+    [buildPlanPrompt, sessionId, cwd],
+  );
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
@@ -2405,6 +2535,30 @@ export function ChatPanel({
           <BlockedProgressCard progress={liveProgress} />,
         ));
       }
+      // Plan card (BET-951): the plan_exit question, blocking tier — it is an
+      // unanswered ask, beside permission, never below an ambient card. The
+      // delegate split reuses SplitChip + the existing ModelMenu (no new
+      // split/dropdown surface).
+      planQuestions.forEach((q) => {
+        const data = planDataByQuestion.get(q.id);
+        if (!data) return;
+        list.push(block(
+          `plan-${q.id}`, blockOrder(`plan-${q.id}`),
+          <PlanCard
+            key={q.id}
+            data={data}
+            models={delegateSelectable}
+            remembered={rememberedDelegateModel}
+            sessionModel={sessionModel}
+            buildModelName={activeModel?.name ?? ""}
+            atDelegateCap={atDelegateCap}
+            onBuildHere={(fb) => void buildHere(q, fb)}
+            onKeepPlanning={(fb) => void keepPlanning(q, fb)}
+            onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
+            onRememberDelegateModel={rememberDelegateModel}
+          />,
+        ));
+      });
     }
     // Ambient tier — fixed priority, independent of arrival order.
     if (retryInfo) list.push(amb("retry",
@@ -2492,7 +2646,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress, planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel]);
 
 
   if (error || transcriptLoadError) {
@@ -2630,7 +2784,7 @@ export function ChatPanel({
             // BET-418 §D: a job session is read-only — never show its (anyway
             // impossible) question cards. Defensive: a job's pre-flight ruleset
             // means it never generates asks.
-            questions={jobOwnership ? [] : questions}
+            questions={jobOwnership ? [] : questions.filter((q) => !isPlanExitQuestion(q, messages))}
             turnInfo={turnInfo}
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}
