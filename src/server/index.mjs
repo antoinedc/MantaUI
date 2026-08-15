@@ -82,6 +82,7 @@ import {
   pageResponseHeaders,
   isValidSubdomain,
 } from "./servePage.mjs";
+import { publishPlanPage } from "./planPage.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
@@ -2228,7 +2229,49 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // ---------- Notify (AI-triggered notification) ----------
+  // ---------- Plan companion page (BET-954) ----------
+  // POST /api/plan-page  body {sessionID, markdown, path?, title?, generatedAt?}
+  //                    → {url, subdomain, expiresAt}   (400 on missing input)
+  // Published by the remote AI (the plan card's "See in browser" action). The
+  // plan's markdown is rendered to a self-contained HTML document and
+  // registered through the EXISTING serve-page subsystem under the stable
+  // `plan-<shortSessionId>` subdomain, TTL 7 days, replacing any prior
+  // revision of the same session. The URL is whatever publishPlanPage /
+  // registerPage returns — never constructed here (it may be a public https://
+  // host or a tailnet-only address depending on how the box is reached).
+  if (path === "/api/plan-page") {
+    try {
+      const baseUrl = publicBaseUrl();
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const result = await publishPlanPage(
+          {
+            sessionID: body?.sessionID,
+            markdown: body?.markdown,
+            path: body?.path,
+            title: body?.title,
+            generatedAt: body?.generatedAt,
+          },
+          { ...BUS_PUBLISH_DEPS, baseUrl },
+        );
+        if (!result.ok) {
+          respondJson(res, 400, { error: result.error });
+          return;
+        }
+        respondJson(res, 200, {
+          url: result.url,
+          subdomain: result.subdomain,
+          expiresAt: result.expiresAt,
+        });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // POST /api/notify  body {message, title?, urgent?, sessionID}
   //                 → {ok:true}  (400 if message missing)
   // Created by the remote AI's global opencode `notify` tool. Runs through the
