@@ -1064,7 +1064,7 @@ function AppInner() {
           const sel: ModelSelection = { providerID, modelID };
           const apply = panelModelControl.current.get(sessionId);
           if (apply) apply(sel);
-          else writeSavedModel(sessionId, sel);
+          else writeSavedModel(sessionId, "build", sel);
         },
         renameSession: () => {
           // tmux is the source of truth; the existing refresh re-reads it.

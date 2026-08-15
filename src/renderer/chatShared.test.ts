@@ -16,6 +16,9 @@ import {
   findLast,
   readSavedMode,
   writeSavedMode,
+  readSavedModel,
+  writeSavedModel,
+  copySavedModels,
   resolveLauncherFlags,
   readPromptHistory,
   appendPromptHistory,
@@ -248,7 +251,97 @@ describe("readSavedMode / writeSavedMode (BET-138)", () => {
       expect(readSavedMode("sess-1")).toBe("chat");
     } finally {
       Storage.prototype.getItem = orig;
+     }
+   });
+ });
+
+describe("readSavedModel / writeSavedModel per-mode (BET-950)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  const build = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+  const plan = { providerID: "anthropic", modelID: "claude-opus-4-7" };
+
+  it("build mode uses the original legacy key", () => {
+    writeSavedModel("sess-1", "build", build);
+    expect(localStorage.getItem("manta:chat:sess-1:model")).toBe(JSON.stringify(build));
+    expect(localStorage.getItem("manta:chat:sess-1:model:plan")).toBeNull();
+  });
+
+  it("plan mode uses its own key, leaving the build key untouched", () => {
+    writeSavedModel("sess-1", "build", build);
+    writeSavedModel("sess-1", "plan", plan);
+    expect(localStorage.getItem("manta:chat:sess-1:model")).toBe(JSON.stringify(build));
+    expect(localStorage.getItem("manta:chat:sess-1:model:plan")).toBe(JSON.stringify(plan));
+    expect(readSavedModel("sess-1", "build")).toEqual(build);
+    expect(readSavedModel("sess-1", "plan")).toEqual(plan);
+  });
+
+  it("plan key absent → returns the build model (zero-config fallback)", () => {
+    writeSavedModel("sess-1", "build", build);
+    expect(readSavedModel("sess-1", "plan")).toEqual(build);
+  });
+
+  it("both keys absent → null for both modes", () => {
+    expect(readSavedModel("sess-1", "build")).toBeNull();
+    expect(readSavedModel("sess-1", "plan")).toBeNull();
+  });
+
+  it("writing an explicit plan pick leaves the build key untouched", () => {
+    writeSavedModel("sess-1", "build", build);
+    writeSavedModel("sess-1", "plan", plan);
+    expect(readSavedModel("sess-1", "build")).toEqual(build);
+    expect(readSavedModel("sess-1", "plan")).toEqual(plan);
+  });
+
+  it("writing null clears only that mode's key", () => {
+    writeSavedModel("sess-1", "build", build);
+    writeSavedModel("sess-1", "plan", plan);
+    writeSavedModel("sess-1", "plan", null);
+    expect(readSavedModel("sess-1", "plan")).toEqual(build); // falls back to build
+    expect(localStorage.getItem("manta:chat:sess-1:model:plan")).toBeNull();
+    expect(readSavedModel("sess-1", "build")).toEqual(build);
+  });
+
+  it("is scoped per session id", () => {
+    writeSavedModel("sess-1", "plan", plan);
+    expect(readSavedModel("sess-2", "plan")).toBeNull();
+  });
+
+  it("falls back to null on storage error for a present build key", () => {
+    writeSavedModel("sess-1", "build", build);
+    const orig = Storage.prototype.getItem;
+    Storage.prototype.getItem = () => {
+      throw new Error("storage disabled");
+    };
+    try {
+      expect(readSavedModel("sess-1", "build")).toBeNull();
+    } finally {
+      Storage.prototype.getItem = orig;
     }
+  });
+});
+
+describe("copySavedModels /clear carry-forward (BET-950)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  const build = { providerID: "anthropic", modelID: "claude-sonnet-4-6" };
+  const plan = { providerID: "anthropic", modelID: "claude-opus-4-7" };
+
+  it("carries both keys when both are present", () => {
+    writeSavedModel("sess-1", "build", build);
+    writeSavedModel("sess-1", "plan", plan);
+    copySavedModels("sess-1", "sess-2");
+    expect(readSavedModel("sess-2", "build")).toEqual(build);
+    expect(readSavedModel("sess-2", "plan")).toEqual(plan);
+  });
+
+  it("does not stamp a build model into the destination plan key when the source plan key is absent", () => {
+    writeSavedModel("sess-1", "build", build);
+    copySavedModels("sess-1", "sess-2");
+    expect(readSavedModel("sess-2", "build")).toEqual(build);
+    expect(localStorage.getItem("manta:chat:sess-2:model:plan")).toBeNull();
   });
 });
 
