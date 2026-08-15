@@ -101,3 +101,49 @@ describe("ModelMenu footer — Manage models… (BET-645)", () => {
     }
   });
 });
+
+describe("ModelMenu defaultRow — pinned top-row copy override (BET-948)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("omitted → today's exact 'Server default' label + sub line", () => {    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const text = surface().textContent ?? "";
+    expect(text).toContain("Server default");
+    expect(text).toContain("Claude Opus 4.7 · set in Settings");
+  });
+
+  it("overrides ONLY the pinned row's label/sub, leaving the body unchanged", () => {
+    h = mount(
+      <ModelMenu
+        open
+        anchorRef={anchorRef()}
+        groups={GROUPS}
+        modelOverride={null}
+        defaultModel={{ providerID: "anthropic", modelID: "claude-opus-4-7" }}
+        defaultRow={{ label: "Inherit build model", sub: "uses this session's model" }}
+        onSelect={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const text = surface().textContent ?? "";
+    expect(text).toContain("Inherit build model");
+    expect(text).toContain("uses this session's model");
+    // Today's "set in Settings" copy is gone from the pinned row.
+    expect(text).not.toContain("set in Settings");
+    // The body's model row is untouched.
+    expect(text).toContain("Claude Opus 4.7");
+  });
+});

@@ -1951,6 +1951,56 @@ export function hideFastSiblingGroups(
   return out;
 }
 
+// ===== selectableModelGroups =====
+//
+// The model set a user may actually switch TO — the answer to "does
+// delegation respect the Main toggle?". Enabled, not deprecated, not
+// deactivated in Settings (`deactivatedMainModels`), grouped by provider,
+// sorted, then `hideFastSiblingGroups`. Shared by ModelPicker's dropdown and
+// the delegate model picker so both read one source of truth (the `enabled !==
+// false` filter lives here and nowhere else in the renderer).
+
+/**
+ * The flat selectable model list (enabled, not deprecated, not deactivated).
+ * `null` input → `null` (the loading signal callers rely on). The flat list,
+ * not the grouped one, is what `resolveFastToggle` needs — it must still see a
+ * `-fast` twin whose base is present, which `hideFastSiblingGroups` would fold
+ * out of the groups.
+ */
+export function selectableModelList(
+  models: OpencodeModel[] | null,
+  deactivatedMainModels: string[] | undefined,
+): OpencodeModel[] | null {
+  if (!models) return null;
+  const deactivatedMain = new Set(deactivatedMainModels ?? []);
+  return models.filter(
+    (m) =>
+      m.enabled !== false &&
+      m.status !== "deprecated" &&
+      !deactivatedMain.has(`${m.providerID}/${m.id}`),
+  );
+}
+
+/**
+ * The grouped, sorted, fast-sibling-folded selectable list — the candidate
+ * model set for dropdowns and pickers. `null` models → `null` (loading).
+ */
+export function selectableModelGroups(
+  models: OpencodeModel[] | null,
+  deactivatedMainModels: string[] | undefined,
+): Array<[string, OpencodeModel[]]> | null {
+  const selectable = selectableModelList(models, deactivatedMainModels);
+  if (selectable === null) return null;
+  const map = new Map<string, OpencodeModel[]>();
+  for (const m of selectable) {
+    const arr = map.get(m.providerID) ?? [];
+    arr.push(m);
+    map.set(m.providerID, arr);
+  }
+  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+  return hideFastSiblingGroups(sorted);
+}
+
 export type FastToggleState = {
   /** The toggle can be clicked (a counterpart exists that keeps the effort). */
   available: boolean;

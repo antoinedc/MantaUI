@@ -137,11 +137,17 @@ export function SplitChip({
   /**
    * OPT-IN popup semantics. SplitChip is a generic split control — its two
    * segments are plain buttons and it does NOT assume either opens a popup.
-   * A caller whose segments genuinely toggle a listbox (e.g. ModelPicker)
-   * passes `popup` to add `aria-haspopup="listbox"` to both segment buttons;
-   * a non-popup adopter (e.g. a checkbox row) omits it.
+   * A caller whose segments GENUINELY toggle a listbox (e.g. ModelPicker)
+   * opts in to add `aria-haspopup="listbox"` to the segment button(s). A
+   * caller whose left segment is a plain action and whose RIGHT segment opens
+   * a listbox passes `{ right: true }` so the action button never falsely
+   * claims `aria-haspopup` while the listbox segment still lands in the
+   * popup-coverage registry (which keys on `[aria-haspopup]`):
+   *   - `true`          → both segments.
+   *   - `{ left?, right? }` → per segment.
+   *   - omitted/`false` → neither (the non-popup default).
    */
-  popup?: boolean;
+  popup?: boolean | { left?: boolean; right?: boolean };
   /**
    * OPTIONAL third segment, for a boolean TOGGLE that belongs to the same
    * control (e.g. the composer's ⚡ fast-mode switch, which modifies the model
@@ -188,7 +194,12 @@ export function SplitChip({
   /** Forwarded to the RIGHT segment button (used as the effort dropdown's anchor). */
   rightBtnRef?: RefObject<HTMLButtonElement>;
 }) {
-  const listbox = popup ? { "aria-haspopup": "listbox" as const } : {};
+  // `aria-haspopup` is opted in per segment: `true` covers both, an object
+  // covers whichever segment it names, omitted/`false` covers neither.
+  const popupLeft = popup === true || (typeof popup === "object" && popup.left === true);
+  const popupRight = popup === true || (typeof popup === "object" && popup.right === true);
+  const leftListbox = popupLeft ? { "aria-haspopup": "listbox" as const } : {};
+  const rightListbox = popupRight ? { "aria-haspopup": "listbox" as const } : {};
   const leftAria = leftExpanded !== undefined ? { "aria-expanded": leftExpanded } : {};
   const rightAria = rightExpanded !== undefined ? { "aria-expanded": rightExpanded } : {};
   const idle = loading ? " cursor-default" : " hover:bg-fill-hover hover:text-text";
@@ -234,10 +245,10 @@ export function SplitChip({
       className={`${hook ? `${hook} ` : ""}${SPLIT_SHELL} p-0 overflow-hidden ${CHIP_REST}`}
       aria-busy={loading || undefined}
     >
-      <button ref={leftBtnRef} type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...listbox} {...leftAria}>
+      <button ref={leftBtnRef} type="button" onClick={onLeftClick} title={leftTitle} className={leftClass} {...leftListbox} {...leftAria}>
         {left}
       </button>
-      <button ref={rightBtnRef} type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...listbox} {...rightAria}>
+      <button ref={rightBtnRef} type="button" onClick={onRightClick} title={rightTitle} className={rightClass} {...rightListbox} {...rightAria}>
         {right}
       </button>
       {extra !== undefined && (
