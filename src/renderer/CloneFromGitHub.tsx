@@ -22,7 +22,7 @@
 // the zero-state batch workspace creation verbatim — this component only
 // produces directories on disk.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "./Button";
 import { Callout } from "./Callout";
@@ -30,48 +30,17 @@ import { Checkbox } from "./Checkbox";
 import { Field } from "./Field";
 import { ListRow } from "./ListRow";
 import { ProgressBar } from "./ProgressBar";
-import { DeviceCodeSteps } from "./DeviceFlow";
+import { ConnectGithubPanel, PanelHeader, PANEL_CLASS } from "./ConnectGithub";
 import { formatAge, formatBytes, cloneErrorKind, type CloneErrorKind } from "./chatUtils";
 import type {
   ForgeCloneStatus,
-  ForgeDeviceGrant,
   ForgeRepo,
 } from "../shared/types";
 
 type Phase =
-  | { kind: "connect" }
-  | { kind: "notConfigured" }
   | { kind: "pick" }
   | { kind: "clone"; queue: ForgeRepo[]; index: number }
-  | { kind: "expired" }
-  | { kind: "failed"; repo: ForgeRepo | null; message: string; errorKind: CloneErrorKind };
-
-// mm:ss countdown label — mono so it doesn't jitter.
-function countdownLabel(remainingMs: number): string {
-  const s = Math.max(0, Math.floor(remainingMs / 1000));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
-
-// The panel title row (.mhead where it is REAL — [S5] [S6] [E2] [E3]).
-function PanelHeader({
-  title,
-  trailing,
-}: {
-  title: React.ReactNode;
-  trailing?: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-2 border-b border-border-subtle text-[13px] font-medium text-text">
-      {title}
-      {trailing != null && <span className="ml-auto">{trailing}</span>}
-    </div>
-  );
-}
-
-const PANEL_CLASS =
-  "w-full max-w-[420px] rounded-lg border border-border bg-bg-elev overflow-hidden";
+  | { kind: "failed"; repo: ForgeRepo; message: string; errorKind: CloneErrorKind };
 
 export function CloneFromGitHub({
   defaultRoot,
@@ -82,12 +51,10 @@ export function CloneFromGitHub({
   onCancel: () => void;
   onCloned: (paths: string[]) => void;
 }): JSX.Element {
-  const [phase, setPhase] = useState<Phase>({ kind: "connect" });
-  // ---- [S5] device grant state ----
-  const [grant, setGrant] = useState<ForgeDeviceGrant | null>(null);
-  const [remainingMs, setRemainingMs] = useState(0);
-  const [copiedNote, setCopiedNote] = useState(false);
-  const grantRef = useRef<ForgeDeviceGrant | null>(null);
+  // The whole device-connect flow lives in ConnectGithubPanel; this flag just
+  // gates whether the connect screen (pre-credential) or the picker shows.
+  const [connected, setConnected] = useState(false);
+  const [phase, setPhase] = useState<Phase>({ kind: "pick" });
   // ---- [S6] picker state ----
   const [repos, setRepos] = useState<ForgeRepo[]>([]);
   const [reposError, setReposError] = useState<string | null>(null);
@@ -113,91 +80,6 @@ export function CloneFromGitHub({
         (!q || r.fullName.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)),
     );
   }, [repos, owner, search]);
-
-  // ---- [S5]: connect (device flow) ----
-  // On mount, ask the box to start a device grant. A box that already has a
-  // credential (CLI/secret) skips straight to the picker.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await window.api.forgeDeviceStart();
-        if (cancelled) return;
-        if ("notConfigured" in res && res.notConfigured) {
-          // The box's device-grant id is a placeholder (BET-849) — surface a
-          // clear "not configured" state, never a guaranteed-dead-end screen.
-          setPhase({ kind: "notConfigured" });
-          return;
-        }
-        if (res.connected) {
-          setPhase({ kind: "pick" });
-          return;
-        }
-        const g = res.grant!;
-        grantRef.current = g;
-        setGrant(g);
-        setRemainingMs(g.expiresIn * 1000);
-        setCopiedNote(false);
-        // Rule 5: copy the code automatically — the user pastes, not retypes.
-        window.api
-          .clipboardWriteText(g.userCode)
-          .then(() => setCopiedNote(true), () => {});
-      } catch {
-        if (cancelled) return;
-        setPhase({ kind: "failed", repo: null, message: "Couldn't reach the box. Try again.", errorKind: "unknown" });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [phase.kind === "connect" ? phase.kind : null]);
-
-  // Device poll + countdown while connecting.
-  useEffect(() => {
-    if (phase.kind !== "connect" || !grant) return;
-    const startedAt = Date.now();
-    const deadline = startedAt + grant.expiresIn * 1000;
-    let intervalMs = Math.max(grant.pollInterval, 5) * 1000;
-    const ticker = window.setInterval(() => {
-      setRemainingMs(deadline - Date.now());
-    }, 1000);
-    const poll = async () => {
-      try {
-        const res = await window.api.forgeDevicePoll({ grantId: grant.grantId });
-        if (res.status === "done") {
-          window.clearInterval(ticker);
-          setPhase({ kind: "pick" });
-          return;
-        }
-        if (res.status === "expired") {
-          window.clearInterval(ticker);
-          setPhase({ kind: "expired" });
-          return;
-        }
-        if (res.status === "pending") {
-          // slow_down may have lengthened the interval — respect the new value.
-          if (res.pollInterval) intervalMs = res.pollInterval * 1000;
-        }
-      } catch {
-        // transient — keep polling
-      }
-    };
-    const handle = window.setInterval(poll, intervalMs);
-    // Poll immediately once (the pending → done transition can resolve fast).
-    void poll();
-    return () => {
-      window.clearInterval(ticker);
-      window.clearInterval(handle);
-    };
-    // Narrowed to the discriminant so cosmetic state changes don't reset timers.
-  }, [phase.kind, phase.kind === "connect" ? grant?.grantId : null]);
-
-  const cancelConnect = useCallback(() => {
-    if (grantRef.current) {
-      void window.api.forgeDeviceCancel({ grantId: grantRef.current.grantId });
-    }
-    onCancel(); // back to [S4] with nothing changed
-  }, [onCancel]);
 
   // ---- [S6]: fetch the repos once we reach the picker ----
   useEffect(() => {
@@ -319,13 +201,8 @@ export function CloneFromGitHub({
 
   const retryClone = () => {
     if (phase.kind !== "failed") return;
-    // A connection-level failure (no repo) restarts the device flow.
-    if (!phase.repo) {
-      grantRef.current = null;
-      setGrant(null);
-      setPhase({ kind: "connect" });
-      return;
-    }
+    // A connection-level failure now surfaces inside ConnectGithubPanel, so
+    // this is strictly the repo-retry path.
     runClones(
       [
         ...filtered.filter((r) => checked.has(r.fullName) && r.fullName !== phase.repo?.fullName),
@@ -344,36 +221,10 @@ export function CloneFromGitHub({
   // ===== Rendering =====
   return (
     <div className={PANEL_CLASS}>
-      {phase.kind === "connect" && !grant && (
-        <div className="p-4 text-[13px] text-text-muted">Preparing sign-in…</div>
-      )}
-
-      {phase.kind === "connect" && grant && (
+      {!connected ? (
+        <ConnectGithubPanel onConnected={() => setConnected(true)} onCancel={onCancel} />
+      ) : (
         <>
-          <PanelHeader
-            title="Connect GitHub · Waiting for sign-in"
-            trailing={
-              <span className="font-mono tabular-nums text-[11px] text-text-faint">
-                {countdownLabel(remainingMs)} remaining
-              </span>
-            }
-          />
-          <div className="p-4">
-            <DeviceCodeSteps
-              url={grant.verificationUri}
-              displayUrl={grant.verificationUri.replace(/^https?:\/\//, "")}
-              code={grant.userCode}
-              autoCopied={copiedNote}
-            />
-            <div className="flex gap-2 mt-3">
-              <Button tone="ghost" onClick={cancelConnect}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        </>
-      )}
-
       {phase.kind === "pick" && (
         <>
           <PanelHeader
@@ -505,61 +356,13 @@ export function CloneFromGitHub({
         </div>
       )}
 
-      {phase.kind === "notConfigured" && (
-        <>
-          <PanelHeader title="Connect GitHub" />
-          <div className="p-4">
-            <Callout tone="warn">
-              GitHub sign-in isn't configured on this box yet.
-            </Callout>
-            <div className="flex gap-2 mt-3">
-              <Button tone="ghost" onClick={onCancel}>
-                Back
-              </Button>
-            </div>
-          </div>
-        </>
-      )}
-
-      {phase.kind === "expired" && (
-        <>
-          <PanelHeader title="Connect GitHub · Failed" />
-          <div className="p-4">
-            <Callout tone="danger">
-              The sign-in code expired before it was entered.
-            </Callout>
-            <div className="flex gap-2 mt-3">
-              <Button
-                tone="primary"
-                onClick={() => {
-                  grantRef.current = null;
-                  setGrant(null);
-                  setPhase({ kind: "connect" });
-                }}
-              >
-                Try again
-              </Button>
-              <Button tone="ghost" onClick={onCancel}>
-                Skip for now
-              </Button>
-            </div>
-          </div>
-        </>
-      )}
-
       {phase.kind === "failed" && (
         <>
           <PanelHeader title="Clone failed" />
           <div className="p-4">
             <Callout tone="danger">
-              {phase.repo ? (
-                <>
-                  <b className="text-text">{phase.repo.name}</b> —{" "}
-                  {failedMessage(phase.errorKind, phase.message)}
-                </>
-              ) : (
-                phase.message
-              )}
+              <b className="text-text">{phase.repo.name}</b> —{" "}
+              {failedMessage(phase.errorKind, phase.message)}
             </Callout>
             <div className="flex gap-2 mt-3 items-center">
               <Button tone="primary" onClick={retryClone}>
@@ -573,6 +376,8 @@ export function CloneFromGitHub({
               </Button>
             </div>
           </div>
+        </>
+      )}
         </>
       )}
     </div>

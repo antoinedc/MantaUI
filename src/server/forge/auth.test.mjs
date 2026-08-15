@@ -220,7 +220,7 @@ test("device grant: happy path returns a RENDERER-SAFE shape and stores the toke
   assert.ok(seen.every((d) => d === "DEVICE_CODE_SECRET"));
 });
 
-test("device grant: slow_down adds 5s PERMANENTLY to the poll interval", async () => {
+test("device grant: slow_down without an interval falls back to previous + 5", async () => {
   const clock = makeClock();
   const fetchFn = makeFetch(async () => ({ error: "slow_down", error_description: "slow" }));
   const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
@@ -229,6 +229,24 @@ test("device grant: slow_down adds 5s PERMANENTLY to the poll interval", async (
   assert.equal(p1.pollInterval, 10);
   const p2 = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
   assert.equal(p2.pollInterval, 15);
+});
+
+test("device grant: slow_down trusts GitHub's authoritative interval field", async () => {
+  const clock = makeClock();
+  const fetchFn = makeFetch(async () => ({ error: "slow_down", interval: 12 }));
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
+  const p1 = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
+  assert.equal(p1.pollInterval, 12, "the server-returned interval wins, not the +5 guess");
+  const p2 = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
+  assert.equal(p2.pollInterval, 12, "the same interval is reused, not incremented again");
+});
+
+test("device grant: slow_down with an invalid interval falls back to previous + 5", async () => {
+  const clock = makeClock();
+  const fetchFn = makeFetch(async () => ({ error: "slow_down", interval: "nope" }));
+  const started = await startDeviceGrant({ clientId: "Iv1.realclientid", fetch: fetchFn, now: clock.now });
+  const p1 = await pollDeviceGrant(started.grantId, { fetch: fetchFn, now: clock.now, storeToken: okStore });
+  assert.equal(p1.pollInterval, 10);
 });
 
 test("device grant: authorization_pending keeps polling at the same interval", async () => {
