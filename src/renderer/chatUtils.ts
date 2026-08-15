@@ -2903,11 +2903,69 @@ export function usageDialState(
   };
 }
 
-// "resets in 2h 10m" / "resets in 45m" — the popover's per-window reset
-// line. When the reset is more than 12h out, the absolute clock time is
-// appended (reuses formatClockTime, above) so a far-off reset isn't only
-// relative. Floors to the minute. Returns null only for a missing/non-finite
-// timestamp; once the reset instant has passed it returns "resetting…".
+// Reset-time formatting for the usage dial, the "keep going" modal and the
+// alert toasts. There is exactly ONE relative distance primitive and ONE
+// absolute anchor below, composed into a single line by formatWindowReset —
+// no per-caller vocabulary (BET-966).
+//
+// OS locale on purpose (`undefined`), and NEVER an explicit `hour12` — the
+// user's locale decides 12- vs 24-hour. That single rule is what stops the dial
+// and the alert toasts contradicting each other.
+const RESET_TIME_FMT = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const RESET_DAY_TIME_FMT = new Intl.DateTimeFormat(undefined, {
+  weekday: "short", hour: "numeric", minute: "2-digit",
+});
+const RESET_DATE_TIME_FMT = new Intl.DateTimeFormat(undefined, {
+  weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+});
+
+/** Same LOCAL calendar day — not "within 24 hours". The one predicate behind
+ *  both the absolute format and whether the composed line carries an anchor. */
+function isSameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a), y = new Date(b);
+  return x.getFullYear() === y.getFullYear()
+    && x.getMonth() === y.getMonth()
+    && x.getDate() === y.getDate();
+}
+
+/** The relative "how far away" distance, floored to at most two units:
+ *  "45m" / "2h 10m" / "2d 4h". Covers the whole ladder. Pure arithmetic —
+ *  no locale involvement. */
+export function formatResetDistance(deltaMs: number): string {
+  if (!Number.isFinite(deltaMs) || deltaMs <= 0) return "now";
+  if (deltaMs < 60_000) return "under a minute";
+  const m = Math.floor(deltaMs / 60_000);
+  if (deltaMs < 3_600_000) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  if (deltaMs < 86_400_000) {
+    return mm === 0 ? `${h}h` : `${h}h ${mm}m`;
+  }
+  const d = Math.floor(deltaMs / 86_400_000);
+  const hh = Math.floor((deltaMs % 86_400_000) / 3_600_000);
+  return hh === 0 ? `${d}d` : `${d}d ${hh}h`;
+}
+
+/** The absolute anchor: "09:00" (same local day), "Thu 09:00" (<7 days), or
+ *  "Thu, 21 Aug, 09:00" otherwise — locale-dependent via Intl. Returns ""
+ *  for missing/non-finite input so callers omit the clause rather than
+ *  rendering something broken. */
+export function formatResetAt(
+  resetsAt: number | null | undefined,
+  nowMs: number,
+): string {
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return "";
+  if (isSameLocalDay(resetsAt, nowMs)) return RESET_TIME_FMT.format(resetsAt);
+  if (resetsAt - nowMs < 7 * 86_400_000) return RESET_DAY_TIME_FMT.format(resetsAt);
+  return RESET_DATE_TIME_FMT.format(resetsAt);
+}
+
+// "resets in 2h 10m" / "resets in 45m" / "resets in 5d 20h (Thu, 21 Aug, 09:00)"
+// — the popover's per-window reset line. The absolute anchor is appended only
+// when the reset is NOT on the same local calendar day as `now` (a same-day
+// reset is unambiguous from the relative time alone). Returns null only for a
+// missing/non-finite timestamp; once the reset instant has passed it returns
+// "resetting…".
 export function formatWindowReset(
   resetsAt: number | null | undefined,
   nowMs: number,
@@ -2918,14 +2976,8 @@ export function formatWindowReset(
   // window yet (server marks the window `stale`). The dial carries the old
   // number forward, so say why it looks wrong instead of showing no line.
   if (deltaMs <= 0) return "resetting…";
-  const totalMin = Math.floor(deltaMs / 60_000);
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  const relative = h > 0 ? `resets in ${h}h ${m}m` : m > 0 ? `resets in ${m}m` : "resets in <1m";
-  if (deltaMs > 12 * 3_600_000) {
-    return `${relative} (${formatClockTime(resetsAt)})`;
-  }
-  return relative;
+  const line = `resets in ${formatResetDistance(deltaMs)}`;
+  return isSameLocalDay(resetsAt, nowMs) ? line : `${line} (${formatResetAt(resetsAt, nowMs)})`;
 }
 
 // "updated 3m ago" / "updated just now" — the popover footer's freshness

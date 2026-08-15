@@ -21,7 +21,7 @@
 // the exact strings the spec dictates.
 
 import type { UsageSnapshot, UsageWindow } from "../shared/types";
-import { selectCacheTtlMs } from "./chatUtils";
+import { formatWindowReset, selectCacheTtlMs } from "./chatUtils";
 
 /** >=90 = warn, >=100 = limit; anything below 90 is "none". */
 export type UsageAlertLevel = "none" | "warn" | "limit";
@@ -104,69 +104,31 @@ export function shouldWarnStaleCache(
   return fireAt - now > selectCacheTtlMs(cacheTtl);
 }
 
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-/**
- * 12-hour wall clock for reset times in the alert toast copy: "3:05 pm", or
- * with a leading weekday "Tue 9:00 am". Returns "" for a missing/invalid
- * timestamp so callers can omit the "resets …" clause rather than rendering
- * a broken time.
- */
-export function formatResetClock(
-  resetsAt: number | null | undefined,
-  withWeekday: boolean,
-): string {
-  if (resetsAt == null || !Number.isFinite(resetsAt) || Number.isNaN(new Date(resetsAt).getTime())) {
-    return "";
-  }
-  const d = new Date(resetsAt);
-  const h24 = d.getHours();
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ampm = h24 < 12 ? "am" : "pm";
-  const clock = `${h12}:${mm} ${ampm}`;
-  return withWeekday ? `${WEEKDAYS[d.getDay()]} ${clock}` : clock;
-}
-
-/**
- * Human "… away" distance used by the keep-going modal's stale-cache warning:
- * "4 days", "2 hours", "45 minutes", "less than a minute". Floors to the
- * coarsest unit that's still >= 1.
- */
-export function describeResetDistance(deltaMs: number): string {
-  if (!Number.isFinite(deltaMs) || deltaMs < 60_000) return "less than a minute";
-  const minutes = Math.floor(deltaMs / 60_000);
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const hours = Math.floor(deltaMs / 3_600_000);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"}`;
-  const days = Math.floor(deltaMs / 86_400_000);
-  return `${days} day${days === 1 ? "" : "s"}`;
-}
-
 /**
  * The warn (>=90%) toast body — plain, no actions, takes the default 6s TTL.
- * "Claude Session (5h) 93% used — resets 3:05 pm."
+ * "Claude Session (5h) 93% used — resets in 2h 10m."
  */
 export function buildWarnMessage(
   providerLabel: string,
   windowLabel: string,
   pct: number,
   resetsAt: number | null | undefined,
+  nowMs: number,
 ): string {
-  const pctShown = Math.round(pct);
-  const reset = formatResetClock(resetsAt, false);
-  return `${providerLabel} ${windowLabel} ${pctShown}% used${reset ? ` — resets ${reset}` : ""}.`;
+  const line = formatWindowReset(resetsAt, nowMs);
+  return `${providerLabel} ${windowLabel} ${Math.round(pct)}% used${line ? ` — ${line}` : ""}.`;
 }
 
 /**
  * The limit (>=100%) toast body — error tone, two actions, never auto-dismisses.
- * "Weekly limit reached on Claude — resets Tue 9:00 am."
+ * "Weekly limit reached on Claude — resets in 6d 3h (Thu, 21 Aug, 09:00)."
  */
 export function buildLimitMessage(
   providerLabel: string,
   windowLabel: string,
   resetsAt: number | null | undefined,
+  nowMs: number,
 ): string {
-  const reset = formatResetClock(resetsAt, true);
-  return `${windowLabel} limit reached on ${providerLabel}${reset ? ` — resets ${reset}` : ""}.`;
+  const line = formatWindowReset(resetsAt, nowMs);
+  return `${windowLabel} limit reached on ${providerLabel}${line ? ` — ${line}` : ""}.`;
 }

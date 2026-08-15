@@ -93,6 +93,8 @@ import {
   selectUsageSnapshot,
   usageDialState,
   formatWindowReset,
+  formatResetAt,
+  formatResetDistance,
   formatUpdatedAgo,
   usageStale,
   pruneVisitedSessions,
@@ -3523,33 +3525,89 @@ describe("usageDialState", () => {
   });
 });
 
+describe("formatResetDistance", () => {
+  it("covers the whole ladder with exact strings", () => {
+    expect(formatResetDistance(30_000)).toBe("under a minute");
+    expect(formatResetDistance(45 * 60_000)).toBe("45m");
+    expect(formatResetDistance(2 * 3_600_000 + 10 * 60_000)).toBe("2h 10m");
+    expect(formatResetDistance(3 * 3_600_000)).toBe("3h"); // drop the zero minutes
+    expect(formatResetDistance(26 * 3_600_000)).toBe("1d 2h");
+    expect(formatResetDistance(48 * 3_600_000)).toBe("2d"); // drop the zero hours
+    expect(formatResetDistance(140 * 3_600_000 + 12 * 60_000)).toBe("5d 20h");
+  });
+
+  it("returns 'now' for a missing, non-finite, or past distance", () => {
+    expect(formatResetDistance(NaN)).toBe("now");
+    expect(formatResetDistance(Infinity)).toBe("now");
+    expect(formatResetDistance(0)).toBe("now");
+    expect(formatResetDistance(-5)).toBe("now");
+  });
+});
+
+describe("formatResetAt", () => {
+  // Fixture built with local-time arithmetic so the same-day / cross-day
+  // boundary is deterministic regardless of timezone or locale. Assert SHAPE
+  // only — exact Intl output differs across machines.
+  const now = new Date(2026, 7, 18, 12, 0, 0).getTime(); // local noon
+
+  it("returns '' for a missing or non-finite timestamp", () => {
+    expect(formatResetAt(undefined, now)).toBe("");
+    expect(formatResetAt(null, now)).toBe("");
+    expect(formatResetAt(NaN, now)).toBe("");
+  });
+
+  it("renders time-only on the same local day", () => {
+    const sameDay = now + 2 * 3_600_000;
+    expect(formatResetAt(sameDay, now)).not.toBe("");
+    expect(formatResetAt(sameDay, now)).not.toContain(",");
+  });
+
+  it("adds a weekday for a cross-day reset within a week", () => {
+    const r = formatResetAt(now + 5 * 86_400_000, now);
+    expect(r).not.toBe("");
+    expect(r).not.toBe(formatResetAt(now + 2 * 3_600_000, now));
+    expect(r).not.toContain("2026");
+  });
+
+  it("adds the full date for a reset a week or more out", () => {
+    const r = formatResetAt(now + 8 * 86_400_000, now);
+    expect(r).not.toBe("");
+    expect(r).toContain(","); // weekday + month/day separator
+    expect(r).not.toBe(formatResetAt(now + 5 * 86_400_000, now));
+  });
+});
+
 describe("formatWindowReset", () => {
-  it("formats hours and minutes", () => {
-    const now = 0;
-    expect(formatWindowReset(now + 2 * 3_600_000 + 10 * 60_000, now)).toBe("resets in 2h 10m");
+  // Local-time fixtures (see formatResetAt): same-day vs cross-day is
+  // deterministic across timezones. Assert SHAPE, not exact Intl output.
+  const now = new Date(2026, 7, 18, 12, 0, 0).getTime(); // local noon
+
+  it("renders a same-day reset without an absolute anchor", () => {
+    const resetsAt = now + 2 * 3_600_000;
+    const line = formatWindowReset(resetsAt, now);
+    expect(line).toMatch(/^resets in /);
+    expect(line).toContain(formatResetDistance(resetsAt - now));
+    expect(line).not.toContain("(");
   });
 
-  it("formats minutes only under an hour", () => {
-    const now = 0;
-    expect(formatWindowReset(now + 45 * 60_000, now)).toBe("resets in 45m");
-  });
-
-  it("appends the absolute clock time when more than 12h out", () => {
-    const now = 0;
-    const resetsAt = now + 13 * 3_600_000;
-    const result = formatWindowReset(resetsAt, now);
-    expect(result).toMatch(/^resets in 13h 0m \(\d{2}:\d{2}\)$/);
+  it("appends the absolute anchor for a cross-day reset", () => {
+    const resetsAt = now + 5 * 86_400_000;
+    const line = formatWindowReset(resetsAt, now);
+    expect(line).toMatch(/^resets in /);
+    expect(line).toContain(formatResetDistance(resetsAt - now));
+    expect(line).toContain("(");
+    expect(line).toContain(")");
   });
 
   it("returns null for a missing or non-finite timestamp", () => {
-    expect(formatWindowReset(null, 0)).toBeNull();
-    expect(formatWindowReset(undefined, 0)).toBeNull();
-    expect(formatWindowReset(NaN, 0)).toBeNull();
+    expect(formatWindowReset(null, now)).toBeNull();
+    expect(formatWindowReset(undefined, now)).toBeNull();
+    expect(formatWindowReset(NaN, now)).toBeNull();
   });
 
   it("returns 'resetting…' once the reset instant has passed", () => {
-    expect(formatWindowReset(-1, 0)).toBe("resetting…");
-    expect(formatWindowReset(0, 0)).toBe("resetting…");
+    expect(formatWindowReset(now - 1, now)).toBe("resetting…");
+    expect(formatWindowReset(now, now)).toBe("resetting…");
   });
 });
 
