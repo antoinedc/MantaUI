@@ -8,7 +8,7 @@ import {
 } from "react";
 import type { ReactElement } from "react";
 import { ChevronRight, ChevronDown, Plus, X, Pin, Search } from "lucide-react";
-import { useStore, flatSessions, type WindowStatusUI } from "./store";
+import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import { InboxPalette } from "./InboxPalette";
