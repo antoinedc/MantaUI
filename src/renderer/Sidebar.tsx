@@ -1037,7 +1037,11 @@ function dotFor(status: WindowStatusUI | undefined): { variant: SessionStatus; t
     };
   }
   if (status.attention && !status.running) {
-    return { variant: "idle", title: "Finished — click to view" };
+    // A finished-but-unseen window is a SUCCESS state, so it takes the `--ok`
+    // green dot. It used to take amber `--warn`, which in light mode
+    // (`#6E6200`) reads as almost the same muted olive-grey as the at-rest
+    // `--tx4` dot (`#8A8275`) — the two states were indistinguishable at 7px.
+    return { variant: "ok", title: "Done — click to view" };
   }
   if (status.running) {
     // BET-791: the model-authored progress label (when a working turn names
