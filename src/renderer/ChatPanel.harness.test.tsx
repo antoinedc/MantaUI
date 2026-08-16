@@ -731,6 +731,97 @@ describe("ChatPanel composer submit", () => {
   });
 });
 
+// ===== Re-activation re-pin defers the tail scroll until the scroller
+// re-measures (BET-1003) =====
+//
+// While a panel is inactive (display:none) the scroller has no layout and is
+// not re-measured, yet content keeps growing beneath/inside it. On reactivation
+// the user must land EXACTLY at the true tail. A tail write issued in the SAME
+// commit as the re-activation (either the raw scrollTop = scrollHeight or
+// Virtuoso's scrollToIndex(LAST,end), the BET-1001 approach) reads the stale
+// pre-layout height and leaves the transcript ~216px above the tail. The fix
+// defers the true-bottom write by 2x rAF so it reads the freshly re-measured
+// scrollHeight and pins exactly to it. This test pins the deferral: NO element
+// write in the reactivation commit, and the deferred write lands exactly on
+// the (re-measured) tail. It fails on the synchronous BET-1001 scrollToIndex
+// re-pin and passes on the deferred scrollElementToTail fix.
+describe("ChatPanel re-activation re-pin defers to the re-measured tail (BET-1003)", () => {
+  let h: Harness | null = null;
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("writes no tail scroll in the reactivation commit, then lands on the fresh tail after 2 rAF", async () => {
+    const transcript = [
+      {
+        info: {
+          id: "msg_a1",
+          sessionID: "ses_test",
+          role: "assistant" as const,
+          time: { created: 1, completed: 2 },
+        },
+        parts: [
+          { type: "text", id: "prt_a1", messageID: "msg_a1", text: "ready" },
+        ],
+      },
+    ];
+    installMockApi({
+      opencodeMessages: () => Promise.resolve(transcript as never),
+    });
+    resetStore();
+
+    // Content is already present while the panel mounts hidden, so the
+    // scroller mounts (Virtuoso renders its rows on a non-empty transcript)
+    // but the re-activation re-pin effect early-returns on isActive=false.
+    h = mount(<ChatPanel {...PROPS} isActive={false} />);
+    await h.flush();
+
+    const el = h.container.querySelector('[data-testid="virtuoso-scroller"]') as HTMLElement;
+    expect(el).toBeTruthy();
+
+    // The just-un-hidden scroller re-measures once it has layout: emulate that
+    // fresh measurement reporting a taller tail (content arrived while hidden).
+    // The fix must read this FRESH height at defer time, not the stale value.
+    let scrollHeight = 2000;
+    Object.defineProperty(el, "scrollHeight", {
+      get: () => scrollHeight,
+      configurable: true,
+    });
+    const writes: number[] = [];
+    Object.defineProperty(el, "scrollTop", {
+      set: (v: number) => {
+        writes.push(v);
+      },
+      get: () => (writes.length ? writes[writes.length - 1] : 0),
+      configurable: true,
+    });
+    // Drop any scrolls from the initial hidden mount (e.g. composer resize).
+    writes.length = 0;
+
+    // Content grew while hidden -> once visible the scroller measures taller.
+    scrollHeight = 4216;
+
+    // Re-activate the panel (App.tsx's display:none -> block flip + the
+    // isActive false->true prop, which drives this re-activation effect).
+    h.rerender(<ChatPanel {...PROPS} isActive={true} />);
+
+    // Not in the reactivation commit itself: the true-bottom write is
+    // deferred until the browser re-lays out the now-visible scroller.
+    expect(writes).toEqual([]);
+
+    // Advance past the two rAF frames -> the deferred write lands exactly on
+    // the freshly re-measured tail (scrollHeight = the grown true tail).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
+
+    expect(writes).toContain(4216);
+    expect(writes[writes.length - 1]).toBe(4216);
+  });
+});
+
 // ===== Abort self-heals orphaned questions (BET-116) =====
 //
 // opencode's /question pending list is cumulative and never expires. A
