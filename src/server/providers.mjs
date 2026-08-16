@@ -10,12 +10,12 @@
 // This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
 // until SSH is removed.
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { modify, applyEdits, parse } from "jsonc-parser";
+import { parse } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
 
@@ -85,6 +85,18 @@ const normBaseURL = (u) => stripUrlUserinfo(u).replace(/\/$/, "");
 // comment-stripping regex that used to live here is deleted.
 const OPENCODE_JSONC = join(homedir(), ".config", "opencode", "opencode.jsonc");
 const OPENCODE_API = "http://127.0.0.1:4096/global/config";
+
+// opencode's PATCH /global/config has no HTTP delete semantics (it deep-merges
+// objects and rejects `null`), so a `remove` op can't be expressed through the
+// single endpoint. Re-scoped out of BET-1019: setProviders/setSubagents REJECT
+// removes with this message rather than writing the file directly (a direct
+// write behind the endpoint's back is what made memory and disk diverge — a
+// removed key resurrects on the next upsert PATCH). See BET-1033 for restoring
+// deactivation through a vetted mechanism.
+const REMOVE_UNSUPPORTED_MSG =
+  "remove ops are not supported through the config endpoint (PATCH /global/config " +
+  "has no delete semantics). Deactivation is pending a vetted mechanism — " +
+  "nothing was changed.";
 
 // ---------------------------------------------------------------------------
 // Provider block manipulation (pure)
@@ -365,76 +377,31 @@ export async function patchGlobalConfig(patch) {
 }
 
 /**
- * Perform a comment-preserving deletion of the given JSONC paths from
- * opencode.jsonc (e.g. ["agent", "haiku"] to remove one agent block).
- *
- * This exists ONLY for `remove` ops, which opencode's PATCH /global/config
- * cannot express: the endpoint deep-merges objects and rejects `null` values
- * (verified on 1.18.10), so a key can't be deleted through it. The removal is
- * therefore a surgical edit built on jsonc-parser's `modify(path, undefined)`
- * — the exact primitive opencode itself uses for its own .jsonc writes. It
- * never parses the document to {} and never strips comments, so it does NOT
- * reintroduce the silent-loss bug this module deletes. Upserts never take this
- * path; they always go through patchGlobalConfig.
- *
- * `removeConfigKeys` is injectable for tests.
- */
-export async function removeConfigKeys(paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return { ok: true };
-  let raw;
-  try {
-    raw = await readFile(OPENCODE_JSONC, "utf-8");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: `could not read opencode.jsonc: ${msg}` };
-  }
-  const options = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
-  let next = raw;
-  for (const path of paths) {
-    try {
-      const edits = modify(next, path, undefined, options);
-      next = applyEdits(next, edits);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: `could not remove config key ${path.join(".")}: ${msg}` };
-    }
-  }
-  try {
-    await writeFile(OPENCODE_JSONC, next);
-    return { ok: true };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: `could not write opencode.jsonc: ${msg}` };
-  }
-}
-
-/**
  * Apply a set of provider mutations through opencode's config endpoint.
- * Upserts go through PATCH /global/config; removes go through
- * removeConfigKeys (the endpoint can't delete). Does NOT restart opencode; the
- * caller decides (prompt-before-restart).
+ * Upserts go through PATCH /global/config — the single authority that owns
+ * both the in-memory config and the file. `remove` ops are NOT supported
+ * (the endpoint has no delete semantics over HTTP: it deep-merges objects and
+ * rejects `null`, so a key can't be removed through it) and are REJECTED with
+ * an explicit error rather than written directly — writing the file behind the
+ * endpoint's back would let memory and disk diverge (a removed key resurrects
+ * on the next upsert PATCH). Restoring deactivation is tracked as follow-up
+ * work. Does NOT restart opencode; the caller decides (prompt-before-restart).
  */
 export async function setProviders(ops, deps = {}) {
   const patch = deps.patch ?? patchGlobalConfig;
-  const remove = deps.remove ?? removeConfigKeys;
   const upserts = ops.upsert ?? [];
   const removes = ops.remove ?? [];
 
-  if (upserts.length > 0) {
-    const providerPatch = {};
-    for (const input of upserts) {
-      providerPatch[input.id] = upsertProviderBlock({}, input).provider[input.id];
-    }
-    const res = await patch({ provider: providerPatch });
-    if (!res.ok) return res;
-  }
-
   if (removes.length > 0) {
-    const res = await remove(removes.map((id) => ["provider", id]));
-    if (!res.ok) return res;
+    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
   }
 
-  return { ok: true };
+  if (upserts.length === 0) return { ok: true };
+  const providerPatch = {};
+  for (const input of upserts) {
+    providerPatch[input.id] = upsertProviderBlock({}, input).provider[input.id];
+  }
+  return patch({ provider: providerPatch });
 }
 
 /**
@@ -459,31 +426,29 @@ export async function getSubagents(readConfig = readRemoteConfig) {
 
 /**
  * Apply a set of subagent mutations through opencode's config endpoint.
- * Upserts go through PATCH /global/config; removes go through
- * removeConfigKeys (the endpoint can't delete). Does NOT restart opencode; the
- * caller must do that manually.
+ * Upserts go through PATCH /global/config — the single authority that owns
+ * both the in-memory config and the file. `remove` ops are NOT supported (the
+ * endpoint has no delete semantics over HTTP) and are REJECTED with an
+ * explicit error rather than written directly — writing the file behind the
+ * endpoint's back would let memory and disk diverge (a removed block
+ * resurrects on the next upsert PATCH). Restoring deactivation is tracked as
+ * follow-up work. Does NOT restart opencode; the caller must do that manually.
  */
 export async function setSubagents(ops, deps = {}) {
   const patch = deps.patch ?? patchGlobalConfig;
-  const remove = deps.remove ?? removeConfigKeys;
   const upserts = ops.upsert ?? [];
   const removes = ops.remove ?? [];
 
-  if (upserts.length > 0) {
-    const agentPatch = {};
-    for (const input of upserts) {
-      agentPatch[input.name] = upsertAgentBlock({}, input).agent[input.name];
-    }
-    const res = await patch({ agent: agentPatch });
-    if (!res.ok) return res;
-  }
-
   if (removes.length > 0) {
-    const res = await remove(removes.map((name) => ["agent", name]));
-    if (!res.ok) return res;
+    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
   }
 
-  return { ok: true };
+  if (upserts.length === 0) return { ok: true };
+  const agentPatch = {};
+  for (const input of upserts) {
+    agentPatch[input.name] = upsertAgentBlock({}, input).agent[input.name];
+  }
+  return patch({ agent: agentPatch });
 }
 
 /**

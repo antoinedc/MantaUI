@@ -1403,11 +1403,14 @@ the `.jsonc` surgically, and **preserves `//` comments** (verified live). The ol
 behavior — comment-stripping the file before `JSON.parse` and starting from `{}`
 when unparseable, silently discarding comments and other keys — is deleted. Note
 **`PATCH /config` is INERT on 1.18.x** (returns 200 but changes nothing): only
-`PATCH /global/config` works. `setSubagents`/`setProviders` also support
-`remove` ops (deactivating a subagent / deleting a provider endpoint); opencode's
-PATCH endpoint has no delete semantics over HTTP (it deep-merges and rejects
-`null`), so removal is a surgical comment-preserving edit of the named key via
-jsonc-parser — the same primitive opencode uses for its own writes. The default
+`PATCH /global/config` works, and it is the ONLY config writer — never write
+opencode.jsonc directly. `remove` ops (deactivating a subagent / deleting a
+provider endpoint) are NOT supported: opencode's PATCH endpoint has no delete
+semantics over HTTP (it deep-merges and rejects `null`), so `setProviders` /
+`setSubagents` REJECT a `remove` with an explicit error and never touch the file.
+Writing the file behind the endpoint's back is forbidden — memory and disk would
+diverge and a removed key would resurrect on the next upsert PATCH. Restoring
+deactivation is tracked in BET-1033. The default
 registry
 (`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
@@ -2037,8 +2040,11 @@ agent blocks — so a not-yet-registered model still shows up.
   wrapper `syncSubagents({models, deactivated})` in `src/server/providers.mjs`
   reads `opencode.jsonc`, reconciles, and applies via the EXISTING
   `setSubagents` writer (no second config writer — the ONLY config writer is
-  `PATCH /global/config`, see the AppConfig section above; `remove` ops go
-  through a surgical comment-preserving jsonc-parser delete). No-op diffs skip
+  `PATCH /global/config`, see the AppConfig section above). Because the
+  endpoint can't express `remove` ops, a deactivated-but-registered model's
+  block is currently LEFT IN PLACE — `setSubagents` rejects the remove and
+  `syncSubagents` degrades to the pre-sync list, so deactivation is a no-op
+  until BET-1033 restores it through a vetted mechanism. No-op diffs skip
   the write
   entirely, so it's safe to call on every card open AND every activation
   toggle (`opencode:sync-subagents` RPC channel — mirrors `get`/`set-subagents`

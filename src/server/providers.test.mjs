@@ -536,10 +536,9 @@ describe("getProviderEndpoints", () => {
 describe("setProviders", () => {
   it("routes an upsert through PATCH /global/config with only the changed provider", async () => {
     const patches = [];
-    const removed = [];
     const result = await setProviders(
       { upsert: [{ id: "voska", name: "Voska AI", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: ["voska-1"] }] },
-      { patch: async (p) => { patches.push(p); return { ok: true }; }, remove: async (p) => { removed.push(p); return { ok: true }; } },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
     );
     assert.equal(result.ok, true);
     assert.equal(patches.length, 1);
@@ -547,19 +546,17 @@ describe("setProviders", () => {
     assert.equal(providerBlock.name, "Voska AI");
     assert.equal(providerBlock.options.baseURL, "https://api.voska.org/v1");
     assert.equal(patches[0].provider["other"], undefined, "only the changed provider is patched");
-    assert.equal(removed.length, 0, "no remove op for a pure upsert");
   });
 
-  it("routes a remove through removeConfigKeys under /provider", async () => {
-    const patches = [];
-    const removed = [];
+  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+    let patched = false;
     const result = await setProviders(
       { remove: ["voska"] },
-      { patch: async (p) => { patches.push(p); return { ok: true }; }, remove: async (p) => { removed.push(p); return { ok: true }; } },
+      { patch: async () => { patched = true; return { ok: true }; } },
     );
-    assert.equal(result.ok, true);
-    assert.equal(patches.length, 0, "no PATCH for a remove-only op");
-    assert.deepEqual(removed, [[["provider", "voska"]]]);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
   });
 
   it("surfaces an endpoint error to the caller (no file fallback)", async () => {
@@ -822,10 +819,9 @@ describe("getSubagents", () => {
 describe("setSubagents", () => {
   it("routes an upsert through PATCH /global/config with only the changed agent", async () => {
     const patches = [];
-    const removed = [];
     const result = await setSubagents(
       { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "New fast" }] },
-      { patch: async (p) => { patches.push(p); return { ok: true }; }, remove: async (p) => { removed.push(p); return { ok: true }; } },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
     );
     assert.equal(result.ok, true);
     assert.equal(patches.length, 1);
@@ -834,29 +830,28 @@ describe("setSubagents", () => {
     assert.equal(block.description, "New fast");
     assert.equal(block.mode, "subagent", "default mode for an ordinary block");
     assert.equal(patches[0].agent["old"], undefined, "only the changed agent is patched");
-    assert.equal(removed.length, 0);
   });
 
-  it("routes a remove through removeConfigKeys under /agent", async () => {
-    const patches = [];
-    const removed = [];
+  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+    let patched = false;
     const result = await setSubagents(
       { remove: ["haiku"] },
-      { patch: async (p) => { patches.push(p); return { ok: true }; }, remove: async (p) => { removed.push(p); return { ok: true }; } },
-    );
-    assert.equal(result.ok, true);
-    assert.equal(patches.length, 0, "no PATCH for a remove-only op");
-    assert.deepEqual(removed, [[["agent", "haiku"]]]);
-  });
-
-  it("surfaces an endpoint error and does not run the removal", async () => {
-    const removed = [];
-    const result = await setSubagents(
-      { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
-      { patch: async () => ({ ok: false, error: "opencode config update failed (500)" }), remove: async (p) => { removed.push(p); return { ok: true }; } },
+      { patch: async () => { patched = true; return { ok: true }; } },
     );
     assert.equal(result.ok, false);
-    assert.equal(removed.length, 0, "an upsert failure aborts the batch before any removal");
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
+  });
+
+  it("rejects a batch that includes a remove before patching (remove unsupported)", async () => {
+    let patched = false;
+    const result = await setSubagents(
+      { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
+      { patch: async () => { patched = true; return { ok: true }; } },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "rejects the batch before any upsert PATCH");
   });
 });
 
