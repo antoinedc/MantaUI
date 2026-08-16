@@ -79,7 +79,7 @@ export function planSubdomain(sessionID) {
 // do NOT import the app's stylesheet and do not invent a palette.
 // ---------------------------------------------------------------------------
 
-const LIGHT_TOKENS = `
+export const LIGHT_TOKENS = `
   --r-xs: 4px;
   --r-sm: 6px;
   --canvas: #FAF9F7;
@@ -123,7 +123,7 @@ const LIGHT_TOKENS = `
 // `src/renderer/tokens.css` (do not retune). Only the tokens this page uses.
 // Radii (`--r-xs`/`--r-sm`) and the font stacks are theme-independent and stay
 // in `:root` only, so they are not repeated here.
-const DARK_TOKENS = `
+export const DARK_TOKENS = `
   --canvas: #0B1020;
   --inset: #070B16;
   --border-subtle: #222C49;
