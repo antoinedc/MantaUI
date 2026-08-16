@@ -209,6 +209,47 @@ html, body, #root {
   .manta-artifacts-tab-indicator { transition: none; }
 }
 
+/* Sidebar rail hover highlight (the gliding pill). ONE element per rail,
+   absolutely positioned inside the rail's scroll content, that travels to
+   whichever row the pointer is over. Rows no longer paint their own
+   `hover:bg-fill-hover`; if they did, the fill would appear twice.
+
+   It lives INSIDE the scroll container's content box, so it scrolls with the
+   rows for free — its `top` is a content-space coordinate (viewport delta +
+   scrollTop), never a viewport one.
+
+   `z-index: 0` + `relative z-[1]` on the rows is load-bearing: a positioned
+   element paints above the background AND the text of a non-positioned
+   sibling, so without the explicit pair the highlight would wash over the
+   label of any static row.
+
+   `[data-snap="true"]` suppresses the geometry transition for the frame in
+   which the highlight first appears, so it fades in where the pointer is
+   instead of sliding in from a stale position. */
+.rail-glide {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: var(--r-md);
+  background: var(--fill-hover);
+  opacity: 0;
+  transition:
+    top var(--motion-base) var(--ease-out),
+    left var(--motion-base) var(--ease-out),
+    width var(--motion-base) var(--ease-out),
+    height var(--motion-base) var(--ease-out),
+    opacity var(--motion-fast) ease;
+}
+.rail-glide[data-shown="true"] {
+  opacity: 1;
+}
+.rail-glide[data-snap="true"] {
+  transition: opacity var(--motion-fast) ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-glide { transition: opacity var(--motion-fast) ease; }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

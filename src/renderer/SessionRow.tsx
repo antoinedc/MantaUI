@@ -9,8 +9,9 @@
 //
 // Chrome contract (BET-529 inventory + the `.srow` spec):
 //   - one line, `dot · name · age` — nothing else. Layout `flex; align-items:
-//     center; gap: --sp-2`, radius `--r-md`, `margin-bottom: 4px`, hover
-//     `--fill-hover`.
+//     center; gap: --sp-2`, radius `--r-md`, `margin-bottom: 4px`. The hover
+//     `--fill-hover` is NOT painted by the row: the rail owns one gliding
+//     highlight (src/renderer/RailGlide.tsx) that travels behind the rows.
 //   - dot (`.st`) 7px circle: `run` → `--accent` + 3px `--accent-bg` ring +
 //     pulse; `att` → `--danger` + `--danger-bg` ring + faster-proxied pulse;
 //     `idle` → `--warn`; `ok` → `--ok`; `default` → `--tx4`.
@@ -47,7 +48,7 @@ export type SessionStatus = "run" | "att" | "idle" | "ok" | "default";
 // The rest is the spec'd row chrome, with ALL metrics token-referenced so the
 // [data-density] ancestor owns them (C2).
 const ROW_BASE =
-  "group relative flex cursor-pointer items-center gap-2 rounded-md mb-1 " +
+  "group relative z-[1] flex cursor-pointer items-center gap-2 rounded-md mb-1 " +
   "min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] " +
   "transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1";
 
@@ -56,9 +57,6 @@ const ROW_SELECTED =
   "bg-raised before:absolute before:content-[''] before:left-[-8px] " +
   "before:top-1/2 before:-translate-y-1/2 before:h-4 before:w-[3px] " +
   "before:rounded-r-[3px] before:bg-accent";
-
-// Resting: the spec'd hover fill.
-const ROW_REST = "hover:bg-fill-hover";
 
 // Child (`.child`): 26px indent + the `left:13px` tree connectors. The
 // horizontal elbow stub is ::before, the vertical trunk is ::after. This is
@@ -159,11 +157,14 @@ export function SessionRow({
     selected ? ROW_CHILD_INK_SELECTED : ROW_CHILD_INK,
     lastChild ? ROW_CHILD_TRUNK_LAST : ROW_CHILD_TRUNK,
   ].join(" ");
-  const row =
-    ROW_BASE + " " + (child ? childChrome : selected ? ROW_SELECTED : ROW_REST);
+  // No resting hover fill here: the rail owns ONE gliding highlight that
+  // travels behind the rows (see src/renderer/RailGlide.tsx). A per-row
+  // `hover:bg-fill-hover` would paint the fill a second time.
+  const row = ROW_BASE + (child ? " " + childChrome : selected ? " " + ROW_SELECTED : "");
   return (
     <div
       role="treeitem"
+      data-rail-row=""
       aria-selected={ariaSelected}
       aria-level={ariaLevel}
       tabIndex={tabIndex}
