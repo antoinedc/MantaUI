@@ -158,29 +158,28 @@ describe("preflightBox", () => {
     expect(r.failures[0].cause).toMatch(/not yet trusted/);
   });
 
-  it("classifies a never-seen host as unknown-host via ssh-keyscan when ssh prints only the one-line refusal (BET-1008)", async () => {
-    // A non-interactive ssh prints ONLY "Host key verification failed." on an
-    // unknown host (no fingerprint block — that only ever appears on a TTY).
-    // The fingerprint must come from ssh-keyscan, so the spawn stub routes
-    // the reachability probe to the refusal and the keyscan to a known key.
-    const r = await preflightKeyscanVerdict({
-      code: 0,
-      stdout: `dev ssh-ed25519 ${SCAN_KEY}\n`,
-    });
+  it.each([
+    // A non-interactive ssh prints ONLY "Host key verification failed." (no
+    // fingerprint block — that only ever appears on a TTY), so the offered key
+    // is fetched with ssh-keyscan. A usable key → unknown-host; none → unreachable.
+    {
+      name: "offers a key → unknown-host with the ED25519 fingerprint",
+      keyscan: { code: 0, stdout: `dev ssh-ed25519 ${SCAN_KEY}\n` },
+      wantReachability: "unknown-host",
+      wantFp: { algo: "ED25519", sha256: computeFingerprint(SCAN_KEY) },
+    },
+    {
+      name: "offers nothing → unreachable",
+      keyscan: { code: 1, stdout: "", stderr: "" },
+      wantReachability: "unreachable",
+      wantFp: null,
+    },
+  ])("$name (BET-1008)", async ({ keyscan, wantReachability, wantFp }) => {
+    const r = await preflightKeyscanVerdict(keyscan);
     expect(r.ok).toBe(false);
-    expect(r.probes.reachability).toBe("unknown-host");
-    expect(r.probes.hostFingerprint).toEqual({
-      algo: "ED25519",
-      sha256: computeFingerprint(SCAN_KEY),
-    });
-    expect(r.unknownHost).toEqual(r.probes.hostFingerprint);
-  });
-
-  it("falls back to unreachable when ssh refuses on the host key but ssh-keyscan offers nothing (BET-1008)", async () => {
-    const r = await preflightKeyscanVerdict({ code: 1, stdout: "", stderr: "" });
-    expect(r.ok).toBe(false);
-    expect(r.probes.reachability).toBe("unreachable");
-    expect(r.probes.hostFingerprint).toBeNull();
+    expect(r.probes.reachability).toBe(wantReachability);
+    expect(r.probes.hostFingerprint).toEqual(wantFp);
+    expect(r.unknownHost).toEqual(wantFp);
   });
 
   it("classifies tailscale-running → ingressMode=tailscale (wins over macOS)", async () => {
