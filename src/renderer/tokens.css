@@ -99,7 +99,7 @@
      survive 1.5, so 1.5 is a floor, not a target. Do NOT change the token's
      value: it is multi-consumer (BET-516 generates a Swift theme from this
      file) and it still governs the composer and the user bubble. */
-  --measure: 72ch;
+  --measure: 80ch;
   --prose-lh: 1.55;
   --ui-lh: 1.45;
 

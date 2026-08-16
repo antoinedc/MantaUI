@@ -63,7 +63,7 @@ export function CardStack({ cards, sessionId }: { cards: PinnedCardRender[]; ses
     <div className="shrink-0 overflow-y-auto" style={{ maxHeight: "30vh" }}>
       {/* Blocking tier — newest first, at most one expanded. */}
       {blockingList.length > 0 && (
-        <div className="mx-auto w-full py-1" style={{ maxWidth: "72ch" }}>
+        <div className="mx-auto w-full py-1" style={{ maxWidth: "var(--measure)" }}>
           <div className="space-y-2">
             <CardMount show={blockingList.length > 0} k={blocking?.id ?? "blocking"}>
               <div className="shrink-0 px-4 pt-2">{blocking?.render}</div>

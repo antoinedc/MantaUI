@@ -478,7 +478,7 @@ export function InputArea({
         {/* Send button — sits beside the textarea in the composer box (BET-620
             change 4). Accent when there's text to send, muted fill when empty. */}
         <button
-          onClick={running ? abort : submit}
+          onClick={() => (running ? abort() : submit())}
           disabled={!running && !input.trim()}
           aria-label={running ? "Stop the running turn" : "Send message"}
           title={running ? "Stop (Esc)" : "Send (Enter)"}
@@ -575,7 +575,7 @@ export function InputArea({
             onSecrets={onSecrets}
             onWebhooks={onWebhooks}
           />
-          {(voiceActive || running) && (
+          {voiceActive && (
             <span className="text-meta text-text-faint">
               {voiceProcessing ? (
                 "transcribing… · esc cancels"
@@ -601,9 +601,7 @@ export function InputArea({
                     </span>
                   )}
                 </span>
-              ) : (
-                "esc · interrupt"
-              )}
+              ) : null}
             </span>
           )}
         </span>
@@ -618,6 +616,7 @@ export function InputArea({
       <div className="pb-3 flex items-center">
         {plan.on ? (
           <span className="inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
+            <Shield size={14} aria-hidden="true" />
             Plan mode — edits blocked
           </span>
         ) : (

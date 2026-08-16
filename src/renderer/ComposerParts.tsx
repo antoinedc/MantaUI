@@ -655,7 +655,7 @@ export function MicButton({
             ? `${activeColor} animate-pulse`
             : phase === "error"
               ? "text-danger hover:text-danger"
-              : "text-text-faint hover:text-text-muted")
+              : "text-text-faint hover:bg-fill-hover hover:text-text")
       }
       style={{ touchAction: "none" }}  // suppress mobile pull-to-refresh
     >
