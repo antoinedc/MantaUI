@@ -1020,17 +1020,19 @@ export function ChatPanel({
   useEffect(() => {
     if (!isActive) return;
     if (!followingRef.current) return;
-    // Re-activation re-pin. MUST use Virtuoso's scrollToIndex here, NOT
-    // scrollToTail()/scrollElementToTail: this effect runs right after the
-    // panel's display:none -> block flip, before react-virtuoso has re-measured
-    // the scroller (its ResizeObserver fires only after this effect). A raw
-    // `el.scrollTop = el.scrollHeight` read at this instant is stale/short and
-    // lands the transcript ABOVE the tail. scrollToIndex converges on the true
-    // tail (it is layout-aware and accounts for the transcript footer) - same
-    // behaviour as the pre-5ac17b3 code. All OTHER scrollToTail() callers run on
-    // a visible, already-measured scroller, so they keep using the raw write.
+    // Re-activation re-pin. The scroller was display:none while inactive, so at
+    // this instant it has NOT re-measured: both a synchronous el.scrollTop =
+    // el.scrollHeight and Virtuoso's scrollToIndex(LAST,end) land SHORT (the
+    // real increaseViewportBy bottom crowds out the tail). Defer the true-bottom
+    // write to after the browser has re-laid-out the now-visible scroller
+    // (2x rAF — scrollHeight is then the real tail), and pin exactly to it. All
+    // OTHER scrollToTail() callers run on a visible, measured scroller and stay
+    // as they are. (BET-1003 — supersedes the BET-1001 scrollToIndex approach
+    // which still landed ~216px above the tail under "content grew while
+    // hidden".)
     setFollowing(true);
-    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+    const el = scrollerElRef.current;
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollElementToTail(el)));
   }, [isActive, setFollowing]);
 
   // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
