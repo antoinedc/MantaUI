@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { statePath } from "../shared/paths.mjs";
 import {
   classifyPushEvent,
   buildSessionLabel,
@@ -103,6 +105,90 @@ test("question.asked carries the question text + option actions (single select)"
     { action: "ans:1", title: "No" },
     { action: "ans:2", title: "Wait" },
   ]);
+});
+
+test("plan_exit question → MantaUI plan-ready body + plan page URL, no raw path (BET-993)", () => {
+  // Make the box addressable so publicBaseUrl() resolves (auth.json under the
+  // MANTA_STATE_HOME sandbox, read fresh on every call). Cleaned up after.
+  const authPath = statePath("auth.json");
+  mkdirSync(statePath(), { recursive: true });
+  writeFileSync(authPath, JSON.stringify({ gateway_host: "box123.boxes.mantaui.com" }));
+  try {
+    const p = classifyPushEvent(
+      {
+        type: "question.asked",
+        properties: {
+          sessionID: "ses_plan",
+          questions: [
+            {
+              header: "Build Agent",
+              question:
+                "Plan at .opencode/plans/sunny-eagle.md is complete. Would you like to switch to the build agent?",
+            },
+          ],
+        },
+      },
+      NOFOCUS,
+    );
+    assert.equal(p?.kind, "question");
+    assert.match(p?.body ?? "", /Your plan is ready to review/);
+    assert.match(
+      p?.body ?? "",
+      /https:\/\/box123\.boxes\.mantaui\.com\/pages\/plan-sesplan/,
+    );
+    assert.ok(!(p?.body ?? "").includes(".md"), "no raw .md path leaks");
+    assert.ok(!(p?.body ?? "").includes("Plan at"), "no 'Plan at' literal leaks");
+  } finally {
+    rmSync(authPath, { force: true });
+  }
+});
+
+test("plan_exit question with unresolvable URL → body is just the clean line (BET-993)", () => {
+  // No sessionID → planPageUrl cannot build a slug → returns "" → nothing appended.
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        questions: [{ header: "Build Agent", question: "Plan at foo.md is complete?" }],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(
+    p?.body,
+    "Your plan is ready to review — open it, then approve or keep planning.",
+  );
+  assert.ok(!(p?.body ?? "").includes("Plan at"));
+});
+
+test("plan_exit detected via header alone (question not prefixed with 'Plan at ') (BET-993)", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_plan_h",
+        questions: [{ header: "Build Agent", question: "Ready to hand off?" }],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.match(p?.body ?? "", /Your plan is ready to review/);
+  assert.ok(!(p?.body ?? "").includes(".md"));
+});
+
+test("normal question → body unchanged (BET-993 regression)", () => {
+  const p = classifyPushEvent(
+    {
+      type: "question.asked",
+      properties: {
+        sessionID: "ses_norm",
+        questions: [{ header: "Deploy?", question: "Should I deploy to production now?" }],
+      },
+    },
+    NOFOCUS,
+  );
+  assert.equal(p?.kind, "question");
+  assert.equal(p?.body, "Should I deploy to production now?");
 });
 
 test("question.asked with multi-select → text but NO quick actions", () => {

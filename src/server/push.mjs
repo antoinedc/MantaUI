@@ -33,6 +33,8 @@
 
 import { join } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { planPageUrl } from "../shared/planMode.mjs";
+import { publicBaseUrl } from "./gatewayRegister.mjs";
 import * as tmux from "./tmux.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { loadJobs } from "./delegate.mjs";
@@ -302,6 +304,24 @@ export function routeNotification(payload, presence, now = Date.now()) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Whether a question is opencode's plan_exit approval — the "Plan ready"
+ * handoff at the end of plan mode (BET-993). opencode's plan_exit question
+ * literal starts with "Plan at " and carries header "Build Agent". We match
+ * either so the detection survives opencode phrasing drift.
+ */
+function isPlanExitQuestion(q) {
+  if (!q || typeof q !== "object") return false;
+  const question = typeof q.question === "string" ? q.question : "";
+  return question.startsWith("Plan at ") || q.header === "Build Agent";
+}
+
+// MantaUI's notification body for the plan_exit approval, replacing opencode's
+// raw "Plan at <derived .md path>…" text so no opencode path ever leaks to the
+// user. The plan page URL (BET-992) is appended when the box is addressable.
+const PLAN_READY_BODY =
+  "Your plan is ready to review — open it, then approve or keep planning.";
+
+/**
  * Decide whether an opencode event should produce a notification and, if so,
  * what it says. Pure — all state comes in via `ctx`.
  *
@@ -361,14 +381,25 @@ export function classifyPushEvent(evt, ctx) {
       // Body shows the question text, prefixed with the header when we have a
       // label in the title (so the "what kind" cue isn't lost). Without a label
       // the title still carries the header (legacy "Claude: <header>" form).
-      const qBody = first?.question || "Claude needs your input to continue.";
+      // opencode's plan_exit approval is MantaUI's "Plan ready" handoff: swap
+      // the raw "Plan at <path>.md…" question for a clean line + the plan page
+      // URL (BET-992) when the box is addressable. Everything else is unchanged.
+      const isPlan = isPlanExitQuestion(first);
+      let qBody = first?.question || "Claude needs your input to continue.";
+      if (isPlan) {
+        const url = planPageUrl(sessionId, publicBaseUrl());
+        qBody = url ? `${PLAN_READY_BODY}\n\n${url}` : PLAN_READY_BODY;
+      }
       const out = {
         kind: "question",
         title: titleOr(
           first?.header ? `Claude: ${first.header}` : "Claude has a question",
         ),
-        body:
-          label && first?.header ? `${first.header} — ${qBody}` : qBody,
+        body: isPlan
+          ? qBody
+          : label && first?.header
+            ? `${first.header} — ${qBody}`
+            : qBody,
         sessionId,
         tag: `question-${tagBase}`,
         requestId,
