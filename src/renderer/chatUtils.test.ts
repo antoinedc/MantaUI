@@ -117,6 +117,7 @@ import {
   describeMergeFailure,
   commentableLines,
   cloneErrorKind,
+  repoListErrorMessage,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -4711,6 +4712,22 @@ describe("cloneErrorKind", () => {
     expect(cloneErrorKind("fatal: some other git error")).toBe("unknown");
     expect(cloneErrorKind("")).toBe("unknown");
     expect(cloneErrorKind(undefined as unknown as string)).toBe("unknown");
+  });
+});
+
+describe("repoListErrorMessage (BET-1011)", () => {
+  it("maps the server's not_connected code to sign-in guidance", () => {
+    expect(repoListErrorMessage("not_connected")).toBe(
+      "GitHub isn't connected. Go back and sign in again.",
+    );
+  });
+
+  it("falls back to a generic message for any other code or absence", () => {
+    const generic = "Couldn't list your repositories from GitHub.";
+    expect(repoListErrorMessage("rate_limited")).toBe(generic);
+    expect(repoListErrorMessage("")).toBe(generic);
+    expect(repoListErrorMessage(null)).toBe(generic);
+    expect(repoListErrorMessage(undefined)).toBe(generic);
   });
 });
 

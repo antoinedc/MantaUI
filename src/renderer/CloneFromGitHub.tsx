@@ -31,8 +31,15 @@ import { Field } from "./Field";
 import { ListRow } from "./ListRow";
 import { ProgressBar } from "./ProgressBar";
 import { ScrollFrame } from "./ScrollFrame";
+import { MantaLoader } from "./MantaLoader";
 import { ConnectGithubPanel, PanelHeader, PANEL_CLASS } from "./ConnectGithub";
-import { formatAge, formatBytes, cloneErrorKind, type CloneErrorKind } from "./chatUtils";
+import {
+  formatAge,
+  formatBytes,
+  cloneErrorKind,
+  repoListErrorMessage,
+  type CloneErrorKind,
+} from "./chatUtils";
 import type {
   ForgeCloneStatus,
   ForgeRepo,
@@ -42,6 +49,19 @@ type Phase =
   | { kind: "pick" }
   | { kind: "clone"; queue: ForgeRepo[]; index: number }
   | { kind: "failed"; repo: ForgeRepo; message: string; errorKind: CloneErrorKind };
+
+// One state for the repo fetch, so "in flight", "failed" and "loaded" can
+// never disagree. The previous three-flag version (repos + reposError, with
+// the fetch keyed on neither) is what left the picker stuck showing
+// `not_connected` after a successful sign-in.
+type ReposState =
+  | { kind: "loading" }
+  | { kind: "ready"; repos: ForgeRepo[] }
+  | { kind: "error"; message: string };
+
+// Module-scope constant so the `owners` / `filtered` memos see a stable
+// identity while loading.
+const NO_REPOS: ForgeRepo[] = [];
 
 export function CloneFromGitHub({
   defaultRoot,
@@ -57,8 +77,8 @@ export function CloneFromGitHub({
   const [connected, setConnected] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: "pick" });
   // ---- [S6] picker state ----
-  const [repos, setRepos] = useState<ForgeRepo[]>([]);
-  const [reposError, setReposError] = useState<string | null>(null);
+  const [reposState, setReposState] = useState<ReposState>({ kind: "loading" });
+  const repos = reposState.kind === "ready" ? reposState.repos : NO_REPOS;
   const [search, setSearch] = useState("");
   const [owner, setOwner] = useState<string>("");
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
@@ -82,30 +102,31 @@ export function CloneFromGitHub({
     );
   }, [repos, owner, search]);
 
-  // ---- [S6]: fetch the repos once we reach the picker ----
+  // ---- [S6]: fetch the repos once a credential exists ----
+  // Keyed on `connected` ONLY. The old version keyed on `phase.kind`, so it
+  // fired on mount — before sign-in — and cached the resulting `not_connected`
+  // as a permanent error that no later sign-in could clear.
   useEffect(() => {
-    if (phase.kind !== "pick" || repos.length > 0 || reposError) return;
+    if (!connected) return;
     let cancelled = false;
+    setReposState({ kind: "loading" });
     (async () => {
       try {
         const res = await window.api.forgeRepos();
         if (cancelled) return;
-        if (res.repos) {
-          setRepos(res.repos);
-          setReposError(res.error ?? null);
-        } else {
-          setReposError(res.error ?? "Couldn't list repositories");
-        }
+        // `res.repos` is always an array; `res.error` is the only failure
+        // signal. Testing the array's truthiness was the original bug.
+        if (res.error) setReposState({ kind: "error", message: repoListErrorMessage(res.error) });
+        else setReposState({ kind: "ready", repos: res.repos });
       } catch {
         if (cancelled) return;
-        setReposError("Couldn't list repositories from GitHub");
+        setReposState({ kind: "error", message: repoListErrorMessage(null) });
       }
     })();
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase.kind]);
+  }, [connected]);
 
   const toggleRepo = (fullName: string, on: boolean) => {
     setChecked((prev) => {
@@ -271,11 +292,15 @@ export function CloneFromGitHub({
                   ariaLabel="Search repositories"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder={`Search ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}…`}
+                  placeholder={
+                    reposState.kind === "ready"
+                      ? `Search ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}…`
+                      : "Search repositories…"
+                  }
                 />
-                {reposError && (
+                {reposState.kind === "error" && (
                   <div className="mt-2">
-                    <Callout tone="danger">{reposError}</Callout>
+                    <Callout tone="danger">{reposState.message}</Callout>
                   </div>
                 )}
               </>
@@ -328,22 +353,29 @@ export function CloneFromGitHub({
             }
             bodyClassName="mt-1"
           >
-            {filtered.map((r) => (
-              <ListRow
-                key={r.fullName}
-                leading={
-                  <Checkbox
-                    checked={checked.has(r.fullName)}
-                    onChange={(on) => toggleRepo(r.fullName, on)}
-                    ariaLabel={`Clone ${r.name}`}
-                  />
-                }
-                name={r.name}
-                secondary={r.description || "—"}
-                trailing={r.pushedAt != null ? formatAge(Date.now() - r.pushedAt) : "—"}
-              />
-            ))}
-            {filtered.length === 0 && !reposError && (
+            {reposState.kind === "loading" && (
+              <div className="flex items-center gap-2 py-3 text-[13px] text-text-faint">
+                <MantaLoader />
+                <span>Loading repositories…</span>
+              </div>
+            )}
+            {reposState.kind === "ready" &&
+              filtered.map((r) => (
+                <ListRow
+                  key={r.fullName}
+                  leading={
+                    <Checkbox
+                      checked={checked.has(r.fullName)}
+                      onChange={(on) => toggleRepo(r.fullName, on)}
+                      ariaLabel={`Clone ${r.name}`}
+                    />
+                  }
+                  name={r.name}
+                  secondary={r.description || "—"}
+                  trailing={r.pushedAt != null ? formatAge(Date.now() - r.pushedAt) : "—"}
+                />
+              ))}
+            {reposState.kind === "ready" && filtered.length === 0 && (
               <div className="text-[13px] text-text-faint py-2">No repositories match.</div>
             )}
           </ScrollFrame>

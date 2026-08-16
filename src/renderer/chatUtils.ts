@@ -3405,6 +3405,14 @@ export function cloneErrorKind(stderr: string): CloneErrorKind {
   return "unknown";
 }
 
+// The box returns machine codes (`not_connected`) or a raw exception string
+// for a failed repo listing; neither is something to show a person. One
+// mapping, so the picker never renders a server code verbatim.
+export function repoListErrorMessage(code: string | null | undefined): string {
+  if (code === "not_connected") return "GitHub isn't connected. Go back and sign in again.";
+  return "Couldn't list your repositories from GitHub.";
+}
+
 // ===== Forge merge gate (BET-794) =====
 
 /**
