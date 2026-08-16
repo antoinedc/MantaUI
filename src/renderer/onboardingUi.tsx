@@ -136,7 +136,7 @@ export function StepFooter({
         <ArrowLeft />
         Back
       </button>
-      <Button tone="primary" block type="button" onClick={onContinue} disabled={continueDisabled}>
+      <Button tone="primary" type="button" onClick={onContinue} disabled={continueDisabled}>
         {continueLabel}
         <ArrowRight />
       </Button>
