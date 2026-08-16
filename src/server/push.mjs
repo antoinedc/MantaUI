@@ -304,14 +304,6 @@ export function routeNotification(payload, presence, now = Date.now()) {
 // ---------------------------------------------------------------------------
 
 /**
- * Decide whether an opencode event should produce a notification and, if so,
- * what it says. Pure — all state comes in via `ctx`.
- *
- * @param {{type?: string, properties?: any}} evt
- * @param {{ focusSessionId: string|null, focusVisible: boolean, wasBusy: boolean, pendingAttention?: boolean }} ctx
- * @returns {{ kind: string, title: string, body: string, sessionId: string|null, tag: string }|null}
- */
-/**
  * Whether a question is opencode's plan_exit approval — the "Plan ready"
  * handoff at the end of plan mode (BET-993). opencode's plan_exit question
  * literal starts with "Plan at " and carries header "Build Agent". We match
@@ -329,6 +321,14 @@ function isPlanExitQuestion(q) {
 const PLAN_READY_BODY =
   "Your plan is ready to review — open it, then approve or keep planning.";
 
+/**
+ * Decide whether an opencode event should produce a notification and, if so,
+ * what it says. Pure — all state comes in via `ctx`.
+ *
+ * @param {{type?: string, properties?: any}} evt
+ * @param {{ focusSessionId: string|null, focusVisible: boolean, wasBusy: boolean, pendingAttention?: boolean }} ctx
+ * @returns {{ kind: string, title: string, body: string, sessionId: string|null, tag: string }|null}
+ */
 export function classifyPushEvent(evt, ctx) {
   const type = evt?.type;
   const props = evt?.properties ?? {};
