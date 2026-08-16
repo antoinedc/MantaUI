@@ -628,12 +628,13 @@ describe("ChatPanel composer submit", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    const textarea = h.container.querySelector("textarea");
+    const container = h.container;
+    const textarea = container.querySelector("textarea");
     await act(async () => {
       typeInto(textarea as HTMLTextAreaElement, "ship it");
     });
     await act(async () => {
-      const send = h.container.querySelector('button[aria-label="Send message"]');
+      const send = container.querySelector('button[aria-label="Send message"]');
       (send as HTMLButtonElement).click();
     });
     await h.flush();
