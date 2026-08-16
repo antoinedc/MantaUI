@@ -434,6 +434,24 @@ function Shell() {
   } | null>(null);
   const cacheTtl = useStore((s) => s.cacheTtl);
 
+  // Pull the box's CACHED usage snapshots. This is an in-memory read on the box
+  // (no provider request), which is why it is safe to call on every reconnect.
+  const pullUsage = useCallback(async () => {
+    if (!window.api.usageList) return;
+    try {
+      const snapshots = await window.api.usageList();
+      const list = Array.isArray(snapshots) ? snapshots : [];
+      useStore.getState().setUsage(list);
+      // Seed the escalation baseline from the SAME payload that primes the dial,
+      // so the first live update after a launch does not re-fire for a window
+      // that was already over the threshold.
+      usageLevelsRef.current = buildUsageLevels(list, usageLevelsRef.current);
+    } catch {
+      // Older box or a transport blip — leave the slice as-is; UsageDial's own
+      // null-snapshot path already renders nothing.
+    }
+  }, []);
+
   useEffect(() => {
     // Bootstrap (BET-678). The first paint is INSTANT — read from the persisted
     // local snapshot restored in main.tsx (zero round trips). This effect only
@@ -496,13 +514,14 @@ function Shell() {
       const isResync = "resync" in delta && delta.resync === true;
       if (isResync) {
         void refresh();
+        void pullUsage();
         return;
       }
       // applySyncPayload owns the stale-envelope guard (same gen, lower seq).
       useStore.getState().applySyncPayload(delta as SyncPayload);
     });
     return off;
-  }, [refresh, apiGeneration]);
+  }, [refresh, apiGeneration, pullUsage]);
 
   useEffect(() => {
     if (!window.api.onStatusEvent) return;
@@ -595,38 +614,18 @@ function Shell() {
   }, [apiGeneration]);
 
   // Subscription plan usage (BET-738): prime the store's `usage` slice with
-  // ONE window.api.usageList() call on mount, then stay live via the box's
-  // `usage.updated` bus event. Deliberately NOT a poll — the box's usage
-  // poller (src/server/usage.mjs, 3-minute interval) is the only timer;
-  // adding a second one here would just be two clocks disagreeing.
+  // ONE window.api.usageList() call on mount (and on api change), then stay
+  // live via the box's `usage.updated` bus event. Deliberately NOT a poll —
+  // the box's usage poller (src/server/usage.mjs, 10-minute interval) is the
+  // only timer; adding a second one here would just be two clocks
+  // disagreeing.
   useEffect(() => {
-    if (!window.api.usageList) return;
-    window.api
-      .usageList()
-      .then((snapshots) => {
-        const list = Array.isArray(snapshots) ? snapshots : [];
-        useStore.getState().setUsage(list);
-        // Seed the escalation baseline from the SAME payload that primes the
-        // dial. Without this the fire-once memory starts empty, so the first
-        // live update after any launch re-fires for a window that was already
-        // over the threshold when the app opened.
-        usageLevelsRef.current = buildUsageLevels(list, usageLevelsRef.current);
-      })
-      .catch(() => {
-        // Transport blip or an older box that doesn't implement the channel
-        // yet — leave the slice as-is (UsageDial's own null-snapshot path
-        // already renders nothing).
-      });
-    let off: (() => void) | null = null;
-    if (window.api.onUsageUpdated) {
-      off = window.api.onUsageUpdated(({ snapshots }) => {
-        useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
-      });
-    }
-    return () => {
-      if (off) off();
-    };
-  }, [apiGeneration]);
+    void pullUsage();
+    if (!window.api.onUsageUpdated) return;
+    return window.api.onUsageUpdated(({ snapshots }) => {
+      useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
+    });
+  }, [apiGeneration, pullUsage]);
 
   // ---- Subscription usage escalation (BET-739) ----
   // The warn (>=90%) / limit (>=100%) toasts, pushed through the existing

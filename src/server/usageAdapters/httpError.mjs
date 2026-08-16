@@ -4,7 +4,8 @@
 // (claude/codex/kimi) call this identically; it is not provider-specific
 // logic, so it lives here rather than being duplicated three times or
 // living in usage.mjs (which would create a usage.mjs <-> adapter import
-// cycle, since usage.mjs imports the adapters).
+// cycle, since usage.mjs imports the adapters). `retryAfterMs` is parsed
+// regardless of status — only usage.mjs's 429 branch reads it.
 
 /**
  * @param {{status:number, headers?:{get?:(name:string)=>string|null|undefined}}} res
@@ -14,9 +15,14 @@
 export function httpError(res, label) {
   const err = new Error(`${label}: HTTP ${res.status}`);
   err.status = res.status;
-  if (res.status === 429) {
-    const retryAfter = Number(res.headers?.get?.("retry-after"));
-    if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfterMs = retryAfter * 1000;
-  }
+  // Parsed regardless of status: only usage.mjs's 429 branch reads
+  // `retryAfterMs`, so a status guard here would gate a field nobody else
+  // touches. `>= 0`, NOT `> 0`: Anthropic's usage endpoint answers a 429 with
+  // a literal `retry-after: 0`, and treating that as "no header" is what sent
+  // the poller into its long default backoff and blanked the dial for 15
+  // minutes at a time. A falsy raw header (absent or "") stays undefined.
+  const raw = res.headers?.get?.("retry-after");
+  const secs = raw ? Number(raw) : NaN;
+  if (Number.isFinite(secs) && secs >= 0) err.retryAfterMs = secs * 1000;
   return err;
 }

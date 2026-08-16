@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeWindow, createUsagePoller, ADAPTERS } from "./usage.mjs";
+import { normalizeWindow, createUsagePoller, ADAPTERS, rateLimitBackoffMs, carryForward } from "./usage.mjs";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
@@ -215,7 +215,7 @@ test("poller: a 429 with Retry-After backs off only that adapter, for exactly th
       if (rlFetchCalls === 1) {
         const err = new Error("rate limited");
         err.status = 429;
-        err.retryAfterMs = 5000;
+        err.retryAfterMs = 5 * 60_000; // 5 min — above floor, below ceiling, honoured verbatim
         throw err;
       }
       return { windows: [{ kind: "session", label: "s", pct: 10 }] };
@@ -234,17 +234,17 @@ test("poller: a 429 with Retry-After backs off only that adapter, for exactly th
   try {
     const poller = createUsagePoller({ adapters: [rateLimited, ok], now: () => nowMs });
 
-    await poller.tick(); // rl fails (429, backoff 5s); ok succeeds
+    await poller.tick(); // rl fails (429, backoff 5 min); ok succeeds
     assert.equal(rlFetchCalls, 1);
     assert.equal(okFetchCalls, 1);
     assert.equal(poller.snapshots.some((s) => s.provider === "rl"), false);
 
-    nowMs += 2000; // still inside the 5s backoff window
+    nowMs += 2 * 60_000; // still inside the 5-minute backoff window
     await poller.tick();
     assert.equal(rlFetchCalls, 1, "rl must not be fetched again while backed off");
     assert.equal(okFetchCalls, 2);
 
-    nowMs += 4000; // 6s elapsed since the 429 — backoff has expired
+    nowMs += 4 * 60_000; // 6 minutes elapsed since the 429 — backoff has expired
     await poller.tick();
     assert.equal(rlFetchCalls, 2, "rl is fetched again once its backoff expires");
     assert.equal(poller.snapshots.find((s) => s.provider === "rl").windows[0].pct, 10);
@@ -253,7 +253,7 @@ test("poller: a 429 with Retry-After backs off only that adapter, for exactly th
   }
 });
 
-test("poller: a bare 429 with no Retry-After falls back to the 15-minute default backoff", async () => {
+test("poller: a bare 429 with no Retry-After floors at 2 minutes", async () => {
   let nowMs = 0;
   let calls = 0;
   const rl = makeAdapter("rl", {
@@ -272,16 +272,176 @@ test("poller: a bare 429 with no Retry-After falls back to the 15-minute default
     await poller.tick();
     assert.equal(calls, 1);
 
-    nowMs += 14 * 60_000; // just under 15 minutes
+    nowMs += 1 * 60_000; // just under the 2-minute floor (even retry-after: 0 lands here)
     await poller.tick();
     assert.equal(calls, 1);
 
-    nowMs += 2 * 60_000; // now past 15 minutes total
+    nowMs += 2 * 60_000; // now past 2 minutes total — retried
     await poller.tick();
     assert.equal(calls, 2);
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("rateLimitBackoffMs: clamps into the 2-15 minute band", () => {
+  assert.equal(rateLimitBackoffMs(undefined), 120_000);
+  assert.equal(rateLimitBackoffMs(0), 120_000);
+  assert.equal(rateLimitBackoffMs(30_000), 120_000); // below floor
+  assert.equal(rateLimitBackoffMs(300_000), 300_000); // in band
+  assert.equal(rateLimitBackoffMs(3_600_000), 900_000); // above ceiling
+});
+
+test("poller: a 429 carrying retry-after: 0 backs off 2 minutes, not 15 (regression)", async () => {
+  let nowMs = 0;
+  let calls = 0;
+  const rl = makeAdapter("rl", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      const err = new Error("rate limited");
+      err.status = 429;
+      err.retryAfterMs = 0; // Anthropic's literal retry-after: 0
+      throw err;
+    },
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({ adapters: [rl], now: () => nowMs });
+    await poller.tick();
+    assert.equal(calls, 1);
+
+    nowMs += 1 * 60_000; // before the 2-minute floor → still backed off
+    await poller.tick();
+    assert.equal(calls, 1);
+
+    nowMs += 2 * 60_000; // past 2 minutes → retried (NOT after 15)
+    await poller.tick();
+    assert.equal(calls, 2);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: a failing adapter's snapshot is carried forward (same ref, unchanged fetchedAt, nothing republished)", async () => {
+  let nowMs = 1_000_000;
+  let calls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      if (calls === 2) throw new Error("boom");
+      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
+    },
+  });
+  const published = [];
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({
+      adapters: [adapter],
+      now: () => nowMs,
+      publish: (evt) => published.push(evt),
+    });
+
+    await poller.tick(); // success
+    const first = poller.snapshots[0];
+    assert.equal(first.fetchedAt, 1_000_000);
+    assert.equal(published.length, 1);
+
+    nowMs += 60_000; // 1 minute later the adapter throws
+    await poller.tick();
+    assert.equal(calls, 2);
+    assert.equal(poller.snapshots.length, 1, "snapshot still present after the failed tick");
+    assert.equal(poller.snapshots[0], first, "the SAME object reference is carried forward");
+    assert.equal(poller.snapshots[0].fetchedAt, 1_000_000, "fetchedAt untouched");
+    assert.equal(published.length, 1, "the failed tick put nothing on the bus");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: carry-forward across the backoff window keeps the snapshot present", async () => {
+  let nowMs = 1_000_000;
+  let calls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      if (calls === 2) {
+        const err = new Error("rate limited");
+        err.status = 429;
+        throw err;
+      }
+      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
+    },
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
+    await poller.tick(); // success
+    assert.equal(poller.snapshots.length, 1);
+    const first = poller.snapshots[0];
+
+    nowMs += 1 * 60_000; // 1 min later — bare 429 sets the 2-minute floor backoff
+    await poller.tick();
+    assert.equal(calls, 2, "adapter was called on the failing tick");
+    assert.equal(poller.snapshots.length, 1, "snapshot present after the 429");
+
+    nowMs += 30_000; // still inside the 2-min backoff — adapter not even called
+    await poller.tick();
+    assert.equal(calls, 2, "adapter not called while backed off");
+    assert.equal(poller.snapshots.length, 1, "snapshot carried across the backoff window");
+    assert.equal(poller.snapshots[0], first, "same reference carried");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: carry-forward expires after 30 minutes with no successful fetch", async () => {
+  let nowMs = 1_000_000;
+  let calls = 0;
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      calls++;
+      if (calls === 2) throw new Error("boom");
+      return { windows: [{ kind: "session", label: "s", pct: 42 }] };
+    },
+  });
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
+    await poller.tick(); // success
+    assert.equal(poller.snapshots.length, 1);
+
+    nowMs += 31 * 60_000; // past the 30-minute carry-forward cap
+    await poller.tick(); // fails again
+    assert.equal(calls, 2);
+    assert.equal(poller.snapshots.length, 0, "snapshot dropped once older than the carry cap");
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("poller: detect() flips to false → snapshot dropped on the very next tick, no carry-forward", async () => {
+  let nowMs = 1_000_000;
+  let detected = true;
+  const adapter = makeAdapter("a", {
+    detect: async () => detected,
+    fetch: async () => ({ windows: [{ kind: "session", label: "s", pct: 42 }] }),
+  });
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs });
+  await poller.tick(); // detected — snapshot present
+  assert.equal(poller.snapshots.length, 1);
+
+  nowMs += 60_000;
+  detected = false; // credential gone — genuinely not connected
+  await poller.tick();
+  assert.equal(poller.snapshots.length, 0, "a missing credential clears the snapshot immediately");
 });
 
 // Reviewer Block (cycle 1): a content-identical tick must still refresh
@@ -308,13 +468,13 @@ test("poller: identical consecutive results publish exactly once, but fetchedAt 
   await poller.tick();
   assert.equal(poller.snapshots[0].fetchedAt, 1_000_000);
 
-  nowMs += 180_000; // a full poll interval later, same numbers
+  nowMs += 600_000; // a full poll interval (10 min) later, same numbers
   await poller.tick();
-  assert.equal(poller.snapshots[0].fetchedAt, 1_180_000, "fetchedAt must advance on a healthy re-confirm");
+  assert.equal(poller.snapshots[0].fetchedAt, 1_600_000, "fetchedAt must advance on a healthy re-confirm");
 
-  nowMs += 180_000;
+  nowMs += 600_000;
   await poller.tick();
-  assert.equal(poller.snapshots[0].fetchedAt, 1_360_000);
+  assert.equal(poller.snapshots[0].fetchedAt, 2_200_000);
 
   // Content never changed across all three ticks — the bus stayed quiet.
   assert.equal(published.length, 1);

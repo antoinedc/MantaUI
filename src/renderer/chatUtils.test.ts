@@ -3683,9 +3683,9 @@ describe("formatUpdatedAgo / usageStale", () => {
     expect(formatUpdatedAgo(0, 2 * 3_600_000)).toBe("updated 2h ago");
   });
 
-  it("usageStale flips at exactly 10 minutes", () => {
-    expect(usageStale(0, 10 * 60_000)).toBe(false);
-    expect(usageStale(0, 10 * 60_000 + 1)).toBe(true);
+  it("usageStale flips at exactly 25 minutes", () => {
+    expect(usageStale(0, 25 * 60_000)).toBe(false);
+    expect(usageStale(0, 25 * 60_000 + 1)).toBe(true);
   });
 });
 

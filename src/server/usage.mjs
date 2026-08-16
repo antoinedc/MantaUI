@@ -84,23 +84,62 @@ export { normalizeWindow };
 export const ADAPTERS = [claudeAdapter, codexAdapter, kimiAdapter];
 
 // Cache TTL is the poll interval; there is no separate cache layer (per spec).
-const POLL_MS = 180_000; // 3 minutes
+const POLL_MS = 600_000; // 10 minutes
 // How long after a tick that first saw an expired window we re-poll, so the
 // carried-forward reading is replaced in seconds rather than up to POLL_MS.
 const STALE_RETRY_MS = 20_000;
-// Default per-adapter backoff on a bare 429 (no usable Retry-After).
-const DEFAULT_RATE_LIMIT_BACKOFF_MS = 15 * 60_000; // 15 minutes
+// A 429 backoff is always clamped into this band. The floor exists because
+// Anthropic's usage endpoint answers with `retry-after: 0` — honouring that
+// literally would hot-loop the endpoint — and the ceiling exists because a
+// provider asking for an hour still must not blank the dial for an hour.
+// Both ends collapse the old "header present / header absent" branch into one
+// expression.
+const MIN_RATE_LIMIT_BACKOFF_MS = 2 * 60_000;  // 2 minutes
+const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000; // 15 minutes
+// How long a snapshot may be carried forward across failed/backed-off ticks
+// before it is dropped. Sits above the stale-warning threshold the popover
+// uses, so a carried reading visibly ages into a warning before it disappears.
+const MAX_CARRY_FORWARD_MS = 30 * 60_000; // 30 minutes
 
 /**
  * Strip `fetchedAt` for the "did anything actually change" comparison — a
  * fresh fetch always has a new timestamp, so comparing the full object would
  * publish on every tick regardless of content, defeating the whole point of
  * the dedupe (BET-737 spec: "only when the serialized snapshot set actually
- * changed... a poller that republishes an identical payload every 3 minutes
+ * changed... a poller that republishes an identical payload every 10 minutes
  * wakes every connected client for nothing").
  */
 function contentKey(results) {
   return JSON.stringify(results.map(({ fetchedAt, ...rest }) => rest));
+}
+
+/**
+ * Clamp a provider's requested retry delay into the supported band. A missing
+ * or non-finite value is treated as 0 and therefore lands on the floor — the
+ * "no header" and "retry-after: 0" cases are deliberately the SAME case, which
+ * is what lets the caller drop its ternary.
+ * @param {number|undefined} retryAfterMs
+ * @returns {number}
+ */
+export function rateLimitBackoffMs(retryAfterMs) {
+  const ms = Number.isFinite(retryAfterMs) ? retryAfterMs : 0;
+  return Math.min(MAX_RATE_LIMIT_BACKOFF_MS, Math.max(MIN_RATE_LIMIT_BACKOFF_MS, ms));
+}
+
+/**
+ * The previous tick's snapshot for `adapterId`, if it is young enough to keep
+ * showing. Returns the SAME object reference on purpose: an unchanged
+ * contentKey is what keeps a failed tick off the bus entirely.
+ * @param {UsageSnapshot[]} prevSnapshots
+ * @param {string} adapterId
+ * @param {number} nowMs
+ * @param {number} [maxAgeMs]
+ * @returns {UsageSnapshot | null}
+ */
+export function carryForward(prevSnapshots, adapterId, nowMs, maxAgeMs = MAX_CARRY_FORWARD_MS) {
+  const prev = (prevSnapshots ?? []).find((s) => s.provider === adapterId);
+  if (!prev) return null;
+  return nowMs - prev.fetchedAt > maxAgeMs ? null : prev;
 }
 
 /**
@@ -151,7 +190,11 @@ export function createUsagePoller({
 
       for (const adapter of adapters) {
         const until = backoffUntil.get(adapter.id);
-        if (until != null && nowMs < until) continue; // still backed off
+        if (until != null && nowMs < until) {
+          const carried = carryForward(snapshots, adapter.id, nowMs);
+          if (carried) results.push(carried);
+          continue; // still backed off
+        }
 
         let detected = false;
         try {
@@ -185,17 +228,17 @@ export function createUsagePoller({
           backoffUntil.delete(adapter.id);
           failing.delete(adapter.id);
         } catch (e) {
-          // Quarantined: a throw, a non-2xx, or zero usable windows removes
-          // this provider's snapshot for the tick and never affects another
-          // adapter.
+          // A throw, a non-2xx, or zero usable windows: carry the previous
+          // reading forward so a transient failure doesn't blank the dial
+          // (visually indistinguishable from "this plan has no limits"). The
+          // SAME object reference keeps contentKey unchanged, so a failed
+          // tick publishes nothing.
           if (e?.status === 429) {
-            const retryMs =
-              typeof e.retryAfterMs === "number" && e.retryAfterMs > 0
-                ? e.retryAfterMs
-                : DEFAULT_RATE_LIMIT_BACKOFF_MS;
-            backoffUntil.set(adapter.id, nowMs + retryMs);
+            backoffUntil.set(adapter.id, nowMs + rateLimitBackoffMs(e.retryAfterMs));
           }
           warnOnce(adapter.id, e);
+          const carried = carryForward(snapshots, adapter.id, nowMs);
+          if (carried) results.push(carried);
         }
       }
 
