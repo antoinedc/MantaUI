@@ -43,6 +43,7 @@ import type {
   PluginRegistryRow,
   ForgeRuleRow,
   ForgeStatusResult,
+  OpencodeReference,
 } from "../shared/types";
 import {
   SETTINGS,
@@ -52,6 +53,8 @@ import {
   sectionIsModified,
   resetAllPayload,
   fieldId,
+  validateReferenceAlias,
+  classifyReferenceTarget,
   type SettingEntry,
   type SettingSectionId,
 } from "../shared/settingsSchema";
@@ -426,6 +429,52 @@ export function Settings({
     const next = registryUrls.filter((u) => u !== url);
     setRegistryUrls(next);
     void persistRegistryUrls(next);
+  };
+
+  // References (custom control — BET-1023). A user-managed list of opencode
+  // references (@alias → external dir / git repo) written through the single
+  // config-write path via opencodeSetReferences. Read back from GET
+  // /api/reference so the list reflects what opencode actually has active.
+  const [references, setReferences] = useState<OpencodeReference[]>([]);
+  const [refAlias, setRefAlias] = useState("");
+  const [refTarget, setRefTarget] = useState("");
+  const [refDescription, setRefDescription] = useState("");
+  const [refAliasError, setRefAliasError] = useState<string | null>(null);
+  const [refTargetError, setRefTargetError] = useState<string | null>(null);
+  const refreshReferences = () => {
+    window.api.opencodeReferences().then(setReferences).catch(() => {});
+  };
+  useEffect(() => {
+    refreshReferences();
+  }, []);
+  const onAddReference = async () => {
+    const alias = refAlias.trim();
+    const aliasErr = validateReferenceAlias(alias);
+    setRefAliasError(aliasErr);
+    const target = refTarget.trim();
+    if (!target) {
+      setRefTargetError("Enter a local path or a repository.");
+      return;
+    }
+    setRefTargetError(null);
+    if (aliasErr) return;
+    const description = refDescription.trim();
+    const kind = classifyReferenceTarget(target);
+    const upsert = (kind === "repository"
+      ? { alias, repository: target, ...(description ? { description } : {}) }
+      : { alias, path: target, ...(description ? { description } : {}) });
+    try {
+      const res = await window.api.opencodeSetReferences({ upsert: [upsert] });
+      if (!res.ok) {
+        push({ id: `ref-${Date.now()}`, message: `Couldn't add reference: ${res.error ?? "unknown error"}` });
+        return;
+      }
+      setRefAlias(""); setRefTarget(""); setRefDescription(""); setRefAliasError(null); setRefTargetError(null);
+      refreshReferences();
+      push({ id: `refok-${Date.now()}`, message: "Reference added" });
+    } catch (e) {
+      push({ id: `err-ref-${Date.now()}`, message: errorDisclosure("Couldn't add reference.", e) });
+    }
   };
 
   // Launcher flags (custom control — instant apply per flag).
@@ -876,6 +925,39 @@ export function Settings({
                 <Field placeholder="https://example.com/skills" value={newRegistryUrl} onChange={(e) => setNewRegistryUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onAddRegistry()} />
               </div>
               <Button onClick={onAddRegistry} disabled={!newRegistryUrl.trim()} tone="default">Add</Button>
+            </div>
+          </GroupCard>
+          <GroupCard title="References">
+            <div className="text-body text-text-faint">Add an external directory or git repository as an opencode reference. Type <code className="text-text-muted">@alias</code> in the chat to attach it, or <code className="text-text-muted">@alias/…</code> to search inside it. Agents can read a reference's files without a permission prompt. Removing a reference isn't available yet.</div>
+            <div className="space-y-2">
+              {references.length === 0 ? (
+                <div className="text-body text-text-faint">No references configured.</div>
+              ) : (
+                references.map((r) => (
+                  <div key={r.name} className="flex items-center gap-2">
+                    <code className="flex-1 text-body bg-bg-soft border border-border rounded-xs px-3 py-2 text-text-muted truncate">
+                      @{r.name} → {r.path ?? (r.repository ? `${r.repository}${r.branch ? ` (${r.branch})` : ""}` : "")}
+                    </code>
+                    {r.description && <span className="text-meta text-text-faint truncate max-w-[40%]">{r.description}</span>}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <Field placeholder="alias" value={refAlias} onChange={(e) => { setRefAlias(e.target.value); setRefAliasError(null); }} onKeyDown={(e) => e.key === "Enter" && void onAddReference()} />
+                {refAliasError && <div role="alert" className="text-meta text-danger">{refAliasError}</div>}
+              </div>
+              <div className="flex-[2]">
+                <Field placeholder="path or repository — e.g. ../docs or owner/repo" value={refTarget} onChange={(e) => { setRefTarget(e.target.value); setRefTargetError(null); }} onKeyDown={(e) => e.key === "Enter" && void onAddReference()} />
+                {refTargetError && <div role="alert" className="text-meta text-danger">{refTargetError}</div>}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <Field placeholder="optional description" value={refDescription} onChange={(e) => setRefDescription(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void onAddReference()} />
+              </div>
+              <Button onClick={() => void onAddReference()} disabled={!refAlias.trim() || !refTarget.trim()} tone="default">Add</Button>
             </div>
           </GroupCard>
           {availableLaunchers.some((l) => l.flags.length > 0) && (

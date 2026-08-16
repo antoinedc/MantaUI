@@ -32,6 +32,7 @@ import {
   _setReadinessTimeoutMs,
   _resetStreamReadyState,
   _getOcAgent,
+  listReferences,
   _pooledOcRequest,
   discardBody,
   getProviders,
@@ -2155,4 +2156,42 @@ test("sessionExists: empty id → false without any request", async () => {
     },
   );
   assert.equal(called, 0);
+});
+
+// ---------------------------------------------------------------------------
+// listReferences — BET-1023: GET /api/reference → projected renderer shape.
+// ---------------------------------------------------------------------------
+test("listReferences projects the /api/reference payload", async () => {
+  await withMockFetch(
+    async (url) => {
+      assert.equal(String(url), "http://127.0.0.1:4096/api/reference");
+      return new Response(JSON.stringify({
+        location: { directory: "/box", project: undefined },
+        data: [
+          { name: "docs", path: "/box/docs", source: { type: "local", path: "/box/docs" } },
+          {
+            name: "sdk", path: "/box/.opencode/repos/sdk",
+            source: { type: "git", repository: "anomalyco/opencode-sdk-js", branch: "main" },
+            description: "SDK impl",
+          },
+          { name: "internal", path: "/box/internal", hidden: true, source: { type: "local", path: "/box/internal" } },
+        ],
+      }));
+    },
+    async () => {
+      const refs = await listReferences();
+      assert.deepEqual(refs, [
+        { name: "docs", path: "/box/docs" },
+        { name: "sdk", repository: "anomalyco/opencode-sdk-js", branch: "main", description: "SDK impl" },
+        { name: "internal", hidden: true, path: "/box/internal" },
+      ]);
+    },
+  );
+});
+
+test("listReferences degrades to [] when the payload has no data array", async () => {
+  await withMockFetch(
+    async () => new Response(JSON.stringify({ location: { directory: "/box" } })),
+    async () => assert.deepEqual(await listReferences(), []),
+  );
 });

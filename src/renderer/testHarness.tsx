@@ -124,6 +124,8 @@ function defaultApiImpl(): Record<string, unknown> {
     opencodeCommands: () => Promise.resolve([]),
     opencodeAgents: () => Promise.resolve([]),
     opencodeFindFiles: () => Promise.resolve([]),
+    opencodeReferences: () => Promise.resolve([]),
+    opencodeSetReferences: () => Promise.resolve({ ok: true }),
     opencodePrompt: () => Promise.resolve({ ok: true }),
     opencodeAbort: () => Promise.resolve(),
     scheduleList: () => Promise.resolve([]),

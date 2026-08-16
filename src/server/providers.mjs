@@ -469,6 +469,54 @@ export async function setSkillRegistryUrls(urls = [], deps = {}) {
 }
 
 /**
+ * Upsert opencode references (BET-1023) through THE single opencode.jsonc
+ * write path — PATCH /global/config (the same `patchGlobalConfig` used by
+ * setProviders/setSubagents; never a second writer).
+ *
+ * A reference entry is written as an explicit object — either
+ *   { path, description? }            for a local directory, or
+ *   { repository, branch?, description? }  for a git repository
+ * — never as a bare shorthand string, so the config stays unambiguous and
+ * keyed by the alias the user declared.
+ *
+ * `remove` ops are REJECTED with an explicit error, mirroring
+ * REMOVE_UNSUPPORTED_MSG: opencode's PATCH /global/config has no HTTP delete
+ * semantics (it deep-merges objects and rejects `null`), so a reference alias
+ * can't be removed through the single endpoint. Restoring removal is tracked
+ * as follow-up work alongside BET-1033.
+ *
+ * `patch` is injectable for unit tests; defaults to patchGlobalConfig.
+ */
+export async function setReferences(ops, deps = {}) {
+  const patch = deps.patch ?? patchGlobalConfig;
+  const upserts = ops?.upsert ?? [];
+  const removes = ops?.remove ?? [];
+
+  if (removes.length > 0) {
+    return { ok: false, error: REMOVE_UNSUPPORTED_MSG };
+  }
+
+  if (upserts.length === 0) return { ok: true };
+
+  const referencesPatch = {};
+  for (const input of upserts) {
+    const { alias } = input;
+    if (!alias) continue;
+    const entry = {};
+    if (input.repository) {
+      entry.repository = input.repository;
+      if (input.branch) entry.branch = input.branch;
+    } else {
+      entry.path = input.path;
+    }
+    if (input.description) entry.description = input.description;
+    referencesPatch[alias] = entry;
+  }
+  if (Object.keys(referencesPatch).length === 0) return { ok: true };
+  return patch({ references: referencesPatch });
+}
+
+/**
  * Reconcile the full model list against opencode.jsonc's configured agent
  * blocks + the caller-supplied deactivated set (BET-123 "auto-register every
  * model" feature), then apply the diff via the EXISTING setSubagents writer

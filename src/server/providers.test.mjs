@@ -22,6 +22,7 @@ import {
   setSubagents,
   setSkillRegistryUrls,
   syncSubagents,
+  setReferences,
   mantaPlanAgentBlock,
   ensureMantaPlanAgent,
 } from "./providers.mjs";
@@ -1125,5 +1126,80 @@ describe("ensureMantaPlanAgent", () => {
       promptPath: "/box/prompt.md",
     });
     assert.equal(result.ok, false);
+  });
+});
+
+// setReferences — BET-1023. Writes go through opencode's /global/config
+// endpoint (injectable `patch`, the single config-write path — never a second
+// writer). Remove ops are rejected because the endpoint has no delete
+// semantics, mirroring setProviders/setSubagents.
+describe("setReferences", () => {
+  it("upserts a local path reference through the single patch writer", async () => {
+    const patches = [];
+    const result = await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs", description: "Product docs" }] },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(patches.length, 1);
+    assert.deepEqual(patches[0], {
+      references: {
+        docs: { path: "../docs", description: "Product docs" },
+      },
+    });
+  });
+
+  it("upserts a git repository reference with branch through the single writer", async () => {
+    const patches = [];
+    const result = await setReferences(
+      { upsert: [{ alias: "sdk", repository: "anomalyco/opencode-sdk-js", branch: "main" }] },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(patches[0], {
+      references: {
+        sdk: { repository: "anomalyco/opencode-sdk-js", branch: "main" },
+      },
+    });
+  });
+
+  it("never writes a bare shorthand string — always an explicit object", async () => {
+    const patches = [];
+    await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs" }] },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(typeof patches[0].references.docs, "object");
+    assert.equal(patches[0].references.docs.path, "../docs");
+  });
+
+  it("rejects remove ops with no PATCH write", async () => {
+    let patched = false;
+    const result = await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs" }], remove: ["docs"] },
+      { patch: async () => { patched = true; return { ok: true }; } },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /not supported|no delete/);
+    assert.equal(patched, false, "no PATCH for a rejected remove op");
+  });
+
+  it("no-ops when there is nothing to upsert", async () => {
+    let patched = false;
+    const result = await setReferences(
+      {},
+      { patch: async () => { patched = true; return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(patched, false);
+  });
+
+  it("surfaces endpoint failures", async () => {
+    const result = await setReferences(
+      { upsert: [{ alias: "docs", path: "../docs" }] },
+      { patch: async () => ({ ok: false, error: "opencode config update failed (500)" }) },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /500/);
   });
 });

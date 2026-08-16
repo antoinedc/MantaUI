@@ -19,7 +19,7 @@
 // verbatim on selection.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { OpencodeCommand } from "../../shared/types";
+import type { OpencodeCommand, OpencodeReference } from "../../shared/types";
 import {
   filterCommands,
   dedupeAgainstBuiltins,
@@ -87,6 +87,10 @@ export function useTypeahead(params: {
   // fetch that powers the plan-mode chip. No per-typeahead copy.
   const { agents } = useAgentCatalog();
   const [fileResults, setFileResults] = useState<string[]>([]);
+  // BET-1023: configured opencode references (@alias). Fetched on the SAME
+  // debounced file-search tick (no second debounce/seq guard) and rendered
+  // ahead of file results. Hidden references are omitted (opencode semantics).
+  const [references, setReferences] = useState<OpencodeReference[]>([]);
   const fileSearchSeqRef = useRef(0);
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -100,7 +104,10 @@ export function useTypeahead(params: {
 
   // File search: sequence-tracked so stale responses don't clobber the
   // latest. Empty query is passed through — opencode's /find/file returns a
-  // browse-style listing of the directory's top-level entries.
+  // browse-style listing of the directory's top-level entries. Configured
+  // references are read on the same debounced tick (shared 80ms timer and
+  // seq guard — deliberately no second debounce), so the alias list rides
+  // the file search the user is already triggering.
   const searchFiles = useCallback(
     (query: string) => {
       if (fileSearchTimer.current) clearTimeout(fileSearchTimer.current);
@@ -112,8 +119,14 @@ export function useTypeahead(params: {
         fileSearchTimer.current = null;
         const seq = ++fileSearchSeqRef.current;
         try {
-          const list = await window.api.opencodeFindFiles({ query, directory: cwd });
-          if (seq === fileSearchSeqRef.current) setFileResults(list.slice(0, 20));
+          const [list, refs] = await Promise.all([
+            window.api.opencodeFindFiles({ query, directory: cwd }),
+            window.api.opencodeReferences(),
+          ]);
+          if (seq === fileSearchSeqRef.current) {
+            setFileResults(list.slice(0, 20));
+            setReferences(refs);
+          }
         } catch {
           if (seq === fileSearchSeqRef.current) setFileResults([]);
         }
@@ -226,17 +239,32 @@ export function useTypeahead(params: {
         },
       ];
     }
-    return fileResults.map((p) => ({
-      kind: "file",
-      key: p,
-      primary: `@${p}`,
-      secondary: undefined,
-    }));
+    // Configured references (@alias for external dirs/repos) sort ahead of
+    // workspace files. Hidden ones are excluded, matching opencode's own
+    // autocomplete behavior for `hidden: true`.
+    const refRows = references
+      .filter((r) => !r.hidden && (q ? r.name.toLowerCase().includes(q) : true))
+      .map((r) => ({
+        kind: "reference" as const,
+        key: r.name,
+        primary: `@${r.name}`,
+        secondary: r.description,
+      }));
+    return [
+      ...refRows,
+      ...fileResults.map((p) => ({
+        kind: "file" as const,
+        key: p,
+        primary: `@${p}`,
+        secondary: undefined,
+      })),
+    ].slice(0, 20);
   }, [
     typeahead,
     commands,
     agents,
     fileResults,
+    references,
     currentModelSupportsAttachments,
     currentModelName,
   ]);

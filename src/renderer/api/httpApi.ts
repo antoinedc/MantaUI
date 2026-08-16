@@ -1151,6 +1151,8 @@ export const httpApi: Api = {
   opencodeCommands: () => rpc(IPC.opencodeCommands),
   opencodeAgents: () => rpc(IPC.opencodeAgents),
   opencodeFindFiles: (input) => rpc(IPC.opencodeFindFiles, input),
+  opencodeReferences: () => rpc(IPC.opencodeReferences),
+  opencodeSetReferences: (ops) => rpc(IPC.opencodeSetReferences, ops),
   opencodeSearchMessages: (input) => rpc(IPC.opencodeSearchMessages, input),
 
   // -- slash-command execution --

@@ -567,6 +567,14 @@ export interface Api {
   opencodeCommands(): Promise<OpencodeCommand[]>;
   opencodeAgents(): Promise<OpencodeAgent[]>;
   opencodeFindFiles(input: { query: string; directory: string }): Promise<string[]>;
+  // BET-1023: configured opencode references (GET /api/reference) + the
+  // single-writer upsert for them. `remove` is rejected server-side (opencode's
+  // PATCH /global/config has no delete semantics) — removal is deferred.
+  opencodeReferences(): Promise<OpencodeReference[]>;
+  opencodeSetReferences(ops: {
+    upsert?: OpencodeReferenceUpsert[];
+    remove?: string[];
+  }): Promise<{ ok: boolean; error?: string }>;
   // BET-698: server-side conversation search. `sessionIds` is the search scope
   // in priority order (sessionIds[0] = the active conversation). Hit caps stay
   // server-side defaults. `supported:false` = the box can't search (needs the

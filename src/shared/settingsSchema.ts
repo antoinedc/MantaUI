@@ -373,3 +373,46 @@ export function resetAllPayload(
 export function fieldId(entry: SettingEntry): string {
   return `setting-${entry.id}`;
 }
+
+// ----- opencode references (BET-1023) -----
+//
+// Settings → Extensions → References lets a user declare opencode "references"
+// (@alias for an external directory or git repo). These helpers are the
+// renderer-side rules for that list: validate the alias against opencode's
+// constraint and classify the combined "path-or-repository" field so the
+// server can write an unambiguous { path } / { repository } value.
+
+const INVALID_ALIAS_CHARS = /[\/\s` ,]/;
+
+/** Validate an opencode reference alias. Returns a user-facing error message
+ *  or null when the alias is acceptable. opencode forbids `/`, whitespace,
+ *  backticks and commas in aliases (they'd break @-mention parsing). */
+export function validateReferenceAlias(alias: string): string | null {
+  const a = alias.trim();
+  if (!a) return "Alias is required.";
+  if (INVALID_ALIAS_CHARS.test(a)) {
+    return "Alias can't contain spaces, slashes, backticks, or commas.";
+  }
+  return null;
+}
+
+/** Classify the combined "path-or-repository" field into a path
+ *  (local directory) or a repository (git URL / host-path). Mirror of
+ *  opencode's shorthand decoding: a value that clearly looks like a local
+ *  path (leading /, ./ , ../, ~/) is a path; git URL / scp-style / bare
+ *  `owner/repo` forms are repositories; everything else defaults to path. */
+export function classifyReferenceTarget(target: string): "path" | "repository" {
+  const t = target.trim();
+  if (!t) return "path";
+  if (t.startsWith("/") || t.startsWith("./") || t.startsWith("../") || t.startsWith("~/")) {
+    return "path";
+  }
+  if (t.includes("://") || t.startsWith("git@") || t.endsWith(".git") || /^[^/\s]+:[^\s]+$/.test(t)) {
+    return "repository";
+  }
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(t)) {
+    return "repository"; // GitHub owner/repo shorthand
+  }
+  return "path";
+}
+
