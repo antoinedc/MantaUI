@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1588,6 +1588,57 @@ test("install.sh defaults the install home to the XDG data dir (BET-995)", () =>
   // A legacy install still loses to an explicit MANTA_HOME override.
   const overridden = run({ legacy: true, mantaHome: "/opt/bui" });
   assert.equal(overridden.value, "/opt/bui");
+});
+
+test("install.sh's atomic swap creates MANTA_HOME's parent dir on a fresh home (BET-999)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+
+  // The parent-dir creation is placed immediately before the .prev cleanup +
+  // atomic swap, right after MANTA_HOME is resolved.
+  const start = src.indexOf('mkdir -p "$(dirname "$MANTA_HOME")"');
+  assert.ok(
+    start !== -1,
+    "could not locate the mkdir of MANTA_HOME's parent in install.sh",
+  );
+  assert.match(
+    src.slice(start, start + 200),
+    /mkdir -p "\$\(dirname "\$MANTA_HOME"\)" \\\s*\|\| die "could not create \$MANTA_HOME parent directory"/,
+    "the parent mkdir must die loudly on failure",
+  );
+  const swapIdx = src.indexOf('rm -rf "$MANTA_HOME.prev"');
+  assert.ok(swapIdx > start, "the parent mkdir must run before the atomic swap");
+
+  // Behavioral check on a genuinely fresh home whose parent (~/.local/share)
+  // does NOT exist: after the mkdir step, the parent exists and MANTA_HOME is
+  // its child. Extract the exact mkdir block and run it.
+  const mkdirMatch = src.match(
+    /mkdir -p "\$\(dirname "\$MANTA_HOME"\)" \\\s*\|\| die "could not create \$MANTA_HOME parent directory"/,
+  );
+  const dir = mkdtempSync(join(tmpdir(), "manta-fresh-"));
+  try {
+    const script = join(dir, "t.sh");
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        `HOME="${dir}"`,
+        "die() { echo \"DIE: $*\" >&2; exit 1; }",
+        `MANTA_HOME="\${XDG_DATA_HOME:-\$HOME/.local/share}/manta"`,
+        mkdirMatch[0],
+        `printf '%s' "$(dirname "$MANTA_HOME")"`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const parent = execSync(`bash ${script}`, { encoding: "utf8" });
+    assert.equal(parent, join(dir, ".local", "share"));
+    assert.ok(
+      statSync(parent).isDirectory(),
+      "MANTA_HOME's parent must exist after the atomic-swap mkdir",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // manta-pair.mjs --json (the auto-claim's single writer). The old capture +

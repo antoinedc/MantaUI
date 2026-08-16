@@ -888,6 +888,13 @@ main() {
   MANTA_CHANNEL="${MANTA_CHANNEL:-prod}"
   export MANTA_CHANNEL
 
+  # BET-999: the XDG default (~/.local/share/manta) can have a parent that a
+  # fresh box does NOT have. The mv into $MANTA_HOME below is a same-filesystem
+  # rename that requires the target's parent to exist — create it up front and
+  # die loudly rather than failing the swap mid-install.
+  mkdir -p "$(dirname "$MANTA_HOME")" \
+    || die "could not create $MANTA_HOME parent directory"
+
   rm -rf "$MANTA_HOME.prev"
   if [ -d "$MANTA_HOME" ]; then mv "$MANTA_HOME" "$MANTA_HOME.prev"; fi
   mv "$WORK/pkg" "$MANTA_HOME" \
