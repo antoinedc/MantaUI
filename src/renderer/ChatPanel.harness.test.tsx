@@ -620,6 +620,31 @@ describe("ChatPanel composer submit", () => {
     expect(calls[0][1]).toBe("ship it");
   });
 
+  it("calls opencodePrompt when the user clicks the Send button", async () => {
+    ({ api } = installMockApi({
+      opencodePrompt: () => Promise.resolve({ ok: true }),
+    }));
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    const container = h.container;
+    const textarea = container.querySelector("textarea");
+    await act(async () => {
+      typeInto(textarea as HTMLTextAreaElement, "ship it");
+    });
+    await act(async () => {
+      const send = container.querySelector('button[aria-label="Send message"]');
+      (send as HTMLButtonElement).click();
+    });
+    await h.flush();
+
+    const calls = api.calls.opencodePrompt ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0][0]).toBe("ses_test");
+    expect(calls[0][1]).toBe("ship it");
+  });
+
   it("does not submit an empty composer on Enter", async () => {
     ({ api } = installMockApi());
     resetStore();
