@@ -3,17 +3,17 @@
 // derives from SshInstallStep's state.
 //
 // One panel, four fixed zones, in a fixed order: A·target (the host picker
-// ReactNode passed in), B·status (tone, text, meta, bar, sub), C·details
-// (log / failures / hint — or the inline prompt children), D·actions
-// (primary + at most one secondary, plus an optional right-aligned hint).
-// Nothing moves between states; every state reuses the same four slots.
+// ReactNode — collapsing to a one-line summary once committed), B·status
+// (tone, text, meta, bar, sub — omitted entirely when there is nothing to
+// say), C·details (failures / hint — or the inline prompt children), D·actions
+// (centred). The install log is its OWN quiet pane BELOW the panel, never a
+// fifth zone. Nothing moves between states; every state reuses the same slots.
 //
 // Presentational only: the only local state is the log open/closed toggle,
-// which auto-resets to each state's `defaultOpen` when the details phase
+// which auto-resets to each log phase's `defaultOpen` when the log phase
 // changes. Every colour/size/radius below maps to an existing token.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronUp, ChevronDown } from "lucide-react";
 import { Button } from "./Button";
 import type { ConnectActionId, ConnectPanelState } from "./connectPanelLogic";
 
@@ -85,6 +85,7 @@ function renderHintSegments(text: string) {
 export function ConnectPanel({
   state,
   target,
+  targetSummary,
   logLines,
   onAction,
   children,
@@ -93,7 +94,10 @@ export function ConnectPanel({
   state: ConnectPanelState;
   /** Zone A body — the host picker. Placed inside the panel's zone A. */
   target: ReactNode;
-  /** Live install log lines for the zone-C log pane. */
+  /** Zone A body once the target is committed — replaces `target` when
+   *  `state.targetCollapsed` (the picker is not rendered at all). */
+  targetSummary: ReactNode;
+  /** Live install log lines for the log pane BELOW the panel. */
   logLines: string[];
   onAction: (id: ConnectActionId) => void;
   /** Zone-C prompt slot (fingerprint / passphrase cards). */
@@ -101,34 +105,30 @@ export function ConnectPanel({
   /** Wires the "Copy diagnostics" button (shown only on install failure). */
   onCopyDiagnostics?: () => void | Promise<void>;
 }): JSX.Element {
-  const { status, details, actions, hint, disabledActions } = state;
+  const { status, details, log, actions, disabledActions, targetCollapsed } = state;
 
-  // Log open/closed toggle, auto-reset to each details phase's defaultOpen.
-  const [logOpen, setLogOpen] = useState(
-    details.kind === "log" ? details.defaultOpen : false,
-  );
+  // Log open/closed toggle, auto-reset to each log phase's defaultOpen.
+  const [logOpen, setLogOpen] = useState(log?.defaultOpen ?? false);
   const logRef = useRef<HTMLDivElement | null>(null);
 
-  // Reset the toggle when the details PHASE changes (kind / defaultOpen /
-  // copy flag), not on every re-render — the derived `details` object is
-  // fresh each render (elapsed-seconds ticks), so comparing identities is
-  // useless; compare the phase-relevant fields instead. This is what auto-
-  // opens the log on failure ("row 5") while leaving the user free to open/
-  // close it during an install without the next tick slamming it shut.
-  const prevDetailsRef = useRef(details);
+  // Reset the toggle when the log PHASE changes (pane presence / defaultOpen
+  // / copy flag), not on every re-render — the derived `log` object is fresh
+  // each render, so comparing identities is useless; compare the phase-
+  // relevant fields instead.
+  const prevLogRef = useRef(log);
   useEffect(() => {
-    const prev = prevDetailsRef.current;
-    let phaseChanged = prev.kind !== details.kind;
-    if (!phaseChanged && details.kind === "log" && prev.kind === "log") {
-      phaseChanged =
-        prev.defaultOpen !== details.defaultOpen ||
-        prev.showCopyDiagnostics !== details.showCopyDiagnostics;
-    }
-    if (phaseChanged) {
-      setLogOpen(details.kind === "log" ? details.defaultOpen : false);
-    }
-    prevDetailsRef.current = details;
-  }, [details]);
+    const prev = prevLogRef.current;
+    const changed =
+      (prev === null) !== (log === null) ||
+      Boolean(
+        prev &&
+          log &&
+          (prev.defaultOpen !== log.defaultOpen ||
+            prev.showCopyDiagnostics !== log.showCopyDiagnostics),
+      );
+    if (changed) setLogOpen(log ? log.defaultOpen : false);
+    prevLogRef.current = log;
+  }, [log]);
 
   // Auto-scroll the log to the bottom on new lines (matches ProcessPanel).
   useEffect(() => {
@@ -137,137 +137,146 @@ export function ConnectPanel({
     }
   }, [logLines, logOpen]);
 
-  // Row 9/10 (hosts not loaded / invalid target) and row 3 (cancelled, meta
-  // set) all offer `install`. The only ready one is row 11, which is the only
-  // one that carries the "takes about a minute" hint and no in-flight meta —
-  // that combination is exactly when the button becomes clickable.
-  const installDisabled = status.progress === null && !hint;
-
   const actionDisabled = (id: ConnectActionId): boolean =>
-    (id === "install" && installDisabled) ||
     Boolean(disabledActions?.includes(id));
 
   const showZoneC = details.kind !== "none" || Boolean(children);
 
   return (
-    <section className="bg-bg-elev border border-border rounded-lg overflow-hidden shadow-sm">
-      {/* ZONE A — target (host picker) */}
-      <div className="px-4 py-3 border-b border-border-subtle">{target}</div>
+    <>
+      <section className="bg-bg-soft border border-border rounded-lg overflow-hidden shadow-sm">
+        {/* ZONE A — the picker, or a one-line summary once the target is committed */}
+        <div className="px-4 py-3">{targetCollapsed ? targetSummary : target}</div>
 
-      {/* ZONE B — status */}
-      <div className="px-4 py-3 border-b border-border-subtle">
-        <div className="flex items-center gap-2">
-          <span
-            aria-hidden
-            className={`w-2 h-2 rounded-full shrink-0 ${DOT[status.tone]}`}
-          />
-          <span className={`text-body flex-1 min-w-0 ${TEXT[status.tone]}`}>
-            {status.text}
-          </span>
-          {status.meta && (
-            <span className="text-meta font-mono text-text-quiet whitespace-nowrap">
-              {status.meta}
-            </span>
-          )}
-        </div>
-        {status.progress !== null && (
-          <div className="h-[3px] rounded-full bg-border-subtle mt-3 overflow-hidden">
-            <div
-              className="h-full rounded-full transition-[width] duration-300"
-              style={{
-                width: `${Math.round(status.progress * 100)}%`,
-                background: BAR[status.tone],
-              }}
-            />
-          </div>
-        )}
-        {status.sub && (
-          <div className="text-meta text-text-quiet mt-2">{status.sub}</div>
-        )}
-      </div>
-
-      {/* ZONE C — details (omitted entirely when there's nothing to show) */}
-      {showZoneC && (
-        <div className="px-4 py-3 border-b border-border-subtle">
-          {children ??
-            (details.kind === "log" ? (
-              <div>
-                <button
-                  type="button"
-                  onClick={() => setLogOpen((o) => !o)}
-                  aria-expanded={logOpen}
-                  className="flex items-center gap-2 text-meta text-text-faint hover:text-text"
-                >
-                  {logOpen ? (
-                    <ChevronUp size={12} aria-hidden />
-                  ) : (
-                    <ChevronDown size={12} aria-hidden />
-                  )}
-                  {logOpen ? "Hide log" : "Show log"}
-                </button>
-                {logOpen && (
+        {/* ZONE B — status. Omitted entirely when there is nothing to say. */}
+        {status && (
+          <>
+            <div className="mx-4 h-px bg-border-subtle" />
+            <div className="px-4 py-3">
+              <div className="flex items-center gap-2">
+                <span
+                  aria-hidden
+                  className={`w-2 h-2 rounded-full shrink-0 ${DOT[status.tone]}`}
+                />
+                <span className={`text-body flex-1 min-w-0 ${TEXT[status.tone]}`}>
+                  {status.text}
+                </span>
+                {status.meta && (
+                  <span className="text-meta font-mono text-text-quiet whitespace-nowrap">
+                    {status.meta}
+                  </span>
+                )}
+              </div>
+              {status.progress !== null && (
+                <div className="h-[3px] rounded-full bg-border-subtle mt-3 overflow-hidden">
                   <div
-                    ref={logRef}
-                    className="mt-2 bg-bg-elev border border-border-subtle rounded-sm px-3 py-2 font-mono text-meta text-text-faint overflow-y-auto"
-                    style={{ maxHeight: 172 }}
-                  >
-                    {logLines.map((l, i) => (
-                      <div key={i}>{l}</div>
-                    ))}
-                  </div>
-                )}
-                {details.showCopyDiagnostics && (
-                  <div className="mt-2">
-                    <Button tone="default" onClick={() => void onCopyDiagnostics?.()}>
-                      Copy diagnostics
-                    </Button>
-                  </div>
-                )}
-              </div>
-            ) : details.kind === "failures" ? (
-              <div>
-                <ul className="flex flex-col gap-2">
-                  {details.items.map((f, i) => (
-                    <li
-                      key={i}
-                      className="border border-danger bg-danger-bg rounded-sm px-3 py-2"
-                    >
-                      <div className="text-body font-medium text-danger">{f.cause}</div>
-                      <div className="text-meta text-text-faint mt-px">{f.action}</div>
-                    </li>
-                  ))}
-                </ul>
-                <p className="text-meta text-text-faint mt-2">
-                  Nothing was installed or changed — the checks run before any
-                  write.
-                </p>
-              </div>
-            ) : details.kind === "hint" ? (
-              <p className="text-meta text-text-faint">
-                {renderHintSegments(details.text)}
-              </p>
-            ) : null)}
-        </div>
-      )}
+                    className="h-full rounded-full transition-[width] duration-300"
+                    style={{
+                      width: `${Math.round(status.progress * 100)}%`,
+                      background: BAR[status.tone],
+                    }}
+                  />
+                </div>
+              )}
+              {status.sub && (
+                <div className="text-meta text-text-quiet mt-2">{status.sub}</div>
+              )}
+            </div>
+          </>
+        )}
 
-      {/* ZONE D — actions */}
-      <div className="px-4 py-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          {actions.map((id, i) => (
-            <Button
-              key={id}
-              tone={i === 0 ? "primary" : "default"}
-              disabled={actionDisabled(id)}
-              onClick={() => onAction(id)}
-            >
-              {actionLabel(id, i)}
-            </Button>
-          ))}
-          {hint && (
-            <span className="text-meta text-text-quiet ml-auto">{hint}</span>
-          )}
+        {/* ZONE C — failures / hint / prompt children */}
+        {showZoneC && (
+          <>
+            <div className="mx-4 h-px bg-border-subtle" />
+            <div className="px-4 py-3">
+              {children ??
+                (details.kind === "failures" ? (
+                  <div>
+                    <ul className="flex flex-col gap-2">
+                      {details.items.map((f, i) => (
+                        <li
+                          key={i}
+                          className="border border-danger bg-danger-bg rounded-sm px-3 py-2"
+                        >
+                          <div className="text-body font-medium text-danger">
+                            {f.cause}
+                          </div>
+                          <div className="text-meta text-text-faint mt-px">
+                            {f.action}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-meta text-text-faint mt-2">
+                      Nothing was installed or changed — the checks run before
+                      any write.
+                    </p>
+                  </div>
+                ) : details.kind === "hint" ? (
+                  <p className="text-meta text-text-faint">
+                    {renderHintSegments(details.text)}
+                  </p>
+                ) : null)}
+            </div>
+          </>
+        )}
+
+        {/* ZONE D — actions, centred, one size larger */}
+        <div className="mx-4 h-px bg-border-subtle" />
+        <div className="px-4 py-3">
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+            {actions.map((id, i) => (
+              <Button
+                key={id}
+                size="lg"
+                tone={i === 0 ? "primary" : "default"}
+                disabled={actionDisabled(id)}
+                onClick={() => onAction(id)}
+              >
+                {actionLabel(id, i)}
+              </Button>
+            ))}
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      {/* The install log — its own quiet pane BELOW the panel, never inside it. */}
+      {log && logLines.length > 0 && (
+        <section className="mt-3 rounded-md border border-border-subtle bg-inset overflow-hidden">
+          <div className="flex items-center gap-3 px-3 py-2 border-b border-border-subtle">
+            <span className="text-meta font-medium text-text-faint">Install log</span>
+            {log.showCopyDiagnostics && (
+              <button
+                type="button"
+                onClick={() => void onCopyDiagnostics?.()}
+                className="text-meta text-text-faint underline underline-offset-2 hover:text-text"
+              >
+                Copy diagnostics
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setLogOpen((o) => !o)}
+              aria-expanded={logOpen}
+              className="ml-auto text-meta text-text-faint hover:text-text"
+            >
+              {logOpen ? "Hide" : "Show"}
+            </button>
+          </div>
+          {logOpen && (
+            <div
+              ref={logRef}
+              className="px-3 py-2 font-mono text-meta text-text-faint overflow-y-auto"
+              style={{ maxHeight: 150 }}
+            >
+              {logLines.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+    </>
   );
 }

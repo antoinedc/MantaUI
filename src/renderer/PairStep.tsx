@@ -14,8 +14,8 @@
 //   - A clipboard pair-link (BET-704) switches zone A to manual mode, fills
 //     the fields through the SAME pendingPairLink path (no second prefill
 //     mechanism), and renders a "from clipboard" chip beside the address.
-//   - A successful claim lands on the same "Connected — your box is ready" +
-//     Next → state the SSH path ends on, so both pairing paths converge.
+//   - A successful claim lands on the same "Your box is ready" + Next → state
+//     the SSH path ends on, so both pairing paths converge.
 //
 // Both modes call `onPaired` when the panel's Next is pressed; the shell
 // decides what to do next (usually post-pair verification, BET-356 §4).
@@ -39,6 +39,7 @@ import { getMantaPreload } from "./preloadAccess";
 import { channelConfig } from "../shared/channel.mjs";
 import { ConnectPanel } from "./ConnectPanel";
 import { deriveConnectPanel, type ConnectActionId } from "./connectPanelLogic";
+import { MantaLoader } from "./MantaLoader";
 
 const DANGER = "var(--danger)"; // inline error text
 const SERVER_URL_ERROR = "Server URL must start with http:// or https://";
@@ -261,10 +262,27 @@ function ManualPairPanel({
   }
 
   const boxIdLooksBad = boxId.trim() !== "" && !isValidBoxToken(boxId.trim());
-  const locked = connectState.targetLocked;
 
   // Zone A — the manual code-entry fields, in the same responsive grid the
   // old standalone form used, plus the mode-switch link back to the picker.
+  // Zone A is not rendered at all once `targetCollapsed` (submitting/paired) —
+  // `targetSummary` replaces it, so there are no `disabled` copies of these
+  // fields. The host label for the summary is the address the user paired
+  // against (or the pending deep-link's server).
+  const hostLabel = serverUrlTrimmed || prefill?.serverUrl || "your box";
+  const targetSummary = (
+    <div className="flex items-center gap-2 min-w-0">
+      {paired ? (
+        <span aria-hidden className="w-2 h-2 rounded-full shrink-0 bg-ok" />
+      ) : (
+        <MantaLoader size="inline" />
+      )}
+      <span className="text-body font-medium text-text truncate">
+        {paired ? `Connected to ${hostLabel}` : `Setting up ${hostLabel}`}
+      </span>
+    </div>
+  );
+
   const zoneA = (
     <div className="space-y-2">
       <div className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_0.9fr] gap-3 items-end">
@@ -292,7 +310,6 @@ function ManualPairPanel({
             autoComplete="off"
             spellCheck={false}
             placeholder="https://box.mantaui.com"
-            disabled={locked}
             value={serverUrl}
             onChange={(e) => {
               setServerUrl(e.target.value);
@@ -333,7 +350,6 @@ function ManualPairPanel({
             autoComplete="off"
             spellCheck={false}
             placeholder="0d5784a7a43451f4ad70dd3d9ee5cf72"
-            disabled={locked}
             value={boxId}
             onChange={(e) => {
               setBoxId(e.target.value.trim());
@@ -356,7 +372,6 @@ function ManualPairPanel({
           <PairingCodeInput
             id="pair-code"
             ref={codeRef}
-            disabled={locked}
             hasError={claimError != null}
             value={code}
             onChange={(v) => {
@@ -383,6 +398,7 @@ function ManualPairPanel({
     <ConnectPanel
       state={connectState}
       target={zoneA}
+      targetSummary={targetSummary}
       logLines={[]}
       onAction={handleAction}
     />

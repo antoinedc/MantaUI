@@ -18,8 +18,10 @@
 //
 // Icons are the caller's job (a lucide icon at `size={14}`); the primitive does
 // not style children — it only reserves the `gap-[6px]` so an inline icon sits
-// beside the label. There is deliberately no size prop: the spec has no
-// `.btn.sm` rule, so there is one size only.
+// beside the label. SIZE is an axis with exactly two steps (`md` and `lg`),
+// both spec values — `md` is the existing chrome and stays the default, `lg`
+// is the onboarding panel's primary action. Adding a third size is a spec
+// change, not an implementation choice.
 //
 // `block` is a WIDTH axis, not a size one: the spec puts a full-width, centred
 // button at the foot of a narrow panel (the context popover's "Clear session"
@@ -31,13 +33,29 @@
 
 import type { ReactNode, RefObject } from "react";
 
-const BUTTON_CHROME =
-  "inline-flex items-center h-8 rounded-md border " +
-  "text-[12.5px] font-medium leading-none transition-colors " +
+const BUTTON_BASE =
+  "inline-flex items-center gap-[6px] rounded-md border " +
+  "font-medium leading-none transition-colors " +
+  "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
+  "disabled:opacity-50 disabled:cursor-not-allowed";
+
+// SIZE is an axis like `block`, not a free number: two steps, both spec values.
+// `md` is the existing chrome and stays the default, so every current call site
+// is byte-identical. `lg` is the onboarding panel's primary action.
+const BUTTON_SIZE = {
+  md: "h-8 px-[14px] text-[12.5px]",
+  lg: "h-10 px-6 text-body",
+} as const;
+
+// SplitButton's shell needs the md sizing (h-8 + text size) WITHOUT the
+// `px-[14px]` — its segments carry their own segment padding. Kept as its own
+// constant so the split shell stays byte-identical.
+const SPLIT_BUTTON_CHROME =
+  "inline-flex items-center h-8 rounded-md border text-[12.5px] " +
+  "font-medium leading-none transition-colors " +
   "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
   "disabled:opacity-50 disabled:cursor-not-allowed";
 const BUTTON_PAD = "gap-[6px] px-[14px]";
-const BUTTON_BASE = `${BUTTON_CHROME} ${BUTTON_PAD}`;
 
 const BUTTON_TONE = {
   default: "border-border bg-bg text-text hover:bg-raised hover:border-border-strong",
@@ -51,6 +69,7 @@ const BUTTON_BLOCK = "w-full justify-center";
 export function Button({
   tone,
   block = false,
+  size = "md",
   onClick,
   disabled,
   type = "button",
@@ -63,6 +82,8 @@ export function Button({
   tone: keyof typeof BUTTON_TONE;
   /** Full-width, centred label — the spec's panel-footer action. */
   block?: boolean;
+  /** Size step: `md` (default, the existing chrome) or `lg`. */
+  size?: keyof typeof BUTTON_SIZE;
   onClick?: () => void;
   /** Renders the native `disabled` attribute + the not-allowed cursor, and dims the chrome. */
   disabled?: boolean;
@@ -88,7 +109,7 @@ export function Button({
 }) {
   const inert = disabled || loading;
   const className =
-    `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_TONE[tone]}` +
+    `${hook ? `${hook} ` : ""}${BUTTON_BASE} ${BUTTON_SIZE[size]} ${BUTTON_TONE[tone]}` +
     (block ? ` ${BUTTON_BLOCK}` : "");
   return (
     <button
@@ -174,7 +195,7 @@ export function SplitButton({
     (rightAccent && !inert ? " text-accent-tx" : "");
   return (
     <div
-      className={`${BUTTON_CHROME} p-0 overflow-hidden ${SPLIT_BUTTON_TONE}`}
+      className={`${SPLIT_BUTTON_CHROME} p-0 overflow-hidden ${SPLIT_BUTTON_TONE}`}
       aria-busy={loading || undefined}
     >
       <button

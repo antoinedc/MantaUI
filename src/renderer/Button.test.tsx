@@ -14,7 +14,7 @@ import { mount, type Harness } from "./testHarness";
 import { Button } from "./Button";
 
 const CHROME =
-  "inline-flex items-center h-8 rounded-md border text-[12.5px] font-medium leading-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed gap-[6px] px-[14px]";
+  "inline-flex items-center gap-[6px] rounded-md border font-medium leading-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-50 disabled:cursor-not-allowed h-8 px-[14px] text-[12.5px]";
 
 const TONE = {
   default: "border-border bg-bg text-text hover:bg-raised hover:border-border-strong",
@@ -107,6 +107,20 @@ describe("Button", () => {
   it("passes title through as the native tooltip", () => {
     h = mount(<Button tone="default" title="Save changes">Save</Button>);
     expect(buttonEl(h).getAttribute("title")).toBe("Save changes");
+  });
+
+  it("defaults to the md size step; lg swaps the chrome for the larger step", () => {
+    h?.unmount();
+    h = mount(<Button tone="primary">Save</Button>);
+    expect(buttonEl(h).className).toContain("h-8 px-[14px] text-[12.5px]");
+
+    h.unmount();
+    h = mount(<Button tone="primary" size="lg">Save</Button>);
+    const lg = buttonEl(h).className;
+    expect(lg).toContain("h-10 px-6 text-body");
+    expect(lg).not.toContain("h-8 px-[14px] text-[12.5px]");
+    // Same tone chrome — the size axis composes with tone, it never replaces it.
+    expect(lg).toContain("border-accent-solid bg-accent-solid text-on-accent");
   });
 
   it("prepends a manta-* hook class when provided", () => {
