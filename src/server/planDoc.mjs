@@ -120,7 +120,7 @@ function overlayHtml(href) {
   return `
 <div style="position:fixed;right:16px;bottom:16px;z-index:2147483647;display:inline-flex;align-items:center;gap:9px;padding:8px 14px 8px 10px;border-radius:999px;background:rgba(15,20,38,.86);border:1px solid rgba(255,255,255,.16);box-shadow:0 6px 20px rgba(0,0,0,.28);font:600 13px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
   <a href="${href}" target="_blank" rel="noopener noreferrer" title="Built with MantaAI" style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:#fff;">
-    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" style="flex:none"><rect width="24" height="24" rx="6" fill="#1F55D6"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="-apple-system,Segoe UI,Roboto,Arial,sans-serif">M</text></svg>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex:none"><path d="M3 17c3-6 6-9 9-9s6 3 9 9"/><path d="M7 17c2-3.5 3.4-5 5-5s3 1.5 5 5" opacity=".6"/></svg>
     <span style="color:#fff;">Powered by Manta</span>
   </a>
 </div>
