@@ -20,3 +20,11 @@ src/renderer/mobile/MobileApp.tsx
 # alternative) — the shared runner<->sudoPass stdin fixture WAS extracted to
 # _testFixtures.ts for real; only this one harness-heavy test file is exempted.
 src/main/installer/handlers.test.ts
+# BET-1008: the installer preflight suite (BET-361 unknown-host + BET-1008
+# keyscan tests). Its it() blocks share the same preflightBox assert-on-probes
+# boilerplate, which jscpd flags as self-clones — INTRA-file, pre-existing on
+# origin/main (3 clones in the untouched file), intrinsic to the harness, not
+# production duplication. Surfaces only when this file is in a diff (the gate
+# scans changed files). Same rationale as the handlers.test.ts exemption above;
+# my BET-1008 additions introduced no new clones.
+src/main/installer/installer.test.ts

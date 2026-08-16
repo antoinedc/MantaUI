@@ -15,6 +15,15 @@
 // takes a string and returns a typed result — no I/O, no ssh. Tested in
 // fingerprint.test.ts with the canonical OpenSSH snippets.
 //
+// NOTE (BET-1008): this parser is now the FALLBACK, not the primary path. On
+// a NON-interactive connection OpenSSH prints ONLY "Host key verification
+// failed." — the multi-line fingerprint block above appears only on a TTY, and
+// a desktop app has none. So probeReachability's primary path is
+// probeOfferedFingerprint (knownHosts.ts), which FETCHES the key with
+// ssh-keyscan; parseFingerprint still wins when a build does print the block.
+// Do not "simplify" by deleting the scan — the scan is what makes the trust
+// flow work, this parser is what it falls back to.
+//
 // NOTE on the fingerprint vs. the host key: the SHA256 fingerprint is a
 // HASH of the host's public key — it is NOT the key itself, so it cannot
 // be written straight into ~/.ssh/known_hosts. knownHosts.ts fetches the

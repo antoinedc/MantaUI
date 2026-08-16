@@ -1,6 +1,7 @@
 // knownHosts.test.ts — parseKeyScanOutput / computeFingerprint /
 // fingerprintsMatch / formatKnownHostsLine / appendKnownHostsLine /
-// scanHostKeys / resolveKnownHostsKey / trustHost.
+// scanHostKeys / resolveKnownHostsKey / hostKeyAlgoLabel /
+// probeOfferedFingerprint / trustHost.
 //
 // No real ssh-keyscan, no real network: spawn is stubbed with the shared
 // makeFakeChild helper, and appendKnownHostsLine writes to a tmp path.
@@ -17,6 +18,8 @@ import {
   appendKnownHostsLine,
   scanHostKeys,
   resolveKnownHostsKey,
+  hostKeyAlgoLabel,
+  probeOfferedFingerprint,
   trustHost,
 } from "./knownHosts.js";
 import { makeFakeChild } from "./_testFixtures.js";
@@ -200,6 +203,50 @@ describe("resolveKnownHostsKey", () => {
     setImmediate(() => fake.fireExit(1));
     const r = await resolveKnownHostsKey("dev", { spawn });
     expect(r).toEqual({ hostname: "dev", port: 22 });
+  });
+});
+
+describe("hostKeyAlgoLabel", () => {
+  it("maps OpenSSH algo tokens to the display names parseFingerprint normalises to", () => {
+    expect(hostKeyAlgoLabel("ssh-ed25519")).toBe("ED25519");
+    expect(hostKeyAlgoLabel("ecdsa-sha2-nistp256")).toBe("ECDSA");
+    expect(hostKeyAlgoLabel("ssh-rsa")).toBe("RSA");
+    expect(hostKeyAlgoLabel("ssh-dss")).toBe("DSA");
+  });
+
+  it("passes through an algo that matches no known family, upper-cased", () => {
+    expect(hostKeyAlgoLabel("ssh-xmss")).toBe("SSH-XMSS");
+    expect(hostKeyAlgoLabel("")).toBe("");
+  });
+});
+
+describe("probeOfferedFingerprint", () => {
+  it("returns the SHA256: fingerprint of the ed25519 key when both ed25519 + rsa are offered", async () => {
+    const fake = makeFakeChild();
+    const spawn: SpawnFn = () => fake.child as any;
+    setImmediate(() => {
+      fake.pushStdout(
+        `box.example.com ssh-ed25519 ${KEY_ED25519}\nbox.example.com ssh-rsa ${KEY_RSA}\n`,
+      );
+      fake.fireExit(0);
+    });
+    const fp = await probeOfferedFingerprint(
+      { kind: "custom", host: "box.example.com" },
+      { spawn },
+    );
+    expect(fp).toEqual({ algo: "ED25519", sha256: computeFingerprint(KEY_ED25519) });
+    expect(fp?.sha256).toMatch(/^SHA256:/);
+  });
+
+  it("returns null when ssh-keyscan offers no usable key", async () => {
+    const fake = makeFakeChild();
+    const spawn: SpawnFn = () => fake.child as any;
+    setImmediate(() => fake.fireExit(1));
+    const fp = await probeOfferedFingerprint(
+      { kind: "custom", host: "box.example.com" },
+      { spawn },
+    );
+    expect(fp).toBeNull();
   });
 });
 
