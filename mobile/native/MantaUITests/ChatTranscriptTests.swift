@@ -196,6 +196,42 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(agent.duration, "5.0s")
     }
 
+    /// A task part not yet stamped with `state.metadata.sessionId` (the 
+    /// not-started case, see `TranscriptComponents.SubagentSession`) maps to a
+    /// SubagentSession whose `childSessionId` is nil — the empty-state case,
+    /// which the child screen explains instead of pushing a silent blank.
+    func testTaskPartWithoutSessionMapsToSubagentWithNilChildSession() {
+        let state: [String: JSONValue] = [
+            "status": str("running"),
+            "title": str("unblock sweep"),
+        ]
+        let part = OpencodePart(type: "tool", id: "t1", messageID: "m1", extra: [
+            "tool": str("task"),
+            "state": jsonObject(state),
+        ])
+        let agent = ChatSubagentMapper.session(from: part)
+        XCTAssertNotNil(agent)
+        XCTAssertEqual(agent?.taskName, "unblock sweep")
+        XCTAssertNil(agent?.childSessionId,
+                     "no state.metadata.sessionId means the child screen shows the empty state")
+    }
+
+    /// Ownership moved to the child screen (BET-1024): a store constructed for
+    /// a child session id is no longer placed in a parent-owned registry, so
+    /// two screens opened on the same child id get two INDEPENDENT stores
+    /// rather than a shared parent-cached one that a push/dismiss can destroy.
+    @MainActor
+    func testTwoChildStoresForKeyAreIndependentInstances() {
+        let eventStore = MantaEventStore()
+        let api = MantaAPIClient(serverURL: URL(string: "https://127.0.0.1:1")!)
+        let a = ChatSessionStore(sessionId: "ses_child", eventStore: eventStore, api: api, isReadOnly: true)
+        let b = ChatSessionStore(sessionId: "ses_child", eventStore: eventStore, api: api, isReadOnly: true)
+        XCTAssertFalse(a === b,
+                       "two stores for the same child session id must be independent objects, not shared parent-registry state")
+        XCTAssertEqual(a.sessionId, "ses_child")
+        XCTAssertEqual(b.sessionId, "ses_child")
+    }
+
     // MARK: - Rollup
 
     func testThreeConsecutiveStepsRollUp() {

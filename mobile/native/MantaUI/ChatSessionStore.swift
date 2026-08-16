@@ -170,7 +170,6 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var permissions: [PermissionRequest] = []
     @Published private(set) var planOn: Bool?
     @Published private(set) var subagents: [StreamSubagentPayload] = []
-    @Published private(set) var childStores: [String: ChatSessionStore] = [:]
     /// Prompts accepted mid-turn, FIFO. Drained one per idle edge — never
     /// POSTed while `running`, which is what used to implicitly abort the
     /// in-flight turn.
@@ -348,11 +347,10 @@ final class ChatSessionStore: ObservableObject {
 
     func stop() {
         // The session is leaving the screen: it is no longer a consumer of
-        // this session's stream chunks, and its subagent stores can all go
-        // (BET-672). Dropping the dictionary here is the teardown-path half of
-        // child-store eviction — the transcript-capped half runs per rebuild.
+        // this session's stream chunks. A push is not a dismissal — the child
+        // subagent screen owns ITS OWN store (BET-1024), so nothing here
+        // touches any child; this releases the parent's own resources only.
         eventStore.unregisterSession(sessionId)
-        childStores.removeAll()
         // A queued prompt must never fire into a session the user has left.
         queuedPrompts.removeAll()
     }
@@ -512,19 +510,6 @@ final class ChatSessionStore: ObservableObject {
         // running (the drain's send sets it optimistically) or an empty queue.
         drainQueuedPromptIfIdle()
 
-        // Register a store for any subagent that has a child session id, so the
-        // drill-in destination can resolve it without mutating state during a
-        // view update (BET-576). Registering does NOT start it: the child's own
-        // screen calls `start()` on appear. Starting them here meant opening a
-        // parent session downloaded a full extra transcript for EVERY subagent
-        // in its history, none of which is on screen.
-        for payload in s.subagents {
-            let childID = payload.childSessionId
-            if !childID.isEmpty, childStores[childID] == nil {
-                _ = ensureChildStore(childID)
-            }
-        }
-
         // Refetch the canonical transcript at turn boundaries so a finished
         // turn's blocks (steps/prose/subagents) land as real content. The fetch
         // itself retires the live text it now covers (see `fetchTranscript`) —
@@ -646,39 +631,6 @@ final class ChatSessionStore: ObservableObject {
                 + uniqueTranscriptRows(trailing)
         }
         rows = newRows
-        // Cap the subagent stores at the children the CURRENT transcript can
-        // actually drill into; stores left over from a previous transcript no
-        // longer show a row the user could open (BET-672).
-        evictChildStores()
-    }
-
-    /// The child session ids present in the CURRENT transcript's subagent rows.
-    /// The drill-in only ever happens from these rows, so they are exactly the
-    /// set a live `childStores` needs to hold; anything else is a leak.
-    private var childIDsInTranscript: Set<String> {
-        var ids = Set<String>()
-        for block in transcript {
-            guard case .steps(let content) = block else { continue }
-            let rows: [StepGroupRow]
-            switch content {
-            case .rows(let r): rows = r
-            case .rollup(_, let r): rows = r
-            }
-            for row in rows {
-                if case .subagent(let agent) = row, let id = agent.childSessionId, !id.isEmpty {
-                    ids.insert(id)
-                }
-            }
-        }
-        return ids
-    }
-
-    private func evictChildStores() {
-        guard !childStores.isEmpty else { return }
-        let live = childIDsInTranscript
-        for id in childStores.keys where !live.contains(id) {
-            childStores.removeValue(forKey: id)
-        }
     }
 
     // MARK: - Refetch
@@ -1000,30 +952,6 @@ final class ChatSessionStore: ObservableObject {
         }
         replyQuestion(question, answers: answers)
         return nil
-    }
-
-    // MARK: - Subagent drill-in (BET-576)
-
-    func ensureChildStore(_ childSessionId: String) -> ChatSessionStore {
-        if let existing = childStores[childSessionId] {
-            return existing
-        }
-        let child = ChatSessionStore(
-            sessionId: childSessionId,
-            eventStore: eventStore,
-            api: api,
-            isReadOnly: true
-        )
-        childStores[childSessionId] = child
-        // NOT started here — `ChatSubagentScreen.onAppear` calls `start()`, so
-        // a child's transcript is fetched when the user opens it and not
-        // before. See the registration comment in `applyStreamState`.
-        return child
-    }
-
-    func store(for childSessionId: String?) -> ChatSessionStore? {
-        guard let childSessionId else { return nil }
-        return ensureChildStore(childSessionId)
     }
 
     // MARK: - Header
