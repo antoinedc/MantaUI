@@ -244,7 +244,7 @@ function runAndCaptureTty(scriptPath) {
 
 test("resolveConfig applies defaults when env is empty", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
-  assert.equal(cfg.mantaHome, join(HOME, "manta"));
+  assert.equal(cfg.mantaHome, join(HOME, ".local", "share", "manta"));
   assert.equal(cfg.authDir, join(HOME, ".manta"));
   assert.equal(cfg.authFile, join(HOME, ".manta", "auth.json"));
   assert.equal(cfg.tarballUrl, null);
@@ -273,9 +273,20 @@ test("resolveConfig treats empty-string env vars as unset (shell footgun)", () =
     env: { MANTA_HOME: "", MANTA_TARBALL_URL: "", MANTA_MOBILE_PORT: "" },
     home: HOME,
   });
-  assert.equal(cfg.mantaHome, join(HOME, "manta"));
+  assert.equal(cfg.mantaHome, join(HOME, ".local", "share", "manta"));
   assert.equal(cfg.tarballUrl, null);
   assert.equal(cfg.port, DEFAULT_PORT);
+});
+
+test("resolveConfig honors XDG_DATA_HOME for the default install home (BET-995)", () => {
+  const cfg = resolveConfig({ env: { XDG_DATA_HOME: "/data/xdg" }, home: HOME });
+  assert.equal(cfg.mantaHome, join("/data/xdg", "manta"));
+  // MANTA_HOME still wins over XDG_DATA_HOME.
+  const overridden = resolveConfig({
+    env: { XDG_DATA_HOME: "/data/xdg", MANTA_HOME: "/opt/bui" },
+    home: HOME,
+  });
+  assert.equal(overridden.mantaHome, "/opt/bui");
 });
 
 test("resolveConfig strips trailing slash from MANTA_RELEASE_HOST", () => {
@@ -817,7 +828,7 @@ test("formatExpiry handles epoch-ms, ISO string, and junk", () => {
 test("renderShellConfig emits eval-able KEY=VALUE lines", () => {
   const cfg = resolveConfig({ env: {}, home: HOME });
   const out = renderShellConfig(cfg, { version: "0.0.1" });
-  assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, "manta")}'`));
+  assert.match(out, new RegExp(`MANTA_HOME='${join(HOME, ".local", "share", "manta")}'`));
   assert.match(out, /MANTA_AUTH_FILE='.*\.manta\/auth\.json'/);
   assert.match(out, /MANTA_PORT='8787'/);
   assert.match(out, /MANTA_HEALTH_URL='http:\/\/127\.0\.0\.1:8787\/auth\/status'/);
@@ -1510,7 +1521,7 @@ test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at i
   // shim must never be unbound (set -u in the shim would otherwise crash
   // `manta pair` on a box installed without MANTA_CHANNEL in its env).
   const src = readFileSync(INSTALL_SH, "utf-8");
-  const startIdx = src.indexOf('MANTA_HOME="${MANTA_HOME:-$HOME/manta}"');
+  const startIdx = src.indexOf('MANTA_HOME="${MANTA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/manta}"');
   assert.ok(startIdx !== -1, "could not locate the MANTA_HOME resolution line in install.sh");
   const nearby = src.slice(startIdx, startIdx + 600);
   assert.match(
@@ -1521,8 +1532,63 @@ test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at i
   assert.match(nearby, /export MANTA_CHANNEL/);
 });
 
-// ----------------------------------------------------------------------------
-// Pairing sidecar (BET-989) — install.sh writes ~/.manta/pairing.json via
+test("install.sh defaults the install home to the XDG data dir (BET-995)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  const start = src.indexOf('if [ -z "${MANTA_HOME:-}" ]');
+  assert.ok(start !== -1, "could not locate the MANTA_HOME resolution guard in install.sh");
+  const end = src.indexOf("\n  fi\n", start);
+  assert.ok(end !== -1, "could not find the end of the MANTA_HOME resolution guard");
+  // The guard: `if [ -z "${MANTA_HOME:-}" ] ... fi` resumes after the closing `fi`.
+  const block = src.slice(start, end + 1);
+
+  const run = ({ legacy, xdg, mantaHome }) => {
+    const dir = mkdtempSync(join(tmpdir(), "manta-home-"));
+    try {
+      if (legacy) {
+        const m = join(dir, "manta");
+        mkdirSync(m, { recursive: true });
+        writeFileSync(join(m, "RELEASE.json"), "{}"); // packaged install marker
+      }
+      const script = join(dir, "t.sh");
+      writeFileSync(
+        script,
+        [
+          "#!/usr/bin/env bash",
+          "set -euo pipefail",
+          `HOME="${dir}"`,
+          "log() { :; }",
+          mantaHome ? `MANTA_HOME="${mantaHome}"` : "",
+          xdg ? `XDG_DATA_HOME="${xdg}"` : "",
+          block,
+          `printf '%s' "$MANTA_HOME"`,
+        ]
+          .filter((l) => l !== "")
+          .join("\n"),
+        { mode: 0o755 },
+      );
+      return { dir, value: execSync(`bash ${script}`, { encoding: "utf8" }) };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  // Fresh home (no legacy install) → XDG data dir default.
+  const fresh = run({});
+  assert.equal(fresh.value, join(fresh.dir, ".local", "share", "manta"));
+
+  // XDG_DATA_HOME set → $XDG_DATA_HOME/manta.
+  const xdg = run({ xdg: "/data/xdg" });
+  assert.equal(xdg.value, join("/data/xdg", "manta"));
+
+  // Legacy packaged install already at ~/manta → preserved, not orphaned.
+  const legacy = run({ legacy: true });
+  assert.equal(legacy.value, join(legacy.dir, "manta"));
+
+  // A legacy install still loses to an explicit MANTA_HOME override.
+  const overridden = run({ legacy: true, mantaHome: "/opt/bui" });
+  assert.equal(overridden.value, "/opt/bui");
+});
+
 // manta-pair.mjs --json (the auto-claim's single writer). The old capture +
 // trailing print of the human pairing block is deleted; the manual `manta
 // pair` path (and its footer hint) stays.

@@ -247,7 +247,7 @@ function planPathFromPart(part) {
 // missed. `refreshNow()` is driven by the poller below; `tmux:list` lazily
 // guarantees a first tick before serving anything.
 const syncState = createSyncState({
-  listProjects: () => tmux.listProjects(),
+  listProjects: () => tmux.listProjects(tmux.INSTALL_HOME),
   publish: (env) => bus.publish(env),
 });
 // Seed the config baseline at startup so the first snapshot already carries it.
@@ -281,7 +281,7 @@ let rpcHandlers = null;
 async function resolveProjectName({ sessionID, directory }) {
   if (!sessionID && !directory) return null;
   try {
-    const projects = await tmux.listProjects();
+    const projects = await tmux.listProjects(tmux.INSTALL_HOME);
     const ws = resolveWorkspace(projects, sessionID, directory);
     return ws?.project?.tmuxSession ?? null;
   } catch {
@@ -438,7 +438,7 @@ const webhookEngine = createWebhookEngine({
 const delegateEngine = createDelegateEngine({
   publish: (evt) => bus.publish(evt),
   deliver: (args) => promptDelivery.deliver(args),
-  listProjects: () => tmux.listProjects(),
+  listProjects: () => tmux.listProjects(tmux.INSTALL_HOME),
   newWindow: (input) => tmux.newWindow(input),
   killWindow: (input) => tmux.killWindow(input),
   gitAddWorktree: (input) => local.gitAddWorktree(input),
@@ -523,7 +523,7 @@ forgeRulesEngine = createRulesEngine({
     // so the job's window has a home (the stopgap's synthetic "forge" parent
     // could never resolve an owner, so a forge delegate could not actually
     // launch). Refused when no local project wraps the checkout.
-    const owner = resolveForgeOwner(await tmux.listProjects(), cwd);
+    const owner = resolveForgeOwner(await tmux.listProjects(tmux.INSTALL_HOME), cwd);
     if (!owner) {
       return {
         ok: false,
@@ -870,7 +870,7 @@ const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller();
 // in this module (index.mjs is ESM and runs top-level awaits already).
 let eagerChatDirs = [];
 try {
-  const projects = await tmux.listProjects();
+  const projects = await tmux.listProjects(tmux.INSTALL_HOME);
   eagerChatDirs = [
     ...new Set(
       (projects ?? [])
@@ -1571,7 +1571,7 @@ const handleRequest = async (req, res) => {
 
   if (req.method === "GET" && path === "/api/projects") {
     try {
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(tmux.INSTALL_HOME);
       respondJson(res, 200, projects);
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });

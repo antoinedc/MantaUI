@@ -8,6 +8,7 @@ import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
 import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
+import { INSTALL_HOME } from "./tmux.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
@@ -251,7 +252,7 @@ export function buildHandlers({
     //    session's first window's actual pane path — the canonical "where this
     //    project lives" — so consult it before defaulting to ~.
     try {
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(INSTALL_HOME);
       const live = projects.find((p) => p.tmuxSession === sessionName);
       const liveCwd = (live?.defaultCwd ?? "").trim();
       if (liveCwd && liveCwd !== "~") return liveCwd;
@@ -266,7 +267,7 @@ export function buildHandlers({
   async function resolveProjectName(sessionID) {
     if (!sessionID) return null;
     try {
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(INSTALL_HOME);
       const ws = resolveWorkspace(projects, sessionID, undefined);
       return ws?.project?.tmuxSession ?? null;
     } catch {
@@ -784,7 +785,7 @@ export function buildHandlers({
       const resolvedCwd = await resolveProjectCwd(sessionName, cwd);
       const windowIndex = await tmux.newWindowGetIndex(sessionName, windowName, resolvedCwd);
       await tmux.restampSessionId(sessionName, windowIndex, forked.id);
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(INSTALL_HOME);
       // BET-675: refresh materialized state so the new window's delta publishes now.
       await syncState.refreshNow();
       return { newSessionId: forked.id, projects };
@@ -801,7 +802,7 @@ export function buildHandlers({
       const directory = await resolveProjectCwd(sessionName, cwd);
       const sess = await oc.createSession({ directory, title });
       await tmux.restampSessionId(sessionName, windowIndex, sess.id);
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(INSTALL_HOME);
       // BET-675: refresh materialized state so the change publishes now.
       await syncState.refreshNow();
       return { newSessionId: sess.id, projects };
@@ -817,7 +818,7 @@ export function buildHandlers({
     "opencode:delete-session": async ({ sessionId, sessionName, windowIndex }) => {
       await oc.deleteSessionRaw(sessionId);
       await tmux.killWindow({ sessionName, windowIndex }).catch(() => {});
-      const projects = await tmux.listProjects();
+      const projects = await tmux.listProjects(INSTALL_HOME);
       // BET-675: refresh materialized state so the removed window publishes now.
       await syncState.refreshNow();
       return projects;

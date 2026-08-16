@@ -752,6 +752,46 @@ test("listProjects stamps mantaOwned + reconciles orphan sidecar entries", async
   }
 });
 
+test("listProjects hides a session whose defaultCwd is the install home (BET-995)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "tmux-installhome-"));
+  const installHome = join(dir, ".local", "share", "manta");
+  const workDir = join(dir, "work");
+  const ownedPath = join(dir, "tmux-sessions.json");
+  try {
+    _resetOwnedSessionsCache();
+    _setOwnedSessionsPath(ownedPath);
+    _setRun(async (cmd, args) => {
+      if (args.includes("list-sessions")) {
+        return { stdout: "install-home\t1\nwork\t1\n", stderr: "" };
+      }
+      if (args.includes("list-windows")) {
+        return {
+          stdout: `install-home\t1\tmain\t1\t${installHome}\nwork\t1\tmain\t1\t${workDir}\n`,
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    try {
+      // The box's own session (cwd == install home) is dropped; a real
+      // project dir still appears.
+      const projects = await listProjects(installHome);
+      const names = projects.map((p) => p.tmuxSession);
+      assert.ok(names.includes("work"), "normal project dir still listed");
+      assert.ok(!names.includes("install-home"), "install home session is hidden");
+      // Without installHome the filter is not applied (back-compat).
+      const unfiltered = await listProjects();
+      assert.ok(unfiltered.some((p) => p.tmuxSession === "install-home"));
+    } finally {
+      _setRun(null);
+      _setOwnedSessionsPath(null);
+      _resetOwnedSessionsCache();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("killSession prunes the sidecar entry (eager, before listProjects)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "tmux-owned-"));
   const path = join(dir, "tmux-sessions.json");
