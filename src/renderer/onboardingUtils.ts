@@ -15,12 +15,12 @@
 
 import type { AppConfig } from "../shared/types";
 
-// The ordered numbered steps. `success` is the terminal screen after step 2,
-// kept out of this tuple so it never participates in progress-dot math.
+// The ordered numbered steps.
 export const ONBOARDING_STEPS = [1, 2] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
-// Full navigable position: a numbered step OR the terminal success screen.
-export type OnboardingPosition = OnboardingStep | "success";
+/** Full navigable position. There is no terminal success screen — step 2's
+ *  own button ends onboarding — so a position IS a numbered step. */
+export type OnboardingPosition = OnboardingStep;
 
 export const FIRST_STEP: OnboardingStep = 1;
 export const LAST_STEP: OnboardingStep = 2;
@@ -35,22 +35,22 @@ export const STEP_LABELS: Record<OnboardingStep, string> = {
 };
 
 // Back navigation is available on step 2 only (per the two-step flow — step 1
-// has no back slot: it's the entry point, and success has no back either).
+// has no back slot: it's the entry point).
 export function canGoBack(pos: OnboardingPosition): boolean {
   return pos === 2;
 }
 
-// The next position after `pos`. Step 2 → success; success stays success.
+// The next position after `pos`. There is no step after 2 — the provider
+// step's own button ends onboarding — so nextPosition clamps at the last step.
 export function nextPosition(pos: OnboardingPosition): OnboardingPosition {
-  if (pos === "success") return "success";
-  if (pos >= LAST_STEP) return "success";
+  if (pos >= LAST_STEP) return pos;
   return (pos + 1) as OnboardingStep;
 }
 
 // The previous position. Only meaningful when canGoBack(pos) is true; clamps
-// at the first step and is a no-op from step 1 / success.
+// at the first step.
 export function prevPosition(pos: OnboardingPosition): OnboardingPosition {
-  if (pos === "success" || pos <= FIRST_STEP) return pos;
+  if (pos <= FIRST_STEP) return pos;
   return (pos - 1) as OnboardingStep;
 }
 

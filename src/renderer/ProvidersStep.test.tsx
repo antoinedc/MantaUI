@@ -45,7 +45,7 @@ describe("ProvidersStep render harness (BET-960)", () => {
   function continueButton(): HTMLButtonElement | null {
     const btns = Array.from(h!.container.querySelectorAll("button"));
     return (
-      (btns.find((b) => b.textContent?.includes("Continue")) as
+      (btns.find((b) => b.textContent?.includes("Start using Manta")) as
         | HTMLButtonElement
         | undefined) ?? null
     );
