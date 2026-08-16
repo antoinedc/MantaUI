@@ -19,3 +19,16 @@ export function planModeFromToolPart(part: unknown): boolean | null;
  * (undefined, null, numbers, objects) and empty strings are false.
  */
 export function isPlanAgent(name: unknown): boolean;
+
+/**
+ * The stable subdomain for a session's plan page: `plan-<shortSessionId>`, or
+ * `null` when the input yields no usable slug.
+ */
+export function planSubdomain(sessionID: unknown): string | null;
+
+/**
+ * The deterministic public URL of a session's plan page:
+ * `<baseUrl>/pages/plan-<shortSessionId>`, or `""` when no usable slug. Never
+ * throws.
+ */
+export function planPageUrl(sessionID: unknown, baseUrl: unknown): string;

@@ -59,7 +59,7 @@ describe("planSubdomain", () => {
   it("derives plan-<shortSessionId>, lowercased, alphanumerics only, truncated to 20 chars", () => {
     expect(planSubdomain("AbC-123")).toBe("plan-abc123");
     expect(planSubdomain("not-a-uuid-123456789012345678901234567890")).toBe(
-      "plan-notauuid1234567890",
+      "plan-notauuid123456789012",
     );
   });
 
