@@ -289,7 +289,19 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.configUpdate, patch)  → args[0] = patch (Partial<AppConfig>)
     // BET-675: after a successful write, push the new config into syncState so
     // the materialized config delta is published for sync subscribers.
+    //
+    // BET-1031: skillRegistryUrls is the one Settings field that must ALSO be
+    // applied to opencode itself (its `skills.urls`), not just persisted to
+    // config.json. Written to opencode FIRST through the single endpoints
+    // writer; only on success is config.json persisted, so a registry change
+    // that can't reach opencode fails loudly (renderer reverts + errors)
+    // instead of "appears to save but does nothing". opencode re-reads
+    // `skills` at startup, like subagents.
     "config:update": async (patch) => {
+      if (Array.isArray(patch?.skillRegistryUrls)) {
+        const applied = await providers.setSkillRegistryUrls(patch.skillRegistryUrls);
+        if (!applied.ok) throw new Error(applied.error);
+      }
       const next = await local.configUpdate(patch);
       syncState.applyConfig(next);
       return next;

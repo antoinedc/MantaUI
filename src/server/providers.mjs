@@ -452,6 +452,23 @@ export async function setSubagents(ops, deps = {}) {
 }
 
 /**
+ * Apply the user's configured skill-registry URLs to opencode's `skills.urls`
+ * via PATCH /global/config — the single opencode.jsonc writer (BET-1019).
+ * The renderer persists the list to config.json via config:update; this is the
+ * server-side half of BET-1031 that actually makes opencode honor it
+ * (previously nothing on the server read skillRegistryUrls into opencode, so
+ * adding a registry in Settings "saved" but did nothing).
+ *
+ * The endpoint deep-merges `skills`, so unrelated skills keys (e.g. `command`)
+ * are untouched. Does NOT restart opencode; like providers/subagents, opencode
+ * only re-reads `skills` at startup and the caller decides whether to restart.
+ */
+export async function setSkillRegistryUrls(urls = [], deps = {}) {
+  const patch = deps.patch ?? patchGlobalConfig;
+  return patch({ skills: { urls: Array.isArray(urls) ? urls : [] } });
+}
+
+/**
  * Reconcile the full model list against opencode.jsonc's configured agent
  * blocks + the caller-supplied deactivated set (BET-123 "auto-register every
  * model" feature), then apply the diff via the EXISTING setSubagents writer
