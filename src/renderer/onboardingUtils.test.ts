@@ -31,9 +31,8 @@ describe("onboarding step model", () => {
 });
 
 describe("canGoBack", () => {
-  it("is false on step 1 and on success", () => {
+  it("is false on step 1", () => {
     expect(canGoBack(1)).toBe(false);
-    expect(canGoBack("success")).toBe(false);
   });
   it("is true on step 2", () => {
     expect(canGoBack(2)).toBe(true);
@@ -44,11 +43,8 @@ describe("nextPosition", () => {
   it("advances numbered steps", () => {
     expect(nextPosition(1)).toBe(2);
   });
-  it("step 2 → success", () => {
-    expect(nextPosition(2)).toBe("success");
-  });
-  it("success is terminal", () => {
-    expect(nextPosition("success")).toBe("success");
+  it("step 2 clamps at the last step", () => {
+    expect(nextPosition(2)).toBe(2);
   });
 });
 
@@ -58,9 +54,6 @@ describe("prevPosition", () => {
   });
   it("clamps at step 1", () => {
     expect(prevPosition(1)).toBe(1);
-  });
-  it("is a no-op from success", () => {
-    expect(prevPosition("success")).toBe("success");
   });
 });
 

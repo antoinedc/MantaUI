@@ -223,6 +223,7 @@ export function ProvidersStep({
       <StepFooter
         onBack={onBack}
         onContinue={onContinue}
+        continueLabel="Start using Manta"
         continueDisabled={!canContinue}
       />
     </div>

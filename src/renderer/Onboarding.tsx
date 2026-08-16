@@ -1,8 +1,7 @@
 // Onboarding.tsx — full-screen M6.6 onboarding shell (BET-356, BET-421).
 //
 // Owns the full-screen container (no sidebar / header / footer), the progress
-// rail (numbered dots + connecting lines), fade+slide step transitions, and
-// the terminal success screen.
+// rail (numbered dots + connecting lines), and fade+slide step transitions.
 //
 // The user-visible flow is two steps (Connect → Connect a provider). Model is
 // global config (edited in Settings); no dedicated onboarding step for it.
@@ -23,7 +22,9 @@
 //                                 disclosure secondary)
 //   - Step 2 (Connect provider) → ProvidersStep.tsx (always shown; renders
 //                                 already-connected providers ticked)
-//   - Success                   → this file
+//
+// There is no terminal success screen — step 2's own button ("Start using
+// Manta") ends onboarding and hands control back to App.tsx.
 //
 // Those components own their own footers; the shell hides its generic
 // footer and lets each step drive advancement (`onPaired` / `onContinue`).
@@ -32,7 +33,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ONBOARDING_STEPS,
   STEP_LABELS,
-  LAST_STEP,
   prevPosition,
   resolveInitialStep,
   type OnboardingPosition,
@@ -42,17 +42,15 @@ import { PairStep } from "./PairStep";
 import { ProvidersStep } from "./ProvidersStep";
 import { installHttpTransport } from "./transportInstall";
 import { desktopHttpClientSeed } from "../shared/transport.mjs";
-import { ArrowRight, CheckIcon } from "./onboardingUi";
-import { Button } from "./Button";
+import { CheckIcon } from "./onboardingUi";
 import mantaMark from "./assets/manta-mark-128.png";
 
 const ACCENT = "var(--accent)"; // the app's accent token (borders/tints)
 const ACCENT_SOLID = "var(--accent-solid)"; // filled buttons (BET-409: darker in light for AA)
 
-// Progress rail — one dot + connector per step. Reads every numbered step as
-// completed on the success screen.
+// Progress rail — one dot + connector per step.
 function ProgressRail({ current }: { current: OnboardingPosition }) {
-  const activeIdx = current === "success" ? LAST_STEP + 1 : current;
+  const activeIdx = current;
   return (
     <div className="flex flex-col items-center">
       <div className="flex items-center justify-center">
@@ -107,7 +105,8 @@ function ProgressRail({ current }: { current: OnboardingPosition }) {
 }
 
 // Props:
-//   onDone — called when onboarding completes (success screen "Open manta").
+//   onDone — called when onboarding completes (step 2's own "Start using Manta"
+//            button). App.tsx drops back to the normal shell on onDone.
 export function Onboarding({ onDone }: { onDone: () => void }) {
   // Derive the resume point once from the current config so a quit-mid-flow
   // reopens at the first incomplete step. Deep-link pairing forces step 1.
@@ -155,11 +154,12 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setPos(2);
   }, [refreshAndInstallTransport]);
 
-  // Step 2 → success. Connecting a provider completes onboarding — there is
-  // no model probe, so we advance straight to the success screen.
+  // Step 2 is the last thing onboarding asks for: connecting a provider ends
+  // the flow. There is no success screen — the provider step's own button
+  // ("Start using Manta") hands control back to App.tsx.
   const onProviderContinue = useCallback(() => {
-    setPos("success");
-  }, []);
+    onDone();
+  }, [onDone]);
 
   const goBack = () => setPos((p) => prevPosition(p));
 
@@ -186,12 +186,10 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     }
   }, [pos]);
 
-  const isSuccess = pos === "success";
-
   return (
     <div className="fixed inset-0 z-50 bg-bg text-text flex items-center justify-center overflow-y-auto">
       <div className="w-full max-w-[720px] px-6 py-8">
-        {/* Header: brand mark + progress rail (hidden on the success screen). */}
+        {/* Header: brand mark + progress rail. */}
         <div className="text-center mb-10">
           <div className="inline-flex items-center gap-3 mb-8">
             {/* The real brand mark (docs/brand/README.md: "The current
@@ -211,16 +209,14 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             />
             <span className="text-title font-semibold tracking-tight">Manta</span>
           </div>
-          {!isSuccess && <ProgressRail current={pos} />}
+          <ProgressRail current={pos} />
         </div>
 
         {/* Step body. `key` on the wrapper restarts the fade+slide animation on
             every position change. */}
         <div className="relative overflow-hidden" ref={bodyRef}>
           <div key={String(pos)} className="onboarding-step-enter">
-            {isSuccess ? (
-              <SuccessPanel onOpen={onDone} />
-            ) : pos === 1 ? (
+            {pos === 1 ? (
               <PairStep onPaired={() => void onPaired()} />
             ) : pos === 2 ? (
               <ProvidersStep onBack={goBack} onContinue={onProviderContinue} />
@@ -229,31 +225,6 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         </div>
 
       </div>
-    </div>
-  );
-}
-
-// The terminal success screen — moved out of Onboarding's render body so the
-// step-body slot above stays readable. "Open Manta" hands control back to
-// the parent; App.tsx drops back to the normal shell on onDone.
-function SuccessPanel({ onOpen }: { onOpen: () => void }) {
-  return (
-    <div className="text-center py-5">
-      <div
-        className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
-        style={{ background: "var(--ok-bg)" }}
-      >
-        <CheckIcon className="w-7 h-7 text-ok" />
-      </div>
-      <h2 className="text-display font-semibold mb-2">You're all set!</h2>
-      <p className="text-body text-text-muted leading-relaxed max-w-sm mx-auto mb-8">
-        Your box is paired and a provider is connected. Start chatting with
-        your AI assistant.
-      </p>
-      <Button tone="primary" block onClick={onOpen}>
-        Open Manta
-        <ArrowRight />
-      </Button>
     </div>
   );
 }
