@@ -20,6 +20,9 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       "src/server/**",
+      // node:test files under src/shared (run via `node --test`) — the .ts
+      // vitest tests in the same dir stay collected. Only the .mjs ones.
+      "src/shared/**/*.test.mjs",
       "src/gateway/**",
       "scripts/**",
       ".claude/**",
