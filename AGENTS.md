@@ -1392,12 +1392,26 @@ handle is read-only, always.
 explicit user choice. `defaultModel: { providerID, modelID }` — global default
 for all new and cleared sessions; settable in Settings; `null`/absent = opencode
 picks its own default. `skillRegistryUrls: string[]` — extra opencode skill
-registry URLs (Settings UI). On save, the `configUpdate` handler reads remote
-`~/.config/opencode/opencode.jsonc`, deep-merges only the `skills.urls` key,
-and writes it back via an HTTP call to manta-server (`src/server/local.mjs`).
-**Merge is JSONC-comment-stripped** (`//`
-single-line only) before `JSON.parse`; if it's unparseable we start from `{}`
-rather than corrupting other keys. The default registry
+registry URLs (Settings UI), persisted to `~/.manta/config.json` via the generic
+`configUpdate` channel.
+
+**All opencode.jsonc writes go through opencode's own `PATCH /global/config`
+endpoint — never a hand-rolled read/merge/write (BET-1019).** The writer lives
+in `src/server/providers.mjs` (`patchGlobalConfig` → `setProviders` /
+`setSubagents`). The endpoint owns both the in-memory config and the file, edits
+the `.jsonc` surgically, and **preserves `//` comments** (verified live). The old
+behavior — comment-stripping the file before `JSON.parse` and starting from `{}`
+when unparseable, silently discarding comments and other keys — is deleted. Note
+**`PATCH /config` is INERT on 1.18.x** (returns 200 but changes nothing): only
+`PATCH /global/config` works, and it is the ONLY config writer — never write
+opencode.jsonc directly. `remove` ops (deactivating a subagent / deleting a
+provider endpoint) are NOT supported: opencode's PATCH endpoint has no delete
+semantics over HTTP (it deep-merges and rejects `null`), so `setProviders` /
+`setSubagents` REJECT a `remove` with an explicit error and never touch the file.
+Writing the file behind the endpoint's back is forbidden — memory and disk would
+diverge and a removed key would resurrect on the next upsert PATCH. Restoring
+deactivation is tracked in BET-1033. The default
+registry
 (`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"1h"`).
@@ -2025,7 +2039,13 @@ agent blocks — so a not-yet-registered model still shows up.
   known model is NEVER touched (a user's hand-made agent survives). The I/O
   wrapper `syncSubagents({models, deactivated})` in `src/server/providers.mjs`
   reads `opencode.jsonc`, reconciles, and applies via the EXISTING
-  `setSubagents` writer (no second config writer). No-op diffs skip the write
+  `setSubagents` writer (no second config writer — the ONLY config writer is
+  `PATCH /global/config`, see the AppConfig section above). Because the
+  endpoint can't express `remove` ops, a deactivated-but-registered model's
+  block is currently LEFT IN PLACE — `setSubagents` rejects the remove and
+  `syncSubagents` degrades to the pre-sync list, so deactivation is a no-op
+  until BET-1033 restores it through a vetted mechanism. No-op diffs skip
+  the write
   entirely, so it's safe to call on every card open AND every activation
   toggle (`opencode:sync-subagents` RPC channel — mirrors `get`/`set-subagents`
   1:1). Idempotent: running it twice against its own output is a no-op.

@@ -528,21 +528,44 @@ describe("getProviderEndpoints", () => {
 });
 
 // ---------------------------------------------------------------------------
-// setProviders — handler test (mocks file system)
+// setProviders — handler test. Writes go through opencode's /global/config
+// endpoint (injectable `patch`) and the config-key remover (injectable
+// `remove`); neither touches the live opencode endpoint or the real file.
 // ---------------------------------------------------------------------------
 
 describe("setProviders", () => {
-  it("returns ok:false with actionable error for unparseable config", async () => {
-    // setProviders reads from OPENCODE_JSONC. We can't easily mock that,
-    // but we can verify the function signature is correct and doesn't throw
-    // when called with valid input (it will fail to write in test env, but
-    // that's expected — the pure helpers are tested above).
-    // The actual file-system test is covered by the integration path.
-    // Here we just verify the shape of the return value.
-    const result = await setProviders({ upsert: [], remove: [] });
-    // In test env, the write may succeed or fail depending on filesystem
-    // permissions. The important thing is it returns { ok, error? }.
-    assert.ok("ok" in result);
+  it("routes an upsert through PATCH /global/config with only the changed provider", async () => {
+    const patches = [];
+    const result = await setProviders(
+      { upsert: [{ id: "voska", name: "Voska AI", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: ["voska-1"] }] },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(patches.length, 1);
+    const providerBlock = patches[0].provider["voska"];
+    assert.equal(providerBlock.name, "Voska AI");
+    assert.equal(providerBlock.options.baseURL, "https://api.voska.org/v1");
+    assert.equal(patches[0].provider["other"], undefined, "only the changed provider is patched");
+  });
+
+  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+    let patched = false;
+    const result = await setProviders(
+      { remove: ["voska"] },
+      { patch: async () => { patched = true; return { ok: true }; } },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
+  });
+
+  it("surfaces an endpoint error to the caller (no file fallback)", async () => {
+    const result = await setProviders(
+      { upsert: [{ id: "voska", name: "Voska", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: [] }] },
+      { patch: async () => ({ ok: false, error: "opencode config update failed (500)" }) },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /500/);
   });
 });
 
@@ -794,39 +817,41 @@ describe("getSubagents", () => {
 });
 
 describe("setSubagents", () => {
-  it("upserts and removes agents", async () => {
-    let written = null;
-    const mockRead = async () => ({
-      agent: {
-        old: { model: "anthropic/claude-haiku-3", description: "Old", mode: "subagent" },
-      },
-    });
-    const mockWrite = async (path, content) => { written = JSON.parse(content); };
-    
-    // Mock the internal atomicWrite by temporarily replacing it (not ideal but works for test)
-    const { setSubagents } = await import("./providers.mjs");
-    // Instead, we'll test the pure transformations
-    const cfg = await mockRead();
-    let updated = cfg;
-    updated = removeAgentBlock(updated, "old");
-    updated = upsertAgentBlock(updated, {
-      name: "fast",
-      model: "anthropic/claude-haiku-4",
-      description: "New fast",
-    });
-    
-    assert.equal(updated.agent.old, undefined);
-    assert.equal(updated.agent.fast.model, "anthropic/claude-haiku-4");
+  it("routes an upsert through PATCH /global/config with only the changed agent", async () => {
+    const patches = [];
+    const result = await setSubagents(
+      { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "New fast" }] },
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(patches.length, 1);
+    const block = patches[0].agent["fast"];
+    assert.equal(block.model, "anthropic/claude-haiku-4");
+    assert.equal(block.description, "New fast");
+    assert.equal(block.mode, "subagent", "default mode for an ordinary block");
+    assert.equal(patches[0].agent["old"], undefined, "only the changed agent is patched");
   });
 
-  it("refuses to write on unparseable config", async () => {
+  it("rejects a remove (the endpoint has no delete) without writing the file", async () => {
+    let patched = false;
     const result = await setSubagents(
-      { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }] },
+      { remove: ["haiku"] },
+      { patch: async () => { patched = true; return { ok: true }; } },
     );
-    // Since we can't easily mock the readRemoteConfig without filesystem access,
-    // we'll just verify the contract: if it can't read, it returns an error.
-    // In practice this would need the real file to be corrupt.
-    assert.ok(result.ok === true || (result.ok === false && result.error));
+    assert.equal(result.ok, false);
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "no PATCH for a rejected remove op — no file write, no endpoint call");
+  });
+
+  it("rejects a batch that includes a remove before patching (remove unsupported)", async () => {
+    let patched = false;
+    const result = await setSubagents(
+      { upsert: [{ name: "fast", model: "anthropic/claude-haiku-4", description: "Fast" }], remove: ["haiku"] },
+      { patch: async () => { patched = true; return { ok: true }; } },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /remove/i);
+    assert.equal(patched, false, "rejects the batch before any upsert PATCH");
   });
 });
 
