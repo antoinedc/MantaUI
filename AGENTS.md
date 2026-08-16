@@ -528,6 +528,32 @@ out on load (`src/main/config.ts`).
 **Mode detection:** if `boxToken` is set → HTTP mode (normal). No fallback to
 SSH — the old `host`-based mode is fully removed.
 
+## Auto-rename (session titles) — BET-1018
+
+When `autoRenameSessions` is on, a chat-mode window gets its **first name from
+opencode's own session title**, which opencode derives from the FIRST user
+message for free (`GET /session`, read via `opencodeListSessions(cwd)` →
+`findSessionTitle`). Before that, the empty-first-name case was only named on
+the every-5th-turn drift rename. If the title isn't populated yet the effect
+skips silently and retries on the next turn; never blank a window name.
+
+Subsequent **re-titles** (every `AUTO_RENAME_EVERY_N_TURNS` = 5 turns) run on
+opencode's **"title" agent** (`agent:"title"` in `generateSessionTitle`'s
+prompt_async body in `src/server/opencode.mjs`) — its own cheap naming model,
+not our main model — returning a clean short name. `sanitizeGeneratedTitle`
+stays as a safety net on both paths.
+
+**DO NOT add structured output to that prompt_async call.** Passing
+`{"format":{"type":"json_schema",…}}` is ACCEPTED on opencode 1.18.10, but
+opencode defaults `retryCount` and its own reader then rejects the whole
+session's message list with a permanent HTTP 400 — the entire transcript
+becomes unreadable, not just that one message. See the code comment at
+`generateSessionTitle`.
+
+Do not change `AUTO_RENAME_EVERY_N_TURNS` (cadence is a separate concern) and
+do not delete the throwaway-session mechanism (it's still how drift-tracking
+re-titles work — the session title is first-name-only and never updates).
+
 ## Web Push notifications (`src/server/push.mjs`)
 
 Mobile PWA gets Web Push (VAPID) for events it can't otherwise see when
