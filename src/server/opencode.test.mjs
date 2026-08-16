@@ -18,6 +18,7 @@ import {
   listPermissions,
   listQuestions,
   replyPermission,
+  replyQuestion,
   subscribeEvents,
   selectStreamsToEvict,
   isStreamDeaf,
@@ -867,6 +868,102 @@ test("listQuestions without sessionId returns unfiltered directory-wide list", a
     async () => {
       const result = await listQuestions(null);
       assert.equal(result.length, 2, "unscoped call returns full list");
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Fail-soft listing on non-OK (BET-1020)
+//
+// Upstream opencode #38912: GET /permission returns 400 whenever ANY pending
+// request carries unset optional metadata (glob / grep / webfetch / etc.). The
+// whole array is validated at once, so one malformed pending item 400s the
+// entire listing — including the good request the user is waiting on. The
+// READ listings must fail soft (return []) so the live SSE path, the primary
+// source, keeps driving the card; the REPLY path must keep throwing.
+// ---------------------------------------------------------------------------
+
+test("listPermissions returns [] on a 400 and does not throw", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/permission")) {
+        return new Response("one malformed pending item", { status: 400 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listPermissions();
+      assert.deepEqual(result, [], "400 must yield an empty list, not throw");
+    },
+  );
+});
+
+test("listQuestions returns [] on a non-OK and does not throw", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).includes("/question")) {
+        return new Response("boom", { status: 500 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const result = await listQuestions("ses_B");
+      assert.deepEqual(result, [], "non-OK must yield an empty list, not throw");
+    },
+  );
+});
+
+// The fail-soft treatment is scoped to the two READ listings. A failed REPLY
+// must still surface — the user pressed a button and deserves to know it did
+// not land (BET-1020 non-goals).
+test("replyPermission still throws on a non-OK reply", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(JSON.stringify({ id: "ses_r", directory: "/proj/r" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (String(url).includes("/reply")) {
+        return new Response("nope", { status: 400 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await assert.rejects(
+        replyPermission({ requestId: "per_x", reply: "always", sessionId: "ses_r" }),
+        /replyPermission/,
+        "a failed permission reply must still throw",
+      );
+    },
+  );
+});
+
+test("replyQuestion still throws on a non-OK reply", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
+        return new Response(JSON.stringify({ id: "ses_rq", directory: "/proj/rq" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (String(url).includes("/reply")) {
+        return new Response("nope", { status: 400 });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      await assert.rejects(
+        replyQuestion({ requestId: "que_x", answers: [["a"]], sessionId: "ses_rq" }),
+        /replyQuestion/,
+        "a failed question reply must still throw",
+      );
     },
   );
 });

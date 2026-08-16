@@ -917,6 +917,30 @@ function extractAssistantText(msgs) {
 // merged multi-directory fetch) is deleted. listPermissions/listQuestions are
 // back to plain scoped reads of the requested session's directory.
 
+/** Fetch a pending-items listing and soften a non-OK response.
+ *  opencode's listings are not all-or-nothing safe: a single malformed pending
+ *  item makes GET /permission (or /question) return 400 for the WHOLE array
+ *  (upstream #38912) — which would otherwise throw and blank out the card the
+ *  user is waiting on. Treat a non-OK response as "no pending items I can
+ *  see": warn once and return []. The live SSE path remains the primary
+ *  source; these listings are reconciliation only. Scoped to the two READ
+ *  listings below — NOT a general-purpose opencode wrapper.
+ *  @param {string} endpoint  API path with `?directory=` already applied.
+ *  @param {string} label     caller name, for the warning.
+ *  @returns {Promise<Array<unknown>>}
+ */
+async function fetchPendingList(endpoint, label) {
+  const res = await ocFetch(apiUrl(endpoint));
+  if (!res.ok) {
+    console.warn(
+      `opencode ${label}: non-OK ${res.status} (${await res.text()}); treating as no pending items`,
+    );
+    return [];
+  }
+  const all = await res.json();
+  return Array.isArray(all) ? all : [];
+}
+
 /** List all pending tool-use permissions.
  *  Scoped to the session's directory when sessionId is provided. opencode's
  *  WorkspaceRoutingMiddleware makes the UNSCOPED endpoint return [] for
@@ -929,12 +953,7 @@ function extractAssistantText(msgs) {
  */
 export async function listPermissions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const res = await ocFetch(apiUrl(`/permission${dirQ}`));
-  if (!res.ok) {
-    throw new Error(`opencode listPermissions ${res.status}: ${await res.text()}`);
-  }
-  const all = await res.json();
-  const list = Array.isArray(all) ? all : [];
+  const list = await fetchPendingList(`/permission${dirQ}`, "listPermissions");
   // opencode's /permission is `?directory=`-scoped, not session-scoped: a
   // directory can hold pending items from multiple sessions (orphan/subagent
   // sessions included). Filter the directory-wide response down to the
@@ -979,12 +998,7 @@ export async function replyPermission({ requestId, reply, sessionId }) {
  */
 export async function listQuestions(sessionId) {
   const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const res = await ocFetch(apiUrl(`/question${dirQ}`));
-  if (!res.ok) {
-    throw new Error(`opencode listQuestions ${res.status}: ${await res.text()}`);
-  }
-  const all = await res.json();
-  const list = Array.isArray(all) ? all : [];
+  const list = await fetchPendingList(`/question${dirQ}`, "listQuestions");
   // opencode's /question is `?directory=`-scoped, not session-scoped — see
   // listPermissions above. Filter to the requested sessionId (BET-110).
   // Background-job children no longer surface here (BET-418 §A).
