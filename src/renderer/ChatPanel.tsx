@@ -64,7 +64,8 @@ import {
   extractPlanData,
   selectableModelGroups,
 } from "./chatUtils";
-import { isPlanAgent } from "../shared/planMode.mjs";
+import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
+import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
   copySavedModels,
@@ -2576,6 +2577,21 @@ export function ChatPanel({
     [sessionId],
   );
 
+  // The PlanCard's "Open page" URL. The eager-publish result wins when it's
+  // present; otherwise fall back to the DETERMINISTIC URL derived from the
+  // session id (`<base>/pages/plan-<shortSessionId>` — the same subdomain the
+  // server publishes under), so a plan_render-published plan ALWAYS shows its
+  // link even before eager-publish returns (BET-992). serverBase may be
+  // unavailable (no server configured); then there is simply no URL.
+  const planCardUrl = useMemo(() => {
+    if (planUrl) return planUrl;
+    try {
+      return planPageUrl(sessionId, serverBase());
+    } catch {
+      return "";
+    }
+  }, [planUrl, sessionId]);
+
   // The plan_exit card, built here and mounted in the transcript tail the SAME
   // way the questions are (it used to be pinned in the CardStack). Building the
   // element here keeps the closures over the plan data + the eager-published
@@ -2598,7 +2614,7 @@ export function ChatPanel({
           onKeepPlanning={(fb) => void keepPlanning(q, fb)}
           onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
           onRememberDelegateModel={rememberDelegateModel}
-          planUrl={planUrl}
+          planUrl={planCardUrl}
           planPublishing={planPublishing}
           onOpenInBrowser={() => {
             // Live page already published → just open it (no re-publish).
