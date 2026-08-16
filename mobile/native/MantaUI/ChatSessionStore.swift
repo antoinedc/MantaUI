@@ -244,6 +244,13 @@ final class ChatSessionStore: ObservableObject {
     /// `false`) must not clobber the optimistic `true` — but once the box
     /// reports running at all, the snapshot is authoritative.
     private var optimisticRunning = false
+    /// The transcript-derived context breakdown (`opencode:context`), fetched
+    /// on session open so an idle conversation shows its meter immediately.
+    /// The live `stream/context` frame is the single preferred source; this is
+    /// only the fallback that fills the gap while (or in place of) such a
+    /// frame (BET-1030). nil when a brand-new/never-billed session returns
+    /// null, or the RPC failed — the meter then stays blank, as before.
+    private var transcriptContext: StreamContextPayload?
     /// The last `runningSetSeq` this store has folded into its running state. A
     /// change in it means the box has (re)stated the authoritative running set
     /// since `send()` stamped `optimisticRunning`, so the optimistic flag must
@@ -339,6 +346,7 @@ final class ChatSessionStore: ObservableObject {
         if !didRunOnce {
             didRunOnce = true
             load()
+            refreshContextFromTranscript()
         }
         // Register as an observer so the event store knows a consumer is
         // attached (BET-672): a session it completes with NO observer has its
@@ -369,6 +377,27 @@ final class ChatSessionStore: ObservableObject {
             await MainActor.run { loading = false }
             if !isReadOnly {
                 await refreshPermissions()
+            }
+        }
+    }
+
+    /// Fetch the transcript-derived context breakdown (`opencode:context`) on
+    /// session open so an idle conversation shows its context meter immediately
+    /// (BET-1030). The box derives it from the persisted transcript and returns
+    /// null when there is no billed assistant turn yet (or the RPC fails — a
+    /// non-fatal no-op). Reconciliation lives in `applyStreamState` + here: the
+    /// live `stream/context` frame wins when present; the RPC value is the
+    /// idle/open fallback.
+    private func refreshContextFromTranscript() {
+        Task {
+            let payload = try? await api.context(sessionId: sessionId)
+            await MainActor.run {
+                transcriptContext = payload
+                // Only publish when the live frame has not already filled the
+                // meter — the stream/context frame is the preferred source.
+                if eventStore.sessionStates[sessionId]?.context == nil {
+                    context = payload
+                }
             }
         }
     }
@@ -414,7 +443,11 @@ final class ChatSessionStore: ObservableObject {
         // Fields that are copied straight through from the latest frame (the
         // stream is the single writer for these — no optimistic value to
         // protect).
-        context = s.context
+        // The live `stream/context` frame is the preferred source; the
+        // transcript-derived `opencode:context` fallback (BET-1030) fills the
+        // meter for an idle conversation on open, when no such frame has
+        // arrived yet.
+        context = s.context ?? transcriptContext
         cache = s.cache
         truncation = s.truncation
         sessionError = s.sessionError
