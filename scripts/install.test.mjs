@@ -1762,6 +1762,47 @@ test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at i
 });
 
 // ----------------------------------------------------------------------------
+// Pairing sidecar (BET-989) — install.sh writes ~/.manta/pairing.json via
+// manta-pair.mjs --json (the auto-claim's single writer). The old capture +
+// trailing print of the human pairing block is deleted; the manual `manta
+// pair` path (and its footer hint) stays.
+// ----------------------------------------------------------------------------
+
+test("install.sh writes the pairing sidecar via manta-pair.mjs --json instead of capturing the human block (BET-989)", () => {
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.match(
+    src,
+    /manta-pair\.mjs" --json > "\$AUTH_DIR\/pairing\.json"/,
+    "install.sh must write the machine-readable pairing sidecar via manta-pair.mjs --json",
+  );
+  // The old capture variable + the trailing `printf '%s\n' "$PAIR_BLOCK"` are gone.
+  assert.doesNotMatch(src, /PAIR_BLOCK/, "PAIR_BLOCK must be deleted from install.sh");
+  // The manual `manta pair` path + footer hint are preserved.
+  assert.match(src, /manta pair/, "the manual `manta pair` guidance must remain");
+});
+
+test("manta-pair.mjs --json emits {pairing_code, box_id, expiresAt, serverUrl} (BET-989)", () => {
+  // Pin the symmetrical key set the desktop sidecar reader depends on. The
+  // install path's caller (install.sh) redirects this to ~/.manta/pairing.json.
+  const src = readFileSync(join(__dirname, "manta-pair.mjs"), "utf-8");
+  const jsonStart = src.indexOf('process.argv[2] === "--json"');
+  assert.ok(jsonStart !== -1, "manta-pair.mjs must have a --json branch");
+  // The JSON.stringify object literal — the only region that decides the
+  // sidecar keys. Sliced to the Stringify call so it can't bleed into the
+  // human-path formatPairingOutput block below.
+  const literalStart = src.indexOf("JSON.stringify({", jsonStart);
+  const literalEnd = src.indexOf("serverUrl: readIngressServerUrl", literalStart);
+  const literal = src.slice(literalStart, literalEnd + "serverUrl: readIngressServerUrl".length);
+  assert.match(literal, /pairing_code:/);
+  assert.match(literal, /box_id:/);
+  assert.match(literal, /expiresAt:/);
+  assert.match(literal, /serverUrl:/);
+  // No human formatting inside the JSON object.
+  assert.doesNotMatch(literal, /formatPairingOutput/);
+});
+
+
+// ----------------------------------------------------------------------------
 // manifest_get — the bash helper install.sh uses to read key=value from the
 // release manifest BEFORE any node exists on the box.
 // ----------------------------------------------------------------------------

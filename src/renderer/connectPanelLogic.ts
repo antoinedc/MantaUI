@@ -83,7 +83,6 @@ export type SshConnectFields = {
   preflightFailure: { failures: Array<{ cause: string; action: string }> } | null;
   awaitingPrompt: boolean; // fingerprintPrompt !== null || passphrasePrompt !== null
   claimRunning: boolean;
-  claimElapsed: number | null;
   cancelled: boolean;
 };
 
@@ -97,11 +96,6 @@ export type ManualConnectFields = {
 export type ConnectInput =
   | ({ mode: "ssh" } & SshConnectFields & SharedConnectFields)
   | ({ mode: "manual" } & ManualConnectFields & SharedConnectFields);
-
-/** The row-4 pairing-failed hint. `manta pair` is rendered as <code> by
- *  ConnectPanel by splitting the backticks — keep the backticks here. */
-const CLAIM_FAILED_HINT =
-  "The box is running. Run `manta pair` on it for a fresh 6-digit code, then enter it here.";
 
 /** `<stage meta>` — `${index} of ${total}` plus the elapsed time while the
  *  operation is actively progressing (install running OR claim retrying).
@@ -272,7 +266,8 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     };
   }
 
-  // 4 — installed, but the claim (pairing) failed.
+  // 4 — installed, but the claim (pairing) failed. Surface the REAL error the
+  // claim returned (the actual outcome.message), not a fixed placeholder.
   if (input.claimError) {
     return {
       status: {
@@ -282,7 +277,7 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         progress,
         sub: null,
       },
-      details: { kind: "hint", text: CLAIM_FAILED_HINT },
+      details: { kind: "hint", text: input.claimError },
       actions: ["pairManually", "retry"],
       hint: null,
       targetLocked,
@@ -328,16 +323,15 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     };
   }
 
-  // 7 — auto-claim retrying (the box is still booting).
+  // 7 — auto-claim in flight (single attempt — no retry loop behind it).
   if (input.claimRunning) {
-    const booting = input.claimElapsed !== null && input.claimElapsed > 0;
     return {
       status: {
         tone: "running",
-        text: booting ? "Pairing — the box is still starting" : "Pairing with this app",
+        text: "Pairing with this app",
         meta: stageMeta(input),
         progress,
-        sub: booting ? "retrying every 2s · this is normal on a fresh install" : null,
+        sub: null,
       },
       details: logDetails(false, false, input.logLineCount),
       actions: ["cancel"],

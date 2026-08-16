@@ -29,13 +29,12 @@ import {
   execRemote,
   execLocal,
   streamRemote,
-  type ExecRemoteResult,
   type ExecRemoteOptions,
   type SpawnFn,
 } from "./runner.js";
 import { parseSshConfig, type SshHostEntry } from "./sshConfig.js";
 import { isEmptySshTarget, type SshTarget } from "../../shared/sshTarget.js";
-import { isValidBoxToken } from "../../shared/transport.mjs";
+import { boxDirectUrl, isValidBoxToken } from "../../shared/transport.mjs";
 import {
   resolveChannel,
   channelConfig,
@@ -53,7 +52,7 @@ import {
   type InstallStageId,
 } from "./stageMapper.js";
 import { claimPairing } from "../auth.js";
-import type { ClaimOutcome } from "../../shared/claim.mjs";
+import { networkFailure, type ClaimOutcome } from "../../shared/claim.mjs";
 import type { AppConfig } from "../../shared/types.js";
 
 export type { SpawnFn } from "./runner.js";
@@ -522,8 +521,10 @@ export function stageSnapshot(): ReturnType<typeof buildStageSnapshot> {
 }
 
 // ===========================================================================
-// mintAndClaim — loopback-mint a pairing code over SSH, claim it via the box's
-// public URL, and persist credentials through the existing claim path.
+// mintAndClaim — read the pairing sidecar the install already wrote, claim it
+// via the box's public URL, and persist credentials through the existing claim
+// path. No re-mint: the code comes from ~/.manta/pairing.json (produced by
+// manta-pair.mjs --json during install), never from a `manta pair` SSH call.
 // ===========================================================================
 
 export type MintAndClaimDeps = {
@@ -532,26 +533,75 @@ export type MintAndClaimDeps = {
   /** Persistence callback (main's `commit`). REQUIRED — the installer must
    *  not invent a second config writer (constraint #4). */
   persist: (patch: Partial<AppConfig>) => void;
-  /** Optional override for the box's claim URL — defaults to the serverUrl
-   *  parsed out of `manta pair` output. */
+  /** Optional override for the box's claim URL — defaults to the serverUrl in
+   *  the pairing sidecar, falling back to boxDirectUrl(boxId). */
   claimUrlOverride?: string;
-  /** Askpass env vars (BET-360). When set, the `manta pair` SSH call runs
-   *  without BatchMode so a passphrase-protected key can be decrypted via
-   *  the SSH_ASKPASS helper. The session is owned by the installer handler
-   *  and cleaned up after the claim resolves. */
+  /** Askpass env vars (BET-360). When set, the `cat` SSH read runs without
+   *  BatchMode so a passphrase-protected key can be decrypted via the
+   *  SSH_ASKPASS helper. The session is owned by the installer handler and
+   *  cleaned up after the claim resolves. */
   askpassEnv?: Record<string, string>;
 };
 
+type PairingSidecar =
+  | { ok: true; code: string; boxId: string; serverUrl?: string }
+  | { ok: false; outcome: ClaimOutcome };
+
 /**
- * Mint a pairing code over the existing SSH connection, claim it via the
+ * Read the machine-readable pairing sidecar the install wrote
+ * (`~/.manta/pairing.json`, produced by `manta-pair.mjs --json`). This is the
+ * only remote pairing step — the box mints the code ONCE during install; the
+ * desktop never re-mints it over SSH (BET-989).
+ */
+async function readPairingSidecar(
+  alias: SshTarget,
+  deps: MintAndClaimDeps,
+): Promise<PairingSidecar> {
+  const fetched = await execRemote(alias, "bash -lc 'cat ~/.manta/pairing.json'", {
+    spawn: deps.spawn,
+    timeoutMs: 30_000,
+    env: deps.askpassEnv,
+    allowPrompt: !!deps.askpassEnv,
+  });
+  if (fetched.code !== 0) {
+    return {
+      ok: false,
+      outcome: {
+        ok: false,
+        kind: "network",
+        message: `reading pairing file failed (exit ${fetched.code})`,
+      },
+    };
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(fetched.stdout);
+  } catch {
+    return { ok: false, outcome: networkFailure() };
+  }
+  const code = typeof parsed?.pairing_code === "string" ? parsed.pairing_code : "";
+  const boxId = typeof parsed?.box_id === "string" ? parsed.box_id : "";
+  const serverUrl = typeof parsed?.serverUrl === "string" ? parsed.serverUrl : undefined;
+  if (!/^[0-9]{6}$/.test(code) || !isValidBoxToken(boxId)) {
+    return {
+      ok: false,
+      outcome: {
+        ok: false,
+        kind: "invalid_response",
+        message: "box did not return a valid pairing code / box_id",
+      },
+    };
+  }
+  return { ok: true, code, boxId, serverUrl };
+}
+
+/**
+ * Read the pairing sidecar over the existing SSH connection, claim it via the
  * box's reachable URL, and persist credentials. Returns the classified
  * ClaimOutcome from src/main/auth.ts (same shape as the manual claim path).
  *
- * The SSH-minted code is preferred over scraping from the install log
- * (BET-355 issue §5: "Do not scrape the code out of the install log —
- * that is fragile"). Running `manta pair` over SSH is exactly what a user
- * would do after a manual install, and it returns a clean
- * {pairing_code, box_id, serverUrl} block the desktop parses.
+ * The code comes from the install's own sidecar — no re-mint, no log scraping
+ * (BET-355 issue §5: "Do not scrape the code out of the install log").
  */
 export async function mintAndClaim(
   alias: SshTarget,
@@ -563,35 +613,14 @@ export async function mintAndClaim(
   if (typeof deps.persist !== "function") {
     throw new Error("mintAndClaim: persist callback is required");
   }
-  const spawn = deps.spawn;
-  const fetched = await execRemote(alias, "bash -lc 'manta pair'", {
-    spawn,
-    timeoutMs: 30_000,
-    env: deps.askpassEnv,
-    allowPrompt: !!deps.askpassEnv,
-  });
-  if (fetched.code !== 0) {
-    return {
-      ok: false,
-      kind: "network",
-      message: `manta pair exited ${fetched.code} on the box`,
-    };
-  }
-  const parsed = parseMintOutput(fetched);
+  const parsed = await readPairingSidecar(alias, deps);
   if (!parsed.ok) {
     return parsed.outcome;
   }
   const claimUrl =
     typeof deps.claimUrlOverride === "string" && deps.claimUrlOverride !== ""
       ? deps.claimUrlOverride
-      : parsed.serverUrl;
-  if (!isValidBoxToken(parsed.boxId)) {
-    return {
-      ok: false,
-      kind: "invalid_response",
-      message: "box did not return a valid 32-hex box_id",
-    };
-  }
+      : parsed.serverUrl || boxDirectUrl(parsed.boxId);
   // Reuse the existing claim path — single source of truth for box
   // credentials (constraint #4).
   return claimPairing(
@@ -599,52 +628,4 @@ export async function mintAndClaim(
     deps.persist,
     deps.fetchImpl,
   );
-}
-
-type MintParseOk = {
-  ok: true;
-  code: string;
-  boxId: string;
-  serverUrl: string;
-};
-type MintParseFail = {
-  ok: false;
-  outcome: ClaimOutcome;
-};
-
-function parseMintOutput(r: ExecRemoteResult): MintParseOk | MintParseFail {
-  // The formatPairingOutput block has stable labels:
-  //   "  Pairing code:  <6 digits>"
-  //   "  Box ID:        <32 hex>"
-  //   "  Server URL:    <url>"   (only on tailscale path; public path
-  //                                derives https://<boxId>.boxes.mantaui.com)
-  const codeMatch = /Pairing code:\s+(\d{6})/.exec(r.stdout);
-  if (!codeMatch) {
-    return {
-      ok: false,
-      outcome: {
-        ok: false,
-        kind: "invalid_response",
-        message: "could not parse a 6-digit pairing code from manta pair output",
-      },
-    };
-  }
-  const boxMatch = /Box ID:\s+([0-9a-f]{32})/i.exec(r.stdout);
-  if (!boxMatch) {
-    return {
-      ok: false,
-      outcome: {
-        ok: false,
-        kind: "invalid_response",
-        message: "could not parse a box_id from manta pair output",
-      },
-    };
-  }
-  const urlMatch = /Server URL:\s+(\S+)/.exec(r.stdout);
-  return {
-    ok: true,
-    code: codeMatch[1],
-    boxId: boxMatch[1].toLowerCase(),
-    serverUrl: urlMatch ? urlMatch[1] : "",
-  };
 }

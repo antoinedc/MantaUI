@@ -44,7 +44,6 @@ import {
   sshTargetLabel,
   type HostFieldSelection,
 } from "../shared/sshTarget";
-import { claimWithRetry } from "./claimRetry";
 import { Button } from "./Button";
 
 const ACCENT = "var(--accent)";
@@ -61,10 +60,6 @@ const LOG_LINES_MAX = 500;
 const JUST_REFRESHED_DECAY_MS = 60_000;
 
 const INITIAL_STAGE: InstallStageId = "preflight";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 // SecretPrompt — the ONE inline card for every paused-secret prompt (BET-360
 // for the SSH key passphrase, BET-979 for the box's sudo password). The two
@@ -270,10 +265,6 @@ export function SshInstallStep({
   const [installHostLabel, setInstallHostLabel] = useState("");
   const [claimRunning, setClaimRunning] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
-  // BET-705 c: while the auto-claim is retrying a transient failure, how many
-  // seconds have elapsed so far — drives the "the box is starting up (Ns)"
-  // banner. null when not mid-retry.
-  const [claimElapsed, setClaimElapsed] = useState<number | null>(null);
   // True after the user cancels an install, until the next install starts —
   // renders a neutral "Install cancelled." card instead of a failure one.
   const [cancelled, setCancelled] = useState(false);
@@ -576,7 +567,6 @@ export function SshInstallStep({
     setLines([]);
     setDone(null);
     setClaimError(null);
-    setClaimElapsed(null);
     setCancelled(false);
     cancelRequestedRef.current = false;
     // Clear the previous handle so the event guard doesn't discard this
@@ -678,17 +668,12 @@ export function SshInstallStep({
     const resolved = resolveInstallTarget(currentSelection());
     setClaimRunning(true);
     setClaimError(null);
-    setClaimElapsed(0);
-    // Tick the "(Ns)" countdown once a second while retrying.
-    const tick = setInterval(() => setClaimElapsed((s) => (s ?? 0) + 1), 1000);
     try {
-      const attempt = () =>
-        preload.installerMintAndClaim({
-          alias: resolved.ok ? resolved.target : undefined,
-        });
-      // BET-705 c: retry transient failures (the box service not listening
-      // yet) every few seconds up to a 45s budget, with a visible countdown.
-      const { outcome } = await claimWithRetry(attempt, { sleep, now: Date.now });
+      // BET-989: a single claim attempt against the code the install already
+      // minted (read from ~/.manta/pairing.json in main). No re-mint, no retry.
+      const outcome = await preload.installerMintAndClaim({
+        alias: resolved.ok ? resolved.target : undefined,
+      });
       if (outcome.ok) {
         // Mirror the manual PairStep onPaired — but hold the step on a real
         // "Connected" state instead of advancing: the user confirms with the
@@ -697,14 +682,12 @@ export function SshInstallStep({
         setPaired(true);
         return;
       }
-      // Non-transient failure, or the retry budget exhausted → the real error.
-      setClaimError(`Pairing failed: ${outcome.message}`);
+      // Failure → surface the real error (the actual outcome.message).
+      setClaimError(outcome.message);
     } catch (e) {
       setClaimError(e instanceof Error ? e.message : String(e));
     } finally {
-      clearInterval(tick);
       setClaimRunning(false);
-      setClaimElapsed(null);
     }
   }
 
@@ -766,7 +749,6 @@ export function SshInstallStep({
         preflightFailure,
         awaitingPrompt: fingerprintPrompt !== null || secretPrompt !== null,
         claimRunning,
-        claimElapsed,
         claimError,
         cancelled,
         paired,
@@ -785,7 +767,6 @@ export function SshInstallStep({
       secretPrompt,
       secretInput,
       claimRunning,
-      claimElapsed,
       claimError,
       cancelled,
       paired,

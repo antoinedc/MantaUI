@@ -1919,8 +1919,11 @@ SHIM
   ok "Installed \`manta\` CLI shim at $MANTA_SHIM (run: manta pair)."
 
   log "Minting pairing code…"
-  # Capture the formatted pairing block; printed at the very end of main().
-  PAIR_BLOCK="$("$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" 2>/dev/null || true)"
+  # BET-989: write the machine-readable pairing sidecar the desktop auto-claim
+  # reads. manta-pair.mjs --json emits {pairing_code, box_id, expiresAt,
+  # serverUrl}; the human pairing block is no longer captured/printed on the
+  # install path (the manual `manta pair` command still prints it for humans).
+  "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs" --json > "$AUTH_DIR/pairing.json" 2>/dev/null || true
 
   if [ "$IS_MACOS" = "1" ]; then
     # macOS path (BET-277): LaunchAgent management commands, not systemctl.
@@ -2002,9 +2005,6 @@ EOF
   # of install.sh (so unit tests in scripts/install.test.mjs can call it
   # via runBootstrap). The install body stays a thin orchestrator.
   print_provider_detection_summary "$LIB" "$NODE" "$HOME" "$IS_MACOS"
-
-  # The connect block prints LAST so it's what the user sees at rest.
-  printf '%s\n' "$PAIR_BLOCK"
 
   # Cleanup: the previous install lives at $MANTA_HOME.prev until this point.
   # If we got here, everything is healthy and the new install is serving — drop
