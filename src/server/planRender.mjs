@@ -16,7 +16,7 @@ import { readFile as readFileImpl, mkdir as mkdirImpl, writeFile as writeFileImp
 import { join, dirname, resolve, sep } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { parsePlanBundle, renderPlanDoc } from "./planDoc.mjs";
-import { planSubdomain } from "./planPage.mjs";
+import { planSubdomain } from "../shared/planMode.mjs";
 import { registerPage } from "./servePage.mjs";
 
 // Directory the rendered source HTML is staged into before registerPage copies

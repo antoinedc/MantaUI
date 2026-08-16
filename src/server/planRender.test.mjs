@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { publishPlanBundle } from "./planRender.mjs";
-import { planSubdomain } from "./planPage.mjs";
+import { planSubdomain } from "../shared/planMode.mjs";
 
 const BASE_URL = "https://0123abc.boxes.mantaui.com";
 const SESSION_ID = "sess-123xYZ";

@@ -82,7 +82,6 @@ import {
   pageResponseHeaders,
   isValidSubdomain,
 } from "./servePage.mjs";
-import { publishPlanPage, readPlanMarkdown } from "./planPage.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import * as appControl from "./appControl.mjs";
@@ -188,7 +187,6 @@ function contextLimitFor(providerID, modelID) {
 const streamInterp = createStreamInterpreter({
   publish: (evt) => bus.publish(evt),
   contextLimitFor,
-  autoPublishPlan,
 });
 // BET-913 + BET-916 + BET-922: when a client (re)connects mid-state, replay the
 // current edge-only state so frames that only fire on an edge aren't lost —
@@ -205,41 +203,6 @@ bus.setSnapshot(() => streamInterp.snapshotState());
 // etc). Single source of truth — every endpoint that creates/deletes a
 // store entry uses this same deps object.
 const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
-
-// Auto-publish the plan companion page when a session's plan finishes (the
-// completed plan_exit frame relayed by streamInterp). Overrides BET-974's
-// publish-on-click with publish-on-exit: every completed plan gets a shareable
-// page (7-day TTL, replaced on revision). BEST-EFFORT + fire-and-forget — a box
-// with no public hostname, an unreadable plan file, or a publish failure must
-// never block or fail the prompt stream, so every path returns quietly.
-async function autoPublishPlan({ sessionID, part }) {
-  try {
-    const path = planPathFromPart(part);
-    if (!path) return;
-    const sessionDir = await oc.getSessionDirectory(sessionID);
-    if (!sessionDir) return;
-    const loaded = await readPlanMarkdown({ path, sessionDir }, {});
-    if (!loaded.ok) return;
-    const baseUrl = publicBaseUrl();
-    if (!baseUrl) return;
-    await publishPlanPage(
-      { sessionID, markdown: loaded.markdown, path, generatedAt: Date.now() },
-      { ...BUS_PUBLISH_DEPS, baseUrl },
-    );
-  } catch (e) {
-    console.error("[plan-page] auto-publish failed:", e?.message ?? e);
-  }
-}
-
-// The plan path the client (the `plan_exit` tool) reported. Superset of the
-// renderer's `extractPlanData` precedence (chatUtils.ts: planPath ?? path); the
-// extra `filePath` fallback is harmless — readPlanMarkdown still confines to
-// the session dir and requires `.md`.
-function planPathFromPart(part) {
-  const input = part?.state?.input;
-  const p = input?.planPath ?? input?.path ?? input?.filePath;
-  return typeof p === "string" && p.length > 0 ? p : null;
-}
 
 // BET-675: materialized in-memory session/config state. tmux:list is served
 // from memory (never a per-request tmux shell-out), and `sync` deltas are
@@ -2257,60 +2220,6 @@ const handleRequest = async (req, res) => {
         }
         const result = await unregisterPage(subdomain, BUS_PUBLISH_DEPS);
         respondJson(res, 200, { deleted: result.deleted });
-        return;
-      }
-      respondJson(res, 405, { error: "method not allowed" });
-    } catch (e) {
-      respondJson(res, 500, { error: String(e?.message ?? e) });
-    }
-    return;
-  }
-
-  // ---------- Plan companion page (BET-954) ----------
-  // POST /api/plan-page  body {sessionID, markdown, path?, title?, generatedAt?}
-  //                    → {url, subdomain, expiresAt}   (400 on missing input)
-  // Published by the remote AI (the plan card's "See in browser" action). The
-  // plan's markdown is rendered to a self-contained HTML document and
-  // registered through the EXISTING serve-page subsystem under the stable
-  // `plan-<shortSessionId>` subdomain, TTL 7 days, replacing any prior
-  // revision of the same session. The URL is whatever publishPlanPage /
-  // registerPage returns — never constructed here (it may be a public https://
-  // host or a tailnet-only address depending on how the box is reached).
-  if (path === "/api/plan-page") {
-    try {
-      const baseUrl = publicBaseUrl();
-      if (req.method === "POST") {
-        const body = await readJsonBody(req);
-        const sessionID = body?.sessionID;
-        let markdown = body?.markdown;
-        if (typeof markdown !== "string" && typeof body?.path === "string") {
-          const sessionDir = await oc.getSessionDirectory(sessionID);
-          const loaded = await readPlanMarkdown({ path: body.path, sessionDir }, {});
-          if (!loaded.ok) {
-            respondJson(res, 400, { error: loaded.error });
-            return;
-          }
-          markdown = loaded.markdown;
-        }
-        const result = await publishPlanPage(
-          {
-            sessionID,
-            markdown,
-            path: body?.path,
-            title: body?.title,
-            generatedAt: body?.generatedAt,
-          },
-          { ...BUS_PUBLISH_DEPS, baseUrl },
-        );
-        if (!result.ok) {
-          respondJson(res, 400, { error: result.error });
-          return;
-        }
-        respondJson(res, 200, {
-          url: result.url,
-          subdomain: result.subdomain,
-          expiresAt: result.expiresAt,
-        });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
