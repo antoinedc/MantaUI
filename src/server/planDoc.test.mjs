@@ -94,51 +94,104 @@ test("parsePlanBundle: non-string input returns error", () => {
 // renderPlanDoc
 // ---------------------------------------------------------------------------
 
-function renderSample() {
+function renderSample(ref) {
   const parsed = parsePlanBundle(SAMPLE_BUNDLE);
   assert.equal(parsed.ok, true);
-  return renderPlanDoc(parsed);
+  return renderPlanDoc({ ...parsed, ref });
 }
 
-test("renderPlanDoc: returns a full document with header, branding, and toggle", () => {
-  const r = renderSample();
+const FULL_DOC_SAMPLE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Model's Own Title</title>
+<script type="application/json" id="plan-meta">
+{"title":"Meta Title","sections":[{"id":"intro","heading":"Intro"},{"id":"steps","heading":"Steps"}]}
+</script>
+<style>body { color: #111; }</style>
+</head>
+<body>
+<h1 id="intro">Intro</h1>
+<p>model authored <strong>content</strong>.</p>
+<h2 id="steps">Steps</h2>
+</body>
+</html>`;
+
+test("renderPlanDoc: full-doc body is preserved verbatim with one overlay before </body>", () => {
+  const parsed = parsePlanBundle(FULL_DOC_SAMPLE);
+  assert.equal(parsed.ok, true);
+  const r = renderPlanDoc({ ...parsed, ref: "box123" });
   assert.equal(r.ok, true);
+  // The model's own document structure is intact — own title + style preserved.
   assert.ok(r.html.startsWith("<!DOCTYPE html>"));
-  assert.ok(r.html.includes("<html lang=\"en\""));
-  assert.ok(r.html.includes("<header"));
-  assert.ok(r.html.includes(">Manta</span>"));
-  assert.ok(r.html.includes("plan-theme-toggle"));
+  assert.ok(r.html.includes("<html lang=\"en\">"));
+  assert.ok(r.html.includes("<title>Model's Own Title</title>"), "model's own <title> intact");
+  assert.ok(r.html.includes("<style>body { color: #111; }</style>"), "model's own <style> intact");
+  assert.ok(!r.html.includes("Meta Title</title>"), "renderer did not inject its own title");
+  // Exactly one overlay, injected before the LAST </body>.
+  const overlays = r.html.match(/Powered by Manta/g) ?? [];
+  assert.equal(overlays.length, 1, "exactly one overlay");
+  assert.ok(r.html.includes("<a href=\"https://mantaui.com?ref=box123\""));
+  const bodyLoc = r.html.lastIndexOf("</body>");
+  const overlayLoc = r.html.lastIndexOf("Powered by Manta");
+  assert.ok(overlayLoc < bodyLoc, "overlay injected before </body>");
 });
 
-test("renderPlanDoc: includes the theme toggle script and no localStorage/iframe/external", () => {
-  const r = renderSample();
-  assert.ok(r.html.includes("prefers-color-scheme"));
-  assert.ok(r.html.includes("data-theme"));
-  assert.ok(r.html.includes("URLSearchParams"), "theme read via URLSearchParams");
-  assert.ok(r.html.includes("history.replaceState"), "theme persisted via history.replaceState");
-  assert.ok(r.html.includes("\"?theme=\" + next"), "replaceState writes ?theme= next");
-  assert.ok(!r.html.toLowerCase().includes("localstorage"));
-  assert.ok(!r.html.toLowerCase().includes("sessionstorage"));
-  assert.ok(!r.html.toLowerCase().includes("<iframe"));
-  assert.ok(!r.html.includes("http://"));
-  assert.ok(!r.html.includes("https://"));
+test("renderPlanDoc: fragment body is wrapped in a single valid doc with the meta title", () => {
+  const r = renderPlanDoc({
+    title: "Fragment Plan",
+    sections: [{ id: "a", heading: "A" }],
+    body: "<h2 id=\"a\">A</h2><p>hello</p>",
+    ref: "box9",
+  });
+  assert.equal(r.ok, true);
+  assert.ok(r.html.startsWith("<!DOCTYPE html>\n<html lang=\"en\">"));
+  assert.ok(r.html.includes("<meta name=\"viewport\""));
+  assert.ok(r.html.includes("<title>Fragment Plan</title>"), "meta title used");
+  assert.ok(r.html.includes("<h2 id=\"a\">A</h2><p>hello</p>"), "fragment body preserved");
+  assert.ok(r.html.includes("\n</body>\n</html>\n"), "wrapped as one valid doc");
+  assert.ok(r.html.includes("<a href=\"https://mantaui.com?ref=box9\""));
+});
+
+test("renderPlanDoc: non-empty ref adds ?ref=<encoded id> to the overlay href", () => {
+  const r = renderSample("a b&c");
+  assert.equal(r.ok, true);
+  assert.ok(r.html.includes("https://mantaui.com?ref=a%20b%26c"), "ref URL-encoded");
+});
+
+test("renderPlanDoc: empty / absent ref yields plain https://mantaui.com with no ?ref=", () => {
+  for (const ref of ["", undefined]) {
+    const r = renderSample(ref);
+    assert.equal(r.ok, true);
+    assert.ok(r.html.includes("<a href=\"https://mantaui.com\""), "plain href when ref empty/absent");
+    assert.ok(!r.html.includes("?ref="), "no ?ref query when ref empty/absent");
+  }
 });
 
 test("renderPlanDoc: renders NO Summary nav even when sections.length > 1", () => {
   const parsed = parsePlanBundle(SAMPLE_BUNDLE);
   assert.equal(parsed.ok, true);
   assert.ok(parsed.sections.length > 1, "sample has multiple sections");
-  const r = renderPlanDoc(parsed);
+  const r = renderSample("box");
   assert.equal(r.ok, true);
   assert.ok(!r.html.includes("Summary"));
   assert.ok(!r.html.includes("class=\"summary\""));
   assert.ok(!r.html.includes("aria-label=\"Summary\""));
 });
 
-test("renderPlanDoc: base stylesheet widens the body container to 1080px", () => {
-  const r = renderSample();
-  assert.ok(r.html.includes(".wrap { max-width: 1080px; margin: 0 auto; padding: 32px 40px; }"));
-  assert.ok(!r.html.includes("max-width: 720px"));
+test("renderPlanDoc: output contains NO shell / theme / token / storage remnants", () => {
+  const r = renderSample("box1");
+  assert.equal(r.ok, true);
+  const lower = r.html.toLowerCase();
+  assert.ok(!r.html.includes("plan-theme-toggle"), "no theme toggle");
+  assert.ok(!r.html.includes("doc-header"), "no doc header");
+  assert.ok(!lower.includes("data-theme"), "no data-theme");
+  assert.ok(!r.html.includes("LIGHT_TOKENS"), "no light token block");
+  assert.ok(!r.html.includes("DARK_TOKENS"), "no dark token block");
+  assert.ok(!lower.includes("localstorage"), "no localStorage");
+  assert.ok(!lower.includes("sessionstorage"), "no sessionStorage");
+  assert.ok(!r.html.includes("THEME_SCRIPT"), "no theme script");
+  assert.ok(!r.html.includes("BASE_STYLE"), "no base style");
 });
 
 test("renderPlanDoc: renders NO Summary block when sections.length <= 1", () => {

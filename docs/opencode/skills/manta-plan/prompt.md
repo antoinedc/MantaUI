@@ -41,13 +41,50 @@ The file must contain:
    by that section's content, styled freely with inline `<style>`/classes as
    you like. The body is fully yours to author — no chrome from us.
 
+**Author a COMPLETE, self-contained standalone HTML page — you are the one who
+owns the whole document.** The renderer serves your page as-is with NO wrapper,
+header, or chrome around it. The full page IS the plan. So the file must carry
+its own:
+
+- `<!DOCTYPE html>` and `<html lang="en">`
+- `<head>` with its own `<title>` (a good plan title) and
+  `<meta name="viewport" content="width=device-width, initial-scale=1">`
+- its own `<style>` (your palette, layout, typography — exactly what you want
+  a reviewer to see; do not rely on any shared/default styling)
+- a `<body>` whose content is the plan
+
+The `plan-meta` script block can live in the `<head>` or `<body>` — it is
+stripped before serving and does not render.
+
 **Contract rule (mandatory):** EVERY `id` in `plan-meta.sections` MUST appear
 as a literal `id="<id>"` attribute on the matching `<h2>` in the body —
 otherwise `plan_render` rejects the publish. If it would reject, fix the
 anchor rather than skipping. Write the prose in ordinary HTML, not markdown;
 the body is served as-is.
 
-**Published-page constraint (storage-free):** the served page runs in a sandboxed origin where `localStorage`/`sessionStorage` are UNAVAILABLE and throw a `SecurityError`. Never use them in the body or in any `<script>` you add. The light/dark theme is handled automatically by the renderer via the `?theme=` URL query string — do NOT write your own theme toggle or persistence logic. Keep the body static HTML; any tiny script must not touch storage.
+**Published-page constraint (storage-free):** the served page runs in a sandboxed origin where `localStorage`/`sessionStorage` are UNAVAILABLE and throw a `SecurityError`. Never use them anywhere in the page. No external CDN/resources/fonts — anything you need must be inline (inline `<style>` and inline SVG are fine). Any `<script>` you add must be storage-free. There is no theme toggle from us — paint your page however you want, but never rely on storage, external resources, or any injected chrome.
+
+**Spec-presentation checklist (a reviewed plan reads like this):**
+1. **Top summary** — an `<h1>` title plus one tight "what / why / outcome"
+   paragraph up front.
+2. **`<nav>` table of contents** linking to each section — one link per
+   `plan-meta.sections` id (those ids become the `id` attrs on the matching
+   `<h2>`s).
+3. **Clear hierarchy + readable type** — comfortable line-height (≈1.5–1.7),
+   ~72ch max prose width, generous padding; consistent spacing; a tasteful,
+   restrained palette.
+4. **Mockup(s)** — realistic product screens (windows/panels/controls) with
+   short captions and behavior notes, designed rather than wireframe-stubs.
+   See the mockups section below.
+5. **Accessibility** — semantic headings, sufficient contrast,
+   visible `focus-visible` states.
+6. **No TODO/lorem/placeholder text** — the page is self-explanatory to a
+   reviewer.
+
+**Overlay is automatic:** a small "Powered by Manta" badge is injected
+automatically at the bottom-right. Keep the bottom-right corner visually clear
+(some breathing room) and **do not add your own branding or footer that would
+collide with it**.
 
 ## 3. Mockups (only for UI/layout changes)
 
