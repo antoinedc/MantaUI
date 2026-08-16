@@ -1018,52 +1018,12 @@ function safeJoin(root, sub) {
   return target;
 }
 
-// Read a request body, capped at 64KB (push subscriptions are ~1KB; the cap
-// guards against a runaway/hostile body).
-//   parse=true  → JSON.parse the bytes (the common path for /api/* POSTs).
-//   parse=false → return the EXACT UTF-8 string (webhook delivery needs the
-//                 raw bytes to recompute the HMAC; parsing + re-serializing
-//                 would change whitespace).
-function readBody(req, { parse = true, limit = 64 * 1024 } = {}) {
-  return new Promise((resolve, reject) => {
-    let size = 0;
-    const chunks = [];
-    req.on("data", (c) => {
-      size += c.length;
-      if (size > limit) {
-        reject(new Error("body too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf-8");
-      if (!parse) return resolve(raw);
-      const trimmed = raw.trim();
-      if (!trimmed) return resolve({});
-      try {
-        resolve(JSON.parse(trimmed));
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-// JSON-parse variant. Thin shim kept for the /api/* call sites so each one
-// reads as `await readJsonBody(req)` instead of `await readBody(req, { parse: true })`.
-const readJsonBody = (req, limit) => readBody(req, { parse: true, limit });
-// Raw-bytes variant for webhook HMAC. Thin shim — see `readBody` for why we
-// need exact bytes (parsing + re-serializing would change whitespace).
-const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
-
-// Raw BINARY body for octet-stream uploads (voice audio). Unlike readBody this
-// returns the exact Buffer (its parse:false path coerces to a UTF-8 string,
-// which would mangle audio bytes). Capped so a hostile/runaway body can't OOM
-// the box; 16 MB comfortably covers a 5-minute opus/webm clip.
-function readRawBuffer(req, limit = 16 * 1024 * 1024) {
+// Drain a request body into a single Buffer, capped at `limit` bytes. Shared
+// by every body reader below (single source of truth for the read-up-to-N /
+// reject + destroy on overflow loop). On overflow it rejects with "body too
+// large" and destroys the request so the excess bytes aren't buffered and the
+// connection is freed.
+function readBodyChunks(req, limit) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -1079,6 +1039,38 @@ function readRawBuffer(req, limit = 16 * 1024 * 1024) {
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+// Read a request body, capped at 64KB (push subscriptions are ~1KB; the cap
+// guards against a runaway/hostile body).
+//   parse=true  → JSON.parse the bytes (the common path for /api/* POSTs).
+//   parse=false → return the EXACT UTF-8 string (webhook delivery needs the
+//                 raw bytes to recompute the HMAC; parsing + re-serializing
+//                 would change whitespace).
+function readBody(req, { parse = true, limit = 64 * 1024 } = {}) {
+  return readBodyChunks(req, limit).then((buf) => {
+    const raw = buf.toString("utf-8");
+    if (!parse) return raw;
+    const trimmed = raw.trim();
+    if (!trimmed) return {};
+    return JSON.parse(trimmed);
+  });
+}
+
+// JSON-parse variant. Thin shim kept for the /api/* call sites so each one
+// reads as `await readJsonBody(req)` instead of `await readBody(req, { parse: true })`.
+const readJsonBody = (req, limit) => readBody(req, { parse: true, limit });
+// Raw-bytes variant for webhook HMAC. Thin shim — see `readBody` for why we
+// need exact bytes (parsing + re-serializing would change whitespace).
+const readRawBody = (req, limit) => readBody(req, { parse: false, limit });
+
+// Raw BINARY body for octet-stream uploads (voice audio). Returns the exact
+// Buffer via readBodyChunks. Unlike readBody its parse:false path coerces to a
+// UTF-8 string, which would mangle audio bytes — so it keeps its own Buffer
+// contract. Capped so a hostile/runaway body can't OOM the box; 16 MB
+// comfortably covers a 5-minute opus/webm clip.
+function readRawBuffer(req, limit = 16 * 1024 * 1024) {
+  return readBodyChunks(req, limit);
 }
 
 // ---------- tiny HTTP helpers ----------
