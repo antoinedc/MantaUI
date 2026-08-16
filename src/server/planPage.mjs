@@ -37,40 +37,21 @@ import rehypeHighlight from "rehype-highlight";
 import { visit } from "unist-util-visit";
 import { statePath } from "../shared/paths.mjs";
 import { extractPlanMockups } from "../shared/planMockups.mjs";
+import { planSubdomain } from "../shared/planMode.mjs";
 import { registerPage } from "./servePage.mjs";
+
+// Single source for the subdomain scheme: the shared module owns
+// `planSubdomain`/`planPageUrl` (BET-992). Re-export so existing server
+// consumers importing it from here keep working — same function, not a copy.
+export { planSubdomain };
 
 // 7 days — matching the artifact mailbox, not the 24h serve-page default.
 export const PLAN_TTL_HOURS = 168;
-
-// How many [a-z0-9] chars of the session id survive into the subdomain. Kept
-// short so `plan-` + shortId never approaches the 63-char ceiling.
-const SHORT_ID_LEN = 20;
 
 // Directory the rendered source HTML is staged into before registerPage copies
 // it into the durable pages tree. Goes through statePath() (state-file rule).
 function planSrcDir() {
   return statePath("plan-pages");
-}
-
-// ---------------------------------------------------------------------------
-// Subdomain derivation — pure
-// ---------------------------------------------------------------------------
-
-/**
- * The stable subdomain for a session's plan page: `plan-<shortSessionId>`.
- * `shortSessionId` is the session id lowercased, non-alphanumerics stripped,
- * truncated to SHORT_ID_LEN chars. Returns null when the input yields no
- * usable slug (caller must refuse, matching the "never hand back a 404 URL"
- * rule). The result always satisfies isValidSubdomain.
- */
-export function planSubdomain(sessionID) {
-  if (typeof sessionID !== "string" || sessionID.length === 0) return null;
-  const slug = sessionID
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "")
-    .slice(0, SHORT_ID_LEN);
-  if (!slug) return null;
-  return `plan-${slug}`;
 }
 
 // ---------------------------------------------------------------------------
