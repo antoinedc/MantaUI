@@ -570,28 +570,26 @@ describe("mintAndClaim", () => {
     ).rejects.toThrow(/persist callback is required/);
   });
 
-  it("mints a code over SSH + claims it via the existing claim path", async () => {
+  it("reads the pairing sidecar + claims it via the existing claim path", async () => {
     const HEX32 = "0123456789abcdef0123456789abcdef";
     const HEX32b = "fedcba9876543210fedcba9876543210";
     const fake = makeFakeChild();
     const spawn: SpawnFn = () => {
       setImmediate(() => {
         fake.pushStdout(
-          [
-            "  ✓ Manta server is running — connect your devices:",
-            "",
-            "  Pairing code:  847291",
-            `  Box ID:        ${HEX32}`,
-            "  Server URL:    https://box.example",
-            "  Expires:       5 minutes",
-          ].join("\n"),
+          JSON.stringify({
+            pairing_code: "847291",
+            box_id: HEX32,
+            expiresAt: 1750000000000,
+            serverUrl: "https://box.example",
+          }),
         );
         fake.fireExit(0);
       });
       return fake.child as any;
     };
     const fetchImpl = vi.fn(async (url: string) => {
-      // Verify the claim URL was the one parsed from the pair block.
+      // The claim URL must be the serverUrl read from the sidecar.
       expect(url).toBe("https://box.example/auth/claim");
       return {
         status: 200,
@@ -614,26 +612,21 @@ describe("mintAndClaim", () => {
     ]);
   });
 
-  it("falls back to boxDirectUrl(boxId) when no Server URL line is printed (public path)", async () => {
+  it("falls back to boxDirectUrl(boxId) when the sidecar has no serverUrl (public path)", async () => {
     const HEX32 = "0123456789abcdef0123456789abcdef";
     const HEX32b = "fedcba9876543210fedcba9876543210";
     const fake = makeFakeChild();
     const spawn: SpawnFn = () => {
       setImmediate(() => {
+        // no serverUrl → public path → claim at <boxId>.boxes.mantaui.com
         fake.pushStdout(
-          [
-            "  Pairing code:  847291",
-            `  Box ID:        ${HEX32}`,
-            // no Server URL → public path → claim at <boxId>.boxes.mantaui.com
-          ].join("\n"),
+          JSON.stringify({ pairing_code: "847291", box_id: HEX32 }),
         );
         fake.fireExit(0);
       });
       return fake.child as any;
     };
     const fetchImpl = vi.fn(async (url: string) => {
-      // boxDirectUrl returns https://<boxId>.boxes.mantaui.com — the
-      // canonical URL the desktop persists for direct mode.
       expect(url).toMatch(
         new RegExp(`^https://${HEX32}\\.boxes\\.mantaui\\.com/auth/claim$`),
       );
@@ -657,7 +650,7 @@ describe("mintAndClaim", () => {
     const spawn: SpawnFn = () => {
       setImmediate(() => {
         fake.pushStdout(
-          ["  Pairing code:  847291", `  Box ID:        ${HEX32}`].join("\n"),
+          JSON.stringify({ pairing_code: "847291", box_id: HEX32 }),
         );
         fake.fireExit(0);
       });
@@ -678,7 +671,7 @@ describe("mintAndClaim", () => {
     });
   });
 
-  it("returns a failure outcome when `manta pair` exits non-zero on the box", async () => {
+  it("returns a network failure when reading the sidecar exits non-zero on the box", async () => {
     const fake = makeFakeChild();
     const spawn: SpawnFn = () => {
       setImmediate(() => fake.fireExit(1));
@@ -692,11 +685,30 @@ describe("mintAndClaim", () => {
     expect(out.kind).toBe("network");
   });
 
-  it("returns an invalid_response when the box's pair output is unparseable", async () => {
+  it("returns a network failure when the sidecar is unparseable JSON", async () => {
     const fake = makeFakeChild();
     const spawn: SpawnFn = () => {
       setImmediate(() => {
-        fake.pushStdout("not a pairing block at all\n");
+        fake.pushStdout("not json at all\n");
+        fake.fireExit(0);
+      });
+      return fake.child as any;
+    };
+    const out = (await mintAndClaim("dev", {
+      spawn,
+      persist: () => {},
+    })) as Extract<ClaimOutcome, { ok: false }>;
+    expect(out.ok).toBe(false);
+    expect(out.kind).toBe("network");
+  });
+
+  it("returns an invalid_response when the sidecar has no valid code / box_id", async () => {
+    const fake = makeFakeChild();
+    const spawn: SpawnFn = () => {
+      setImmediate(() => {
+        fake.pushStdout(
+          JSON.stringify({ pairing_code: "12", box_id: "short" }),
+        );
         fake.fireExit(0);
       });
       return fake.child as any;

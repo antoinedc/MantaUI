@@ -25,7 +25,6 @@ const base: ConnectInput = {
   preflightFailure: null,
   awaitingPrompt: false,
   claimRunning: false,
-  claimElapsed: null,
   claimError: null,
   cancelled: false,
   paired: false,
@@ -88,8 +87,12 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     expect(s.actions).toEqual(["install"]);
   });
 
-  it("row 4 — claim error: 'Installed, but pairing didn't complete' + hint", () => {
-    const s = deriveConnectPanel({ ...base, claimError: "x", stage: "pairing" });
+  it("row 4 — claim error: 'Installed, but pairing didn't complete' + the real error", () => {
+    const s = deriveConnectPanel({
+      ...base,
+      claimError: "Couldn't reach the server. Check the URL and try again.",
+      stage: "pairing",
+    });
     expect(status({ claimError: "x", stage: "pairing" })).toEqual({
       tone: "error",
       text: "Installed, but pairing didn't complete",
@@ -97,6 +100,12 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     });
     expect(s.status.progress).toBe(5 / 6);
     expect(s.details.kind).toBe("hint");
+    if (s.details.kind === "hint") {
+      // The real claim outcome.message is the primary text shown.
+      expect(s.details.text).toBe(
+        "Couldn't reach the server. Check the URL and try again.",
+      );
+    }
     expect(s.actions).toEqual(["pairManually", "retry"]);
   });
 
@@ -142,27 +151,21 @@ describe("deriveConnectPanel — precedence table (BET-961)", () => {
     expect(s.actions).toEqual(["cancel"]);
   });
 
-  it("row 7 — claim running: 'box is still starting' wording + retry substatus", () => {
+  it("row 7 — claim running: a single 'Pairing with this app' state, no retry substatus", () => {
     const s = deriveConnectPanel({
       ...base,
       claimRunning: true,
-      claimElapsed: 5,
       stage: "pairing",
       elapsedSeconds: 53,
       logLineCount: 1,
     });
-    expect(status({ claimRunning: true, claimElapsed: 5, stage: "pairing", elapsedSeconds: 53 })).toEqual({
+    expect(status({ claimRunning: true, stage: "pairing", elapsedSeconds: 53 })).toEqual({
       tone: "running",
-      text: "Pairing — the box is still starting",
+      text: "Pairing with this app",
       meta: "5 of 6 · 0:53",
     });
-    expect(s.status.sub).toBe("retrying every 2s · this is normal on a fresh install");
+    expect(s.status.sub).toBeNull();
     expect(s.actions).toEqual(["cancel"]);
-
-    // claimElapsed === 0 → plain "Pairing with this app", no substatus.
-    const t0 = deriveConnectPanel({ ...base, claimRunning: true, claimElapsed: 0, stage: "pairing" });
-    expect(t0.status.text).toBe("Pairing with this app");
-    expect(t0.status.sub).toBeNull();
   });
 
   it("row 8 — running: stage label + elapsed meta", () => {

@@ -36,8 +36,9 @@
 #   3. opencode installs and comes up on 127.0.0.1:4096.
 #   4. Both LaunchAgents load into the GUI domain and keep their process alive.
 #   5. manta-server answers /auth/status on 127.0.0.1:8787.
-#   6. The install tail prints a 6-digit pairing code (the last screen a user
-#      sees) and NEVER prints a systemctl command.
+#   6. The install writes ~/.manta/pairing.json (the machine-readable sidecar
+#      the desktop auto-claim reads — BET-989), does NOT print the human pairing
+#      block, and NEVER prints a systemctl command.
 #   7. `manta pair` (the ~/.local/bin shim) mints a FRESH code…
 #   8. …which /auth/claim exchanges for a real box_token…
 #   9. …that authenticates a tmux RPC — i.e. the server can actually reach the
@@ -223,15 +224,23 @@ jobs:
           fi
           echo "ok."
 
-      - name: Assert — the install tail printed a pairing code
+      - name: Assert — install wrote the pairing sidecar (BET-989, no printed block)
         run: |
           set -euo pipefail
-          grep -Eq '^ *Pairing code: +[0-9]{6}$' "$LOG" \
-            || { echo "FAIL: no 6-digit pairing code in the install output"; tail -40 "$LOG"; exit 1; }
-          grep -q "Manta server is running" "$LOG" \
-            || { echo "FAIL: connect block missing"; exit 1; }
-          echo "pairing block present:"
-          grep -E '^ *(Pairing code|Box ID|Server URL):' "$LOG"
+          # BET-989: the install no longer prints the human pairing block; it
+          # writes the machine-readable sidecar the desktop auto-claim reads.
+          sidecar="$HOME/.manta/pairing.json"
+          [ -f "$sidecar" ] || { echo "FAIL: missing $sidecar (install should write it)"; exit 1; }
+          code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pairing_code",""))' "$sidecar")"
+          box="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("box_id",""))' "$sidecar")"
+          [[ "$code" =~ ^[0-9]{6}$ ]] || { echo "FAIL: sidecar pairing_code invalid ($code)"; exit 1; }
+          [[ "$box" =~ ^[0-9a-f]{32}$ ]] || { echo "FAIL: sidecar box_id invalid ($box)"; exit 1; }
+          echo "pairing sidecar: code=$code box_id=$box"
+          # The human block must no longer appear in the install tail.
+          if grep -Eq '^ *Pairing code: +[0-9]{6}$' "$LOG"; then
+            echo "FAIL: install printed the pairing block; it should only write the sidecar"
+            exit 1
+          fi
 
       - name: Assert — both LaunchAgents are loaded and alive
         run: |

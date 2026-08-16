@@ -87,6 +87,23 @@ async function main() {
     return;
   }
 
+  // BET-989: `--json` writes the machine-readable sidecar the desktop install
+  // auto-claim reads (single writer of ~/.manta/pairing.json). No human block,
+  // no formatPairingOutput. JSON.stringify drops `undefined` keys, so a missing
+  // ingress serverUrl simply doesn't appear — the desktop derives the public
+  // hostname from the box_id.
+  if (process.argv[2] === "--json") {
+    process.stdout.write(
+      JSON.stringify({
+        pairing_code: data?.pairing_code,
+        box_id: data?.box_id,
+        expiresAt: data?.expiresAt,
+        serverUrl: readIngressServerUrl(cfg.authDir),
+      }),
+    );
+    return;
+  }
+
   try {
     // BET-386: scheme comes from cfg.urlScheme (MANTA_CHANNEL, resolved by
     // resolveConfig()) so a staging/dev box prints its own channel's pair
