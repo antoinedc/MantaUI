@@ -439,3 +439,43 @@ test("release_is_current: an unreadable installed stamp is never 'current'", () 
   assert.equal(isCurrent("", "", "0.0.29", ""), false);
   assert.equal(isCurrent("", "", "0.0.29", "def456"), false);
 });
+
+// --- should_skip_self_update: the BET-1016 early-exit decision ------------------
+//
+// The updater's early exit must skip the whole update ONLY when the box is
+// current AND opencode is unchanged. If opencode changed, the box must keep
+// going so its restart step runs — otherwise an opencode-only upgrade is
+// swallowed by the cheap exit and the new binary never gets restarted. This is
+// the full 2x2 (box-current x opencode-changed) matrix.
+
+function shouldSkip(installedVersion, installedSha, releaseVersion, releaseSha, opencodeChanged) {
+  const script = `
+    log() { :; }; ok() { :; }; warn() { :; }; die() { echo "$*" >&2; exit 1; }
+    . "${RELEASE_LIB}"
+    if should_skip_self_update "$1" "$2" "$3" "$4" "$5"; then echo skip; else echo prog; fi
+  `;
+  const out = execFileSync(
+    "bash",
+    ["-c", script, "bash", installedVersion, installedSha, releaseVersion, releaseSha, opencodeChanged],
+    { encoding: "utf-8" },
+  );
+  return out.trim() === "skip";
+}
+
+test("should_skip_self_update: box current + opencode unchanged → skip", () => {
+  assert.equal(shouldSkip("0.0.29", "abc123", "0.0.29", "abc123", "0"), true);
+});
+
+test("should_skip_self_update: box current + opencode CHANGED → do NOT skip", () => {
+  // An opencode-only upgrade on an already-current box must fall through to the
+  // restart — this is the whole reason the early exit is now conditional.
+  assert.equal(shouldSkip("0.0.29", "abc123", "0.0.29", "abc123", "1"), false);
+});
+
+test("should_skip_self_update: box stale + opencode unchanged → do NOT skip", () => {
+  assert.equal(shouldSkip("0.0.29", "abc123", "0.0.30", "def456", "0"), false);
+});
+
+test("should_skip_self_update: box stale + opencode changed → do NOT skip", () => {
+  assert.equal(shouldSkip("0.0.29", "abc123", "0.0.30", "def456", "1"), false);
+});

@@ -51,7 +51,7 @@ import {
   loadNotes,
   startVoiceSweep,
 } from "./voiceNotes.mjs";
-import { startServerUpdatePoller } from "./serverUpdate.mjs";
+import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
 import { startUsagePoller } from "./usage.mjs";
@@ -845,8 +845,20 @@ try {
   ];
 } catch { /* non-fatal */ }
 
+// Forward opencode's own `installation.update-available` onto the shared
+// serverUpdateAvailable banner. Dedup state is held in the forwarder closure.
+const forwardOpencodeUpdate = createOpencodeUpdateForwarder();
+
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
+  // Map opencode's own installation.update-available onto the EXISTING
+  // serverUpdateAvailable banner (BET-1016). The forwarder is dedup-gated by
+  // opencode version and returns null for non-update events, so this is a no-op
+  // for everything else and never re-raises a version already shown.
+  const forwardedUpdate = forwardOpencodeUpdate(evt);
+  if (forwardedUpdate) {
+    bus.publish(forwardedUpdate);
+  }
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second
   // stream/endpoint). Consumers (S1b) demux by `kind:"stream"`.

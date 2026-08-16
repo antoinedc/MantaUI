@@ -2837,6 +2837,32 @@ Consequences worth knowing:
 - Two arches built from different commits is now a hard publish error rather
   than something only a version mismatch could have caught.
 
+### Self-update also upgrades the opencode binary (BET-1016)
+
+opencode is no longer frozen at install time — `scripts/self-update.sh` now
+runs `opencode upgrade` (the CLI command on the installed binary) as part of
+every update, so a box stops drifting from whatever it was installed with
+(measured 2026-08-16: installed 1.18.10 vs latest upstream 1.18.18). Key facts:
+
+- **Non-fatal**: an offline box, a missing CLI, or a refused upgrade logs a
+  warning and continues — the box update must never be aborted by opencode
+  (dry-run rule: mirrors `refresh_opencode_tools()`).
+- **Runs BEFORE the packaged-install early exit**, and that early exit is now
+  conditional on BOTH the box being current AND opencode being unchanged —
+  otherwise an opencode-only upgrade would be swallowed by the cheap exit and
+  the upgraded (but un-restarted) binary would stay inert. The decision is
+  `should_skip_self_update` in `scripts/lib/release.sh` (pure, unit-tested
+  alongside `release_is_current`).
+- **opencode is unpinned by design** — never pin a version; the whole point is
+  following upstream.
+- **The upgrade is surfaced through the EXISTING shared update banner**: the
+  server maps opencode's `installation.update-available` event onto the same
+  `serverUpdateAvailable` bus event, dedup-gated per opencode version
+  (`createOpencodeUpdateForwarder` in `src/server/serverUpdate.mjs`). No second
+  banner variant, no new confirm copy — the existing "Update the box?" flow
+  already warns it restarts opencode and ends running agent turns, which is
+  exactly right for this.
+
 ### Verifying a deploy actually landed
 
 Never trust "the workflow was green" alone for the FIRST run of a new pipeline —
