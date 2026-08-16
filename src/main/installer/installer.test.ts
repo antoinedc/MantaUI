@@ -13,6 +13,7 @@ import {
   DEFAULT_SSH_CONFIG_PATH,
   type SpawnFn,
 } from "./installer.js";
+import type { PreflightResult } from "./preflight.js";
 import type { ClaimOutcome } from "../../shared/claim.mjs";
 import type { AppConfig } from "../../shared/types.js";
 import {
@@ -23,6 +24,29 @@ import {
   PROBE_KEYS,
   type ProbeResponse,
 } from "./_testFixtures.js";
+import { computeFingerprint } from "./knownHosts.js";
+
+// The key ssh-keyscan "offers" for the host in the BET-1008 keyscan tests.
+const SCAN_KEY = "AAAB3NzaC1lZDI1NTE5AAAAIBET1008ScanKey==";
+
+// Build the preflight response set where the reachability probe refuses on a
+// host key with the ONE-LINE non-interactive ssh output, and ssh-keyscan (for
+// the resolved destination "dev") answers with `keyscanResponse`. Routes the
+// spawn stub to the refusal and to the keyscan in one place so the two
+// BET-1008 verdict tests share no duplicated setup. Respons is keyed on the
+// destination ("dev") — both `ssh -G dev` and `ssh-keyscan … -- dev` match it
+// (makeProbeSpawn matches the last arg); ssh -G just ignores the keyscan output.
+async function preflightKeyscanVerdict(
+  keyscanResponse: ProbeResponse,
+): Promise<PreflightResult> {
+  const responses = happyLinuxProbes();
+  responses[PROBE_KEYS.REACHABILITY] = {
+    code: 255,
+    stderr: "Host key verification failed.\n",
+  };
+  responses["dev"] = keyscanResponse;
+  return preflightBox("dev", { spawn: makeProbeSpawn(responses) });
+}
 
 // ===========================================================================
 // listSshHosts
@@ -132,6 +156,31 @@ describe("preflightBox", () => {
     // Short-circuited — no OS/unsupported noise on top of the trust prompt.
     expect(r.failures).toHaveLength(1);
     expect(r.failures[0].cause).toMatch(/not yet trusted/);
+  });
+
+  it("classifies a never-seen host as unknown-host via ssh-keyscan when ssh prints only the one-line refusal (BET-1008)", async () => {
+    // A non-interactive ssh prints ONLY "Host key verification failed." on an
+    // unknown host (no fingerprint block — that only ever appears on a TTY).
+    // The fingerprint must come from ssh-keyscan, so the spawn stub routes
+    // the reachability probe to the refusal and the keyscan to a known key.
+    const r = await preflightKeyscanVerdict({
+      code: 0,
+      stdout: `dev ssh-ed25519 ${SCAN_KEY}\n`,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.probes.reachability).toBe("unknown-host");
+    expect(r.probes.hostFingerprint).toEqual({
+      algo: "ED25519",
+      sha256: computeFingerprint(SCAN_KEY),
+    });
+    expect(r.unknownHost).toEqual(r.probes.hostFingerprint);
+  });
+
+  it("falls back to unreachable when ssh refuses on the host key but ssh-keyscan offers nothing (BET-1008)", async () => {
+    const r = await preflightKeyscanVerdict({ code: 1, stdout: "", stderr: "" });
+    expect(r.ok).toBe(false);
+    expect(r.probes.reachability).toBe("unreachable");
+    expect(r.probes.hostFingerprint).toBeNull();
   });
 
   it("classifies tailscale-running → ingressMode=tailscale (wins over macOS)", async () => {

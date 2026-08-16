@@ -46,6 +46,7 @@ import {
   type Reachability,
 } from "./preflight.js";
 import { parseFingerprint, isHostKeyVerificationFailure, type HostFingerprint } from "./fingerprint.js";
+import { probeOfferedFingerprint } from "./knownHosts.js";
 import {
   foldChunk,
   buildStageSnapshot,
@@ -282,10 +283,12 @@ async function probeReachability(alias: SshTarget, opts: ProbeOpts): Promise<Rea
   //   resolve hostname" → unreachable
   if (r.code === 255 || r.code === null) {
     if (isHostKeyVerificationFailure(r.stderr)) {
-      // Host-key refusal without a parseable fingerprint (rare ssh build):
-      // still unknown-host, but with no fingerprint to show — the trust UI
-      // cannot verify a key against nothing, so treat as unreachable and
-      // let the standard failure guidance surface.
+      // A non-interactive ssh prints ONLY "Host key verification failed." —
+      // no fingerprint reaches us — so fetch the key the host is offering
+      // instead of giving up and calling a reachable box unreachable. The
+      // security guarantee is unchanged: see probeOfferedFingerprint.
+      const offered = await probeOfferedFingerprint(alias, { spawn: opts.spawn });
+      if (offered) return { reachability: "unknown-host", fingerprint: offered };
       return { reachability: "unreachable", fingerprint: null };
     }
     const stderr = r.stderr;

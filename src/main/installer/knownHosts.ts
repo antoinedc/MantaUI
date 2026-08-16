@@ -186,6 +186,67 @@ export function fingerprintsMatch(a: string, b: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// hostKeyAlgoLabel / probeOfferedFingerprint — the probing half of the trust
+// flow. See installer.ts probeReachability for why the fingerprint has to be
+// FETCHED (ssh-keyscan) instead of scraped off an ssh failure.
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenSSH's own algorithm token (`ssh-ed25519`) → the display name the
+ * fingerprint card shows (`ED25519`), matching what parseFingerprint
+ * normalises to. Pure.
+ */
+export function hostKeyAlgoLabel(algo: string): string {
+  const a = String(algo).toLowerCase();
+  if (a.includes("ed25519")) return "ED25519";
+  if (a.includes("ecdsa")) return "ECDSA";
+  if (a.includes("rsa")) return "RSA";
+  if (a.includes("dss") || a.includes("dsa")) return "DSA";
+  return algo.toUpperCase();
+}
+
+/**
+ * The fingerprint a host is currently offering, fetched with ssh-keyscan.
+ *
+ * WHY THIS EXISTS: a non-interactive `ssh` prints only "Host key verification
+ * failed." on a never-seen host — the fingerprint block parseFingerprint looks
+ * for is emitted ONLY on an interactive terminal, which a desktop app never
+ * has (verified against OpenSSH 9.6). So the fingerprint has to be fetched,
+ * not scraped. This is NOT a weaker trust model: the fingerprint shown to the
+ * user is unauthenticated either way, and the real guarantee is unchanged —
+ * the user compares it out of band, and trustHost re-scans and refuses to
+ * write a key whose hash does not match what was shown.
+ *
+ * Returns null when the target cannot be resolved or offers no usable key;
+ * the caller then falls back to the ordinary "unreachable" verdict.
+ */
+export async function probeOfferedFingerprint(
+  target: SshTarget,
+  deps: TrustHostDeps = {},
+): Promise<HostFingerprint | null> {
+  let resolved: ResolvedHostKey;
+  try {
+    resolved = await resolveKnownHostsKey(target, deps);
+  } catch {
+    return null;
+  }
+  if (!resolved.hostname || resolved.hostname.trim() === "") return null;
+  const keys = await scanHostKeys(resolved.hostname, resolved.port, deps);
+  if (keys.length === 0) return null;
+  // Prefer the algorithm OpenSSH itself prefers, so the key we show is the
+  // key a later connection will actually be offered.
+  const preferred =
+    keys.find((k) => k.algo === "ssh-ed25519") ??
+    keys.find((k) => k.algo.startsWith("ecdsa-")) ??
+    keys.find((k) => k.algo === "ssh-rsa") ??
+    keys[0];
+  return {
+    algo: hostKeyAlgoLabel(preferred.algo),
+    sha256: computeFingerprint(preferred.keyBase64),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // formatKnownHostsLine — the single known_hosts entry. Non-default ports
 // use the bracketed `[host]:port` form ssh looks up; port 22 is bare.
 // ---------------------------------------------------------------------------
