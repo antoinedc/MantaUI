@@ -28,6 +28,7 @@ import {
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
+import { useRailGlide } from "./RailGlide";
 import { ConfirmModal } from "./ConfirmModal";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
@@ -127,6 +128,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   // computed nav order. Keys: `pin:<id>` | `group:<session>` | `win:<session>:<idx>`
   // | `job:<session>:<idx>`.
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
+
+  const railGlide = useRailGlide();
 
   useEffect(() => {
     localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed]));
@@ -635,13 +638,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       </div>
 
       <div
-        className="flex-1 overflow-y-auto px-2 pb-2 outline-none"
+        className="relative flex-1 overflow-y-auto px-2 pb-2 outline-none"
         role="tree"
         aria-label="Sessions"
         tabIndex={-1}
         data-density="comfortable"
         onKeyDown={onRailKeyDown}
+        {...railGlide.containerProps}
       >
+        {railGlide.glide}
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.
@@ -1284,9 +1289,10 @@ function RailCreateRow({
 }) {
   return (
     <button
+      data-rail-row=""
       onClick={onClick}
       title={`${label} (${shortcut})`}
-      className="group flex w-full items-center gap-2 rounded-md mb-1 min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] text-left transition-colors outline-none hover:bg-fill-hover focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
+      className="group relative z-[1] flex w-full items-center gap-2 rounded-md mb-1 min-h-[var(--row-h)] px-[var(--row-px)] py-[var(--row-py)] text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
     >
       <span className="flex w-[7px] shrink-0 items-center justify-center text-text-faint group-hover:text-text">
         <Plus size={11} aria-hidden="true" />

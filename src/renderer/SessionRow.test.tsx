@@ -38,8 +38,9 @@ describe("SessionRow — one line: dot · name · age", () => {
     expect(el.className).toContain("gap-2");
     expect(el.className).toContain("rounded-md");
     expect(el.className).toContain("mb-1");
-    // Resting: hover fill, no selection surface/marker.
-    expect(el.className).toContain("hover:bg-fill-hover");
+    // Resting: NO per-row hover fill (the rail's gliding highlight owns it),
+    // no selection surface/marker.
+    expect(el.className).not.toContain("hover:bg-fill-hover");
     expect(el.className).not.toContain("bg-raised");
   });
 
@@ -109,7 +110,7 @@ describe("SessionRow — one line: dot · name · age", () => {
     // C3: the marker hangs at left:-8px — the primitive owns the marker, not a
     // left inset on itself.
     expect(el.className).toContain("before:left-[-8px]");
-    // Resting hover is dropped once selected (the row is already surfaced).
+    // No row ever carries its own hover fill.
     expect(el.className).not.toContain("hover:bg-fill-hover");
     const name = el.firstElementChild!.nextElementSibling as HTMLElement;
     expect(name.className).toContain("text-text");
@@ -227,5 +228,16 @@ describe("SessionRow — one line: dot · name · age", () => {
     // @ts-expect-error — status is REQUIRED with no default (C4 applies to the dot)
     void <SessionRow name="x" />;
     expect(true).toBe(true);
+  });
+
+  it("marks itself as a rail row and paints above the rail's gliding highlight", () => {
+    h = mount(<SessionRow status="idle" name="Add CSV export" />);
+    const el = h.container.firstElementChild as HTMLElement;
+    // The delegated hover handler in useRailGlide finds rows by this attribute.
+    expect(el.getAttribute("data-rail-row")).toBe("");
+    // z-[1] over the highlight's z-index: 0 — without it the highlight would
+    // paint over the row's own text.
+    expect(el.className).toContain("relative");
+    expect(el.className).toContain("z-[1]");
   });
 });
