@@ -137,7 +137,7 @@ import {
   readPairAsset,
 } from "./pairPage.mjs";
 import * as push from "./push.mjs";
-import { registerWithGateway, publicBaseUrl } from "./gatewayRegister.mjs";
+import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2338,8 +2338,9 @@ const handleRequest = async (req, res) => {
         const body = await readJsonBody(req);
         const sessionID = body?.sessionID;
         const sessionDir = await oc.getSessionDirectory(sessionID);
+        const ref = (loadAuthFile(DEFAULT_AUTH_PATH) ?? {}).box_id ?? "";
         const result = await publishPlanBundle(
-          { sessionID, file: body?.file, sessionDir },
+          { sessionID, file: body?.file, sessionDir, ref },
           { ...BUS_PUBLISH_DEPS, baseUrl },
         );
         if (!result.ok) {

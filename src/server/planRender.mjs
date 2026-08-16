@@ -58,7 +58,7 @@ function confineToSession({ file, sessionDir }) {
  * page (TTL 0 = never expires). Returns whatever `registerPage` returns — the
  * URL comes from there / `baseUrl`, never hand-built here.
  *
- * @param {{ sessionID?: unknown, file?: unknown, sessionDir?: unknown }} input
+ * @param {{ sessionID?: unknown, file?: unknown, sessionDir?: unknown, ref?: unknown }} input
  * @param {object} [deps]
  * @param {string} [deps.baseUrl]     - the box's published base URL (from
  *                                      publicBaseUrl()); required or the call
@@ -71,7 +71,7 @@ function confineToSession({ file, sessionDir }) {
  * @param {Function} [deps.register]  - defaults to servePage.registerPage.
  */
 export async function publishPlanBundle(
-  { sessionID, file, sessionDir },
+  { sessionID, file, sessionDir, ref },
   {
     baseUrl,
     readFile = readFileImpl,
@@ -116,6 +116,7 @@ export async function publishPlanBundle(
     title: parsed.title,
     sections: parsed.sections,
     body: parsed.body,
+    ref,
   });
   if (!rendered.ok) return rendered;
 

@@ -139,6 +139,37 @@ test("publishPlanBundle confines a relative in-session path by resolving against
   assert.ok(calls.readFile.includes(SESSION_DIR), "read resolved against sessionDir");
 });
 
+test("publishPlanBundle threads `ref` through into the rendered overlay href", async () => {
+  const sections = [{ id: "overview", heading: "Overview" }];
+  const text = bundle(sections);
+  const { calls, deeps } = makeDeeps({ readText: text });
+  const result = await publishPlanBundle(
+    { sessionID: SESSION_ID, file: "plan.html", sessionDir: SESSION_DIR, ref: "boxABC" },
+    deeps,
+  );
+  assert.equal(result.ok, true);
+  const written = calls.writtenFile.data;
+  assert.ok(
+    written.includes("<a href=\"https://mantaui.com?ref=boxABC\""),
+    "ref reaches the overlay href in the staged html",
+  );
+  assert.ok(written.includes("Powered by Manta"), "overlay present");
+});
+
+test("publishPlanBundle with no ref yields a plain overlay href", async () => {
+  const sections = [{ id: "overview", heading: "Overview" }];
+  const text = bundle(sections);
+  const { calls, deeps } = makeDeeps({ readText: text });
+  const result = await publishPlanBundle(
+    { sessionID: SESSION_ID, file: "plan.html", sessionDir: SESSION_DIR },
+    deeps,
+  );
+  assert.equal(result.ok, true);
+  const written = calls.writtenFile.data;
+  assert.ok(written.includes("<a href=\"https://mantaui.com\""), "plain href when no ref");
+  assert.ok(!written.includes("?ref="), "no ?ref= when no ref");
+});
+
 test("publishPlanBundle surfaces an I/O read failure as {ok:false,error}, not a throw", async () => {
   const { deeps } = makeDeeps();
   const result = await publishPlanBundle(
