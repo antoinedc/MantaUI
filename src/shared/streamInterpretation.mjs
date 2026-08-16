@@ -403,6 +403,41 @@ export function computeContextBreakdown(tokens, limit) {
 }
 
 /**
+ * The newest assistant token usage in a transcript that actually consumed
+ * context, plus the model that produced it (so the caller can resolve the
+ * context window).
+ *
+ * Walks BACKWARDS and returns the first assistant message whose combined input
+ * (fresh + cache read + cache write) is greater than zero. Messages reporting
+ * zero are skipped: a freshly-streaming message reports zeros, and treating
+ * one as authoritative makes the context meter blink off mid-turn.
+ *
+ * Mirrors the desktop `latestTokens` selector in src/renderer/ChatPanel.tsx so
+ * both clients agree on which message is authoritative.
+ *
+ * @param {any[]} messages transcript as returned by listMessages
+ * @returns {{tokens: any, providerID: string|null, modelID: string|null}|null}
+ */
+export function selectLatestTokenUsage(messages) {
+  if (!Array.isArray(messages)) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const info = messages[i]?.info;
+    if (info?.role !== "assistant") continue;
+    const t = info.tokens;
+    if (!t) continue;
+    const totalInput =
+      (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0);
+    if (totalInput <= 0) continue;
+    return {
+      tokens: t,
+      providerID: info.providerID ?? null,
+      modelID: info.modelID ?? null,
+    };
+  }
+  return null;
+}
+
+/**
  * True when a todo item is in a terminal state (completed or cancelled).
  * Both liveTodos (from todo.updated SSE) and transcript-scraped TodoWrite
  * inputs surface a free-form `status` string; opencode's canonical terminal

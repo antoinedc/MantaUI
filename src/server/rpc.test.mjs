@@ -14,6 +14,10 @@ import { statePath } from "../shared/paths.mjs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  computeContextBreakdown,
+  ASSUMED_CONTEXT_TOKENS,
+} from "../shared/streamInterpretation.mjs";
 
 test("dispatch routes a known channel to its handler with args", async () => {
   const handlers = { "echo:it": async (a, b) => ({ sum: a + b }) };
@@ -899,4 +903,51 @@ test("forge:ship returns the forge result unchanged and performs no config write
   const res = await handlers["forge:ship"]({ cwd });
   assert.deepEqual(res, { ok: false, error: "no_forge" });
   assert.equal(calls.projectMetaUpsert.length, 0);
+});
+
+test("opencode:context derives a breakdown from a billed assistant message", async () => {
+  const tokens = { input: 50_000, cache: { read: 10_000, write: 0 } };
+  const listCalls = [];
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async (sessionId, opts) => {
+    assert.equal(sessionId, "ses_idle");
+    listCalls.push(opts);
+    return [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "claude-sonnet-4-6" } }];
+  };
+  const handlers = buildHandlers(deps);
+  const res = await handlers["opencode:context"]("ses_idle");
+  assert.deepEqual(listCalls, [{ slim: true }]);
+  assert.deepEqual(res, computeContextBreakdown(tokens, ASSUMED_CONTEXT_TOKENS));
+});
+
+test("opencode:context uses contextLimitFor and falls back to ASSUMED_CONTEXT_TOKENS", async () => {
+  const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [
+    { info: { role: "assistant", tokens, providerID: "anthropic", modelID: "claude-sonnet-4-6" } },
+  ];
+
+  const withLimit = buildHandlers({
+    ...deps,
+    contextLimitFor: () => 400_000,
+  });
+  const limited = await withLimit["opencode:context"]("s");
+  assert.deepEqual(limited, computeContextBreakdown(tokens, 400_000));
+
+  const fallback = buildHandlers({
+    ...deps,
+    contextLimitFor: () => null,
+  });
+  const fellBack = await fallback["opencode:context"]("s");
+  assert.deepEqual(fellBack, computeContextBreakdown(tokens, ASSUMED_CONTEXT_TOKENS));
+
+  assert.notEqual(limited.pct, fellBack.pct);
+});
+
+test("opencode:context returns null for an empty transcript", async () => {
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [];
+  const handlers = buildHandlers(deps);
+  const res = await handlers["opencode:context"]("ses_empty");
+  assert.equal(res, null);
 });

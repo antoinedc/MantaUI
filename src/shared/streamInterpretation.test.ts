@@ -33,6 +33,7 @@ import {
   selectActiveTodos,
   selectCacheTtlMs,
   selectLastAssistantCompletion,
+  selectLatestTokenUsage,
   selectVisibleTodos,
   shouldAutoRename,
   shouldDropEventForSessionFilter,
@@ -151,6 +152,77 @@ describe("computeContextBreakdown", () => {
     );
     // 100_000 / 200_000 = 50%
     expect(b.pct).toBe(50);
+  });
+});
+
+describe("selectLatestTokenUsage", () => {
+  const billed = (over = {}) => ({
+    info: { role: "assistant", tokens: { input: 100, cache: { read: 0, write: 0 } }, ...over },
+  });
+
+  it("returns null for empty, null, and non-array input", () => {
+    expect(selectLatestTokenUsage([])).toBeNull();
+    expect(selectLatestTokenUsage(null)).toBeNull();
+    expect(selectLatestTokenUsage(undefined)).toBeNull();
+    expect(selectLatestTokenUsage({})).toBeNull();
+  });
+
+  it("returns null for a transcript with only user messages", () => {
+    expect(
+      selectLatestTokenUsage([{ info: { role: "user", tokens: { input: 50 } } }]),
+    ).toBeNull();
+  });
+
+  it("skips an assistant message with no tokens", () => {
+    const first = billed();
+    const messages = [first, { info: { role: "assistant" } }];
+    const found = selectLatestTokenUsage(messages);
+    if (!found) throw new Error("expected a billed assistant message");
+    expect(found.tokens).toBe(first.info.tokens);
+  });
+
+  it("skips a zero-billed assistant message and returns an earlier billed one", () => {
+    const zero = {
+      info: {
+        role: "assistant",
+        tokens: { input: 0, cache: { read: 0, write: 0 } },
+      },
+    };
+    const earlier = { info: { role: "assistant", tokens: { input: 200 } } };
+    const found = selectLatestTokenUsage([earlier, zero]);
+    if (!found) throw new Error("expected a billed assistant message");
+    expect(found.tokens).toBe(earlier.info.tokens);
+  });
+
+  it("returns the newest billed assistant message when several are billed", () => {
+    const older = { info: { role: "assistant", tokens: { input: 10 } } };
+    const newer = { info: { role: "assistant", tokens: { input: 30 } } };
+    const found = selectLatestTokenUsage([older, newer]);
+    if (!found) throw new Error("expected a billed assistant message");
+    expect(found.tokens).toBe(newer.info.tokens);
+  });
+
+  it("counts cache.read alone as billed even when input is zero", () => {
+    const read = {
+      info: { role: "assistant", tokens: { input: 0, cache: { read: 40, write: 0 } } },
+    };
+    const found = selectLatestTokenUsage([read]);
+    if (!found) throw new Error("expected a billed assistant message");
+    expect(found.tokens).toBe(read.info.tokens);
+  });
+
+  it("surfaces providerID/modelID from the matching message, null when omitted", () => {
+    const withIds = billed({ providerID: "anthropic", modelID: "claude-opus-4-7" });
+    const found = selectLatestTokenUsage([withIds]);
+    if (!found) throw new Error("expected a billed assistant message");
+    expect(found.providerID).toBe("anthropic");
+    expect(found.modelID).toBe("claude-opus-4-7");
+
+    const bare = billed();
+    const bareFound = selectLatestTokenUsage([bare]);
+    if (!bareFound) throw new Error("expected a billed assistant message");
+    expect(bareFound.providerID).toBeNull();
+    expect(bareFound.modelID).toBeNull();
   });
 });
 
