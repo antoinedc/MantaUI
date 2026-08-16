@@ -83,6 +83,7 @@ import {
   isValidSubdomain,
 } from "./servePage.mjs";
 import { publishPlanPage, readPlanMarkdown } from "./planPage.mjs";
+import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
@@ -2323,6 +2324,42 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Single-HTML plan publish (BET-987) ----------
+  // POST /api/plan-render  body {sessionID, file}
+  //                      → {ok:true, url}   (400 {ok:false, error} on failure)
+  // Called by the remote manta-plan agent's `plan_render` tool. `file` is an
+  // UNTRUSTED path to the authored plan HTML bundle; it is resolved against
+  // the session directory and REJECTED if it escapes (same confinement as
+  // readPlanMarkdown, but no `.md` requirement — the bundle is HTML). The
+  // bundle is parsed + rendered (planDoc.mjs) and published through the
+  // EXISTING serve-page subsystem under the stable `plan-<shortSessionId>`
+  // subdomain with TTL 0 (never expires). The URL is whatever
+  // publishPlanBundle / registerPage returns — never constructed here.
+  if (path === "/api/plan-render") {
+    try {
+      const baseUrl = publicBaseUrl();
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        const sessionID = body?.sessionID;
+        const sessionDir = await oc.getSessionDirectory(sessionID);
+        const result = await publishPlanBundle(
+          { sessionID, file: body?.file, sessionDir },
+          { ...BUS_PUBLISH_DEPS, baseUrl },
+        );
+        if (!result.ok) {
+          respondJson(res, 400, { ok: false, error: result.error });
+          return;
+        }
+        respondJson(res, 200, { ok: true, url: result.url });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
     }
     return;
   }
