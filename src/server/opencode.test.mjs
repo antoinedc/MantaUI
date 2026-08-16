@@ -37,6 +37,7 @@ import {
   discardBody,
   getProviders,
   getDefaultModel,
+  generateSessionTitle,
   listModels,
   claudeCliStatus,
   parseProviderApiKey,
@@ -2193,5 +2194,53 @@ test("listReferences degrades to [] when the payload has no data array", async (
   await withMockFetch(
     async () => new Response(JSON.stringify({ location: { directory: "/box" } })),
     async () => assert.deepEqual(await listReferences(), []),
+  );
+});
+
+// generateSessionTitle (BET-1018) — retitles run on opencode's own "title"
+// agent. Assert the prompt_async body sends `agent:"title"` and NEVER a
+// `format` (structured-output) field or a main-model override: json_schema on
+// prompt_async is accepted by opencode 1.18.10 but poisons the whole session
+// transcript with a permanent HTTP 400.
+// ---------------------------------------------------------------------------
+test("generateSessionTitle sends agent:title and never a format/model field", async () => {
+  let promptBody = null;
+  await withMockFetch(
+    async (url, opts) => {
+      const u = String(url);
+      if (u.includes("/prompt_async")) {
+        promptBody = JSON.parse(String(opts?.body ?? "{}"));
+        return new Response(null, { status: 204 });
+      }
+      if (u.includes("/message")) {
+        return new Response(
+          JSON.stringify([
+            {
+              info: { role: "assistant" },
+              parts: [{ type: "text", text: "Payment webhook retry idempotency" }],
+            },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (u.includes("/session?directory=")) {
+        return new Response(JSON.stringify({ id: "ses_title" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    },
+    async () => {
+      const title = await generateSessionTitle({
+        directory: "/w",
+        instruction: "Title this session",
+      });
+      assert.equal(title, "Payment webhook retry idempotency");
+      assert.ok(promptBody, "expected a prompt_async body");
+      assert.equal(promptBody.agent, "title", "retitle must run on the title agent");
+      assert.equal("format" in promptBody, false, "must never send a format/structured-output field");
+      assert.equal("model" in promptBody, false, "title agent uses its own model, not our main model");
+    },
   );
 });
