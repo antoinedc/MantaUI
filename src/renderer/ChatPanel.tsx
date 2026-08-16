@@ -1020,8 +1020,18 @@ export function ChatPanel({
   useEffect(() => {
     if (!isActive) return;
     if (!followingRef.current) return;
-    scrollToTail();
-  }, [isActive, scrollToTail]);
+    // Re-activation re-pin. MUST use Virtuoso's scrollToIndex here, NOT
+    // scrollToTail()/scrollElementToTail: this effect runs right after the
+    // panel's display:none -> block flip, before react-virtuoso has re-measured
+    // the scroller (its ResizeObserver fires only after this effect). A raw
+    // `el.scrollTop = el.scrollHeight` read at this instant is stale/short and
+    // lands the transcript ABOVE the tail. scrollToIndex converges on the true
+    // tail (it is layout-aware and accounts for the transcript footer) - same
+    // behaviour as the pre-5ac17b3 code. All OTHER scrollToTail() callers run on
+    // a visible, already-measured scroller, so they keep using the raw write.
+    setFollowing(true);
+    virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end" });
+  }, [isActive, setFollowing]);
 
   // Catch-up refetch on reactivation. While inactive, scheduleRefetch and the
   // delta buffer are suppressed (see the gating refs near refetchTimer) so we
