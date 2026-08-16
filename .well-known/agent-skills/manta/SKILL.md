@@ -98,7 +98,9 @@ Run on the target box:
 
 Watch the output. The installer is idempotent and prints its own diagnostics.
 It downloads a self-contained release (app + Node runtime), verifies its
-checksum, installs to `~/manta`, installs + configures Caddy, registers the
+checksum, installs to `${XDG_DATA_HOME:-$HOME/.local/share}/manta` (default
+`~/.local/share/manta`; a legacy `~/manta` install is preserved on upgrade),
+installs + configures Caddy, registers the
 box with the push gateway, sets up `manta-server` and `opencode-serve`
 systemd --user units, enables linger, and ends by printing a 6-digit pairing
 code, the box id, and a `manta://pair` link. Capture all of those for your
@@ -160,7 +162,7 @@ before the user enters it, mint a fresh one:
   Linux: `journalctl --user -u manta-server -n 50`; macOS:
   `tail -n 50 ~/.manta/server.log`. Most common cause is a stale partial
   install — re-run the installer (safe; the previous install is kept at
-  `~/manta.prev` until a run succeeds).
+  `$MANTA_HOME.prev` until a run succeeds).
 - **`systemctl --user` errors with "Failed to connect to bus"** → Linux only —
   the user SSH'd in without a session bus; run
   `export XDG_RUNTIME_DIR=/run/user/$(id -u)` and retry, and make sure
