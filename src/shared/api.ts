@@ -11,6 +11,8 @@ import type {
   OpencodeCommand,
   OpencodeEvent,
   OpencodeMessage,
+  OpencodeReference,
+  OpencodeReferenceUpsert,
   StreamEnvelope,
   OpencodeModel,
   OpencodeProviderAuthRequest,
