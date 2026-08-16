@@ -66,6 +66,11 @@ returns the shareable URL. Do NOT call `serve_page` for the plan or any mockup
 anymore — the mockup is inline in the single plan page and the plan is
 published via `plan_render`.
 
+If the plan is later revised (the user asks for changes or keeps planning),
+update the HTML bundle in place, then RE-CALL `plan_render` with the same file
+path — it republishes the SAME URL. Never leave the served page stale while
+the local bundle differs.
+
 ## 5. Hand off
 
 When the plan is written and published, invoke the `plan_exit` tool (the
