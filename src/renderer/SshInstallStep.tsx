@@ -30,6 +30,7 @@
 // state + per-event dispatch + JSX, nothing more.
 
 import { useCallback, useEffect, useState, useRef, useMemo } from "react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import {
   getMantaPreload,
   type InstallerEvent,
@@ -50,9 +51,7 @@ import {
   type HostFieldSelection,
 } from "../shared/sshTarget";
 import { Button } from "./Button";
-
-const ACCENT = "var(--accent)";
-const DANGER = "var(--danger)";
+import { MantaLoader } from "./MantaLoader";
 
 // Keep the last N log lines only — main already caps its own tail at 200
 // (handlers.ts LOG_TAIL_MAX); the renderer needs its own cap too, or a long
@@ -95,10 +94,7 @@ function SecretPrompt({
   const primaryLabel = isSudo ? "Continue" : "Unlock & continue";
   const cancelLabel = isSudo ? "Cancel install" : "Cancel";
   return (
-    <div
-      className="rounded-sm p-4 space-y-3"
-      style={{ border: `1px solid ${ACCENT}` }}
-    >
+    <div className="rounded-sm p-4 space-y-3 border border-accent">
       <div className="text-body font-medium">{heading}</div>
       <p className="text-meta text-text-muted">
         {isSudo ? (
@@ -136,8 +132,7 @@ function SecretPrompt({
           onChange={(e) => onChange(e.target.value)}
           autoFocus
           placeholder={placeholder}
-          className="w-full rounded-sm px-3 py-2 text-body bg-bg-elev"
-          style={{ border: `1px solid ${ACCENT}` }}
+          className="w-full rounded-sm px-3 py-2 text-body bg-bg border border-accent"
         />
         <div className="flex gap-2 pt-px">
           <Button type="submit" tone="primary" disabled={value.length === 0}>
@@ -156,17 +151,17 @@ function SecretPrompt({
           <ul className="text-meta text-text-muted list-disc list-inside space-y-1">
             <li>
               <span className="font-medium">Install as root</span> — connect
-              as <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">{`root@${hostLabel}`}</code>{" "}
+              as <code className="font-mono text-code bg-bg rounded-sm px-2 py-1 text-text-muted">{`root@${hostLabel}`}</code>{" "}
               and run the installer again. No password needed.
             </li>
             <li>
               <span className="font-medium">Use Tailscale</span> — MantaUI
               then needs no root at all. On the box, run:{" "}
-              <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">
+              <code className="font-mono text-code bg-bg rounded-sm px-2 py-1 text-text-muted">
                 curl -fsSL https://tailscale.com/install.sh | sh
               </code>{" "}
               then{" "}
-              <code className="font-mono text-code bg-bg-elev rounded-sm px-2 py-1 text-text-muted">
+              <code className="font-mono text-code bg-bg rounded-sm px-2 py-1 text-text-muted">
                 sudo tailscale up
               </code>
               , then run the installer again.
@@ -228,7 +223,7 @@ export function SshInstallStep({
   // CUSTOM_HOST_VALUE. Never persisted, never written to ~/.ssh/config.
   const [customHost, setCustomHost] = useState("");
   const [customPort, setCustomPort] = useState("");
-  const [customUser, setCustomUser] = useState("");
+  const [customUser, setCustomUser] = useState("root");
   const [customIdentityFile, setCustomIdentityFile] = useState("");
   const [targetError, setTargetError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -754,8 +749,6 @@ export function SshInstallStep({
   }
 
   // ---------- Render ----------
-  const targetLocked = running || claimRunning || paired;
-
   const connectState = useMemo(
     () =>
       deriveConnectPanel({
@@ -803,11 +796,10 @@ export function SshInstallStep({
         ? "No hosts in ~/.ssh/config"
         : `${hosts.length} hosts from ~/.ssh/config${justRefreshed ? " · just now" : ""}`;
 
-  // Zone A — the host picker (header + select + refresh + custom-host panel
+  // Zone A — the host picker (header + select + refresh + custom-host fields
   // + inline target validation error). ConnectPanel owns the four-zone panel
-  // chrome; this node is its zone-A body. `disabled` follows `targetLocked`
-  // so the picker is frozen while an install/claim is in flight or after
-  // pairing succeeds (BET-961).
+  // chrome; this node is its zone-A body. When `targetCollapsed` it is not
+  // rendered at all — `targetSummary` replaces it (BET-1007).
   const zoneA = (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -820,162 +812,155 @@ export function SshInstallStep({
         <span className="text-meta text-text-quiet">{hostCountLabel}</span>
       </div>
       <div className="flex gap-2">
-        <select
-          id="ssh-host"
-          value={alias}
-          onChange={(e) => {
-            setAlias(e.target.value);
-            setTargetError(null);
-          }}
-          disabled={targetLocked}
-          className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-        >
-          {hosts.map((h) => (
-            <option key={h.alias} value={h.alias}>
-              {h.alias}
-              {h.patterns.length > 1 ? ` (${h.patterns.join(", ")})` : ""}
-            </option>
-          ))}
-          <option value={CUSTOM_HOST_VALUE}>Custom host…</option>
-        </select>
+        <div className="relative flex-1 min-w-0">
+          <select
+            id="ssh-host"
+            value={alias}
+            onChange={(e) => {
+              setAlias(e.target.value);
+              setTargetError(null);
+            }}
+            className="w-full appearance-none rounded-sm bg-bg pl-3 pr-8 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+          >
+            {hosts.map((h) => (
+              <option key={h.alias} value={h.alias}>
+                {h.alias}
+                {h.patterns.length > 1 ? ` (${h.patterns.join(", ")})` : ""}
+              </option>
+            ))}
+            <option value={CUSTOM_HOST_VALUE}>Custom host…</option>
+          </select>
+          <ChevronDown
+            size={14}
+            aria-hidden
+            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-faint"
+          />
+        </div>
         <button
           type="button"
           onClick={() => void loadHosts({ manual: true })}
-          disabled={hostsLoading || targetLocked}
+          disabled={hostsLoading}
           aria-label="Refresh host list"
           title="Re-read ~/.ssh/config"
-          className="w-[34px] h-[34px] shrink-0 flex items-center justify-center rounded-sm bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+          className="w-9 h-9 shrink-0 flex items-center justify-center rounded-sm bg-bg border border-border text-text-faint hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
         >
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={`w-3.5 h-3.5${hostsLoading ? " animate-spin" : ""}`}
-            aria-hidden
-          >
-            <path d="M21 12a9 9 0 1 1-2.6-6.4" />
-            <path d="M21 3v6h-6" />
-          </svg>
+          <RefreshCw size={14} aria-hidden className={hostsLoading ? "animate-spin" : undefined} />
         </button>
       </div>
 
-      {/* Custom host panel — only rendered for the custom sentinel once the
-          host list has settled (see the original BET-384 comment above). */}
+      {/* Custom host fields — a plain section of zone A, separated from the
+          picker by an inset rule (no nested box). Only rendered for the
+          custom sentinel once the host list has settled. */}
       {hostsLoaded && alias === CUSTOM_HOST_VALUE && (
-        <div className="rounded-sm border border-border bg-bg-soft p-4 space-y-3">
-          <div className="grid grid-cols-[1fr_90px] gap-3">
-            <div className="flex flex-col gap-1">
-              <label
-                className="text-label font-medium text-text-muted"
-                htmlFor="ssh-custom-host"
-              >
-                Host or IP
-              </label>
-              <input
-                id="ssh-custom-host"
-                type="text"
-                placeholder="box.example.com"
-                value={customHost}
-                onChange={(e) => {
-                  setCustomHost(e.target.value);
-                  setTargetError(null);
-                }}
-                disabled={targetLocked}
-                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label
-                className="text-label font-medium text-text-muted"
-                htmlFor="ssh-custom-port"
-              >
-                Port
-              </label>
-              <input
-                id="ssh-custom-port"
-                type="text"
-                inputMode="numeric"
-                placeholder="22"
-                value={customPort}
-                onChange={(e) => {
-                  setCustomPort(e.target.value);
-                  setTargetError(null);
-                }}
-                disabled={targetLocked}
-                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-              />
-            </div>
-          </div>
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-col gap-1">
-              <label
-                className="text-label font-medium text-text-muted"
-                htmlFor="ssh-custom-user"
-              >
-                User
-              </label>
-              <input
-                id="ssh-custom-user"
-                type="text"
-                placeholder="root"
-                value={customUser}
-                onChange={(e) => {
-                  setCustomUser(e.target.value);
-                  setTargetError(null);
-                }}
-                disabled={targetLocked}
-                className="w-full rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label
-                className="text-label font-medium text-text-muted"
-                htmlFor="ssh-custom-identity"
-              >
-                Identity file
-              </label>
-              <div className="flex gap-2">
+        <>
+          <div className="h-px bg-border-subtle my-3" />
+          <div className="space-y-3">
+            <div className="grid grid-cols-[1fr_90px] gap-3">
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-label font-medium text-text-muted"
+                  htmlFor="ssh-custom-host"
+                >
+                  Host or IP
+                </label>
                 <input
-                  id="ssh-custom-identity"
+                  id="ssh-custom-host"
                   type="text"
-                  placeholder="~/.ssh/id_ed25519"
-                  value={customIdentityFile}
+                  placeholder="box.example.com"
+                  value={customHost}
                   onChange={(e) => {
-                    setCustomIdentityFile(e.target.value);
+                    setCustomHost(e.target.value);
                     setTargetError(null);
                   }}
-                  disabled={targetLocked}
-                  className="flex-1 min-w-0 rounded-sm bg-bg-elev px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  className="w-full rounded-sm bg-bg px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
                 />
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const result = await preload.dialogShowOpenFile();
-                    if (!result.canceled) {
-                      setCustomIdentityFile(result.path);
-                      setTargetError(null);
-                    }
-                  }}
-                  disabled={targetLocked}
-                  className="shrink-0 px-3 py-2 rounded-sm text-body font-medium bg-bg-elev border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+              </div>
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-label font-medium text-text-muted"
+                  htmlFor="ssh-custom-port"
                 >
-                  Browse
-                </button>
+                  Port
+                </label>
+                <input
+                  id="ssh-custom-port"
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="22"
+                  value={customPort}
+                  onChange={(e) => {
+                    setCustomPort(e.target.value);
+                    setTargetError(null);
+                  }}
+                  className="w-full rounded-sm bg-bg px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
               </div>
             </div>
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-label font-medium text-text-muted"
+                  htmlFor="ssh-custom-user"
+                >
+                  User
+                </label>
+                <input
+                  id="ssh-custom-user"
+                  type="text"
+                  placeholder="root"
+                  value={customUser}
+                  onChange={(e) => {
+                    setCustomUser(e.target.value);
+                    setTargetError(null);
+                  }}
+                  className="w-full rounded-sm bg-bg px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <label
+                  className="text-label font-medium text-text-muted"
+                  htmlFor="ssh-custom-identity"
+                >
+                  Identity file
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="ssh-custom-identity"
+                    type="text"
+                    placeholder="~/.ssh/id_ed25519"
+                    value={customIdentityFile}
+                    onChange={(e) => {
+                      setCustomIdentityFile(e.target.value);
+                      setTargetError(null);
+                    }}
+                    className="flex-1 min-w-0 rounded-sm bg-bg px-3 py-2 text-body border border-border focus:outline-none focus:ring-2 focus:ring-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const result = await preload.dialogShowOpenFile();
+                      if (!result.canceled) {
+                        setCustomIdentityFile(result.path);
+                        setTargetError(null);
+                      }
+                    }}
+                    className="shrink-0 px-3 py-2 rounded-sm text-body font-medium bg-bg border border-border text-text-muted hover:text-text hover:border-border-strong transition-colors disabled:opacity-50"
+                  >
+                    Browse
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p className="text-meta text-text-faint">
+              Leave a field empty to let OpenSSH decide. These are used for
+              this box only — your ~/.ssh/config is never written to.
+            </p>
           </div>
-          <p className="text-meta text-text-faint">
-            Leave a field empty to let OpenSSH decide. These are used for
-            this box only — your ~/.ssh/config is never written to.
-          </p>
-        </div>
+        </>
       )}
 
       {targetError && (
-        <p className="text-meta" style={{ color: DANGER }}>
+        <p className="text-meta text-danger">
           {targetError}
         </p>
       )}
@@ -993,11 +978,30 @@ export function SshInstallStep({
     </div>
   );
 
+  // Zone A when the target is committed: one line, nothing else.
+  // `installHostLabel` is captured at install start from the resolved
+  // SshTarget, so a custom host reads "root@54.73.231.25" and an alias reads
+  // its own label.
+  const hostLabel = installHostLabel || "your box";
+  const targetSummary = (
+    <div className="flex items-center gap-2 min-w-0">
+      {paired ? (
+        <span aria-hidden className="w-2 h-2 rounded-full shrink-0 bg-ok" />
+      ) : (
+        <MantaLoader size="inline" />
+      )}
+      <span className="text-body font-medium text-text truncate">
+        {paired ? `Connected to ${hostLabel}` : `Setting up ${hostLabel}`}
+      </span>
+    </div>
+  );
+
   return (
     <div className="space-y-5">
       <ConnectPanel
         state={connectState}
         target={zoneA}
+        targetSummary={targetSummary}
         logLines={lines}
         onAction={handleAction}
         onCopyDiagnostics={copyDiagnostics}
@@ -1007,8 +1011,7 @@ export function SshInstallStep({
             user answers. */}
         {fingerprintPrompt ? (
           <div
-            className="rounded-sm p-4 space-y-3"
-            style={{ border: `1px solid ${ACCENT}` }}
+            className="rounded-sm p-4 space-y-3 border border-accent"
           >
             <div className="text-body font-medium">Trust this host?</div>
             <p className="text-meta text-text-muted">
@@ -1016,8 +1019,7 @@ export function SshInstallStep({
               {fingerprintPrompt.algo} key fingerprint is:
             </p>
             <code
-              className="block text-meta font-mono break-all rounded-xs px-2 py-2 bg-bg-elev"
-              style={{ color: ACCENT }}
+              className="block text-meta font-mono break-all rounded-xs px-2 py-2 bg-bg text-accent"
             >
               {fingerprintPrompt.sha256}
             </code>

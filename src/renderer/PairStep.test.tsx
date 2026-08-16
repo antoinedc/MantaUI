@@ -114,8 +114,9 @@ describe("PairStep render harness (BET-382 / BET-962)", () => {
     expect(boxId?.value).toBe(VALID_BOX);
     expect(code?.value).toBe(VALID_CODE);
 
-    // The prefill row: "Pairing link ready" + Connect/Discard.
-    expect(h.text()).toContain("Pairing link ready");
+    // The prefill row (M1): the status zone is omitted (nothing is happening),
+    // so there is no "Pairing link ready" line — just Connect/Discard.
+    expect(h.text()).not.toContain("Pairing link ready");
     expect(h.text()).toContain("Discard");
     expect(buttonByText(h.container, "Connect")).not.toBeNull();
 

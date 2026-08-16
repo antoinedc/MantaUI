@@ -14,7 +14,8 @@
 // Today each combination used to get its own ad-hoc branch, so status
 // appeared in five vertical positions and errors in four shapes. This module
 // maps that state onto ONE descriptor — status (tone/text/meta/progress/sub),
-// details (log/failures/hint/none), actions, hint and the zone-A lock — and
+// details (failures/hint/none), a sibling log pane, actions and the zone-A
+// collapse — and
 // ConnectPanel.tsx renders that descriptor, so nothing moves between states.
 //
 // Pure, no JSX, no React. The precedence rules below are the acceptance gate:
@@ -31,9 +32,11 @@ export type ConnectTone = "idle" | "running" | "attention" | "ok" | "error" | "n
 
 export type ConnectDetails =
   | { kind: "none" }
-  | { kind: "log"; defaultOpen: boolean; showCopyDiagnostics: boolean }
   | { kind: "failures"; items: Array<{ cause: string; action: string }> }
   | { kind: "hint"; text: string };
+
+/** The sibling log pane below the panel. null = no pane at all. */
+export type ConnectLog = { defaultOpen: boolean; showCopyDiagnostics: boolean } | null;
 
 export type ConnectActionId =
   | "install"
@@ -46,22 +49,24 @@ export type ConnectActionId =
   | "discard";
 
 export type ConnectPanelState = {
+  /** null = the status zone is omitted entirely (nothing is happening). */
   status: {
     tone: ConnectTone;
     text: string;
     meta: string | null; // e.g. "3 of 6 · 0:24"
     progress: number | null; // 0..1, null = no bar
     sub: string | null; // second line under the bar
-  };
+  } | null;
   details: ConnectDetails;
+  /** The log pane rendered BELOW the panel, not inside it. */
+  log: ConnectLog;
   actions: ConnectActionId[]; // first is primary, rest secondary
   /** Action ids whose button must render disabled. The manual mode's Connect
    *  stays disabled until `canConnectSetup` passes; the ssh mode has its own
-   *  inline gate. Absent/undefined = nothing disabled beyond the panel's own
-   *  install gate. */
+   *  inline gate. Absent/undefined = nothing disabled. */
   disabledActions?: ConnectActionId[];
-  hint: string | null; // right-aligned text in zone D
-  targetLocked: boolean;
+  /** true = zone A shows the one-line target summary instead of the picker. */
+  targetCollapsed: boolean;
 };
 
 /** The claim outcome — shared by both modes. */
@@ -108,15 +113,15 @@ function stageMeta(input: Extract<ConnectInput, { mode: "ssh" }>): string {
     : `${index} of ${total}`;
 }
 
-/** A log details kind, degraded to `none` when there are no lines to show —
- *  an action must never offer a log button over an empty pane. */
-function logDetails(
+/** A log pane, degraded to `null` when there is nothing to show — a pane
+ *  must never render over an empty body. */
+function logPane(
   defaultOpen: boolean,
   showCopyDiagnostics: boolean,
   logLineCount: number,
-): ConnectDetails {
-  if (logLineCount === 0) return { kind: "none" };
-  return { kind: "log", defaultOpen, showCopyDiagnostics };
+): ConnectLog {
+  if (logLineCount === 0) return null;
+  return { defaultOpen, showCopyDiagnostics };
 }
 
 /**
@@ -134,15 +139,15 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
       return {
         status: {
           tone: "ok",
-          text: "Connected — your box is ready",
+          text: "Your box is ready",
           meta: null,
           progress: null,
           sub: null,
         },
         details: { kind: "none" },
+        log: null,
         actions: ["next"],
-        hint: null,
-        targetLocked: true,
+        targetCollapsed: true,
       };
     }
     // M4 — claim failed: surface the exact message claimBox returned.
@@ -156,9 +161,9 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
           sub: null,
         },
         details: { kind: "none" },
+        log: null,
         actions: ["retry"],
-        hint: null,
-        targetLocked: false,
+        targetCollapsed: false,
       };
     }
     // M3 — submitting.
@@ -172,25 +177,19 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
           sub: null,
         },
         details: { kind: "none" },
+        log: null,
         actions: ["cancel"],
-        hint: null,
-        targetLocked: true,
+        targetCollapsed: true,
       };
     }
     // M1 — clipboard / deep-link prefill present: Confirm or discard it.
     if (input.prefillPresent) {
       return {
-        status: {
-          tone: "idle",
-          text: "Pairing link ready",
-          meta: null,
-          progress: null,
-          sub: null,
-        },
+        status: null,
         details: { kind: "none" },
+        log: null,
         actions: ["connect", "discard"],
-        hint: null,
-        targetLocked: false,
+        targetCollapsed: false,
       };
     }
     // M2 — idle manual (default): the code is typed by hand.
@@ -203,15 +202,15 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         sub: null,
       },
       details: { kind: "hint", text: "Run `manta pair` on the box to get a code." },
+      log: null,
       actions: ["connect"],
       disabledActions: input.canConnect ? undefined : ["connect"],
-      hint: null,
-      targetLocked: false,
+      targetCollapsed: false,
     };
   }
 
   // ===== SSH install mode (rows 1–11) =====
-  const targetLocked = input.running || input.claimRunning || input.paired;
+  const targetCollapsed = input.running || input.claimRunning || input.paired;
   const { index, total, label } = currentStageInfo(input.stage);
   const progress = index / total;
 
@@ -220,15 +219,15 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
     return {
       status: {
         tone: "ok",
-        text: "Connected — your box is ready",
+        text: "Your box is ready",
         meta: `${total} of ${total} · ${formatElapsed(input.elapsedSeconds)}`,
         progress: 1,
         sub: null,
       },
-      details: logDetails(false, false, input.logLineCount),
+      details: { kind: "none" },
+      log: logPane(false, false, input.logLineCount),
       actions: ["next"],
-      hint: "next: connect a provider",
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -243,9 +242,9 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         sub: null,
       },
       details: { kind: "failures", items: input.preflightFailure.failures },
+      log: null,
       actions: ["retry", "editTarget"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -259,10 +258,10 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         progress,
         sub: null,
       },
-      details: logDetails(false, false, input.logLineCount),
+      details: { kind: "none" },
+      log: logPane(false, false, input.logLineCount),
       actions: ["install"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -278,9 +277,9 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         sub: null,
       },
       details: { kind: "hint", text: input.claimError },
+      log: null,
       actions: ["pairManually", "retry"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -299,10 +298,10 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         progress,
         sub: null,
       },
-      details: logDetails(true, true, input.logLineCount),
+      details: { kind: "none" },
+      log: logPane(true, true, input.logLineCount),
       actions: ["retry", "pairManually"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -317,9 +316,9 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         sub: null,
       },
       details: { kind: "none" }, // the prompt renders as zone-C children
+      log: null,
       actions: ["cancel"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -333,10 +332,10 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         progress,
         sub: null,
       },
-      details: logDetails(false, false, input.logLineCount),
+      details: { kind: "none" },
+      log: logPane(true, false, input.logLineCount),
       actions: ["cancel"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
@@ -350,59 +349,43 @@ export function deriveConnectPanel(input: ConnectInput): ConnectPanelState {
         progress,
         sub: null,
       },
-      details: logDetails(false, false, input.logLineCount),
+      details: { kind: "none" },
+      log: logPane(true, false, input.logLineCount),
       actions: ["cancel"],
-      hint: null,
-      targetLocked,
+      targetCollapsed,
     };
   }
 
   // 9 — hosts still loading.
   if (!input.hostsLoaded) {
     return {
-      status: {
-        tone: "idle",
-        text: "Reading ~/.ssh/config…",
-        meta: null,
-        progress: null,
-        sub: null,
-      },
+      status: null,
       details: { kind: "none" },
+      log: null,
       actions: ["install"],
-      hint: null,
-      targetLocked,
+      disabledActions: ["install"],
+      targetCollapsed,
     };
   }
 
   // 10 — invalid target.
   if (input.targetError) {
     return {
-      status: {
-        tone: "attention",
-        text: "Check the highlighted field",
-        meta: null,
-        progress: null,
-        sub: null,
-      },
+      status: null,
       details: { kind: "none" },
+      log: null,
       actions: ["install"],
-      hint: null,
-      targetLocked,
+      disabledActions: ["install"],
+      targetCollapsed,
     };
   }
 
   // 11 — otherwise: ready to install.
   return {
-    status: {
-      tone: "idle",
-      text: "Ready to install",
-      meta: null,
-      progress: null,
-      sub: null,
-    },
+    status: null,
     details: { kind: "none" },
+    log: null,
     actions: ["install"],
-    hint: "takes about a minute",
-    targetLocked,
+    targetCollapsed,
   };
 }
