@@ -3023,11 +3023,13 @@ export function formatUpdatedAgo(fetchedAt: number, nowMs: number): string {
   return age === "now" ? "updated just now" : `updated ${age} ago`;
 }
 
-// True once a snapshot is more than 10 minutes stale — the popover footer's
+// True once a snapshot is more than 25 minutes stale — the popover footer's
 // "updated Nm ago" line turns --warn at this point. The box's poller runs
-// every 3 minutes, so 10 minutes means at least 2-3 missed ticks.
+// every 10 minutes, so 25 minutes means at least two missed ticks; it also
+// sits below the box's 30-minute carry-forward cap, so a reading the box is
+// holding on to visibly ages into a warning before it is dropped.
 export function usageStale(fetchedAt: number, nowMs: number): boolean {
-  return nowMs - fetchedAt > 10 * 60_000;
+  return nowMs - fetchedAt > 25 * 60_000;
 }
 
 // M6/BET-730: given the set of "visited" chat session ids (panels kept
