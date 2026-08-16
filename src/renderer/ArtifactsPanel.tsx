@@ -47,6 +47,7 @@ import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
+import { planPageUrl } from "../shared/planMode.mjs";
 
 // Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
 // box filesystem path: a self-contained image part carries a `data:` URI (its
@@ -714,28 +715,19 @@ export function ArtifactsPanel({
     previewSourceRef.current = null;
   };
 
-  // Open a plan's companion page. When the page is already live (auto-published
-  // on plan_exit, so `pageUrl` is set on the artifact) just open it — no
-  // re-publish. Otherwise fall back to BET-974's publish-then-open: ONE gesture
-  // publishes the page on demand and opens the returned URL. The server reads
-  // the plan file itself (never the renderer); the URL comes from the response
-  // or the artifact — never hand-built. Reused by both the row-body "open" and
-  // the plan row's action.
+  // Open a plan's companion page. The single-HTML flow publishes it at
+  // plan_render time under the DETERMINISTIC subdomain
+  // (`<base>/pages/plan-<shortSessionId>`), so we open the artifact's `pageUrl`
+  // when present, else the deterministic URL — never publish-on-demand.
   const openPlanPage = (a: Artifact) => {
     if (!sessionId) return;
     setPlanError(null);
-    if (a.pageUrl) {
-      void window.api.openExternal(a.pageUrl!).catch((e: unknown) => {
+    const url = a.pageUrl || planPageUrl(sessionId, serverBase());
+    if (url) {
+      void window.api.openExternal(url).catch((e: unknown) => {
         setPlanError(String((e as Error)?.message ?? e));
       });
-      return;
     }
-    void window.api
-      .planPublish(sessionId, a.href)
-      .then(({ url }) => window.api.openExternal(url))
-      .catch((e: unknown) => {
-        setPlanError(String((e as Error)?.message ?? e));
-      });
   };
 
   // Row-body "open". Previewables (image/PDF/text) open the BET-661 overlay;

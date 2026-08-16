@@ -934,31 +934,6 @@ export const httpApi: Api = {
     }
   },
 
-  /**
-   * Publish (or refresh) the hosted companion page for a session's plan and
-   * return its public URL. The server reads the plan file itself (never the
-   * renderer); `path` is the plan's path as reported by the plan_exit tool.
-   * The URL comes from the response — never constructed here (it may be a
-   * public https:// host or a tailnet-only address).
-   */
-  planPublish: async (sessionID, path) => {
-    const url = `${serverBase()}/api/plan-page`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: authHeaders(clientToken(), { "content-type": "application/json" }),
-      body: JSON.stringify({ sessionID, path }),
-    });
-    if (res.status === 401) throw new AuthRequiredError();
-    let json: { url?: string; error?: string } = {};
-    try {
-      json = (await res.json()) as { url?: string; error?: string };
-    } catch {
-      /* non-JSON body (proxy/HTML error) */
-    }
-    if (!res.ok || !json.url) throw new Error(json.error ?? `HTTP ${res.status}`);
-    return { url: json.url };
-  },
-
   // -- PTY --
   ptySpawn: (opts) => rpc(IPC.ptySpawn, opts),
   ptyWrite: (sessionKey, data) => rpc(IPC.ptyWrite, sessionKey, data),

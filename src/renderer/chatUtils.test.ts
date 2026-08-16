@@ -133,9 +133,7 @@ import {
   describeSessionClose,
   describeProjectClose,
   isPlanExitQuestion,
-  planMetrics,
   extractPlanData,
-  planPathsFromMessages,
   planRefsFromPart,
   resolveDelegateModel,
 } from "./chatUtils";
@@ -5105,38 +5103,11 @@ describe("isPlanExitQuestion", () => {
   });
 });
 
-describe("planMetrics", () => {
-  it("omits steps and files when nothing is derivable", () => {
-    expect(planMetrics("Just prose.")).toEqual({});
-  });
-
-  it("counts 'Step N' headings as steps", () => {
-    const r = planMetrics("## Step 1\nx\n## Step 2\ny\n## Step 3\nz");
-    expect(r.steps).toBe(3);
-  });
-
-  it("counts numbered headings as steps", () => {
-    const r = planMetrics("## 1. first\n## 2. second");
-    expect(r.steps).toBe(2);
-  });
-
-  it("counts backticked file bullets as files", () => {
-    const r = planMetrics("- `src/a.ts`\n- `src/b.ts`\n");
-    expect(r.files).toBe(2);
-  });
-
-  it("does not print 0 for an absent clause", () => {
-    const r = planMetrics("### Do x\n- `src/a.ts`");
-    expect(r.steps).toBeUndefined();
-    expect(r.files).toBe(1);
-  });
-});
-
 describe("extractPlanData", () => {
   const planq = (callID: string): QuestionRequest =>
     ({ id: "q1", sessionID: "s1", questions: [], tool: { messageID: "m1", callID } }) as QuestionRequest;
 
-  it("title from first heading, path + metrics from the tool input", () => {
+  it("title from first heading + the plan text from the tool input", () => {
     const msg: OpencodeMessage = {
       info: {} as never,
       parts: [
@@ -5145,14 +5116,13 @@ describe("extractPlanData", () => {
           id: "p",
           messageID: "m1",
           callID: "call-exit",
-          state: { status: "completed", input: { tool: "plan_exit", planPath: "/work/plan.md", plan: "# Add login\n## Step 1\n- `src/a.ts`" } },
+          state: { status: "completed", input: { tool: "plan_exit", plan: "# Add login\n## Step 1\n- `src/a.ts`" } },
         },
       ],
     };
     const d = extractPlanData(planq("call-exit"), [msg]);
     expect(d.title).toBe("Add login");
-    expect(d.path).toBe("/work/plan.md");
-    expect(d.metrics).toEqual({ steps: 1, files: 1 });
+    expect(d.text).toContain("## Step 1");
   });
 
   it("falls back to the question header when no plan text is present", () => {
@@ -5160,94 +5130,45 @@ describe("extractPlanData", () => {
     q.questions = [{ question: "Plan at /p is complete. Would you like to switch?", header: "Build Agent", options: [] }];
     const d = extractPlanData(q, []);
     expect(d.title).toBe("Build Agent");
-    expect(d.metrics).toEqual({});
-    expect(d.path).toBeUndefined();
-  });
-
-  it("resolves the plan path from the authoring tool when the plan_exit input is empty", () => {
-    // plan_exit (opencode's built-in) carries NO input — the path only lives in
-    // the `plan`-authoring tool that wrote the file. The tolerant fallback must
-    // surface it so the plan card can publish the companion page.
-    const q = planq("call-exit");
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        {
-          type: "tool",
-          id: "p-write",
-          messageID: "m1",
-          callID: "call-write",
-          tool: "plan",
-          state: { status: "completed", input: { filePath: ".opencode/plans/2026-08-15-fix.md" } },
-        },
-        {
-          type: "tool",
-          id: "p-exit",
-          messageID: "m2",
-          callID: "call-exit",
-          tool: "plan_exit",
-          state: { status: "completed", input: {} },
-        },
-      ],
-    };
-    const d = extractPlanData(q, [msg]);
-    expect(d.title).toBe("Plan complete");
-    expect(d.path).toBe(".opencode/plans/2026-08-15-fix.md");
-  });
-
-  it("plan_exit input wins over the transcript fallback", () => {
-    const q = planq("call-exit");
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        { type: "tool", id: "p-write", messageID: "m1", callID: "c-w", tool: "plan", state: { status: "completed", input: { filePath: ".opencode/plans/older.md" } } },
-        { type: "tool", id: "p-exit", messageID: "m2", callID: "call-exit", tool: "plan_exit", state: { status: "completed", input: { planPath: ".opencode/plans/newer.md" } } },
-      ],
-    };
-    const d = extractPlanData(q, [msg]);
-    expect(d.path).toBe(".opencode/plans/newer.md");
+    expect(d.text).toBe("");
   });
 });
 
-describe("planPathsFromMessages", () => {
+describe("planRefsFromPart", () => {
   const part = (over: Record<string, unknown>): OpencodePart =>
     ({ type: "tool", id: "p", messageID: "m", ...over }) as OpencodePart;
 
   it("collects .opencode/plans refs across text, tool input, and patch files", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        part({ type: "text", text: "Plan: .opencode/plans/a.md" }),
-        part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } }),
-        part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }),
-        part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } }),
-      ],
-    };
-    expect(planPathsFromMessages([msg]).sort()).toEqual([
+    expect(planRefsFromPart(part({ type: "text", text: "Plan: .opencode/plans/a.md" }))).toEqual([
       ".opencode/plans/a.md",
-      ".opencode/plans/b.md",
+    ]);
+    expect(
+      planRefsFromPart(part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } })),
+    ).toEqual([".opencode/plans/b.md"]);
+    expect(planRefsFromPart(part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }))).toEqual([
       ".opencode/plans/c.md",
     ]);
+    expect(
+      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } })),
+    ).toEqual([]);
   });
 
   it("does not treat a read reference as an authoring signal", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })],
-    };
-    expect(planPathsFromMessages([msg])).toEqual([]);
-    expect(planRefsFromPart(msg.parts[0])).toEqual([]);
+    expect(
+      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })),
+    ).toEqual([]);
   });
 
-  it("deduplicates identical refs", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        part({ tool: "plan", state: { status: "completed", input: { path: ".opencode/plans/same.md" } } }),
-        part({ type: "text", text: ".opencode/plans/same.md" }),
-      ],
-    };
-    expect(planPathsFromMessages([msg])).toEqual([".opencode/plans/same.md"]);
+  it("deduplicates identical refs within a part", () => {
+    expect(
+      planRefsFromPart(
+        part({
+          tool: "plan",
+          state: { status: "completed", input: { path: ".opencode/plans/same.md" } },
+          text: ".opencode/plans/same.md",
+        }),
+      ),
+    ).toEqual([".opencode/plans/same.md"]);
   });
 });
 

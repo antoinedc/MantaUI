@@ -2130,11 +2130,11 @@ export function resolvePlanToggle(
 // ===== Plan card data (BET-951) =====
 //
 // The plan_exit question is upgraded into a plan card in the pinned card
-// stack. Its title ("the plan's title/first heading"), the metrics line
-// (`N steps · N files`) and the plan path are all derived from the plan text
-// the `plan_exit` tool call carried. Detection is EXACT, never heuristic: the
-// question's `tool.callID` links back to the `plan_exit` tool part in the
-// transcript — match on that, never on the question text.
+// stack. Its title ("the plan's title/first heading") and the FULL plan text
+// are derived from the `plan_exit` tool call's carried plan. Detection is
+// EXACT, never heuristic: the question's `tool.callID` links back to the
+// `plan_exit` tool part in the transcript — match on that, never on the
+// question text.
 
 // A tool part may surface its name/callID directly (the live `message.part.*`
 // event shape used by useSseBus) or nested under `state.input` (the reconciled
@@ -2167,24 +2167,6 @@ export function isPlanExitQuestion(
     }
   }
   return false;
-}
-
-/**
- * The metrics line for the plan card: `N steps · N files`, derived from the
- * plan text. A clause is OMITTED (not `0`) when it cannot be derived — the
- * card never prints `0 steps`. `steps` counts step/labelled-numbered headings;
- * `files` counts bullet list items whose text is a backticked path (the
- * conventional `- \`path\`` file listing). Empty / no-match → `{}`.
- */
-export function planMetrics(text: string): { steps?: number; files?: number } {
-  const out: { steps?: number; files?: number } = {};
-  const stepHeading = text.match(/^#{1,6}[ \t]+step[ \t]+/gim)?.length ?? 0;
-  const numberedHeading = text.match(/^#{1,6}[ \t]+\d+[.)]/gm)?.length ?? 0;
-  const steps = stepHeading || numberedHeading;
-  if (steps > 0) out.steps = steps;
-  const files = text.match(/^[ \t]*[-*][ \t]+`[^`]+`[ \t]*$/gm)?.length ?? 0;
-  if (files > 0) out.files = files;
-  return out;
 }
 
 // ---- Plan-file discovery (tolerant of how the plan was authored) ----
@@ -2236,40 +2218,21 @@ export function planRefsFromPart(part: OpencodePart): string[] {
   return out;
 }
 
-/** Every distinct `.opencode/plans/*.md` reference across a transcript. */
-export function planPathsFromMessages(
-  messages: OpencodeMessage[] | null,
-): string[] {
-  const out: string[] = [];
-  for (const msg of messages ?? []) {
-    for (const part of msg.parts) {
-      for (const ref of planRefsFromPart(part)) {
-        if (!out.includes(ref)) out.push(ref);
-      }
-    }
-  }
-  return out;
-}
-
 /**
  * The plan card's display data: the title (first markdown heading of the plan
- * text, falling back to the question header), the plan file path when known,
- * the metrics, and the FULL plan text (what "Build here" resubmits as the next
- * prompt with the build model). Everything is tolerant — when the `plan_exit`
- * part's input carries no plan text the card still renders, just with the
- * question's header as the title and no metrics.
+ * text, falling back to the question header) and the FULL plan text (what
+ * "Build here" resubmits as the next prompt with the build model). Everything
+ * is tolerant — when the `plan_exit` part's input carries no plan text the
+ * card still renders, just with the question's header as the title.
  */
 export function extractPlanData(
   question: QuestionRequest,
   messages: OpencodeMessage[] | null,
 ): {
   title: string;
-  path?: string;
-  metrics: { steps?: number; files?: number };
   text: string;
 } {
   let text = "";
-  let path = "";
   for (const msg of messages ?? []) {
     for (const part of msg.parts) {
       if (part.type !== "tool") continue;
@@ -2280,19 +2243,10 @@ export function extractPlanData(
         | Record<string, unknown>
         | undefined;
       const t = input?.plan ?? input?.content ?? input?.text;
-      const p = input?.planPath ?? input?.path;
       if (typeof t === "string") text = t;
-      if (typeof p === "string") path = p;
       break;
     }
   }
-  // The plan_exit input often carries no path (opencode's plan_exit tool takes
-  // no arguments). Fall back to tolerant discovery across the transcript so
-  // the plan's `.opencode/plans/*.md` path (found in the `write`/`plan` tool
-  // that authored it, or a prose mention) still resolves — this is what lets
-  // the plan card publish the companion page even before plan_exit completes.
-  // Most recent plan wins (`at(-1)`): messages are append-ordered.
-  if (!path) path = planPathsFromMessages(messages).at(-1) ?? "";
   const firstHeading = text.match(/^#{1,6}[ \t]+(.+)$/m)?.[1]?.trim();
   const firstLine = text.split("\n").find((l) => l.trim())?.trim();
   const title =
@@ -2300,12 +2254,7 @@ export function extractPlanData(
     firstLine ??
     question.questions[0]?.header ??
     "Plan complete";
-  return {
-    title,
-    path: path || undefined,
-    metrics: planMetrics(text),
-    text,
-  };
+  return { title, text };
 }
 
 // ===== resolveDelegateModel (BET-951) =====

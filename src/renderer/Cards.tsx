@@ -526,32 +526,32 @@ export function PlanCard({
   sessionModel,
   buildModelName,
   atDelegateCap,
+  busy = null,
   onBuildHere,
-  onKeepPlanning,
+  onSendFeedback,
   onStartDelegate,
   onRememberDelegateModel,
   onOpenInBrowser,
   planUrl = null,
-  planPublishing = false,
 }: {
-  data: { title: string; path?: string; metrics: { steps?: number; files?: number } };
+  data: { title: string };
   models: Array<[string, OpencodeModel[]]> | null;
   remembered: import("./chatShared").ModelSelection | null;
   sessionModel: import("./chatShared").ModelSelection | null;
   buildModelName: string;
   atDelegateCap: boolean;
+  /** The pending async action on the card; drives loading + disabling. */
+  busy?: "build" | "delegate" | "feedback" | null;
   onBuildHere: (feedback: string) => void;
-  onKeepPlanning: (feedback: string) => void;
+  onSendFeedback: (feedback: string) => void;
   onOpenInBrowser: () => void;
   onStartDelegate: (
     model: import("./chatShared").ModelSelection | null,
     feedback: string,
   ) => void;
   onRememberDelegateModel: (model: import("./chatShared").ModelSelection | null) => void;
-  /** Eagerly-published shareable page URL for this session's plan (before plan_exit). */
+  /** The deterministic shareable page URL for this session's plan. */
   planUrl?: string | null;
-  /** True while the page is being published. */
-  planPublishing?: boolean;
 }) {
   // Level 1 of the model precedence — an explicit pick made on THIS card wins
   // while it is open. Written through to the remembered key on pick (see
@@ -578,26 +578,10 @@ export function PlanCard({
   const modelLabel =
     shortModelName(resolvedOpencode?.name) ?? delegateModel?.modelID ?? "model";
 
-  // `N steps · N files` — each clause omitted (never `0`) when not derivable.
-  const metricsLine = [
-    data.metrics.steps ? `${data.metrics.steps} steps` : null,
-    data.metrics.files ? `${data.metrics.files} files` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const busy = atDelegateCap;
-
   const body = (
     <>
-      {(metricsLine || data.path) && (
-        <div className="text-text-faint mb-px">
-          {metricsLine}
-          {metricsLine && data.path ? " · " : ""}
-          {data.path && <span className="text-text-quiet">{data.path}</span>}
-        </div>
-      )}
-      {/* Free-text feedback — QuestionCard's field recipe verbatim. */}
+      {/* Free-text feedback — QuestionCard's field recipe verbatim, with a Send
+          button at the END of the row as the submit affordance. */}
       <div className="flex items-center gap-2 border border-border rounded-md bg-bg px-3 py-2 mt-2">
         <Send size={14} aria-hidden="true" className="text-text-quiet shrink-0" />
         <input
@@ -605,11 +589,29 @@ export function PlanCard({
           placeholder="Anything to change before we start?"
           value={feedback}
           onChange={(e) => setFeedback(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && feedback.trim() && busy === null) {
+              e.preventDefault();
+              onSendFeedback(feedback);
+            }
+          }}
           className="flex-1 min-w-0 bg-transparent border-0 outline-none text-meta text-text placeholder:text-text-faint"
         />
+        <Button
+          tone="ghost"
+          type="button"
+          loading={busy === "feedback"}
+          disabled={busy !== null || !feedback.trim()}
+          onClick={() => onSendFeedback(feedback)}
+          title="Send feedback"
+          hook="manta-plan-send-feedback"
+        >
+          <Send size={14} aria-hidden="true" />
+          Send
+        </Button>
       </div>
-      {/* Once the page is published (eager, before plan_exit) surface the URL so
-          the reader can open/share it without clicking anything. */}
+      {/* Once the page is live surface the URL so the reader can open/share it
+          without clicking anything. */}
       {planUrl && (
         <div
           className="flex items-center gap-1 text-meta text-text-quiet mt-2 truncate"
@@ -622,13 +624,13 @@ export function PlanCard({
     </>
   );
 
-  // Actions, in order: [Build here] [Delegate ▾] [See in browser ↗] spacer [Keep planning].
-  const splitTitle = busy
+  // Actions, in order: [Build here] [Delegate ▾] [Open page].
+  const splitTitle = atDelegateCap
     ? "Too many background jobs running (5)"
     : "Start a background job in its own worktree";
   const actions = (
     <>
-      <Button tone="primary" onClick={() => onBuildHere(feedback)}>
+      <Button tone="primary" onClick={() => onBuildHere(feedback)} loading={busy === "build"} disabled={busy !== null}>
         Build here
       </Button>
       <SplitButton
@@ -647,30 +649,18 @@ export function PlanCard({
         leftHook="manta-plan-delegate-btn"
         rightHook="manta-plan-delegate-model-btn"
         leftTitle={splitTitle}
-        rightTitle={busy ? splitTitle : "Model this background job will run on"}
-        disabled={busy}
-        loading={models === null}
+        rightTitle={atDelegateCap ? splitTitle : "Model this background job will run on"}
+        disabled={busy !== null || atDelegateCap}
+        loading={busy === "delegate" || models === null}
       />
       <Button
         tone="ghost"
         onClick={onOpenInBrowser}
-        loading={planPublishing}
-        disabled={planPublishing || (!planUrl && !data.path)}
-        title={
-          planUrl
-            ? "Open the published plan page"
-            : data.path
-              ? "Publish this plan to a shareable page and open it"
-              : undefined
-        }
+        title="Open the published plan page"
         hook="manta-plan-open-page"
       >
-        {planUrl ? "Open page" : planPublishing ? "Publishing…" : "See in browser"}
+        Open page
         <ArrowUpRight size={14} aria-hidden="true" />
-      </Button>
-      <div className="flex-1" />
-      <Button tone="ghost" onClick={() => onKeepPlanning(feedback)}>
-        Keep planning
       </Button>
     </>
   );

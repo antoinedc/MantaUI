@@ -2430,45 +2430,6 @@ export function ChatPanel({
     [planQuestions, messages],
   );
 
-  // Eager publish of the plan companion page so the shareable URL shows up in
-  // the card BEFORE plan_exit completes. The subdomain is stable per session
-  // (`plan-<shortId>`), so re-publishing replaces the snapshot under the same
-  // URL. Fire-and-forget + deduped by the plan QUESTION (not the file path) —
-  // a "Keep planning" revision is a NEW question reusing the same path, so it
-  // re-publishes fresh content instead of serving the stale snapshot. A
-  // failure is silent and falls back to publish-on-click.
-  const [planUrl, setPlanUrl] = useState<string | null>(null);
-  const [planPublishing, setPlanPublishing] = useState(false);
-  const publishedPlanQuestionRef = useRef<string | null>(null);
-  const publishPlanEager = useCallback(
-    (qId: string, path: string) => {
-      if (!path || publishedPlanQuestionRef.current === qId) return;
-      publishedPlanQuestionRef.current = qId;
-      // New/revised plan → drop the old URL and show the loading state until
-      // the fresh page is published.
-      setPlanUrl(null);
-      setPlanPublishing(true);
-      window.api
-        .planPublish(sessionId, path)
-        .then(({ url }) => setPlanUrl(url))
-        .catch(() => { /* fall back to publish-on-click */ })
-        .finally(() => setPlanPublishing(false));
-    },
-    [sessionId],
-  );
-  useEffect(() => {
-    // Only the panel the user is actually viewing publishes eagerly; a hidden
-    // panel's plan page is published lazily once it becomes active.
-    if (!isActive) return;
-    for (const q of planQuestions) {
-      const data = planDataByQuestion.get(q.id);
-      if (data?.path) {
-        publishPlanEager(q.id, data.path);
-        break;
-      }
-    }
-  }, [planQuestions, planDataByQuestion, publishPlanEager, isActive]);
-
   // Delegate split control (BET-951).
   // Level 3 of the model precedence — "same as current" means the BUILD model,
   // not the plan model the composer chip may be showing while plan mode is on.
@@ -2563,7 +2524,7 @@ export function ChatPanel({
 
   const startPlanDelegate = useCallback(
     (q: QuestionRequest, m: ModelSelection | null, feedback: string) => {
-      void window.api
+      return window.api
         .delegateStart({
           prompt: buildPlanPrompt(q, feedback),
           sessionID: sessionId,
@@ -2577,38 +2538,29 @@ export function ChatPanel({
     [buildPlanPrompt, sessionId, cwd],
   );
 
-  const openPlanInBrowser = useCallback(
-    (path: string) => {
-      void window.api
-        .planPublish(sessionId, path)
-        .then(({ url }) => window.api.openExternal(url))
-        .catch((e: unknown) => {
-          setSendError(String((e as Error)?.message ?? e));
-        });
-    },
-    [sessionId],
-  );
-
-  // The PlanCard's "Open page" URL. The eager-publish result wins when it's
-  // present; otherwise fall back to the DETERMINISTIC URL derived from the
-  // session id (`<base>/pages/plan-<shortSessionId>` — the same subdomain the
-  // server publishes under), so a plan_render-published plan ALWAYS shows its
-  // link even before eager-publish returns (BET-992). serverBase may be
-  // unavailable (no server configured); then there is simply no URL.
+  // The PlanCard's "Open page" URL. Single-HTML plans are published by the
+  // model's plan_render tool under the DETERMINISTIC per-session subdomain
+  // (`<base>/pages/plan-<shortSessionId>`); there is no eager-publish state and
+  // no `.md` publish path. serverBase may be unavailable (no server
+  // configured); then there is simply no URL.
   const planCardUrl = useMemo(() => {
-    if (planUrl) return planUrl;
     try {
       return planPageUrl(sessionId, serverBase());
     } catch {
       return "";
     }
-  }, [planUrl, sessionId]);
+  }, [sessionId]);
 
   // The plan_exit card, built here and mounted in the transcript tail the SAME
   // way the questions are (it used to be pinned in the CardStack). Building the
-  // element here keeps the closures over the plan data + the eager-published
+  // element here keeps the closures over the plan data + the deterministic
   // URL; Transcript just mounts it. The stable `key={q.id}` preserves the
   // card's internal state (feedback / open model menu) across updates.
+  //
+  // ONE pending-action state drives the loading/disabled of all three actions
+  // (Build here / Delegate / Send feedback) while their async call is in
+  // flight — SQL no loading state existed before.
+  const [pendingAction, setPendingAction] = useState<"build" | "delegate" | "feedback" | null>(null);
   const planCard = useMemo(() => {
     for (const q of planQuestions) {
       const data = planDataByQuestion.get(q.id);
@@ -2622,25 +2574,29 @@ export function ChatPanel({
           sessionModel={sessionModel}
           buildModelName={activeModel?.name ?? ""}
           atDelegateCap={atDelegateCap}
-          onBuildHere={(fb) => void buildHere(q, fb)}
-          onKeepPlanning={(fb) => void keepPlanning(q, fb)}
-          onStartDelegate={(m, fb) => startPlanDelegate(q, m, fb)}
+          busy={pendingAction}
+          onBuildHere={(fb) => {
+            setPendingAction("build");
+            void buildHere(q, fb).finally(() => setPendingAction(null));
+          }}
+          onSendFeedback={(fb) => {
+            setPendingAction("feedback");
+            void keepPlanning(q, fb).finally(() => setPendingAction(null));
+          }}
+          onStartDelegate={(m, fb) => {
+            setPendingAction("delegate");
+            void startPlanDelegate(q, m, fb).finally(() => setPendingAction(null));
+          }}
           onRememberDelegateModel={rememberDelegateModel}
           planUrl={planCardUrl}
-          planPublishing={planPublishing}
           onOpenInBrowser={() => {
-            // Live page already published → just open it (no re-publish).
-            if (planUrl) {
-              void window.api.openExternal(planUrl).catch(() => { /* best-effort */ });
-              return;
-            }
-            if (data.path) openPlanInBrowser(data.path);
+            if (planCardUrl) void window.api.openExternal(planCardUrl).catch(() => { /* best-effort */ });
           }}
         />
       );
     }
     return null;
-  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planUrl, planPublishing, openPlanInBrowser]);
+  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
 
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];

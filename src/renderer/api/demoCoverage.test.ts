@@ -114,7 +114,6 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeSetSubagents",
   "opencodeSyncSubagents",
   "peekRemoteFile",
-  "planPublish",
   "pluginsRegistry",
    "progressGet",
    "projectMetaDelete",
