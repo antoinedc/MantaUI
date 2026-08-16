@@ -14,37 +14,61 @@ off.
   Do not invent product decisions. When a reasonable default exists, prefer
   stating it as a decision to confirm rather than blocking on trivia.
 
-## 2. Produce a structured plan
+## 2. Produce the plan (single HTML bundle)
 
-Write the plan into the plan directory as markdown. Use headings and short
-bullets covering at least:
+Author ONE self-contained HTML file into the plan directory. That file is the
+whole plan — it contains both the metadata the tooling needs AND the full,
+model-authored body (including any mockup). Do not write a separate markdown
+plan and do not write a separate mockup page.
 
-- **Goal** — what this delivers, in one or two sentences.
-- **Confirmed decisions** — the concrete choices you made (and any you are
-  asking the user to confirm), so a build agent does not re-litigate them.
-- **Mockups** — links to any high-fidelity visuals you produced (see step 3).
-- **Files to change** — the specific files and what changes in each.
-- **Verification** — how the result should be checked (tests, typecheck, a
-  manual step), consistent with the repo's conventions.
+The file must contain:
 
-Keep it conservative and scoped: no new product decisions, no invented scope.
+1. **A meta block**, exactly this shape:
 
-## 3. Mockups / high-fidelity visuals
+   ```html
+   <script type="application/json" id="plan-meta">
+   { "title": "<the plan title>", "sections": [ { "id": "<kebab-case-id>", "heading": "<Section heading>" } ] }
+   </script>
+   ```
 
-If the request calls for a visual (a mockup, a UI proposal, a layout), do this
-exactly once per visual:
+   One entry in `sections` per MAJOR plan section. Include at least **Goal**,
+   **Decisions**, **Files to change**, and **Verification**; add more only if
+   warranted. Pick short, stable kebab-case ids. Keep the meta minimal — title
+   and sections only, do not invent extra fields.
 
-1. Write the standalone HTML into the plan directory.
-2. Publish it with the `serve_page` tool, passing `ttlHours: 0` so it never
-   expires.
-3. Reference the returned `/pages/<subdomain>` URL in the plan's **Mockups**
-   section so it renders as a card.
+2. **A rich HTML `<body>`** (below or around the script tag is fine) that IS
+   the plan. Each major section is an `<h2 id="<SAME id as in meta>">` followed
+   by that section's content, styled freely with inline `<style>`/classes as
+   you like. The body is fully yours to author — no chrome from us.
 
-Publish each visual once — do not re-publish identical pages.
+**Contract rule (mandatory):** EVERY `id` in `plan-meta.sections` MUST appear
+as a literal `id="<id>"` attribute on the matching `<h2>` in the body —
+otherwise `plan_render` rejects the publish. If it would reject, fix the
+anchor rather than skipping. Write the prose in ordinary HTML, not markdown;
+the body is served as-is.
 
-## 4. Hand off
+## 3. Mockups (only for UI/layout changes)
 
-When the plan is complete, invoke the `plan_exit` tool (the built-in approval →
-build hand-off). It locates the plan automatically; simply follow the tool's
-returned UI. Your work is done when the plan is written and the hand-off is
-invoked.
+If the plan involves a UI or layout change, render the high-fidelity preview
+as part of the body — its visual shell/container/frame AND its colors styled
+by you to match the actual product being designed (the real product's design
+language, not Manta's — you know it from context; e.g. MantaUI plans use
+MantaUI's real tokens). It may be a full-width section or a framed `<div>` —
+your call, but it must read as a real product mockup.
+
+If the plan does NOT involve a UI/layout change, do NOT add a mockup section
+at all.
+
+## 4. Publish
+
+Call the `plan_render` tool with the file path. It publishes the plan and
+returns the shareable URL. Do NOT call `serve_page` for the plan or any mockup
+anymore — the mockup is inline in the single plan page and the plan is
+published via `plan_render`.
+
+## 5. Hand off
+
+When the plan is written and published, invoke the `plan_exit` tool (the
+built-in approval → build hand-off). It locates the plan automatically; simply
+follow the tool's returned UI. Your work is done when the plan is written,
+published, and the hand-off is invoked.
