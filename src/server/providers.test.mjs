@@ -20,6 +20,7 @@ import {
   readAgentBlocks,
   getSubagents,
   setSubagents,
+  setSkillRegistryUrls,
   syncSubagents,
   mantaPlanAgentBlock,
   ensureMantaPlanAgent,
@@ -852,6 +853,51 @@ describe("setSubagents", () => {
     assert.equal(result.ok, false);
     assert.match(result.error, /remove/i);
     assert.equal(patched, false, "rejects the batch before any upsert PATCH");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// setSkillRegistryUrls — the BET-1031 writer. Routes the user's registry list
+// to opencode's `skills.urls` through PATCH /global/config, touching only the
+// `urls` key (deep-merge) so unrelated keys are preserved.
+// ---------------------------------------------------------------------------
+
+describe("setSkillRegistryUrls", () => {
+  it("patches skills.urls with the given list", async () => {
+    const patches = [];
+    const result = await setSkillRegistryUrls(
+      ["https://example.com/a.json", "https://example.com/b.json"],
+      { patch: async (p) => { patches.push(p); return { ok: true }; } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(patches.length, 1);
+    assert.deepEqual(patches[0], { skills: { urls: ["https://example.com/a.json", "https://example.com/b.json"] } });
+  });
+
+  it("patches only urls, never other skills keys", async () => {
+    const patches = [];
+    await setSkillRegistryUrls(["https://example.com/a.json"], {
+      patch: async (p) => { patches.push(p); return { ok: true }; },
+    });
+    const keys = Object.keys(patches[0].skills);
+    assert.deepEqual(keys, ["urls"], "deep-merge patch must carry only the urls key");
+  });
+
+  it("normalizes a non-array value to an empty list (defensive, no throw)", async () => {
+    const patches = [];
+    const result = await setSkillRegistryUrls(null, {
+      patch: async (p) => { patches.push(p); return { ok: true }; },
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(patches[0].skills.urls, []);
+  });
+
+  it("propagates a failed opencode write back to the caller", async () => {
+    const result = await setSkillRegistryUrls(["https://example.com/a.json"], {
+      patch: async () => ({ ok: false, error: "opencode config endpoint unreachable: boom" }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /unreachable/);
   });
 });
 
