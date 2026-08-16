@@ -34,6 +34,7 @@ import { Check } from "lucide-react";
 import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { CustomProviderForm } from "./CustomProviderForm";
+import { MantaLoader } from "./MantaLoader";
 import { StepFooter } from "./onboardingUi";
 
 const DANGER = "var(--danger)";
@@ -60,13 +61,18 @@ export function ProvidersStep({
   // Exactly one row can be mid-mutation at a time.
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [showCustom, setShowCustom] = useState(false);
+  // True while a re-probe (post-connect refresh) is in flight, so the stale
+  // list never just sits there after a connect completes.
+  const [refreshing, setRefreshing] = useState(false);
 
   // Refresh on mount (and after a custom provider save / connect done).
   const refresh = useCallback(async () => {
+    setRefreshing(true);
     setLoadError(null);
     if (typeof window.api.opencodeProviderAuth !== "function") {
       setLoadError("Couldn't reach the box to check providers.");
       setStatuses([]);
+      setRefreshing(false);
       return;
     }
     try {
@@ -80,8 +86,10 @@ export function ProvidersStep({
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
       setStatuses([]);
+    } finally {
+      setRefreshing(false);
     }
-  }, [onContinue]);
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -97,6 +105,15 @@ export function ProvidersStep({
     [refresh],
   );
 
+  // One waiting image for both the mount probe and the post-connect re-probe
+  // (BET-1009) — the Manta loader beside "Checking connected providers…".
+  const probingRow = (
+    <div className="flex items-center gap-2 text-body text-text-faint">
+      <MantaLoader size="inline" />
+      <span>Checking connected providers…</span>
+    </div>
+  );
+
   return (
     <div>
       <h2 className="text-display font-semibold tracking-tight text-text mb-2">
@@ -105,6 +122,8 @@ export function ProvidersStep({
       <p className="text-body text-text-muted leading-relaxed mb-6 max-w-md">
         Sign in with a subscription you already pay for. You can add more later.
       </p>
+
+      {statuses === null && !loadError && probingRow}
 
       {loadError && (
         <div role="alert" className="text-body mb-4" style={{ color: DANGER }}>
@@ -118,9 +137,9 @@ export function ProvidersStep({
         </div>
       )}
 
-      {statuses === null && !loadError && (
-        <div className="text-body text-text-faint">Checking connected providers…</div>
-      )}
+      {/* While a post-connect re-probe runs the list would otherwise sit
+          stale ("not connected") until it resolves — show the same loader row. */}
+      {refreshing && statuses !== null && probingRow}
 
       {/* Subscriptions — one row per provider from the registry. */}
       <div className="space-y-2">

@@ -56,7 +56,6 @@ import {
   type ConnectPhase,
 } from "./chatUtils";
 import { CopyButton } from "./CopyButton";
-import { Button } from "./Button";
 import { Terminal } from "./Terminal";
 import { useStore } from "./store";
 import { ProcessPanel } from "./ProcessPanel";
@@ -941,23 +940,21 @@ const CredentialInput = memo(function CredentialInput({
               void submit();
             }
           }}
+          disabled={submitting}
           placeholder={placeholder}
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
+          className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none disabled:opacity-60"
         />
-        <Button
-          tone="primary"
+        <button
           onClick={() => void submit()}
           disabled={!canSubmit}
-          loading={submitting}
+          className="shrink-0 inline-flex items-center gap-[6px] px-2 py-1 rounded-xs border disabled:opacity-40 border-border text-text-muted hover:text-text"
         >
-          {submitting ? (
-            <Loader2 size={14} className="animate-spin" aria-hidden />
-          ) : null}
-          {submitting ? "Submitting…" : submitLabel}
-        </Button>
+          {submitting ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
+          {submitting ? "Saving…" : submitLabel}
+        </button>
       </div>
       {error && <div className="text-danger text-label break-words">{error}</div>}
     </div>

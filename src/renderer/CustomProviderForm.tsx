@@ -45,6 +45,9 @@ export function CustomProviderForm({
   const [baseURL, setBaseURL] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [phase, setPhase] = useState<Phase>("editing");
+  // Names the slow part of save() so the button can announce it: "Saving…"
+  // while the provider is written, then "Restarting opencode…" (BET-1009).
+  const [saveStep, setSaveStep] = useState<"save" | "restart" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<{ id: string }[] | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
@@ -54,6 +57,7 @@ export function CustomProviderForm({
 
   const reset = () => {
     setPhase("editing");
+    setSaveStep(null);
     setModels(null);
     setChecked(new Set());
     setError(null);
@@ -104,9 +108,10 @@ export function CustomProviderForm({
       setError("Select at least one model.");
       return;
     }
-    setPhase("probing"); // reuse the busy flag for the save call
+    setPhase("probing"); // keep the busy flag for disabling
     setError(null);
     try {
+      setSaveStep("save");
       const res = await window.api.opencodeSetProviders({
         upsert: [
           {
@@ -121,8 +126,10 @@ export function CustomProviderForm({
       if (!res.ok) {
         setError(res.error ?? "Couldn't save the provider.");
         setPhase("ready");
+        setSaveStep(null);
         return;
       }
+      setSaveStep("restart");
       try {
         await window.api.opencodeRestart();
       } catch (e) {
@@ -132,20 +139,26 @@ export function CustomProviderForm({
           }`,
         );
         setPhase("ready");
+        setSaveStep(null);
         return;
       }
+      // Stay busy (and mounted) until the parent's re-probe resolves — clearing
+      // first is what left a blank gap while opencode was still restarting.
+      await onSaved();
       setName("");
       setBaseURL("");
       setApiKey("");
+      setSaveStep(null);
       reset();
-      await onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPhase("ready");
+      setSaveStep(null);
     }
   };
 
   const busy = phase === "probing";
+  const inSave = saveStep !== null;
 
   if (compact) {
     return (
@@ -191,21 +204,21 @@ export function CustomProviderForm({
           />
         )}
         <div className="flex gap-2 pt-1">
-          {phase !== "ready" ? (
+          {inSave || phase === "ready" ? (
+            <button
+              onClick={() => void save()}
+              disabled={busy || checked.size === 0}
+              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
+            >
+              {saveStep === "save" ? "Saving…" : saveStep === "restart" ? "Restarting opencode…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
+            </button>
+          ) : (
             <button
               onClick={() => void probe()}
               disabled={busy || draftErr !== null}
               className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               {busy ? "Probing…" : "Probe"}
-            </button>
-          ) : (
-            <button
-              onClick={() => void save()}
-              disabled={busy || checked.size === 0}
-              className="px-3 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
-            >
-              {busy ? "Saving…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
             </button>
           )}
         </div>
@@ -260,7 +273,17 @@ export function CustomProviderForm({
         />
       )}
       <div className="flex items-center gap-2">
-        {phase !== "ready" ? (
+        {inSave || phase === "ready" ? (
+          <Button
+            tone="primary"
+            type="button"
+            onClick={() => void save()}
+            disabled={busy || checked.size === 0}
+          >
+            {inSave ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
+            {saveStep === "save" ? "Saving…" : saveStep === "restart" ? "Restarting opencode…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
+          </Button>
+        ) : (
           <Button
             tone="primary"
             type="button"
@@ -269,16 +292,6 @@ export function CustomProviderForm({
           >
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
             {busy ? "Probing…" : "Probe endpoint"}
-          </Button>
-        ) : (
-          <Button
-            tone="primary"
-            type="button"
-            onClick={() => void save()}
-            disabled={busy || checked.size === 0}
-          >
-            {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : null}
-            {busy ? "Saving…" : `Save ${checked.size} model${checked.size === 1 ? "" : "s"}`}
           </Button>
         )}
       </div>
