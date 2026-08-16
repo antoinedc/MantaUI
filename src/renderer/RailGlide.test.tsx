@@ -23,7 +23,13 @@ function Rail() {
 }
 
 function fire(el: Element, type: "mouseover" | "mouseleave") {
-  el.dispatchEvent(new MouseEvent(type, { bubbles: type === "mouseover" }));
+  // `mouseleave` does not bubble, and React's onMouseLeave is derived from the
+  // bubbling `mouseout` event (checked against relatedTarget). So the leave
+  // case fires a bubbling `mouseout`; with no relatedTarget the pointer is
+  // treated as having left the rail entirely.
+  el.dispatchEvent(
+    new MouseEvent(type === "mouseleave" ? "mouseout" : "mouseover", { bubbles: true }),
+  );
 }
 
 describe("useRailGlide", () => {
