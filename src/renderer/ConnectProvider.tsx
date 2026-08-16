@@ -45,7 +45,7 @@
 // server-side SUBSCRIPTION_PROVIDERS table in subscriptionProviders.mjs.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { X, Loader2 } from "lucide-react";
 import type { OpencodeProviderAuthRequest } from "../shared/types";
 import {
   connectPhaseLabel,
@@ -56,6 +56,7 @@ import {
   type ConnectPhase,
 } from "./chatUtils";
 import { CopyButton } from "./CopyButton";
+import { Button } from "./Button";
 import { Terminal } from "./Terminal";
 import { useStore } from "./store";
 import { ProcessPanel } from "./ProcessPanel";
@@ -946,13 +947,17 @@ const CredentialInput = memo(function CredentialInput({
           autoCorrect="off"
           className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
         />
-        <button
+        <Button
+          tone="primary"
           onClick={() => void submit()}
           disabled={!canSubmit}
-          className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40 border-border text-text-muted hover:text-text"
+          loading={submitting}
         >
-          {submitting ? "…" : submitLabel}
-        </button>
+          {submitting ? (
+            <Loader2 size={14} className="animate-spin" aria-hidden />
+          ) : null}
+          {submitting ? "Submitting…" : submitLabel}
+        </Button>
       </div>
       {error && <div className="text-danger text-label break-words">{error}</div>}
     </div>
