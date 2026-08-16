@@ -150,6 +150,22 @@ jobs:
           echo "MANTA_DEPLOY_REF=origin/main" >> "$GITHUB_ENV"
           echo "deploy source: this PR ($(git rev-parse --short HEAD))"
 
+      - name: Create a genuinely fresh HOME
+        run: |
+          set -euo pipefail
+          # BET-999's fix is a mkdir of MANTA_HOME's parent (~/.local/share) on a
+          # fresh box. To actually exercise it, the install must run against a
+          # home whose XDG parent does NOT pre-exist. The GitHub macOS runner's
+          # stock /Users/runner already ships with ~/.local/share, so pointing
+          # the install at the stock $HOME would make the mkdir a silent no-op.
+          # Point the WHOLE job at a fresh home we create here; every subsequent
+          # $HOME (clean-slate, opencode pre-install, install, LaunchAgents, the
+          # manta shim, re-install) resolves against it.
+          FRESH_HOME="$RUNNER_TEMP/fresh-home"
+          mkdir -p "$FRESH_HOME"
+          echo "HOME=$FRESH_HOME" >> "$GITHUB_ENV"
+          echo "fresh HOME=$FRESH_HOME"
+
       - name: Install box prerequisites (tmux)
         run: |
           set -euo pipefail
@@ -163,11 +179,11 @@ jobs:
       - name: Assert a clean slate (no prior box identity)
         run: |
           set -euo pipefail
-          # $HOME/.local/share (the PARENT of the XDG-default MANTA_HOME) must
-          # also be absent, not just $HOME/.local/share/manta: BET-999's fix is
-          # precisely the mkdir of that parent on a fresh box. If the parent
-          # already exists the install's mkdir is a silent no-op and the bug
-          # can slip back in without this job noticing.
+          # This runs against the fresh HOME created above, which genuinely has
+          # no ~/.manta, ~/manta, ~/.local/share (the PARENT of the XDG-default
+          # MANTA_HOME) or LaunchAgent. Requiring the parent absent is the point:
+          # BET-999's mkdir must create it, and a leftover would silently no-op
+          # the fix.
           for p in "$HOME/.manta" "$HOME/manta" "$HOME/.local/share" "$HOME/Library/LaunchAgents/com.mantaui.server.plist"; do
             if [ -e "$p" ]; then echo "unexpected leftover: $p"; exit 1; fi
           done
