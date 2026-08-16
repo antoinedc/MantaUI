@@ -10,13 +10,13 @@
 // This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
 // until SSH is removed.
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { modify, applyEdits, parse } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
-import { writeJsonAtomic } from "./jsonStore.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
 
 // ---------------------------------------------------------------------------
@@ -78,52 +78,13 @@ function stripUrlUserinfo(url) {
 const normBaseURL = (u) => stripUrlUserinfo(u).replace(/\/$/, "");
 
 // opencode.jsonc lives at ~/.config/opencode/opencode.jsonc on the box. The
-// mobile server IS the box, so we read/write it directly (no SSH hop).
+// mobile server IS the box. WRITES go through opencode's own /global/config
+// endpoint (the single authority that owns both the in-memory config and the
+// file, and edits the .jsonc surgically so comments survive). The READ path
+// below parses the file with jsonc-parser (opencode's own JSONC parser) — the
+// comment-stripping regex that used to live here is deleted.
 const OPENCODE_JSONC = join(homedir(), ".config", "opencode", "opencode.jsonc");
-
-// Atomic writes route through jsonStore.mjs (single source of truth for the
-// temp-file-then-rename dance). The READ path stays here because opencode.jsonc
-// is JSONC (// comments), which the plain-JSON readJsonSync can't parse — the
-// comment-stripping readRemoteConfig below is the JSONC-aware loader.
-
-/**
- * Strip // line comments from JSONC without eating // inside strings.
- * Ported from src/main/setup.ts:stripLineComments.
- */
-function stripLineComments(jsonc) {
-  let out = "";
-  let i = 0;
-  let inStr = false;
-  while (i < jsonc.length) {
-    const c = jsonc[i];
-    if (inStr) {
-      out += c;
-      if (c === "\\" && i + 1 < jsonc.length) {
-        out += jsonc[i + 1];
-        i += 2;
-        continue;
-      }
-      if (c === '"') inStr = false;
-      i += 1;
-      continue;
-    }
-    if (c === '"') {
-      out += c;
-      inStr = true;
-      i += 1;
-      continue;
-    }
-    if (c === "/" && jsonc[i + 1] === "/") {
-      const nl = jsonc.indexOf("\n", i);
-      if (nl === -1) break;
-      i = nl;
-      continue;
-    }
-    out += c;
-    i += 1;
-  }
-  return out;
-}
+const OPENCODE_API = "http://127.0.0.1:4096/global/config";
 
 // ---------------------------------------------------------------------------
 // Provider block manipulation (pure)
@@ -257,15 +218,20 @@ const UNPARSEABLE_CONFIG_MSG =
   "opencode.jsonc on the box is unparseable — fix it manually first.";
 
 /**
- * Read opencode.jsonc from the box and parse it. Returns {} if the file is
+ * Read opencode.jsonc from the box and parse it with jsonc-parser (opencode's
+ * own JSONC parser — no comment-stripping regex). Returns {} if the file is
  * absent. THROWS if the file exists but is unparseable — callers must NOT
  * overwrite an unparseable config.
  */
 async function readRemoteConfig() {
   if (!existsSync(OPENCODE_JSONC)) return {};
   const raw = await readFile(OPENCODE_JSONC, "utf-8");
-  const stripped = stripLineComments(raw);
-  return JSON.parse(stripped);
+  const errors = [];
+  const parsed = parse(raw, errors, { allowTrailingComma: true });
+  if (errors.length > 0 || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(UNPARSEABLE_CONFIG_MSG);
+  }
+  return parsed;
 }
 
 /**
@@ -351,36 +317,124 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
 }
 
 /**
- * Serialize + atomically write opencode.jsonc. Shared write path for
- * setProviders / setSubagents (and any future writer) so the mkdir +
- * atomicWrite + error-shape contract lives in one place.
+ * THE single opencode.jsonc write path: PATCH /global/config.
+ *
+ * opencode's endpoint is the single authority for what the config should be —
+ * it owns both the in-memory config and the file, and edits the .jsonc
+ * surgically so comments survive (verified live: a PATCH of one key leaves all
+ * other lines byte-identical). Writes therefore go through it, never through a
+ * hand-rolled read/merge/write (which is what used to strip comments and
+ * silently discard an unparseable config).
+ *
+ * On ANY failure (network or non-2xx) returns { ok:false, error } with the
+ * endpoint's error surfaced to the caller — there is deliberately NO fallback
+ * that writes opencode.jsonc itself (a fallback would reintroduce the silent
+ * data-loss bug this replaces).
+ *
+ * `patchGlobalConfig` is injectable so setProviders/setSubagents can be
+ * unit-tested against a stub without touching the live opencode endpoint.
  */
-async function writeOpencodeJsonc(cfg) {
-  const content = JSON.stringify(cfg, null, 2);
+export async function patchGlobalConfig(patch) {
+  let res;
   try {
-    await writeJsonAtomic(OPENCODE_JSONC, content);
+    res = await fetch(OPENCODE_API, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[providers] patch /global/config unreachable:", msg);
+    return { ok: false, error: `opencode config endpoint unreachable: ${msg}` };
+  }
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = await res.text();
+    } catch {
+      /* ignore read error on the error body */
+    }
+    console.warn(`[providers] patch /global/config failed: ${res.status}`, detail);
+    return {
+      ok: false,
+      error: `opencode config update failed (${res.status}): ${String(detail ?? "").slice(0, 200)}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Perform a comment-preserving deletion of the given JSONC paths from
+ * opencode.jsonc (e.g. ["agent", "haiku"] to remove one agent block).
+ *
+ * This exists ONLY for `remove` ops, which opencode's PATCH /global/config
+ * cannot express: the endpoint deep-merges objects and rejects `null` values
+ * (verified on 1.18.10), so a key can't be deleted through it. The removal is
+ * therefore a surgical edit built on jsonc-parser's `modify(path, undefined)`
+ * — the exact primitive opencode itself uses for its own .jsonc writes. It
+ * never parses the document to {} and never strips comments, so it does NOT
+ * reintroduce the silent-loss bug this module deletes. Upserts never take this
+ * path; they always go through patchGlobalConfig.
+ *
+ * `removeConfigKeys` is injectable for tests.
+ */
+export async function removeConfigKeys(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return { ok: true };
+  let raw;
+  try {
+    raw = await readFile(OPENCODE_JSONC, "utf-8");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `could not read opencode.jsonc: ${msg}` };
+  }
+  const options = { formattingOptions: { insertSpaces: true, tabSize: 2 } };
+  let next = raw;
+  for (const path of paths) {
+    try {
+      const edits = modify(next, path, undefined, options);
+      next = applyEdits(next, edits);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: `could not remove config key ${path.join(".")}: ${msg}` };
+    }
+  }
+  try {
+    await writeFile(OPENCODE_JSONC, next);
     return { ok: true };
   } catch (e) {
-    console.warn("[providers] write failed:", e);
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `could not write opencode.jsonc: ${msg}` };
   }
 }
 
 /**
- * Apply a set of provider mutations and write opencode.jsonc back.
- * Does NOT restart opencode; the caller decides (prompt-before-restart).
+ * Apply a set of provider mutations through opencode's config endpoint.
+ * Upserts go through PATCH /global/config; removes go through
+ * removeConfigKeys (the endpoint can't delete). Does NOT restart opencode; the
+ * caller decides (prompt-before-restart).
  */
-export async function setProviders(ops) {
-  let cfg;
-  try {
-    cfg = await readRemoteConfig();
-  } catch (e) {
-    console.warn("[providers] refusing to write — config unparseable/unreadable:", e);
-    return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
+export async function setProviders(ops, deps = {}) {
+  const patch = deps.patch ?? patchGlobalConfig;
+  const remove = deps.remove ?? removeConfigKeys;
+  const upserts = ops.upsert ?? [];
+  const removes = ops.remove ?? [];
+
+  if (upserts.length > 0) {
+    const providerPatch = {};
+    for (const input of upserts) {
+      providerPatch[input.id] = upsertProviderBlock({}, input).provider[input.id];
+    }
+    const res = await patch({ provider: providerPatch });
+    if (!res.ok) return res;
   }
-  for (const id of ops.remove ?? []) cfg = removeProviderBlock(cfg, id);
-  for (const input of ops.upsert ?? []) cfg = upsertProviderBlock(cfg, input);
-  return writeOpencodeJsonc(cfg);
+
+  if (removes.length > 0) {
+    const res = await remove(removes.map((id) => ["provider", id]));
+    if (!res.ok) return res;
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -404,20 +458,32 @@ export async function getSubagents(readConfig = readRemoteConfig) {
 }
 
 /**
- * Apply a set of subagent mutations and write opencode.jsonc back.
- * Does NOT restart opencode; the caller must do that manually.
+ * Apply a set of subagent mutations through opencode's config endpoint.
+ * Upserts go through PATCH /global/config; removes go through
+ * removeConfigKeys (the endpoint can't delete). Does NOT restart opencode; the
+ * caller must do that manually.
  */
-export async function setSubagents(ops) {
-  let cfg;
-  try {
-    cfg = await readRemoteConfig();
-  } catch (e) {
-    console.warn("[providers] refusing to write — config unparseable/unreadable:", e);
-    return { ok: false, error: `${UNPARSEABLE_CONFIG_MSG} (refusing to overwrite)` };
+export async function setSubagents(ops, deps = {}) {
+  const patch = deps.patch ?? patchGlobalConfig;
+  const remove = deps.remove ?? removeConfigKeys;
+  const upserts = ops.upsert ?? [];
+  const removes = ops.remove ?? [];
+
+  if (upserts.length > 0) {
+    const agentPatch = {};
+    for (const input of upserts) {
+      agentPatch[input.name] = upsertAgentBlock({}, input).agent[input.name];
+    }
+    const res = await patch({ agent: agentPatch });
+    if (!res.ok) return res;
   }
-  for (const name of ops.remove ?? []) cfg = removeAgentBlock(cfg, name);
-  for (const input of ops.upsert ?? []) cfg = upsertAgentBlock(cfg, input);
-  return writeOpencodeJsonc(cfg);
+
+  if (removes.length > 0) {
+    const res = await remove(removes.map((name) => ["agent", name]));
+    if (!res.ok) return res;
+  }
+
+  return { ok: true };
 }
 
 /**
