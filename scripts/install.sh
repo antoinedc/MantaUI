@@ -358,135 +358,6 @@ launchd_agent_path() {
   printf '%s' "$base"
 }
 
-# print_provider_detection_summary <lib-path> <node-path> <home-path> [is_macos]
-# Probe opencode's `connected[]` + the local Claude credentials file + the
-# claude/codex/kimi CLIs on PATH, then print the per-provider detection
-# block at the tail of a successful install (BET-313).
-#
-# Warns (never dies) for each missing provider; only prints the "chat will
-# start but reject requests" guidance when ZERO providers are connected.
-# Also probes the claude / codex / kimi CLIs on PATH so the user can see
-# why a launcher slot in MantaUI's session-mode dropdown is or is not
-# offered. The restart hint (systemctl vs launchctl) inside the guidance
-# block follows IS_MACOS.
-#
-# Extracted as a top-level function (defined alongside the other testable
-# helpers) so unit tests in scripts/install.test.mjs can call it via
-# runBootstrap — both the runMain flag-parser and the install body itself
-# go through this one entry point, so the tests pin the actual install
-# behavior rather than a replicated copy of it.
-print_provider_detection_summary() {
-  local lib="$1" node_bin="$2" home_path="$3" macos="${4:-0}"
-
-  log "Checking provider connections…"
-
-  # Probe opencode for connected[]. Pure: fetchConnectedProviders returns
-  # [] on any failure (network error, opencode down, malformed response,
-  # non-2xx status). install.sh treats absence as "not detected" — the
-  # formatProviderDetection fallback for Claude then checks the local
-  # cred file. We pipe the newline-separated ids to format-provider-
-  # detection; the subcommand also accepts a JSON array via stdin.
-  local connected_ids
-  connected_ids="$("$node_bin" -e '
-    import("'"$lib"'").then(async (m) => {
-      const ids = await m.fetchConnectedProviders();
-      process.stdout.write(ids.join("\n"));
-    }).catch(() => process.stdout.write(""));
-  ' 2>/dev/null || true)"
-
-  # Probe local credential files. Only Claude has one — opencode's native
-  # Codex/Kimi auth lives inside opencode's auth store, not on the shell.
-  local has_claude_creds=0
-  [ -f "$home_path/.claude/.credentials.json" ] && has_claude_creds=1
-
-  # Probe CLIs via command -v through the same shell — never install any.
-  local cli_claude=0 cli_codex=0 cli_kimi=0
-  command -v claude >/dev/null 2>&1 && cli_claude=1
-  command -v codex  >/dev/null 2>&1 && cli_codex=1
-  command -v kimi   >/dev/null 2>&1 && cli_kimi=1
-
-  local detection_json
-  detection_json="$(printf '%s\n' "$connected_ids" | "$node_bin" "$lib" format-provider-detection \
-    --has-claude-creds "$has_claude_creds" \
-    --cli-claude "$cli_claude" \
-    --cli-codex  "$cli_codex"  \
-    --cli-kimi   "$cli_kimi" 2>/tmp/manta-detect.err)" \
-    || detection_json=""
-
-  if [ -z "$detection_json" ]; then
-    # format-provider-detection failed unexpectedly (would only happen if
-    # the lib crashed). Don't die — emit a single generic warn so the
-    # user still sees SOMETHING, and move on. install.sh never blocks on
-    # detection (BET-313: a missing provider is not an installation
-    # failure).
-    warn "could not build provider detection summary (see /tmp/manta-detect.err) — assuming no providers connected."
-    warn "Connect any provider from the MantaUI app."
-    # BET-354: the app now connects Claude end-to-end (spawns `claude auth
-    # login` over the pty bus, feeds the OAuth callback code back, restarts
-    # opencode, verifies `anthropic` in connected[]). The "run claude by
-    # hand" fallback is no longer the primary path; it's a safety net for
-    # when the app is genuinely unreachable. The same caveat applies to
-    # Codex/Kimi but those already had opencode-native OAuth, so only the
-    # Claude-specific copy changes.
-    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Codex: '/auth' command; Claude: install the claude CLI from https://claude.ai then run 'claude auth login')."
-    return 0
-  fi
-
-  # Print each row. Three provider rows (status-driven ok/warn) + one CLI
-  # row with three slots (status-driven ✓ detected / ○ not found).
-  local show_guidance
-  show_guidance="$(printf '%s' "$detection_json" | "$node_bin" -e '
-    let s = ""; process.stdin.on("data", (c) => { s += c; });
-    process.stdin.on("end", () => {
-      try { process.stdout.write(JSON.parse(s).showGuidance ? "1" : "0"); }
-      catch { process.stdout.write("0"); }
-    });
-  ' 2>/dev/null || echo 1)"
-
-  "$node_bin" -e '
-    let s = ""; process.stdin.on("data", (c) => { s += c; });
-    process.stdin.on("end", () => {
-      let parsed;
-      try { parsed = JSON.parse(s); } catch { process.exit(2); }
-      for (const r of parsed.rows) {
-        if (r.kind === "provider") {
-          process.stdout.write("ROW\t" + r.status + "\t" + r.label + "\t" + r.suffix + "\n");
-        } else if (r.kind === "cli") {
-          for (const slot of r.slots) {
-            process.stdout.write("CLI\t" + slot.id + "\t" + (slot.detected ? "1" : "0") + "\n");
-          }
-        }
-      }
-    });
-  ' <<<"$detection_json" 2>/dev/null | while IFS=$'\t' read -r kind a b c; do
-    case "$kind" in
-      ROW)
-        if [ "$a" = "ok" ]; then ok "$b $c"
-        else warn "$b $c"
-        fi
-        ;;
-      CLI)
-        if [ "$b" = "1" ]; then
-          ok "$a CLI detected"
-        else
-          warn "$a CLI not found"
-        fi
-        ;;
-    esac
-  done
-
-  if [ "$show_guidance" = "1" ]; then
-    warn "no providers connected — chat will start but reject requests until you authenticate."
-    warn "Connect any of Claude, Codex, or Kimi from the MantaUI app."
-    # BET-354: the app drives Claude's OAuth end-to-end (BET-352 POC +
-    # BET-354 wiring), so the "run claude by hand" guidance is now only
-    # a fallback for boxes where the app is unreachable. Codex/Kimi
-    # already had opencode-native OAuth, so the original copy just lost
-    # its Claude-specific invocation.
-    warn "Fallback (if the app is unavailable): connect providers from inside opencode (Codex: '/auth' command; Claude: install the claude CLI from https://claude.ai then run 'claude auth login')."
-  fi
-}
-
 # read_box_id <lib-path> <node-path>
 # Echo the 32-hex box_id out of $MANTA_AUTH_FILE, or nothing when the file is
 # missing / half-written / corrupt. Single source of truth for the inline
@@ -753,9 +624,8 @@ $(printf '  - %s\n' $missing)
 
 # Test mode: when sourced by scripts/install.test.mjs with MANTA_INSTALL_TEST_MODE=1,
 # only the bash helpers (log/ok/warn/die + manifest_get + _sha256_of +
-# verify_sha256 + resolve_arch + launchd_agent_path +
-# print_provider_detection_summary + read_box_id / wait_for_box_id +
-# deploy_git_checkout / check_release_dependencies) are
+# verify_sha256 + resolve_arch + launchd_agent_path + read_box_id /
+# wait_for_box_id + deploy_git_checkout / check_release_dependencies) are
 # loaded. The actual install does NOT run. Lets the unit tests exercise
 # the helpers with mocked `uname`/etc. without hitting the network. See
 # scripts/install.test.mjs.
@@ -1993,18 +1863,6 @@ Re-run this installer any time to upgrade in place (your box identity is preserv
 Run 'manta pair' to mint a fresh pairing code (if 'manta' isn't found, open a new
 shell so ~/.local/bin is on PATH, or run: "$NODE" "$MANTA_HOME/scripts/manta-pair.mjs").
 EOF
-
-  # --- Final per-provider detection summary (BET-313). --------------------
-  # Replaces the prior single-Claude credentials check. Warns (never dies)
-  # for each missing provider; only prints the "chat will start but reject
-  # requests" guidance when ZERO providers are connected. Also probes the
-  # claude / codex / kimi CLIs on PATH so the user can see why a launcher
-  # slot in MantaUI's session-mode dropdown is or is not offered.
-  #
-  # The helper is defined alongside the other testable helpers at the top
-  # of install.sh (so unit tests in scripts/install.test.mjs can call it
-  # via runBootstrap). The install body stays a thin orchestrator.
-  print_provider_detection_summary "$LIB" "$NODE" "$HOME" "$IS_MACOS"
 
   # Cleanup: the previous install lives at $MANTA_HOME.prev until this point.
   # If we got here, everything is healthy and the new install is serving — drop
