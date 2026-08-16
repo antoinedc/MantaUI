@@ -432,14 +432,15 @@ private struct ChatScreenContent: View {
             }
         }
         .navigationDestination(for: SubagentSession.self) { agent in
-            if let child = store.store(for: agent.childSessionId) {
-                ChatSubagentScreen(
-                    title: agent.taskName,
-                    subtitle: agent.subtitle,
-                    store: child,
-                    tokens: tokens
-                )
-            }
+            ChatSubagentScreen(
+                childSessionId: agent.childSessionId,
+                title: agent.taskName,
+                subtitle: agent.subtitle,
+                eventStore: eventStore,
+                api: MantaAPIClient.live(),
+                tokens: tokens
+            )
+            .id(agent.childSessionId)
         }
         // The identity moved into the system navigation bar (BET-821): the bar
         // supplies its own scroll-edge effect and reserves its own space, so the
@@ -1062,8 +1063,27 @@ private struct ChatScreenContent: View {
 struct ChatSubagentScreen: View {
     let title: String
     let subtitle: String
-    @ObservedObject var store: ChatSessionStore
+    let childSessionId: String?
+    /// The child screen OWNS its store (BET-1024). Keyed by the child session
+    /// id and constructed from the shared eventStore + api, it is tied to this
+    /// screen's identity via `.id(childSessionId)` at the call site — so a
+    /// parent-side push/dismiss or any store sweep can never rebind this
+    /// screen to a different, empty store. The parent owns nothing about it.
+    @StateObject private var store: ChatSessionStore
     let tokens: Tokens
+
+    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens) {
+        self.childSessionId = childSessionId
+        self.title = title
+        self.subtitle = subtitle
+        self.tokens = tokens
+        _store = StateObject(wrappedValue: ChatSessionStore(
+            sessionId: childSessionId ?? "",
+            eventStore: eventStore,
+            api: api,
+            isReadOnly: true
+        ))
+    }
 
     /// Drives MessagingUI's `TiledView` scroll layer for the child transcript:
     /// stays on the newest message as the child streams, and stops following
@@ -1082,6 +1102,37 @@ struct ChatSubagentScreen: View {
     @State private var dataSource = ListDataSource<TranscriptRow>()
 
     var body: some View {
+        content
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+            .toolbarBackground(tokens.canvas, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .subtitle) {
+                    Text(subtitle)
+                        .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                        .foregroundColor(tokens.tx4)
+                        .lineLimit(1)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("subagent-scene")
+    }
+
+    /// Unset when a task part has not yet been stamped with a child session id
+    /// (see `SubagentSession`): there is nothing to stream yet, so explain it
+    /// instead of pushing a silent blank screen.
+    private var hasSession: Bool { !(childSessionId?.isEmpty ?? true) }
+
+    @ViewBuilder private var content: some View {
+        if hasSession {
+            transcript
+        } else {
+            emptyState
+        }
+    }
+
+    private var transcript: some View {
         TiledView(dataSource: dataSource, scrollPosition: $scrollPosition) { row in
             TranscriptBlockCell(item: row, tokens: tokens)
         }
@@ -1098,22 +1149,18 @@ struct ChatSubagentScreen: View {
             dataSource.apply(rows)
         }
         .background(tokens.canvas.ignoresSafeArea())
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
-        .toolbarBackground(tokens.canvas, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .subtitle) {
-                Text(subtitle)
-                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                    .foregroundColor(tokens.tx4)
-                    .lineLimit(1)
-            }
-        }
         .onAppear { store.start() }
         .onDisappear { store.stop() }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("subagent-scene")
+    }
+
+    private var emptyState: some View {
+        Text("This task has not started yet.")
+            .font(.manta(size: Metrics.type.small))
+            .foregroundColor(tokens.tx3)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(tokens.canvas.ignoresSafeArea())
     }
 }
 
