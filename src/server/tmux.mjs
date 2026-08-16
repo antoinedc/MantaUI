@@ -2,6 +2,7 @@ import { spawn as cpSpawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expandTilde, statePath } from "../shared/paths.mjs";
 import { atomicWrite } from "./storeUtils.mjs";
 
@@ -238,6 +239,14 @@ export function run(cmd, args) {
   return runImpl(cmd, args);
 }
 
+// The server's OWN install home — derived from this module's location, never
+// process.cwd() (the same way index.mjs derives PROJECT_ROOT). tmux.mjs always
+// ships at <home>/src/server/tmux.mjs, so its parent's parent is the install
+// home. listProjects uses this to hide the box's own install dir from the
+// user-facing project list (BET-995). Production callers pass it explicitly so
+// every list is filtered; tests pass a fixture value.
+export const INSTALL_HOME = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
 /** Test-only: override the tmux command transport. Pass null to restore. */
 export function _setRun(fn) {
   runImpl = fn ?? spawnRun;
@@ -320,7 +329,7 @@ async function tmuxListOutput(args) {
   }
 }
 
-export async function listProjects() {
+export async function listProjects(installHome = INSTALL_HOME) {
   const sessFmt = `#{session_name}${FS}#{?session_attached,1,0}`;
   const winFmt = `#{session_name}${FS}#{window_index}${FS}#{window_name}${FS}#{?window_active,1,0}${FS}#{pane_current_path}${FS}#{@manta-session-id}${FS}#{@manta-worktree-path}`;
   const sess = { stdout: await tmuxListOutput(["list-sessions", "-F", sessFmt]) };
@@ -333,7 +342,12 @@ export async function listProjects() {
   const parsedSess = parseSessions(sess.stdout, "");
   const liveNames = parsedSess.map((p) => p.tmuxSession);
   const owned = await reconcileOwnedSessions(liveNames);
-  return parseSessions(sess.stdout, wins.stdout, owned);
+  const projects = parseSessions(sess.stdout, wins.stdout, owned);
+  // BET-995: the box runs its own session FROM its install dir, so that dir
+  // surfaces as an "available project" in onboarding. Never offer the server's
+  // own install home as a user project. We filter on cwd ONLY — real user chat
+  // sessions are also manta-owned, so `mantaOwned` is NOT a usable signal.
+  return projects.filter((p) => p.defaultCwd !== installHome);
 }
 
 // Chat-mode windows don't run a TUI — manta renders its own React ChatPanel

@@ -92,7 +92,9 @@
 #   MANTA_RELEASE_HOST  host for the manifest + tarball (default https://mantaui.com)
 #   MANTA_REPO_URL      git URL the deploy is initialised against for `scripts/self-update.sh`
 #                       (default https://github.com/antoinedc/MantaUI.git)
-#   MANTA_HOME          where code is unpacked (default ~/manta)
+#   MANTA_HOME          where code is unpacked
+#                       (default ${XDG_DATA_HOME:-$HOME/.local/share}/manta; a legacy
+#                       install still present at ~/manta is preserved on upgrade)
 #   MANTA_CHANNEL       build channel — prod|staging|dev (default prod). Drives
 #                       the pair-link URL scheme install.sh/`manta pair` print
 #                       (BET-386 — see scripts/install-lib.mjs's resolveConfig),
@@ -864,7 +866,17 @@ main() {
   # 4. Atomic swap. .prev preserves the previous install in case anything in
   #    the new install fails before completion — operators can `mv` it back.
   # ---------------------------------------------------------------------------
-  MANTA_HOME="${MANTA_HOME:-$HOME/manta}"
+  # BET-995: the default install location moved from ~/manta to the XDG data
+  # dir (${XDG_DATA_HOME:-$HOME/.local/share}/manta). If MANTA_HOME is not set
+  # but a box is already installed at the legacy ~/manta location, keep it there
+  # so an install/update re-run never orphans a running server or spawns a
+  # second install. An explicitly set MANTA_HOME is always the override and wins.
+  if [ -z "${MANTA_HOME:-}" ] && { [ -d "$HOME/manta/.git" ] || [ -f "$HOME/manta/RELEASE.json" ]; }; then
+    MANTA_HOME="$HOME/manta"
+    log "Preserving existing install at $MANTA_HOME (legacy ~/manta default location)"
+  else
+    MANTA_HOME="${MANTA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/manta}"
+  fi
   AUTH_DIR="$HOME/.manta"
   # BET-386/BET-392: resolve + export MANTA_CHANNEL here (same
   # "unset/unrecognised -> prod" fallback resolveBoxChannel() applies) so every

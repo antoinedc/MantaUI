@@ -14,7 +14,9 @@
 // macOS runner — node-pty's native binding cannot be cross-compiled.
 //
 // The tarball's top-level dir is `manta-<version>/`. install.sh extracts with
-// `--strip-components=1` into `~/manta`. The tarball is SELF-CONTAINED — the
+// `--strip-components=1` into the box home (default
+// ${XDG_DATA_HOME:-$HOME/.local/share}/manta, BET-995). The tarball is
+// SELF-CONTAINED — the
 // box does NOT run `npm ci` after extraction:
 //
 //   manta-<version>/

@@ -47,9 +47,12 @@ export const HEALTH_PATH = "/auth/status";
 // for local testing.
 export const DEFAULT_RELEASE_HOST = "https://mantaui.com";
 
-// Where the box lives once installed. `~/.manta/` (auth.json + config.json)
-// is deliberately OUTSIDE this dir so an upgrade that replaces MANTA_HOME never
-// touches box identity. `MANTA_HOME` overrides the code location only.
+// Where the code lives once installed. Per the XDG Base Directory spec, app
+// *data* belongs under $XDG_DATA_HOME (default ~/.local/share/<app>), so the
+// payload lands in ${XDG_DATA_HOME:-~/.local/share}/manta (BET-995). `~/.manta/`
+// (auth.json + config.json) is deliberately OUTSIDE this dir so an upgrade that
+// replaces MANTA_HOME never touches box identity. `MANTA_HOME` overrides the
+// code location only.
 export const DEFAULT_HOME_DIRNAME = "manta";
 
 // Download links printed in the pairing block. IOS_APP_URL is a placeholder
@@ -79,7 +82,8 @@ function envVal(env, key) {
  * Injectable `home` for tests (defaults to os.homedir()).
  *
  * Returns:
- *   mantaHome      — where the code is unpacked (MANTA_HOME || ~/manta)
+ *   mantaHome      — where the code is unpacked
+ *                    (MANTA_HOME || ${XDG_DATA_HOME:-~/.local/share}/manta)
  *   authDir      — ~/.manta (never inside mantaHome)
  *   authFile     — ~/.manta/auth.json (idempotency probe target)
  *   tarballUrl   — explicit MANTA_TARBALL_URL, else null (overrides manifest fetch)
@@ -103,7 +107,9 @@ function envVal(env, key) {
  * content.
  */
 export function resolveConfig({ env = process.env, home = homedir() } = {}) {
-  const mantaHome = envVal(env, "MANTA_HOME") ?? join(home, DEFAULT_HOME_DIRNAME);
+  const mantaHome =
+    envVal(env, "MANTA_HOME") ??
+    join(envVal(env, "XDG_DATA_HOME") ?? join(home, ".local", "share"), DEFAULT_HOME_DIRNAME);
   const authDir = join(home, AUTH_DIRNAME);
   const authFile = join(authDir, AUTH_FILENAME);
   const tarballUrl = envVal(env, "MANTA_TARBALL_URL") ?? null;
