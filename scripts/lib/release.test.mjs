@@ -121,7 +121,7 @@ exit $?
 // The canonical `includes` self-update.sh ships with today (pack.mjs INCLUDE
 // + runtime). Not load-bearing on the function's behaviour — each test passes
 // its own — just a realistic fixture.
-const PKG_INCLUDES = ["src", "scripts", "docs/opencode-tools", "package.json", "runtime"];
+const PKG_INCLUDES = ["src", "scripts", "docs/opencode-tools", "docs/opencode/skills", "package.json", "runtime"];
 
 function makePkg(includes) {
   const pkg = mkdtempSync(join(tmpdir(), "manta-rel-pkg-"));
@@ -135,6 +135,7 @@ function makePkg(includes) {
     "src/server/index.mjs": "new index",
     "scripts/self-update.sh": "new self-update",
     "docs/opencode-tools/peers.ts": "new peers",
+    "docs/opencode/skills/manta-plan/prompt.md": "new prompt",
     "package.json": "new package",
     "runtime/node/bin/node": "new node binary",
   };

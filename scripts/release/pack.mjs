@@ -30,6 +30,8 @@
 //                                    node's ABI on Linux, or taken from the
 //                                    prebuilds node-pty ships for darwin/win32
 //     docs/opencode-tools/           manta-native opencode tool bundle
+//     docs/opencode/skills/          primary-agent prompts (manta-plan) referenced
+//                                    by opencode.jsonc `{file:…}` — BET-984
 //     RELEASE.json                   { name, version, built_at, includes,
 //                                      node, arch }
 //
@@ -140,6 +142,7 @@ const INCLUDE = [
   "src",
   "scripts",
   "docs/opencode-tools",
+  "docs/opencode/skills",
   "package.json",
   "package-lock.json",
   "README.md",
