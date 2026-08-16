@@ -5,13 +5,11 @@ import { ASSUMED_CONTEXT_TOKENS } from "../shared/streamInterpretation.mjs";
 
 function make(now = 500_000) {
   const events = [];
-  const published = [];
   const interp = createStreamInterpreter({
     publish: (e) => events.push(e),
     now: () => now,
-    autoPublishPlan: ({ sessionID, part }) => published.push({ sessionID, part }),
   });
-  return { interp, events, published };
+  return { interp, events };
 }
 
 const SID = "ses_main";
@@ -923,73 +921,6 @@ test("an errored plan_exit tool part emits NOTHING", () => {
     },
   });
   assert.equal(events.filter((e) => e.sub === "planMode").length, 0);
-});
-
-test("a completed plan_exit auto-publishes the plan page with the reported path", () => {
-  const { interp, published } = make();
-  interp.interpret({
-    type: "message.part.updated",
-    properties: {
-      sessionID: SID,
-      part: {
-        id: "p1",
-        type: "tool",
-        tool: "plan_exit",
-        callID: "toolu_exit",
-        state: {
-          status: "completed",
-          input: { planPath: ".opencode/plans/2026-08-15-auto-publish.md", plan: "# Auto-publish" },
-        },
-      },
-    },
-  });
-  assert.equal(published.length, 1);
-  assert.equal(published[0].sessionID, SID);
-  assert.equal(published[0].part.state.input.planPath, ".opencode/plans/2026-08-15-auto-publish.md");
-});
-
-test("a completed plan_enter does NOT auto-publish", () => {
-  const { interp, published } = make();
-  interp.interpret({
-    type: "message.part.updated",
-    properties: {
-      sessionID: SID,
-      part: { id: "p1", type: "tool", tool: "plan_enter", callID: "toolu_enter", state: { status: "completed" } },
-    },
-  });
-  assert.equal(published.length, 0);
-});
-
-test("an errored plan_exit does NOT auto-publish (the exit never happened)", () => {
-  const { interp, published } = make();
-  interp.interpret({
-    type: "message.part.updated",
-    properties: {
-      sessionID: SID,
-      part: { id: "p1", type: "tool", tool: "plan_exit", callID: "toolu_exit", state: { status: "error" } },
-    },
-  });
-  assert.equal(published.length, 0);
-});
-
-test("the same plan_exit callID auto-publishes once (deduped)", () => {
-  const { interp, published } = make();
-  const upd = {
-    type: "message.part.updated",
-    properties: {
-      sessionID: SID,
-      part: {
-        id: "p1",
-        type: "tool",
-        tool: "plan_exit",
-        callID: "toolu_exit",
-        state: { status: "completed", input: { planPath: ".opencode/plans/x.md" } },
-      },
-    },
-  };
-  interp.interpret(upd);
-  interp.interpret(upd);
-  assert.equal(published.length, 1);
 });
 
 test("the same planMode callID arriving twice emits once", () => {
