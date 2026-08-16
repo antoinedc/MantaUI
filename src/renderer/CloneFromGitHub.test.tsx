@@ -18,7 +18,7 @@
 // existing credential (so the picker renders immediately) and a fixed repo
 // list.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { CloneFromGitHub } from "./CloneFromGitHub";
@@ -99,6 +99,16 @@ async function flushMicro(): Promise<void> {
   });
 }
 
+// Microtask-only flush for use under vi.useFakeTimers(), where a real
+// setTimeout(r, 0) would never fire. Mirrors ConnectGithub.test.tsx.
+async function flushMicrotasks(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 function unmount(): void {
   act(() => {
     root?.unmount();
@@ -135,6 +145,7 @@ function cloneButtonFor(name: string): HTMLButtonElement {
 
 afterEach(() => {
   unmount();
+  vi.useRealTimers();
 });
 
 describe("CloneFromGitHub picker", () => {
@@ -221,5 +232,105 @@ describe("CloneFromGitHub picker", () => {
     await flushMicro();
 
     expect(clonedPaths).toEqual(["/root/alpha"]);
+  });
+
+  it("fetches repos exactly once, after sign-in completes, and never shows not_connected (BET-1011)", async () => {
+    // The broken sequence: fetch fired on mount (before a credential
+    // existed), cached { repos: [], error: "not_connected" } as a permanent
+    // error, and no later sign-in could clear it. With the fix the fetch is
+    // keyed on `connected`, so it runs only once the device flow completes.
+    vi.useFakeTimers();
+    let repoCallCount = 0;
+    // Mirrors the box: without a credential it answers `not_connected`; with
+    // one it returns the real list. Only flipped once the device flow turns
+    // `connected` on — so if the fetch ever ran pre-connect it would hit the
+    // error branch (reproducing the old stuck state).
+    let connected = false;
+    installMockApi({
+      forgeDeviceStart: () =>
+        Promise.resolve({
+          connected: false,
+          grant: {
+            grantId: "g1",
+            userCode: "ABCD-1234",
+            verificationUri: "https://github.com/login/device",
+            expiresIn: 900,
+            pollInterval: 5,
+          },
+          error: null,
+        }),
+      forgeDevicePoll: () => Promise.resolve({ status: "done" }),
+      forgeRepos: () => {
+        repoCallCount++;
+        return Promise.resolve(
+          connected
+            ? { repos: REPOS, stale: false, error: null }
+            : { repos: [], stale: false, error: "not_connected" },
+        );
+      },
+      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
+      );
+    });
+
+    // Let forgeDeviceStart settle so the code panel mounts and schedules the
+    // first poll at max(pollInterval, 5) seconds.
+    await flushMicrotasks();
+    // Complete the device flow — advance past the first poll, which resolves
+    // "done" → onConnected → connected=true → the picker (and the fetch).
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+    // Mirror the component's new `connected` state before the flushed effects
+    // run, so the post-sign-in fetch returns the real list, not an error.
+    connected = true;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(repoCallCount).toBe(1);
+    const text = container!.textContent ?? "";
+    expect(text).not.toContain("not_connected");
+    expect(container!.querySelector('input[aria-label="Clone alpha"]')).toBeTruthy();
+  });
+
+  it("shows the loader + 'Loading repositories…' while the repo list is in flight, then the rows (BET-1011)", async () => {
+    let resolveRepos: (r: unknown) => void;
+    const reposPromise = new Promise((resolve) => {
+      resolveRepos = resolve;
+    });
+    installMockApi({
+      forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
+      forgeRepos: () => reposPromise,
+      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
+      );
+    });
+    // The fetch is pending — the picker must show the loading state, not
+    // "Search 0 repositories…" / "No repositories match.".
+    await flushMicro();
+    expect(container!.querySelector(".manta-loader")).toBeTruthy();
+    expect(container!.textContent).toContain("Loading repositories…");
+
+    // Resolve the fetch; the loader goes away and the real rows render.
+    act(() => {
+      resolveRepos!({ repos: REPOS, stale: false, error: null });
+    });
+    await flushMicro();
+    expect(container!.querySelector(".manta-loader")).toBeNull();
+    expect(container!.querySelector('input[aria-label="Clone alpha"]')).toBeTruthy();
   });
 });
