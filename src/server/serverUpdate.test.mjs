@@ -22,6 +22,7 @@ import {
   startServerUpdatePoller,
   MANIFEST_URL,
   manifestUrl,
+  createOpencodeUpdateForwarder,
 } from "./serverUpdate.mjs";
 
 function fakeBus() {
@@ -390,3 +391,64 @@ test("createUpdateCheck on a feedless (dev) build reports no update and never fe
   assert.equal(res.available, false);
   assert.equal(called, 0, "a dev build must not reach for a public feed");
 });
+
+// ---------------------------------------------------------------------------
+// createOpencodeUpdateForwarder (BET-1016).
+//
+// Maps opencode's own `installation.update-available` onto the EXISTING
+// serverUpdateAvailable bus event. The dedup gate is the exact behaviour the
+// issue asks to lock in: opencode may emit the same version repeatedly and the
+// banner must not re-raise for a version already shown.
+// ---------------------------------------------------------------------------
+
+const opencodeUpdate = (v) => ({
+  type: "installation.update-available",
+  properties: { version: v },
+});
+
+test("forwarder: maps an opencode update onto serverUpdateAvailable", () => {
+  const onEvent = createOpencodeUpdateForwarder();
+  assert.deepEqual(onEvent(opencodeUpdate("1.18.18")), {
+    kind: "serverUpdateAvailable",
+    payload: { version: "1.18.18", notesUrl: null },
+  });
+});
+
+test("forwarder: returns null for non-update opencode events", () => {
+  const onEvent = createOpencodeUpdateForwarder();
+  assert.equal(onEvent({ type: "message.updated", properties: {} }), null);
+  assert.equal(onEvent(null), null);
+  assert.equal(onEvent(undefined), null);
+});
+
+test("forwarder: ignores events without a usable version", () => {
+  const onEvent = createOpencodeUpdateForwarder();
+  // missing properties / missing version / non-string version
+  assert.equal(onEvent({ type: "installation.update-available" }), null);
+  assert.equal(onEvent({ type: "installation.update-available", properties: {} }), null);
+  assert.equal(onEvent(opencodeUpdate("")), null);
+  assert.equal(onEvent({ type: "installation.update-available", properties: { version: 42 } }), null);
+});
+
+test("forwarder: dedup — repeated same-version events publish ONCE", () => {
+  const onEvent = createOpencodeUpdateForwarder();
+  assert.ok(onEvent(opencodeUpdate("1.18.18")));
+  assert.equal(onEvent(opencodeUpdate("1.18.18")), null, "same version must not re-raise");
+  assert.equal(onEvent(opencodeUpdate("1.18.18")), null);
+});
+
+test("forwarder: gate advances — a strictly newer version re-raises", () => {
+  const onEvent = createOpencodeUpdateForwarder();
+  assert.deepEqual(onEvent(opencodeUpdate("1.18.10")), {
+    kind: "serverUpdateAvailable",
+    payload: { version: "1.18.10", notesUrl: null },
+  });
+  assert.equal(onEvent(opencodeUpdate("1.18.10")), null);
+  // a genuinely newer version bumps the gate and publishes again
+  assert.deepEqual(onEvent(opencodeUpdate("1.18.18")), {
+    kind: "serverUpdateAvailable",
+    payload: { version: "1.18.18", notesUrl: null },
+  });
+  assert.equal(onEvent(opencodeUpdate("1.18.18")), null);
+});
+

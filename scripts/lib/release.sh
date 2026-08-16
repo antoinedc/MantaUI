@@ -292,3 +292,29 @@ release_is_current() {
   fi
   [ "$installed_version" = "$release_version" ]
 }
+
+# should_skip_self_update <installed_version> <installed_git_sha> <release_version> <release_git_sha> <opencode_changed>
+#
+# The updater's EARLY-EXIT decision (BET-1016): skip the ENTIRE self-update (no
+# download, no reinstall, no restart) only when BOTH the box release is current
+# AND opencode is unchanged. When opencode changed, the box must fall through
+# to its restart step even if the tarball is current — otherwise an opencode-only
+# upgrade would be swallowed by the cheap early exit and leave the upgraded (but
+# un-restarted) binary inert until the next update.
+#
+# Returns 0 (skip) when the box is current AND opencode unchanged; 1 (do not
+# skip) otherwise. Pure: no I/O, no globals. Unit-tested in release.test.mjs
+# alongside release_is_current.
+should_skip_self_update() {
+  installed_version="$1"
+  installed_sha="$2"
+  release_version="$3"
+  release_sha="$4"
+  opencode_changed="$5"
+
+  if release_is_current "$installed_version" "$installed_sha" "$release_version" "$release_sha" \
+     && [ "$opencode_changed" = "0" ]; then
+    return 0
+  fi
+  return 1
+}

@@ -113,6 +113,46 @@ if [ -d "$MANTA_HOME/runtime/node/bin" ]; then
   export PATH
 fi
 
+# --- Upgrade the opencode binary (BET-1016) ----------------------------------
+# opencode is installed once (deliberately UNPINNED) and otherwise frozen at
+# install time, so every box drifts from whatever it was installed with forever.
+# Fold its upgrade into the self-update so a box stops drifting: run `opencode
+# upgrade` (the CLI command on the installed binary — no auth question, no port
+# assumption) and capture `opencode --version` before/after to report whether
+# anything actually changed.
+#
+# MUST run BEFORE the packaged-install early exit below: that cheap exit skips
+# EVERYTHING (including the restart at MANTA_PROGRESS 5/6) when the box tarball
+# is already current, and an opencode-only upgrade must still fall through to
+# that restart. `OPCODE_VERSION_CHANGED` is the flag the early exit re-checks —
+# set here so the early exit can go conditional on it.
+#
+# Non-fatal throughout, mirroring refresh_opencode_tools(): an offline box, a
+# missing CLI, or a refused upgrade must never abort the server update.
+OPCODE_VERSION_CHANGED=0
+upgrade_opencode() {
+  if ! command -v opencode >/dev/null 2>&1; then
+    echo "⚠ self-update: opencode not found on PATH — skipping binary upgrade"
+    return 0
+  fi
+  local before after
+  before="$(opencode --version 2>/dev/null || true)"
+  before="${before:-unknown}"
+  if ! opencode upgrade >/dev/null 2>&1; then
+    echo "⚠ self-update: opencode upgrade failed (current: $before) — continuing"
+    return 0
+  fi
+  after="$(opencode --version 2>/dev/null || true)"
+  after="${after:-unknown}"
+  if [ "$before" != "$after" ]; then
+    OPCODE_VERSION_CHANGED=1
+    echo "✓ self-update: opencode upgraded: $before → $after"
+  else
+    echo "✓ self-update: opencode already current ($before)"
+  fi
+}
+upgrade_opencode
+
 echo "MANTA_PROGRESS 2/6 Downloading update"
 if [ "$INSTALL_KIND" = "git" ]; then
   # A git checkout has no vendored runtime under version control — the box runs
@@ -171,8 +211,10 @@ else
   # Cheap early exit when already current — no download, no reinstall, no
   # restart. The decision itself lives in scripts/lib/release.sh so it can be
   # unit-tested; see release_is_current for why it compares the build's commit
-  # rather than its version number.
-  if release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
+  # rather than its version number. BET-1016: the exit is conditional on BOTH
+  # the box being current AND opencode not having changed — an opencode-only
+  # upgrade must fall through to the restart below, never be swallowed here.
+  if should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$OPCODE_VERSION_CHANGED"; then
     if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
       ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
     else

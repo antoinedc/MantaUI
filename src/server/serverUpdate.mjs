@@ -183,3 +183,39 @@ export function startServerUpdatePoller(
 
   return startPoller(runTick, { intervalMs: POLL_MS, label: "server-update" });
 }
+
+/**
+ * Map opencode's own `installation.update-available` event onto the EXISTING
+ * `serverUpdateAvailable` bus event, so the shared update banner (which the
+ * user already confirmed) raises for an opencode binary upgrade exactly as it
+ * does for a server release (BET-1016).
+ *
+ * opencode may emit the same version repeatedly, and re-raising the banner for
+ * a version already shown is noise — so this mirrors the
+ * `startServerUpdatePoller` `lastNotifiedVersion` gate with its own dedup on
+ * the last published opencode version. The dedup state lives in the closure
+ * returned by the factory (module-level in effect: it persists across events),
+ * keeping the mapping side-effect-free and unit-testable without a live event
+ * stream or bus.
+ *
+ * @returns {(evt:any) => ({kind:string, payload:any}|null)} An `onEvent`
+ *   handler for the opencode pump. Returns the bus event to publish for an
+ *   opencode update (version not yet shown), or `null` when the event is not
+ *   an opencode update, carries no usable version, or is a version already
+ *   published.
+ */
+export function createOpencodeUpdateForwarder() {
+  let lastPublishedOpencodeVersion = null;
+
+  return function onEvent(evt) {
+    if (!evt || evt.type !== "installation.update-available") return null;
+    const version = evt.properties?.version;
+    if (typeof version !== "string" || !version) return null;
+    if (version === lastPublishedOpencodeVersion) return null;
+    lastPublishedOpencodeVersion = version;
+    return {
+      kind: "serverUpdateAvailable",
+      payload: { version, notesUrl: null },
+    };
+  };
+}
