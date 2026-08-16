@@ -54,6 +54,18 @@ final class MantaAPIClient: Sendable {
         return try await call("opencode:messages", args: args, as: [OpencodeMessage].self) ?? []
     }
 
+    /// `opencode:context` — the transcript-derived context breakdown for a
+    /// session, same shape as the live `stream/context` frame's payload
+    /// (`computeContextBreakdown`: `freshInput`, `cacheRead`, `cacheWrite`,
+    /// `totalInput`, `pct`, `segments`). Returns nil when the transcript has
+    /// no billed assistant turn yet. This is the idle/open fallback: the live
+    /// `stream/context` frame is preferred when it arrives, but an existing
+    /// conversation that is idle on open has no such frame, so the meter stays
+    /// blank until this RPC fills it (BET-1030).
+    func context(sessionId: String) async throws -> StreamContextPayload? {
+        try await call("opencode:context", args: [sessionId], as: StreamContextPayload.self)
+    }
+
     func sendPrompt(_ input: SendPromptInput) async throws {
         var argsDict: [String: Any] = [
             "sessionId": input.sessionId,
