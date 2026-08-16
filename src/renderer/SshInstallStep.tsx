@@ -36,6 +36,11 @@ import {
   type PreflightFailure,
 } from "./preloadAccess";
 import type { InstallStageId } from "../shared/installStages";
+import {
+  CLAIM_TRANSIENT_ATTEMPTS,
+  CLAIM_TRANSIENT_DELAY_MS,
+  shouldRetryClaim,
+} from "./claimRetry";
 import { ConnectPanel } from "./ConnectPanel";
 import { deriveConnectPanel, type ConnectActionId } from "./connectPanelLogic";
 import {
@@ -669,21 +674,38 @@ export function SshInstallStep({
     setClaimRunning(true);
     setClaimError(null);
     try {
-      // BET-989: a single claim attempt against the code the install already
-      // minted (read from ~/.manta/pairing.json in main). No re-mint, no retry.
-      const outcome = await preload.installerMintAndClaim({
-        alias: resolved.ok ? resolved.target : undefined,
-      });
-      if (outcome.ok) {
-        // Mirror the manual PairStep onPaired — but hold the step on a real
-        // "Connected" state instead of advancing: the user confirms with the
-        // panel's Next button (BET-961), which stops the provider step from
-        // being skipped (BET-960).
-        setPaired(true);
+      // BET-989: a single claim against the code the install already minted
+      // (read from ~/.manta/pairing.json in main). No re-mint over SSH.
+      // BET-1002: wrap that in a SHORT, BOUNDED transient retry — a fresh
+      // install's box registers a new public hostname with the gateway, which
+      // takes a couple of seconds to propagate (Caddy + DNS). The first
+      // auto-claim can hit that window as a network/server_error failure. Retry
+      // only those two transient kinds up to N attempts with a fixed delay;
+      // any non-transient failure (wrong code, malformed response) fails
+      // immediately. Bounded ~20s window, NOT the old 45s "is the box booting"
+      // pump.
+      for (let attempt = 0; attempt < CLAIM_TRANSIENT_ATTEMPTS; attempt++) {
+        const outcome = await preload.installerMintAndClaim({
+          alias: resolved.ok ? resolved.target : undefined,
+        });
+        if (outcome.ok) {
+          // Mirror the manual PairStep onPaired — but hold the step on a real
+          // "Connected" state instead of advancing: the user confirms with the
+          // panel's Next button (BET-961), which stops the provider step from
+          // being skipped (BET-960).
+          setPaired(true);
+          return;
+        }
+        const canRetry = attempt < CLAIM_TRANSIENT_ATTEMPTS - 1 && shouldRetryClaim(outcome.kind);
+        if (canRetry) {
+          await new Promise((r) => setTimeout(r, CLAIM_TRANSIENT_DELAY_MS));
+          continue;
+        }
+        // Final attempt, or a non-transient failure → surface the real error
+        // (the actual outcome.message).
+        setClaimError(outcome.message);
         return;
       }
-      // Failure → surface the real error (the actual outcome.message).
-      setClaimError(outcome.message);
     } catch (e) {
       setClaimError(e instanceof Error ? e.message : String(e));
     } finally {
