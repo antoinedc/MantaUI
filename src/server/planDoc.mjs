@@ -3,7 +3,7 @@
 // `<script type="application/json" id="plan-meta">` (title + section list) plus
 // a fully model-authored rich HTML body. THIS module is the deterministic
 // renderer: it parses the meta, renders the fixed branded chrome (header,
-// dark/light toggle, summary/TOC, base token stylesheet) from that meta, and
+// dark/light toggle, base token stylesheet) from that meta, and
 // injects the model body as `<main>`. Structure is guaranteed by the template;
 // the body stays 100% AI-authored.
 //
@@ -109,34 +109,34 @@ export function parsePlanBundle(text) {
 // renderPlanDoc — the deterministic branded document
 // ---------------------------------------------------------------------------
 
-// The theme toggle script — inline, self-contained, in-memory only. Sets the
-// theme from a variable (falling back to prefers-color-scheme) on load, and
-// flips `data-theme` on <html> when the header button is clicked. Deliberately
-// NO localStorage: the page is served in an opaque-origin sandbox (serve-page
-// CSP without allow-same-origin), where localStorage throws.
+// The theme toggle script — inline, self-contained, storage-free. Reads the
+// initial theme from the `?theme=` query string (accepting exactly "dark" |
+// "light"), falling back to prefers-color-scheme; flips `data-theme` on <html>
+// and persists via `history.replaceState` (no reload, no storage). Deliberately
+// NO localStorage/sessionStorage: the page is served in an opaque-origin
+// sandbox (serve-page CSP without allow-same-origin), where storage throws.
 const THEME_SCRIPT = `
 <script>
 (function () {
-  var theme = "";
   var root = document.documentElement;
-  function apply() {
-    if (!theme) {
-      theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
-        ? "dark" : "light";
-    }
-    root.setAttribute("data-theme", theme);
-  }
-  apply();
+  var match = /^(dark|light)$/.exec(new URLSearchParams(location.search).get("theme") || "");
+  var theme = match ? match[1]
+    : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+      ? "dark" : "light";
+  root.setAttribute("data-theme", theme);
   var toggle = document.getElementById("plan-theme-toggle");
   if (toggle) toggle.addEventListener("click", function () {
-    theme = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", theme);
+    var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try {
+      history.replaceState(null, "", "?theme=" + next);
+    } catch (e) {}
   });
 })();
 </script>
 `.trim();
 
-// Minimal prose typography + header/summary styling, all referenced via the
+// Minimal prose typography + header styling, all referenced via the
 // imported token blocks (no copied planPage body stylesheet, no external
 // resources).
 const BASE_STYLE = `
@@ -183,25 +183,7 @@ const BASE_STYLE = `
     line-height: 1;
   }
   .doc-header button:hover { border-color: var(--border-strong); }
-  .wrap { max-width: 720px; margin: 0 auto; padding: 28px; }
-  .summary {
-    margin: 0 0 28px;
-    padding: 14px 18px;
-    background: var(--inset);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--r-sm);
-  }
-  .summary-title {
-    margin: 0 0 8px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--tx4);
-  }
-  .summary ul { margin: 0; padding: 0; list-style: none; }
-  .summary li { margin: 3px 0; font-size: 13.5px; }
-  .summary a { color: var(--tx2); text-decoration: none; }
-  .summary a:hover { color: var(--accent-tx); text-decoration: underline; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 40px; }
   main { color: var(--tx1); }
   main h1, main h2, main h3, main h4, main h5, main h6 {
     color: var(--tx1);
@@ -239,10 +221,10 @@ const BASE_STYLE = `
  * Render a full, self-contained HTML plan document from a parsed bundle.
  *
  * - Validates that every `section.id` has a matching `id="<id>"` anchor in the
- *   body (so TOC links never dead-end) — fail-fast on the first missing one.
+ *   body — fail-fast on the first missing one.
  * - The model `body` is injected VERBATIM (after the meta is stripped); it is
  *   deliberately NOT re-escaped — it is the model's authored HTML.
- * - Title, headings, and header text are escaped via `escapeHtml`.
+ * - Title and header text are escaped via `escapeHtml`.
  * - The only `<script>` is the theme toggle; no iframe, no external resources,
  *   no localStorage.
  *
@@ -266,20 +248,6 @@ export function renderPlanDoc({ title, sections, body }) {
       return { ok: false, error: `section id '${s.id}' not found in body` };
     }
   }
-
-  const tocHtml =
-    sections.length > 1
-      ? `<nav class="summary" aria-label="Summary">
-  <p class="summary-title">Summary</p>
-  <ul>
-${sections
-  .map(
-    (s) => `    <li><a href="#${escapeHtml(s.id)}">${escapeHtml(s.heading)}</a></li>`,
-  )
-  .join("\n")}
-  </ul>
-</nav>`
-      : "";
 
   const html = `<!DOCTYPE html>
 <html lang="en" data-theme="light">
@@ -305,7 +273,6 @@ ${sections
     <button id="plan-theme-toggle" type="button" title="Toggle theme">&#9680;</button>
   </header>
   <div class="wrap">
-    ${tocHtml}
     <main>
 ${body}
     </main>

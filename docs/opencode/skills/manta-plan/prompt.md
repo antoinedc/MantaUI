@@ -47,6 +47,8 @@ otherwise `plan_render` rejects the publish. If it would reject, fix the
 anchor rather than skipping. Write the prose in ordinary HTML, not markdown;
 the body is served as-is.
 
+**Published-page constraint (storage-free):** the served page runs in a sandboxed origin where `localStorage`/`sessionStorage` are UNAVAILABLE and throw a `SecurityError`. Never use them in the body or in any `<script>` you add. The light/dark theme is handled automatically by the renderer via the `?theme=` URL query string — do NOT write your own theme toggle or persistence logic. Keep the body static HTML; any tiny script must not touch storage.
+
 ## 3. Mockups (only for UI/layout changes)
 
 If the plan involves a UI or layout change, render the high-fidelity preview

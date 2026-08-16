@@ -114,18 +114,31 @@ test("renderPlanDoc: includes the theme toggle script and no localStorage/iframe
   const r = renderSample();
   assert.ok(r.html.includes("prefers-color-scheme"));
   assert.ok(r.html.includes("data-theme"));
+  assert.ok(r.html.includes("URLSearchParams"), "theme read via URLSearchParams");
+  assert.ok(r.html.includes("history.replaceState"), "theme persisted via history.replaceState");
+  assert.ok(r.html.includes("\"?theme=\" + next"), "replaceState writes ?theme= next");
   assert.ok(!r.html.toLowerCase().includes("localstorage"));
+  assert.ok(!r.html.toLowerCase().includes("sessionstorage"));
   assert.ok(!r.html.toLowerCase().includes("<iframe"));
   assert.ok(!r.html.includes("http://"));
   assert.ok(!r.html.includes("https://"));
 });
 
-test("renderPlanDoc: renders Summary/TOC when sections.length > 1, with #id links", () => {
+test("renderPlanDoc: renders NO Summary nav even when sections.length > 1", () => {
+  const parsed = parsePlanBundle(SAMPLE_BUNDLE);
+  assert.equal(parsed.ok, true);
+  assert.ok(parsed.sections.length > 1, "sample has multiple sections");
+  const r = renderPlanDoc(parsed);
+  assert.equal(r.ok, true);
+  assert.ok(!r.html.includes("Summary"));
+  assert.ok(!r.html.includes("class=\"summary\""));
+  assert.ok(!r.html.includes("aria-label=\"Summary\""));
+});
+
+test("renderPlanDoc: base stylesheet widens the body container to 1080px", () => {
   const r = renderSample();
-  assert.ok(r.html.includes("Summary"));
-  assert.ok(r.html.includes("href=\"#intro\""));
-  assert.ok(r.html.includes("href=\"#steps\""));
-  assert.ok(r.html.includes("href=\"#outro\""));
+  assert.ok(r.html.includes(".wrap { max-width: 1080px; margin: 0 auto; padding: 32px 40px; }"));
+  assert.ok(!r.html.includes("max-width: 720px"));
 });
 
 test("renderPlanDoc: renders NO Summary block when sections.length <= 1", () => {
@@ -163,7 +176,7 @@ test("renderPlanDoc: injects the body verbatim without double-escaping sentinels
   assert.ok(!r.html.includes("&amp;lt;"), "< must not become &amp;lt;");
 });
 
-test("renderPlanDoc: escapes title and heading text", () => {
+test("renderPlanDoc: escapes title text", () => {
   const body = "<p id=\"x\">anchor</p><p id=\"y\">anchor2</p>";
   const r = renderPlanDoc({
     title: "A < Title & More",
@@ -175,5 +188,4 @@ test("renderPlanDoc: escapes title and heading text", () => {
   });
   assert.equal(r.ok, true);
   assert.ok(r.html.includes("A &lt; Title &amp; More"), "title escaped");
-  assert.ok(r.html.includes("L &lt; R"), "heading escaped in TOC");
 });
