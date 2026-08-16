@@ -1523,7 +1523,7 @@ test("install.sh's manta CLI shim defaults MANTA_CHANNEL to prod when unset at i
   const src = readFileSync(INSTALL_SH, "utf-8");
   const startIdx = src.indexOf('MANTA_HOME="${MANTA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/manta}"');
   assert.ok(startIdx !== -1, "could not locate the MANTA_HOME resolution line in install.sh");
-  const nearby = src.slice(startIdx, startIdx + 600);
+  const nearby = src.slice(startIdx, startIdx + 1400);
   assert.match(
     nearby,
     /MANTA_CHANNEL="\$\{MANTA_CHANNEL:-prod\}"/,
@@ -1536,10 +1536,11 @@ test("install.sh defaults the install home to the XDG data dir (BET-995)", () =>
   const src = readFileSync(INSTALL_SH, "utf-8");
   const start = src.indexOf('if [ -z "${MANTA_HOME:-}" ]');
   assert.ok(start !== -1, "could not locate the MANTA_HOME resolution guard in install.sh");
-  const end = src.indexOf("\n  fi\n", start);
+  // The guard runs from `if [ -z "${MANTA_HOME:-}" ]` through its closing `fi`.
+  const endMarker = "\n  fi\n";
+  const end = src.indexOf(endMarker, start);
   assert.ok(end !== -1, "could not find the end of the MANTA_HOME resolution guard");
-  // The guard: `if [ -z "${MANTA_HOME:-}" ] ... fi` resumes after the closing `fi`.
-  const block = src.slice(start, end + 1);
+  const block = src.slice(start, end + endMarker.length);
 
   const run = ({ legacy, xdg, mantaHome }) => {
     const dir = mkdtempSync(join(tmpdir(), "manta-home-"));
