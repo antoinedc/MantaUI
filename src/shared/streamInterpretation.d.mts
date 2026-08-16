@@ -95,6 +95,10 @@ export function computeContextBreakdown(
   limit: number,
 ): ContextBreakdown;
 
+export function selectLatestTokenUsage(
+  messages: unknown,
+): { tokens: Record<string, unknown>; providerID: string | null; modelID: string | null } | null;
+
 export function isTerminalTodo(t: Record<string, unknown>): boolean;
 
 export function allTodosTerminal(todos: Array<Record<string, unknown>>): boolean;

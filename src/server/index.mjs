@@ -759,6 +759,7 @@ rpcHandlers = buildHandlers({
         }));
     },
   },
+  contextLimitFor,
 });
 
 // Server-update checker: polls https://mantaui.com/updates/server.json every

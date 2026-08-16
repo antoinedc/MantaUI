@@ -8,6 +8,11 @@ import { gzipSync } from "node:zlib";
 import { homedir } from "node:os";
 import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
+import {
+  computeContextBreakdown,
+  selectLatestTokenUsage,
+  ASSUMED_CONTEXT_TOKENS,
+} from "../shared/streamInterpretation.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots } from "./usage.mjs";
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
@@ -227,6 +232,7 @@ export function buildHandlers({
   delegate,
   progress,
   voiceNotes,
+  contextLimitFor = () => null,
 }) {
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
   // copy (the src/main/index.ts duplicate was retired in the HTTP-only
@@ -620,6 +626,22 @@ export function buildHandlers({
     // the full transcript. The native iOS client passes {limit, slim}. The
     // duplicated tool stdout is stripped server-side for every client.
     "opencode:messages": (sessionId, opts) => oc.listMessages(sessionId, opts ?? {}),
+
+    // Context usage for a session that may be idle. The live `stream/context`
+    // frame is emitted only when an assistant message arrives, so a client
+    // opening an existing conversation has nothing to render until the next
+    // turn. This derives the same payload from the persisted transcript, using
+    // the same shared breakdown function, so an idle session is correct on
+    // open. Returns null when the transcript has no billed assistant turn yet.
+    "opencode:context": async (sessionId) => {
+      const messages = await oc.listMessages(sessionId, { slim: true });
+      const found = selectLatestTokenUsage(messages);
+      if (!found) return null;
+      const limit =
+        contextLimitFor(found.providerID, found.modelID) ??
+        ASSUMED_CONTEXT_TOKENS;
+      return computeContextBreakdown(found.tokens, limit);
+    },
 
     // Single-message fetch for live-turn splice (returns null on miss).
     "opencode:message": (sessionId, messageId) =>
