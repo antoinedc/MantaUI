@@ -92,6 +92,27 @@ final class WaveformTests: XCTestCase {
         }
     }
 
+    /// The fix the live meter relies on (BET-1050): the bar count the view
+    /// derives from its width must never OVER-produce bars — at most `n`
+    /// values for any requested `n`, so the row can never demand more space
+    /// than its container offers.
+    func testBucketPeaksReturnsAtMostBarsAcrossTheWindow() {
+        let peaks = (0..<90).map { UInt8($0) }
+        for n in 1...200 {
+            let out = Waveform.bucketPeaks(peaks, bars: n)
+            XCTAssertLessThanOrEqual(out.count, n, "bars=\(n) produced \(out.count) values")
+        }
+    }
+
+    /// BET-1050 adds the live meter as another caller that hits the
+    /// fewer-peaks-than-bars case (the first ~3.6s of every recording): one
+    /// value per peak, never stretched to fill the window.
+    func testBucketPeaksOneValuePerPeakWhenFewerPeaksThanBars() {
+        let peaks: [UInt8] = [128, 64, 255]
+        let out = Waveform.bucketPeaks(peaks, bars: 90)
+        XCTAssertEqual(out, [128.0 / 255.0, 64.0 / 255.0, 255.0 / 255.0])
+    }
+
     // MARK: - normalizeForDisplay
 
     func testNormalizeForDisplayEmpty() {

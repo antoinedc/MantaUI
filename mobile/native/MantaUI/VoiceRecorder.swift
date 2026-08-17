@@ -36,14 +36,10 @@ final class VoiceRecorder: ObservableObject {
     /// recording UI can render held/locked/paused/cancelling surfaces.
     @Published private(set) var phase: VoicePhase = .idle
 
-    /// The live meter tail — the last `VOICE_LIVE_WINDOW_BARS` linear samples,
-    /// `0...1`. NOT renormalised (see `Waveform.normalizeForDisplay` doc — the
+    /// The live meter tail — the last `VOICE_LIVE_WINDOW_BARS` quantized
+    /// samples. NOT renormalised (see `Waveform.normalizeForDisplay` doc — the
     /// live meter pins its ceiling at 1.0 on purpose).
-    @Published private(set) var livePeaks: [Double] = []
-
-    /// The stored peak set for the note — `downsamplePeaks` at
-    /// `VOICE_MAX_STORED_PEAKS` (`0...255`, max per bucket, never mean).
-    @Published private(set) var storedPeaks: [UInt8] = []
+    @Published private(set) var livePeaks: [UInt8] = []
 
     /// Elapsed recording time in ms, with paused time excluded (decision #5).
     @Published private(set) var durationMs: Int = 0
@@ -204,7 +200,8 @@ final class VoiceRecorder: ObservableObject {
             reset()
             return nil
         }
-        let take = Take(data: data, durationMs: currentElapsedMs(), peaks: storedPeaks)
+        let take = Take(data: data, durationMs: currentElapsedMs(),
+                        peaks: Waveform.downsamplePeaks(peakBuf, max: Waveform.Constants.maxStoredPeaks))
         publishHaptic(.send)
         reset()
         return take
@@ -363,8 +360,7 @@ final class VoiceRecorder: ObservableObject {
 
     private func appendPeak(_ level: Double) {
         peakBuf.append(level)
-        livePeaks = Array(peakBuf.suffix(Waveform.Constants.liveWindowBars))
-        storedPeaks = Waveform.downsamplePeaks(peakBuf, max: Waveform.Constants.maxStoredPeaks)
+        livePeaks = peakBuf.suffix(Waveform.Constants.liveWindowBars).map(Waveform.quantizePeak)
     }
 
     /// Decision #6: reaching the cap SENDS the take — it is parked so the next
@@ -375,7 +371,8 @@ final class VoiceRecorder: ObservableObject {
             reset()
             return
         }
-        pendingTake = Take(data: data, durationMs: elapsed, peaks: storedPeaks)
+        pendingTake = Take(data: data, durationMs: elapsed,
+                           peaks: Waveform.downsamplePeaks(peakBuf, max: Waveform.Constants.maxStoredPeaks))
         reset()
     }
 
@@ -423,7 +420,6 @@ final class VoiceRecorder: ObservableObject {
         durationMs = 0
         peakBuf = []
         livePeaks = []
-        storedPeaks = []
         lastLinearLevel = 0
         haptic = nil
         phase = .idle
