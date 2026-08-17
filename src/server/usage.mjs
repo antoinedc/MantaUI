@@ -76,12 +76,48 @@ import { startPoller } from "./startPoller.mjs";
 import { claudeAdapter } from "./usageAdapters/claude.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 import { kimiAdapter } from "./usageAdapters/kimi.mjs";
+import { isUsageAtLimit } from "./usageStopper.mjs";
 
 export { normalizeWindow };
 
 // The registry of built-in adapters. Registry only — the engine below never
 // branches on a provider name.
 export const ADAPTERS = [claudeAdapter, codexAdapter, kimiAdapter];
+
+// Map an opencode providerID ("anthropic" | "openai" | "kimi-for-coding") to
+// its usage adapter id ("claude" | "codex" | "kimi"). The two namespaces differ
+// on purpose (see the UsageSnapshot.providerIDs note); the usage-stopped
+// classifier keys on the ADAPTER id, so a session's providerID must be mapped
+// before it reaches the classifier / the at-limit re-check. Returns null for an
+// unlisted provider (out of scope — a pay-as-you-go key).
+export function adapterForProviderID(providerID) {
+  if (typeof providerID !== "string") return null;
+  return ADAPTERS.find((a) => Array.isArray(a.providerIDs) && a.providerIDs.includes(providerID))?.id ?? null;
+}
+
+// Re-check ONE adapter's usage immediately (spec §4, signal 2), reusing the
+// existing adapter fetch rather than writing a second fetch. Returns true when
+// that provider is currently at its limit. Best-effort: a missing credential,
+// a failed fetch or an unlisted id all resolve to false (they must never
+// over-enrol from a stale/absent reading).
+export async function recheckAdapterAtLimit(adapterId, { fetchImpl = fetch, now = () => Date.now() } = {}) {
+  const adapter = ADAPTERS.find((a) => a.id === adapterId);
+  if (!adapter) return false;
+  try {
+    let detected = false;
+    try {
+      detected = await adapter.detect({ fetchImpl, now });
+    } catch {
+      detected = false;
+    }
+    if (!detected) return false;
+    const raw = await adapter.fetch({ fetchImpl, now });
+    const windows = Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : [];
+    return isUsageAtLimit(windows);
+  } catch {
+    return false;
+  }
+}
 
 // Cache TTL is the poll interval; there is no separate cache layer (per spec).
 const POLL_MS = 600_000; // 10 minutes

@@ -54,7 +54,7 @@ import {
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
-import { startUsagePoller } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit } from "./usage.mjs";
 import {
   createCapJob,
   getJob,
@@ -84,6 +84,8 @@ import {
 } from "./servePage.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
+import { upsertStopped } from "./stoppedStore.mjs";
+import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
@@ -347,6 +349,27 @@ const { stop: stopDeferredMobilePoller } = push.startDeferredMobilePoller();
 // indicator — see src/server/usage.mjs for that boundary.
 // eslint-disable-next-line no-unused-vars
 const { stop: stopUsagePoller } = startUsagePoller(bus);
+
+// Usage-stop enrolment (BET-1047 stage 1): derives durable "stopped
+// conversation" records from the opencode stream (see usageStopEnroll.mjs).
+// Either a refusal-word match or the provider's meter sitting at its limit
+// (re-checked on the failure via the EXISTING usage adapters) enrols a
+// conversation into the stoppedStore. observeEvent is called from the pump
+// below. Scope: the three subscription providers only.
+const usageStopEngine = createUsageStopEngine({
+  upsert: (input) => upsertStopped(input, { publish: (evt) => bus.publish(evt) }),
+  recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
+  resolveWorkspace: async (sessionId) => {
+    try {
+      const dir = await oc.getSessionDirectory(sessionId);
+      if (!dir) return "";
+      const leaf = basename(dir);
+      return leaf || dir;
+    } catch {
+      return "";
+    }
+  },
+});
 
 // Capability-job sweeper: same shape as startSchedulePoller — fails out stale
 // `running` jobs (30 min) and expired `queued` jobs (24h), then prunes terminal
@@ -891,6 +914,11 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     delegateEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[delegate] observeEvent failed:", e?.message ?? e);
+  }
+  try {
+    usageStopEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[usage-stop] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
