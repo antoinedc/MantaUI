@@ -11,25 +11,34 @@ import UIKit
 // in `VoiceGesture.swift`. The only branch here is which SURFACE to draw for
 // the phase the machine reports.
 //
-// Both surfaces REPLACE the composer box in place (same outer padding), reuse
-// the composer's shared `BoxChrome` glass, and derive every colour/spacing from
-// the tokens. No hex, no new token, no second glass recipe.
+// These surfaces are PURELY PRESENTATIONAL (BET-1051, decision #4): they render
+// props and call callbacks, and contain no gesture of their own. The ONE drag
+// gesture in the whole voice feature lives on the mic button in ComposerView —
+// the only view guaranteed to exist when the touch begins — and feeds the
+// machine directly. The held surface is drawn as an OVERLAY on the composer box
+// while a finger is down (so the mic button underneath keeps the touch alive for
+// the whole continuous gesture), and the locked bar REPLACES the box once the
+// take is hands-free.
+//
+// Both surfaces reuse the composer's shared `BoxChrome` glass (applied as the
+// LAST modifier in each `body`), and derive every colour/spacing from the
+// tokens. No hex, no new token, no second glass recipe.
 // ===========================================================================
 
 // MARK: - Surface A · Recording — held
 
 /// The finger-down held surface: record dot + timer + the "‹ slide to cancel"
-/// hint, with the lock lane floating to the right. Renders while
-/// `recorder.phase == .recordingHeld` and hosts the ongoing hold gesture
-/// (slide up → lock, slide left → cancel, release → send).
+/// hint, with the lock lane floating to the right. Drawn as an OVERLAY on the
+/// composer box while `recorder.phase == .recordingHeld` (or `.cancelling`), so
+/// the mic button underneath stays alive for the whole continuous gesture. It
+/// has NO gesture of its own — `translation` (fed from the mic's drag) drives
+/// the hint shift and the lock-glyph brightening, and it never decides what the
+/// take should do next.
 struct VoiceRecordingHeldView: View {
     @ObservedObject var recorder: VoiceRecorder
+    let translation: CGSize
     let isRTL: Bool
     let tokens: Tokens
-    var onTake: (VoiceRecorder.Take) -> Void = { _ in }
-
-    @State private var translation: CGSize = .zero
-    @State private var dragStart: Date?
 
     /// The enlarged mic in the lane — 38 (chatHeaderBtn) + 8 (sp2) = 46, derived,
     /// never hardcoded. The glyph sits on the accent at the composer's body size.
@@ -44,7 +53,7 @@ struct VoiceRecordingHeldView: View {
 
         ZStack(alignment: .bottomTrailing) {
             HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                AccessoryDot(danger: tokens.danger)
+                VoiceRecordDot(danger: tokens.danger)
                 timer
                 cancelHint(progress: cancelP, shift: hintShift, isRTL: isRTL, isCancelling: isCancelling)
             }
@@ -62,18 +71,7 @@ struct VoiceRecordingHeldView: View {
         // single element instead of propagating to every child in the AX tree.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("voice-recording-held")
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    if dragStart == nil { dragStart = Date() }
-                    translation = value.translation
-                    recorder.drag(dx: value.translation.width, dy: value.translation.height, isRTL: isRTL)
-                }
-                .onEnded { _ in
-                    withAnimation(.smooth(duration: 0.22)) { translation = .zero }
-                    finishHoldRelease()
-                }
-        )
+        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35)))
     }
 
     // MARK: records
@@ -88,8 +86,7 @@ struct VoiceRecordingHeldView: View {
 
     /// The "‹ slide to cancel" hint — translates with the drag and fades toward
     /// 0 as the cancel threshold is approached. Once the take is actually in
-    /// the cancelling phase it flips to a solid danger "release to cancel" —
-    /// still on the same held surface so the drag gesture stays mounted.
+    /// the cancelling phase it flips to a solid danger "release to cancel".
     @ViewBuilder
     private func cancelHint(progress: Double, shift: CGFloat, isRTL: Bool, isCancelling: Bool) -> some View {
         let text = isCancelling ? "release to cancel" : "‹ slide to cancel"
@@ -113,7 +110,7 @@ struct VoiceRecordingHeldView: View {
 
     /// The floating lock lane — chevron, lock glyph, enlarged mic — appearing
     /// only while held. The lock glyph brightens to `accentTx` as the lock
-    /// threshold is approached.
+    /// threshold is approached (a pure crossfade of the two tokens).
     private func lockLane(lockProgress: Double, isCancelling: Bool) -> some View {
         VStack(spacing: Metrics.spacing.sp2) {
             Image(systemName: "chevron.up")
@@ -121,7 +118,13 @@ struct VoiceRecordingHeldView: View {
                 .foregroundColor(tokens.tx2)
             Image(systemName: "lock")
                 .font(.system(size: Metrics.type.small))
-                .foregroundColor(lockGlyphColor(progress: lockProgress))
+                .foregroundColor(tokens.tx3)
+                .overlay {
+                    Image(systemName: "lock")
+                        .font(.system(size: Metrics.type.small))
+                        .foregroundColor(tokens.accentTx)
+                        .opacity(lockProgress)
+                }
             mic
         }
         .frame(width: Metrics.spacing.spPx * 46)
@@ -129,14 +132,6 @@ struct VoiceRecordingHeldView: View {
         .background(tokens.raised.opacity(0.9), in: Capsule())
         .overlay(Capsule().stroke(tokens.borderSubtle, lineWidth: 1))
         .accessibilityIdentifier("voice-lock-lane")
-    }
-
-    private func lockGlyphColor(progress: Double) -> Color {
-        // Fade tx3 → accentTx as the lock threshold is approached.
-        let p = progress
-        if p >= 1 { return tokens.accentTx }
-        // Linear interpolation between the two token colours.
-        return interpolate(from: tokens.tx3, to: tokens.accentTx, t: p)
     }
 
     private var mic: some View {
@@ -155,64 +150,15 @@ struct VoiceRecordingHeldView: View {
         .frame(width: micDiameter, height: micDiameter)
         .contentShape(Rectangle())
     }
-
-    /// Colour-lerp — both args are token colours, no raw component math.
-    private func interpolate(from a: Color, to b: Color, t: Double) -> Color {
-        guard t > 0 else { return tokens.tx3 }
-        guard t < 1 else { return tokens.accentTx }
-        let uiA = UIColor(a), uiB = UIColor(b)
-        var ra: CGFloat = 0; var ga: CGFloat = 0; var ba: CGFloat = 0; var aa: CGFloat = 0
-        var rb: CGFloat = 0; var gb: CGFloat = 0; var bb: CGFloat = 0; var ab: CGFloat = 0
-        uiA.getRed(&ra, green: &ga, blue: &ba, alpha: &aa)
-        uiB.getRed(&rb, green: &gb, blue: &bb, alpha: &ab)
-        let tt = CGFloat(t)
-        return Color(
-            .sRGB,
-            red: ra + (rb - ra) * tt,
-            green: ga + (gb - ga) * tt,
-            blue: ba + (bb - ba) * tt,
-            opacity: aa + (ab - aa) * tt
-        )
-    }
-
-    // MARK: release
-
-    /// Map the end of a hold to the machine. `VoiceGesture` owns every branch;
-    /// we only pick the INPUT for the gesture that just ended.
-    private func finishHoldRelease() {
-        let heldMs = dragStart.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
-        dragStart = nil
-        switch recorder.phase {
-        case .cancelling:
-            // sliding left then release → discard.
-            recorder.stop()
-        case .recordingLocked:
-            // already locked — release is a no-op; the bar owns the take now.
-            break
-        case .recordingHeld:
-            if heldMs < Int(Waveform.Constants.tapHoldMs) {
-                // A tap while held toggles ON → fingers-free locked bar.
-                onTakeFrom(recorder.tapToggle())
-            } else {
-                // A hold + release → send.
-                onTakeFrom(recorder.stop())
-            }
-        default:
-            break
-        }
-    }
-
-    private func onTakeFrom(_ take: VoiceRecorder.Take?) {
-        if let take { onTake(take) }
-    }
 }
 
 // MARK: - Surface C · Recording — locked
 
 /// The hands-free locked surface: head row (record dot, timer, live waveform),
-/// optional remaining-time line, and the discard / pause / send bar. Renders
-/// while the machine is `.recordingLocked` or `.paused`. Tapping the surface
-/// (away from a button) is the tap-toggle OFF — it stops and sends.
+/// optional remaining-time line, and the discard / pause / send bar. Replaces
+/// the composer box while the machine is `.recordingLocked` or `.paused`. The
+/// only interactive elements are the three bar buttons — a tap on the surface's
+/// background does nothing (decision #6, BET-1051: no tap-anywhere-to-send).
 struct VoiceRecordingLockedView: View {
     @ObservedObject var recorder: VoiceRecorder
     let tokens: Tokens
@@ -225,7 +171,7 @@ struct VoiceRecordingLockedView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
             // Head row: record dot + timer + live waveform (right-aligned).
             HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
-                VoiceRecordingHeldView.AccessoryDot(danger: tokens.danger)
+                VoiceRecordDot(danger: tokens.danger)
                 timer
                 Spacer(minLength: Metrics.spacing.sp2)
                 VoiceBarsView(peaks: recorder.livePeaks, progress: nil, tokens: tokens,
@@ -260,14 +206,11 @@ struct VoiceRecordingLockedView: View {
         }
         .padding(Metrics.spacing.sp3)
         .contentShape(Rectangle())
-        .onTapGesture {
-            // Tap-toggle OFF: a second tap stops and sends.
-            onTakeFrom(recorder.tapToggle())
-        }
         // One accessibility element for the surface; the bar's three buttons
         // remain separate interactive elements (they carry their own ids).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("voice-recording-locked")
+        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35)))
     }
 
     private var remaining: Int {
@@ -339,48 +282,29 @@ struct VoiceRecordingLockedView: View {
     }
 }
 
-// MARK: - Dispatcher
+// MARK: - Feedback modifier
 
-/// Renders whichever surface the machine's `VoicePhase` asks for, and owns the
-/// phase→VoiceOver announcements + haptic playback the machine requests. This
-/// is the single surface ComposerView swaps in for the input box.
-struct VoiceRecordingSurface: View {
+/// Applies the recording machine's VoiceOver announcements + haptic playback to
+/// whatever view owns the recording UI. Applied ONCE to a persistent container
+/// (the composer VStack in ComposerView), so `lastAnnounced` survives the
+/// held-surface overlay ↔ locked-bar replacement without resetting on remount.
+@MainActor
+struct VoiceFeedback: ViewModifier {
     @ObservedObject var recorder: VoiceRecorder
-    let isRTL: Bool
-    var onTake: (VoiceRecorder.Take) -> Void = { _ in }
-
-    private var tokens: Tokens { Tokens.scheme(environment) }
-    @Environment(\.colorScheme) private var environment
-
     @State private var lastAnnounced: VoicePhase?
 
-    var body: some View {
-        // The shared BoxChrome glass — applied ONCE here so each surface uses
-        // exactly the same modifier (no second glass recipe anywhere).
-        Group {
-            switch recorder.phase {
-            case .recordingHeld, .cancelling:
-                // `.cancelling` renders through the held surface too so its
-                // drag gesture stays mounted (swapping it away mid-drag would
-                // cancel the gesture and lose the release→discard).
-                VoiceRecordingHeldView(recorder: recorder, isRTL: isRTL, tokens: tokens, onTake: onTake)
-            case .recordingLocked, .paused:
-                VoiceRecordingLockedView(recorder: recorder, tokens: tokens, onTake: onTake, onDiscarded: { announceDiscard() })
-            default:
-                EmptyView()
+    func body(content: Content) -> some View {
+        content
+            .onAppear { lastAnnounced = recorder.phase }
+            .onChange(of: recorder.phase) { _, newPhase in
+                announce(previous: lastAnnounced, current: newPhase)
+                lastAnnounced = newPhase
             }
-        }
-        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35)))
-        .onAppear { lastAnnounced = recorder.phase }
-        .onChange(of: recorder.phase) { _, newPhase in
-            announce(previous: lastAnnounced, current: newPhase)
-            lastAnnounced = newPhase
-        }
-        .onChange(of: recorder.haptic) { _, newValue in
-            guard let haptic = newValue else { return }
-            VoiceHapticPlayer.play(haptic)
-            recorder.consumeHaptic()
-        }
+            .onChange(of: recorder.haptic) { _, newValue in
+                guard let haptic = newValue else { return }
+                VoiceHapticPlayer.play(haptic)
+                recorder.consumeHaptic()
+            }
     }
 
     // MARK: VoiceOver announcements (decision #4)
@@ -401,10 +325,6 @@ struct VoiceRecordingSurface: View {
             UIAccessibility.post(notification: .announcement, argument: message)
         }
     }
-
-    private func announceDiscard() {
-        UIAccessibility.post(notification: .announcement, argument: "Recording discarded")
-    }
 }
 
 /// Physical playback of a machine-requested haptic. The VIEW maps a machine
@@ -424,23 +344,21 @@ enum VoiceHapticPlayer {
     }
 }
 
-extension VoiceRecordingHeldView {
-    /// The pulsing record dot, shared with the locked surface's head row.
-    struct AccessoryDot: View {
-        let danger: Color
-        @State private var pulse = false
-        var body: some View {
-            Circle()
-                .fill(danger)
-                .frame(width: Metrics.spacing.spPx * 11, height: Metrics.spacing.spPx * 11)
-                .overlay(
-                    Circle()
-                        .stroke(danger.opacity(0.16), lineWidth: 4)
-                )
-                .opacity(pulse ? 1 : 0.55)
-                .animation(.smooth(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
-                .onAppear { pulse = true }
-                .accessibilityHidden(true)
-        }
+/// The pulsing record dot, shared by the held and locked surfaces.
+struct VoiceRecordDot: View {
+    let danger: Color
+    @State private var pulse = false
+    var body: some View {
+        Circle()
+            .fill(danger)
+            .frame(width: Metrics.spacing.spPx * 11, height: Metrics.spacing.spPx * 11)
+            .overlay(
+                Circle()
+                    .stroke(danger.opacity(0.16), lineWidth: 4)
+            )
+            .opacity(pulse ? 1 : 0.55)
+            .animation(.smooth(duration: 0.9).repeatForever(autoreverses: true), value: pulse)
+            .onAppear { pulse = true }
+            .accessibilityHidden(true)
     }
 }
