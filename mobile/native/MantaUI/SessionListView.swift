@@ -60,10 +60,9 @@ struct SessionListView: View {
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
-    /// 1 s tick so a running row's count-up stays live (BET-752 task 6). The
-    /// running timer is computed from `now` in the body; without a tick nothing
-    /// re-renders it after the initial layout, so it froze at "0s" until the
-    /// next unrelated store change.
+    /// 10 s tick so an idle row's age chip keeps advancing (BET-1084). The age
+    /// is computed from `now` in the body; without a tick nothing re-renders it
+    /// after the initial layout, so ages froze at whatever they showed on load.
     @State private var now = Date()
 
     var body: some View {
@@ -134,11 +133,10 @@ struct SessionListView: View {
         .fullScreenCover(isPresented: $showSettings) {
             SettingsScreen()
         }
-        // The running rows' count-up ticks every second (BET-752 task 6), but
-        // only while something is actually running — an all-idle list must not
-        // re-render every second (BET-897).
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { tick in
-            guard hasRunningRow else { return }
+        // The age chip advances on its own, like the desktop rail's 10s tick
+        // (src/renderer/clock.ts, AGE_TICK_MS). Ungated: an idle list is exactly
+        // the list whose ages must keep moving. — BET-1084.
+        .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { tick in
             now = tick
         }
         // Popping the last session off the stack lands us back on the list.
@@ -257,14 +255,6 @@ struct SessionListView: View {
         }
     }
 
-    /// True when any currently-filtered row is mid-turn. Gates the 1 s tick so
-    /// an all-idle list stops re-rendering every second (BET-897).
-    private var hasRunningRow: Bool {
-        filteredProjects.contains { project in
-            project.windows.contains { store.rowStatus(for: $0).running }
-        }
-    }
-
     private var filteredProjects: [MantaProject] {
         guard !searchText.isEmpty else { return sorted(store.projects) }
         let q = searchText.lowercased()
@@ -336,7 +326,7 @@ struct SessionListView: View {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
-                timer: timerText(window, now: now),
+                age: ageText(window, now: now),
                 position: entry.position,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
                 now: now,
@@ -386,12 +376,8 @@ struct SessionListView: View {
         .accessibilityHint("Opens the session. Swipe or long-press for actions.")
     }
 
-    private func timerText(_ window: MantaWindow, now: Date) -> String? {
-        let status = store.rowStatus(for: window)
-        guard status.running, let since = store.runningStart(for: window) else {
-            return nil
-        }
-        return SessionTimerFormat.liveElapsed(now.timeIntervalSince(since))
+    private func ageText(_ window: MantaWindow, now: Date) -> String? {
+        SessionRowAge.text(for: store.rowStatus(for: window), now: now)
     }
 
     private func subtitle(for window: MantaWindow) -> String {
@@ -777,7 +763,7 @@ private struct SessionCardBackground: View {
 private struct SessionRowContent: View {
     let window: MantaWindow
     let status: SessionRowStatus
-    let timer: String?
+    let age: String?
     let position: SessionCardPosition
     let pinned: Bool
     let now: Date
@@ -807,16 +793,15 @@ private struct SessionRowContent: View {
                 }
             }
             Spacer()
-            // Exactly one of the two, never both: the running timer pill, or
-            // the idle chevron.
-            if let timer {
-                Text(timer)
+            // Exactly one of the two, never both: the idle age chip, or the
+            // chevron on a running / attention / no-activity row. The chip is
+            // PLAIN — idle information, not a live signal — so it carries no
+            // capsule chrome (BET-1084).
+            if let age {
+                Text(age)
                     .font(.manta(size: Metrics.type.twoXS, weight: .medium, design: .monospaced))
-                    .foregroundColor(tokens.accentTx)
+                    .foregroundColor(tokens.tx4)
                     .monospacedDigit()
-                    .padding(.vertical, Metrics.spacing.sp1)
-                    .padding(.horizontal, Metrics.spacing.sp2)
-                    .background(tokens.accentSoft, in: Capsule())
             } else {
                 Image(systemName: "chevron.right")
                     .font(.system(size: Metrics.type.twoXS))
