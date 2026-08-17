@@ -12,7 +12,7 @@
 // - Footer: the selected folder's git state, Cancel, and a primary Select.
 // - Mobile gets it as a full-height sheet (handled by .mobile-* CSS classes).
 //
-// Pure helpers (breadcrumbs / parentPath / isDimmedDir / worktreeBadge /
+// Pure helpers (breadcrumbs / parentPath / worktreeBadge /
 // gitStateLabel) live in folderPicker.ts and are unit-tested there.
 
 import { useEffect, useRef, useState } from "react";
@@ -29,7 +29,6 @@ import {
   crumbLabel,
   gitStateLabel,
   hasWorktreeFanOut,
-  isDimmedDir,
   parentPath,
   worktreeBadge,
 } from "./folderPicker";
@@ -39,7 +38,8 @@ import { Button } from "./Button";
 type Props = {
   // Controlled presence. Kept MOUNTED so Modal can play its exit animation.
   open: boolean;
-  // The initial path the picker opens at. Usually "~" or the project's cwd.
+  // The initial path the picker opens at (e.g. the project's cwd). Normalized
+  // to absolute on first list (a leading ~ resolves via the server).
   initialPath: string;
   // Called when the user picks a single folder (no fan-out).
   onSelect: (path: string) => void;
@@ -56,11 +56,10 @@ type Props = {
 };
 
 // A row in the folder list. `name` is the directory basename; `full` is the
-// path to feed back into fsListDirs when the user descends.
+// absolute path to feed back into fsListDirs when the user descends.
 type Row = {
   name: string;
   full: string;
-  dimmed: boolean;
 };
 
 // Worktree fan-out state. When the user selects a folder that has >1
@@ -109,9 +108,12 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
     }
     debounce.current = setTimeout(async () => {
       try {
-        const matches = (await window.api.fsListDirs(value)).filter((m) =>
-          m.startsWith(value),
-        );
+        const dir = value.endsWith("/") ? value : parentPath(value);
+        const prefix = value.endsWith("/") ? "" : (value.split("/").pop() ?? "");
+        const res = await window.api.fsListDirs(dir);
+        const matches = res.entries
+          .filter((e) => !e.hidden && e.name.startsWith(prefix))
+          .map((e) => e.path);
         if (matches.length === 0) {
           setSuggestion(null);
           return;
@@ -152,12 +154,16 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
     setError(null);
     setWorktreeCounts({});
     try {
-      const matches = await window.api.fsListDirs(dir);
-      const filtered = matches.filter((m) => m.startsWith(dir));
-      const built: Row[] = filtered.map((full) => {
-        const name = full.split("/").filter(Boolean).pop() ?? full;
-        return { name, full, dimmed: isDimmedDir(name) };
-      });
+      const res = await window.api.fsListDirs(dir);
+      // Normalize the path field: if the server resolved a different directory
+      // than the one we listed (e.g. a typed `~` expanded to an absolute path),
+      // set it once so no tilde survives anywhere in the UI.
+      if (res.dir.replace(/\/$/, "") !== dir.replace(/\/$/, "")) {
+        setPath(res.dir + "/");
+      }
+      const built: Row[] = res.entries
+        .filter((e) => !e.hidden)
+        .map((e) => ({ name: e.name, full: e.path }));
       setRows(built);
       // Probe the selected dir's own git state for the footer.
       try {
@@ -214,11 +220,31 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
     setPath(up);
   };
 
+  // Resolve "home": ask the server to list the home directory (empty input
+  // means home) and point the field at the returned absolute path. This is
+  // how the Home button and an empty-field Go work without any tilde in the
+  // UI or across the wire.
+  const goHome = () => {
+    setSuggestion(null);
+    void (async () => {
+      try {
+        const res = await window.api.fsListDirs("");
+        setPath((res.dir || "") + "/");
+      } catch {
+        // home probe failed — leave the field as-is
+      }
+    })();
+  };
+
   // The design's "Go" discovery trigger (§07): browse into whatever path is
   // in the field, treating it as a directory to descend into. Mirrors the
   // row-click/descend affordance for a typed (or ghost-completed) path.
   const goNavigate = () => {
-    const target = (path || "").trim() || "~";
+    const target = (path || "").trim();
+    if (!target) {
+      goHome();
+      return;
+    }
     const next = target.endsWith("/") ? target : target + "/";
     setSuggestion(null);
     setPath(next);
@@ -362,7 +388,7 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                   at full weight (aligns to §07). */}
               <div className="flex items-center flex-wrap gap-px mt-2 text-label">
                 <button
-                  onClick={() => setPath("~")}
+                  onClick={goHome}
                   className="inline-flex items-center px-1 py-px rounded-xs text-text-faint hover:text-text"
                   title="Home"
                   aria-label="Home"
@@ -424,9 +450,8 @@ export function FolderPickerModal({ open, initialPath, onSelect, onFanOut, fanOu
                         key={r.full}
                         onClick={() => descend(r.full)}
                         className={
-                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs " +
-                          (r.dimmed ? "text-text-quiet" : "text-text-muted") +
-                          " hover:bg-bg-soft"
+                          "w-full flex items-center gap-2 px-3 py-2 text-left text-meta rounded-xs text-text-muted " +
+                          "hover:bg-bg-soft"
                         }
                         title={r.full}
                       >

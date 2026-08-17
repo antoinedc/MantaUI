@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone } from "./local.mjs";
@@ -16,84 +16,100 @@ test("parseWorktrees parses `git worktree list --porcelain`", () => {
   assert.equal(out[1].detached, true);
 });
 
-// ---- BET-307: fsListDirs returns paths in the form the caller typed -------
+// ---- BET-1072: fsListDirs returns an absolute-path DirListing --------------
 //
-// Autocomplete: the renderer's `(await fsListDirs(value)).filter(m => m.startsWith(value))`
-// filter only matches when results are in the SAME form as the input. Before
-// the fix, typing `~/pro` returned absolute `/home/dev/projects` and the
-// filter rejected everything → no ghost-text. Fix: server returns tilde-form
-// when input was tilde-form, absolute-form otherwise.
+// fsListDirs takes a DIRECTORY to list (no parent/prefix split, no cap) and
+// returns `{ dir, entries: [...] }` with absolute paths only — a leading `~`
+// is expanded into `dir`, and no tilde survives past the box's edge. Dot
+// directories are present (flag `hidden:true`) for the renderer to filter.
 
-test("fsListDirs: tilde input returns tilde-form results", async () => {
+test("fsListDirs: tilde input returns absolute paths and an absolute dir", async () => {
   const home = process.env.HOME;
   assert.ok(home, "HOME is set");
-  // Create a sibling inside HOME whose name starts with a known prefix so
-  // fsListDirs picks it up. `fsListDirs("~/pro")` is the documented example
-  // — it lists ~/.../ entries whose name starts with `pro`.
-  const root = await mkdtemp(join(home, "fslist-tilde-pro-"));
+  const out = await fsListDirs("~");
+  // The resolved `dir` is the expanded home directory (absolute).
+  assert.ok(out.dir.startsWith("/"), `dir is absolute: ${out.dir}`);
+  assert.ok(out.entries.every((e) => e.path.startsWith("/")),
+    `all entry paths absolute: ${JSON.stringify(out.entries)}`);
+  // A sibling created in HOME appears as an absolute path, not a tilde form.
+  const root = await mkdtemp(join(home, "fslist-abs-home-"));
   try {
-    const out = await fsListDirs("~/fslist-tilde-pro");
-    // The mkdtemp suffix (random characters) is the only entry matching the
-    // typed prefix; verify it appears in tilde-form.
-    const tildeName = root.slice(home.length); // ".fslist-tilde-pro-XXXX" → "/fslist-tilde-pro-XXXX" → strip leading /
-    const expected = "~" + tildeName;
-    assert.ok(out.includes(expected),
-      `expected tilde-form ${expected}, got ${JSON.stringify(out)}`);
-    assert.ok(out.every((p) => p.startsWith("~")),
-      `all results tilde-form: ${JSON.stringify(out)}`);
+    const listed = await fsListDirs(home);
+    assert.ok(listed.entries.some((e) => e.path === root),
+      `home listing includes the absolute sibling ${root}: ${JSON.stringify(listed.entries.map((e) => e.path))}`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("fsListDirs: absolute input returns absolute results", async () => {
+test("fsListDirs: absolute input returns absolute paths", async () => {
   const root = await mkdtemp(join(tmpdir(), "fslist-abs-root-"));
   await mkdir(join(root, "alpha"), { recursive: true });
   await mkdir(join(root, "beta"), { recursive: true });
   await writeFile(join(root, "not-a-dir.txt"), "skip");
   try {
-    // Pass the parent + a typed prefix so the function lists parent's
-    // children matching the prefix — mirrors how the renderer's
-    // ghost-text suggestion behaves (typing a partial, getting completions).
-    const out = await fsListDirs(join(root, "al"));
-    assert.ok(out.includes(join(root, "alpha")), `alpha present: ${JSON.stringify(out)}`);
-    assert.ok(!out.includes(join(root, "beta")), "beta does not match prefix 'al'");
-    assert.ok(!out.some((p) => p.endsWith("not-a-dir.txt")),
-      "files are filtered out");
-    assert.ok(out.every((p) => p.startsWith("/")),
+    const out = await fsListDirs(root);
+    assert.equal(out.dir, root);
+    const names = out.entries.map((e) => e.name);
+    assert.ok(names.includes("alpha"), `alpha present: ${JSON.stringify(out.entries)}`);
+    assert.ok(names.includes("beta"), `beta present: ${JSON.stringify(out.entries)}`);
+    assert.ok(!names.includes("not-a-dir.txt"), "files are filtered out");
+    assert.ok(out.entries.every((e) => e.path.startsWith("/")),
       "all results absolute");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("fsListDirs: bare '~' lists the HOME directory's children, not /home's", async () => {
-  // A bare `~` must NOT be split as parent=`/home/`, prefix=`<user>` — that
-  // would list `/home`'s children (other users), not the user's own home.
-  const out = await fsListDirs("~");
-  // Every entry is either an absolute path under process.env.HOME, or (on
-  // systems where homedir() !== process.env.HOME, e.g. macOS where homedir()
-  // is /Users/x but a test could be run with HOME=/var/…) an empty list.
-  // Assert no `/home/` parent split: results must not all live under `/home/`.
-  if (out.length === 0) return; // skip on platforms where the assertion is moot
-  const home = process.env.HOME ?? "";
-  assert.ok(out.every((p) => p.startsWith(home) || p.startsWith("~")),
-    `results should be under HOME, got ${JSON.stringify(out)}`);
-  assert.ok(!out.some((p) => p.startsWith("/home/") && !p.startsWith(home)),
-    `bare ~ must not list /home/'s children, got ${JSON.stringify(out)}`);
-});
-
-test("fsListDirs: prefix filter narrows results by the typed suffix", async () => {
-  const root = await mkdtemp(join(tmpdir(), "fslist-prefix-"));
-  await mkdir(join(root, "alpha"), { recursive: true });
-  await mkdir(join(root, "beta"),  { recursive: true });
+test("fsListDirs: >20 subdirectories returns ALL of them (no cap)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fslist-cap-"));
   try {
-    const out = await fsListDirs(join(root, "al"));
-    assert.ok(out.includes(join(root, "alpha")));
-    assert.ok(!out.includes(join(root, "beta")));
+    for (let i = 0; i < 30; i++) {
+      await mkdir(join(root, `d${String(i).padStart(2, "0")}`), { recursive: true });
+    }
+    const out = await fsListDirs(root);
+    assert.equal(out.entries.length, 30, `all 30 returned, got ${out.entries.length}`);
+    // Dot-directories are present with hidden:true (case d, asserted here too).
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("fsListDirs: dot-directories are present with hidden:true", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fslist-dot-"));
+  await mkdir(join(root, ".config"), { recursive: true });
+  await mkdir(join(root, "visible"), { recursive: true });
+  try {
+    const out = await fsListDirs(root);
+    const dot = out.entries.find((e) => e.name === ".config");
+    assert.ok(dot, `.config present: ${JSON.stringify(out.entries)}`);
+    assert.equal(dot.hidden, true);
+    assert.equal(out.entries.find((e) => e.name === "visible").hidden, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fsListDirs: a symlink pointing at a directory appears in entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fslist-link-"));
+  try {
+    await mkdir(join(root, "target"), { recursive: true });
+    await symlink(join(root, "target"), join(root, "link"));
+    await symlink(join(root, "missing"), join(root, "broke"));
+    const out = await fsListDirs(root);
+    const names = out.entries.map((e) => e.name);
+    assert.ok(names.includes("link"), `dir symlink present: ${JSON.stringify(names)}`);
+    assert.ok(!names.includes("broke"), "broken symlink not a directory");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("fsListDirs: a missing directory returns { dir, entries: [] } without throwing", async () => {
+  const missing = join(tmpdir(), "does-not-exist-" + Date.now());
+  const out = await fsListDirs(missing);
+  assert.equal(out.dir, missing);
+  assert.deepEqual(out.entries, []);
 });
 
 // ===========================================================================

@@ -34,7 +34,7 @@
 // is the single install point).
 
 import type { Api } from "../../shared/api.js";
-import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo } from "../../shared/types.js";
+import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo, DirListing } from "../../shared/types.js";
 import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
@@ -499,7 +499,7 @@ const outboxList = (): Promise<OutboxFile[]> => Promise.resolve([]);
 // null and the picker's folder list renders a raw "Cannot read properties of
 // null" error in the empty-state capture. The listing is fictional (see
 // demoFixture); worktrees are empty so the footer reads "not a git repo".
-const fsListDirs = (partial: string): Promise<string[]> =>
+const fsListDirs = (partial: string): Promise<DirListing> =>
   Promise.resolve(demoFsListDirs(partial));
 
 const gitListWorktrees = (cwd: string): Promise<WorktreeInfo[]> =>

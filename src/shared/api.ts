@@ -43,6 +43,7 @@ import type {
   VoiceUploadNoteResult,
   VoiceRetryResult,
   WindowStatus,
+  DirListing,
   WorktreeInfo,
   ForgeProbeResult,
   ForgeStatusResult,
@@ -199,7 +200,7 @@ export interface Api {
   // can confirm before the retry. Any other failure throws.
   gitRemoveWorktree(input: { path: string; force: boolean }): Promise<{ removed: boolean; reason?: "dirty" | "other" }>;
 
-  fsListDirs(partial: string): Promise<string[]>;
+  fsListDirs(partial: string): Promise<DirListing>;
 
   // BET-786: probe the box for git repos + read origins + detect the gh CLI.
   // Server-side only; the box caches the result in memory for 60s.

@@ -3,7 +3,6 @@ import {
   breadcrumbs,
   crumbLabel,
   parentPath,
-  isDimmedDir,
   worktreeBadge,
   hasWorktreeFanOut,
   gitStateLabel,
@@ -21,18 +20,6 @@ describe("breadcrumbs", () => {
     expect(breadcrumbs("   ")).toEqual([]);
   });
 
-  it("handles bare tilde", () => {
-    expect(breadcrumbs("~")).toEqual(["~"]);
-  });
-
-  it("splits tilde-form paths", () => {
-    expect(breadcrumbs("~/code/foo")).toEqual([
-      "~",
-      "~/code",
-      "~/code/foo",
-    ]);
-  });
-
   it("splits absolute paths", () => {
     expect(breadcrumbs("/home/dev/code")).toEqual([
       "/",
@@ -47,17 +34,11 @@ describe("breadcrumbs", () => {
   });
 
   it("handles trailing slash", () => {
-    expect(breadcrumbs("~/code/")).toEqual(["~", "~/code"]);
+    expect(breadcrumbs("/home/dev/")).toEqual(["/", "/home", "/home/dev"]);
   });
 });
 
 describe("parentPath", () => {
-  it("goes up from tilde paths", () => {
-    expect(parentPath("~/code/foo")).toBe("~/code");
-    expect(parentPath("~/code")).toBe("~");
-    expect(parentPath("~")).toBe("~");
-  });
-
   it("goes up from absolute paths", () => {
     expect(parentPath("/home/dev/code")).toBe("/home/dev");
     expect(parentPath("/home/dev")).toBe("/home");
@@ -71,35 +52,13 @@ describe("parentPath", () => {
 });
 
 describe("crumbLabel", () => {
-  it("labels tilde", () => {
-    expect(crumbLabel("~")).toBe("~");
-  });
-
   it("labels root", () => {
     expect(crumbLabel("/")).toBe("/");
   });
 
   it("extracts the last segment", () => {
-    expect(crumbLabel("~/code/foo")).toBe("foo");
+    expect(crumbLabel("/home/dev/code")).toBe("code");
     expect(crumbLabel("/home/dev")).toBe("dev");
-  });
-});
-
-describe("isDimmedDir", () => {
-  it("dims node_modules", () => {
-    expect(isDimmedDir("node_modules")).toBe(true);
-  });
-
-  it("dims dot-folders", () => {
-    expect(isDimmedDir(".git")).toBe(true);
-    expect(isDimmedDir(".venv")).toBe(true);
-    expect(isDimmedDir(".cache")).toBe(true);
-  });
-
-  it("does not dim regular folders", () => {
-    expect(isDimmedDir("src")).toBe(false);
-    expect(isDimmedDir("my-project")).toBe(false);
-    expect(isDimmedDir("code")).toBe(false);
   });
 });
 

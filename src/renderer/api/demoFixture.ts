@@ -31,6 +31,7 @@ import type {
   OpencodeSessionListItem,
   ServedPageMeta,
   WorktreeInfo,
+  DirListing,
 } from "../../shared/types.js";
 
 // 32-lowercase-hex — the boxId shape httpApi + transport.mjs validate against.
@@ -898,45 +899,66 @@ export const demoLaunchers: AvailableLauncher[] = [
 ];
 
 // =============================================================================
-// Folder picker listing (BET-562). The folder picker modal is opened in the
-// demo empty state by clicking the "Home" chip; `fsListDirs`/`gitListWorktrees`
+// Folder picker listing (BET-562, BET-1072). The folder picker modal is opened
+// in the demo empty state by clicking the "Home" chip; `fsListDirs`/`gitListWorktrees`
 // are NOT covered by the httpApi-shaped Proxy fallback (which resolves null
 // and would leave the list as a raw "Cannot read properties of null" error),
-// so the demo stubs a fictional home-directory listing. Fictional names only —
-// node_modules and the dot-folder are exercised deliberately so the dimmed
-// rows (isDimmedDir) appear.
+// so the demo stubs a fictional home-directory listing. All paths are absolute
+// and there is no tilde anywhere (BET-1072). The dot-folder `.config` is
+// exercised deliberately so the `hidden` flag / renderer filtering appears;
+// `node_modules` is shown like any other folder.
 //
-// The `~/projects` nesting exists so the captured state can descend ONE level
-// out of "~" (a real user gesture: clicking a folder row). The empty-state
-// path is literally "~", which Playwright serialises as `textbox: ~` — and
-// `~` is YAML's null literal, so Playwright's aria snapshot rejects it with
-// "Node value should be a string or a sequence". Descending to `~/projects`
-// puts a real path in the field and makes the structure round-trip (BET-562).
+// The `/home/dev/projects` nesting exists so the captured state can descend
+// ONE level out of home (a real user gesture: clicking a folder row). The
+// empty-state path is initially "~", which `fsListDirs` resolves to absolute
+// `/home/dev` and the modal normalises into the path field (BET-562/BET-1072).
 // =============================================================================
-export const demoHomeDirs = [
-  "~/backups",
-  "~/docker",
-  "~/docs",
-  "~/infra",
-  "~/marketing",
-  "~/node_modules",
-  "~/projects",
-  "~/scripts",
-  "~/.config",
+export const DEMO_HOME = "/home/dev";
+
+const demoHomeDirs = [
+  "backups",
+  "docker",
+  "docs",
+  "infra",
+  "marketing",
+  "node_modules",
+  "projects",
+  "scripts",
+  ".config",
 ];
 
-export const demoProjectsDirs = [
-  "~/projects/ethernal",
-  "~/projects/marketing",
-  "~/projects/infra",
+const demoProjectsDirs = [
+  "ethernal",
+  "marketing",
+  "infra",
 ];
 
-export function demoFsListDirs(partial: string): string[] {
-  if (!partial) return [];
-  const p = partial.endsWith("/") ? partial : `${partial}/`;
-  if (p === "~/") return demoHomeDirs;
-  if (p === "~/projects/") return demoProjectsDirs;
-  return [...demoHomeDirs, ...demoProjectsDirs].filter((d) => d.startsWith(partial));
+function listing(dir: string, names: string[]): DirListing {
+  return {
+    dir,
+    entries: names.map((name) => ({
+      name,
+      path: `${dir}/${name}`,
+      hidden: name.startsWith("."),
+    })),
+  };
+}
+
+export function demoFsListDirs(partial: string): DirListing {
+  if (!partial) return listing(DEMO_HOME, demoHomeDirs);
+  const p = partial.endsWith("/") ? partial.slice(0, -1) : partial;
+  if (p === DEMO_HOME) return listing(DEMO_HOME, demoHomeDirs);
+  if (p === `${DEMO_HOME}/projects`) return listing(`${DEMO_HOME}/projects`, demoProjectsDirs);
+  // Type-ahead: parent dir + prefix arrived from the renderer's
+  // refreshSuggestion; filter the home listing for it.
+  if (p.startsWith(`${DEMO_HOME}/`)) {
+    const prefix = p.slice(DEMO_HOME.length + 1);
+    const matches = demoHomeDirs.filter((d) => d.startsWith(prefix));
+    return listing(DEMO_HOME, matches);
+  }
+  // Home-dependent input ("~" before the modal normalises it, or any other
+  // non-matching input) degrades to the full home listing.
+  return listing(DEMO_HOME, demoHomeDirs);
 }
 
 export function demoGitListWorktrees(_cwd: string): WorktreeInfo[] {

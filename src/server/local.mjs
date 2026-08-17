@@ -263,62 +263,54 @@ export async function gitRemoveWorktree({ path: wtPath, force }) {
 }
 
 // ============================================================
-// FS: directory autocomplete (real implementation)
+// FS: directory listing (real implementation)
 // ============================================================
 //
-// Desktop: runs `ls -1Ap` over SSH and filters for dirs, filtering by prefix.
-// Mobile: same semantics but local fs via readdir.
+// fsListDirs takes a directory to LIST (no parent/prefix splitting — the
+// type-ahead prefix filter lives in the renderer, which already knows the
+// typed text). It returns a DirListing of absolute paths only; a leading `~`
+// is expanded via the shared `expandTilde` and no tilde ever crosses the RPC
+// boundary in either direction. Every subdirectory is returned — there is no
+// cap, and dot-directories are present (flag `hidden:true`) for the renderer
+// to filter. An unreadable / missing directory returns an empty entry list.
 //
-// Caller passes "partial path"; we split on the last "/".
-// ~ and "" expand to $HOME. Returns up to 20 matches.
-// Matches the desktop contract: input="~/foo" → returns ["~/foo/bar", ...] style
-// (full paths so the path picker can display them).
-//
-// fsListDirs(partial: string) → string[]
+// fsListDirs(dir: string) → Promise<DirListing>
 // preload: ipcRenderer.invoke(IPC.fsListDirs, partial) → args[0] = partial
 
-export async function fsListDirs(partial) {
-  const raw = (partial ?? "").trim();
-  if (!raw) return [];
-  // Remember whether the caller asked in tilde-form so the returned paths
-  // match the form they typed. Without this, typing `~/pro` returned
-  // absolute `/home/dev/projects`, which the renderer's `m.startsWith(value)`
-  // filter (Sidebar.tsx / MobileCreateSheet.tsx) rejected — autocomplete went
-  // dead for every `~` path.
-  const isTilde = raw === "~" || raw.startsWith("~/");
-  // Expand leading ~ to $HOME — `expandTilde` lives in src/shared/paths.mjs
-  // and is the single source of truth.
-  let lookup = isTilde ? expandTilde(raw) : raw;
-  // Special case: a bare `~` must list the HOME directory's children, NOT
-  // `/home`'s. The general split would yield parent=`/home/`, prefix=`dev`
-  // and start listing `/home`'s entries. Force a trailing slash so the
-  // parent/prefix split lands on `homedir() + "/"` and the prefix is empty.
-  if (raw === "~") lookup = homedir() + "/";
-
-  // Split into parent dir + typed prefix to filter with.
-  const m = /^(.*\/)([^/]*)$/.exec(lookup);
-  if (!m) return [];
-  const [, parent, prefix] = m;
+export async function fsListDirs(dirPath) {
+  // Empty/missing input lists $HOME. A leading `~` is expanded here — this
+  // is the box's edge, and it must never survive past it.
+  const raw = (dirPath ?? "").trim();
+  const dir = expandTilde(raw === "" || raw === "~" ? "~" : raw);
 
   let entries;
   try {
-    entries = await readdir(parent, { withFileTypes: true });
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return { dir, entries: [] };
   }
 
-  const home = homedir();
-  return entries
-    .filter((e) => e.isDirectory() && (!prefix || e.name.startsWith(prefix)))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .slice(0, 20)
-    .map((e) => {
-      const abs = parent + e.name;
-      // Translate back to tilde-form if the input was tilde-form, so the
-      // renderer's `startsWith(value)` filter and the ghost-text suggestion
-      // both work.
-      return isTilde && abs.startsWith(home) ? "~" + abs.slice(home.length) : abs;
+  const dirEntries = [];
+  for (const e of entries) {
+    let isDir = e.isDirectory();
+    if (!isDir && e.isSymbolicLink()) {
+      // A symlink counts as a directory only when it resolves to one. A
+      // broken symlink (stat throws) is treated as "not a directory".
+      try {
+        isDir = (await stat(join(dir, e.name))).isDirectory();
+      } catch {
+        isDir = false;
+      }
+    }
+    if (!isDir) continue;
+    dirEntries.push({
+      name: e.name,
+      path: join(dir, e.name),
+      hidden: e.name.startsWith("."),
     });
+  }
+  dirEntries.sort((a, b) => a.name.localeCompare(b.name));
+  return { dir, entries: dirEntries };
 }
 
 // ============================================================
