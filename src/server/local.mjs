@@ -706,6 +706,7 @@ export async function scanRepos({
   maxResults = 50,
   timeoutMs = 4000,
   readdir: readdirImpl = readdir,
+  readFile: readFileImpl = readFile,
   realpath: realpathImpl = realpath,
   stat: statImpl = stat,
   gitRun = run,
@@ -726,6 +727,7 @@ export async function scanRepos({
       hits,
       seenReal,
       readdir: readdirImpl,
+      readFile: readFileImpl,
       realpath: realpathImpl,
       stat: statImpl,
       gitRun,
@@ -765,11 +767,14 @@ async function walkRoot(dir, depth, ctx) {
   } catch {
     return; // unreadable / missing — skip quietly
   }
-  // A directory containing a .git entry is a repo. Detect by readdir, NOT by
-  // spawning git, and do not descend into it — the outermost repo wins.
-  if (entries.some((e) => e.name === ".git")) {
+  // A directory holding a real `.git` is a repo. Detect by readdir, NOT by
+  // spawning git, and do not descend into it — the outermost repo wins. When
+  // the `.git` entry is not a real one, keep descending as usual. The home
+  // root is the one exception: home is never offered as a workspace even when
+  // it holds a `.git` (recordRepo skips it), so its children are still scanned.
+  if (await isRepoDir(entries, dir, ctx)) {
     await recordRepo(dir, ctx);
-    return;
+    if (dir !== ctx.home) return;
   }
   if (depth >= ctx.maxDepth) return;
   for (const e of entries) {
@@ -780,6 +785,24 @@ async function walkRoot(dir, depth, ctx) {
   }
 }
 
+async function isRepoDir(entries, dir, ctx) {
+  const git = entries.find((e) => e.name === ".git");
+  if (!git) return false;
+  // A `.git` directory is a normal checkout. No extra I/O in this common case.
+  if (git.isDirectory()) return true;
+  // A `.git` file is a linked worktree / submodule only when its first bytes
+  // are "gitdir:". Anything else named `.git` is not a repository — recording
+  // it would offer the user a workspace no git command will work in.
+  if (!git.isFile()) return false;
+  let text;
+  try {
+    text = await ctx.readFile(join(dir, ".git"), "utf8");
+  } catch {
+    return false;
+  }
+  return typeof text === "string" && text.startsWith("gitdir:");
+}
+
 async function recordRepo(dir, ctx) {
   // Dedupe by resolved real path first (a symlinked root must not double-report).
   let real;
@@ -788,6 +811,11 @@ async function recordRepo(dir, ctx) {
   } catch {
     real = dir;
   }
+  // The home directory itself is never a workspace, even when it holds a
+  // `.git` (dotfiles kept in a repo). It stays a scan root — its children are
+  // still scanned — but it is not offered as a project. Compare on the
+  // resolved real path so a symlinked home is caught too.
+  if (ctx.home && real === ctx.home) return;
   if (ctx.seenReal.has(real)) return;
   ctx.seenReal.add(real);
 
