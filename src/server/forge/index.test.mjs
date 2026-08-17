@@ -3,12 +3,13 @@
 // (zero network), single-flight, rate-limit cooling, the forge:status
 // token-invariance, and the cwd → origin → repo pull-request resolution.
 
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   createRequestLayer,
   createForgeRuntime,
   forgeStatus,
+  forgeListRepos,
   forgeDeviceStart,
   pullRequestForCwd,
   forgeDiffForCwd,
@@ -29,6 +30,11 @@ import {
 } from "./index.mjs";
 import { getDraft, putComment } from "./draft.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
+import { clearVerdicts } from "./auth.mjs";
+
+// The verdict cache (auth.mjs) is module-global — clear it before each test so
+// a "valid"/"rejected" verdict written by one case can't leak into the next.
+beforeEach(() => clearVerdicts());
 
 const URL = "https://api.github.com/repos/acme/widget/pulls?state=open";
 
@@ -144,7 +150,7 @@ test("forgeStatus: reports connected/login and NEVER leaks the token", async () 
     resolveToken: async () => ({ token: TOKEN, source: "cli" }),
     detectCli: async () => ({ installed: true, authenticated: true, login: "octocat" }),
   });
-  assert.deepEqual(status, { connected: true, login: "octocat", kind: "github", source: "cli" });
+  assert.deepEqual(status, { connected: true, login: "octocat", kind: "github", source: "cli", valid: null });
   const serialised = JSON.stringify(status);
   assert.ok(!serialised.includes(TOKEN), "the resolved token must never cross forge:status output");
 });
@@ -155,6 +161,180 @@ test("forgeStatus: disconnected when no token resolves", async () => {
     detectCli: async () => ({ installed: true, authenticated: false, login: null }),
   });
   assert.deepEqual(status, { connected: false });
+});
+
+test("forgeStatus: validate omitted → no adapter call at all, valid null", async () => {
+  let adapterCalls = 0;
+  const status = await forgeStatus({
+    resolveToken: async () => ({ token: "t", source: "stored" }),
+    detectCli: async () => ({ installed: true, authenticated: true, login: "octocat" }),
+    getAdapterFn: () => {
+      adapterCalls++;
+      return { getViewer: async () => ({ data: { login: "probe" }, stale: false }) };
+    },
+  });
+  assert.equal(adapterCalls, 0, "no probe when validate is omitted");
+  assert.equal(status.valid, null);
+});
+
+test("forgeStatus: probe succeeds → valid true, login comes from the probe", async () => {
+  const status = await forgeStatus({
+    validate: true,
+    resolveToken: async () => ({ token: "t", source: "stored" }),
+    detectCli: async () => ({ installed: true, authenticated: true, login: "cli-login" }),
+    getAdapterFn: () => ({ getViewer: async () => ({ data: { login: "probe-login" }, stale: false }) }),
+  });
+  assert.equal(status.valid, true);
+  assert.equal(status.connected, true);
+  assert.equal(status.login, "probe-login", "login reflects the probe, not the CLI");
+});
+
+test("forgeStatus: probe succeeds twice → adapter is called ONCE (verdict cached)", async () => {
+  let probeCalls = 0;
+  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; return { data: { login: "probe" }, stale: false }; } });
+  const resolveToken = async () => ({ token: "t", source: "stored" });
+  const detectCli = async () => ({ installed: true, authenticated: true, login: "cli" });
+  const first = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn });
+  const second = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn });
+  assert.equal(first.valid, true);
+  assert.equal(second.valid, true);
+  assert.equal(probeCalls, 1, "second read is served from the verdict cache");
+});
+
+test("forgeStatus: probe throws 401, source stored → clears credential; ladder empty → connected false", async () => {
+  let cleared = 0;
+  let resolveCalls = 0;
+  const status = await forgeStatus({
+    validate: true,
+    resolveToken: async () => {
+      resolveCalls++;
+      return resolveCalls === 1 ? { token: "storedtok", source: "stored" } : null;
+    },
+    detectCli: async () => ({ installed: true, authenticated: false, login: null }),
+    getAdapterFn: () => ({ getViewer: async () => { throw { status: 401 }; } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 1, "the stored credential was cleared on rejection");
+  assert.deepEqual(status, { connected: false });
+});
+
+test("forgeStatus: probe throws 401, source stored, ladder then yields a cli credential → transparently reconnected", async () => {
+  let cleared = 0;
+  let resolveCalls = 0;
+  const status = await forgeStatus({
+    validate: true,
+    resolveToken: async () => {
+      resolveCalls++;
+      return resolveCalls === 1 ? { token: "storedtok", source: "stored" } : { token: "clitok", source: "cli" };
+    },
+    detectCli: async () => ({ installed: true, authenticated: true, login: "cli-login" }),
+    getAdapterFn: () => ({ getViewer: async () => { throw { status: 401 }; } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 1);
+  assert.deepEqual(status, { connected: true, login: "cli-login", kind: "github", source: "cli", valid: null });
+});
+
+test("forgeStatus: probe throws 401, source cli → NOT cleared, valid false", async () => {
+  let cleared = 0;
+  const status = await forgeStatus({
+    validate: true,
+    resolveToken: async () => ({ token: "clitok", source: "cli" }),
+    detectCli: async () => ({ installed: true, authenticated: true, login: "cli-login" }),
+    getAdapterFn: () => ({ getViewer: async () => { throw { status: 401 }; } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 0, "an env/CLI credential is never ours to delete");
+  assert.equal(status.valid, false);
+});
+
+test("forgeStatus: probe throws a network error → NOT cleared, valid null, nothing cached", async () => {
+  let cleared = 0;
+  let probeCalls = 0;
+  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; throw new Error("offline"); } });
+  const resolveToken = async () => ({ token: "t", source: "stored" });
+  const detectCli = async () => ({ installed: true, authenticated: true, login: "cli" });
+  const clearStored = async () => { cleared++; };
+  const first = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  const second = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  assert.equal(cleared, 0, "a flaky network never signs anyone out");
+  assert.equal(first.valid, null);
+  assert.equal(second.valid, null);
+  assert.equal(probeCalls, 2, "an inconclusive probe is cached NOTHING — probed again");
+});
+
+test("forgeStatus: probe throws 403 → NOT cleared, valid null, nothing cached", async () => {
+  let cleared = 0;
+  let probeCalls = 0;
+  const getAdapterFn = () => ({ getViewer: async () => { probeCalls++; throw { status: 403 }; } });
+  const resolveToken = async () => ({ token: "t", source: "stored" });
+  const detectCli = async () => ({ installed: true, authenticated: true, login: "cli" });
+  const clearStored = async () => { cleared++; };
+  const first = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  const second = await forgeStatus({ validate: true, resolveToken, detectCli, getAdapterFn, clearStored });
+  assert.equal(cleared, 0);
+  assert.equal(first.valid, null);
+  assert.equal(second.valid, null);
+  assert.equal(probeCalls, 2, "a non-401 failure caches nothing — probed again");
+});
+
+// ---- forgeListRepos (BET-1056) ---------------------------------------------
+// The repo listing IS a validity check — same credential, same API — so it must
+// feed the same rejection handling: `error` carries a CODE, never a raw message.
+
+test("forgeListRepos: success passes repos through unchanged", async () => {
+  const repos = [{ name: "a" }, { name: "b" }];
+  const r = await forgeListRepos({
+    resolveToken: async () => ({ token: "t", source: "stored" }),
+    getAdapterFn: () => ({ listMyRepos: async () => ({ data: repos, stale: true }) }),
+  });
+  assert.deepEqual(r, { repos, stale: true, error: null });
+});
+
+test("forgeListRepos: 401 with source stored → error rejected and credential cleared", async () => {
+  let cleared = 0;
+  const r = await forgeListRepos({
+    resolveToken: async () => ({ token: "t", source: "stored" }),
+    getAdapterFn: () => ({ listMyRepos: async () => { throw { status: 401 }; } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 1, "a rejected stored credential is cleared");
+  assert.deepEqual(r, { repos: [], stale: false, error: "rejected" });
+});
+
+test("forgeListRepos: 401 with source env → error rejected, NOT cleared", async () => {
+  let cleared = 0;
+  const r = await forgeListRepos({
+    resolveToken: async () => ({ token: "t", source: "env" }),
+    getAdapterFn: () => ({ listMyRepos: async () => { throw { status: 401 }; } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 0, "an env credential is never deleted");
+  assert.deepEqual(r, { repos: [], stale: false, error: "rejected" });
+});
+
+test("forgeListRepos: network failure → error network, NOT cleared", async () => {
+  let cleared = 0;
+  const r = await forgeListRepos({
+    resolveToken: async () => ({ token: "t", source: "stored" }),
+    getAdapterFn: () => ({ listMyRepos: async () => { throw new Error("offline"); } }),
+    clearStored: async () => { cleared++; },
+  });
+  assert.equal(cleared, 0, "a network failure never clears a credential");
+  assert.deepEqual(r, { repos: [], stale: false, error: "network" });
+});
+
+test("forgeListRepos: no credential → not_connected, no adapter call", async () => {
+  let adapterCalls = 0;
+  const r = await forgeListRepos({
+    resolveToken: async () => null,
+    getAdapterFn: () => {
+      adapterCalls++;
+      return { listMyRepos: async () => ({ data: [], stale: false }) };
+    },
+  });
+  assert.equal(adapterCalls, 0, "no credential means no adapter call");
+  assert.deepEqual(r, { repos: [], stale: false, error: "not_connected" });
 });
 
 // ---- pullRequestForCwd -----------------------------------------------------

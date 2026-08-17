@@ -710,7 +710,7 @@ export const httpApi: Api = {
   forgeProbe: () => rpc(IPC.forgeProbe),
 
   // -- forge read path (BET-788) --
-  forgeStatus: () => rpc(IPC.forgeStatus),
+  forgeStatus: (opts) => rpc(IPC.forgeStatus, opts),
   forgePullRequest: (input) => rpc(IPC.forgePullRequest, input),
   forgeDiff: (input) => rpc(IPC.forgeDiff, input),
   // BET-795: the work inbox (box-side aggregated read).

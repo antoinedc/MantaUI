@@ -33,7 +33,7 @@ import { createSession as ocCreateSession, sendPrompt as ocSendPrompt, listMessa
 import { buildPrDescriptionPrompt, parsePrDescription, extractTranscriptText, extractCompletedAssistantText } from "./shipDescription.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
-import { resolveToken as authResolveToken } from "./auth.mjs";
+import { resolveToken as authResolveToken, readVerdict, writeVerdict, clearStoredToken } from "./auth.mjs";
 import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
 import { createGithubAdapter, GithubRequestError, buildInboxQueries, mergeInboxSources } from "./github.mjs";
@@ -358,10 +358,48 @@ async function detectFromConfig(origin, { getConfig = localConfigGet } = {}) {
  *
  * @param {{ resolveToken?: typeof authResolveToken, detectCli?: () => Promise<{ installed: boolean, authenticated: boolean, login: string | null }> }} [deps]
  */
-export async function forgeStatus({ resolveToken = authResolveToken, detectCli = localDetectForgeCli } = {}) {
+export async function forgeStatus({
+  validate = false,
+  resolveToken = authResolveToken,
+  detectCli = localDetectForgeCli,
+  getAdapterFn = getAdapter,
+  clearStored = clearStoredToken,
+  now = Date.now,
+} = {}) {
   const [cli, tok] = await Promise.all([detectCli(), resolveToken(GH_HOST)]);
   if (!tok) return { connected: false };
-  return { connected: true, login: cli?.login ?? null, kind: "github", source: tok.source ?? null };
+
+  const base = { connected: true, login: cli?.login ?? null, kind: "github", source: tok.source ?? null };
+  if (!validate) return { ...base, valid: null };
+
+  const cached = readVerdict(GH_HOST, tok.token, { now });
+  if (cached === "valid") return { ...base, valid: true };
+  if (cached === "rejected") return { ...base, valid: false };
+
+  let viewer = null;
+  try {
+    ({ data: viewer } = await getAdapterFn("github", tok.token).getViewer());
+  } catch (e) {
+    if (classifyForgeError(e) !== "rejected") {
+      // Inconclusive (offline / rate-limited / SSO). Cache NOTHING, clear
+      // NOTHING — a flaky network must never sign anyone out.
+      return { ...base, valid: null };
+    }
+    writeVerdict(GH_HOST, tok.token, "rejected", { now });
+    if (tok.source !== "stored") {
+      // An env var or the user's `gh` CLI login: report it, never delete it.
+      return { ...base, valid: false };
+    }
+    await clearStored();
+    // The credential ladder may still yield a working `gh`/env credential —
+    // if it does the user is transparently reconnected and sees nothing.
+    const next = await resolveToken(GH_HOST);
+    if (!next) return { connected: false };
+    return { ...base, source: next.source ?? null, valid: null };
+  }
+
+  writeVerdict(GH_HOST, tok.token, "valid", { now });
+  return { ...base, login: viewer?.login ?? cli?.login ?? null, valid: true };
 }
 
 // ---- §7.4 case C: zero-state clone flow (BET-796) --------------------------
@@ -415,7 +453,7 @@ export async function forgeDevicePoll(
     return await poll(grantId);
   } catch (e) {
     if (e instanceof ExpiredCodeError) return { status: "expired" };
-    return { status: "error", error: String((e && e.message) || e) };
+    return { status: "error", error: e instanceof Error && e.message ? e.message : String(e) };
   }
 }
 
@@ -441,17 +479,24 @@ export function forgeDeviceCancel(
  *
  * @param {{ resolveToken?: typeof authResolveToken, getAdapterFn?: typeof getAdapter }} [deps]
  */
-export async function forgeListRepos(
-  { resolveToken = authResolveToken, getAdapterFn = getAdapter } = {},
-) {
+export async function forgeListRepos({
+  resolveToken = authResolveToken,
+  getAdapterFn = getAdapter,
+  clearStored = clearStoredToken,
+  now = Date.now,
+} = {}) {
   const tok = await resolveToken(GH_HOST);
-  if (!tok) return { error: "not_connected", repos: [] };
-  const adapter = getAdapterFn("github", tok.token);
+  if (!tok) return { repos: [], stale: false, error: "not_connected" };
   try {
-    const { data, stale } = await adapter.listMyRepos();
+    const { data, stale } = await getAdapterFn("github", tok.token).listMyRepos();
     return { repos: Array.isArray(data) ? data : [], stale: Boolean(stale), error: null };
   } catch (e) {
-    return { repos: [], error: String((e && e.message) || e), stale: false };
+    const kind = classifyForgeError(e);
+    if (kind === "rejected") {
+      writeVerdict(GH_HOST, tok.token, "rejected", { now });
+      if (tok.source === "stored") await clearStored();
+    }
+    return { repos: [], stale: false, error: kind };
   }
 }
 

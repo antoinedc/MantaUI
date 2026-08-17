@@ -476,6 +476,10 @@ export type ForgeStatusResult =
       login: string | null;
       kind: "github";
       source: "cli" | "env" | "stored" | null;
+      /** null = not probed; true = probed and accepted; false = probed and
+       *  rejected (only reachable for a `gh` CLI / env credential — a rejected
+       *  stored credential is cleared, so it reports `connected: false`). */
+      valid: boolean | null;
     }
   | { connected: false };
 

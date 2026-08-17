@@ -389,7 +389,7 @@ export function buildHandlers({
     // server resolves cwd → origin → repo.
     // preload: ipcRenderer.invoke(IPC.forgeStatus)             → no args
     // preload: ipcRenderer.invoke(IPC.forgePullRequest, {cwd}) → args[0] = { cwd }
-    "forge:status": () => forgeStatus(),
+    "forge:status": (input) => forgeStatus({ validate: input?.validate === true }),
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
     // A forge ref is either the session cwd ({ cwd }) — resolved box-side to

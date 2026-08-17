@@ -731,6 +731,18 @@ export function createGithubAdapter(request, requestWrite, requestText = request
     },
 
     /**
+     * GET /user — the authenticated user. Used as the cheapest possible
+     * "is this credential still accepted?" probe, and it yields `login` for a
+     * stored credential (which otherwise has no identity to show, since `login`
+     * comes from the `gh` CLI today).
+     * @returns {Promise<{ data: { login: string | null }, stale: boolean }>}
+     */
+    async getViewer() {
+      const { data, stale } = await request(`${apiBase}/user`);
+      return { data: { login: typeof data?.login === "string" ? data.login : null }, stale };
+    },
+
+    /**
      * GET /user/repos — the repos the connected user can actually PUSH to,
      * most-recently-pushed first. Paginates (100 per request) until a page
      * returns fewer than `per_page` rows, with a hard cap of 5 pages (500
