@@ -132,7 +132,7 @@ enum SessionRowSubtitle {
     /// branches are unchanged from the original table; only the idle tail is
     /// new (BET-897): a terminal row says "terminal", otherwise the idle line
     /// is the model label alone; recency lives in the age chip (BET-1084).
-    static func text(for s: SessionRowStatus, now: Date) -> String? {
+    static func text(for s: SessionRowStatus) -> String? {
         if s.subagentsRunning > 0 {
             return "\(s.subagentsRunning) subagent" + (s.subagentsRunning == 1 ? "" : "s")
         }

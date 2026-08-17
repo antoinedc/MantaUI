@@ -329,7 +329,6 @@ struct SessionListView: View {
                 age: ageText(window, now: now),
                 position: entry.position,
                 pinned: store.isPinned(session: project.tmuxSession, index: window.index),
-                now: now,
                 tokens: tokens
             )
         }
@@ -381,7 +380,7 @@ struct SessionListView: View {
     }
 
     private func subtitle(for window: MantaWindow) -> String {
-        SessionRowSubtitle.text(for: store.rowStatus(for: window), now: now) ?? ""
+        SessionRowSubtitle.text(for: store.rowStatus(for: window)) ?? ""
     }
 
     // MARK: - Delete (§7.3)
@@ -766,7 +765,6 @@ private struct SessionRowContent: View {
     let age: String?
     let position: SessionCardPosition
     let pinned: Bool
-    let now: Date
     let tokens: Tokens
 
     var body: some View {
@@ -785,7 +783,7 @@ private struct SessionRowContent: View {
                             .foregroundColor(tokens.tx3)
                     }
                 }
-                if let subtitle = SessionRowSubtitle.text(for: status, now: now) {
+                if let subtitle = SessionRowSubtitle.text(for: status) {
                     Text(subtitle)
                         .font(.manta(size: Metrics.type.xs, weight: .medium))
                         .foregroundColor(subtitleColor)
