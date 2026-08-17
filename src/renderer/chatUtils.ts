@@ -3444,12 +3444,48 @@ export function cloneErrorKind(stderr: string): CloneErrorKind {
   return "unknown";
 }
 
-// The box returns machine codes (`not_connected`) or a raw exception string
-// for a failed repo listing; neither is something to show a person. One
-// mapping, so the picker never renders a server code verbatim.
+// The box returns machine codes (`not_connected`, `rejected`, `rate_limited`,
+// `forbidden`, `network`) or a raw exception string for a failed repo listing;
+// neither is something to show a person. One mapping, so the picker never
+// renders a server code verbatim.
 export function repoListErrorMessage(code: string | null | undefined): string {
-  if (code === "not_connected") return "GitHub isn't connected. Go back and sign in again.";
+  if (code === "not_connected" || code === "rejected") {
+    return "GitHub isn't connected. Go back and sign in again.";
+  }
+  if (code === "rate_limited") {
+    return "GitHub's rate limit is used up. Try again in a few minutes.";
+  }
+  if (code === "forbidden") {
+    return "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.";
+  }
+  if (code === "network") {
+    return "Couldn't reach GitHub from your box. Check its connection and try again.";
+  }
   return "Couldn't list your repositories from GitHub.";
+}
+
+/** The secondary line on the Settings GitHub row: who is connected, where the
+ *  credential came from, and — when GitHub has rejected it — what to do. Pure. */
+export function forgeCredentialSecondary(status: {
+  login: string | null;
+  source: "cli" | "env" | "stored" | null;
+  valid: boolean | null;
+}): string {
+  if (status.valid === false) {
+    if (status.source === "cli") {
+      return "GitHub rejected the gh CLI sign-in on your box. Run `gh auth login` there, or Disconnect.";
+    }
+    if (status.source === "env") {
+      return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your box. Replace it there, or Disconnect.";
+    }
+    return "GitHub rejected this sign-in. Disconnect, then connect again.";
+  }
+  const where =
+    status.source === "cli" ? "from the gh CLI on your box"
+    : status.source === "env" ? "from the MANTA_GITHUB_TOKEN env var"
+    : status.source === "stored" ? "signed in on this box"
+    : "connected";
+  return status.login ? `@${status.login} · ${where}` : where;
 }
 
 // ===== Forge merge gate (BET-794) =====

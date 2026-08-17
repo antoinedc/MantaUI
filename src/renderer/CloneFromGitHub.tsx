@@ -114,6 +114,13 @@ export function CloneFromGitHub({
       try {
         const res = await window.api.forgeRepos();
         if (cancelled) return;
+        if (res.error === "rejected" || res.error === "not_connected") {
+          // The box cleared the dead credential; its own sign-in panel is the
+          // next screen. `forgeDeviceStart` no longer short-circuits, so the
+          // real device flow runs.
+          setConnected(false);
+          return;
+        }
         // `res.repos` is always an array; `res.error` is the only failure
         // signal. Testing the array's truthiness was the original bug.
         if (res.error) setReposState({ kind: "error", message: repoListErrorMessage(res.error) });

@@ -34,6 +34,7 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
+import { forgeCredentialSecondary } from "./chatUtils";
 import {
   useLaunchers,
   updateLauncherFlag,
@@ -505,7 +506,7 @@ export function Settings({
     let cancelled = false;
     const load = () => {
       window.api.configGet().then((c) => { if (!cancelled) setForgeRulesOn(c.forgeRulesEnabled === true); }).catch(() => {});
-      window.api.forgeStatus().then((s) => { if (!cancelled) setForgeStatus(s); }).catch(() => {});
+      window.api.forgeStatus({ validate: true }).then((s) => { if (!cancelled) setForgeStatus(s); }).catch(() => {});
       window.api.forgeRulesList()
         .then((rows) => { if (!cancelled) { setForgeRules(rows); setForgeRulesError(null); } })
         .catch((e) => { if (!cancelled) setForgeRulesError(e instanceof Error ? e.message : String(e)); });
@@ -535,12 +536,6 @@ export function Settings({
     } catch (e) {
       push({ id: `err-forge-dc-${Date.now()}`, message: errorDisclosure("Couldn't disconnect GitHub.", e) });
     }
-  };
-  const sourceTextFor = (source: string | null | undefined): string => {
-    if (source === "cli") return "from the gh CLI on your box";
-    if (source === "env") return "from the MANTA_GITHUB_TOKEN env var";
-    if (source === "stored") return "signed in on this box";
-    return "connected";
   };
 
   // Remove box — in-app confirm replaces window.confirm (BET-419 §D).
@@ -817,11 +812,17 @@ export function Settings({
                 came from · Disconnect. Naming the token's provenance is the
                 point — "from the gh CLI on your box" reads as a courtesy, not
                 surveillance. */}
-            {forgeStatus?.connected ? (
+            {forgeStatus === null ? (
               <ListRow
-                leading={<StatusDot tone="ok" />}
+                leading={<StatusDot tone="idle" />}
                 name="GitHub"
-                secondary={forgeStatus.login ? `@${forgeStatus.login} · ${sourceTextFor(forgeStatus.source)}` : sourceTextFor(forgeStatus.source)}
+                secondary="Checking…"
+              />
+            ) : forgeStatus.connected ? (
+              <ListRow
+                leading={<StatusDot tone={forgeStatus.valid === false ? "warn" : "ok"} />}
+                name="GitHub"
+                secondary={forgeCredentialSecondary(forgeStatus)}
                 trailing={<button onClick={() => void disconnectForge()} className="text-label px-3 py-1 rounded-full border border-border text-text-muted hover:text-text">Disconnect</button>}
               />
             ) : (
