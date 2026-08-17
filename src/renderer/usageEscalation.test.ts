@@ -59,15 +59,39 @@ describe("buildUsageLevels", () => {
     expect(buildUsageLevels(undefined)).toEqual({});
     expect(buildUsageLevels([])).toEqual({});
   });
+});
 
-  it("carries a stale window's previous level forward and does not read its pct", () => {
-    const prev = { "claude:session": "limit" as const };
-    const staleLow = [snap("claude", [{ kind: "session", label: "S", pct: 0, stale: true }])];
-    const levels = buildUsageLevels(staleLow, prev);
-    expect(levels["claude:session"]).toBe("limit");
-    // A fresh window still reads its pct — the stale carry is not a blanket hold.
-    const freshLow = [snap("claude", [{ kind: "session", label: "S", pct: 0 }])];
-    expect(buildUsageLevels(freshLow, prev)["claude:session"]).toBe("none");
+describe("reset boundary", () => {
+  const snap = (pct: number, resetsAt: number, stale?: boolean) => [{
+    provider: "claude", providerIDs: ["anthropic"], fetchedAt: 0,
+    windows: [{ kind: "session", label: "Session (5h)", pct, resetsAt, ...(stale ? { stale: true } : {}) }],
+  }] as any;
+
+  it("app open across the boundary stays silent", () => {
+    let prev = buildUsageLevels(snap(100, 2000));
+    expect(shouldFireUsageAlert(prev, snap(100, 2000, true))).toEqual([]);
+    prev = buildUsageLevels(snap(100, 2000, true));
+    expect(shouldFireUsageAlert(prev, snap(100, 20000))).toEqual([]);
+  });
+
+  it("REGRESSION: cold start during the stale window, counts still high, stays silent", () => {
+    // The rolling 5h window does not drop to zero at its reset instant, so this
+    // is the ordinary case, not a corner case. Before the fix this fired "limit".
+    const prev = buildUsageLevels(snap(100, 2000, true));
+    expect(shouldFireUsageAlert(prev, snap(100, 20000))).toEqual([]);
+  });
+
+  it("cold start during the stale window, counts truly reset, stays silent", () => {
+    const prev = buildUsageLevels(snap(100, 2000, true));
+    expect(shouldFireUsageAlert(prev, snap(2, 20000))).toEqual([]);
+  });
+
+  it("still re-arms: after a real reset a later climb fires exactly once", () => {
+    let prev = buildUsageLevels(snap(100, 2000));
+    prev = buildUsageLevels(snap(2, 20000));
+    expect(shouldFireUsageAlert(prev, snap(100, 20000)).map((x) => x.level)).toEqual(["limit"]);
+    prev = buildUsageLevels(snap(100, 20000));
+    expect(shouldFireUsageAlert(prev, snap(100, 20000))).toEqual([]);
   });
 });
 
@@ -160,16 +184,16 @@ describe("shouldFireUsageAlert — fire-once semantics", () => {
     let fired = shouldFireUsageAlert(prev, atLimit);
     expect(fired).toHaveLength(1);
     expect(fired[0].level).toBe("limit");
-    prev = buildUsageLevels(atLimit, prev); // { "claude:session": "limit" }
+    prev = buildUsageLevels(atLimit); // { "claude:session": "limit" }
 
     const stale = [snap("claude", [{ kind: "session", label: "S", pct: 100, stale: true }])];
     expect(shouldFireUsageAlert(prev, stale)).toHaveLength(0);
-    prev = buildUsageLevels(stale, prev);
+    prev = buildUsageLevels(stale);
     expect(prev["claude:session"]).toBe("limit");
 
     const reset = [snap("claude", [{ kind: "session", label: "S", pct: 0 }])];
     expect(shouldFireUsageAlert(prev, reset)).toHaveLength(0);
-    prev = buildUsageLevels(reset, prev);
+    prev = buildUsageLevels(reset);
     expect(prev["claude:session"]).toBe("none");
 
     fired = shouldFireUsageAlert(prev, atLimit);
