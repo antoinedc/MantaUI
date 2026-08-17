@@ -24,6 +24,7 @@ import type {
   TmuxCreateResult,
   ScheduledJob,
   UsageSnapshot,
+  StoppedListResult,
   ProgressRecord,
   SecretMeta,
   SecretInput,
@@ -450,6 +451,15 @@ export interface Api {
   // snapshots are produced by the box's usage poller (src/server/usage.mjs),
   // never written through this channel. NOT the context-window indicator.
   usageList(): Promise<UsageSnapshot[]>;
+  // Usage-limit stopped conversations (BET-1047). list reads the durable
+  // box-side record; arm/disarm mark a conversation for (or against) resume;
+  // stampLastLooked records when the modal was last closed so "new" badges
+  // clear. All mutate the SAME record the indicator + markers read, so they
+  // refresh immediately without caching in renderer state.
+  usageStoppedList(): Promise<StoppedListResult>;
+  usageStoppedArm(conversation: string): Promise<void>;
+  usageStoppedDisarm(conversation: string): Promise<void>;
+  usageStoppedStampLastLooked(): Promise<void>;
 
   // Session progress (manta-server owned, BET-790). Reads the durable
   // "where are we right now" record for a session, written by the AI's
@@ -469,6 +479,11 @@ export interface Api {
   // refetch. No-op on the preload bridge and on demoApi (Proxy fallback
   // returns a no-op unsubscribe).
   onUsageUpdated(cb: (payload: { snapshots: UsageSnapshot[] }) => void): () => void;
+  // BET-1047: the box publishes `usage-stopped.updated` ({conversation}) on
+  // the /events bus whenever the stopped record changes (enrol / arm / disarm
+  // / ran / last-looked). Subscribers refetch usageStoppedList() — the payload
+  // is a hint, not the record. No-op on the preload bridge and on demoApi.
+  onUsageStoppedUpdated(cb: (payload: { conversation?: string }) => void): () => void;
 
   // App-control (BET-840/841). The box publishes ONE `appControl` bus kind
   // with an `action` discriminator (switch-model / rename-session /

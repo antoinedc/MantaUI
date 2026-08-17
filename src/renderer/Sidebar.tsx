@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import type { ReactElement } from "react";
-import { ChevronRight, ChevronDown, Plus, X, Pin, Search } from "lucide-react";
+import { ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
@@ -33,6 +33,8 @@ import { ConfirmModal } from "./ConfirmModal";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { IconButton } from "./IconButton";
+import { Pill } from "./Pill";
+import { shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
 
@@ -65,10 +67,13 @@ type Props = {
   // of an inline form. null = new-project mode; a string = new-session mode.
   onNewProject: () => void;
   onNewSessionInProject: (projectName: string) => void;
+  // BET-1049: open the "resume after limit reset" modal from the sidebar
+  // header pill (the durable indicator of stopped conversations).
+  onOpenResumeModal: () => void;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -79,6 +84,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
   const status = useStore((s) => s.status);
   const jobs = useStore((s) => s.jobs);
+  const usageStopped = useStore((s) => s.usageStopped);
+  // BET-1049: the conversations currently stopped by a provider limit (the
+  // box-side record). Conversation ids → the set for O(1) row-marker lookups;
+  // the pill counts only the ones still asking for a decision (not armed).
+  const stoppedConversations = useMemo(
+    () => new Set(usageStopped.map((r) => r.conversation)),
+    [usageStopped],
+  );
+  const unarmedStoppedCountVal = useMemo(() => unarmedStoppedCount(usageStopped), [usageStopped]);
   const setActive = useStore((s) => s.setActive);
   const storeActivateWindow = useStore((s) => s.activateWindow);
   const refresh = useStore((s) => s.refresh);
@@ -628,6 +642,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             "flex items-center gap-1" + (IS_WINDOWS ? " titlebar-no-drag" : "")
           }
         >
+          {unarmedStoppedCountVal > 0 && (
+            <button
+              type="button"
+              className="p-0 border-0 bg-transparent cursor-pointer hover:brightness-110"
+              onClick={onOpenResumeModal}
+              title={`${unarmedStoppedCountVal} conversation${unarmedStoppedCountVal === 1 ? "" : "s"} stopped by a provider limit`}
+            >
+              <Pill tone="warn" size="meta" border icon={<CirclePause size={13} />}>
+                {unarmedStoppedCountVal}
+              </Pill>
+            </button>
+          )}
           <IconButton
             icon={<Search />}
             label="Search sessions"
@@ -695,6 +721,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                   }
                   status={statusFor(r.project.tmuxSession, r.window.index)}
                   pinned
+                  halted={r.window.opencodeSessionId ? stoppedConversations.has(r.window.opencodeSessionId) : false}
                   focused={focusedKey === `pin:${r.pinId}`}
                   onActivate={() => activateWindow(r.project, r.window.index)}
                   onTogglePin={() => void togglePin(r.pinId)}
@@ -778,6 +805,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           isActive={isActive}
                           status={statusFor(p.tmuxSession, w.index)}
                           pinned={pinnedIds.has(windowPinId(p.tmuxSession, w.index))}
+                          halted={w.opencodeSessionId ? stoppedConversations.has(w.opencodeSessionId) : false}
                           focused={focusedKey === `win:${p.tmuxSession}:${w.index}`}
                           onActivate={() => activateWindow(p, w.index)}
                           onTogglePin={() => void togglePin(windowPinId(p.tmuxSession, w.index))}
@@ -1148,6 +1176,7 @@ function WindowRow({
   status,
   pinned,
   focused,
+  halted,
   onActivate,
   onTogglePin,
   onClose,
@@ -1165,6 +1194,10 @@ function WindowRow({
   status: WindowStatusUI | undefined;
   pinned: boolean;
   focused: boolean;
+  /** BET-1049: this conversation is in the box's stopped-by-provider-limit
+   *  record. The marker is suppressed when a pending question/permission
+   *  blocks the row (precedence — see shouldShowStoppedMarker). */
+  halted?: boolean;
   onActivate: () => void;
   onTogglePin: () => void;
   onClose: () => void;
@@ -1184,13 +1217,16 @@ function WindowRow({
     renameTarget.project === project.tmuxSession &&
     renameTarget.index === w.index;
   const dot = dotFor(status);
+  // A pending question/permission (the "att" dot) outranks the stopped
+  // marker — it blocks on the user now; a stopped conversation waits on a clock.
+  const showHalted = shouldShowStoppedMarker(!!halted, dot.variant === "att");
   const age = useAge(status);
   return (
     <DeletableSessionRow
       row={
         <RailSessionRow
-          status={dot.variant}
-          statusTitle={dot.title}
+          status={showHalted ? "halted" : dot.variant}
+          statusTitle={showHalted ? "Stopped by a provider limit" : dot.title}
           selected={isActive}
           name={
             isRenaming ? (

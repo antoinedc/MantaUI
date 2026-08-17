@@ -13,6 +13,7 @@ import {
   type ServerUpdateAvailablePayload,
   type StreamEnvelope,
   type UsageSnapshot,
+  type StoppedListResult,
   type WindowStatus,
   type VoiceNoteRecord,
   type VoiceRetryResult,
@@ -358,6 +359,7 @@ type Kind =
   | "serverUpdateProgress"
   | "delegate.updated"
   | "usage.updated"
+  | "usage-stopped.updated"
   | "progress.updated"
   | "appControl"
   | "stream"
@@ -378,6 +380,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
+  "usage-stopped.updated": new Set(),
   "progress.updated": new Set(),
   appControl: new Set(),
   stream: new Set(),
@@ -1043,6 +1046,12 @@ export const httpApi: Api = {
   // -- subscription plan usage (manta-server owned; in-process on mobile) --
   usageList: () => rpc(IPC.usageList),
 
+  // -- usage-limit stopped conversations (manta-server owned; BET-1047) --
+  usageStoppedList: () => rpc<StoppedListResult>(IPC.usageStoppedList),
+  usageStoppedArm: (conversation) => rpc(IPC.usageStoppedArm, conversation),
+  usageStoppedDisarm: (conversation) => rpc(IPC.usageStoppedDisarm, conversation),
+  usageStoppedStampLastLooked: () => rpc(IPC.usageStoppedStampLastLooked),
+
   // -- session progress (manta-server owned; BET-790) --
   progressGet: (sessionId) => rpc(IPC.progressGet, sessionId),
   // BET-791: the box publishes `progress.updated` whenever a session's record
@@ -1105,6 +1114,13 @@ export const httpApi: Api = {
   // the store's `usage` slice via setUsage, no refetch needed.
   onUsageUpdated: (cb) =>
     on<{ snapshots: UsageSnapshot[] }>("usage.updated", cb),
+
+  // BET-1047: the box publishes `usage-stopped.updated` ({conversation}) on
+  // the bus whenever the stopped record changes. The payload is a hint only —
+  // subscribers refetch usageStoppedList() and apply it straight to the
+  // store's `usageStopped` slice.
+  onUsageStoppedUpdated: (cb) =>
+    on<{ conversation?: string }>("usage-stopped.updated", cb),
 
   // BET-840/841: the box publishes a single `appControl` bus kind with an
   // `action` discriminator whenever an app-control tool lands a client-visible

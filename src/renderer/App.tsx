@@ -28,6 +28,7 @@ import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChanne
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
+import { UsageResumeModal } from "./UsageResumeModal";
 import { ReconnectingBanner } from "./ReconnectingBanner";
 import { pickBanner, type BannerState } from "./bannerPriority";
 import { parsePairPayload } from "../shared/pairPayload";
@@ -199,6 +200,18 @@ function Shell() {
   const projects = useStore((s) => s.projects);
   const activeProjectName = useStore((s) => s.activeProjectName);
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
+  // BET-1049: resolve a stopped record's `conversation` (an opencode session
+  // id) to its sidebar window name, for the resume modal rows. Records whose
+  // window can't be resolved fall back to the raw id.
+  const nameForStopped = useMemo(() => {
+    const bySession = new Map<string, string>();
+    for (const p of projects) {
+      for (const w of p.windows ?? []) {
+        if (w.opencodeSessionId) bySession.set(w.opencodeSessionId, w.name);
+      }
+    }
+    return (conversation: string) => bySession.get(conversation) ?? conversation;
+  }, [projects]);
   const setActive = useStore((s) => s.setActive);
   const refresh = useStore((s) => s.refresh);
   const applyStatusBatch = useStore((s) => s.applyStatusBatch);
@@ -423,6 +436,10 @@ function Shell() {
   // ---- Subscription usage escalation (BET-739) ----
   // Fire-once level map (per `provider:window.kind`); see usageEscalation.ts.
   const usageLevelsRef = useRef<Record<string, UsageAlertLevel>>({});
+  // BET-1049: the "resume after limit reset" modal. Opened from the sidebar
+  // pill or the limit toast's "Keep going at reset" action; closed stamps
+  // the record's last-looked so "new" badges clear.
+  const [resumeModalOpen, setResumeModalOpen] = useState(false);
 
   // Pull the box's CACHED usage snapshots. This is an in-memory read on the box
   // (no provider request), which is why it is safe to call on every reconnect.
@@ -439,6 +456,25 @@ function Shell() {
     } catch {
       // Older box or a transport blip — leave the slice as-is; UsageDial's own
       // null-snapshot path already renders nothing.
+    }
+  }, []);
+
+  // Pull the box's durable record of conversations stopped by a plan-usage
+  // limit (BET-1047). Both the sidebar indicator/markers and the resume modal
+  // read the store slice this primes — refetched on every `usage-stopped.updated`
+  // bus event, never cached in renderer-only state.
+  const pullUsageStopped = useCallback(async () => {
+    if (!window.api.usageStoppedList) return;
+    try {
+      const result = await window.api.usageStoppedList();
+      if (result) {
+        useStore
+          .getState()
+          .setUsageStopped({ records: result.records, lastLooked: result.lastLooked });
+      }
+    } catch {
+      // Older box (pre BET-1047) — leave the slice empty; pill/markers/modal
+      // all render nothing at zero.
     }
   }, []);
 
@@ -617,6 +653,19 @@ function Shell() {
     });
   }, [apiGeneration, pullUsage]);
 
+  // Usage-limit stopped conversations (BET-1047): prime the store's
+  // `usageStopped` slice on mount (and on api change), then stay live via the
+  // box's `usage-stopped.updated` bus event — a hint that a refetch is due.
+  // Not a poll; the box owns the record and the event fires on every write
+  // (enrol / arm / disarm / ran / last-looked).
+  useEffect(() => {
+    void pullUsageStopped();
+    if (!window.api.onUsageStoppedUpdated) return;
+    return window.api.onUsageStoppedUpdated(() => {
+      void pullUsageStopped();
+    });
+  }, [apiGeneration, pullUsageStopped]);
+
   // ---- Subscription usage escalation (BET-739) ----
   // The warn (>=90%) / limit (>=100%) toasts, pushed through the existing
   // global host via pushAppToast. Consumes the SAME `usage.updated` bus event
@@ -719,6 +768,20 @@ function Shell() {
                           });
                         }
                       })();
+                    },
+                  },
+                  {
+                    // BET-1049: "Keep going at reset" now opens the resume
+                    // modal (listing the conversations actually stopped, which
+                    // the user checks to arm for resume) rather than scheduling
+                    // the focused conversation at a fixed offset. It still
+                    // needs a session to be worth offering, so gated on
+                    // sessionID like "Remind me". Nothing is scheduled here —
+                    // the box-side resume engine (BET-1048) drives the reset.
+                    label: "Keep going at reset",
+                    onClick: () => {
+                      if (fireAt == null || !sessionID) return;
+                      setResumeModalOpen(true);
                     },
                   },
                 ]
@@ -1407,6 +1470,7 @@ function Shell() {
         onOpenSettings={() => setSettingsOpen(true)}
         onNewProject={openNewProject}
         onNewSessionInProject={openNewSessionInProject}
+        onOpenResumeModal={() => setResumeModalOpen(true)}
       />
       <main className="flex-1 flex flex-col min-w-0">
         {/* At most ONE full-width bar (BET-416 §E). `activeBanner` is the
@@ -1733,6 +1797,17 @@ function Shell() {
           void applyServerUpdate();
         }}
         onCancel={() => setConfirmServerUpdate(false)}
+      />
+
+      {/* Resume after limit reset (BET-1049). Rendered at App level (like the
+          toasts) so it works over any pane. Opened from the sidebar pill or
+          the limit toast's "Keep going at reset"; closing stamps last-looked
+          so "new" badges clear. nameFor resolves the opencode session id on a
+          stopped record to the sidebar window name. */}
+      <UsageResumeModal
+        open={resumeModalOpen}
+        onClose={() => setResumeModalOpen(false)}
+        nameFor={nameForStopped}
       />
     </div>
   );
