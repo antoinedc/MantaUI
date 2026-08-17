@@ -418,14 +418,15 @@ test("publicBaseUrl reads fresh on each call (no module-scope cache)", async () 
 });
 
 // ----------------------------------------------------------------------------
-// publicBaseUrl — tailscale fallback (BET-349). A Tailscale-only box never
-// registers with the gateway (no gateway_host), but it has a reachable
-// tailnet address recorded in ~/.manta/ingress.json. The resolver MUST fall
-// back to ingress.json's serverUrl when mode === "tailscale", else serve_page
-// refuses to register a page on what is in fact a reachable box.
+// publicBaseUrl — tailscale precedence (BET-349). A Tailscale-only box DOES
+// register with the gateway (it needs the gateway_token for APNs push), so it
+// has a gateway_host even though nothing listens on it — that hostname is not
+// evidence of public reachability. The resolver MUST therefore win for the
+// ingress.json serverUrl when mode === "tailscale": it is the only reachable
+// address on that path.
 // ----------------------------------------------------------------------------
 
-test("publicBaseUrl: gateway_host wins over a tailscale ingress.json", async () => {
+test("publicBaseUrl: tailscale ingress.json wins over gateway_host", async () => {
   const path = tmpAuthPath("public-base-gateway-wins");
   await writeAuth(path, {
     box_id: BOX_ID,
@@ -438,7 +439,7 @@ test("publicBaseUrl: gateway_host wins over a tailscale ingress.json", async () 
     tailnetIp: "100.64.0.1",
     serverUrl: "http://100.64.0.1:8787",
   }, null, 2), { mode: 0o600 });
-  assert.equal(publicBaseUrl(path), `https://${BOX_ID}.boxes.mantaui.com`);
+  assert.equal(publicBaseUrl(path), "http://100.64.0.1:8787");
 });
 
 test("publicBaseUrl: tailscale ingress.json when no gateway_host (BET-349 regression)", async () => {

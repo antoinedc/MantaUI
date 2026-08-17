@@ -1474,8 +1474,10 @@ main() {
   # --- B/C. Register with the gateway + persist gateway_token -------------
   # B (POST /register) and C (merge-gateway into auth.json) are user-space and
   # run in BOTH ingress modes. On tailscale the gateway records an A record
-  # that is unused but harmless; the persisted gateway_token is still the
-  # APNs push credential (BET-198). On the PUBLIC path a registration failure
+  # that is unused on this path and must NEVER be treated as evidence of
+  # public reachability (nothing terminates TLS on it); the persisted
+  # gateway_token is still the APNs push credential (BET-198). On the PUBLIC
+  # path a registration failure
   # is fatal (there is no public ingress without it); on tailscale / macOS it
   # stays a warn — the server re-registers on every restart and the APNs token
   # is best-effort at install time.

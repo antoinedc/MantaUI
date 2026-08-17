@@ -709,11 +709,13 @@ generates on the box. Follows the same "MantaUI tools" pattern as the scheduler
   one Caddy already reverse-proxies to `127.0.0.1:8787` for the SPA, with an
   automatic LE cert — nothing new to provision. `gateway_host` is read fresh
   per call from `~/.manta/auth.json` via `publicBaseUrl()` in
-  `gatewayRegister.mjs`. **Resolution order (BET-349):** `gateway_host`
-  wins; a Tailscale-only box with no `gateway_host` falls back to the
-  tailnet `serverUrl` in `~/.manta/ingress.json`; otherwise `registerPage`
-  fails loudly with a clear error — never hands back a URL that would
-  silently 404 (BET-343).
+   `gatewayRegister.mjs`. **Resolution order (BET-349):** a Tailscale-mode
+   box's tailnet `serverUrl` in `~/.manta/ingress.json` wins, because a
+   tailnet box still registers with the gateway (for the APNs token) so it
+   HAS a `gateway_host` even though nothing listens on it — that hostname is
+   not evidence of public reachability; otherwise `gateway_host` from
+   `~/.manta/auth.json`; else `registerPage` fails loudly with a clear
+   error — never hands back a URL that would silently 404 (BET-343).
 - **Sandbox CSP is load-bearing.** Pages now share an origin with the SPA
   (which keeps the box_token in localStorage), so the response carries
   `Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups
