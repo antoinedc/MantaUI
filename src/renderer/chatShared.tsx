@@ -250,27 +250,14 @@ export function guessMime(filename: string): string {
 // means "let opencode pick its default" — matches the prompt_async fallback.
 export type ModelSelection = { providerID: string; modelID: string; variant?: string };
 
-// Per-mode storage (BET-950). "build" uses the original `…:model` key so every
-// existing session keeps its model and nothing migrates; "plan" gets its own
-// key (`…:model:plan`), same JSON shape. Zero-config: readSavedModel falls back
-// to the build key when the plan key is absent, so plan mode uses the build
-// model until the user picks one while in plan mode.
-export type ModelMode = "build" | "plan";
-
-export function modelKey(sessionId: string, mode: ModelMode): string {
-  return mode === "plan"
-    ? `manta:chat:${sessionId}:model:plan`
-    : `manta:chat:${sessionId}:model`;
+export function modelKey(sessionId: string): string {
+  return `manta:chat:${sessionId}:model`;
 }
 
-export function readSavedModel(sessionId: string, mode: ModelMode): ModelSelection | null {
+export function readSavedModel(sessionId: string): ModelSelection | null {
   try {
-    const raw = localStorage.getItem(modelKey(sessionId, mode));
-    if (!raw) {
-      // Zero-config until used: plan mode with no plan key uses the build model.
-      if (mode === "plan") return readSavedModel(sessionId, "build");
-      return null;
-    }
+    const raw = localStorage.getItem(modelKey(sessionId));
+    if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.providerID === "string" && typeof parsed.modelID === "string") {
       return parsed as ModelSelection;
@@ -281,28 +268,21 @@ export function readSavedModel(sessionId: string, mode: ModelMode): ModelSelecti
   }
 }
 
-export function writeSavedModel(sessionId: string, mode: ModelMode, m: ModelSelection | null): void {
+export function writeSavedModel(sessionId: string, m: ModelSelection | null): void {
   try {
-    if (m) localStorage.setItem(modelKey(sessionId, mode), JSON.stringify(m));
-    else localStorage.removeItem(modelKey(sessionId, mode));
+    if (m) localStorage.setItem(modelKey(sessionId), JSON.stringify(m));
+    else localStorage.removeItem(modelKey(sessionId));
   } catch { /* quota / disabled storage */ }
 }
 
-// /clear carry-forward (BET-950): copy BOTH per-mode model keys from one
-// session id to another, preserving their independence. Copies the RAW value of
-// each key (not readSavedModel, whose plan→build fallback would stamp the build
-// model into a plan key that was never explicitly written), and leaves the
-// destination plan key absent when the source plan key is absent.
-export function copySavedModels(fromSessionId: string, toSessionId: string): void {
-  for (const mode of ["build", "plan"] as const) {
-    let raw: string | null = null;
-    try { raw = localStorage.getItem(modelKey(fromSessionId, mode)); } catch { continue; }
-    if (raw === null) continue;
-    try {
-      if (raw) localStorage.setItem(modelKey(toSessionId, mode), raw);
-      else localStorage.removeItem(modelKey(toSessionId, mode));
-    } catch { /* quota / disabled storage */ }
-  }
+// /clear carry-forward: copy the session's model to the new session id so the
+// user doesn't have to re-pick after every clear. Copies the RAW stored value.
+export function copySavedModel(fromSessionId: string, toSessionId: string): void {
+  try {
+    const raw = localStorage.getItem(modelKey(fromSessionId));
+    if (raw === null) return;
+    localStorage.setItem(modelKey(toSessionId), raw);
+  } catch { /* quota / disabled storage */ }
 }
 
 // Per-session plan-mode override (BET-949). Deliberately its OWN storage key —
