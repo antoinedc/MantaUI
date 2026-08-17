@@ -791,6 +791,16 @@ export function buildHandlers({
     // → args[0] = { query, directory }; opencode.mjs findFiles expects same shape
     "opencode:find-files": (input) => oc.findFiles(input),
 
+    // BET-1023: read configured opencode references (GET /api/reference) for
+    // @-mention autocomplete + the Settings list. No args.
+    "opencode:references": () => oc.listReferences(),
+
+    // BET-1023: upsert the user's opencode references through the single
+    // config-write path (providers.setReferences → PATCH /global/config).
+    // Args { upsert: [{ alias, path|repository, branch?, description? }],
+    //        remove?: string[] } — remove is rejected (no delete semantics).
+    "opencode:set-references": (input) => providers.setReferences(input ?? {}),
+
     // BET-698: server-side conversation search over opencode's SQLite
     // (messageSearch.mjs). Args { query, sessionIds } — sessionIds[0] is the
     // active conversation. Degrades to { supported:false } on a box that

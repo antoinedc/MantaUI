@@ -9,6 +9,8 @@ import {
   sectionIsModified,
   resetAllPayload,
   fieldId,
+  validateReferenceAlias,
+  classifyReferenceTarget,
   type SettingEntry,
 } from "./settingsSchema";
 
@@ -184,5 +186,53 @@ describe("fieldId", () => {
   it("is unique across all entries", () => {
     const ids = ALL.map(fieldId);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("validateReferenceAlias (BET-1023)", () => {
+  it("accepts alphanumeric and -_. aliases", () => {
+    expect(validateReferenceAlias("docs")).toBeNull();
+    expect(validateReferenceAlias("my-lib")).toBeNull();
+    expect(validateReferenceAlias("a.b_c-1")).toBeNull();
+  });
+
+  it("rejects empty / whitespace-only", () => {
+    expect(validateReferenceAlias("")).not.toBeNull();
+    expect(validateReferenceAlias("   ")).not.toBeNull();
+  });
+
+  it("rejects '/' and comma", () => {
+    expect(validateReferenceAlias("a/b")).not.toBeNull();
+    expect(validateReferenceAlias("a,b")).not.toBeNull();
+  });
+
+  it("rejects whitespace and backticks anywhere", () => {
+    expect(validateReferenceAlias("a b")).not.toBeNull();
+    expect(validateReferenceAlias("a\tb")).not.toBeNull();
+    expect(validateReferenceAlias("a`b")).not.toBeNull();
+  });
+
+  it("trims surrounding whitespace before validating", () => {
+    expect(validateReferenceAlias("  docs  ")).toBeNull();
+    const withInner = validateReferenceAlias("do cs");
+    expect(withInner).not.toBeNull();
+  });
+});
+
+describe("classifyReferenceTarget (BET-1023)", () => {
+  it("classifies local paths", () => {
+    expect(classifyReferenceTarget("/home/user/docs")).toBe("path");
+    expect(classifyReferenceTarget("../docs")).toBe("path");
+    expect(classifyReferenceTarget("./lib")).toBe("path");
+    expect(classifyReferenceTarget("~/docs")).toBe("path");
+    expect(classifyReferenceTarget("docs")).toBe("path");
+  });
+
+  it("classifies git repositories", () => {
+    expect(classifyReferenceTarget("owner/repo")).toBe("repository");
+    expect(classifyReferenceTarget("anomalyco/opencode-sdk-js")).toBe("repository");
+    expect(classifyReferenceTarget("https://github.com/a/b.git")).toBe("repository");
+    expect(classifyReferenceTarget("git@github.com:a/b.git")).toBe("repository");
+    expect(classifyReferenceTarget("repo.git")).toBe("repository");
   });
 });

@@ -59,7 +59,7 @@ export type TypeaheadState = {
 // A single row rendered in the typeahead popup. `kind` matches the trigger
 // mode; `key` is the canonical identifier (path / name) we'll insert.
 export type TypeaheadRow = {
-  kind: "file" | "agent" | "command";
+  kind: "file" | "agent" | "command" | "reference";
   key: string;
   primary: string;            // user-visible label, e.g. "@src/foo" or "/init"
   secondary?: string;         // dim caption: command description / agent description

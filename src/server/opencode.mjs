@@ -1776,6 +1776,42 @@ export async function findFiles({ query, directory }) {
 }
 
 /**
+ * List configured opencode references (BET-1023).
+ *
+ * GET /api/reference returns a location-scoped payload:
+ *   { location: { directory, project }, data: Reference.Info[] }
+ * where each Info is
+ *   { name, path, description?, hidden?,
+ *     source: { type: "local", path, ... } | { type: "git", repository, branch?, ... } }
+ *
+ * We project each entry down to the flat shape the renderer needs for
+ * @-mention autocomplete and the Settings list: alias (name) plus either a
+ * local path or a git repository+branch, and an optional description.
+ * Hidden references are kept — Manta's typeahead only renders non-hidden ones
+ * (see useTypeahead), mirroring opencode's own autocomplete semantics.
+ */
+export async function listReferences() {
+  const res = await ocFetch(apiUrl(`/api/reference`));
+  if (!res.ok) {
+    throw new Error(`opencode reference ${res.status}: ${await res.text()}`);
+  }
+  const body = await res.json();
+  const data = Array.isArray(body?.data) ? body.data : [];
+  return data.map((r) => {
+    const out = { name: r.name };
+    if (r.description !== undefined) out.description = r.description;
+    if (r.hidden !== undefined) out.hidden = r.hidden;
+    if (r.source?.type === "git") {
+      out.repository = r.source.repository;
+      if (r.source.branch !== undefined) out.branch = r.source.branch;
+    } else {
+      out.path = r.path;
+    }
+    return out;
+  });
+}
+
+/**
  * Invoke a slash command inside a session.
  * model is serialised as "providerID/modelID" string (unlike prompt_async's object).
  *

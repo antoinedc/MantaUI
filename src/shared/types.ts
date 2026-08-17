@@ -1191,6 +1191,10 @@ export const IPC = {
   opencodeCommands: "opencode:commands",
   opencodeAgents: "opencode:agents",
   opencodeFindFiles: "opencode:find-files",
+  // BET-1023: configured opencode references (GET /api/reference) + the
+  // single-writer upsert for them (through opencode's PATCH /global/config).
+  opencodeReferences: "opencode:references",
+  opencodeSetReferences: "opencode:set-references",
   // BET-698: server-side conversation search over opencode's SQLite
   // (messageSearch.mjs). Returns { supported, hits }.
   opencodeSearchMessages: "opencode:search-messages",
@@ -1979,6 +1983,40 @@ export type OpencodeAgent = {
   mode?: string;          // "primary" | "subagent"
   native?: boolean;
   builtIn?: boolean;
+};
+
+// A configured opencode reference as read back from GET /api/reference
+// (BET-1023). Alias is the @-mention name; exactly one of `path` (local
+// directory) or `repository` (+ optional `branch`) describes the target.
+// `description` advertises the reference to the agent.
+export type OpencodeReference = {
+  name: string;
+  path?: string;
+  repository?: string;
+  branch?: string;
+  description?: string;
+  /** hidden references are omitted from @ autocomplete (opencode semantics). */
+  hidden?: boolean;
+};
+
+// The user's editable view of a reference in Settings (BET-1023). Mirrors
+// OpencodeReference but flattened for the add-form; `target` is the combined
+// path-or-repository field, classified into path/repository on save.
+export type ManagedReference = {
+  alias: string;
+  target: string;
+  description?: string;
+};
+
+// A reference the renderer asks the server to write, following the
+// setProviders/setSubagents writer contract (ops.up to patchGlobalConfig).
+// Exactly one of `path` / `repository` must be set.
+export type OpencodeReferenceUpsert = {
+  alias: string;
+  path?: string;
+  repository?: string;
+  branch?: string;
+  description?: string;
 };
 
 // A custom provider entry as seen by the renderer (API key value is never
