@@ -192,6 +192,91 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertEqual(label, "\(UsageMeters.formatTokens(value)) cold")
     }
 
+    // MARK: - recompute (BET-1086 — selected-model context breakdown)
+
+    /// A payload shaped like the box's `opencode:context` — raw counts plus the
+    /// derived `pct`/`segments` the box computed against the LAST-REPLY model's
+    /// window. `totalInput` mirrors the box summing the three disjoint buckets.
+    private func payload(fresh: Double = 0, read: Double = 0, write: Double = 0,
+                         pct: Double = 0,
+                         segments: [StreamContextSegment]) -> StreamContextPayload {
+        StreamContextPayload(
+            freshInput: fresh,
+            cacheRead: read,
+            cacheWrite: write,
+            totalInput: fresh + read + write,
+            pct: pct,
+            segments: segments
+        )
+    }
+
+    /// The reported bug, stated as a test: a 200k-window payload (the box read
+    /// 40k tokens, 20% of 200k) recomputed against the user's SELECTED 1M
+    /// window is one fifth as full — the percentage changes with the model,
+    /// with no new reply and no refetch.
+    func testRecomputeChangesPctWithSelectedModel() {
+        let s = payload(fresh: 40_000, pct: 20,
+                        segments: [StreamContextSegment(kind: "fresh", pct: 20)])
+        let r = UsageMeters.recompute(s, limit: 1_000_000)
+        XCTAssertEqual(r.pct, 4)
+        XCTAssertEqual(r.segments.first { $0.kind == "fresh" }?.pct, 4)
+    }
+
+    /// `limit: nil` falls back to 200k (the desktop's ASSUMED_CONTEXT_TOKENS)
+    /// and reproduces the box's own number for a 200k model — recompute is a
+    /// no-op in the common case. Oracle: streamInterpretation.test.ts sums case
+    /// (input 10k, cache.read 30k, cache.write 5k → pct 23).
+    func testRecomputeNilLimitIsNoOpFor200kModel() {
+        let s = payload(fresh: 10_000, read: 30_000, write: 5_000, pct: 23,
+                        segments: [
+                            StreamContextSegment(kind: "fresh", pct: 5),
+                            StreamContextSegment(kind: "cacheWrite", pct: 2.5),
+                            StreamContextSegment(kind: "cacheRead", pct: 15),
+                        ])
+        let r = UsageMeters.recompute(s, limit: nil)
+        XCTAssertEqual(r.pct, 23)
+        XCTAssertEqual(r.segments.map(\.pct), [5, 2.5, 15])
+        XCTAssertEqual(r.totalInput, 45_000)
+    }
+
+    /// A zero or negative limit must fall back to 200k, never divide by zero
+    /// or produce a negative percentage. Oracle: falls-back-to-ASSUMED case.
+    func testRecomputeNonPositiveLimitFallsBackTo200k() {
+        let s = payload(fresh: 100_000, pct: 50,
+                        segments: [StreamContextSegment(kind: "fresh", pct: 50)])
+        XCTAssertEqual(UsageMeters.recompute(s, limit: 0).pct, 50)
+        XCTAssertEqual(UsageMeters.recompute(s, limit: -200_000).pct, 50)
+    }
+
+    /// The raw counts ride through untouched — only the derived fields change.
+    func testRecomputeCopiesRawCountsThrough() {
+        let s = payload(fresh: 20_000, read: 60_000, write: 20_000, pct: 50,
+                        segments: [StreamContextSegment(kind: "fresh", pct: 20)])
+        let r = UsageMeters.recompute(s, limit: 1_000_000)
+        XCTAssertEqual(r.freshInput, 20_000)
+        XCTAssertEqual(r.cacheRead, 60_000)
+        XCTAssertEqual(r.cacheWrite, 20_000)
+        XCTAssertEqual(r.totalInput, 100_000)
+    }
+
+    /// Over-context: `totalInput` clamps `pct` to 100 and the segment widths
+    /// rescale so they never sum past 100. Oracle: clamps-pct-to-100 case.
+    func testRecomputeClampsPctAndSegmentsWhenOverContext() {
+        let s = payload(fresh: 250_000, pct: 100,
+                        segments: [StreamContextSegment(kind: "fresh", pct: 125)])
+        let r = UsageMeters.recompute(s, limit: 200_000)
+        XCTAssertEqual(r.pct, 100)
+        XCTAssertLessThanOrEqual(r.segments.reduce(0) { $0 + $1.pct }, 100 + 0.001)
+    }
+
+    /// Zero tokens yields 0% and zero-width segments — never NaN.
+    func testRecomputeZeroTokensIsZeroNotNaN() {
+        let r = UsageMeters.recompute(payload(segments: []), limit: 200_000)
+        XCTAssertEqual(r.pct, 0)
+        XCTAssertFalse(r.pct.isNaN)
+        XCTAssertTrue(r.segments.allSatisfy { $0.pct == 0 })
+    }
+
     // MARK: - MeterRing clamp / isFull (BET-877)
 
     /// `pct` is clamped to 0...100 before drawing — a provider can report

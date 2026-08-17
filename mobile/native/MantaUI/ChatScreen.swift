@@ -766,12 +766,19 @@ private struct ChatScreenContent: View {
 
     // MARK: - Context meter (BET-824)
 
-    /// The context percentage from the live stream payload: a real percentage
-    /// when the box reports one, nil when it has none (nil early in a session,
-    /// and again after a compaction). A missing value renders nothing — never
-    /// a confident 0%.
+    /// The context breakdown re-derived against the SELECTED model. One read,
+    /// so the pill's percentage and the sheet's "of N" cannot describe two
+    /// different models (which is exactly what "87% — 174k of 1M" was).
+    private var contextBreakdown: StreamContextPayload? {
+        store.context.map { UsageMeters.recompute($0, limit: activeModelContextLimit) }
+    }
+
+    /// The context percentage from the SELECTED model's breakdown: a real
+    /// percentage when the box reports one, nil when it has none (nil early in
+    /// a session, and again after a compaction). A missing value renders
+    /// nothing — never a confident 0%.
     private var contextPct: Double? {
-        guard let ctx = store.context, ctx.pct.isFinite else { return nil }
+        guard let ctx = contextBreakdown, ctx.pct.isFinite else { return nil }
         return ctx.pct
     }
 
@@ -878,7 +885,7 @@ private struct ChatScreenContent: View {
         // The strip only shows for a known reading, but the context can go
         // unknown in the window between the tap and the sheet presenting —
         // never fabricate a 0% sheet for "we don't know".
-        if let ctx = store.context, UsageMeters.shouldShowContext(pct: ctx.pct) {
+        if let ctx = contextBreakdown, UsageMeters.shouldShowContext(pct: ctx.pct) {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
