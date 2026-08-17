@@ -916,6 +916,8 @@ struct ComposerView: View {
             }
         case .cancelling:
             recorder.stop()                               // the machine discards
+        case .lockArmed:
+            recorder.commitArmedLock()                // released at the top → hands-free
         default:
             break                                         // locked, or never armed
         }

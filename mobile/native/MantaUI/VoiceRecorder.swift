@@ -46,11 +46,11 @@ final class VoiceRecorder: ObservableObject {
 
     /// Whether capture is actively running (the take is live on the mic).
     var isRecording: Bool {
-        phase == .recordingHeld || phase == .recordingLocked
+        phase == .recordingHeld || phase == .lockArmed || phase == .recordingLocked
     }
 
-    /// A take with a finger down on it (the armed-cancel state included).
-    var isHeld: Bool { phase == .recordingHeld || phase == .cancelling }
+    /// A take with a finger down on it (both armed states included).
+    var isHeld: Bool { phase == .recordingHeld || phase == .cancelling || phase == .lockArmed }
 
     /// A take that no longer needs the finger: the hands-free bar owns it.
     var isHandsFree: Bool { phase == .recordingLocked || phase == .paused }
@@ -214,7 +214,7 @@ final class VoiceRecorder: ObservableObject {
     /// view can play the haptic the machine asked for.
     @discardableResult
     func drag(dx: Double, dy: Double, isRTL: Bool = false) -> VoiceEffect {
-        guard phase == .recordingHeld || phase == .cancelling else { return .none }
+        guard phase == .recordingHeld || phase == .cancelling || phase == .lockArmed else { return .none }
         let (next, effect) = VoiceGesture.transition(
             currentPhase: phase, input: .drag(dx: dx, dy: dy),
             elapsedMs: currentElapsedMs(), isRTL: isRTL)
@@ -231,6 +231,18 @@ final class VoiceRecorder: ObservableObject {
             currentPhase: phase, input: .tapLock, elapsedMs: currentElapsedMs())
         publishHaptic(effect)
         guard next != phase else { return }
+        phase = next
+    }
+
+    /// Commit an ARMED lock: the finger left the screen at the top of the lock
+    /// lane, so the take goes hands-free rather than being sent. The mirror of a
+    /// release while `.cancelling`, which discards — the drag ARMS, the release
+    /// COMMITS.
+    func commitArmedLock() {
+        guard phase == .lockArmed else { return }
+        let (next, effect) = VoiceGesture.transition(
+            currentPhase: phase, input: .release, elapsedMs: currentElapsedMs())
+        publishHaptic(effect)
         phase = next
     }
 
