@@ -473,6 +473,48 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(next["ses_1"]?.toolStartOrder, ["t1"])
     }
 
+    /// REGRESSION (BET-1066): a `runningSet` entry with a box `since` MUST set
+    /// `runningSince` to that epoch-derived date — never the local clock. This
+    /// is what makes a mid-turn force-quit + relaunch resume the session-list
+    /// timer at the real elapsed time.
+    func testRunningSetWithBoxSinceOnFreshStateUsesBoxStartNotNow() {
+        var states: [String: MantaSessionStreamState] = [:]
+        let payload = StreamRunningSetPayload(sessions: [
+            .init(sessionId: "ses_1", since: 1_700_000_000_000, type: "busy")
+        ])
+        states = MantaStreamRouter.applyingRunningSet(payload, to: states)
+        XCTAssertEqual(states["ses_1"]?.running, true)
+        XCTAssertEqual(states["ses_1"]?.runningSince, Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    /// REGRESSION (BET-1066): a `runningSet` entry with nil `since` applied to a
+    /// FRESH state must NOT silently seed the local clock — that renders the
+    /// force-quit turn timer as "0" (counting from the launch moment). The
+    /// start stays unknown (`nil`) rather than being fabricated.
+    func testRunningSetNilSinceOnFreshStateDoesNotSeedLocalClock() {
+        var states: [String: MantaSessionStreamState] = [:]
+        let payload = StreamRunningSetPayload(sessions: [
+            .init(sessionId: "ses_new", since: nil, type: "busy")
+        ])
+        states = MantaStreamRouter.applyingRunningSet(payload, to: states)
+        XCTAssertEqual(states["ses_new"]?.running, true)
+        XCTAssertNil(states["ses_new"]?.runningSince)
+    }
+
+    /// An older box may omit `since` on a running-set entry for a session we
+    /// already know about; the existing stamp must be kept, not restarted at
+    /// the local clock.
+    func testRunningSetNilSinceKeepsExistingStamp() {
+        var s = MantaSessionStreamState(sessionId: "ses_1")
+        s.runningSince = Date(timeIntervalSince1970: 1234)
+        let next = MantaStreamRouter.applyingRunningSet(
+            StreamRunningSetPayload(sessions: [.init(sessionId: "ses_1", since: nil, type: "busy")]),
+            to: ["ses_1": s]
+        )
+        XCTAssertEqual(next["ses_1"]?.running, true)
+        XCTAssertEqual(next["ses_1"]?.runningSince, Date(timeIntervalSince1970: 1234))
+    }
+
     // MARK: - Subagent upsert (BET-672)
 
     /// A subagent that goes running→done for the SAME child must leave exactly
@@ -875,6 +917,20 @@ final class MantaEventStoreTests: XCTestCase {
         fake.inject(#"{"kind":"runningSet","payload":{"sessions":[]}}"#)
         XCTAssertEqual(store.sessionStates["ses_1"]?.running, false)
         XCTAssertEqual(store.runningSetSeq, 1)
+    }
+
+    /// REGRESSION (BET-1066): a JSON-decoded `runningSet` frame carrying a box
+    /// `since` MUST seed `runningSince` from that epoch (ms -> seconds) — the
+    /// force-quit + relaunch persistence path. This pins the full decode chain
+    /// (frame parse -> typed payload -> router), not just the router.
+    func testRunningSetFrameWithSinceSeedsBoxStartThroughDecode() throws {
+        let fake = FakeStreamControl()
+        fake.drive(.connected)
+        let store = makeStore(fake)
+
+        fake.inject(#"{"kind":"runningSet","payload":{"sessions":[{"sessionId":"ses_1","since":1700000000000,"type":"busy"}]}}"#)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.running, true)
+        XCTAssertEqual(store.sessionStates["ses_1"]?.runningSince, Date(timeIntervalSince1970: 1_700_000_000))
     }
 
     // MARK: - Turn-complete chunk eviction for unobserved sessions (BET-672)
