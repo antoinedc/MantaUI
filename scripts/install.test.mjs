@@ -2652,6 +2652,85 @@ test("merge-gateway CLI subcommand persists a missing auth.json (fresh-install s
   }
 });
 
+test("merge-gateway CLI accepts the gateway's REAL re-register response ({host} only)", () => {
+  // REGRESSION: the gateway names the hostname `host`, not `gateway_host`
+  // (src/gateway/index.mjs handleRegister). A re-registration returns
+  // { host } with NO token, so a CLI that reads only `gateway_host` saw
+  // neither field and failed the "at least one of gateway_token /
+  // gateway_host" invariant. Since a merge failure is FATAL on the public
+  // path, that aborted every re-install of an already-registered box.
+  // The tests above passed only because they fed a payload shape the
+  // gateway never emits.
+  const dir = mkdtempSync(join(tmpdir(), "manta-merge-gateway-reregister-"));
+  const authFile = join(dir, "auth.json");
+  writeFileSync(
+    authFile,
+    JSON.stringify({
+      box_id: HEX32,
+      box_token: "11112222333344445555666677778888",
+      created_at: 1700000000000,
+      gateway_token: "abc123abc123abc123abc123abc123ab",
+      gateway_host: `${HEX32}.boxes.mantaui.com`,
+    }),
+  );
+  try {
+    try {
+      execSync(`node ${join(__dirname, "install-lib.mjs")} merge-gateway --file ${authFile}`, {
+        input: JSON.stringify({ host: `${HEX32}.boxes.mantaui.com` }),
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (e) {
+      assert.fail(`merge-gateway must exit 0 on a re-register response; got: ${e.stderr ?? e.message}`);
+    }
+    const written = JSON.parse(readFileSync(authFile, "utf-8"));
+    assert.equal(written.box_token, "11112222333344445555666677778888");
+    assert.equal(written.gateway_token, "abc123abc123abc123abc123abc123ab", "token must survive a token-less response");
+    assert.equal(written.gateway_host, `${HEX32}.boxes.mantaui.com`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-gateway CLI persists the hostname from a FIRST-registration response ({host, gateway_token})", () => {
+  // The first-registration shape is {host, gateway_token}. Reading only
+  // `gateway_host` persisted the token but silently DROPPED the hostname,
+  // leaving the installer's published-URL resolution dependent on the
+  // server re-registering on its next boot.
+  const dir = mkdtempSync(join(tmpdir(), "manta-merge-gateway-first-"));
+  const authFile = join(dir, "auth.json");
+  writeFileSync(authFile, JSON.stringify({ box_id: HEX32, box_token: "tok", created_at: 1 }));
+  try {
+    execSync(`node ${join(__dirname, "install-lib.mjs")} merge-gateway --file ${authFile}`, {
+      input: JSON.stringify({ host: `${HEX32}.boxes.mantaui.com`, gateway_token: "abc123abc123abc123abc123abc123ab" }),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const written = JSON.parse(readFileSync(authFile, "utf-8"));
+    assert.equal(written.gateway_token, "abc123abc123abc123abc123abc123ab");
+    assert.equal(written.gateway_host, `${HEX32}.boxes.mantaui.com`, "host must be persisted, not dropped");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge-gateway CLI prefers gateway_host when BOTH spellings are present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-merge-gateway-both-"));
+  const authFile = join(dir, "auth.json");
+  writeFileSync(authFile, JSON.stringify({ box_id: HEX32, box_token: "tok", created_at: 1 }));
+  try {
+    execSync(`node ${join(__dirname, "install-lib.mjs")} merge-gateway --file ${authFile}`, {
+      input: JSON.stringify({ host: "from-host.example", gateway_host: "from-gateway-host.example" }),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const written = JSON.parse(readFileSync(authFile, "utf-8"));
+    assert.equal(written.gateway_host, "from-gateway-host.example");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("merge-gateway CLI subcommand refuses to overwrite a corrupt auth.json", () => {
   const dir = mkdtempSync(join(tmpdir(), "manta-merge-gateway-corrupt-"));
   const authFile = join(dir, "auth.json");
