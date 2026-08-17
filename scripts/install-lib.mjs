@@ -1340,9 +1340,25 @@ async function cliMain(argv) {
         return 1;
       }
     }
+    // The gateway's POST /register response names the hostname `host`, NOT
+    // `gateway_host` (src/gateway/index.mjs handleRegister → {host,
+    // gateway_token} on first registration, {host} on every re-registration).
+    // Accept BOTH spellings, exactly as the box-side handshake does
+    // (src/server/gatewayRegister.mjs maps body.host → gateway_host).
+    // Reading only `gateway_host` meant a re-registration response carried
+    // neither recognised field, so merge-gateway failed the "at least one of
+    // gateway_token / gateway_host" invariant — i.e. EVERY re-install of an
+    // already-registered public box aborted (and a first install persisted the
+    // token but silently dropped the hostname).
+    const payloadHost =
+      typeof payload?.gateway_host === "string"
+        ? payload.gateway_host
+        : typeof payload?.host === "string"
+          ? payload.host
+          : null;
     const res = mergeGatewayAuth(existing, {
       gateway_token: typeof payload?.gateway_token === "string" ? payload.gateway_token : null,
-      gateway_host: typeof payload?.gateway_host === "string" ? payload.gateway_host : null,
+      gateway_host: payloadHost,
     });
     if (!res.ok) {
       process.stderr.write(`merge-gateway: ${res.error}\n`);
