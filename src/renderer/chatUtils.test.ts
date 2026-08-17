@@ -138,6 +138,7 @@ import {
   extractPlanData,
   planRefsFromPart,
   resolveDelegateModel,
+  deviceAuthErrorMessage,
 } from "./chatUtils";
 
 import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest } from "../shared/types";
@@ -5316,5 +5317,20 @@ describe("resolveDelegateModel", () => {
     });
     expect(r.model).toEqual(sel("anthropic", "sonnet"));
     expect(r.overridden).toBe(true);
+  });
+});
+
+// ===== deviceAuthErrorMessage (BET-1043) =====
+
+describe("deviceAuthErrorMessage", () => {
+  it('maps "expired" to the expiry copy', () => {
+    expect(deviceAuthErrorMessage("expired")).toBe("The sign-in code expired. Try again.");
+  });
+  it('maps "not_started" to the not-started copy', () => {
+    expect(deviceAuthErrorMessage("not_started")).toBe("Sign-in didn't start. Try again.");
+  });
+  it("falls back to the generic copy for anything else / undefined", () => {
+    expect(deviceAuthErrorMessage("bad_response")).toBe("Sign-in failed. Try again.");
+    expect(deviceAuthErrorMessage(undefined)).toBe("Sign-in failed. Try again.");
   });
 });

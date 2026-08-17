@@ -248,3 +248,32 @@ export function subscriptionStatuses(connected) {
     connected: set.has(p.id),
   }));
 }
+
+// ---------------------------------------------------------------------------
+// OAuth callback classification (BET-1043)
+// ---------------------------------------------------------------------------
+//
+// opencode's `oauth-auto` (Codex headless) callback BLOCKS for as long as
+// the user takes to approve on the provider's device page, so the server
+// fires it detached and reads its outcome back via the `oauth-status`
+// action. This classifier turns the in-flight map entry into the wire
+// payload. Pure — the caller owns the map and the clock.
+
+export const OAUTH_CALLBACK_LIMIT_MS = 5 * 60 * 1000;
+
+/**
+ * Classify an in-flight device-flow callback for the `oauth-status` action.
+ * Pure — the caller owns the map and the clock.
+ *
+ * entry: {startedAt:number, state:"pending"|"ok"|"error", error?:string} | undefined
+ * returns: {state:"pending"} | {state:"ok"} | {state:"error", error:string}
+ */
+export function classifyOauthCallback(entry, now, limitMs = OAUTH_CALLBACK_LIMIT_MS) {
+  if (!entry) return { state: "error", error: "not_started" };
+  if (entry.state === "pending" && now - entry.startedAt > limitMs) {
+    return { state: "error", error: "expired" };
+  }
+  if (entry.state === "pending") return { state: "pending" };
+  if (entry.state === "ok") return { state: "ok" };
+  return { state: "error", error: entry.error || "failed" };
+}

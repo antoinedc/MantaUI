@@ -7,6 +7,8 @@ import {
   acceptsGzip,
   GZIP_MIN_BYTES,
   SELF_UPDATE_SCRIPT,
+  _getOauthCallbacks,
+  _resetOauthCallbacks,
 } from "./rpc.mjs";
 import { gunzipSync } from "node:zlib";
 import { savePages } from "./servePage.mjs";
@@ -67,6 +69,10 @@ function makeDeps(projects, liveProjects = []) {
       oc: {
         createSession: async (i) => { calls.createSession.push(i); return { id: "ses_new" }; },
         forkSession: async (i) => { calls.forkSession.push(i); return { id: "ses_forked" }; },
+        // BET-1043: default no-op for the detached oauth-auto callback so
+        // oauth-auto tests that don't care about it just settle cleanly.
+        // Tests that assert the callback behaviour override this.
+        completeProviderOauth: async () => ({ ok: true }),
       },
       pty: {},
       bus: {},
@@ -950,4 +956,120 @@ test("opencode:context returns null for an empty transcript", async () => {
   const handlers = buildHandlers(deps);
   const res = await handlers["opencode:context"]("ses_empty");
   assert.equal(res, null);
+});
+
+// ---- BET-1043: oauth-auto detached callback + oauth-status ----
+//
+// The oauth-auto (Codex headless) callback BLOCKS until the user approves on
+// the device page, so the rpc `start` branch fires it DETACHED with an empty
+// code and the renderer polls its outcome via `oauth-status` instead of
+// watching `connected[]`.
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+// Shared setup: openai resolves to the headless oauth method → oauth-auto
+// shape. The caller overrides `completeProviderOauth` as needed.
+function setupOauthAutoDeps(deps) {
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: { openai: [{ type: "oauth", label: "ChatGPT headless" }] },
+  });
+  deps.oc.startProviderOauth = async () => ({
+    ok: true,
+    url: "https://auth.openai.com/codex/device",
+    method: "auto",
+  });
+}
+
+test("opencode:provider-auth start fires the oauth-auto callback detached with empty code and returns immediately (BET-1043)", async () => {
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  const calls = [];
+  // Never settles — the handler must STILL resolve with the oauth-auto shape
+  // without waiting on the blocking callback.
+  deps.oc.completeProviderOauth = (id, index, code) => {
+    calls.push({ id, index, code });
+    return new Promise(() => {});
+  };
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+  const result = await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  assert.equal(result.action, "start");
+  assert.equal(result.shape, "oauth-auto");
+  assert.equal(result.methodIndex, 0);
+  assert.deepEqual(calls, [{ id: "openai", index: 0, code: "" }],
+    "must call completeProviderOauth exactly once, with the RESOLVED index and empty code");
+});
+
+test("opencode:provider-auth oauth-status reports pending then ok, then clears (BET-1043)", async () => {
+  const gate = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  deps.oc.completeProviderOauth = () => gate.promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+
+  // In flight → pending.
+  const pending = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
+  assert.deepEqual(pending, { action: "oauth-status", state: "pending" });
+
+  // Approve → next poll reports ok.
+  gate.resolve({ ok: true });
+  await gate.promise;
+  const ok = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
+  assert.deepEqual(ok, { action: "oauth-status", state: "ok" });
+
+  // Terminal state clears the entry → a later poll is not_started.
+  const again = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
+  assert.deepEqual(again, { action: "oauth-status", state: "error", error: "not_started" });
+});
+
+test("opencode:provider-auth oauth-status surfaces a failed callback as error (BET-1043)", async () => {
+  const gate = deferred();
+  const { deps } = makeDeps([]);
+  setupOauthAutoDeps(deps);
+  deps.oc.completeProviderOauth = () => gate.promise;
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+  await handlers["opencode:provider-auth"]({ action: "start", id: "openai" });
+  gate.resolve({ ok: false, error: "bad_response" });
+  await gate.promise;
+  const r = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
+  assert.deepEqual(r, { action: "oauth-status", state: "error", error: "bad_response" });
+});
+
+test("opencode:provider-auth oauth-status for an unknown provider returns not_started (BET-1043)", async () => {
+  const { deps } = makeDeps([]);
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+  const r = await handlers["opencode:provider-auth"]({ action: "oauth-status", id: "openai" });
+  assert.deepEqual(r, { action: "oauth-status", state: "error", error: "not_started" });
+});
+
+test("opencode:provider-auth start does NOT fire the detached callback for claude-login or api-key providers (BET-1043)", async () => {
+  const { deps } = makeDeps([]);
+  deps.oc.listProviderAuthMethods = async () => ({
+    ok: true,
+    methods: {
+      // anthropic (claude-login via empty URL) and kimi (no methods → api-key)
+      anthropic: [{ type: "oauth", label: "Switch Claude Code account" }],
+      "kimi-for-coding": [],
+    },
+  });
+  deps.oc.startProviderOauth = async () => ({ ok: true, url: "", method: "auto" });
+  let called = 0;
+  deps.oc.completeProviderOauth = async () => { called++; return { ok: true }; };
+  _resetOauthCallbacks();
+  const handlers = buildHandlers(deps);
+
+  await handlers["opencode:provider-auth"]({ action: "start", id: "anthropic" });
+  assert.equal(called, 0, "claude-login must NOT fire the callback");
+
+  await handlers["opencode:provider-auth"]({ action: "start", id: "kimi-for-coding" });
+  assert.equal(called, 0, "api-key (kimi) must NOT fire the callback");
 });

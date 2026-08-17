@@ -103,6 +103,49 @@ export function _resetClaudeLoginSessions() {
   _claudeLoginSessions.clear();
 }
 
+// Device-flow (oauth-auto) callbacks in flight, keyed by provider id.
+// opencode's POST /oauth/callback BLOCKS until the user approves on the
+// provider's device page, so it is fired detached and its outcome is read
+// back by the `oauth-status` action. One entry per provider: a restarted
+// flow calls authorize again, which replaces opencode's own pending entry,
+// so overwriting here is correct.
+const _oauthCallbacks = new Map();
+
+/** Test-only: peek the in-flight device-flow callbacks. */
+export function _getOauthCallbacks() {
+  return new Map(_oauthCallbacks);
+}
+
+/** Test-only: clear between scenarios. */
+export function _resetOauthCallbacks() {
+  _oauthCallbacks.clear();
+}
+
+/**
+ * Fire an oauth-auto (Codex headless) callback DETACHED and record its
+ * outcome for the `oauth-status` action to read back. opencode's callback
+ * is a blocking device-token poll that settles minutes later — long after
+ * the `start` response has gone back to the renderer — so we must not
+ * await it here. It can never reject: an unhandled rejection would take
+ * the server down, so both settle paths record into the map instead.
+ */
+function startOauthCallback(oc, id, methodIndex) {
+  _oauthCallbacks.set(id, { startedAt: Date.now(), state: "pending" });
+  // Detached ON PURPOSE: this promise settles minutes later, long after the
+  // `start` response has gone back to the renderer.
+  oc.completeProviderOauth(id, methodIndex, "")
+    .then((r) => {
+      _oauthCallbacks.set(id, r?.ok
+        ? { startedAt: Date.now(), state: "ok" }
+        : { startedAt: Date.now(), state: "error", error: r?.error ?? "failed" });
+      if (!r?.ok) console.warn(`[provider-auth] ${id}: oauth callback failed (${r?.error ?? "failed"})`);
+    })
+    .catch((e) => {
+      _oauthCallbacks.set(id, { startedAt: Date.now(), state: "error", error: "unreachable" });
+      console.warn(`[provider-auth] ${id}: oauth callback threw:`, e?.message ?? e);
+    });
+}
+
 /**
  * Spawn-side metadata registrar for a Claude login flow. Called by the
  * `opencode:provider-auth start` action when `describeConnectShape` returns
@@ -989,6 +1032,10 @@ export function buildHandlers({
         if (shape === "claude-login") {
           return await startClaudeLogin(id);
         }
+        // oauth-auto (Codex headless): opencode's callback blocks until the
+        // user approves on the device page. Fire it detached and let the
+        // renderer poll the outcome via `oauth-status`.
+        if (shape === "oauth-auto") startOauthCallback(oc, id, resolved.index);
         return {
           action: "start",
           shape,
@@ -996,6 +1043,15 @@ export function buildHandlers({
           instructions: authorize?.instructions || undefined,
           methodIndex: resolved.index,
         };
+      }
+      if (action === "oauth-status") {
+        const id = String(req?.id ?? "");
+        const result = subscriptionProviders.classifyOauthCallback(
+          _oauthCallbacks.get(id),
+          Date.now(),
+        );
+        if (result.state !== "pending") _oauthCallbacks.delete(id);
+        return { action: "oauth-status", ...result };
       }
       if (action === "code") {
         const id = String(req?.id ?? "");

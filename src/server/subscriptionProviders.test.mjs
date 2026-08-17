@@ -9,6 +9,8 @@ import {
   resolveAuthMethod,
   describeConnectShape,
   subscriptionStatuses,
+  classifyOauthCallback,
+  OAUTH_CALLBACK_LIMIT_MS,
 } from "./subscriptionProviders.mjs";
 
 // Live snapshot of GET /provider/auth on the dev box, copied verbatim from
@@ -270,5 +272,60 @@ describe("subscriptionStatuses", () => {
     assert.equal(kimi.label, "Kimi");
     assert.equal(kimi.plan, "Kimi For Coding");
     assert.equal(kimi.console, "https://www.kimi.com/code/console");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyOauthCallback (BET-1043)
+// ---------------------------------------------------------------------------
+
+describe("classifyOauthCallback", () => {
+  it("no entry → not_started", () => {
+    assert.deepEqual(classifyOauthCallback(undefined, Date.now()), {
+      state: "error",
+      error: "not_started",
+    });
+  });
+
+  it("pending within the limit → pending", () => {
+    const now = 10_000;
+    assert.deepEqual(
+      classifyOauthCallback({ startedAt: 5_000, state: "pending" }, now),
+      { state: "pending" },
+    );
+  });
+
+  it("pending at exactly the limit boundary is still pending (not expired)", () => {
+    const now = 10_000;
+    // now - startedAt === limitMs → NOT > limitMs → still pending.
+    assert.deepEqual(
+      classifyOauthCallback({ startedAt: now - OAUTH_CALLBACK_LIMIT_MS, state: "pending" }, now),
+      { state: "pending" },
+    );
+  });
+
+  it("pending past the limit → expired", () => {
+    const now = 10_000;
+    assert.deepEqual(
+      classifyOauthCallback({ startedAt: now - (OAUTH_CALLBACK_LIMIT_MS + 1), state: "pending" }, now),
+      { state: "error", error: "expired" },
+    );
+  });
+
+  it("ok → ok", () => {
+    assert.deepEqual(classifyOauthCallback({ startedAt: 5_000, state: "ok" }, Date.now()), {
+      state: "ok",
+    });
+  });
+
+  it("error → error with its stored error, defaulting to 'failed'", () => {
+    assert.deepEqual(
+      classifyOauthCallback({ startedAt: 5_000, state: "error", error: "bad_response" }, Date.now()),
+      { state: "error", error: "bad_response" },
+    );
+    assert.deepEqual(
+      classifyOauthCallback({ startedAt: 5_000, state: "error" }, Date.now()),
+      { state: "error", error: "failed" },
+    );
   });
 });
