@@ -8,7 +8,6 @@ import assert from "node:assert/strict";
 import {
   parseModelsResponse,
   upsertProviderBlock,
-  removeProviderBlock,
   readProviderEndpoints,
   findStoredApiKey,
   discoverModels,
@@ -16,7 +15,6 @@ import {
   setProviders,
   getProviderEndpoints,
   upsertAgentBlock,
-  removeAgentBlock,
   readAgentBlocks,
   getSubagents,
   setSubagents,
@@ -229,39 +227,6 @@ describe("upsertProviderBlock", () => {
       enabledModels: [],
     });
     assert.equal(result.provider.existing.options.apiKey, "");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// removeProviderBlock
-// ---------------------------------------------------------------------------
-
-describe("removeProviderBlock", () => {
-  it("removes an existing provider", () => {
-    const cfg = {
-      provider: {
-        keep: { npm: "x", name: "Keep", options: {}, models: {} },
-        remove: { npm: "x", name: "Remove", options: {}, models: {} },
-      },
-    };
-    const result = removeProviderBlock(cfg, "remove");
-    assert.ok(result.provider.keep);
-    assert.equal(result.provider.remove, undefined);
-  });
-
-  it("is a no-op when provider does not exist", () => {
-    const cfg = { provider: { only: { npm: "x", name: "Only", options: {}, models: {} } } };
-    const result = removeProviderBlock(cfg, "ghost");
-    assert.ok(result.provider.only);
-    assert.equal(Object.keys(result.provider).length, 1);
-  });
-
-  it("handles config with no provider key", () => {
-    const cfg = { skills: {} };
-    const result = removeProviderBlock(cfg, "anything");
-    // When there's no provider key, getProviderMap returns {} and the spread
-    // sets provider to {} (not undefined). This is the actual behavior.
-    assert.deepEqual(result.provider, {});
   });
 });
 
@@ -712,26 +677,6 @@ describe("upsertAgentBlock", () => {
     });
     assert.equal(result.agent.fast.model, "anthropic/claude-haiku-4");
     assert.equal(result.agent.fast.description, "New");
-  });
-});
-
-describe("removeAgentBlock", () => {
-  it("removes the named agent", () => {
-    const cfg = {
-      agent: {
-        fast: { model: "anthropic/claude-haiku-4", description: "Fast", mode: "subagent" },
-        deep: { model: "anthropic/claude-opus-4", description: "Deep", mode: "subagent" },
-      },
-    };
-    const result = removeAgentBlock(cfg, "fast");
-    assert.equal(result.agent.fast, undefined);
-    assert.deepEqual(result.agent.deep, cfg.agent.deep);
-  });
-
-  it("preserves other keys in config", () => {
-    const cfg = { agent: { fast: {} }, provider: { openai: {} } };
-    const result = removeAgentBlock(cfg, "fast");
-    assert.deepEqual(result.provider, { openai: {} });
   });
 });
 
