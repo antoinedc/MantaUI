@@ -14,14 +14,29 @@
 // ScheduledTasksCard's comment for the standing precedent). Mount, then
 // refetch after every mutation.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { SubscriptionStatus } from "../shared/types";
 import { ConnectProvider } from "./ConnectProvider";
 import { describeSubscriptionStatus } from "./chatUtils";
+import { useCachedResource } from "./useCachedResource";
+import { MantaLoader } from "./MantaLoader";
 
 export function SubscriptionsCard() {
-  const [statuses, setStatuses] = useState<SubscriptionStatus[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The list is fetched through the shared cache (BET-1057): a cold open
+  // shows the loader, a warm reopen renders instantly while it revalidates.
+  // Fetch rejections surface via the hook's `error`.
+  const {
+    data: statuses,
+    loading,
+    error,
+    refresh,
+  } = useCachedResource<SubscriptionStatus[]>("subscriptions", async () => {
+    const res = await window.api.opencodeProviderAuth({ action: "status" });
+    // Route protocol surprises through the hook's error path rather than
+    // collapsing into a deceptively-empty list.
+    if (res.action !== "status") throw new Error("Unexpected response from the box.");
+    return res.providers;
+  });
   // Exactly one row can be mid-mutation at a time. The id is the registry
   // id (anthropic / openai / kimi-for-coding); null when idle.
   const [busy, setBusy] = useState<string | null>(null);
@@ -30,58 +45,26 @@ export function SubscriptionsCard() {
   // Which row is showing its destructive-confirm bar. null = hidden.
   const [disconnectConfirmId, setDisconnectConfirmId] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const res = await window.api.opencodeProviderAuth({ action: "status" });
-      if (res.action !== "status") {
-        setError("Unexpected response from the box.");
-        setStatuses([]);
-        return;
-      }
-      setStatuses(res.providers);
-      setError(null);
-    } catch (e) {
-      // Don't collapse a failure into a deceptively-empty list — surface it
-      // as an inline error line, exactly like ProvidersCard's globalError.
-      setError(e instanceof Error ? e.message : String(e));
-      setStatuses([]);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
   const disconnect = useCallback(
     async (id: string) => {
       if (busy) return;
       setBusy(id);
       try {
-        const res = await window.api.opencodeProviderAuth({ action: "disconnect", id });
-        if (res.action === "disconnect" && !res.ok) {
-          setError(res.error ?? "Disconnect failed.");
-        } else if (res.action !== "disconnect") {
-          setError("Unexpected response from the box.");
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        await window.api.opencodeProviderAuth({ action: "disconnect", id });
       } finally {
         setBusy(null);
         setDisconnectConfirmId(null);
+        // Refetch to reflect the box's current state after the mutation.
         void refresh();
       }
     },
     [busy, refresh],
   );
 
-  const onConnectDone = useCallback(
-    (ok: boolean) => {
-      setConnectingId(null);
-      if (!ok) setError("Connect didn't complete. Try again.");
-      void refresh();
-    },
-    [refresh],
-  );
+  const onConnectDone = useCallback(() => {
+    setConnectingId(null);
+    void refresh();
+  }, [refresh]);
 
   return (
     <div className="space-y-2 pt-2 border-t border-border">
@@ -97,7 +80,12 @@ export function SubscriptionsCard() {
 
       {error && <div className="text-meta text-danger break-words">{error}</div>}
 
-      {(statuses ?? []).map((s) => (
+      {loading ? (
+        <div className="py-2">
+          <MantaLoader size="inline" label="Loading subscriptions" />
+        </div>
+      ) : (
+        (statuses ?? []).map((s) => (
         <div key={s.id} className="border border-border rounded-xs p-2 space-y-2">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
@@ -144,10 +132,7 @@ export function SubscriptionsCard() {
               )
             ) : (
               <button
-                onClick={() => {
-                  setError(null);
-                  setConnectingId(s.id);
-                }}
+                onClick={() => setConnectingId(s.id)}
                 disabled={busy !== null || connectingId !== null}
                 className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
               >
@@ -164,7 +149,8 @@ export function SubscriptionsCard() {
             />
           )}
         </div>
-      ))}
+      ))
+      )}
     </div>
   );
 }

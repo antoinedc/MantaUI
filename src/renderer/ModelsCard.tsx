@@ -25,12 +25,14 @@ import { Pencil, X } from "lucide-react";
 import { describeModel } from "../shared/modelGuide.mjs";
 import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
-import type { ModelOverride, OpencodeModel } from "../shared/types";
+import type { AppConfig, ModelOverride, OpencodeModel } from "../shared/types";
 import { Checkbox } from "./Checkbox";
 import { Tag } from "./Tag";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { refreshModelCatalog } from "./modelCatalog";
+import { useCachedResource } from "./useCachedResource";
+import { MantaLoader } from "./MantaLoader";
 
 function modelKey(providerID: string, id: string): string {
   return `${providerID}/${id}`;
@@ -171,59 +173,50 @@ export function ModelsCard() {
   // configGet on refresh / configUpdate after a save).
   const savedDefault = useStore((s) => s.defaultModel);
 
-  const [models, setModels] = useState<OpencodeModel[] | null>(null);
   // Local working state for the toggles. Hydrated from configGet on mount.
   const [deactivatedMain, setDeactivatedMain] = useState<Set<string>>(new Set());
   const [deactivatedSub, setDeactivatedSub] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
+  // The model list + config are fetched through the shared cache (BET-1057).
+  // The synchronized subagent reconcile stays inside the fetcher so it runs
+  // on every (re)load exactly as before.
+  const {
+    data,
+    loading,
+    error,
+    refresh,
+  } = useCachedResource<{ models: OpencodeModel[]; cfg: AppConfig }>("models", async () => {
+    const [modelList, cfg] = await Promise.all([
+      window.api.opencodeModels(),
+      window.api.configGet(),
+    ]);
+    const deactivatedSubList = cfg.deactivatedSubagents ?? [];
+    // The server (opencode:models) is the single source of truth for display
+    // overrides, so the model list it returns is already overridden — use it
+    // as-is.
+    await window.api.opencodeSyncSubagents({
+      models: modelList,
+      deactivated: deactivatedSubList,
+    });
+    return { models: modelList, cfg };
+  });
+  const models = data?.models ?? null;
+  // Hydrate the toggle state from the freshly-fetched config. The toggles
+  // write their own local state on mutation, so this only runs when the
+  // cached config actually changes (mount + explicit refresh).
+  useEffect(() => {
+    if (!data) return;
+    setDeactivatedMain(new Set(data.cfg.deactivatedMainModels ?? []));
+    setDeactivatedSub(new Set(data.cfg.deactivatedSubagents ?? []));
+  }, [data]);
   // Tracks which model row is mid-mutation (key), or "__main__" /
   // "__default__" for the banner-side actions.
   const [busy, setBusy] = useState<string | null>(null);
-  const [globalError, setGlobalError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   // Key ("providerID/modelID") of the model whose edit dialog is open, or null.
   const [editing, setEditing] = useState<string | null>(null);
   // Keeps the edit modal rendered with the last-edited model while it plays
   // its close exit (see the portal below).
   const lastEditModel = useRef<OpencodeModel | null>(null);
-
-  // Load models + config + reconcile subagents on mount. Mirrors the
-  // SubagentsCard.refresh() flow (BET-123): every known model is auto-
-  // registered as a named subagent; the user opts OUT via the Sub toggle.
-  const refresh = useCallback(async () => {
-    setGlobalError(null);
-    try {
-      const [modelList, cfg] = await Promise.all([
-        window.api.opencodeModels(),
-        window.api.configGet(),
-      ]);
-      const deactivatedMainList = cfg.deactivatedMainModels ?? [];
-      const deactivatedSubList = cfg.deactivatedSubagents ?? [];
-      // The server (opencode:models) is the single source of truth for display
-      // overrides, so the model list it returns is already overridden — use it
-      // as-is.
-      const agents = await window.api.opencodeSyncSubagents({
-        models: modelList,
-        deactivated: deactivatedSubList,
-      });
-      setModels(modelList);
-      setDeactivatedMain(new Set(deactivatedMainList));
-      setDeactivatedSub(new Set(deactivatedSubList));
-      // Result ignored — the consolidated table doesn't show per-agent
-      // names ("task(...)" or "registering…") since the column was dropped
-      // in BET-215. Calling sync is still required to apply the Sub toggle
-      // to opencode.jsonc.
-      void agents;
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
 
   // (Reused as-is from the prior SubagentsCard — subagent reconcile is the
   // only opencode.jsonc writing the table triggers.) A sub toggle change
@@ -244,7 +237,6 @@ export function ModelsCard() {
     async (key: string, currentlyMain: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const nextMain = new Set(deactivatedMain);
         if (currentlyMain) nextMain.add(key);
@@ -275,8 +267,6 @@ export function ModelsCard() {
           // typed for setting, not clearing).
           useStore.setState({ defaultModel: null });
         }
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -288,7 +278,6 @@ export function ModelsCard() {
     async (key: string, currentlyActive: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const nextSet = new Set(deactivatedSub);
         if (currentlyActive) nextSet.add(key);
@@ -304,8 +293,6 @@ export function ModelsCard() {
         // Sub toggles write opencode.jsonc agent blocks — a restart is
         // required for opencode to re-read them. Raise the panel banner.
         useStore.getState().setOpencodeRestartNeeded(true);
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
@@ -319,16 +306,14 @@ export function ModelsCard() {
     async (providerID: string, modelID: string) => {
       if (busy) return;
       setBusy("__default__");
-      setGlobalError(null);
       try {
         await setStoreDefaultModel({ providerID, modelID });
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
+        void refresh();
       } finally {
         setBusy(null);
       }
     },
-    [busy, setStoreDefaultModel],
+    [busy, setStoreDefaultModel, refresh],
   );
 
   // Save a model display override (name / description / context) drafted in the
@@ -340,7 +325,6 @@ export function ModelsCard() {
     async (key: string, _model: OpencodeModel, override: ModelOverride) => {
       if (busy) return;
       setBusy(key);
-      setGlobalError(null);
       try {
         const cfg = await window.api.configGet();
         const existing = cfg.modelOverrides ?? {};
@@ -348,18 +332,16 @@ export function ModelsCard() {
         if (Object.keys(override).length === 0) delete next[key];
         else next[key] = override;
         await window.api.configUpdate({ modelOverrides: next });
-        // Server re-reads config per opencode:models call, so a fresh fetch is
-        // already overridden.
-        setModels(await window.api.opencodeModels());
+        // Server re-reads config per opencode:models call, so a fresh cache
+        // refresh is already overridden.
+        await refresh();
         setEditing(null);
         refreshModelCatalog();
-      } catch (e) {
-        setGlobalError(e instanceof Error ? e.message : String(e));
       } finally {
         setBusy(null);
       }
     },
-    [busy],
+    [busy, refresh],
   );
 
   // ---- Render ----
@@ -417,8 +399,7 @@ export function ModelsCard() {
         )}
       </div>
 
-      {globalError && <div className="text-meta text-danger">{globalError}</div>}
-      {loading && <div className="text-meta text-text-faint">Loading models…</div>}
+      {error && <div className="text-meta text-danger">{error}</div>}
 
       <input
         type="text"
@@ -428,6 +409,11 @@ export function ModelsCard() {
         className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent"
       />
 
+      {loading ? (
+        <div className="py-2">
+          <MantaLoader size="inline" label="Loading models" />
+        </div>
+      ) : (
       <div className="border border-border rounded-xs overflow-x-auto">
         <table className="w-full text-body">
           <thead>
@@ -546,6 +532,7 @@ export function ModelsCard() {
           </tbody>
         </table>
       </div>
+      )}
 
       {models && (() => {
         const target = editing

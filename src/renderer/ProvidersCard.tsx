@@ -1,8 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { X } from "lucide-react";
 import type { ProviderEndpoint, DiscoverResult } from "../shared/types";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { Checkbox } from "./Checkbox";
+import { useCachedResource } from "./useCachedResource";
+import { MantaLoader } from "./MantaLoader";
 
 type Props = {
   /**
@@ -18,27 +20,21 @@ type Props = {
 };
 
 export function ProvidersCard({ onRestartNeeded }: Props) {
-  const [endpoints, setEndpoints] = useState<ProviderEndpoint[] | null>(null);
+  // The endpoint list goes through the shared cache (BET-1057): a cold open
+  // shows the loader, a warm reopen renders instantly while it revalidates.
+  const {
+    data: endpoints,
+    loading,
+    error,
+    refresh,
+  } = useCachedResource<ProviderEndpoint[]>("providers", () =>
+    window.api.opencodeGetProviders(),
+  );
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null); // endpoint id being mutated
-  const [globalError, setGlobalError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    window.api
-      .opencodeGetProviders()
-      .then((eps) => { setEndpoints(eps); setGlobalError(null); })
-      .catch((e) => {
-        // Don't collapse a failure into a deceptively-empty list: surface it.
-        // main translates the two cases into clear messages (unparseable config
-        // vs box unreachable); show whichever we got.
-        setEndpoints([]);
-        setGlobalError(e instanceof Error ? e.message : String(e));
-      });
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  const refresh = useCallback(async (ep: ProviderEndpoint) => {
+  const discover = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
     setBusy(ep.id);
     setDiscoverError((e) => ({ ...e, [ep.id]: "" }));
@@ -64,38 +60,32 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
       ? ep.enabledModels.filter((m) => m !== modelId)
       : [...ep.enabledModels, modelId];
     setBusy(ep.id);
-    setGlobalError(null);
     try {
       const res = await window.api.opencodeSetProviders({
         upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
       });
-      if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
+      if (!res.ok) return;
       onRestartNeeded();
-      load();
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
+      refresh();
     } finally {
       setBusy(null);
     }
-  }, [busy, load, onRestartNeeded]);
+  }, [busy, refresh, onRestartNeeded]);
 
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
     setBusy(ep.id);
-    setGlobalError(null);
     try {
       const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
-      if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
+      if (!res.ok) return;
       setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
       setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
       onRestartNeeded();
-      load();
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
+      refresh();
     } finally {
       setBusy(null);
     }
-  }, [busy, load, onRestartNeeded]);
+  }, [busy, refresh, onRestartNeeded]);
 
   return (
     <div className="space-y-2">
@@ -104,9 +94,14 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
         then enable the ones you want in the model picker.
       </div>
 
-      {globalError && <div className="text-meta text-danger">{globalError}</div>}
+      {error && <div className="text-meta text-danger">{error}</div>}
 
-      {(endpoints ?? []).map((ep) => (
+      {loading ? (
+        <div className="py-2">
+          <MantaLoader size="inline" label="Loading endpoints" />
+        </div>
+      ) : (
+        (endpoints ?? []).map((ep) => (
         <div key={ep.id} className="border border-border rounded-xs p-2 space-y-1">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
@@ -114,7 +109,7 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
               <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
             </div>
             <button
-              onClick={() => refresh(ep)}
+              onClick={() => discover(ep)}
               disabled={busy === ep.id}
               className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
             >
@@ -145,7 +140,8 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
             </div>
           ))}
         </div>
-      ))}
+      ))
+      )}
 
       {/* BET-421 §D: shared CustomProviderForm — probes the endpoint before
           saving, derives the provider id from the name, and handles its own
@@ -153,7 +149,7 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
           BET-420 AddEndpointForm (which had no probe and asked for the id). */}
       <CustomProviderForm
         compact
-        onSaved={load}
+        onSaved={refresh}
       />
     </div>
   );
