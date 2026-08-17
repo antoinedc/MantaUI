@@ -3337,6 +3337,25 @@ test("BET-980: the gateway fatality is gated on SKIP_PUBLIC_TLS, not INGRESS_MOD
   );
 });
 
+test("install.sh makes a merge-gateway failure fatal on the public path only", () => {
+  // BET-981 closes the last warn-and-continue gap BET-980 left behind: a
+  // failed merge-gateway persistence on the PUBLIC path advertises a hostname
+  // whose config is incomplete, so it must die exactly like the register-POST
+  // failure beside it. On tailscale/macOS (SKIP_PUBLIC_TLS=1) the gateway
+  // token is a best-effort APNs credential, so warn-and-continue stays.
+  const src = readFileSync(INSTALL_SH, "utf-8");
+  assert.match(
+    src,
+    /if \[ "\$SKIP_PUBLIC_TLS" != "1" \]; then\n[ \t]+die "merge-gateway failed/,
+    "a merge-gateway failure must be fatal (die) on the public path only (gated on SKIP_PUBLIC_TLS)",
+  );
+  assert.match(
+    src,
+    /warn "merge-gateway failed \(see \/tmp\/manta-gateway-merge\.err\) — the server will re-register on next boot\."/,
+    "the non-public (tailscale/macOS) merge-gateway failure must stay a warn, not become fatal",
+  );
+});
+
 // ----------------------------------------------------------------------------
 // install.sh — step 7.5.E all-or-nothing (BET-980, supersedes BET-205 §3/§4).
 // ----------------------------------------------------------------------------
