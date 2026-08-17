@@ -167,7 +167,7 @@ function SettingField({ entry, value, onCommit, credential }: {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const focused = useRef(false);
   // Keep the draft in sync with the store ONLY when the field is NOT focused
-  // (so an external change — e.g. Undo from another toast — is picked up,
+  // (so an external change — a rollback, a reset — is picked up,
   // but an in-progress edit is never stomped).
   useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
   return (
@@ -378,11 +378,6 @@ export function Settings({
       const r = await window.api.configUpdate({ skillRegistryUrls: next });
       const saved = (r as Record<string, unknown>).skillRegistryUrls;
       useStore.setState({ skillRegistryUrls: Array.isArray(saved) ? (saved as string[]) : next });
-      push({
-        id: `registry-${Date.now()}`,
-        message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
-        actions: [{ label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } }],
-      });
       requestRestart();
     } catch (e) {
       useStore.setState({ skillRegistryUrls: prev });
@@ -478,7 +473,7 @@ export function Settings({
     if (!preload?.pluginsSetEnabled) return;
     try {
       await preload.pluginsSetEnabled(on);
-      push({ id: `plugins-${Date.now()}`, message: `Plugins ${on ? "enabled" : "disabled"} — restart Manta to apply.`, actions: [{ label: "Undo", onClick: () => { setPluginsOn(prev); void preload.pluginsSetEnabled(prev); } }] });
+      requestRestart();
     } catch (e) {
       setPluginsOn(prev);
       push({ id: `err-plugins-${Date.now()}`, message: errorDisclosure("Couldn't toggle plugins.", e) });
@@ -524,7 +519,6 @@ export function Settings({
     setForgeRulesOn(on);
     try {
       await window.api.configUpdate({ forgeRulesEnabled: on });
-      push({ id: `forge-${Date.now()}`, message: `Forge rules ${on ? "enabled" : "disabled"}.`, actions: [{ label: "Undo", onClick: () => { setForgeRulesOn(prev); void window.api.configUpdate({ forgeRulesEnabled: prev }).catch(() => {}); } }] });
     } catch (e) {
       setForgeRulesOn(prev);
       push({ id: `err-forge-${Date.now()}`, message: errorDisclosure("Couldn't toggle forge rules.", e) });
@@ -586,11 +580,6 @@ export function Settings({
     if (typeof payload.theme === "string") applyTheme(payload.theme as ThemePref);
     try {
       await window.api.configUpdate(payload);
-      push({
-        id: `reset-${Date.now()}`,
-        message: "All settings reset to defaults.",
-        actions: [{ label: "Undo", onClick: () => { void useStore.setState(prev); if (prev.theme) applyTheme(prev.theme as ThemePref); window.api.configUpdate(prev).catch(() => {}); } }],
-      });
     } catch (e) {
       useStore.setState(prev);
       if (prev.theme) applyTheme(prev.theme as ThemePref);

@@ -17,6 +17,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { act } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { Settings } from "./Settings";
 import { useStore } from "./store";
@@ -199,10 +200,11 @@ describe("Settings — Escape + nested-confirm ownership (BET-724 regression)", 
   });
 });
 
-// BET-942: Settings → Forge → Disconnect now persists a real opt-out on the
-// box, so the toast deliberately has NO Undo action (Undo only restored local
-// state while the box stayed connected — a lie). The disconnect is one RPC
-// call, and the connected row flips to not-connected.
+// BET-1055: Undo has been removed from every toast. The forge disconnect toast
+// (BET-942) is the last confirmation toast Settings keeps, and this test now
+// pins the invariant that it carries NO action array — a toast with an action
+// never auto-dismisses. The disconnect is one RPC call, and the connected row
+// flips to not-connected.
 describe("Settings — Forge Disconnect (BET-942)", () => {
   let h: Harness | null = null;
 
@@ -258,5 +260,75 @@ describe("Settings — Forge Disconnect (BET-942)", () => {
       "Your gh CLI is untouched — Manta will ignore it until you reconnect.",
     );
     expect(toast!.actions, "no Undo action — reconnect only via device sign-in").toBeUndefined();
+  });
+});
+
+// BET-1055: schema-driven settings toasts become error-only. A successful
+// change (optimistic store → configUpdate → reconcile) raises NO toast; a
+// failing configUpdate raises exactly one error toast carrying the disclosure.
+describe("Settings — schema-driven toasts are error-only (BET-1055)", () => {
+  let h: Harness | null = null;
+
+  // "Auto-rename sessions" is a schema toggle (platform "both",
+  // configKey "autoRenameSessions"), committed through applySetting →
+  // configUpdate, and lives on the Sessions tab.
+  const autoRenameInput = () =>
+    h!.container.querySelector<HTMLInputElement>(
+      'input[aria-label="Auto-rename sessions"]',
+    );
+
+  const stubApi = (configUpdate?: () => Promise<unknown>) =>
+    installMockApi({
+      configGet: () => Promise.resolve({}),
+      getClientVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      getServerVersion: () => Promise.resolve({ version: "0.0.0-test" }),
+      launchersList: () => Promise.resolve([]),
+      // configUpdate always resolves to the updated config object in prod; a
+      // bare `undefined` made `next[key]` throw and trip the error path.
+      configUpdate: configUpdate ?? (() => Promise.resolve({})),
+    });
+
+  const toggleAutoRename = () => {
+    const input = autoRenameInput();
+    expect(input, "Auto-rename sessions checkbox").toBeTruthy();
+    act(() => {
+      (input as HTMLInputElement).click();
+    });
+  };
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+    useStore.setState({ appToasts: [] });
+  });
+
+  it("no toast when a schema-driven change succeeds", async () => {
+    const { api } = stubApi();
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+
+    toggleAutoRename();
+    await h.flush();
+
+    expect(api.calls.configUpdate ?? []).toHaveLength(1);
+    expect(useStore.getState().appToasts).toHaveLength(0);
+  });
+
+  it("exactly one error toast with the disclosure when configUpdate fails", async () => {
+    const { api } = stubApi(() => Promise.reject(new Error("boom")));
+    h = mount(<Settings onClose={() => {}} initialSection="sessions" />);
+    await h.flush();
+
+    toggleAutoRename();
+    await h.flush();
+
+    const toasts = useStore.getState().appToasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].id).toMatch(/^err-/);
+    const disclosure = renderToStaticMarkup(
+      toasts[0].message as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(disclosure).toContain("set auto-rename sessions.");
+    expect(api.calls.configUpdate ?? []).toHaveLength(1);
   });
 });
