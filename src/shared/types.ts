@@ -844,6 +844,41 @@ export type ServerUpdateAvailablePayload = {
   notesUrl: string | null;
 };
 
+// Result of an ON-DEMAND server update check (`server:update-check`). Unlike
+// the push payload above this must be able to express "I looked and there is
+// nothing", because it answers a button press: `available:false` with no
+// version is a real, reportable answer, not a missing one.
+//
+// `ok` distinguishes that honest "no update" from a check that could not
+// COMPLETE. The background poller deliberately swallows a manifest-fetch
+// failure into `available:false` (a flaky feed must not crash the box), but
+// that same value is `available:false` for "up to date" — so without `ok` the
+// renderer would show the reassuring green "you're up to date" after a failed
+// on-demand check. `ok:false` lets it render a failure instead. Absent on an
+// old server it is treated as `true`.
+export type ServerUpdateCheck = {
+  available: boolean;
+  version?: string;
+  notesUrl?: string | null;
+  ok?: boolean;
+};
+
+// Result of an ON-DEMAND desktop update check (`autoUpdate:check`).
+//
+// `supported` is the third state that makes this honest. A dev/unpacked build
+// has no updater at all (electron-updater refuses to run against an unsigned
+// tree) and a mobile/web client has no desktop to update — in both cases the
+// answer is "this question does not apply here", which must NOT be rendered as
+// the reassuring "you are up to date". Conflating the two is how a broken
+// updater passes for a healthy one.
+export type DesktopUpdateCheck = {
+  supported: boolean;
+  available: boolean;
+  version: string | null;
+  /** Human-facing failure copy when the check itself could not complete. */
+  error?: string;
+};
+
 // App-control bus envelope payload (BET-840/841). manta-server publishes ONE
 // bus kind, `appControl`, with an `action` discriminator
 // (src/server/appControl.mjs). The desktop renderer subscribes once
@@ -1420,6 +1455,17 @@ export const IPC = {
   autoUpdateInstall: "autoUpdate:install",            // renderer → main: trigger restart+install
   autoUpdateAvailable: "autoUpdate:available",        // main → renderer: an update is available
   autoUpdateDownloaded: "autoUpdate:downloaded",      // main → renderer: update is ready to install
+  // renderer → main: check NOW and RESOLVE with the verdict. Distinct from the
+  // event channels above on purpose: a user who presses "Check for updates"
+  // needs a definite answer including "you are up to date", and the event pair
+  // can only ever report the positive case (`update-not-available` was
+  // log-only). electron-updater's checkForUpdates() already resolves with
+  // `{isUpdateAvailable, updateInfo}`, so the awaited round-trip is exact
+  // rather than a timeout-and-guess over events.
+  autoUpdateCheck: "autoUpdate:check",                // () → DesktopUpdateCheck
+  // main → renderer: download progress (0-100) while a manual download runs.
+  // Without it a large DMG/ZIP download looks like a dead button for minutes.
+  autoUpdateProgress: "autoUpdate:progress",          // main → renderer push
   // main → renderer: an update failed TERMINALLY (integrity/permission — see
   // shared/updateError.mjs). Transient network errors are NOT forwarded. This
   // channel exists because a silent `console.warn` on updater errors let two
@@ -1444,6 +1490,14 @@ export const IPC = {
   // mid-run, so any caller that awaits past the RPC send may never see a
   // response. Modeled on `opencode:restart` (single-purpose server action).
   serverUpdateApply: "server:update-apply",           // () → void
+
+  // ---- server update check on demand ----
+  // Runs the server-update poller's own tick immediately and returns its
+  // verdict, so Settings → About's "Check for updates" button (and the
+  // desktop's check-on-connect) never has to wait out the poll interval. Shares
+  // the poller's tick rather than re-implementing fetch+compare, so the button
+  // and the banner can never disagree.
+  serverUpdateCheck: "server:update-check",           // () → ServerUpdateCheck
 
   // ---- client version (BET-225 stage 3) ----
   // Returns the desktop app's own version via Electron's `app.getVersion()`

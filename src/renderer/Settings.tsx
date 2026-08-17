@@ -34,6 +34,8 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
+import { describeDesktopUpdate, describeServerUpdate, type UpdateRow } from "./chatUtils";
+import type { DesktopUpdateCheck, ServerUpdateCheck } from "../shared/types";
 import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
@@ -269,14 +271,51 @@ function GroupCard({ title, danger = false, children }: {
   );
 }
 
+/**
+ * One line of "Check for updates" output: a tone dot, the verdict, and an
+ * optional action.
+ *
+ * The dot is the point. "Up to date" and "couldn't check" both render as a
+ * sentence with no button, and without a colour they read the same at a glance
+ * — which is the failure this whole feature is meant to make impossible.
+ */
+function UpdateResultRow({ row, children }: { row: UpdateRow; children?: ReactNode }) {
+  const dot =
+    row.tone === "ok"
+      ? "bg-ok"
+      : row.tone === "action"
+        ? "bg-accent"
+        : row.tone === "error"
+          ? "bg-danger"
+          : "bg-text-faint";
+  return (
+    <div className="flex items-center gap-2">
+      <span aria-hidden className={`inline-block w-2 h-2 rounded-full shrink-0 ${dot}`} />
+      <span className={`flex-1 text-meta ${row.tone === "error" ? "text-danger" : "text-text-muted"}`}>
+        {row.text}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 export function Settings({
   onClose,
   initialSection,
+  onRequestServerUpdate,
 }: {
   onClose: () => void;
   /** Section to land on when the modal mounts (e.g. the `manta-open-settings`
    *  bridge from "Manage models…"). Defaults to General. */
   initialSection?: SettingSectionId;
+  /** Ask App.tsx to run its box-update flow. About's "Update & restart" button
+   *  routes here rather than calling `serverUpdateApply()` itself, so the box
+   *  is only ever updated through ONE path: App owns the confirm dialog (which
+   *  warns that every running agent turn dies), the in-flight/progress state,
+   *  the 120s safety cap, and the transient-network-error handling that makes
+   *  a successful restart stop looking like a failure. A second call site here
+   *  would be a second, subtly different version of all of that. */
+  onRequestServerUpdate?: () => void;
 }) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
   // destructure re-renders the whole Settings tree on every store write.
@@ -295,6 +334,10 @@ export function Settings({
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
   const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
+  // Terminal auto-update failure (integrity / permission / unusable feed).
+  // Read here only to end About's "Downloading…" state — the banner owns
+  // reporting it.
+  const updateError = useStore((s) => s.updateError);
   const boxToken = useStore((s) => s.boxToken);
   const serverUrl = useStore((s) => s.serverUrl);
   const push = useStore((s) => s.pushAppToast);
@@ -361,6 +404,109 @@ export function Settings({
     });
     return () => { cancelled = true; };
   }, []);
+
+  // ===== "Check for updates" (About) =====
+  //
+  // One button, two independent checks, run in PARALLEL and reported
+  // separately. They are separate systems — the desktop app updates itself
+  // through electron-updater against mantaui.com/updates, the box updates
+  // itself by running scripts/self-update.sh against a different manifest — and
+  // collapsing them into a single "you're up to date" would hide the common
+  // case where exactly one of the two is behind.
+  //
+  // `Promise.allSettled`, not `all`: a failure of one leg must still report the
+  // other. A box that is unreachable says nothing about whether the desktop has
+  // an update waiting.
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [desktopCheck, setDesktopCheck] = useState<DesktopUpdateCheck | null>(null);
+  const [serverCheck, setServerCheck] = useState<ServerUpdateCheck | null>(null);
+  const [serverCheckFailed, setServerCheckFailed] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
+
+  const runUpdateCheck = async () => {
+    if (checking) return;
+    setChecking(true);
+    setServerCheckFailed(false);
+    // A hung check must never leave the button spinning forever with no way
+    // out. Each leg resolves-or-rejects, but a box whose server wedges before
+    // answering would await indefinitely — so bound the server leg with a
+    // timeout and treat expiry as a failed check rather than a never-ending
+    // "Checking…".
+    const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("timeout")), ms);
+        p.then(
+          (v) => {
+            clearTimeout(t);
+            resolve(v);
+          },
+          (e) => {
+            clearTimeout(t);
+            reject(e);
+          },
+        );
+      });
+
+    const [desktop, server] = await Promise.allSettled([
+      window.api.autoUpdateCheck(),
+      withTimeout(window.api.serverUpdateCheck(), 15_000),
+    ]);
+    // autoUpdateCheck never rejects by contract (main resolves `{error}`
+    // instead), so a rejection here means the bridge itself is missing —
+    // report it as unsupported rather than as an update failure.
+    setDesktopCheck(
+      desktop.status === "fulfilled"
+        ? desktop.value
+        : { supported: false, available: false, version: null },
+    );
+    if (server.status === "fulfilled") {
+      setServerCheck(server.value);
+    } else {
+      // Rejected, or timed out — indistinguishable at this level and both mean
+      // "we couldn't get an answer", not "up to date".
+      setServerCheck(null);
+      setServerCheckFailed(true);
+    }
+    setCheckedAt(Date.now());
+    setChecking(false);
+  };
+
+  // Percent for a manual desktop download. Subscribed unconditionally (the
+  // no-op unsubscribe on mobile makes this safe) so a download started here
+  // renders progress instead of a button that looks stuck for minutes on a
+  // 100MB artifact.
+  useEffect(() => {
+    const off = window.api.onAutoUpdateProgress?.((p) => {
+      setDownloadPercent(typeof p.percent === "number" ? p.percent : null);
+    });
+    return off;
+  }, []);
+
+  // A download ends in exactly one of three ways, and ALL of them must clear
+  // the local in-flight state — otherwise the row sits on "Downloading…"
+  // forever, which is the same "looks busy, is actually dead" impression this
+  // feature exists to remove.
+  //
+  //  - success: the store's `updatePrompt` appears (App.tsx sets it from the
+  //    `update-downloaded` event) and the row becomes "Restart to update".
+  //  - terminal failure: the store's `updateError` appears (main forwards only
+  //    non-transient failures). The failure is reported by the banner; About
+  //    just stops claiming to be busy.
+  //  - transient failure: main neither raises `updatePrompt` nor `updateError`
+  //    (a drop mid-download is deliberately not surfaced as a terminal error),
+  //    but the IPC now rejects, so the click handler's `.catch` below resets
+  //    the state and the "Download" button comes back — the user can retry.
+  useEffect(() => {
+    if (updatePrompt || updateError) {
+      setDownloading(false);
+      setDownloadPercent(null);
+    }
+  }, [updatePrompt, updateError]);
+
+  const desktopRow = describeDesktopUpdate(desktopCheck);
+  const serverRow = describeServerUpdate(serverCheck, { failed: serverCheckFailed });
 
   // opencode port — exposed in the Box "Advanced" row (BET-420). Read via
   // configGet (it's an AppConfig key with no store mirror) and committed via
@@ -689,10 +835,81 @@ export function Settings({
               {serverVersion && (<><span className="text-text-faint"> · </span>server <span className="font-medium text-text">{serverVersion}</span></>)}
               {opencodeVersion && (<><span className="text-text-faint"> · </span>opencode <span className="font-medium text-text">{opencodeVersion}</span></>)}
             </div>
+
+            {/* A downloaded desktop update outranks everything below: it is the
+                one state where the user's next action is a single click, so it
+                stays pinned regardless of whether a check has been run. */}
             {updatePrompt && (
               <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 flex items-center gap-2">
                 <span className="flex-1 text-meta text-text">Update ready: <span className="font-medium">{updatePrompt.releaseName || updatePrompt.version}</span></span>
                 <button onClick={() => { void window.api.autoUpdateInstall(); }} className={BANNER_BTN}>Restart to update</button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3">
+              <Button onClick={() => void runUpdateCheck()} disabled={checking} tone="default">
+                {checking ? "Checking…" : "Check for updates"}
+              </Button>
+              {checkedAt != null && !checking && (
+                <span className="text-meta text-text-faint">
+                  Checked {new Date(checkedAt).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+
+            {(desktopRow || serverRow) && (
+              <div className="space-y-2">
+                {/* Desktop leg. The action is Download, not Install: autoDownload
+                    is off, so the bytes are only fetched on an explicit press. */}
+                {desktopRow && !updatePrompt && (
+                  <UpdateResultRow row={desktopRow}>
+                    {desktopCheck?.available && !downloading && (
+                      <button
+                        className={BANNER_BTN}
+                        onClick={() => {
+                          setDownloading(true);
+                          setDownloadPercent(0);
+                          // The IPC rejects on ANY failure (main now returns
+                          // the download promise), so a transient drop recovers
+                          // to the button instead of wedging "Downloading…".
+                          void window.api
+                            .autoUpdateDownload()
+                            .catch(() => {
+                              setDownloading(false);
+                              setDownloadPercent(null);
+                            });
+                        }}
+                      >
+                        Download
+                      </button>
+                    )}
+                    {downloading && (
+                      <span className="shrink-0 text-meta text-text-faint">
+                        {downloadPercent == null ? "Downloading…" : `Downloading ${Math.round(downloadPercent)}%`}
+                      </span>
+                    )}
+                    {desktopCheck?.error && (
+                      <button
+                        className={BANNER_BTN}
+                        onClick={() => { void window.api.openExternal("https://mantaui.com/downloads/Manta-latest.dmg"); }}
+                      >
+                        Download manually
+                      </button>
+                    )}
+                  </UpdateResultRow>
+                )}
+
+                {/* Box leg. Routed to App.tsx so the confirm + progress + error
+                    handling is shared with the banner (see onRequestServerUpdate). */}
+                {serverRow && (
+                  <UpdateResultRow row={serverRow}>
+                    {serverCheck?.available && onRequestServerUpdate && (
+                      <button className={BANNER_BTN} onClick={onRequestServerUpdate}>
+                        Update &amp; restart
+                      </button>
+                    )}
+                  </UpdateResultRow>
+                )}
               </div>
             )}
           </GroupCard>

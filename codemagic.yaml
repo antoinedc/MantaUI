@@ -462,6 +462,37 @@ workflows:
             if (bad) { console.error("Update feed does not match the artifacts — electron-updater would reject these."); process.exit(1); }
             console.log("Update feed matches every artifact.");
           '
+      - name: Verify the feed offers an installable artifact (ZIP)
+        script: |
+          # A feed whose every digest is CORRECT can still be unusable, and was:
+          # electron-updater's macOS path only installs from a zipped .app
+          # (Squirrel.Mac). MacUpdater resolves it with
+          # `findFile(files, "zip", ["pkg", "dmg"])` — DMG is on the EXCLUDED
+          # list, not a fallback — and throws ERR_UPDATER_ZIP_FILE_NOT_FOUND
+          # otherwise. `latest-mac.yml` shipped DMG-only, so every Mac's
+          # download threw instantly and the error classified as "transient"
+          # and was swallowed: auto-update was dead for the life of the feed
+          # with no failure visible anywhere.
+          #
+          # The digest check above cannot catch this — it verifies the files the
+          # feed names, not whether any of them can be installed. So assert the
+          # property that actually matters, at build time, where it is one red
+          # step instead of a silent no-op discovered from a user report.
+          set -e
+          node -e '
+            const fs = require("node:fs");
+            const YAML = require("yaml");
+            const feed = YAML.parse(fs.readFileSync("dist/desktop/latest-mac.yml", "utf-8"));
+            const files = (feed.files ?? []).map((f) => f.url);
+            const zip = files.filter((u) => u.toLowerCase().endsWith(".zip"));
+            if (zip.length === 0) {
+              console.error("Update feed lists no .zip — electron-updater CANNOT install this on macOS.");
+              console.error("Files in feed: " + (files.join(", ") || "(none)"));
+              console.error("Fix: keep the `zip` target in electron-builder.yml mac.target.");
+              process.exit(1);
+            }
+            console.log("Feed offers an installable artifact: " + zip.join(", "));
+          '
       - name: Publish to mantaui.com (optional)
         script: |
           # Skips cleanly if no deploy key is configured, so the workflow still
@@ -489,8 +520,15 @@ workflows:
           HOST="root@91.107.196.2"
           $SSH "$HOST" "mkdir -p $MANTA_FEED_DIR $MANTA_DOWNLOADS_DIR"
           # Upload feed + binaries to the channel's update directory.
+          #
+          # The ZIP is what electron-updater actually downloads on macOS (see
+          # the "installable artifact" guard above) — publishing the feed and
+          # the DMG without it is what left auto-update inert. The DMG stays
+          # here too: the feed still names it, and the verify step fails if a
+          # file the feed names is missing.
           scp -i ~/.ssh/prod_key dist/desktop/latest-mac.yml "$HOST:$MANTA_FEED_DIR/"
           scp -i ~/.ssh/prod_key dist/desktop/*.dmg "$HOST:$MANTA_FEED_DIR/"
+          scp -i ~/.ssh/prod_key dist/desktop/*.zip "$HOST:$MANTA_FEED_DIR/"
           # Human-facing downloads + refresh the channel's canonical latest.dmg
           # (arm64 preferred; falls back to whatever single dmg exists).
           # MUST pick the HIGHEST version, not the alphabetically-first —
@@ -505,5 +543,8 @@ workflows:
             cp -f \"\$latest\" $MANTA_LATEST_DMG && echo \"$MANTA_LATEST_DMG -> \$latest\""
     artifacts:
       - dist/desktop/*.dmg
+      # The auto-update artifact. Kept in the build artifacts (not just on
+      # prod) so a broken publish can be diagnosed from the Codemagic run.
+      - dist/desktop/*.zip
       - dist/desktop/latest-mac.yml
 

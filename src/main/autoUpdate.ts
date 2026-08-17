@@ -16,6 +16,7 @@
 import { autoUpdater } from "electron-updater";
 import { app, BrowserWindow, ipcMain } from "electron";
 import { IPC } from "../shared/types.js";
+import type { DesktopUpdateCheck } from "../shared/types.js";
 import { shouldSurfaceUpdateError, describeUpdateError } from "../shared/updateError.mjs";
 
 // Disable auto-download so we can prompt the user before installing.
@@ -43,6 +44,16 @@ autoUpdater.on("update-downloaded", (info) => {
   console.log(`[auto-update] Update downloaded: ${info.version}`);
   // Tell the renderer to show the "Restart to update" prompt.
   notifyRenderer("updateDownloaded", info);
+});
+
+// Download progress. autoDownload is off, so a download only ever runs because
+// the user pressed a button — and a 100MB DMG/ZIP over a slow link takes long
+// enough that an un-progressed button is indistinguishable from a broken one.
+autoUpdater.on("download-progress", (p) => {
+  const percent = typeof p?.percent === "number" ? Math.max(0, Math.min(100, p.percent)) : 0;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IPC.autoUpdateProgress, { percent });
+  }
 });
 
 autoUpdater.on("error", (err) => {
@@ -88,13 +99,61 @@ function notifyRenderer(event: string, info: unknown): void {
 }
 
 // IPC handlers: renderer calls these to trigger download / quit-and-install.
-ipcMain.handle(IPC.autoUpdateDownload, () => {
-  autoUpdater.downloadUpdate();
-});
+// Both RETURN the underlying promise (rather than `() => { … }` bodies that
+// resolve `undefined` immediately), so a failure REJECTS the renderer's
+// `invoke` instead of being dropped. Without this the renderer cannot tell a
+// transient download failure from success and leaves its "Downloading…" state
+// stuck forever on a version that will never finish.
+ipcMain.handle(IPC.autoUpdateDownload, () => autoUpdater.downloadUpdate());
 
 ipcMain.handle(IPC.autoUpdateInstall, () => {
   autoUpdater.quitAndInstall();
 });
+
+/**
+ * Run a check NOW and resolve with the verdict — the Settings → About button.
+ *
+ * Deliberately awaits electron-updater's own promise instead of listening for
+ * `update-available` / `update-not-available`: `checkForUpdates()` resolves with
+ * `{isUpdateAvailable, updateInfo}`, which is a definite answer, whereas the
+ * events cannot express "up to date" to a specific caller (the not-available
+ * event was log-only) and would force a timeout-and-guess.
+ *
+ * Never rejects. A button that throws leaves a spinner spinning; a failed check
+ * resolves with `error` so the panel can say why. The `error` event handler
+ * above still runs for the same failure — that is intended, since a terminal
+ * failure deserves the persistent banner as well as the inline result.
+ */
+export async function runUpdateCheck(): Promise<DesktopUpdateCheck> {
+  // An unpacked dev build has no updater (electron-updater refuses to verify an
+  // unsigned tree). Report "not supported" rather than "up to date": claiming a
+  // dev build is current is how a genuinely broken updater looks healthy.
+  if (!app.isPackaged) {
+    return { supported: false, available: false, version: null };
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    // null when the updater declined to run at all (isUpdaterActive() false).
+    if (!result) return { supported: false, available: false, version: null };
+    const version = result.updateInfo?.version ?? null;
+    return {
+      supported: true,
+      available: Boolean(result.isUpdateAvailable),
+      version,
+    };
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    console.warn("[auto-update] Manual check failed:", raw);
+    return {
+      supported: true,
+      available: false,
+      version: null,
+      error: describeUpdateError(raw),
+    };
+  }
+}
+
+ipcMain.handle(IPC.autoUpdateCheck, () => runUpdateCheck());
 
 /**
  * Check for updates. Safe to call in dev (unpacked app) — electron-updater

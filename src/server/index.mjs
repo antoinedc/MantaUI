@@ -804,6 +804,17 @@ rpcHandlers = buildHandlers({
   // determinate progress bar.
   runServerSelfUpdate: (scriptPath) =>
     runServerSelfUpdate(scriptPath, undefined, { publish: (e) => bus.publish(e) }),
+  // On-demand form of the update-poller's tick, behind the
+  // `server:update-check` channel. Wrapped in a thunk rather than passed by
+  // value because the poller is started BELOW this call (it has to be, so it
+  // can capture SERVER_VERSION) — the arrow resolves `checkServerUpdate` when
+  // an RPC actually arrives, long after module init, so there is no TDZ.
+  // Still guarded: if a future reorder ever left it unset, a check should
+  // report "no update" rather than throw at the renderer.
+  checkServerUpdate: () =>
+    typeof checkServerUpdate === "function"
+      ? checkServerUpdate()
+      : Promise.resolve({ available: false }),
   // BET-834: voice-note metadata over /rpc (audio goes over REST). Oldest
   // first, filtered by session, no audio bytes.
   voiceNotes: {
@@ -838,12 +849,19 @@ rpcHandlers = buildHandlers({
 // SERVER_VERSION is read — so the poller can capture the box's running
 // version (reviewer caught a TDZ when this was placed next to the other
 // pollers above, before `SERVER_VERSION` was initialised).
+// `check` is the on-demand form of the same tick, reached over the
+// `server:update-check` RPC by Settings → About's "Check for updates" button
+// and by the desktop's check-on-connect. Sharing the poller's own tick is the
+// point: a second fetch+compare could report something different from the
+// banner, and "the button says up to date while a banner says otherwise" is
+// worse than no button.
 // eslint-disable-next-line no-unused-vars
-const { stop: stopServerUpdatePoller } = startServerUpdatePoller({
-  bus,
-  currentVersion: SERVER_VERSION,
-  notify: push.fireNotify,
-});
+const { stop: stopServerUpdatePoller, check: checkServerUpdate } =
+  startServerUpdatePoller({
+    bus,
+    currentVersion: SERVER_VERSION,
+    notify: push.fireNotify,
+  });
 
 // Cleanup sweep for expired pages (runs every 5 min).
 // eslint-disable-next-line no-unused-vars

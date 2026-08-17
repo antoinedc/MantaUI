@@ -678,6 +678,39 @@ test("server:update-apply routes to runServerSelfUpdate with SELF_UPDATE_SCRIPT 
   assert.deepEqual(result, { ok: true, pid: 9999 });
 });
 
+test("server:update-check routes to the injected checkServerUpdate and returns its verdict", async () => {
+  // The channel behind Settings → About's "Check for updates" button. It must
+  // hand back the poller's verdict verbatim — including `available:false`,
+  // which is a real answer ("up to date"), not an absence of one. A wrapper
+  // that dropped the return value would leave the button unable to distinguish
+  // "checked, nothing new" from "check failed".
+  const { deps } = makeDeps([]);
+  let calls = 0;
+  deps.checkServerUpdate = async () => {
+    calls += 1;
+    return { available: true, version: "9.9.9", notesUrl: "https://mantaui.com/releases" };
+  };
+  const handlers = buildHandlers(deps);
+  const result = await handlers["server:update-check"]();
+  assert.equal(calls, 1, "checkServerUpdate invoked exactly once");
+  assert.deepEqual(result, {
+    available: true,
+    version: "9.9.9",
+    notesUrl: "https://mantaui.com/releases",
+  });
+});
+
+test("server:update-check defaults to 'no update' when the dep is not wired", async () => {
+  // buildHandlers is constructed BEFORE the update poller is started in
+  // src/server/index.mjs, so the dep is a late-bound thunk. If a future reorder
+  // ever left it unset, a check must report "nothing available" rather than
+  // throwing at the renderer — a dead spinner is worse than a boring answer.
+  const { deps } = makeDeps([]);
+  delete deps.checkServerUpdate;
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+});
+
 test("server:update-apply propagates runServerSelfUpdate's failure result through the RPC", async () => {
   // Defense-in-depth: when the spawn throws (script missing, no exec
   // bit, EACCES), the channel must surface that to the caller as

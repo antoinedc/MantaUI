@@ -56,6 +56,12 @@ function makeFakePreload(): MantaPreload {
     // entries were no-op stubs, so the updater's events reached nothing.
     autoUpdateDownload: vi.fn(async () => {}),
     autoUpdateInstall: vi.fn(async () => {}),
+    autoUpdateCheck: vi.fn(async () => ({
+      supported: true,
+      available: false,
+      version: null,
+    })),
+    onAutoUpdateProgress: vi.fn(() => vi.fn()),
     onAutoUpdateAvailable: vi.fn(() => vi.fn()),
     onAutoUpdateDownloaded: vi.fn(() => vi.fn()),
     onAutoUpdateError: vi.fn(() => vi.fn()),

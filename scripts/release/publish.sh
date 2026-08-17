@@ -155,6 +155,13 @@ ok "tarballs + manifest published"
 shopt -s nullglob
 DMGS=( "${DESKTOP_DIR}"/*.dmg )
 APPIMAGES=( "${DESKTOP_DIR}"/*.AppImage )
+# The macOS auto-update artifact. electron-updater can ONLY install from a
+# zipped .app on macOS (Squirrel.Mac) — it looks for a .zip and explicitly
+# excludes .dmg as a fallback — so a feed published without this is inert, which
+# is exactly how desktop auto-update sat broken and silent. Uploaded to the
+# UPDATE feed dir only, never to downloads: it is for the updater, not for
+# humans (the DMG remains the human download).
+MAC_ZIPS=( "${DESKTOP_DIR}"/*.zip )
 FEEDS=()
 [ -f "${DESKTOP_DIR}/latest-mac.yml" ]   && FEEDS+=( "${DESKTOP_DIR}/latest-mac.yml" )
 [ -f "${DESKTOP_DIR}/latest-linux.yml" ] && FEEDS+=( "${DESKTOP_DIR}/latest-linux.yml" )
@@ -176,8 +183,13 @@ else
   [ "${#DMGS[@]}" -gt 0 ]       && LATEST_DMG="$(pick_latest "${DMGS[@]}")"
   [ "${#APPIMAGES[@]}" -gt 0 ]  && LATEST_APPIMAGE="$(pick_latest "${APPIMAGES[@]}")"
 
+  if [ "${#DMGS[@]}" -gt 0 ] && [ "${#MAC_ZIPS[@]}" -eq 0 ]; then
+    warn "mac build produced a .dmg but no .zip — electron-updater CANNOT install"
+    warn "an update from a DMG. Check the \`zip\` target in electron-builder.yml."
+  fi
+
   log "Uploading desktop artifacts → ${PROD_HOST}:${UPDATES_DIR}/…"
-  scp "${ALL_ARTIFACTS[@]}" "${FEEDS[@]}" "${PROD_HOST}:${UPDATES_DIR}/"
+  scp "${ALL_ARTIFACTS[@]}" "${MAC_ZIPS[@]}" "${FEEDS[@]}" "${PROD_HOST}:${UPDATES_DIR}/"
 
   log "Uploading desktop artifacts → ${PROD_HOST}:${DOWNLOADS_DIR}/…"
   scp "${ALL_ARTIFACTS[@]}" "${PROD_HOST}:${DOWNLOADS_DIR}/"

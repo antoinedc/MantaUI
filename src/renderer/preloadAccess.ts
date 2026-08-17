@@ -3,6 +3,7 @@ import type {
   ServerUpdateAvailablePayload,
   AutoUpdateInfo,
   AutoUpdateErrorInfo,
+  DesktopUpdateCheck,
   OpenFileResult,
 } from "../shared/types.js";
 import type { InstallerEvent, InstallerState } from "../shared/types.js";
@@ -123,9 +124,14 @@ export interface MantaPreload {
   // when the preload is present (same pattern as peekRemoteFile).
   autoUpdateDownload(): Promise<void>;
   autoUpdateInstall(): Promise<void>;
+  // On-demand check that resolves with the verdict, for the "Check for updates"
+  // button. The event subscriptions below cannot answer a button press: they
+  // only ever report the positive case, so "up to date" has to come from here.
+  autoUpdateCheck(): Promise<DesktopUpdateCheck>;
   onAutoUpdateAvailable(cb: (info: AutoUpdateInfo) => void): () => void;
   onAutoUpdateDownloaded(cb: (info: AutoUpdateInfo) => void): () => void;
   onAutoUpdateError(cb: (info: AutoUpdateErrorInfo) => void): () => void;
+  onAutoUpdateProgress(cb: (p: { percent: number }) => void): () => void;
 
   // ---- SSH installer (BET-355 — Stage 4) ----
   // Preload bridge for the renderer's "install a new box via SSH" flow.

@@ -19,6 +19,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   createUpdateCheck,
+  createManifestFetcher,
   startServerUpdatePoller,
   MANIFEST_URL,
   manifestUrl,
@@ -66,6 +67,7 @@ test("createUpdateCheck: newer manifest → { available:true, version, notesUrl 
     available: true,
     version: "9.9.9",
     notesUrl: "https://mantaui.com/releases",
+    ok: true,
   });
 });
 
@@ -97,25 +99,29 @@ test("createUpdateCheck: manifest fetch throws → { available:false } (no rethr
   // The contract is that a flaky manifest URL must NEVER crash the poller —
   // a throw here would tear down the server on the first bad check.
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  // `ok:false` is what lets the ON-DEMAND path tell "there wasn't one" from
+  // "we couldn't tell". The background poll swallows the failure into the same
+  // `available:false` value, which is fine for a timer and would be a LIE for
+  // a manual "Check for updates" button — that is the fix this assertion pins.
+  assert.deepEqual(res, { available: false, ok: false });
 });
 
-test("createUpdateCheck: manifest missing version field → { available:false }", async () => {
+test("createUpdateCheck: manifest missing version field → { available:false, ok:true }", async () => {
   const { tick } = createUpdateCheck({
     fetchManifest: async () => ({ notes_url: "x", min_client: "0.0.0" }),
     currentVersion: "1.2.3",
   });
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  assert.deepEqual(res, { available: false, ok: true });
 });
 
-test("createUpdateCheck: manifest with non-string version → { available:false }", async () => {
+test("createUpdateCheck: manifest with non-string version → { available:false, ok:true }", async () => {
   const { tick } = createUpdateCheck({
     fetchManifest: async () => ({ version: 42, notes_url: "x", min_client: "0.0.0" }),
     currentVersion: "1.2.3",
   });
   const res = await tick();
-  assert.deepEqual(res, { available: false });
+  assert.deepEqual(res, { available: false, ok: true });
 });
 
 test("createUpdateCheck: passes the hardcoded MANIFEST_URL to fetchManifest", async () => {
@@ -452,3 +458,271 @@ test("forwarder: gate advances — a strictly newer version re-raises", () => {
   assert.equal(onEvent(opencodeUpdate("1.18.18")), null);
 });
 
+
+// ---------------------------------------------------------------------------
+// createManifestFetcher — conditional GET
+// ---------------------------------------------------------------------------
+//
+// The manifest is ~95 bytes, changes a few times a month, and is polled forever
+// by every box. Conditional GET is what makes a SHORTER poll interval cost less
+// than the old long one, so these pin the two properties the interval change
+// leans on: the validator is sent back, and a 304 still yields a manifest.
+
+function res({ status = 200, body = null, etag = null } = {}) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (k) => (k.toLowerCase() === "etag" ? etag : null) },
+    json: async () => body,
+  };
+}
+
+test("manifest fetcher: first call sends no If-None-Match and caches the ETag", async () => {
+  const calls = [];
+  const fetchManifest = createManifestFetcher({
+    fetchImpl: async (url, init) => {
+      calls.push(init?.headers ?? null);
+      return res({ body: { version: "1.0.0" }, etag: '"abc"' });
+    },
+  });
+
+  assert.deepEqual(await fetchManifest("https://example.test/server.json"), { version: "1.0.0" });
+  assert.equal(calls[0], null, "first request must not send a validator it does not have");
+
+  await fetchManifest("https://example.test/server.json");
+  assert.deepEqual(calls[1], { "if-none-match": '"abc"' }, "second request must revalidate");
+});
+
+test("manifest fetcher: 304 returns the CACHED manifest (a 304 has no body)", async () => {
+  let first = true;
+  const fetchManifest = createManifestFetcher({
+    fetchImpl: async () => {
+      if (first) {
+        first = false;
+        return res({ body: { version: "2.0.0" }, etag: '"v2"' });
+      }
+      // A real 304 carries no body; json() would throw. Prove we never call it.
+      return {
+        status: 304,
+        ok: false,
+        headers: { get: () => null },
+        json: async () => {
+          throw new Error("must not parse a 304 body");
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(await fetchManifest("u"), { version: "2.0.0" });
+  assert.deepEqual(await fetchManifest("u"), { version: "2.0.0" }, "304 → last known manifest");
+});
+
+test("manifest fetcher: a non-2xx (non-304) throws so the check reports no update", async () => {
+  const fetchManifest = createManifestFetcher({
+    fetchImpl: async () => res({ status: 500 }),
+  });
+  await assert.rejects(() => fetchManifest("u"), /manifest fetch failed: 500/);
+});
+
+test("manifest fetcher: a failed body parse does NOT poison the cache with its ETag", async () => {
+  // Caching the validator for a body we never read would make every later poll
+  // a 304 that returns nothing — a permanently stuck check that looks healthy.
+  let call = 0;
+  const sent = [];
+  const fetchManifest = createManifestFetcher({
+    fetchImpl: async (_url, init) => {
+      sent.push(init?.headers ?? null);
+      call += 1;
+      if (call === 1) {
+        return {
+          status: 200,
+          ok: true,
+          headers: { get: () => '"poison"' },
+          json: async () => {
+            throw new Error("bad json");
+          },
+        };
+      }
+      return res({ body: { version: "3.0.0" }, etag: '"good"' });
+    },
+  });
+
+  await assert.rejects(() => fetchManifest("u"));
+  assert.deepEqual(await fetchManifest("u"), { version: "3.0.0" });
+  assert.equal(sent[1], null, "a parse failure must leave no validator behind");
+});
+
+// ---------------------------------------------------------------------------
+// createUpdateCheck — concurrent callers
+// ---------------------------------------------------------------------------
+
+test("createUpdateCheck: a concurrent tick JOINS the in-flight one (never a false 'up to date')", async () => {
+  // The guard used to return { available:false } to the second caller. That was
+  // harmless while only a 6h timer called it, and became a lie the moment a
+  // human could press "Check for updates" during a poll: they would be told
+  // "up to date" with nothing compared.
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  let fetches = 0;
+
+  const { tick } = createUpdateCheck({
+    url: "https://example.test/server.json",
+    currentVersion: "1.0.0",
+    fetchManifest: async () => {
+      fetches += 1;
+      await gate;
+      return { version: "2.0.0", notes_url: null };
+    },
+  });
+
+  const a = tick();
+  const b = tick();
+  release();
+  const [ra, rb] = await Promise.all([a, b]);
+
+  assert.equal(fetches, 1, "the second caller must not start a second fetch");
+  assert.deepEqual(ra, { available: true, version: "2.0.0", notesUrl: null, ok: true });
+  assert.deepEqual(rb, ra, "both callers see the SAME real answer");
+});
+
+test("createUpdateCheck: the in-flight slot is released so a later tick re-fetches", async () => {
+  let fetches = 0;
+  const { tick } = createUpdateCheck({
+    url: "https://example.test/server.json",
+    currentVersion: "1.0.0",
+    fetchManifest: async () => {
+      fetches += 1;
+      return { version: "1.0.0" };
+    },
+  });
+  await tick();
+  await tick();
+  assert.equal(fetches, 2, "sequential ticks must each do their own check");
+});
+
+// ---------------------------------------------------------------------------
+// startServerUpdatePoller — the on-demand check()
+// ---------------------------------------------------------------------------
+
+test("poller.check(): returns the verdict so a button can say 'up to date'", async () => {
+  const bus = fakeBus();
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    fetchManifest: async () => SAME("1.2.3"),
+  });
+  try {
+    assert.deepEqual(await check(), { available: false, ok: true });
+  } finally {
+    stop();
+  }
+});
+
+test("poller.check(): a manifest fetch failure is ok:false, never a false 'up to date'", async () => {
+  // The poller swallows fetch failures so a flaky feed can't crash the box —
+  // but the value it resolves is the SAME `available:false` that "up to date"
+  // resolves, so without `ok:false` the renderer's box row would show the
+  // reassuring green "you're up to date" after a failed check. That false okay
+  // is precisely what a "Check for updates" button exists to break, so the
+  // failure must be distinguishable.
+  const bus = fakeBus();
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    fetchManifest: async () => {
+      throw new Error("network unreachable");
+    },
+  });
+  try {
+    assert.deepEqual(await check(), { available: false, ok: false });
+    assert.equal(updateEvents(bus).length, 0, "a failed check must not raise a banner");
+  } finally {
+    stop();
+  }
+});
+
+test("poller.check(): an available update is reported AND raises the banner", async () => {
+  const bus = fakeBus();
+  const notified = [];
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    notify: async (n) => notified.push(n),
+    fetchManifest: async () => NEWER("9.9.9"),
+  });
+  try {
+    const result = await check();
+    assert.equal(result.available, true);
+    assert.equal(result.version, "9.9.9");
+    // The manual check reuses the poller's tick precisely so the button and the
+    // banner can never disagree about what is available. A banner is raised
+    // with the right payload — the poller's own boot tick may add one more, so
+    // assert at least one rather than a count.
+    const events = updateEvents(bus).map((e) => e.payload);
+    assert.ok(events.length >= 1, "an available update must raise the banner");
+    assert.ok(
+      events.some((p) => p.version === "9.9.9" && p.notesUrl === "https://mantaui.com/releases"),
+      "a banner carries the right version + notesUrl",
+    );
+    assert.equal(notified.length, 1, "push deduped — one per version regardless of callers");
+  } finally {
+    stop();
+  }
+});
+
+test("poller.check(): repeated checks keep answering, but notify at most once", async () => {
+  // Clicking the button twice must report the truth twice — the dedup gate is
+  // for the SIDE EFFECTS (banner + push), never for the answer.
+  const bus = fakeBus();
+  const notified = [];
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    notify: async (n) => notified.push(n),
+    fetchManifest: async () => NEWER("9.9.9"),
+  });
+  try {
+    const first = await check();
+    const second = await check();
+    assert.equal(first.available, true);
+    assert.deepEqual(second, first, "the second press must not report 'up to date'");
+    // `check()` re-surfaces the banner on every call (forceBanner) — this is
+    // the reconnect case where a desktop that came back after a release should
+    // see the banner even though the box's timer already notified that version.
+    // The banner is an idempotent store set, so re-publishing is harmless. The
+    // PUSH stays deduped: same version → one push, never a re-buzz.
+    assert.ok(updateEvents(bus).length >= 2, "a repeat check re-surfaces the banner (forceBanner)");
+    assert.equal(notified.length, 1, "push deduped — at most once per version");
+  } finally {
+    stop();
+  }
+});
+
+test("poller.check(): concurrent checks still push at most ONCE", async () => {
+  // The dedup gate reads and writes `lastNotifiedVersion` with no `await`
+  // between them, so concurrent checks resume as sequential microtasks and the
+  // second sees the gate already closed. That atomicity is what stops "user
+  // pressed the button just as the timer fired" from double-notifying — it is
+  // easy to break by adding an await inside the gate, so pin the PUSH. (The
+  // banner may be published a few times — it is an idempotent store set and
+  // `check()` force-re-surfaces it — but a push must fire once per version.)
+  const bus = fakeBus();
+  const notified = [];
+  const { stop, check } = startServerUpdatePoller({
+    bus,
+    currentVersion: "1.2.3",
+    notify: async (n) => notified.push(n),
+    fetchManifest: async () => NEWER("9.9.9"),
+  });
+  try {
+    const [a, b] = await Promise.all([check(), check()]);
+    assert.equal(a.available, true);
+    assert.equal(b.available, true, "every caller gets the real answer");
+    assert.ok(updateEvents(bus).length >= 1, "banner surfaced at least once");
+    assert.equal(notified.length, 1, "one push, not one per caller");
+  } finally {
+    stop();
+  }
+});

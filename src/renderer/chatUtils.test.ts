@@ -41,6 +41,8 @@ import {
   runWithConcurrency,
   chooseUpdateSkewVariant,
   isTransientUpdateNetworkError,
+  describeDesktopUpdate,
+  describeServerUpdate,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
@@ -1485,6 +1487,99 @@ describe("chooseUpdateSkewVariant", () => {
     expect(chooseUpdateSkewVariant("1.x.3", "0.0.0")).toBe("ok");
     // But once one side has a real version, the compare takes over.
     expect(chooseUpdateSkewVariant("abc", "0.0.1")).toBe("outdated");
+  });
+});
+
+// ===== "Check for updates" verdict rows =====
+describe("describeDesktopUpdate", () => {
+  it("returns null before a check has run (renders nothing, not 'up to date')", () => {
+    expect(describeDesktopUpdate(null)).toBeNull();
+  });
+
+  it("reports up to date as 'ok'", () => {
+    expect(describeDesktopUpdate({ supported: true, available: false, version: "0.0.36" })).toEqual({
+      tone: "ok",
+      text: "Manta UI is up to date.",
+    });
+  });
+
+  it("names the available version and asks for an action", () => {
+    expect(describeDesktopUpdate({ supported: true, available: true, version: "0.0.37" })).toEqual({
+      tone: "action",
+      text: "Manta UI 0.0.37 is available.",
+    });
+  });
+
+  it("still reports an available update when the feed carries no version", () => {
+    expect(describeDesktopUpdate({ supported: true, available: true, version: null })).toEqual({
+      tone: "action",
+      text: "An update is available.",
+    });
+  });
+
+  it("an unsupported build is MUTED, never 'up to date'", () => {
+    // A dev build and a mobile client have no updater at all. Rendering either
+    // as "up to date" is a claim about something that was never checked — the
+    // precise shape of reassurance that let a permanently broken macOS updater
+    // pass for a healthy one.
+    const row = describeDesktopUpdate({ supported: false, available: false, version: null });
+    expect(row?.tone).toBe("muted");
+    expect(row?.tone).not.toBe("ok");
+  });
+
+  it("a failed check is an ERROR and outranks the up-to-date reading", () => {
+    const row = describeDesktopUpdate({
+      supported: true,
+      available: false,
+      version: null,
+      error: "Couldn't check for updates.",
+    });
+    expect(row).toEqual({ tone: "error", text: "Couldn't check for updates." });
+  });
+});
+
+describe("describeServerUpdate", () => {
+  it("returns null before a check has run", () => {
+    expect(describeServerUpdate(null)).toBeNull();
+  });
+
+  it("reports up to date as 'ok'", () => {
+    expect(describeServerUpdate({ available: false })).toEqual({
+      tone: "ok",
+      text: "The box is up to date.",
+    });
+  });
+
+  it("names the available box version and asks for an action", () => {
+    expect(describeServerUpdate({ available: true, version: "0.0.37" })).toEqual({
+      tone: "action",
+      text: "Box update 0.0.37 is available.",
+    });
+  });
+
+  it("an unreachable box is an ERROR, and outranks any stale result", () => {
+    // The RPC not coming back is a different fact from the box saying "nothing
+    // new", and must not inherit the reassuring tone of the latter.
+    const row = describeServerUpdate({ available: false }, { failed: true });
+    expect(row?.tone).toBe("error");
+    expect(row?.text).toMatch(/couldn’t reach the box/i);
+  });
+
+  it("a check that could not complete (ok:false) is an ERROR, never 'up to date'", () => {
+    // A manifest-fetch failure resolves `available:false` — the SAME value as
+    // "up to date". Without this branch the box row would show the green
+    // reassuring tone after a failed check. The failure must be read as an
+    // error, not a clean bill of health.
+    const row = describeServerUpdate({ available: false, ok: false });
+    expect(row?.tone).toBe("error");
+    expect(row?.tone).not.toBe("ok");
+    expect(row?.text).toMatch(/couldn’t check the box/i);
+  });
+
+  it("an absent ok is treated as a successful check (old server)", () => {
+    // A response from an older server that predates the `ok` field must still
+    // render normally, not as an error.
+    expect(describeServerUpdate({ available: false })?.tone).toBe("ok");
   });
 });
 

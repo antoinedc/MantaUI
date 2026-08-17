@@ -29,6 +29,8 @@ import type {
   SecretMeta,
   SecretInput,
   ServerUpdateAvailablePayload,
+  ServerUpdateCheck,
+  DesktopUpdateCheck,
   ServedPageMeta,
   OutboxFile,
   WebhookMeta,
@@ -562,6 +564,16 @@ export interface Api {
   // autoUpdateInstall to restart and install a downloaded update.
   autoUpdateDownload(): Promise<void>;
   autoUpdateInstall(): Promise<void>;
+  // Check on demand and RESOLVE with the verdict — the "Check for updates"
+  // button in Settings → About. Distinct from the event subscriptions below
+  // because a button needs to be able to say "up to date": the events can only
+  // report the positive case. Never rejects; a failed check resolves with
+  // `error` set so the caller renders a reason instead of a dead spinner.
+  // `supported:false` on mobile/web and in an unpacked dev build.
+  autoUpdateCheck(): Promise<DesktopUpdateCheck>;
+  // Download progress (0-100) for a manual download. Desktop-only; the httpApi
+  // shim returns a no-op unsubscribe on mobile.
+  onAutoUpdateProgress(cb: (p: { percent: number }) => void): () => void;
   onAutoUpdateAvailable(
     cb: (info: { version: string; releaseName?: string; releaseNotes?: string }) => void,
   ): () => void;
@@ -686,6 +698,15 @@ export interface Api {
   // Mirror of the desktop `opencode:restart` action — fixed-argv execFile,
   // no injection surface, no caller-supplied input.
   serverUpdateApply(): Promise<{ ok: boolean; error?: string }>;
+
+  // Server-update check on demand: runs the box's update poller's own tick
+  // right now and resolves with its verdict. Behind Settings → About's "Check
+  // for updates" button, and called once when the desktop connects so a box
+  // release is noticed on app open instead of up to a poll interval later.
+  // Reuses the poller's tick, so a manual check that finds an update also
+  // raises the normal banner (deduped per version) and the two can never
+  // report different things.
+  serverUpdateCheck(): Promise<ServerUpdateCheck>;
 
   // Server-update available subscription (BET-225 stage 3): fires when the
   // box's server-update poller sees a newer manifest version. Mirrors the

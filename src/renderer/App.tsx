@@ -953,6 +953,29 @@ function Shell() {
     return off;
   }, []);
 
+  // Check the box for an update as soon as we have a live connection, and
+  // again on every reconnect.
+  //
+  // The box polls on its own timer, but that timer answers "has a release
+  // happened", not "is someone here to see it". A desktop that has been closed
+  // for a week reconnects to a box whose own last check may be nearly a full
+  // interval old, so the banner would be up to that late for the one moment it
+  // actually matters — the moment the user opens the app. This makes the
+  // common case immediate and leaves the timer as the backstop for when nobody
+  // is looking (it still fires the push).
+  //
+  // Cheap: one ~95-byte conditional GET on the box, which answers 304 when
+  // nothing changed. The result needs no handling here — the server publishes
+  // the usual `serverUpdateAvailable` bus event (deduped per version), so the
+  // banner appears through the subscription above, exactly as if the timer had
+  // found it. Failures are ignored on purpose: this is opportunistic, and the
+  // poller plus the manual button in Settings → About both remain.
+  useEffect(() => {
+    if (connectionState.state !== "connected") return;
+    if (!window.api.serverUpdateCheck) return;
+    void window.api.serverUpdateCheck().catch(() => {});
+  }, [connectionState.state, apiGeneration]);
+
   // Server-update progress (this ticket): while the box runs
   // scripts/self-update.sh, manta-server tails its log and republishes each
   // MANTA_PROGRESS marker as a `serverUpdateProgress` bus event. The renderer
@@ -1773,7 +1796,16 @@ function Shell() {
         />
       )}
       {settingsOpen && (
-        <Settings onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+        <Settings
+          onClose={() => setSettingsOpen(false)}
+          initialSection={settingsSection}
+          // Settings → About's "Update & restart" opens the SAME confirm the
+          // update banner opens, so the box is only ever updated down one path
+          // (confirm → applyServerUpdate → progress → 120s cap → transient-error
+          // handling). Settings deliberately does not call serverUpdateApply()
+          // itself; a second call site would be a second copy of all of that.
+          onRequestServerUpdate={() => setConfirmServerUpdate(true)}
+        />
       )}
       {searchOpen && activeChatSessionId != null && (
         <SearchPalette
