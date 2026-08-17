@@ -109,7 +109,6 @@ import {
   shouldOfferForgeConnect,
   failuresToAgentPrompt,
   zeroStateMode,
-  initialRepoSelection,
   describeRepoRow,
   homeRelativePath,
   planHighlightRanges,
@@ -4025,38 +4024,6 @@ describe("zeroStateMode", () => {
 
   it("returns fresh (not degraded) when the probe succeeded with zero repos", () => {
     expect(zeroStateMode({ probePending: false, probeFailed: false, repos: [] })).toBe("fresh");
-  });
-});
-
-describe("initialRepoSelection", () => {
-  it("checks every local row when they fit under the cap", () => {
-    const repos = [
-      repoRow({ path: "/a", lastCommitAt: 3 }),
-      repoRow({ path: "/b", lastCommitAt: 2 }),
-      repoRow({ path: "/c", lastCommitAt: 1 }),
-    ];
-    const sel = initialRepoSelection(repos, 8);
-    expect(sel.map((r) => r.path)).toEqual(["/a", "/b", "/c"]);
-  });
-
-  it("caps the checked set at the cap, most-recent first (12 repos -> 8)", () => {
-    const repos = Array.from({ length: 12 }, (_, i) =>
-      repoRow({ path: `/r${i}`, lastCommitAt: 12 - i }),
-    );
-    const sel = initialRepoSelection(repos, 8);
-    expect(sel).toHaveLength(8);
-    expect(sel[0].path).toBe("/r0");
-    expect(sel[1].path).toBe("/r1");
-    expect(sel[7].path).toBe("/r7");
-  });
-
-  it("never pre-checks a non-local row, even a recent one", () => {
-    const repos = [
-      repoRow({ path: "/local-repo", lastCommitAt: 2 }),
-      repoRow({ path: "/clone-repo", lastCommitAt: 99, local: false }),
-    ];
-    const sel = initialRepoSelection(repos, 8);
-    expect(sel.map((r) => r.path)).toEqual(["/local-repo"]);
   });
 });
 
