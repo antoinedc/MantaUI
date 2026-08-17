@@ -45,7 +45,7 @@ struct RunningIndicator: View {
             Text("\(verb)…")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx1)
-            Text("(\(SessionTimerFormat.liveElapsed(elapsed)))")
+            Text("(\(SessionTimerFormat.elapsed(elapsed)))")
                 .font(.manta(size: Metrics.type.small, design: .monospaced))
                 .foregroundColor(tokens.tx4)
             Spacer(minLength: 0)

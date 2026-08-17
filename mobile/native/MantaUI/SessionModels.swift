@@ -125,14 +125,14 @@ struct SessionRowStatus: Equatable, Sendable {
 
 enum SessionRowSubtitle {
     /// §7.1a subtitle table — precedence: subagents, then the working progress
-    /// label, then running, then blocked, then (idle) model + recency. The
+    /// label, then running, then blocked, then (idle) model. The
     /// subagent case REPLACES the line. A model-authored progress label
     /// (BET-791) is more informative than a bare "running" / "running · model",
     /// so it replaces both when a working turn names its step. The first four
     /// branches are unchanged from the original table; only the idle tail is
     /// new (BET-897): a terminal row says "terminal", otherwise the idle line
-    /// is "model · recency" when either is known.
-    static func text(for s: SessionRowStatus, now: Date) -> String? {
+    /// is the model label alone; recency lives in the age chip (BET-1084).
+    static func text(for s: SessionRowStatus) -> String? {
         if s.subagentsRunning > 0 {
             return "\(s.subagentsRunning) subagent" + (s.subagentsRunning == 1 ? "" : "s")
         }
@@ -149,11 +149,18 @@ enum SessionRowSubtitle {
             return "needs you"
         }
         if s.isTerminal { return "terminal" }
-        let parts = [
-            s.modelLabel,
-            s.lastActivity.map { SessionTimerFormat.relative(now.timeIntervalSince($0)) },
-        ].compactMap { $0 }.filter { !$0.isEmpty }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        // Recency lives in the trailing age chip (BET-1084); the subtitle is model-only.
+        return s.modelLabel.flatMap { $0.isEmpty ? nil : $0 }
+    }
+}
+
+/// The row's trailing age slot (BET-1084): a pure gate mirroring the desktop
+/// sidebar's `useAge` (src/renderer/Sidebar.tsx) — running / attention rows and
+/// unknown-activity rows show no age; their dot is the signal.
+enum SessionRowAge {
+    static func text(for s: SessionRowStatus, now: Date) -> String? {
+        guard !s.running, !s.attention, let last = s.lastActivity else { return nil }
+        return SessionTimerFormat.age(now.timeIntervalSince(last))
     }
 }
 
@@ -217,23 +224,28 @@ enum SessionTimerFormat {
         return "\(s)s"
     }
 
-    /// Live elapsed for the running row ("12s" / "1m" / "1h5m"). Ticks
-    /// per-second under a minute (BET-630, D1) then per-minute; reuses the
-    /// canonical `compact` form so every timer reads identically.
-    static func liveElapsed(_ interval: TimeInterval) -> String {
-        compact(interval)
+    /// Seconds-precise elapsed for the in-chat working row, mirrored 1:1 with
+    /// the desktop transcript's `formatDuration` (src/renderer/chatUtils.ts).
+    /// Seconds survive past a minute, so a running turn ticks, not freezes on "1m".
+    static func elapsed(_ interval: TimeInterval) -> String {
+        guard interval.isFinite, interval >= 1 else { return "<1s" }
+        let total = Int(interval.rounded())
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 { return "\(h)h\(m)m\(s)s" }
+        if m > 0 { return "\(m)m\(s)s" }
+        return "\(s)s"
     }
 
-    /// Coarse recency for an idle row (BET-897). Interval-based on purpose — no
-    /// calendar, no locale, no "yesterday": pure and exactly testable.
-    static func relative(_ interval: TimeInterval) -> String {
-        let t = Int(max(0, interval))
-        if t < 60 { return "just now" }
-        let m = t / 60
-        if m < 60 { return "\(m)m ago" }
-        let h = m / 60
-        if h < 24 { return "\(h)h ago" }
-        return "\(h / 24)d ago"
+    /// Idle recency for a session row, mirrored 1:1 with the desktop sidebar's
+    /// `formatAge` (src/renderer/chatUtils.ts): "now" / "N m" / "N h" / "N d".
+    /// Negative and non-finite intervals clamp to "now".
+    static func age(_ interval: TimeInterval) -> String {
+        guard interval.isFinite, interval >= 60 else { return "now" }
+        if interval < 3600 { return "\(Int(interval / 60))m" }
+        if interval < 86400 { return "\(Int(interval / 3600))h" }
+        return "\(Int(interval / 86400))d"
     }
 }
 

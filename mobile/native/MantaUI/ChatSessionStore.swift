@@ -551,8 +551,12 @@ final class ChatSessionStore: ObservableObject {
             liveTailRowID = streamingTailID
         }
         // Prefer the box's turn start; keep the optimistic stamp `send()` set
-        // until the first frame confirms it; fall back only if neither exists.
-        runningSince = running ? (s.runningSince ?? runningSince ?? Date()) : nil
+        // until the first frame confirms it, but never invent one. The box only
+        // ever announces a running session together with the instant that turn
+        // started, so an absent start means we genuinely do not know one — and
+        // falling back to "now" is what made a force-quit relaunch restart the
+        // timer from zero. An unknown start renders no timer, which is honest.
+        runningSince = running ? (s.runningSince ?? runningSince) : nil
 
         // The session just went idle (stream fold set `running = false`): any
         // queued prompt may now be sent. Guard-based, so firing on whichever
