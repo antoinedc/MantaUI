@@ -2,45 +2,18 @@
 //
 // All functions here are pure (no I/O) so they can be unit-tested without a
 // box. The modal component in FolderPickerModal.tsx wires `window.api`
-// (fsListDirs / gitListWorktrees) to these helpers.
+// (fsListDirs / gitListWorktrees) to these helpers. The picker deals in
+// absolute paths only — there is no tilde anywhere in the UI (BET-1072).
 
 import type { WorktreeInfo } from "../shared/types";
 
-// Dimmed-but-selectable directories. `node_modules` and dot-folders render at
-// --tx4 so nothing becomes unreachable, but they recede visually. Hidden
-// files inside a listing are a different concern (fsListDirs already filters
-// to directories only); this is about *known noisy* directories that ARE
-// valid choices but visually pollute a browse.
-export function isDimmedDir(name: string): boolean {
-  if (name === "node_modules") return true;
-  // Dot-folders (.git, .venv, .cache, …). A leading dot is the convention;
-  // we do not enumerate a blocklist — the visual dim is the signal, not a
-  // permission gate.
-  return name.startsWith(".");
-}
-
-// Build clickable breadcrumbs from a path string. `~/code/foo` →
-// ["~", "~/code", "~/code/foo"]. Absolute `/home/dev/code` →
-// ["/", "/home", "/home/dev", "/home/dev/code"]. Tilde-form is preserved
-// so the chip the user picks matches what they would type.
+// Build clickable breadcrumbs from an absolute path. `/home/dev/code` →
+// ["/", "/home", "/home/dev", "/home/dev/code"].
 //
 // Returns [] for empty/invalid input (the caller renders nothing).
 export function breadcrumbs(path: string): string[] {
   const raw = (path ?? "").trim();
   if (!raw) return [];
-
-  // Tilde-form: "~/code/foo" → ["~", "~/code", "~/code/foo"]
-  if (raw === "~") return ["~"];
-  if (raw.startsWith("~/")) {
-    const parts = raw.slice(2).split("/").filter(Boolean);
-    const out: string[] = ["~"];
-    let acc = "~";
-    for (const p of parts) {
-      acc += "/" + p;
-      out.push(acc);
-    }
-    return out;
-  }
 
   // Absolute: "/home/dev/code" → ["/", "/home", "/home/dev", "/home/dev/code"]
   if (raw.startsWith("/")) {
@@ -61,19 +34,12 @@ export function breadcrumbs(path: string): string[] {
   return [raw];
 }
 
-// The parent path for a "go up one level" click. "~/code/foo" → "~/code",
-// "~/code" → "~", "~" → "~" (already at top). "/a/b" → "/a", "/a" → "/",
+// The parent path for a "go up one level" click. "/a/b" → "/a", "/a" → "/",
 // "/" → "/". Empty → "".
 export function parentPath(path: string): string {
   const raw = (path ?? "").trim();
   if (!raw) return "";
-  if (raw === "~") return "~";
   if (raw === "/") return "/";
-  if (raw.startsWith("~/")) {
-    const idx = raw.lastIndexOf("/");
-    if (idx <= 1) return "~"; // "~/x" → "~"
-    return raw.slice(0, idx);
-  }
   if (raw.startsWith("/")) {
     const idx = raw.lastIndexOf("/");
     if (idx === 0) return "/"; // "/a" → "/"
@@ -82,10 +48,9 @@ export function parentPath(path: string): string {
   return raw;
 }
 
-// Label for a breadcrumb crumb — the last segment, or "/" for root, or "~"
-// for home. Used so the clickable row shows "code" not "~/code".
+// Label for a breadcrumb crumb — the last segment, or "/" for root. Used so
+// the clickable row shows "code" not "/home/dev/code".
 export function crumbLabel(path: string): string {
-  if (path === "~") return "~";
   if (path === "/") return "/";
   const idx = path.lastIndexOf("/");
   if (idx < 0) return path;

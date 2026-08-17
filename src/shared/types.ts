@@ -326,6 +326,24 @@ export type WorktreeInfo = {
   detached: boolean;
 };
 
+// One entry in a directory listing from fsListDirs. All paths are absolute —
+// no tilde ever crosses the RPC boundary in either direction (BET-1072).
+export type DirEntry = {
+  /** Directory basename, e.g. "projects". */
+  name: string;
+  /** Absolute path, e.g. "/home/dev/projects". */
+  path: string;
+  /** True when `name` starts with "." — the renderer filters on this. */
+  hidden: boolean;
+};
+
+export type DirListing = {
+  /** The absolute directory that was actually listed (input, tilde-expanded). */
+  dir: string;
+  /** Every subdirectory of `dir`, sorted by name. Never truncated. */
+  entries: DirEntry[];
+};
+
 // BET-786: one entry in a repo-probe result. `forge` is the normalised forge
 // kind ("github" | "gitlab") from detectForge, null when there is no origin or
 // the host is unrecognised; `repoKey` is the canonical `host/owner/repo` key.

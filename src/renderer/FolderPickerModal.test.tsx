@@ -32,10 +32,19 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
   it("first Escape dismisses a live suggestion; second Escape closes the dialog", async () => {
     let cancelled = 0;
     installMockApi({
-      fsListDirs: (dir: unknown) =>
-        dir === "/home/dev/pro"
-          ? Promise.resolve(["/home/dev/projects"])
-          : Promise.resolve(["/home/dev"]),
+      fsListDirs: (dir: unknown) => {
+        const d = dir as string;
+        if (d === "/home/dev") {
+          return Promise.resolve({
+            dir: d,
+            entries: [{ name: "projects", path: "/home/dev/projects", hidden: false }],
+          });
+        }
+        return Promise.resolve({
+          dir: d,
+          entries: [{ name: "dev", path: "/home/dev", hidden: false }],
+        });
+      },
       gitListWorktrees: () => Promise.reject(new Error("not a repo")),
     });
     h = mount(
@@ -78,7 +87,8 @@ describe("FolderPickerModal — Escape (BET-724 review cycle 1 Question)", () =>
   it("Escape with no suggestion closes on the first press (unchanged case)", async () => {
     let cancelled = 0;
     installMockApi({
-      fsListDirs: () => Promise.resolve([]),
+      fsListDirs: (dir: unknown) =>
+        Promise.resolve({ dir: dir as string, entries: [] }),
       gitListWorktrees: () => Promise.reject(new Error("not a repo")),
     });
     h = mount(
