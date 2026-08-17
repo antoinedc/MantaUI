@@ -257,6 +257,25 @@ enum MantaStreamRouter {
         return s
     }
 
+    /// Return the box's authoritative start for a running-set entry, or keep
+    /// whatever we already had, and NEVER fabricate the local clock.
+    ///
+    /// `applyingRunningSet` is the reconnect snapshot of ALREADY-running
+    /// sessions, so a running entry here is a PERSISTED turn that can predate
+    /// the app launch by minutes. The live `stream/running` path may fall back
+    /// to `Date()` (a live "just started" edge, pinned by
+    /// `testRunningFrameWithoutSinceAndNoExistingFallsBackToNow`), but doing so
+    /// here renders a force-quit turn's session-list timer as "0" — it counts
+    /// up from the relaunch moment instead of the real box-reported start. So a
+    /// running entry whose `since` is missing keeps an existing stamp (an older
+    /// box may omit it) and, on a genuinely fresh state, leaves the start
+    /// UNKNOWN (`nil`) rather than lying that it began at the launch moment.
+    private static func resolveRunningSetSince(_ entry: StreamRunningSetPayload.Entry?, current: Date?) -> Date? {
+        guard let entry else { return nil }
+        if let since = entry.since { return Date(timeIntervalSince1970: since / 1000) }
+        return current
+    }
+
     /// Replace running state across ALL known sessions from the box's
     /// authoritative set. A session absent from the set is not running.
     /// Only `running` / `runningSince` are touched — `turnComplete`, `chunks`
@@ -272,16 +291,14 @@ enum MantaStreamRouter {
         for (sid, var s) in next {
             let entry = bySession[sid]
             s.running = entry != nil
-            s.runningSince = resolveRunningSince(
-                running: entry != nil, since: entry?.since, current: s.runningSince
-            )
+            s.runningSince = resolveRunningSetSince(entry, current: s.runningSince)
             next[sid] = s
         }
         // A session the device has never seen a frame for can still be running.
         for entry in payload.sessions where next[entry.sessionId] == nil {
             var s = MantaSessionStreamState(sessionId: entry.sessionId)
             s.running = true
-            s.runningSince = resolveRunningSince(running: true, since: entry.since, current: nil)
+            s.runningSince = resolveRunningSetSince(entry, current: nil)
             next[entry.sessionId] = s
         }
         return next
