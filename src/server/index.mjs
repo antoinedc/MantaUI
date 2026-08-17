@@ -332,6 +332,12 @@ const { stop: stopSchedulePoller } = startSchedulePoller(
   { intervalMs: 30000 },
 );
 
+// Deferred mobile-push deliveries (BET-1044): every 30s, resolve notifications
+// parked by the router (deferMobile) against the live desktop state and deliver
+// the ones whose user has gone away. See push.mjs / startDeferredMobilePoller.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopDeferredMobilePoller } = push.startDeferredMobilePoller();
+
 // Subscription plan usage engine (BET-737): polls each connected provider
 // adapter (claude/codex/kimi — src/server/usageAdapters/) for its rolling-5h
 // + weekly plan usage and publishes `usage.updated` on the bus whenever the
@@ -2553,8 +2559,9 @@ const handleRequest = async (req, res) => {
   // ---------- Native push (APNs) ----------
   // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
   //                        the session the user is actively viewing)
-  // POST /push/desktop-presence body = { visible }  (desktop Electron heartbeat;
-  //                        suppress mobile "done" while active on desktop)
+  // POST /push/desktop-presence body = { idleSeconds, lockedSeconds }  (desktop
+  //                        Electron heartbeat — raw system-idle + screen-lock;
+  //                        server decides away/present/gone)
   // POST /push/register-apns body = { token }  (BET-181: iOS app registers its
   //                        APNs device token. Same Bearer gate as every other
   //                        /push/* route. Server-side mirror of the
@@ -2578,10 +2585,19 @@ const handleRequest = async (req, res) => {
           visible: body?.visible,
         });
       } else if (path === "/push/desktop-presence") {
-        // Desktop (Electron) heartbeat: suppress mobile "done" pushes while
-        // the user is active on desktop. Posted on focus/blur/system-idle.
-        result = push.setDesktopPresence({ visible: body?.visible });
-        console.log(`[push] desktop-presence visible=${!!body?.visible}`);
+        // Desktop (Electron) heartbeat: raw system-idle + screen-lock
+        // observations, posted unconditionally every 30s. Away/present/gone is
+        // decided server-side (computeAwayAt / desktopState). Version skew is
+        // deliberately unhandled: an old desktop posting {visible} sends no
+        // idleSeconds, so the record shows idle 0 and reads "present" until its
+        // heartbeats lapse the TTL, after which it is "gone" and mobile resumes.
+        result = push.setDesktopPresence({
+          idleSeconds: body?.idleSeconds,
+          lockedSeconds: body?.lockedSeconds,
+        });
+        console.log(
+          `[push] desktop-presence idle=${body?.idleSeconds}s locked=${body?.lockedSeconds ?? "-"}`,
+        );
       } else if (path === "/push/answer") {
         // Direct reply to a Question tool from a notification action button.
         // answers is string[][] (one array per question); the SW sends

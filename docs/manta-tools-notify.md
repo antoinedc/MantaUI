@@ -44,22 +44,29 @@ AI notify tool ──┤→ manta-server router (push.mjs)
 
 ## The presence model (Slack/Discord parity)
 
-Desktop presence comes from `desktopPresence.ts` heartbeats; three states:
+Desktop presence comes from `desktopPresence.ts` heartbeats. The desktop
+reports raw observations every 30s, unconditionally — `{idleSeconds,
+lockedSeconds}` — and the SERVER computes the desktop's state. Window focus is
+NOT an input: Manta's normal pattern is to start a turn then work in another
+app on the same Mac, and a focus-based rule would call that "away". System-wide
+input idle measures the machine, not a window (Slack/Teams do the same).
+
+The two away conditions are merged into ONE instant by `computeAwayAt`
+(`min()`): idle for 10 min (`IDLE_AWAY_MS`) OR locked for 5 min (`LOCK_AWAY_MS`)
+— whichever trips first wins, so they are one state transition, not two timers.
+`desktopState` then yields three states:
 
 | State | Definition | Source |
 |---|---|---|
-| **active** | a manta window is focused **AND** `getSystemIdleTime() < 30s` | `_desktop.visible === true`, fresh `lastSeen` |
-| **idle / away** | app open (heartbeat fresh, `lastSeen` within 60s TTL) but `visible === false` (blurred or idle >30s) | fresh `lastSeen`, `visible:false`, outside grace |
-| **gone** | no heartbeat for > 60s TTL (app closed, machine asleep) | `lastSeen` stale |
+| **present** | app running and the user is at the machine | heartbeat fresh (`lastSeen` within `PRESENCE_TTL_MS` 90s) AND now before `awayAt` |
+| **away** | app running, but the user has left (locked or idle) | heartbeat fresh AND now past `awayAt` |
+| **gone** | no heartbeat for > 90s TTL (app closed, machine asleep) | `lastSeen` stale |
 
 Mobile presence comes from `/push/focus {sessionId, visible}`:
 - **foreground** (`_focus.visible`) / **background**, plus the session it's
   viewing.
 
-This is exactly Slack/Discord "active / away / offline" per device. The
-"active = focus **AND** recent input" rule is load-bearing and already
-documented in `desktopPresence.ts` — picking up your phone does not blur the Mac
-window, so focus alone would mute mobile forever.
+This is exactly Slack/Discord "active / away / offline" per device.
 
 ## Notification tiers
 
@@ -70,20 +77,21 @@ Two tiers, mirroring how Slack/Discord treat @mentions/DMs vs. channel noise:
   immediately; never delayed, never escalation-gated. (This preserves today's
   behavior: blocking events already fan out to all devices.)
 - **informational** — `session.idle`→"done" and a normal `notify`. Follows the
-  soft **desktop-first → mobile-escalation** ladder below.
+  **desktop-first → deferred-mobile** ladder below.
 
-## Routing matrix (informational tier)
+## Routing matrix (informational tier, by `desktopState`)
 
-For a notification about session `S`, given device states:
+For a notification about session `S`. `deferMobile` = the mobile notification is
+parked (delivered later or dropped stale), never added.
 
-| Desktop | Mobile | Desktop OS notif | Mobile push |
+| Desktop state | Mobile | Desktop OS notif | Mobile push |
 |---|---|---|---|
-| active, viewing `S` | – | – (already on screen) | – |
-| active, other session | – | ✅ now | – |
-| idle/away (app open) | – | ✅ now | ⏳ after `ESCALATE_MS` if unacked |
-| gone | – | – | ✅ now |
-| any | foreground viewing `S` | (desktop rules) | – (in-app already shows it) |
-| gone | foreground other session | – | ✅ (push; PWA shows in-app) |
+| present | not viewing `S` | ✅ now | ⏳ deferred until away/gone or 30-min stale |
+| present | foreground viewing `S` | – (already on screen) | – |
+| away | not viewing `S` | ✅ now | ✅ now |
+| away | foreground viewing `S` | ✅ now | – (in-app already shows it) |
+| gone | not viewing `S` | – | ✅ now |
+| gone | foreground other session | – | ✅ (push) |
 
 **Blocking tier** collapses the matrix: desktop now (unless viewing `S`) **and**
 mobile now (unless mobile foreground viewing `S`) — both, immediately.
@@ -97,38 +105,41 @@ we don't have to plumb the desktop's active session all the way to the server.
 Mobile can't do this — a push can't be un-sent — so mobile's "viewing `S`"
 suppression stays server-side via the existing `/push/focus`.
 
-## Escalation — desktop-first, then mobile if unhandled
+## Deferred mobile — desktop-first, then deliver when the user leaves
 
-`ESCALATE_MS = 90_000` (locked). When the router decides desktop is **idle/away**
-for an informational notification:
+There is no flat escalation timer any more. When the router decides
+`deferMobile` (desktop state `present`), the notification payload is parked in
+one `_deferredMobile` list keyed by `tag`. A single 30s poller
+(`flushDeferredMobile` / `startDeferredMobilePoller`, started from
+`index.mjs` like the other pollers) re-evaluates each parked entry against the
+LIVE `awayAt` on every tick:
 
-1. Emit the desktop directive **now** (the Mac is still open; you may wander
-   back).
-2. Schedule a mobile push for `now + ESCALATE_MS`, keyed by the notification
-   `tag` (per session+kind, so a re-notify replaces rather than stacks a second
-   timer).
-3. **Cancel** the pending escalation when any of:
-   - desktop becomes **active** again (`setDesktopPresence visible:true`) —
-     cancels *all* pending escalations (the user is back at the desk; clicking
-     the desktop notification focuses the app, which trips this naturally);
-   - the session resumes or the ask is answered for `S`
-     (`session.status busy`, `question.replied/rejected`,
-     `permission.replied/rejected`) — cancels escalations for that session;
-   - a newer notification with the same `tag` supersedes it.
+1. Emit the desktop directive **now** (the Mac is open; you may wander back).
+2. Park the mobile push keyed by the notification `tag` (per session+kind, so a
+   re-notify replaces rather than stacks).
+3. On a later flush: desktop **away** or **gone** → deliver to mobile now; held
+   **> 30 min** → drop without delivering (stale); still **present** → leave it.
 
-If the desktop is **gone** (TTL lapsed) there's no desktop leg and the mobile
-push fires immediately — your scenario "AFK too long, I'm probably not at my
-desktop at all" (the heartbeat is what proves the Mac is even reachable).
+**Cancel** without delivering when any of:
+- a heartbeat reports a LOWER `idleSeconds` than the last one (the user came
+  back — `setDesktopPresence` cancels all parked deliveries; they'll see the
+  desktop notification);
+- the session resumes or the ask is answered for `S` (`cancelDeferredMobileForSession`
+  from the busy/reply branches in `firePush`);
+- a newer notification with the same `tag` supersedes it.
+
+If the desktop is **gone** (TTL lapsed) the router routes mobile immediately —
+your scenario "AFK too long, I'm probably not at my desktop at all".
 
 ## The four asked scenarios, mapped
 
-1. **Working on desktop, another session has a notif** → desktop **active** →
-   desktop OS notification only, mobile suppressed. ✅
+1. **Working on desktop, another session has a notif** → desktop **present** →
+   desktop OS notification now, mobile **deferred** until you leave the desk. ✅
 2. **Working on mobile, another session has a notif** → desktop not active →
-   mobile leg fires (the foregrounded PWA shows it in-app; a background PWA gets
-   the push). Desktop silent. ✅
-3. **AFK, desktop open** → desktop **idle/away** → desktop notification now,
-   mobile push escalates after 90s unless you return / handle it. ✅
+   desktop **gone** (or away) → mobile leg fires (a foregrounded phone shows it
+   in-app; a background one gets the push). ✅
+3. **AFK, desktop open** → desktop **away** → desktop notification now + mobile
+   push now. ✅
 4. **AFK too long** → desktop **gone** (no heartbeat) → mobile only, immediately.
    ✅
 
@@ -137,15 +148,14 @@ desktop at all" (the heartbeat is what proves the Mac is even reachable).
 - **Active on desktop but on a different chat than the notif** — desktop OS
   notification (you're at the machine but not looking at that chat); the in-app
   sidebar dot alone is too easy to miss.
-- **Both desktop active + mobile foreground** — desktop wins, mobile suppressed
+- **Both desktop present + mobile foreground** — desktop wins, mobile suppressed
   (Discord rule).
 - **Re-notify / dedupe** — reuse the existing `tag` (`<kind>-<sessionId>`) so a
   second notification for the same session+kind *replaces* the first
-  (`renotify` on the SW; `tag`-collapse on Electron) instead of stacking.
+  (a same-tag entry in `_deferredMobile` is overwritten) instead of stacking.
 - **Subagent / unresolved session** — a "done" whose sessionID has no tmux
-  `@manta-session-id` is a subagent child or orphan; already suppressed by
-  `shouldSuppressUnresolvedDone`. The `notify` tool always carries a real
-  session, so it's unaffected.
+  `@manta-session-id` is a subagent child or orphan; already suppressed.
+  The `notify` tool always carries a real session, so it's unaffected.
 - **Quiet hours / DND** — Slack's signature feature. **Deferred to v2** (locked).
   Sketch: an `AppConfig.quietHours = {start, end}`; during the window force
   informational notifs to silent-mobile-only (or hold), blocking still fires.
@@ -183,13 +193,14 @@ Server-owned core (testable first, no device wiring):
 
 | Piece | File |
 |---|---|
-| Pure router `routeNotification(payload, presence, now)` → `{desktop, mobileNow, escalateAfterMs}` | `src/server/push.mjs` |
-| Escalation timers (`_escalations` Map keyed by tag) + cancel hooks | `src/server/push.mjs` |
+| Pure router `routeNotification(payload, presence, now)` → `{desktop, mobileNow, deferMobile}` | `src/server/push.mjs` |
+| Away calculation + state (`computeAwayAt`, `desktopState`) | `src/server/push.mjs` |
+| Parked mobile list (`_deferredMobile` Map keyed by tag) + flush poller | `src/server/push.mjs` |
 | Desktop sink injection (`setDesktopSink(fn)` → `bus.publish({kind:"desktopNotify"})`) | `src/server/push.mjs` + wired in `src/server/index.mjs` |
 | `POST /api/notify` endpoint | `src/server/index.mjs` |
 | `notify` opencode tool | `docs/opencode-tools/notify.ts` |
 | Tool guidance | `docs/opencode-tools/AGENTS.md` |
-| Tests (router matrix + escalation fire/cancel) | `src/server/push.test.mjs` |
+| Tests (router matrix + deferred flush/cancel) | `src/server/push.test.mjs` |
 
 Desktop leg:
 
@@ -214,7 +225,8 @@ Mobile leg: unchanged transport; the router just gates `sendPush` as today.
 ## Test coverage (`src/server/push.test.mjs`, node:test)
 
 Pure logic only:
-- `routeNotification`: each matrix row (active-viewing/active-other/idle/gone ×
-  blocking/informational), TTL-stale → mobile, grace window.
-- Escalation: idle informational schedules a timer; desktop-active cancels;
-  reply event cancels by session; same-tag supersede replaces.
+- `routeNotification`: each matrix row (present/away/gone × blocking/informational,
+  mobile-viewing suppression).
+- `computeAwayAt` / `desktopState`: idle+lock → one instant; fresh/past-awayAt/stale-TTL → present/away/gone.
+- Deferred delivery: park while present, deliver on away/gone, drop stale after 30 min,
+  cancel on lower-idle heartbeat / by session, same-tag supersede replaces.
