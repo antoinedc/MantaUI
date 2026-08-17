@@ -114,12 +114,7 @@ final class VoiceRecorder: ObservableObject {
             currentPhase: phase, input: .press, elapsedMs: 0)
         phase = nextPhase
         publishHaptic(effect)
-        beginCapture()
-    }
 
-    /// Begin the audio capture after the machine has armed a take. Shared by
-    /// the press-start (`start()`) and the first tap of the tap-toggle path.
-    private func beginCapture() {
         stopRequested = false
         pendingTake = nil
         accumulatedMs = 0
@@ -222,30 +217,15 @@ final class VoiceRecorder: ObservableObject {
         return effect
     }
 
-    /// The tap-toggle path (decision #5): a tap ON starts a hands-free,
-    /// finger-up take (→ `.recordingLocked`); a tap while a take is live sends
-    /// it (toggle OFF). Feed the machine's `.tapToggle`; returns the finished
-    /// take only when the tap ends the take.
-    @discardableResult
-    func tapToggle() -> Take? {
-        if phase == .idle {
-            // Tap #1: start a finger-up take into the held surface.
-            let (next, effect) = VoiceGesture.transition(
-                currentPhase: .idle, input: .tapToggle, elapsedMs: 0)
-            phase = next
-            publishHaptic(effect)
-            beginCapture()
-            return nil
-        }
+    /// Lock a held take into the hands-free bar (decision #5/#6): a press that
+    /// ended under the hold threshold is a tap and locks rather than sending.
+    /// Feeds the machine's `.tapLock`; a locked take keeps recording hands-free.
+    func lockTake() {
         let (next, effect) = VoiceGesture.transition(
-            currentPhase: phase, input: .tapToggle, elapsedMs: currentElapsedMs())
+            currentPhase: phase, input: .tapLock, elapsedMs: currentElapsedMs())
         publishHaptic(effect)
-        if next == .idle {
-            // Tap #2: "a second tap stops" — stop and send.
-            return finalizeTake()
-        }
+        guard next != phase else { return }
         phase = next
-        return nil
     }
 
     /// Locked-bar send: feed the machine's `.tapSend` and return the take.

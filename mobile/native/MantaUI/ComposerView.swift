@@ -91,6 +91,12 @@ struct ComposerView: View {
     @State private var showDocPicker = false
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var micAvailable = false
+    /// When the current mic press began — nil while no finger is down. Sets the
+    /// hold-vs-tap boundary at release (BET-1051).
+    @State private var micTouchStart: Date?
+    /// The live translation of the mic's ongoing drag, fed to the held surface
+    /// overlay so the hint shift + lock-glyph brightening track the finger.
+    @State private var micTranslation: CGSize = .zero
     @State private var hint: String?
     @State private var showHint = false
     @FocusState private var inputFocused: Bool
@@ -192,22 +198,38 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             }
-            if recorder.phase == .idle {
-                inputBox
-                    .transition(.opacity)
-            } else {
-                VoiceRecordingSurface(
+            if recorder.phase == .recordingLocked || recorder.phase == .paused {
+                VoiceRecordingLockedView(
                     recorder: recorder,
-                    isRTL: isRTL,
-                    onTake: { take in
-                        Task { await handleVoiceTake(take) }
+                    tokens: tokens,
+                    onTake: { take in Task { await handleVoiceTake(take) } },
+                    onDiscarded: {
+                        UIAccessibility.post(notification: .announcement, argument: "Recording discarded")
                     }
                 )
                 .transition(.opacity)
+            } else {
+                inputBox
+                    .overlay {
+                        if recorder.phase == .recordingHeld || recorder.phase == .cancelling {
+                            VoiceRecordingHeldView(
+                                recorder: recorder,
+                                translation: micTranslation,
+                                isRTL: isRTL,
+                                tokens: tokens
+                            )
+                            .transition(.opacity)
+                        }
+                    }
+                    .transition(.opacity)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
+        // The recording VoiceOver announcements + haptics, applied ONCE to this
+        // persistent container so `lastAnnounced` survives the held-overlay ⇄
+        // locked-bar swap without resetting (BET-1051).
+        .modifier(VoiceFeedback(recorder: recorder))
         .animation(.smooth(duration: 0.22), value: recorder.phase != .idle)
         // ONE presentation per view. The model sheet, the photo picker and the
         // file importer were all attached HERE, and SwiftUI honours only one of
@@ -844,13 +866,44 @@ struct ComposerView: View {
         .buttonStyle(.plain)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { _ in startRecordingIfPermitted() }
-                .onEnded { _ in }
+                .onChanged { value in
+                    if micTouchStart == nil {
+                        micTouchStart = Date()
+                        startRecordingIfPermitted()
+                    }
+                    micTranslation = value.translation
+                    recorder.drag(dx: value.translation.width,
+                                  dy: value.translation.height,
+                                  isRTL: isRTL)
+                }
+                .onEnded { _ in
+                    let heldMs = micTouchStart.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+                    micTouchStart = nil
+                    withAnimation(.smooth(duration: 0.22)) { micTranslation = .zero }
+                    finishMicRelease(heldMs: heldMs)
+                }
         )
         .accessibilityLabel("Record")
         .accessibilityHint("Tap to record, then slide up to lock or left to cancel")
         .accessibilityIdentifier("mic-button")
         .disabled(!micAvailable)
+    }
+
+    /// Map the end of the mic's ONE continuous gesture to the machine input that
+    /// gesture just produced. Decides nothing itself — it only picks the input.
+    private func finishMicRelease(heldMs: Int) {
+        switch recorder.phase {
+        case .recordingHeld:
+            if heldMs < Waveform.Constants.tapHoldMs {
+                recorder.lockTake()                       // a tap → hands-free bar
+            } else if let take = recorder.stop() {        // a hold → send
+                Task { await handleVoiceTake(take) }
+            }
+        case .cancelling:
+            recorder.stop()                               // the machine discards
+        default:
+            break                                         // locked, or never armed
+        }
     }
 
     private var micIcon: String {
@@ -876,10 +929,9 @@ struct ComposerView: View {
                 hintState("Microphone permission is required")
                 return
             }
-            // The finger may have lifted while the permission prompt was up;
-            // the held surface (which appears on start) owns the continued
-            // gesture, so we don't re-check here — desktop parity keeps the
-            // arms-the-take on press semantics of BET-1027.
+            // The finger may have lifted while the permission prompt was up; if
+            // it did, the mic gesture's onEnded (which continues to own the
+            // touch — see BET-1051) releases the take normally.
             recordingStartInFlight = false
             recorder.start()
         }

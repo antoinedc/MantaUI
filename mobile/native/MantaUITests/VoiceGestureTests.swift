@@ -184,37 +184,34 @@ final class VoiceGestureTests: XCTestCase {
         XCTAssertEqual(rtlLeft.0, .recordingHeld, "RTL: dragging left must not cancel (mirrored)")
     }
 
-    // MARK: - tap-toggle (decision #5 — tap #1 starts, tap #2 stops)
+    // MARK: - tap-lock (BET-1051, decision #5/#6 — a tap locks, it never sends)
 
-    func testTapToggleFromIdleStartsHeld() {
-        // Tap #1 starts a finger-up take showing the held surface.
-        let (phase, effect) = step(.idle, .tapToggle, elapsedMs: 0)
-        XCTAssertEqual(phase, .recordingHeld)
-        XCTAssertEqual(effect, .haptic(.arm))
+    func testTapLockFromHeldLocks() {
+        // A press that ended under the hold threshold is a tap → lock.
+        let (phase, effect) = step(.recordingHeld, .tapLock, elapsedMs: 300)
+        XCTAssertEqual(phase, .recordingLocked)
+        XCTAssertEqual(effect, .haptic(.lock))
     }
 
-    func testTapToggleFromHeldSends() {
-        // Tap #2 while held: "a second tap stops" → stop and send.
-        let (phase, effect) = step(.recordingHeld, .tapToggle, elapsedMs: 300)
+    func testTapLockFromIdleUnreachableNoop() {
+        // `tapLock` only ever follows a press, so `.idle` is unreachable — but
+        // it must be a safe no-op, not a send.
+        let (phase, effect) = step(.idle, .tapLock, elapsedMs: 0)
         XCTAssertEqual(phase, .idle)
-        XCTAssertEqual(effect, .send)
+        XCTAssertEqual(effect, .none)
     }
 
-    func testTapToggleFromLockedSends() {
-        let (phase, effect) = step(.recordingLocked, .tapToggle, elapsedMs: 5000)
-        XCTAssertEqual(phase, .idle)
-        XCTAssertEqual(effect, .send)
+    func testTapLockFromLockedNoop() {
+        // Decision #6: the bar has an explicit send button; a second tap no
+        // longer sends.
+        let (phase, effect) = step(.recordingLocked, .tapLock, elapsedMs: 5000)
+        XCTAssertEqual(phase, .recordingLocked)
+        XCTAssertEqual(effect, .none)
     }
 
-    func testTapToggleFromPausedSends() {
-        let (phase, effect) = step(.paused, .tapToggle, elapsedMs: 5000)
-        XCTAssertEqual(phase, .idle)
-        XCTAssertEqual(effect, .send)
-    }
-
-    func testTapToggleFromCancellingIgnored() {
-        let (phase, effect) = step(.cancelling, .tapToggle, elapsedMs: 3000)
-        XCTAssertEqual(phase, .cancelling)
+    func testTapLockFromPausedNoop() {
+        let (phase, effect) = step(.paused, .tapLock, elapsedMs: 5000)
+        XCTAssertEqual(phase, .paused)
         XCTAssertEqual(effect, .none)
     }
 

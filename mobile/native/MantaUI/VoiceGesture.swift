@@ -12,16 +12,15 @@ import Foundation
 // ```
 // Idle ─────────────────────────────────────────► RecordingHeld
 //   │                                                │
-//   │ press                                          │ release(hold,≥cap? no) → .send
-//   │ tapToggle                                      │ release(too short) → Idle (silent)
+//   │ press                                          │ release(hold) → .send
+//   │                                                │ release(too short) → Idle (silent)
 //   ▼                                                │ drag up   > lockThreshold → RecordingLocked
 // RecordingLocked ◄───────────────────────────────── │ drag left > cancelThreshold → Cancelling
-//   │  tapToggle / tapSend ──► .send                  │
-//   │  tapDiscard ─────────► .discard                 │
-//   │  tapPause ──► Paused ⇄ tapResume                │
-// Cancelling ── dragBack ──► RecordingHeld            │
-//            └─ release ──► .discard                  │
-// RecordingLocked/Paused ── tapToggle ──► .send   (tap-toggle OFF; decision #5)
+//   │  tapSend ──► .send (bar button)                │ tapLock (release under tapHoldMs) → RecordingLocked
+//   │  tapDiscard ───► .discard                      │
+//   │  tapPause ──► Paused ⇄ tapResume               │
+// Cancelling ── dragBack ──► RecordingHeld           │
+//            └─ release ──► .discard                 │
 // any ── elapsed ≥ 300_000ms ──► .send          (the take is KEPT)
 // any ── interrupted ──► .discard
 // ```
@@ -73,11 +72,12 @@ enum VoiceInput: Equatable {
     case tapPause
     case tapResume
     case tapDiscard
-    /// The tap-toggle path (decision #5): a tap ON starts a hands-free,
-    /// finger-up take (→ `.recordingLocked`), a tap while a take is live
-    /// sends it (toggle OFF). Distinct from `.release` so a quick tap is not
+    /// The single meaning of "a press ended quickly enough to be a tap": lock
+    /// the take into the hands-free bar. It no longer toggles anything — a tap
+    /// ON locks (decision #5/#6), and the bar's own send button is the only
+    /// way to stop it. Distinct from `.release` so a quick tap is not
     /// swallowed by the `.release` mis-tap discard rules.
-    case tapToggle
+    case tapLock
 }
 
 enum VoiceGesture {
@@ -168,19 +168,10 @@ enum VoiceGesture {
             default: return (currentPhase, .none)
             }
 
-        case .tapToggle:
+        case .tapLock:
             switch currentPhase {
-            case .idle:
-                // Tap #1: start a finger-up take — the held surface shows
-                // immediately (decision #5: "Tap starts…without sustaining a
-                // drag").
-                return (.recordingHeld, .haptic(.arm))
-            case .recordingHeld, .recordingLocked, .paused:
-                // Tap #2: "…and a second tap stops" — stop and send. From a
-                // locked take this is the same as `.tapSend`.
-                return (.idle, .send)
-            default:
-                return (currentPhase, .none)
+            case .recordingHeld: return (.recordingLocked, .haptic(.lock))
+            default: return (currentPhase, .none)
             }
 
         case .interrupted:
