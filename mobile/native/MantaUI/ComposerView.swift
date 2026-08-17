@@ -36,6 +36,15 @@ struct ComposerAttachment: Identifiable, Equatable {
     var isUploading: Bool { remotePath == nil }
 }
 
+/// The transient composer-state of a completed voice take while it uploads +
+/// transcribes (and, on the 409 path, the stored note offered a Retry).
+struct VoicePendingState: Equatable {
+    var peaks: [UInt8]
+    var durationMs: Int
+    var noteID: String?
+    var error: String?
+}
+
 struct ComposerView: View {
     let sessionId: String
     let projectName: String
@@ -86,6 +95,10 @@ struct ComposerView: View {
     @State private var showHint = false
     @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
+    /// The transient composer-state row for a voice take: shown while it
+    /// uploads + transcribes, and kept (in place of discarding the recording)
+    /// with a Retry when the box stores it but transcription fails (409).
+    @State private var voicePending: VoicePendingState?
     /// High-water flag for a press whose permission prompt is still resolving —
     /// lets the mic's press-start re-check after the await so a second change
     /// doesn't double-request permission.
@@ -165,6 +178,20 @@ struct ComposerView: View {
             // by the recording surface (BET-1028, decision #1) — same position,
             // same outer padding, so nothing in the layout jumps. The surface
             // renders the machine's `VoicePhase`; it owns no transition logic.
+            // A completed take: store-and-transcribe it in ONE round trip (the
+            // clip is NOT sent to the model — only its transcript text is, via
+            // the normal send path). A stored-but-untranscribed take stays
+            // pending with a Retry rather than being discarded.
+            if let pending = voicePending {
+                VoiceNotePendingRow(
+                    peaks: pending.peaks,
+                    durationMs: pending.durationMs,
+                    error: pending.error,
+                    tokens: tokens,
+                    onRetry: pending.noteID != nil ? { retryPendingVoice() } : nil
+                )
+                .transition(.opacity)
+            }
             if recorder.phase == .idle {
                 inputBox
                     .transition(.opacity)
@@ -173,7 +200,7 @@ struct ComposerView: View {
                     recorder: recorder,
                     isRTL: isRTL,
                     onTake: { take in
-                        Task { await transcribe(data: take.data) }
+                        Task { await handleVoiceTake(take) }
                     }
                 )
                 .transition(.opacity)
@@ -858,14 +885,75 @@ struct ComposerView: View {
         }
     }
 
-    private func transcribe(data: Data) async {
-        let result = try? await api.voiceTranscribe(data: data, mime: "audio/mp4")
-        let transcript = result?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !transcript.isEmpty else {
-            hintState("No speech detected")
-            return
+    /// A completed take: store the clip AND transcribe it in ONE round trip
+    /// (`POST /api/voice`). The clip is NOT sent to the model — only the
+    /// returned transcript text is, submitted through the EXISTING `submit()`
+    /// path so slash commands, mentions and model resolution behave identically
+    /// (BET-1029 decision #1/#2). This replaces the legacy `voice:transcribe`
+    /// dictation-only call.
+    @MainActor
+    private func handleVoiceTake(_ take: VoiceRecorder.Take) async {
+        voicePending = VoicePendingState(peaks: take.peaks, durationMs: take.durationMs, noteID: nil, error: nil)
+        do {
+            let note = try await api.uploadVoiceNote(
+                sessionId: sessionId,
+                audio: take.data,
+                mime: "audio/mp4",
+                durationMs: take.durationMs,
+                peaks: take.peaks
+            )
+            let transcript = note.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else {
+                voicePending = nil
+                hintState("No speech detected")
+                return
+            }
+            voicePending = nil
+            submitVoiceTranscript(transcript)
+        } catch MantaError.storedButUntranscribed(let noteID) {
+            // The recording was KEPT on the box; keep the pending row and offer
+            // a Retry against its id rather than discarding the take.
+            voicePending?.noteID = noteID
+            voicePending?.error = "transcription failed"
+        } catch {
+            voicePending = nil
+            hintState("Voice note failed — try again")
         }
-        await MainActor.run { insertAtCaret(transcript) }
+    }
+
+    /// Submit a transcript through the existing typed-send path (caller sets
+    /// the composed text and reuses `submit()` unchanged).
+    @MainActor
+    private func submitVoiceTranscript(_ transcript: String) {
+        text = transcript
+        submit()
+    }
+
+    /// Retry transcription for a stored-but-untranscribed note. On success its
+    /// transcript is submitted through the normal send path; a second 409 keeps
+    /// the pending row's Retry.
+    @MainActor
+    private func retryPendingVoice() {
+        guard let pending = voicePending, let noteID = pending.noteID else { return }
+        Task {
+            do {
+                let note = try await api.retryVoiceNote(id: noteID)
+                let transcript = note.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !transcript.isEmpty else {
+                    voicePending?.error = "transcription failed"
+                    hintState("Transcription failed again")
+                    return
+                }
+                voicePending = nil
+                submitVoiceTranscript(transcript)
+            } catch MantaError.storedButUntranscribed(_) {
+                voicePending?.error = "transcription failed"
+                hintState("Transcription failed again")
+            } catch {
+                voicePending = nil
+                hintState("Retry failed — check the connection")
+            }
+        }
     }
 
     /// Insert text at the caret (dictate). If the composer's text field is the

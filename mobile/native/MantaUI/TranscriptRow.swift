@@ -43,10 +43,21 @@ extension TranscriptBlock {
             return "u\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
         case .prose(let text, let at):
             return "p\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
+        case .file(let attachment):
+            return "f" + attachmentIdentity(attachment)
         case .steps(let content): return "s" + content.rows.map(\.id).joined(separator: "|")
         case .notice(let text, let kind): return "n\(kind)\(text.hashValue)"
         case .queuedPrompt(let text): return "q\(text.hashValue)"
         }
+    }
+}
+
+/// A content-stable identity for an attachment block, unique across the
+/// attachment kinds. Used by `stableScrollID` so a `.file` row survives a
+/// refetch unchanged.
+private func attachmentIdentity(_ attachment: TranscriptAttachment) -> String {
+    switch attachment.kind {
+    case .voiceNote(let note): return "voice:\(note.id)"
     }
 }
 
@@ -143,6 +154,12 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
             .padding(.bottom, Metrics.spacing.sp4)
     case .prose(let text, _):
         MantaProse(text: text, tokens: tokens)
+    case .file(let attachment):
+        // The voice-note player sits directly under the user band it belongs
+        // to: 12px horizontal, 14px below. Image and generic-file rendering are
+        // deliberately not implemented yet — the `.file` case only renders the
+        // voice-note flavour (see `attachmentView`).
+        attachmentView(attachment, tokens: tokens)
     case .steps(let content):
         // Machinery is inset to the same margin as prose. Only the USER
         // band is full-bleed (§8) — that edge-to-edge treatment is what
@@ -160,6 +177,19 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens) -> some View 
         // current turn ends, so it renders a preview of where that will be.
         UserBand(text: text, tokens: tokens)
             .opacity(0.45)
+            .padding(.bottom, Metrics.spacing.sp4)
+    }
+}
+
+/// Render a `.file` attachment block. ONLY the voice-note flavour renders — an
+/// image or generic-file part is deliberately NOT implemented yet (BET-1029);
+/// it would return nothing here, exactly as it did before this case existed.
+@ViewBuilder
+private func attachmentView(_ attachment: TranscriptAttachment, tokens: Tokens) -> some View {
+    switch attachment.kind {
+    case .voiceNote(let note):
+        VoiceNotePlayerRow(note: note, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp4)
     }
 }

@@ -4,6 +4,9 @@ enum MantaError: Error, Equatable {
     case authRequired
     case server(String)
     case transport(String)
+    /// A voice clip was stored but its transcription failed (HTTP 409). The
+    /// recorder must be KEPT — the caller surfaces a Retry against the id.
+    case storedButUntranscribed(noteID: String)
 }
 
 final class MantaAPIClient: Sendable {
@@ -471,6 +474,124 @@ final class MantaAPIClient: Sendable {
         try await Task.sleep(nanoseconds: 0)
         let result: [String: JSONValue]? = try await call("voice:transcribe", args: [input], as: [String: JSONValue].self)
         return ChatJSON.string(result?["text"])
+    }
+
+    // MARK: - Voice notes (BET-1029)
+
+    /// Store a voice clip AND transcribe it in ONE round trip (`POST
+    /// /api/voice?session=<id>`). The box owns both; splitting them would leave
+    /// orphaned audio on a failure. Body is the RAW bytes (octet-stream), with
+    /// `x-mime`, `x-duration-ms` and `x-peaks` (base64 of the peak bytes) — the
+    /// exact contract in `src/renderer/api/httpApi.ts` / `src/server/index.mjs`.
+    ///
+    /// Throws `MantaError.storedButUntranscribed(id:)` for HTTP 409 — the clip
+    /// WAS stored but transcription failed; the caller keeps the note (with its
+    /// id) and offers Retry rather than discarding the recording.
+    func uploadVoiceNote(sessionId: String, audio: Data, mime: String,
+                         durationMs: Int, peaks: [UInt8]) async throws -> VoiceNote {
+        var url = serverURL.appendingPathComponent("api").appendingPathComponent("voice")
+        url.append(queryItems: [URLQueryItem(name: "session", value: sessionId)])
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(mime, forHTTPHeaderField: "x-mime")
+        request.setValue(String(durationMs), forHTTPHeaderField: "x-duration-ms")
+        request.setValue(Data(peaks).base64EncodedString(), forHTTPHeaderField: "x-peaks")
+        request.httpBody = audio
+
+        let (dataOut, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode == 409 {
+            let id = ((try? JSONSerialization.jsonObject(with: dataOut) as? [String: Any])??["id"]) as? String ?? ""
+            throw MantaError.storedButUntranscribed(noteID: id)
+        }
+        guard let object = (try? JSONSerialization.jsonObject(with: dataOut)) as? [String: Any] else {
+            throw MantaError.transport("invalid voice upload envelope")
+        }
+        if let error = object["error"] as? String, !error.isEmpty {
+            throw MantaError.server(error)
+        }
+        return VoiceNote(
+            id: object["id"] as? String ?? "",
+            sessionId: sessionId,
+            transcript: object["transcript"] as? String ?? "",
+            mime: mime,
+            durationMs: durationMs,
+            peaks: peaks,
+            createdAt: Int(Date().timeIntervalSince1970 * 1000),
+            expiresAt: object["expiresAt"] as? Int,
+            audioAvailable: true
+        )
+    }
+
+    /// `voice:list-notes` — note metadata only (no audio bytes), oldest first,
+    /// filtered to the session. Peak bytes are decoded from the wire's base64.
+    func voiceNotes(sessionId: String) async throws -> [VoiceNote] {
+        try await call("voice:list-notes", args: [["sessionId": sessionId]], as: [VoiceNote].self) ?? []
+    }
+
+    /// Stream a note's audio bytes back (`GET /api/voice/<id>`), bearer auth
+    /// (cannot ride a URL or an `<audio src>`). Non-2xx THROWS — a missing or
+    /// swept clip must be a visible failure.
+    func voiceNoteAudio(id: String) async throws -> Data {
+        let url = serverURL.appendingPathComponent("api/voice/\(id)")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            throw MantaError.server("voice audio unavailable (\(http.statusCode))")
+        }
+        return data
+    }
+
+    /// Re-run transcription for a note whose transcript came back empty (the
+    /// 409 path). 200 → transcript present; 409 → failed again.
+    func retryVoiceNote(id: String) async throws -> VoiceNote {
+        let url = serverURL.appendingPathComponent("api/voice/\(id)/retry")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (dataOut, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode == 401 {
+            throw MantaError.authRequired
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode == 409 {
+            throw MantaError.storedButUntranscribed(noteID: id)
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            throw MantaError.server("retry failed (\(http.statusCode))")
+        }
+        guard let object = (try? JSONSerialization.jsonObject(with: dataOut)) as? [String: Any] else {
+            throw MantaError.transport("invalid retry envelope")
+        }
+        if let error = object["error"] as? String, !error.isEmpty {
+            throw MantaError.server(error)
+        }
+        return VoiceNote(
+            id: object["id"] as? String ?? id,
+            sessionId: "",
+            transcript: object["transcript"] as? String ?? "",
+            mime: "audio/mp4",
+            durationMs: 0,
+            peaks: [],
+            createdAt: 0,
+            expiresAt: nil,
+            audioAvailable: true
+        )
     }
 
     /// `git:list-worktrees` — git worktree fan-out detection for a folder.

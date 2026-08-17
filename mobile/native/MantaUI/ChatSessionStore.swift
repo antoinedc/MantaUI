@@ -148,6 +148,11 @@ struct QueuedPrompt: Equatable {
 final class ChatSessionStore: ObservableObject {
 
     @Published private(set) var transcript: [TranscriptBlock] = []
+    /// The voice notes recorded in this session (fetched on load + refreshed
+    /// after a send). Their transcripts claim user messages via
+    /// `buildVoiceNoteMap`, so a dictated note renders its player bubble in the
+    /// transcript under the message it became (BET-1029).
+    @Published private(set) var voiceNotes: [VoiceNote] = []
     /// The LAST fetched raw transcript (`opencode:messages`), kept alongside the
     /// rendered `transcript` blocks so the plan card can run its exact
     /// derivation (`isPlanExitQuestion` / `extractPlanData` need the raw tool
@@ -299,6 +304,10 @@ final class ChatSessionStore: ObservableObject {
     /// arrived mid-flight so the refresh still happens — exactly once — after.
     private var fetchInFlight = false
     private var fetchPending = false
+    /// The message-id → voice-note association, recomputed whenever the message
+    /// window or the notes change. Baked into `transcript` at mapping time
+    /// (BET-1029).
+    private var voiceNoteMap: [String: VoiceNote] = [:]
     /// The connection sink replays its CURRENT value on subscribe, so without
     /// this the store fired a "reconnect" refetch before `start()` had even run.
     /// Only a genuine drop→connect transition is a resync.
@@ -382,6 +391,7 @@ final class ChatSessionStore: ObservableObject {
             await MainActor.run { loading = false }
             if !isReadOnly {
                 await refreshPermissions()
+                await refreshVoiceNotes()
             }
         }
     }
@@ -727,7 +737,8 @@ final class ChatSessionStore: ObservableObject {
                 if !didFail { hasEarlier = loaded.count >= limit }
                 if !didFail || isFirstLoad {
                     messages = loaded
-                    transcript = ChatTranscriptMapper.blocks(from: loaded)
+                    voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
+                    transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes)
                     // The transcript now carries these messages, so any live
                     // copy of them is a duplicate — retire it BEFORE rebuilding
                     // or the finished answer renders twice, once from each
@@ -763,6 +774,22 @@ final class ChatSessionStore: ObservableObject {
     func refreshPermissions() async {
         let perms = (try? await api.permissions(sessionId: sessionId)) ?? []
         await MainActor.run { permissions = perms }
+    }
+
+    // MARK: - Voice notes (BET-1029)
+
+    /// Fetch this session's voice-note metadata, re-forge the message→note map
+    /// and re-render the transcript so the dictation attachments appear. Called
+    /// on session load and after a send (a dictated note's player bubble only
+    /// exists once its matching user message does).
+    func refreshVoiceNotes() async {
+        let notes = (try? await api.voiceNotes(sessionId: sessionId)) ?? []
+        await MainActor.run {
+            voiceNotes = notes
+            voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: messages, notes: notes)
+            transcript = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes)
+            rebuildBlocks()
+        }
     }
 
     // MARK: - Answers (wire from the phone, S1a)
@@ -911,6 +938,9 @@ final class ChatSessionStore: ObservableObject {
                 mentions: mentions,
                 agent: agent
             ))
+            // A dictated note's user message now exists on the box; refetch the
+            // notes so its player bubble attaches under it (BET-1029).
+            Task { await refreshVoiceNotes() }
             return true
         } catch {
             // Surface the failure instead of swallowing it: stop the running
