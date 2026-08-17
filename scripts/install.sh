@@ -1526,6 +1526,12 @@ main() {
         if printf '%s' "$GW_RESP" | "$NODE" "$LIB" merge-gateway --file "$MANTA_AUTH_FILE" 2>/tmp/manta-gateway-merge.err; then
           ok "gateway registration complete."
         else
+          if [ "$SKIP_PUBLIC_TLS" != "1" ]; then
+            die "merge-gateway failed — the gateway token/host could not be persisted, so this box would advertise a hostname whose config is incomplete (see /tmp/manta-gateway-merge.err).
+              Fix the gateway registration issue and run the installer again.
+
+              Fix the above and run the installer again — re-running is safe and preserves your box identity."
+          fi
           warn "merge-gateway failed (see /tmp/manta-gateway-merge.err) — the server will re-register on next boot."
         fi
       else
