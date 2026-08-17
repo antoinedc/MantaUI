@@ -43,6 +43,7 @@ import {
   ASSUMED_CONTEXT_TOKENS,
 } from "../shared/streamInterpretation.mjs";
 import { planModeFromToolPart } from "../shared/planMode.mjs";
+import { createSeenIdFilter } from "./seenIds.mjs";
 
 const TTL_DEFAULT = "1h";
 
@@ -240,23 +241,9 @@ export function createStreamInterpreter({
   // per-directory scoped one, so interpret() is called twice for it. Un-deduped
   // that doubles every derived event — and because flushed text is APPENDED by
   // the client, a streamed answer arrived on the phone written out twice.
-  // Events carry a unique id; remember a bounded window of them.
-  const seenEventIds = new Set();
-  const SEEN_CAP = 1000;
-  function isDuplicate(id) {
-    if (typeof id !== "string" || id.length === 0) return false;
-    if (seenEventIds.has(id)) return true;
-    seenEventIds.add(id);
-    if (seenEventIds.size > SEEN_CAP) {
-      // Drop the oldest half; insertion order is preserved by Set.
-      let drop = seenEventIds.size - SEEN_CAP / 2;
-      for (const key of seenEventIds) {
-        if (drop-- <= 0) break;
-        seenEventIds.delete(key);
-      }
-    }
-    return false;
-  }
+  // Events carry a unique id; remember a bounded window of them (shared filter,
+  // lifted from this inline block so push.mjs can reuse the same guard).
+  const seenEventIds = createSeenIdFilter();
   function state(sid) {
     if (!sessions.has(sid)) sessions.set(sid, newSessionState());
     return sessions.get(sid);
@@ -283,7 +270,7 @@ export function createStreamInterpreter({
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
     const sid = evt.properties?.sessionID;
     if (typeof sid !== "string" || sid.length === 0) return; // no session to interpret for
-    if (isDuplicate(evt.id)) return;
+    if (seenEventIds.seen(evt.id)) return;
 
     const st = state(sid);
     switch (evt.type) {
