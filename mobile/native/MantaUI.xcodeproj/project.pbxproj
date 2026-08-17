@@ -11,6 +11,7 @@
 		01871023D47544D64443194D /* MantaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C8240F1954861B4846E279D /* MantaModels.swift */; };
 		0488B71F794FC6E64CDC0B23 /* TerminalKeyRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7BC8920829E8847057C8DA /* TerminalKeyRow.swift */; };
 		0DA0C1C92C06A3BED780494E /* UsageMeters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A81D1BB24FB02E4DFFA04FE /* UsageMeters.swift */; };
+		12070C130BD9D1CD9EA0603F /* WaveformTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEF7554D798247FECA6BFF84 /* WaveformTests.swift */; };
 		1A55CBC343898856735AF0F8 /* MantaChatSurfaceCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 570E190164DB3AB83DC14283 /* MantaChatSurfaceCaptureUITests.swift */; };
 		1B9026B4F0286A5186FD5197 /* MantaSettingsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39978655A14BFA5D39336286 /* MantaSettingsModels.swift */; };
 		1E8A1AB9FB3945E6092CA2E2 /* UsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAFF319B4F3CD4F13A20A1EB /* UsageStore.swift */; };
@@ -33,6 +34,7 @@
 		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
 		51F9E82B1001E68644519724 /* MantaRunningStateCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17673950838B843917DA660F /* MantaRunningStateCaptureUITests.swift */; };
+		578DA0FFC68283A72AF914E8 /* VoiceGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */; };
 		5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */; };
 		5CDC4D3B2FD207C5E38A9AA1 /* MultilineTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */; };
 		5DED49382A895F0EB73EE951 /* MantaStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F45372304FA61F99907B0A3 /* MantaStreamModels.swift */; };
@@ -49,6 +51,7 @@
 		6A720AF41BDA6F4FC40A5585 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7631E09B6FF7B150392A83 /* ChatModels.swift */; };
 		74D756D48A7D2A5483170A8B /* MantaLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 872DDE9D9BAD041950DAC24A /* MantaLoader.swift */; };
 		754FEC92229B58783D516DC4 /* ModelPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2C97C92B5E1ADA62F799D73 /* ModelPickerSheet.swift */; };
+		75B97ECFE219AB9C7D45EDE3 /* Waveform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7B1F4E5EF7E0ADD2238839 /* Waveform.swift */; };
 		7C41CAE9FE6D1E06DEC10142 /* MantaResourceCardModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */; };
 		7E8C2A70A3D5C0F949D79FF5 /* SessionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28250B8DDAB996449F7AE3AD /* SessionModels.swift */; };
 		863035B4DE4C873A0BD9D0F5 /* MantaAuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F29E8693B4AA4191CF9C556 /* MantaAuthClient.swift */; };
@@ -75,6 +78,7 @@
 		B0D305420CA78C35FFD1E617 /* ArtifactDerivation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15E5DB4B26254A37A3075BD2 /* ArtifactDerivation.swift */; };
 		B46B35ED65EDB8F13002F091 /* MessagingUI in Frameworks */ = {isa = PBXBuildFile; productRef = 2B48EABB4EC8AF086CA5C6AB /* MessagingUI */; };
 		B5B62843F8D5814E0E5CEA40 /* MantaTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */; };
+		B7D2A1C0F9EC29C5B0002C8F /* VoiceGestureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4A5AE775D3F3D82FC69A54F /* VoiceGestureTests.swift */; };
 		B97905DC3BE32E36E682EF0C /* MantaLiveChatClearCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E1D5B31C8FB29B23AB2A577 /* MantaLiveChatClearCaptureUITests.swift */; };
 		BFC5BB268D33C67CB9C66A9E /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = F69CF621A0341F78A09CFF85 /* MarkdownView */; };
 		C2C89BEF7843F4F3460A926F /* MantaOverflowCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */; };
@@ -165,6 +169,7 @@
 		5C02DA420B52094269A88E80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D71EC917661085ED10E0867 /* FolderPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderPickerView.swift; sourceTree = "<group>"; };
 		5EF0199856D7E4C0B0D2595C /* MantaUIOverflowCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaUIOverflowCaptureUITests.swift; sourceTree = "<group>"; };
+		6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceGesture.swift; sourceTree = "<group>"; };
 		681F342360878481A0D8364F /* MantaOverflowCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaOverflowCaptureUITests.swift; sourceTree = "<group>"; };
 		6BA4ADBB2FD5BAC7940D5B69 /* RunningIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningIndicator.swift; sourceTree = "<group>"; };
 		6BDC7F6FA94631DA4C55A948 /* TerminalWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWebView.swift; sourceTree = "<group>"; };
@@ -186,6 +191,7 @@
 		8879A94FE1BE824F438342AD /* MantaDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaDeepLink.swift; sourceTree = "<group>"; };
 		8A6472C0BC3BDACAC4559198 /* ChatModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModelStore.swift; sourceTree = "<group>"; };
 		8C8240F1954861B4846E279D /* MantaModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaModels.swift; sourceTree = "<group>"; };
+		8D7B1F4E5EF7E0ADD2238839 /* Waveform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Waveform.swift; sourceTree = "<group>"; };
 		8D8A1A5388E54F31462D616F /* MantaPairFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairFixture.swift; sourceTree = "<group>"; };
 		938AB4A14437119280E1B53A /* ComposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTests.swift; sourceTree = "<group>"; };
 		942605E2D67D55C6DCCE83AC /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
@@ -202,6 +208,7 @@
 		ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingTests.swift; sourceTree = "<group>"; };
 		ABF1AB00CC95EA99A4EF537B /* MantaSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsStore.swift; sourceTree = "<group>"; };
 		AD55034506C4DF218AD7300E /* MantaPairingDriverUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaPairingDriverUITests.swift; sourceTree = "<group>"; };
+		AEF7554D798247FECA6BFF84 /* WaveformTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaveformTests.swift; sourceTree = "<group>"; };
 		B230F69A60CD3DBC416612B0 /* manta-logo.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "manta-logo.png"; sourceTree = "<group>"; };
 		B82B782F73475FDD71F6D6B5 /* PolishTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PolishTests.swift; sourceTree = "<group>"; };
 		B928337494F2C80D8ACB126C /* SessionCreateSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCreateSheet.swift; sourceTree = "<group>"; };
@@ -221,6 +228,7 @@
 		DC240598BDE45C3D43B46191 /* MantaUI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MantaUI.entitlements; sourceTree = "<group>"; };
 		DD646A4951E292E750890CCB /* MantaAppRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaAppRoot.swift; sourceTree = "<group>"; };
 		E0733CF7BEEE1C7B517C4010 /* ChatLoadingSkeleton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLoadingSkeleton.swift; sourceTree = "<group>"; };
+		E4A5AE775D3F3D82FC69A54F /* VoiceGestureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceGestureTests.swift; sourceTree = "<group>"; };
 		E4FA4CCB9740565057F26D31 /* MantaLiveArtifactsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaLiveArtifactsUITests.swift; sourceTree = "<group>"; };
 		EBC7D0BF807861DCCABC5A26 /* MantaResourceCardModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaResourceCardModelsTests.swift; sourceTree = "<group>"; };
 		ED6ABAA46F1CBD2093D4AC87 /* ComposerTypeahead.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTypeahead.swift; sourceTree = "<group>"; };
@@ -293,6 +301,8 @@
 				9803742B79E4302F8813EFCC /* SessionModelsTests.swift */,
 				DA2C52DC49C55784D6EF2B65 /* TerminalModelsTests.swift */,
 				D687A8F5AD2BEEAC0D728C3C /* UsageMetersTests.swift */,
+				E4A5AE775D3F3D82FC69A54F /* VoiceGestureTests.swift */,
+				AEF7554D798247FECA6BFF84 /* WaveformTests.swift */,
 			);
 			path = MantaUITests;
 			sourceTree = "<group>";
@@ -389,7 +399,9 @@
 				1A81D1BB24FB02E4DFFA04FE /* UsageMeters.swift */,
 				7582E08CBBDCE70E242A6B18 /* UsageSheets.swift */,
 				CAFF319B4F3CD4F13A20A1EB /* UsageStore.swift */,
+				6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */,
 				4B4BD7922C8909E3A3961957 /* VoiceRecorder.swift */,
+				8D7B1F4E5EF7E0ADD2238839 /* Waveform.swift */,
 				6C581AFB55001DF333A22728 /* Resources */,
 			);
 			path = MantaUI;
@@ -617,6 +629,8 @@
 				E013C537E1082259B979DF35 /* SessionModelsTests.swift in Sources */,
 				C414F36E83344076CE4F1ACD /* TerminalModelsTests.swift in Sources */,
 				97CCE1CDDEF2E81BF57B52D1 /* UsageMetersTests.swift in Sources */,
+				B7D2A1C0F9EC29C5B0002C8F /* VoiceGestureTests.swift in Sources */,
+				12070C130BD9D1CD9EA0603F /* WaveformTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -683,7 +697,9 @@
 				0DA0C1C92C06A3BED780494E /* UsageMeters.swift in Sources */,
 				37B7F5C28332A180E825982C /* UsageSheets.swift in Sources */,
 				1E8A1AB9FB3945E6092CA2E2 /* UsageStore.swift in Sources */,
+				578DA0FFC68283A72AF914E8 /* VoiceGesture.swift in Sources */,
 				98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */,
+				75B97ECFE219AB9C7D45EDE3 /* Waveform.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -753,7 +769,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MantaUI/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = MantaUI;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MantaUI uses the microphone for push-to-talk dictation and voice commands in chat.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MantaUI uses the microphone for dictation and to record voice notes in chat.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -860,7 +876,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MantaUI/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = MantaUI;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MantaUI uses the microphone for push-to-talk dictation and voice commands in chat.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "MantaUI uses the microphone for dictation and to record voice notes in chat.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

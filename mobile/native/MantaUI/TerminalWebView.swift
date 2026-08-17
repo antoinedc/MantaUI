@@ -488,9 +488,9 @@ final class TerminalContainerController: UIViewController {
     }
 
     private func dictateEnded() {
-        guard let rec = recorder, let data = rec.stop() else { return }
+        guard let rec = recorder, let take = rec.stop() else { return }
         Task { @MainActor [weak self] in
-            if let text = try? await self?.api.voiceTranscribe(data: data, mime: "audio/mp4"), !text.isEmpty {
+            if let text = try? await self?.api.voiceTranscribe(data: take.data, mime: "audio/mp4"), !text.isEmpty {
                 self?.sendToShell(text)
             }
         }

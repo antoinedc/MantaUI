@@ -958,7 +958,7 @@ final class ChatSessionStore: ObservableObject {
         }
     }
 
-    /// Interrupt the running turn (voice `abort`).
+    /// Interrupt the running turn.
     func abort() {
         Task {
             do { try await api.abort(sessionId: sessionId) }
@@ -966,11 +966,11 @@ final class ChatSessionStore: ObservableObject {
         }
     }
 
-    /// Compact the session to free context (voice `compact`).
+    /// Compact the session to free context.
     ///
     /// Compact used to fire blind — no confirmation and no feedback that context
-    /// was freed. Both the overflow action (now confirm-gated) and the voice
-    /// `compact` route here, and both surface the outcome through the composer
+    /// was freed. Both the overflow action (now confirm-gated) and the compact
+    /// route here, and both surface the outcome through the composer
     /// `actionHint` bus so a compact is never silent:
     /// - success surfaces "Compacted — context freed" and schedules the store's
     ///   standard refresh, so the next `context` frame the box pushes shows the
@@ -1033,8 +1033,7 @@ final class ChatSessionStore: ObservableObject {
 
     // MARK: - Header
 
-    /// The newest pending permission, if any (used by the composer's voice
-    /// answer routing + the bottom cards).
+    /// The newest pending permission, if any (used by the bottom cards).
     var newestPermission: PermissionRequest? { permissions.last }
 
     /// The newest pending question request, if any.

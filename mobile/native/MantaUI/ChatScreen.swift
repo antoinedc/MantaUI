@@ -508,7 +508,7 @@ private struct ChatScreenContent: View {
     /// treat it as changed after the box confirms. A failed update never
     /// fabricates a success — the visible toggle stays put (it reads the store,
     /// which only mutates on success) and the composer `actionHint` bus says
-    /// why. Shared by the overflow toggle and the voice `toggleTrust` action.
+    /// why. Shared by the overflow toggle.
     private func flipTrustMode() {
         guard let entry = SettingsSchema.entries.first(where: { $0.id == "chatAutoAllow" }) else { return }
         let target = settingsStore.current(entry) != .bool(true)
