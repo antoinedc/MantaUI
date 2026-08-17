@@ -170,16 +170,30 @@ final class VoicePlaybackEngine: ObservableObject {
 
 // MARK: - Voice-bars waveform
 
-/// The static DOM-style waveform, rendered from the stored peaks. Bars are
-/// `2px` wide with `2px` gaps up to `22px` tall. Played bars take `accentTx`,
-/// unplayed `tx4` (the stored/playback waveform normalises — unlike the live
-/// meter). The bar count fits the available width, and the whole strip is
-/// tappable to seek.
-private struct VoiceBarsView: View {
+/// The one width-derived bar-row view, shared by the stored/playback waveform
+/// and the LIVE meter. Bars are `2px` wide with `2px` gaps; the bar COUNT is
+/// derived from the available width via `GeometryReader` and the peaks are
+/// bucketed down to it with the shared `Waveform.bucketPeaks`. The `Style`
+/// expresses the two callers' differences (see `Style` below); everything
+/// else — the width-derived bar count, `barWidth`, `barGap`, `maxHeight`,
+/// `barHeight`, the `RoundedRectangle` radius — is identical for both.
+struct VoiceBarsView: View {
+    enum Style {
+        /// A finished note: peaks are normalised so the loudest bar is full
+        /// height, bars run leading→trailing, and `progress` colours the played
+        /// prefix `accentTx` against `tx4`.
+        case stored
+        /// The live meter: NOT normalised (the ceiling is pinned at 1.0 on
+        /// purpose — see `Waveform.normalizeForDisplay`), newest sample at the
+        /// TRAILING edge, every bar `accentTx` at 0.9 opacity.
+        case live
+    }
+
     let peaks: [UInt8]
     let progress: Double?
     let tokens: Tokens
-    let onSeek: (Double) -> Void
+    let style: Style
+    let onSeek: ((Double) -> Void)?
 
     private var maxHeight: CGFloat { Metrics.spacing.sp5 + Metrics.spacing.spPx * 2 }
     private var barWidth: CGFloat { Metrics.spacing.spPx * 2 }
@@ -189,25 +203,36 @@ private struct VoiceBarsView: View {
         GeometryReader { geo in
             let slot = barWidth + barGap
             let barCount = max(1, Int(geo.size.width / slot))
-            let values = Waveform.normalizeForDisplay(Waveform.bucketPeaks(peaks, bars: barCount))
+            let bucketed = Waveform.bucketPeaks(peaks, bars: barCount)
+            let values = style == .stored ? Waveform.normalizeForDisplay(bucketed) : bucketed
+            let alignment: Alignment = style == .stored ? .leading : .trailing
             HStack(alignment: .center, spacing: barGap) {
                 ForEach(Array(values.enumerated()), id: \.offset) { index, value in
                     let played = index < barCount && (progress ?? 0) > Double(index) / Double(barCount)
                     RoundedRectangle(cornerRadius: Metrics.radius.xs, style: .continuous)
-                        .fill(played ? tokens.accentTx : tokens.tx4)
+                        .fill(fillStyle(played: played))
                         .frame(width: barWidth, height: barHeight(value))
                 }
                 if values.isEmpty {
                     Spacer(minLength: 0)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
             .contentShape(Rectangle())
-            .gesture(tapSeek(width: geo.size.width))
+            .gesture(onSeek.map { _ in tapSeek(width: geo.size.width) })
         }
         .frame(height: maxHeight)
         .frame(maxWidth: .infinity)
         .accessibilityHidden(true)
+    }
+
+    private func fillStyle(played: Bool) -> Color {
+        switch style {
+        case .stored:
+            return played ? tokens.accentTx : tokens.tx4
+        case .live:
+            return tokens.accentTx.opacity(0.9)
+        }
     }
 
     private func barHeight(_ value: Double) -> CGFloat {
@@ -218,7 +243,7 @@ private struct VoiceBarsView: View {
     private func tapSeek(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onEnded { value in
-                guard width > 0 else { return }
+                guard width > 0, let onSeek else { return }
                 onSeek(min(1, max(0, value.location.x / width)))
             }
     }
@@ -262,6 +287,7 @@ struct VoiceNotePlayerRow: View {
                 peaks: note.peaks,
                 progress: player.progress(note: note),
                 tokens: tokens,
+                style: .stored,
                 onSeek: { player.seek(note: note, fraction: $0) }
             )
 
@@ -301,7 +327,7 @@ struct VoiceNotePlayerRow: View {
                 .fill(tokens.borderSubtle)
                 .frame(width: discDiameter, height: discDiameter)
 
-            VoiceBarsView(peaks: note.peaks, progress: nil, tokens: tokens, onSeek: { _ in })
+            VoiceBarsView(peaks: note.peaks, progress: nil, tokens: tokens, style: .stored, onSeek: nil)
 
             Text("\(Waveform.formatClock(note.durationMs)) · expired")
                 .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.semibold)))
@@ -349,7 +375,7 @@ struct VoiceNotePendingRow: View {
                     .fill(tokens.borderStrong)
                     .frame(width: discDiameter, height: discDiameter)
 
-                VoiceBarsView(peaks: peaks, progress: nil, tokens: tokens, onSeek: { _ in })
+                VoiceBarsView(peaks: peaks, progress: nil, tokens: tokens, style: .stored, onSeek: nil)
 
                 Text(Waveform.formatClock(durationMs))
                     .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.semibold)))
@@ -398,5 +424,62 @@ struct VoiceNotePendingRow: View {
             RoundedRectangle(cornerRadius: Metrics.radius.md)
                 .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
         }
+    }
+}
+
+// MARK: - Capture-harness scene
+
+/// Harness-only capture scene (BET-1050), elected via `MANTA_SCENE=voice-note-
+/// stored` — never rendered in normal app use. Shows the real
+/// `VoiceNotePlayerRow` for a finished note, i.e. the `.stored` waveform path
+/// (normalised, leading-aligned, seekable via `onSeek`), evidenced on-device
+/// with no live box.
+struct VoiceNoteStoredCaptureScene: View {
+    @StateObject private var engine: VoicePlaybackEngine
+
+    init() {
+        _engine = StateObject(wrappedValue: VoicePlaybackEngine(
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!)))
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+    private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    /// A finished note whose peaks spell a normalised stored waveform.
+    private var note: VoiceNote {
+        VoiceNote(
+            id: "fixture-n1",
+            sessionId: "s1",
+            transcript: "This is a finished voice note rendered from stored peaks.",
+            mime: "audio/mp4",
+            durationMs: 12800,
+            peaks: fixturePeaks,
+            createdAt: 0,
+            expiresAt: nil,
+            audioAvailable: true
+        )
+    }
+
+    /// Deterministic stored peaks (`0...255`) shaped like a waveform.
+    private var fixturePeaks: [UInt8] {
+        var out = [UInt8]()
+        out.reserveCapacity(Waveform.Constants.maxStoredPeaks)
+        for i in 0..<Waveform.Constants.maxStoredPeaks {
+            let phase = Double(i) / Double(Waveform.Constants.maxStoredPeaks) * .pi * 4
+            let envelope = 0.3 + 0.7 * abs(sin(phase))
+            out.append(Waveform.quantizePeak(envelope))
+        }
+        return out
+    }
+
+    var body: some View {
+        tokens.canvas
+            .ignoresSafeArea()
+            .overlay(alignment: .bottom) {
+                VoiceNotePlayerRow(note: note, tokens: tokens)
+                    .environmentObject(engine)
+                    .padding(Metrics.spacing.sp3)
+                    .padding(.bottom, Metrics.spacing.sp6)
+            }
     }
 }

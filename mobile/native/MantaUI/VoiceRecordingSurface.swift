@@ -16,35 +16,6 @@ import UIKit
 // the tokens. No hex, no new token, no second glass recipe.
 // ===========================================================================
 
-/// The live, scrolling waveform bar row. Takes peaks ALREADY bucketed to
-/// `0...1` (newest at the trailing edge) by the caller. It deliberately does
-/// NOT call `Waveform.normalizeForDisplay` — the live meter pins its ceiling
-/// at 1.0 on purpose (see the `Waveform` doc), and renormalising a scrolling
-/// window would make every previously-drawn bar jump each time a new loudest
-/// sample arrives.
-struct VoiceLiveWaveform: View {
-    let peaks: [Double]
-    let tokens: Tokens
-
-    var body: some View {
-        let barWidth = Metrics.spacing.spPx * 2
-        let barGap = Metrics.spacing.spPx * 2
-        let maxBarHeight = Metrics.spacing.sp5
-        HStack(alignment: .center, spacing: barGap) {
-            ForEach(Array(peaks.enumerated()), id: \.offset) { index, peak in
-                let p = min(1, max(0, peak))
-                RoundedRectangle(cornerRadius: Metrics.radius.full, style: .continuous)
-                    .fill(tokens.accentTx.opacity(0.9))
-                    .frame(width: barWidth, height: max(barWidth, maxBarHeight * p))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .frame(height: maxBarHeight)
-        .clipped()
-        .accessibilityLabel("Live audio waveform")
-    }
-}
-
 // MARK: - Surface A · Recording — held
 
 /// The finger-down held surface: record dot + timer + the "‹ slide to cancel"
@@ -257,8 +228,8 @@ struct VoiceRecordingLockedView: View {
                 VoiceRecordingHeldView.AccessoryDot(danger: tokens.danger)
                 timer
                 Spacer(minLength: Metrics.spacing.sp2)
-                VoiceLiveWaveform(peaks: recorder.livePeaks, tokens: tokens)
-                    .frame(maxWidth: .infinity)
+                VoiceBarsView(peaks: recorder.livePeaks, progress: nil, tokens: tokens,
+                              style: .live, onSeek: nil)
             }
 
             // Remaining-time line — only inside the warn window.
