@@ -4,24 +4,14 @@
 //
 // The stomping bug (sub-issue 13 §"The bug") is fixed by removing the
 // per-field local state + resync effect that overwrote unsaved text. These
-// helpers write to the store directly (optimistic) then to configUpdate,
-// with a toast carrying an Undo action — the "one save model: instant
-// apply + Undo" from §A.
+// helpers write to the store directly (optimistic) then to configUpdate.
+// Success raises no toast (BET-1055); failure rolls back + raises an error.
 
 import { useStore } from "./store";
 import { applyTheme, type ThemePref } from "./theme";
 import type { ToastItem } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import type { SettingEntry } from "../shared/settingsSchema";
-
-function describeValue(entry: SettingEntry, value: unknown): string {
-  if (entry.control === "toggle") return value ? "on" : "off";
-  if (entry.control === "segmented") {
-    const opt = entry.options?.find((o) => o.value === String(value));
-    return opt?.label ?? String(value);
-  }
-  return String(value);
-}
 
 /**
  * Coerce a UI-produced value to the entry's stored type. Segmented controls
@@ -41,8 +31,9 @@ function coerceSettingValue(entry: SettingEntry, value: unknown): unknown {
 
 /**
  * Instant-apply a single config key. Optimistic store update → configUpdate →
- * reconcile → toast with Undo. Rolls back + raises an error toast on failure.
- * Never throws to the caller. `prevValue` is captured for the Undo action.
+ * reconcile. On failure, rolls back to `prevValue` and raises an error toast.
+ * Success raises no toast (BET-1055). Never throws to the caller. `prevValue`
+ * is captured for rollback on failure.
  */
 export function useApplySetting(pushToast: (t: ToastItem) => void) {
   return async (entry: SettingEntry, value: unknown, prevValue: unknown) => {
@@ -55,23 +46,6 @@ export function useApplySetting(pushToast: (t: ToastItem) => void) {
       const next = await window.api.configUpdate({ [key]: value });
       const reconciled = (next as Record<string, unknown>)[key];
       useStore.setState({ [key]: reconciled ?? value });
-      pushToast({
-        id: `apply-${key}-${Date.now()}`,
-        message: `${entry.label} set to ${describeValue(entry, value)}`,
-        actions: [{
-          label: "Undo",
-          onClick: () => {
-            void useStore.setState({ [key]: prevValue });
-            if (key === "theme") applyTheme(prevValue as ThemePref);
-            window.api.configUpdate({ [key]: prevValue })
-              .then((r) => {
-                const back = (r as Record<string, unknown>)[key];
-                useStore.setState({ [key]: back ?? prevValue });
-              })
-              .catch(() => {});
-          },
-        }],
-      });
     } catch (e) {
       useStore.setState({ [key]: prevValue });
       if (key === "theme") applyTheme(prevValue as ThemePref);

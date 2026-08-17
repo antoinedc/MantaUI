@@ -9,9 +9,12 @@ import {
 
 const base: ToastItem = { id: "x", message: "hi" };
 
+// BET-1055 removed Undo from every toast. This test pins the Toast primitive's
+// generic action rule (an action means no auto-dismiss) with a neutral label —
+// no Settings toast carries an action any more.
 describe("toastTtl", () => {
   it("never auto-dismisses when any action is present", () => {
-    expect(toastTtl({ ...base, actions: [{ label: "Undo", onClick: () => {} }] })).toBeNull();
+    expect(toastTtl({ ...base, actions: [{ label: "Save", onClick: () => {} }] })).toBeNull();
     expect(
       toastTtl({ ...base, actions: [{ label: "Remind me", onClick: () => {} }, { label: "Keep going", onClick: () => {} }] }),
     ).toBeNull();

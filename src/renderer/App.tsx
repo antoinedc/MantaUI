@@ -749,17 +749,8 @@ function Shell() {
                           sessionID,
                         });
                         if (res.ok && res.job) {
-                          const jobId = res.job.id;
                           pushAppToastStore({
                             message: toastLine(Bell, `Reminder set for ${formatResetAt(fireAt, Date.now())}.`),
-                            actions: [
-                              {
-                                label: "Undo",
-                                onClick: () => {
-                                  if (jobId) void window.api.scheduleDelete(jobId);
-                                },
-                              },
-                            ],
                           });
                         } else {
                           pushAppToastStore({
