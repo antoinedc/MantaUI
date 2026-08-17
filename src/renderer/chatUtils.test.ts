@@ -3598,6 +3598,37 @@ describe("usageDialState", () => {
     expect(usageDialState(null, true).visible).toBe(false);
     expect(usageDialState(undefined, true).visible).toBe(false);
   });
+
+  it("every window stale hides the dial even with always-show on", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "Session (5h)", pct: 100, resetsAt: 100, stale: true },
+        { kind: "weekly", label: "Weekly", pct: 100, resetsAt: 100, stale: true },
+      ],
+    });
+    const state = usageDialState(snap, true);
+    expect(state.visible).toBe(false);
+  });
+
+  it("a stale session yields to a live weekly, which becomes the primary", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "Session (5h)", pct: 100, resetsAt: 100, stale: true },
+        { kind: "weekly", label: "Weekly", pct: 95 },
+      ],
+    });
+    const state = usageDialState(snap, false);
+    expect(state.visible).toBe(true);
+    expect(state.pct).toBe(95);
+    expect(state.window?.kind).toBe("weekly");
+  });
+
+  it("a window with no stale flag behaves exactly as before (undefined is not stale)", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "s", pct: 72 }] });
+    const state = usageDialState(snap, false);
+    expect(state.visible).toBe(true);
+    expect(state.pct).toBe(72);
+  });
 });
 
 describe("formatTimerDuration", () => {

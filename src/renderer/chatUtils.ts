@@ -2911,7 +2911,7 @@ export type UsageDialState = {
   window: UsageWindow | null;
 };
 
-function usageTone(pct: number): UsageDialTone {
+export function usageTone(pct: number): UsageDialTone {
   if (pct >= 100) return "over";
   if (pct >= 90) return "danger";
   if (pct >= 70) return "warn";
@@ -2932,7 +2932,13 @@ export function usageDialState(
   snapshot: UsageSnapshot | null | undefined,
   alwaysShow: boolean,
 ): UsageDialState {
-  const windows = snapshot?.windows ?? [];
+  // A stale window is reporting the number the PREVIOUS window finished on, so
+  // it contributes nothing: not the value, not the colour, and not the
+  // visibility decision. Dropping it here reuses every path below — if it was
+  // the only window the existing zero-window early return hides the dial, and
+  // if a live window remains that window becomes the primary. This is the same
+  // rule shouldFireUsageAlert applies to the alert path.
+  const windows = (snapshot?.windows ?? []).filter((w) => !w.stale);
   if (windows.length === 0) {
     return { visible: false, pct: 0, tone: "under", window: null };
   }
