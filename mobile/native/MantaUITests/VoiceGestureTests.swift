@@ -183,4 +183,68 @@ final class VoiceGestureTests: XCTestCase {
         let rtlLeft = step(.recordingHeld, .drag(dx: -100, dy: 0), elapsedMs: 100, isRTL: true)
         XCTAssertEqual(rtlLeft.0, .recordingHeld, "RTL: dragging left must not cancel (mirrored)")
     }
+
+    // MARK: - tap-toggle (decision #5 — tap #1 starts, tap #2 stops)
+
+    func testTapToggleFromIdleStartsHeld() {
+        // Tap #1 starts a finger-up take showing the held surface.
+        let (phase, effect) = step(.idle, .tapToggle, elapsedMs: 0)
+        XCTAssertEqual(phase, .recordingHeld)
+        XCTAssertEqual(effect, .haptic(.arm))
+    }
+
+    func testTapToggleFromHeldSends() {
+        // Tap #2 while held: "a second tap stops" → stop and send.
+        let (phase, effect) = step(.recordingHeld, .tapToggle, elapsedMs: 300)
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .send)
+    }
+
+    func testTapToggleFromLockedSends() {
+        let (phase, effect) = step(.recordingLocked, .tapToggle, elapsedMs: 5000)
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .send)
+    }
+
+    func testTapToggleFromPausedSends() {
+        let (phase, effect) = step(.paused, .tapToggle, elapsedMs: 5000)
+        XCTAssertEqual(phase, .idle)
+        XCTAssertEqual(effect, .send)
+    }
+
+    func testTapToggleFromCancellingIgnored() {
+        let (phase, effect) = step(.cancelling, .tapToggle, elapsedMs: 3000)
+        XCTAssertEqual(phase, .cancelling)
+        XCTAssertEqual(effect, .none)
+    }
+
+    // MARK: - drag → progress mapping (view-facing, BET-1028)
+
+    func testLockProgress() {
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: 0), 0, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: -80), 1, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: -40), 0.5, accuracy: 0.0001)
+        // Clamped above threshold.
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: -200), 1, accuracy: 0.0001)
+        // Positive dy (dragging down) is never lock progress.
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: 40), 0, accuracy: 0.0001)
+    }
+
+    func testCancelProgressLTR() {
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 0, isRTL: false), 0, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -64, isRTL: false), 1, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -32, isRTL: false), 0.5, accuracy: 0.0001)
+        // Clamped.
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -200, isRTL: false), 1, accuracy: 0.0001)
+        // Dragging right is not cancel in LTR.
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 64, isRTL: false), 0, accuracy: 0.0001)
+    }
+
+    func testCancelProgressMirrorsForRTL() {
+        // In RTL the SAME physical drag (right) advances cancel, mirroring the
+        // machine's own horizontal mirror.
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 64, isRTL: true), 1, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 32, isRTL: true), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -64, isRTL: true), 0, accuracy: 0.0001)
+    }
 }

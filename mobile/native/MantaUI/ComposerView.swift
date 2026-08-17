@@ -74,6 +74,7 @@ struct ComposerView: View {
     /// owns forking + navigation; the composer just triggers it.
     var onSlashFork: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.layoutDirection) private var layoutDirection
 
     @State private var text = ""
     @State private var attachments: [ComposerAttachment] = []
@@ -86,8 +87,9 @@ struct ComposerView: View {
     @FocusState private var inputFocused: Bool
     @StateObject private var recorder = VoiceRecorder()
     /// High-water flag for a press whose permission prompt is still resolving —
-    /// lets `micPress` re-check the finger is still down after the await.
-    @State private var micPressActive = false
+    /// lets the mic's press-start re-check after the await so a second change
+    /// doesn't double-request permission.
+    @State private var recordingStartInFlight = false
     /// Auto-dismiss task for the currently shown hint — tied to the hint's own
     /// identity so a new hint cancels and restarts the 4 s timer.
     @State private var hintDismissTask: Task<Void, Never>?
@@ -112,6 +114,9 @@ struct ComposerView: View {
     @State private var fileSearchTask: Task<Void, Never>?
     @State private var fileSearchSeq = 0
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
+    /// Whether the layout direction is right-to-left — mirrored for the
+    /// slide-to-cancel gesture (the machine + progress helpers mirror dx).
+    private var isRTL: Bool { layoutDirection == .rightToLeft }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
@@ -155,10 +160,28 @@ struct ComposerView: View {
             // line, INSIDE the same glass as the input. Hence the composer is
             // two rows by default — type up top, act below — rather than a
             // one-row capsule with inline controls.
-            inputBox
+            //
+            // While a voice take is active the input box is REPLACED in place
+            // by the recording surface (BET-1028, decision #1) — same position,
+            // same outer padding, so nothing in the layout jumps. The surface
+            // renders the machine's `VoicePhase`; it owns no transition logic.
+            if recorder.phase == .idle {
+                inputBox
+                    .transition(.opacity)
+            } else {
+                VoiceRecordingSurface(
+                    recorder: recorder,
+                    isRTL: isRTL,
+                    onTake: { take in
+                        Task { await transcribe(data: take.data) }
+                    }
+                )
+                .transition(.opacity)
+            }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
+        .animation(.smooth(duration: 0.22), value: recorder.phase != .idle)
         // ONE presentation per view. The model sheet, the photo picker and the
         // file importer were all attached HERE, and SwiftUI honours only one of
         // them — which is why attaching a file silently did nothing. The two
@@ -772,8 +795,7 @@ struct ComposerView: View {
 
     private var micButton: some View {
         Button {
-            // Tap without hold = no-op (recording is gesture-driven); kept as a
-            // hit target with an accessibility action that starts dictation.
+            // No-op on tap alone; recording is gesture-driven.
         } label: {
             ZStack {
                 // The disc is drawn only while RECORDING. At rest the glyph
@@ -795,10 +817,11 @@ struct ComposerView: View {
         .buttonStyle(.plain)
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
-                .onChanged { _ in micPress() }
-                .onEnded { _ in micRelease() }
+                .onChanged { _ in startRecordingIfPermitted() }
+                .onEnded { _ in }
         )
-        .accessibilityLabel("Hold to dictate")
+        .accessibilityLabel("Record")
+        .accessibilityHint("Tap to record, then slide up to lock or left to cancel")
         .accessibilityIdentifier("mic-button")
         .disabled(!micAvailable)
     }
@@ -815,36 +838,23 @@ struct ComposerView: View {
         recorder.isRecording ? tokens.onAccent : tokens.tx2
     }
 
-    private func micPress() {
-        guard micAvailable, !recorder.isRecording else { return }
-        // onChanged fires repeatedly during the permission await — one Task only.
-        guard !micPressActive else { return }
-        micPressActive = true
+    private func startRecordingIfPermitted() {
+        guard micAvailable, !recorder.isRecording, !recordingStartInFlight else { return }
+        recordingStartInFlight = true
         Task {
             let granted = await recorder.requestPermission()
             guard granted else {
-                micPressActive = false
+                recordingStartInFlight = false
                 recorder.fail("Microphone permission needed")
                 hintState("Microphone permission is required")
                 return
             }
-            // The finger may have lifted while the permission prompt was up —
-            // starting now would record with no press and wedge the phase guard
-            // (desktop parity: "cancel checked AFTER getUserMedia resolves").
-            guard micPressActive else { return }
+            // The finger may have lifted while the permission prompt was up;
+            // the held surface (which appears on start) owns the continued
+            // gesture, so we don't re-check here — desktop parity keeps the
+            // arms-the-take on press semantics of BET-1027.
+            recordingStartInFlight = false
             recorder.start()
-        }
-    }
-
-    private func micRelease() {
-        micPressActive = false
-        guard let take = recorder.stop() else {
-            // Too short — treat as an accidental tap, not an error (§ desktop
-            // too-short guard). Quiet.
-            return
-        }
-        Task {
-            await transcribe(data: take.data)
         }
     }
 
@@ -1186,7 +1196,7 @@ struct ComposerView: View {
 /// differ only in this number, and SwiftUI can interpolate it. Passing an
 /// `AnyShape` instead (a Capsule or a RoundedRectangle) type-erases the
 /// animatable data, which is what made the change snap in one frame.
-private struct BoxChrome: ViewModifier {
+struct BoxChrome: ViewModifier {
     let cornerRadius: CGFloat
     let stroke: Color
     /// A LIGHT wash laid UNDER the glass so the box reads slightly less

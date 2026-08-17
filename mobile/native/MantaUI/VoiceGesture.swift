@@ -10,19 +10,18 @@ import Foundation
 // re-basing that keeps paused time out of the cap, decision #5).
 //
 // ```
-//                  press
-// Idle ─────────────────────────► RecordingHeld
-//                                   │
-//    release, elapsed ≥ 400ms ──────┤──► .send
-//    release, elapsed < 400ms ──────┤──► Idle          (silent, no callback)
-//    drag up   > lockThreshold ─────┤──► RecordingLocked
-//    drag left > cancelThreshold ───┤──► Cancelling
-//                                   │
-// RecordingLocked ── tapSend ──► .send
-//                 ├─ tapPause ──► Paused ⇄ tapResume
-//                 └─ tapDiscard ──► .discard
-// Cancelling ── dragBack ──► RecordingHeld
-//            └─ release ──► .discard
+// Idle ─────────────────────────────────────────► RecordingHeld
+//   │                                                │
+//   │ press                                          │ release(hold,≥cap? no) → .send
+//   │ tapToggle                                      │ release(too short) → Idle (silent)
+//   ▼                                                │ drag up   > lockThreshold → RecordingLocked
+// RecordingLocked ◄───────────────────────────────── │ drag left > cancelThreshold → Cancelling
+//   │  tapToggle / tapSend ──► .send                  │
+//   │  tapDiscard ─────────► .discard                 │
+//   │  tapPause ──► Paused ⇄ tapResume                │
+// Cancelling ── dragBack ──► RecordingHeld            │
+//            └─ release ──► .discard                  │
+// RecordingLocked/Paused ── tapToggle ──► .send   (tap-toggle OFF; decision #5)
 // any ── elapsed ≥ 300_000ms ──► .send          (the take is KEPT)
 // any ── interrupted ──► .discard
 // ```
@@ -74,6 +73,11 @@ enum VoiceInput: Equatable {
     case tapPause
     case tapResume
     case tapDiscard
+    /// The tap-toggle path (decision #5): a tap ON starts a hands-free,
+    /// finger-up take (→ `.recordingLocked`), a tap while a take is live
+    /// sends it (toggle OFF). Distinct from `.release` so a quick tap is not
+    /// swallowed by the `.release` mis-tap discard rules.
+    case tapToggle
 }
 
 enum VoiceGesture {
@@ -164,6 +168,21 @@ enum VoiceGesture {
             default: return (currentPhase, .none)
             }
 
+        case .tapToggle:
+            switch currentPhase {
+            case .idle:
+                // Tap #1: start a finger-up take — the held surface shows
+                // immediately (decision #5: "Tap starts…without sustaining a
+                // drag").
+                return (.recordingHeld, .haptic(.arm))
+            case .recordingHeld, .recordingLocked, .paused:
+                // Tap #2: "…and a second tap stops" — stop and send. From a
+                // locked take this is the same as `.tapSend`.
+                return (.idle, .send)
+            default:
+                return (currentPhase, .none)
+            }
+
         case .interrupted:
             // handled above (unreachable)
             return (.idle, .discard)
@@ -203,5 +222,26 @@ enum VoiceGesture {
         default:
             return (currentPhase, .none)
         }
+    }
+
+    // MARK: - Drag → progress mapping (pure, view-facing)
+
+    /// 0...1 of how far the vertical drag is toward the lock threshold (lock is
+    /// sliding UP, so a negative `dy` advances it). Clamped. RTL never mirrors
+    /// the vertical axis, so `isRTL` is deliberately absent. The view uses this
+    /// to brighten the lock lane / scale its glyph as the lock threshold is
+    /// approached; it must NOT decide the transition itself.
+    static func lockProgress(dy: Double, threshold: Double = 80) -> Double {
+        guard threshold > 0 else { return 0 }
+        return min(1, max(0, -dy / threshold))
+    }
+
+    /// 0...1 of how far the horizontal drag is toward the cancel threshold,
+    /// with the direction mirrored for RTL (mirrors the machine's own mirror
+    /// so the hint/veil track the true cancel direction). Clamped.
+    static func cancelProgress(dx: Double, isRTL: Bool, threshold: Double = 64) -> Double {
+        let x = isRTL ? -dx : dx
+        guard threshold > 0 else { return 0 }
+        return min(1, max(0, -x / threshold))
     }
 }

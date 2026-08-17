@@ -53,6 +53,14 @@ final class VoiceRecorder: ObservableObject {
         phase == .recordingHeld || phase == .recordingLocked
     }
 
+    /// The haptic the machine just asked the UI to play (arm / lock /
+    /// cancelArmed / send). The recorder computes it from the machine's output
+    /// but never plays it — the VIEW plays the haptic it describes, so the view
+    /// chooses nothing on its own (BET-1028: "Fire the haptics the machine
+    /// asks for; the view chooses no haptics itself"). Cleared by
+    /// `consumeHaptic()` once fired.
+    @Published private(set) var haptic: VoiceHaptic?
+
     /// Last non-phase error surfaced to the UI (e.g. a denied permission).
     @Published private(set) var lastError: String?
 
@@ -106,9 +114,16 @@ final class VoiceRecorder: ObservableObject {
         guard phase == .idle else { return }
 
         // Recording starts on PRESS (decision #4); the machine arms the take.
-        let (nextPhase, _effect) = VoiceGesture.transition(
+        let (nextPhase, effect) = VoiceGesture.transition(
             currentPhase: phase, input: .press, elapsedMs: 0)
         phase = nextPhase
+        publishHaptic(effect)
+        beginCapture()
+    }
+
+    /// Begin the audio capture after the machine has armed a take. Shared by
+    /// the press-start (`start()`) and the first tap of the tap-toggle path.
+    private func beginCapture() {
         stopRequested = false
         pendingTake = nil
         accumulatedMs = 0
@@ -166,24 +181,103 @@ final class VoiceRecorder: ObservableObject {
         let elapsed = currentElapsedMs()
         let (_next, effect) = VoiceGesture.transition(
             currentPhase: phase, input: .release, elapsedMs: elapsed)
-        recorder?.stop()
-        deactivateSession()
+        publishHaptic(effect)
 
         switch effect {
         case .send:
-            guard let url = fileURL,
-                  let data = try? Data(contentsOf: url), !data.isEmpty else {
-                reset()
-                return nil
-            }
-            let take = Take(data: data, durationMs: elapsed, peaks: storedPeaks)
-            reset()
-            return take
+            return finalizeTake()
         default:
             // Too short (silent mis-tap) or cancelled/discarded.
             reset()
             return nil
         }
+    }
+
+    /// The shared tail of every send path: stop capture, deactivate the audio
+    /// session, read the file, reset, and return the take. `nil` only when the
+    /// file is empty/missing (treated as "no speech", not an error).
+    private func finalizeTake() -> Take? {
+        recorder?.stop()
+        deactivateSession()
+        guard let url = fileURL,
+              let data = try? Data(contentsOf: url), !data.isEmpty else {
+            reset()
+            return nil
+        }
+        let take = Take(data: data, durationMs: currentElapsedMs(), peaks: storedPeaks)
+        publishHaptic(.send)
+        reset()
+        return take
+    }
+
+    /// Feed a drag translation from the held surface to the machine (BET-1028
+    /// slide-to-cancel / slide-up-to-lock). Only meaningful while the take is
+    /// held or cancelling; locked takes ignore drags. Returns the effect so the
+    /// view can play the haptic the machine asked for.
+    @discardableResult
+    func drag(dx: Double, dy: Double, isRTL: Bool = false) -> VoiceEffect {
+        guard phase == .recordingHeld || phase == .cancelling else { return .none }
+        let (next, effect) = VoiceGesture.transition(
+            currentPhase: phase, input: .drag(dx: dx, dy: dy),
+            elapsedMs: currentElapsedMs(), isRTL: isRTL)
+        phase = next
+        publishHaptic(effect)
+        return effect
+    }
+
+    /// The tap-toggle path (decision #5): a tap ON starts a hands-free,
+    /// finger-up take (→ `.recordingLocked`); a tap while a take is live sends
+    /// it (toggle OFF). Feed the machine's `.tapToggle`; returns the finished
+    /// take only when the tap ends the take.
+    @discardableResult
+    func tapToggle() -> Take? {
+        if phase == .idle {
+            // Tap #1: start a finger-up take into the held surface.
+            let (next, effect) = VoiceGesture.transition(
+                currentPhase: .idle, input: .tapToggle, elapsedMs: 0)
+            phase = next
+            publishHaptic(effect)
+            beginCapture()
+            return nil
+        }
+        let (next, effect) = VoiceGesture.transition(
+            currentPhase: phase, input: .tapToggle, elapsedMs: currentElapsedMs())
+        publishHaptic(effect)
+        if next == .idle {
+            // Tap #2: "a second tap stops" — stop and send.
+            return finalizeTake()
+        }
+        phase = next
+        return nil
+    }
+
+    /// Locked-bar send: feed the machine's `.tapSend` and return the take.
+    @discardableResult
+    func sendLockedTake() -> Take? {
+        guard phase == .recordingLocked || phase == .paused else { return nil }
+        let (next, effect) = VoiceGesture.transition(
+            currentPhase: phase, input: .tapSend, elapsedMs: currentElapsedMs())
+        publishHaptic(effect)
+        guard next == .idle else { return nil }
+        return finalizeTake()
+    }
+
+    /// Locked-bar discard: feed the machine's `.tapDiscard` and reset. Returns
+    /// whether the take was actually discarded (false when no live take).
+    @discardableResult
+    func discardLockedTake() -> Bool {
+        guard phase == .recordingLocked || phase == .paused else { return false }
+        let (next, _effect) = VoiceGesture.transition(
+            currentPhase: phase, input: .tapDiscard, elapsedMs: currentElapsedMs())
+        guard next == .idle else { return false }
+        reset()
+        return true
+    }
+
+    /// Clear the published haptic after the view has played it, so a later
+    /// identical haptic still fires its `.onChange`.
+    func consumeHaptic() {
+        haptic = nil
     }
 
     /// Pause an active locked take (the sibling locked-bar UI). Paused time is
@@ -213,6 +307,17 @@ final class VoiceRecorder: ObservableObject {
     /// not alter the gesture phase — take state is owned by the machine.
     func fail(_ message: String) {
         lastError = message
+    }
+
+    /// Publish the machine's haptic intent (arm / lock / cancelArmed / send).
+    /// The recorder never plays a haptic — the view does, from the value the
+    /// machine produced.
+    private func publishHaptic(_ effect: VoiceEffect) {
+        switch effect {
+        case .haptic(let h): haptic = h
+        case .send: haptic = .send
+        case .none, .discard: break
+        }
     }
 
     // MARK: - Metering
@@ -320,6 +425,7 @@ final class VoiceRecorder: ObservableObject {
         livePeaks = []
         storedPeaks = []
         lastLinearLevel = 0
+        haptic = nil
         phase = .idle
     }
 }
