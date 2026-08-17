@@ -446,7 +446,7 @@ final class ChatSessionStore: ObservableObject {
         // meter for an idle conversation on open, when no such frame has
         // arrived yet.
         context = s.context ?? transcriptContext
-        cache = s.cache
+        if let c = s.cache { cache = c }
         truncation = s.truncation
         sessionError = s.sessionError
         todos = s.todos
