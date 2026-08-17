@@ -49,6 +49,12 @@ final class VoiceRecorder: ObservableObject {
         phase == .recordingHeld || phase == .recordingLocked
     }
 
+    /// A take with a finger down on it (the armed-cancel state included).
+    var isHeld: Bool { phase == .recordingHeld || phase == .cancelling }
+
+    /// A take that no longer needs the finger: the hands-free bar owns it.
+    var isHandsFree: Bool { phase == .recordingLocked || phase == .paused }
+
     /// The haptic the machine just asked the UI to play (arm / lock /
     /// cancelArmed / send). The recorder computes it from the machine's output
     /// but never plays it — the VIEW plays the haptic it describes, so the view
