@@ -57,16 +57,6 @@ export function crumbLabel(path: string): string {
   return path.slice(idx + 1);
 }
 
-// Worktree badge text for a directory row: "⎇ N worktrees" when N > 0,
-// empty string otherwise. The count comes from gitListWorktrees(cwd) which
-// the modal calls while browsing. We only show a count > 0; a repo with a
-// single worktree (the main checkout) is the common case and "1 worktree"
-// is noise.
-export function worktreeBadge(worktrees: WorktreeInfo[] | null): string {
-  if (!worktrees || worktrees.length <= 1) return "";
-  return `⎇ ${worktrees.length} worktrees`;
-}
-
 // Does this directory row carry a worktree fan-out offer? True when the
 // folder has >1 worktree (the same threshold the old interstitial used).
 // The modal asks the fan-out question HERE, before the user commits, instead
