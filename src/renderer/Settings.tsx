@@ -25,7 +25,7 @@ import { AddPhonePanel } from "./AddPhonePanel";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
-import { TtlToggle } from "./TtlToggle";
+import { ChipGroup } from "./Chip";
 import { Card } from "./Card";
 import { Field } from "./Field";
 import { Button } from "./Button";
@@ -142,38 +142,14 @@ function ToggleField({ entry, value, onApply }: {
 function SegmentedField({ entry, value, onApply }: {
   entry: SettingEntry; value: string; onApply: (v: string) => void;
 }) {
-  const id = fieldId(entry);
-  // cacheTtl uses the shared TtlToggle on desktop (matches the old UI's
-  // "1 hour (default)" label). Other segmented controls (theme) render the
-  // generic inline-flex.
-  if (entry.id === "cacheTtl") {
-    return (
-      <SettingsRow name={entry.label} help={entry.help}>
-        <TtlToggle ttl={value as "5m" | "1h"} setTtl={onApply} />
-      </SettingsRow>
-    );
-  }
   return (
     <SettingsRow name={entry.label} help={entry.help}>
-      <div role="group" aria-label={entry.label} className="inline-flex rounded-md border border-border overflow-hidden">
-        {entry.options?.map((opt) => {
-          const selected = value === opt.value;
-          return (
-            <button
-              key={opt.value}
-              id={selected ? id : undefined}
-              type="button"
-              aria-pressed={selected}
-              onClick={() => onApply(opt.value)}
-              className={`px-4 py-2 text-body capitalize transition-colors border-r border-border last:border-r-0 ${
-                selected ? "bg-raised text-text font-semibold" : "text-text-muted hover:text-text hover:bg-bg-elev"
-              }`}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
-      </div>
+      <ChipGroup
+        label={entry.label}
+        value={value}
+        options={entry.options ?? []}
+        onChange={onApply}
+      />
     </SettingsRow>
   );
 }

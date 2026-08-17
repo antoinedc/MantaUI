@@ -43,6 +43,7 @@ export function Chip({
   children,
   hook,
   disabled = false,
+  pressed,
 }: {
   /** The "on"/active state — accent border + accent-bg surface. Default off. */
   on?: boolean;
@@ -66,6 +67,11 @@ export function Chip({
    * flattening to grey and lying about its state.
    */
   disabled?: boolean;
+  /**
+   * Selected state for a chip inside a ChipGroup. When provided, renders
+   * `aria-pressed` so a group of chips is announced as a set of toggles.
+   */
+  pressed?: boolean;
 }) {
   const tone = disabled
     ? `${on ? CHIP_ON : CHIP_REST} opacity-50 cursor-not-allowed`
@@ -73,6 +79,7 @@ export function Chip({
       ? CHIP_ON
       : `${CHIP_REST} ${CHIP_HOVER}`;
   const className = `${hook ? `${hook} ` : ""}${CHIP_SHELL} ${CHIP_PAD} ${tone}`;
+  const pressedAria = pressed !== undefined ? { "aria-pressed": pressed } : {};
   return (
     <button
       type="button"
@@ -80,9 +87,45 @@ export function Chip({
       disabled={disabled}
       title={title}
       className={className}
+      {...pressedAria}
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * A labelled set of single-select chips (a reduced form of a segmented
+ * control): a `role="group"` wrapper holding one toggleable `Chip` per option,
+ * the selected one `on`+`pressed`. Shares the chip primitive's one chrome and
+ * adds no wrapper border/dividers — separate chips with a `gap-2`, which is
+ * what the chip family is for.
+ */
+export function ChipGroup<T extends string | number>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  /** Accessible name for the whole group (e.g. "Theme"). */
+  label: string;
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+}): JSX.Element {
+  return (
+    <div role="group" aria-label={label} className="inline-flex flex-wrap gap-2">
+      {options.map((opt) => (
+        <Chip
+          key={opt.value}
+          on={opt.value === value}
+          pressed={opt.value === value}
+          onClick={() => onChange(opt.value)}
+        >
+          {opt.label}
+        </Chip>
+      ))}
+    </div>
   );
 }
 

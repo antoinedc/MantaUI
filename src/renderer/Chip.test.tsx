@@ -12,7 +12,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
-import { Chip, SplitChip } from "./Chip";
+import { Chip, SplitChip, ChipGroup } from "./Chip";
 
 const CHIP_SHELL =
   "inline-flex items-center h-[29px] rounded-md border whitespace-nowrap text-meta font-normal leading-none transition-colors";
@@ -63,6 +63,65 @@ describe("Chip", () => {
     h = mount(<Chip hook="manta-folder-chip">leasebot</Chip>);
     expect(button(h).textContent).toBe("leasebot");
     expect(button(h).className).toBe(`manta-folder-chip ${CHIP_SHELL} ${CHIP_PAD} ${CHIP_REST} ${CHIP_HOVER}`);
+  });
+
+  it("renders no aria-pressed when pressed is undefined — existing callers stay unchanged", () => {
+    h = mount(<Chip>Hello</Chip>);
+    expect(button(h).hasAttribute("aria-pressed")).toBe(false);
+  });
+
+  it("renders aria-pressed reflecting the boolean when provided", () => {
+    h = mount(<Chip pressed>Hello</Chip>);
+    expect(button(h).getAttribute("aria-pressed")).toBe("true");
+    h.unmount();
+    h = mount(<Chip pressed={false}>Hello</Chip>);
+    expect(button(h).getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("ChipGroup", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("has no className escape hatch — the prop is not accepted (compile-time)", () => {
+    // @ts-expect-error — ChipGroup must NOT accept className (M527 decision 3)
+    void <ChipGroup label="Theme" value="a" options={[{ value: "a", label: "A" }]} onChange={() => {}} className="bg-red-500" />;
+    expect(true).toBe(true);
+  });
+
+  it("exposes role=group with the given accessible name", () => {
+    h = mount(
+      <ChipGroup label="Theme" value="a" options={[{ value: "a", label: "Light" }, { value: "b", label: "Dark" }]} onChange={() => {}} />,
+    );
+    const group = h.container.querySelector('[role="group"]') as HTMLElement;
+    expect(group).toBeTruthy();
+    expect(group.getAttribute("aria-label")).toBe("Theme");
+    const chips = group.querySelectorAll("button");
+    expect(chips.length).toBe(2);
+    expect(chips[0].textContent).toBe("Light");
+    expect(chips[1].textContent).toBe("Dark");
+  });
+
+  it("marks the selected option aria-pressed=true and the others false", () => {
+    h = mount(
+      <ChipGroup label="Theme" value="b" options={[{ value: "a", label: "Light" }, { value: "b", label: "Dark" }]} onChange={() => {}} />,
+    );
+    const chips = Array.from(h.container.querySelectorAll("button"));
+    expect(chips[0].getAttribute("aria-pressed")).toBe("false");
+    expect(chips[1].getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("calls onChange with the clicked option's value", () => {
+    let changed: string | undefined;
+    h = mount(
+      <ChipGroup label="Theme" value="a" options={[{ value: "a", label: "Light" }, { value: "b", label: "Dark" }]} onChange={(v) => (changed = v)} />,
+    );
+    const chips = Array.from(h.container.querySelectorAll("button"));
+    (chips[1] as HTMLButtonElement).click();
+    expect(changed).toBe("b");
   });
 });
 
