@@ -212,4 +212,18 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertTrue(MeterRing.isFull(100))
         XCTAssertTrue(MeterRing.isFull(120))
     }
+
+    // MARK: - shouldShowContext (BET-1022)
+
+    /// A fresh session with no billed turn reports 0%; a "Context 0%" row is
+    /// noise and must not render. `nil` (unknown) and non-finite values never
+    /// render either. Anything above zero renders.
+    func testShouldShowContextGate() {
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: nil))
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: 0))
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: Double.nan))
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: Double.infinity))
+        XCTAssertTrue(UsageMeters.shouldShowContext(pct: 0.4))
+        XCTAssertTrue(UsageMeters.shouldShowContext(pct: 100))
+    }
 }

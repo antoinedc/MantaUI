@@ -243,7 +243,6 @@ private struct ChatScreenContent: View {
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             .toolbarBackground(tokens.canvas, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .subtitle) { subtitleChip }
                 ToolbarItem(placement: .primaryAction) {
                     Button { showOverflow = true } label: {
                         Image(systemName: "ellipsis")
@@ -787,7 +786,7 @@ private struct ChatScreenContent: View {
         // overlay. It renders whenever the reading is known (see `contextStrip`)
         // and animates in above the transcript.
         .safeAreaBar(edge: .top) {
-            contextStrip
+            sessionHeaderBlock
         }
         // A tap on the transcript lowers the keyboard. (TiledView handles the
         // scroll-driven interactive keyboard dismiss itself.)
@@ -852,6 +851,27 @@ private struct ChatScreenContent: View {
         return tokens.tx4
     }
 
+    /// The header block mounted via `.safeAreaBar(edge: .top)` below the system
+    /// navigation bar: a branch row (when a branch exists) stacked over a
+    /// full-width context row. Its own background is fully opaque `tokens.canvas`
+    /// so the bar's default material is not visible — that removes the seam
+    /// between the solid nav bar and the block. The branch row drops out
+    /// entirely when there is no branch (`subtitleChip` renders nothing then).
+    @ViewBuilder
+    private var sessionHeaderBlock: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            subtitleChip
+            contextStrip
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tokens.canvas)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(tokens.borderSubtle).frame(height: 1)
+        }
+    }
+
     /// Full-width, one-tap strip directly under the navigation bar: the word
     /// "Context", a linear meter filling the remaining width, the percentage,
     /// a chevron. Always rendered for a KNOWN reading, because a meter that
@@ -864,7 +884,7 @@ private struct ChatScreenContent: View {
     /// and VoiceOver announces it so.
     @ViewBuilder
     private var contextStrip: some View {
-        if let pct = contextPct {
+        if let pct = contextPct, UsageMeters.shouldShowContext(pct: pct) {
             Button { showContextSheet = true } label: {
                 HStack(spacing: Metrics.spacing.sp2) {
                     Text("Context")
@@ -907,7 +927,7 @@ private struct ChatScreenContent: View {
         // The strip only shows for a known reading, but the context can go
         // unknown in the window between the tap and the sheet presenting —
         // never fabricate a 0% sheet for "we don't know".
-        if let ctx = store.context {
+        if let ctx = store.context, UsageMeters.shouldShowContext(pct: ctx.pct) {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
@@ -1103,18 +1123,10 @@ struct ChatSubagentScreen: View {
 
     var body: some View {
         content
-            .navigationTitle(title)
+            .navigationTitle(subtitle.isEmpty ? title : "\(title) · \(subtitle)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             .toolbarBackground(tokens.canvas, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .subtitle) {
-                    Text(subtitle)
-                        .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                        .foregroundColor(tokens.tx4)
-                        .lineLimit(1)
-                }
-            }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("subagent-scene")
     }

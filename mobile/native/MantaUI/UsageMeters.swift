@@ -36,6 +36,16 @@ enum UsageMeters {
         return .ok
     }
 
+    /// Whether the context meter should render at all.
+    ///
+    /// Above zero only: a fresh session with no billed turn reports 0% and a
+    /// "Context 0%" row is noise. `nil` (unknown) and non-finite values never
+    /// render.
+    static func shouldShowContext(pct: Double?) -> Bool {
+        guard let pct, pct.isFinite else { return false }
+        return pct > 0
+    }
+
     /// The 5-hour session window across all snapshots, or nil. `nil` is the
     /// signal that hides the usage dot — e.g. a snapshot set
     /// holding only a weekly window.
