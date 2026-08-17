@@ -120,6 +120,48 @@ describe("Settings — Escape + nested-confirm ownership (BET-724 regression)", 
     expect(closeCalls.length).toBe(1);
   });
 
+  it("Escape with focus fallen back to document.body still closes Settings (BET-1052)", async () => {
+    const closeCalls: number[] = [];
+    stubApi();
+    h = mount(<Settings onClose={() => closeCalls.push(1)} />);
+    await h.flush();
+
+    // Focus frequently falls back to document.body after clicking a control
+    // that unmounts or blurs itself. The old guard treated body as "outside
+    // the dialog" and swallowed the Escape, so Settings never closed.
+    act(() => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await h.flush();
+
+    expect(closeCalls.length).toBe(1);
+  });
+
+  it("Escape while a nested dialog is mounted does not close Settings (BET-1052)", async () => {
+    const closeCalls: number[] = [];
+    stubApi();
+    h = mount(<Settings onClose={() => closeCalls.push(1)} />);
+    await h.flush();
+
+    clickResetConfirm();
+    await h.flush();
+    expect(confirmDialog(), "confirm dialog should be open").toBeTruthy();
+
+    // Even with focus dropped to document.body, the still-mounted confirm owns
+    // Escape — Settings must not close around it.
+    act(() => {
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    await settle();
+
+    expect(closeCalls.length).toBe(0);
+    expect(dialogs().length).toBe(2);
+  });
+
   it("with the confirm open, Tab stays within the confirm (Settings' trap does not fight the nested Modal's)", async () => {
     stubApi();
     h = mount(<Settings onClose={() => {}} />);
