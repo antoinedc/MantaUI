@@ -12,7 +12,7 @@
 // separate names for now to minimize churn, but still route through here.
 
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 
 export const STATE_DIRNAME = ".manta";
 export const UPLOAD_DIRNAME = ".manta-uploads";
@@ -92,6 +92,19 @@ export function expandTilde(p) {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));
   if (p.startsWith("~\\")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+// Throws unless `p` is an absolute path. Use at any boundary where a
+// caller-supplied path is about to be handed to a spawned process: a spawned
+// process performs NO tilde expansion (that is a shell feature), so a path
+// still carrying `~` — including the `~user/...` form that expandTilde does not
+// handle — must fail loudly here rather than be created relative to the
+// process's cwd.
+export function assertAbsolutePath(p, label) {
+  if (typeof p !== "string" || !isAbsolute(p)) {
+    throw new Error(`${label} must be an absolute path (got ${JSON.stringify(p)})`);
+  }
   return p;
 }
 

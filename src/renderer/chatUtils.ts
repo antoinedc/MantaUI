@@ -3418,16 +3418,22 @@ export function describeRepoRow(repo: RepoHit, homeDir?: string | null): string 
 // token), so it must be named specifically; `disk` and `network` are
 // distinguished so the failure text can say which one occurred rather than a
 // generic "clone failed".
-export type CloneErrorKind = "permission" | "disk" | "network" | "unknown";
+export type CloneErrorKind = "permission" | "disk" | "network" | "destination" | "unknown";
 
 /**
  * Classify a `git clone` failure's stderr into an actionable kind. Order
- * matters: the permission regex runs first because GitHub's "could not read
- * Username" / "Repository not found" for a private repo reads like a generic
- * error but is really an auth (scope) problem. Pure.
+ * matters: the destination regex runs first (a destination path problem must
+ * never be attributed to the GitHub token), then permission (GitHub's "could
+ * not read Username" / "Repository not found" for a private repo reads like a
+ * generic error but is really an auth (scope) problem). Pure.
  */
 export function cloneErrorKind(stderr: string): CloneErrorKind {
   const s = String(stderr ?? "").toLowerCase();
+  if (
+    /could not create leading directories|destination path .* already exists|not an empty directory/.test(s)
+  ) {
+    return "destination";
+  }
   if (
     /permission to .* denied|permission denied|could not read (username|password)|authentication failed|not authorized|repository not found|\b403\b|check that you have the correct access rights/.test(s)
   ) {

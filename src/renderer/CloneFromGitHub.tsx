@@ -180,8 +180,18 @@ export function CloneFromGitHub({
         }
         return;
       }
-      if (cancelled || !res || !res.id) {
-        if (!cancelled) setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", errorKind: "unknown" });
+      if (cancelled) return;
+      if (!res || !res.id) {
+        // The server preflights the destination before starting a clone and
+        // returns a specific message (dest exists / not empty / unwritable /
+        // bad dest). Surface it verbatim — naming the folder, never the token —
+        // instead of a generic "couldn't start". Only a bare request error
+        // without a message falls back to the generic text.
+        if (res?.message) {
+          setPhase({ kind: "failed", repo, message: res.message, errorKind: "destination" });
+        } else {
+          setPhase({ kind: "failed", repo, message: "Couldn't start the clone.", errorKind: "unknown" });
+        }
         return;
       }
       controller.id = res.id;
@@ -346,10 +356,17 @@ export function CloneFromGitHub({
                       change
                     </button>
                   )}
+                  {!editingRoot && root.trim() === "" && (
+                    <span className="text-[11.5px] text-text-warn ml-1">Set a clone folder</span>
+                  )}
                 </div>
 
                 <div className="flex gap-2 mt-3">
-                  <Button tone="primary" disabled={selected.length === 0} onClick={() => runClones(selected, 0)}>
+                  <Button
+                    tone="primary"
+                    disabled={selected.length === 0 || root.trim() === ""}
+                    onClick={() => runClones(selected, 0)}
+                  >
                     Clone {selected.length} selected
                   </Button>
                   <Button tone="ghost" onClick={onCancel}>
@@ -452,6 +469,10 @@ function failedMessage(kind: CloneErrorKind, raw: string): string {
       return "not enough disk space in the clone location.";
     case "network":
       return "a network error prevented the clone.";
+    case "destination":
+      // The server's preflight message is already specific and user-facing —
+      // pass it through verbatim (it names the folder, not the token).
+      return raw || "the clone destination is not usable.";
     default:
       return raw || "the clone failed.";
   }

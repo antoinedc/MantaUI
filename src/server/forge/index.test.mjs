@@ -25,9 +25,11 @@ import {
   forgeInbox,
   seedPromptFor,
   INBOX_SEED_PROMPT,
+  forgeCloneStart,
   ForgeRateLimitedError,
   classifyForgeError,
 } from "./index.mjs";
+import { createCloneStore } from "./clone.mjs";
 import { getDraft, putComment } from "./draft.mjs";
 import { detectForgeWithHosts } from "./selfhost.mjs";
 import { clearVerdicts } from "./auth.mjs";
@@ -1522,4 +1524,126 @@ test("seedPromptFor fills the {{url}} placeholder from the shared template", () 
   assert.equal(INBOX_SEED_PROMPT, "Complete {{url}}");
   assert.equal(seedPromptFor({ url: "https://github.com/acme/widget/issues/5" }), "Complete https://github.com/acme/widget/issues/5");
   assert.equal(seedPromptFor({ url: "u" }, "Fix {{url}}"), "Fix u");
+});
+
+// ---- BET-1073: forgeCloneStart preflights + expands the destination ---------
+
+// A fake clone store that records the dest each start() received, so tests can
+// assert the expanded ABSOLUTE path is what reaches the clone (never the raw
+// tilde string).
+function recordingStore() {
+  const started = [];
+  return {
+    started,
+    start: ({ url, dest, name, token }) => {
+      started.push({ url, dest, name, token });
+      return "clone-1";
+    },
+  };
+}
+
+test("forgeCloneStart expands ~ and passes the absolute dest to the clone store", async () => {
+  const store = recordingStore();
+  // ~ -> os.homedir() via expandTilde; the destination parents don't exist, so
+  // preflight must create the parent and start the job.
+  const result = await forgeCloneStart(
+    { url: "https://github.com/acme/widget.git", dest: "~/projects/widget", name: "widget" },
+    {
+      store,
+      resolveToken: async () => ({ token: "t", source: "cli" }),
+      stat: async () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; },
+      readdir: async () => { throw new Error("no readdir on missing-dest path"); },
+      mkdir: async () => {},
+    },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(store.started.length, 1);
+  const { dest } = store.started[0];
+  assert.ok(dest.startsWith("/"), `dest must be absolute, got ${dest}`);
+  assert.ok(dest.endsWith("/projects/widget"), `dest must be ~ expanded + /projects/widget, got ${dest}`);
+  assert.ok(!dest.includes("~"), "raw tilde must not reach the clone store");
+});
+
+test("forgeCloneStart rejects a non-expandable tilde dest (~bob/x) with bad_dest and starts no job", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "~bob/x", name: "x" },
+    { store, stat: async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }, readdir: async () => [], mkdir: async () => {} },
+  );
+  assert.equal(result.error, "bad_dest");
+  assert.match(result.message, /absolute path/);
+  assert.equal(store.started.length, 0, "no job may start on a bad destination");
+});
+
+test("forgeCloneStart rejects a bare relative dest with bad_dest", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "a/b", name: "x" },
+    { store, stat: async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }, readdir: async () => [], mkdir: async () => {} },
+  );
+  assert.equal(result.error, "bad_dest");
+  assert.equal(store.started.length, 0);
+});
+
+test("forgeCloneStart returns dest_exists when the dest exists and is not a directory", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "/p/file.txt", name: "x" },
+    {
+      store,
+      stat: async () => ({ isDirectory: () => false }),
+      readdir: async () => [],
+      mkdir: async () => {},
+    },
+  );
+  assert.equal(result.error, "dest_exists");
+  assert.match(result.message, /not a folder/);
+  assert.equal(store.started.length, 0);
+});
+
+test("forgeCloneStart returns dest_not_empty when the dest dir already has contents", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "/p/widget", name: "x" },
+    {
+      store,
+      stat: async () => ({ isDirectory: () => true }),
+      readdir: async () => ["something"],
+      mkdir: async () => {},
+    },
+  );
+  assert.equal(result.error, "dest_not_empty");
+  assert.match(result.message, /isn't empty/);
+  assert.equal(store.started.length, 0);
+});
+
+test("forgeCloneStart returns dest_unwritable when the parent cannot be created", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "/nonexistent-root/widget", name: "x" },
+    {
+      store,
+      stat: async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); },
+      readdir: async () => [],
+      mkdir: async () => { throw new Error("EACCES: permission denied, mkdir '/nonexistent-root'"); },
+    },
+  );
+  assert.equal(result.error, "dest_unwritable");
+  assert.match(result.message, /Can't create/);
+  assert.equal(store.started.length, 0);
+});
+
+test("forgeCloneStart clones into an existing EMPTY destination (empty dir is fine)", async () => {
+  const store = recordingStore();
+  const result = await forgeCloneStart(
+    { url: "u", dest: "/p/widget", name: "x" },
+    {
+      store,
+      stat: async () => ({ isDirectory: () => true }),
+      readdir: async () => [],
+      mkdir: async () => {},
+    },
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(store.started.length, 1);
 });

@@ -41,6 +41,12 @@ export function expandTilde(p: undefined): undefined;
 export function expandTilde(p: number): number;
 export function expandTilde(p: unknown): unknown;
 
+// Throws unless `p` is an absolute path. Use at any boundary where a
+// caller-supplied path is about to be handed to a spawned process (spawned
+// processes do no tilde expansion, so a `~`-carrying or relative path must
+// fail loudly here). Returns `p` on success.
+export function assertAbsolutePath(p: unknown, label: string): string;
+
 // Returns a copy of `baseEnv` with the macOS Homebrew PATH prefix
 // prepended. On every non-darwin platform the env is returned
 // byte-identical (no new `PATH` key written when one was missing).

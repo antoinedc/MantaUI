@@ -4759,6 +4759,13 @@ describe("buildVoiceNoteMap (BET-837)", () => {
 });
 
 describe("cloneErrorKind", () => {
+  it("classifies destination failures (never blame the token)", () => {
+    expect(cloneErrorKind("fatal: could not create leading directories of '/root/projects/x': Permission denied")).toBe("destination");
+    expect(cloneErrorKind("fatal: destination path 'x' already exists and is not an empty directory.")).toBe("destination");
+    expect(cloneErrorKind("fatal: destination path 'x' already exists")).toBe("destination");
+    expect(cloneErrorKind("fatal: reference repository is not an empty directory")).toBe("destination");
+  });
+
   it("classifies permission failures (the actionable one)", () => {
     expect(cloneErrorKind("remote: Permission to acme/widget denied to octocat\nfatal: unable to access ...")).toBe("permission");
     expect(cloneErrorKind("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toBe("permission");
