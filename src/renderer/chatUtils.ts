@@ -2283,11 +2283,10 @@ export function extractPlanData(
 //      whatever happened to be current the first time.
 //   3. The session's BUILD-side model.
 //
-// "Same as current" means the BUILD model — NOT whatever the composer chip is
-// showing (plan mode may be on, so the chip could show the plan model).
+// "Same as current" means the session's one model — there is exactly one model
+// per session now, so (3) is simply that model.
 // Sending a background job to the planning model is the bug this order exists
-// to prevent. Until per-mode models land there is only one model per session
-// and (3) is simply that model; the lookup keeps working when they arrive.
+// to prevent.
 //
 // If a remembered model is no longer selectable (deactivated in Settings or
 // gone from the catalog), fall through to (3) silently — never render a dead

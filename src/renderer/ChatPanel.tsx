@@ -69,7 +69,7 @@ import { isPlanAgent, planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
-  copySavedModels,
+  copySavedModel,
   guessMime,
   mimeToInputMode,
   modelInputModes,
@@ -84,7 +84,6 @@ import {
   resolveActiveModel,
   type AgentMention,
   type Attachment,
-  type ModelMode,
   type ModelSelection,
   type SessionMode,
   type TaskContextValue,
@@ -415,14 +414,11 @@ export function ChatPanel({
 
   // ===== Per-session model override =====
   // Declared before useSseBus: the auth-banner providerID below derives from
-  // it. Initialized from the per-session localStorage override for the ACTIVE
-  // mode (per-mode since BET-950 — plan mode falls back to the build key when
-  // no plan key exists), falling back to the persisted global default (the
-  // same seed useSseBus's providerID used to recompute from readSavedModel on
-  // every render).
+  // it. Initialized from the per-session localStorage override for the session,
+  // falling back to the persisted global default (the same seed useSseBus's
+  // providerID used to recompute from readSavedModel on every render).
   const [modelOverride, setModelOverride] = useState<ModelSelection | null>(() =>
-    readSavedModel(sessionId, readPlanSaved(sessionId) ? "plan" : "build") ??
-    configDefaultModel ?? null,
+    readSavedModel(sessionId) ?? configDefaultModel ?? null,
   );
   // Active-model providerID for the auth-error banner (BET-316). Per-session
   // override wins over the persisted default; null if neither is set. Memoized
@@ -450,14 +446,7 @@ export function ChatPanel({
     const next = !planOn;
     setPlanOn(next);
     writePlanSaved(sessionId, next);
-    // Requirement 1 (BET-950): toggling re-reads the model for the mode we are
-    // entering so the composer's model chip visibly changes. Zero-config:
-    // readSavedModel's plan→build fallback means a first toggle to plan keeps
-    // the build model until the user picks one while in plan mode. The plan
-    // key is NOT written here — only on an explicit model pick.
-    const mode: ModelMode = next ? "plan" : "build";
-    setModelOverride(readSavedModel(sessionId, mode) ?? configDefaultModel ?? null);
-  }, [planOn, sessionId, configDefaultModel]);
+  }, [planOn, sessionId]);
   // Honesty sync from useSseBus: opencode's OWN agent switches (plan_enter /
   // plan_exit / agent.switched) drive this so the chip never lies about the
   // agent the next turn will run as. Also persists so a re-mount seeds right.
@@ -615,7 +604,7 @@ export function ChatPanel({
     const planOnStart = readPlanSaved(sessionId);
     setPlanOn(planOnStart);
     setModelOverride(
-      readSavedModel(sessionId, planOnStart ? "plan" : "build") ?? configDefaultModel ?? null,
+      readSavedModel(sessionId) ?? configDefaultModel ?? null,
     );
     // Seed plan mode from the session's own `agent` field when present (BET-949
     // §5): a session pre-set to plan OUTSIDE MantaUI would otherwise show the
@@ -630,9 +619,6 @@ export function ChatPanel({
           const planNow = isPlanAgent(agent);
           setPlanOn(planNow);
           writePlanSaved(sessionId, planNow);
-          setModelOverride(
-            readSavedModel(sessionId, planNow ? "plan" : "build") ?? configDefaultModel ?? null,
-          );
         }
       }).catch(() => { /* non-fatal — stored-key seed stands */ });
     }
@@ -1458,48 +1444,35 @@ export function ChatPanel({
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
 
-  // If a saved model (in EITHER per-mode key) references one that isn't in the
-  // current list of connected models (common after switching providers or fixing
-  // listModels' source endpoint), clear it. Otherwise the server rejects the
-  // prompt with a not-found error and nothing reaches the transcript. Heals both
-  // keys (BET-950) so a stale model in the inactive mode's key is dropped too.
-  // Reads each mode's RAW key (not readSavedModel, whose plan→build fallback
-  // would mask which key actually held the stale value).
+  // If the saved model references one that isn't in the current list of
+  // connected models (common after switching providers or fixing listModels'
+  // source endpoint), clear it. Otherwise the server rejects the prompt with a
+  // not-found error and nothing reaches the transcript.
   useEffect(() => {
     if (!models) return;
-    const isStale = (sel: { providerID: string; modelID: string }) =>
-      !models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID);
-    const heal = (mode: ModelMode) => {
-      let saved: ModelSelection | null = null;
-      try {
-        const raw = localStorage.getItem(modelKey(sessionId, mode));
-        if (raw) {
-          const p = JSON.parse(raw);
-          if (p && typeof p.providerID === "string" && typeof p.modelID === "string") {
-            saved = p as ModelSelection;
-          }
+    let saved: ModelSelection | null = null;
+    try {
+      const raw = localStorage.getItem(modelKey(sessionId));
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p.providerID === "string" && typeof p.modelID === "string") {
+          saved = p as ModelSelection;
         }
-      } catch { /* non-JSON / disabled storage — nothing to heal */ }
-      if (!saved || !isStale(saved)) return;
-      writeSavedModel(sessionId, mode, null);
-      // Drop the active override when the cleared key is what's in play: the
-      // active mode's own key, or the build fallback a plan session is using.
-      const active: ModelMode = planOn ? "plan" : "build";
-      if (mode === active) setModelOverride(null);
-      else if (modelOverride && modelOverride.providerID === saved.providerID
-        && modelOverride.modelID === saved.modelID) setModelOverride(null);
-    };
-    heal("build");
-    heal("plan");
-  }, [models, modelOverride, planOn, sessionId]);
+      }
+    } catch { /* non-JSON / disabled storage — nothing to heal */ }
+    if (!saved) return;
+    const sel = saved;
+    if (models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID)) return;
+    writeSavedModel(sessionId, null);
+    setModelOverride(null);
+  }, [models, sessionId]);
 
   const selectModel = useCallback(
     (m: ModelSelection | null) => {
-      const mode: ModelMode = planOn ? "plan" : "build";
       setModelOverride(m);
-      writeSavedModel(sessionId, mode, m);
+      writeSavedModel(sessionId, m);
     },
-    [sessionId, planOn],
+    [sessionId],
   );
 
   // App-control (BET-840/841): expose this panel's `selectModel` to App so the
@@ -1565,11 +1538,10 @@ export function ChatPanel({
         cwd: cwd ?? "",
         title: `${tmuxSession} / cleared`,
       });
-      // /clear carries BOTH per-mode model keys forward (BET-950) so the user
-      // doesn't re-pick after every clear. copySavedModels preserves their
-      // independence; plan mode state is carried on top.
+      // /clear carries the session's model forward so the user doesn't re-pick
+      // after every clear; plan mode state is carried on top.
       if (cleared?.newSessionId) {
-        copySavedModels(sessionId, cleared.newSessionId);
+        copySavedModel(sessionId, cleared.newSessionId);
         if (planOn) {
           writePlanSaved(cleared.newSessionId, true);
         }
@@ -2465,10 +2437,8 @@ export function ChatPanel({
   );
 
   // Delegate split control (BET-951).
-  // Level 3 of the model precedence — "same as current" means the BUILD model,
-  // not the plan model the composer chip may be showing while plan mode is on.
-  // Until per-mode models land there is only one model per session and this is
-  // simply the active model, but the lookup keeps working when they arrive.
+  // Level 3 of the model precedence — "same as current" means the session's one
+  // model (there is exactly one per session now).
   const sessionModel = useMemo<ModelSelection | null>(
     () =>
       modelOverride ??
@@ -2515,10 +2485,9 @@ export function ChatPanel({
     async (q: QuestionRequest, feedback: string) => {
       // Answer "Yes" so opencode switches to the build agent...
       await replyQuestion(q, [["Yes"]]);
-      // ...then re-send the plan text ourselves WITH the BUILD model. opencode's
-      // "Yes" path stamps the injected build turn with the model of the last
-      // user message — which, because MantaUI sends the model per prompt, is the
-      // PLAN model. That is exactly why this is a resubmit, not a toggle.
+      // ...then re-send the plan text ourselves with the user's feedback
+      // appended. This is a resubmit (not a toggle) so the feedback text lands
+      // in the build turn with the session's one model.
       setPlanOn(false);
       writePlanSaved(sessionId, false);
       try {
