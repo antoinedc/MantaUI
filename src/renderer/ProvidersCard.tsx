@@ -6,25 +6,22 @@ import { Checkbox } from "./Checkbox";
 
 type Props = {
   /**
-   * BET-420: raised when an endpoint mutation needs an opencode restart. When
-   * provided (desktop Settings), the card does NOT render its own restart
-   * banner — the Settings panel shows ONE shared restart banner instead. When
-   * omitted (mobile), the card keeps its inline "Apply Now / Apply Later"
-   * banner so mobile still has a restart affordance.
+   * BET-420: raised when an endpoint mutation needs an opencode restart. The
+   * card never renders its own restart UI — the Settings panel owns the ONE
+   * shared restart banner (BET-420), and this callback drives it.
    *
    * BET-421 §D: the add-endpoint form (CustomProviderForm) handles its OWN
    * save + restart internally (probe → save → restart), so it does NOT route
    * through this callback — only the per-endpoint toggle/remove mutations do.
    */
-  onRestartNeeded?: () => void;
+  onRestartNeeded: () => void;
 };
 
-export function ProvidersCard({ onRestartNeeded }: Props = {}) {
+export function ProvidersCard({ onRestartNeeded }: Props) {
   const [endpoints, setEndpoints] = useState<ProviderEndpoint[] | null>(null);
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null); // endpoint id being mutated
-  const [restartNeeded, setRestartNeeded] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -61,11 +58,6 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
     }
   }, [busy]);
 
-  const flagRestart = () => {
-    if (onRestartNeeded) onRestartNeeded();
-    else setRestartNeeded(true);
-  };
-
   const toggleModel = useCallback(async (ep: ProviderEndpoint, modelId: string) => {
     if (busy) return;
     const enabled = ep.enabledModels.includes(modelId)
@@ -78,7 +70,7 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
         upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
       });
       if (!res.ok) { setGlobalError(res.error ?? "Save failed"); return; }
-      flagRestart();
+      onRestartNeeded();
       load();
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : String(e));
@@ -96,7 +88,7 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
       if (!res.ok) { setGlobalError(res.error ?? "Remove failed"); return; }
       setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
       setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
-      flagRestart();
+      onRestartNeeded();
       load();
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : String(e));
@@ -104,23 +96,6 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
       setBusy(null);
     }
   }, [busy, load, onRestartNeeded]);
-
-  const [restarting, setRestarting] = useState(false);
-  const applyRestart = useCallback(async () => {
-    if (restarting) return;
-    setRestarting(true);
-    setGlobalError(null);
-    try {
-      await window.api.opencodeRestart();
-      setRestartNeeded(false);
-    } catch (e) {
-      // A restart that killed the session but failed to bring opencode back is
-      // the worst-perceived outcome — never let it fail silently.
-      setGlobalError(`Restart failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setRestarting(false);
-    }
-  }, [restarting]);
 
   return (
     <div className="space-y-2">
@@ -180,24 +155,6 @@ export function ProvidersCard({ onRestartNeeded }: Props = {}) {
         compact
         onSaved={load}
       />
-
-      {/* Mobile-only restart banner (desktop routes through the panel banner
-          via onRestartNeeded, so this never renders on desktop). */}
-      {!onRestartNeeded && restartNeeded && (
-        <div className="flex items-center gap-2 text-meta bg-bg-soft border border-border rounded-xs p-2">
-          <span className="flex-1 text-text-muted">
-            Restart opencode now to apply? (interrupts active sessions)
-          </span>
-          <button onClick={applyRestart} disabled={restarting}
-            className="px-2 py-1 bg-accent/20 border border-accent rounded-xs text-text disabled:opacity-40">
-            {restarting ? "Restarting…" : "Apply Now"}
-          </button>
-          <button onClick={() => setRestartNeeded(false)} disabled={restarting}
-            className="px-2 py-1 border border-border rounded-xs text-text-muted disabled:opacity-40">
-            Apply Later
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -412,6 +412,7 @@ export function Settings({
         message: next.length > prev.length ? "Registry URL added" : "Registry URL removed",
         actions: [{ label: "Undo", onClick: () => { void useStore.setState({ skillRegistryUrls: prev }); window.api.configUpdate({ skillRegistryUrls: prev }).catch(() => {}); } }],
       });
+      requestRestart();
     } catch (e) {
       useStore.setState({ skillRegistryUrls: prev });
       push({ id: `err-registry-${Date.now()}`, message: errorDisclosure("Couldn't update skill registries.", e) });
