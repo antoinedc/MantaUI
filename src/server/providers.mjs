@@ -1,7 +1,7 @@
 // providers.mjs — Provider management for the manta mobile server.
 //
 // Ports the pure helpers from src/main/providers.ts (parseModelsResponse,
-// upsertProviderBlock, removeProviderBlock, readProviderEndpoints,
+// upsertProviderBlock, readProviderEndpoints,
 // findStoredApiKey, stripUrlUserinfo) and adds server-side I/O functions:
 //   discoverModels    — fetch <baseURL>/models directly (server IS the box)
 //   setProviders      — read/merge/write opencode.jsonc locally
@@ -132,12 +132,6 @@ export function upsertProviderBlock(cfg, input) {
   return { ...cfg, provider: providers };
 }
 
-export function removeProviderBlock(cfg, id) {
-  const providers = getProviderMap(cfg);
-  delete providers[id];
-  return { ...cfg, provider: providers };
-}
-
 // Project the config's provider map down to renderer-safe metadata. Never
 // includes the apiKey value — only whether one is present — and scrubs any
 // credential embedded in the baseURL.
@@ -148,10 +142,10 @@ export function removeProviderBlock(cfg, id) {
 // opencode-claude-auth) have no baseURL and MUST be excluded — rendering them
 // in the card gives them a Refresh button that fetches `"" + "/models"`
 // ("unreachable: could not reach the endpoint"), and worse, a model toggle or
-// ✕ on that row would route the block through upsertProviderBlock /
-// removeProviderBlock, overwriting it with npm:"@ai-sdk/openai-compatible" +
-// empty baseURL and corrupting the plugin auth. They still appear in the model
-// dropdown, which reads the live /provider endpoint instead.
+// ✕ on that row would route the block through upsertProviderBlock, overwriting
+// it with npm:"@ai-sdk/openai-compatible" + empty baseURL and corrupting the
+// plugin auth. They still appear in the model dropdown, which reads the live
+// /provider endpoint instead.
 export function readProviderEndpoints(cfg) {
   const providers = getProviderMap(cfg);
   return Object.entries(providers)
@@ -199,12 +193,6 @@ export function upsertAgentBlock(cfg, input) {
   };
   if (input.permission !== undefined) agents[input.name].permission = input.permission;
   if (input.prompt !== undefined) agents[input.name].prompt = input.prompt;
-  return { ...cfg, agent: agents };
-}
-
-export function removeAgentBlock(cfg, name) {
-  const agents = getAgentMap(cfg);
-  delete agents[name];
   return { ...cfg, agent: agents };
 }
 
