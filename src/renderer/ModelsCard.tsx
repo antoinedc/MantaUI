@@ -184,6 +184,7 @@ export function ModelsCard() {
     loading,
     error,
     refresh,
+    mutate,
   } = useCachedResource<{ models: OpencodeModel[]; cfg: AppConfig }>("models", async () => {
     const [modelList, cfg] = await Promise.all([
       window.api.opencodeModels(),
@@ -237,26 +238,26 @@ export function ModelsCard() {
     async (key: string, currentlyMain: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      try {
-        const nextMain = new Set(deactivatedMain);
-        if (currentlyMain) nextMain.add(key);
-        else nextMain.delete(key);
-        const nextMainList = [...nextMain];
-        // Invariant: a saved defaultModel MUST be Main-available. When the
-        // user turns Main off on the current default, clear defaultModel in
-        // the SAME save so the persisted config never violates the invariant.
-        const isCurrentDefault =
-          currentlyMain &&
-          savedDefault != null &&
-          modelKey(savedDefault.providerID, savedDefault.modelID) === key;
-        const patch: Record<string, unknown> = { deactivatedMainModels: nextMainList };
-        if (isCurrentDefault) {
-          // `null` (not `undefined`) — JSON.stringify drops `undefined` keys,
-          // so passing null is the only way the server actually clears the
-          // field. The store's applyConfig normalizes any null back to null
-          // and the existing defaultModel?: type allows absence.
-          patch.defaultModel = null;
-        }
+      const nextMain = new Set(deactivatedMain);
+      if (currentlyMain) nextMain.add(key);
+      else nextMain.delete(key);
+      const nextMainList = [...nextMain];
+      // Invariant: a saved defaultModel MUST be Main-available. When the
+      // user turns Main off on the current default, clear defaultModel in
+      // the SAME save so the persisted config never violates the invariant.
+      const isCurrentDefault =
+        currentlyMain &&
+        savedDefault != null &&
+        modelKey(savedDefault.providerID, savedDefault.modelID) === key;
+      const patch: Record<string, unknown> = { deactivatedMainModels: nextMainList };
+      if (isCurrentDefault) {
+        // `null` (not `undefined`) — JSON.stringify drops `undefined` keys,
+        // so passing null is the only way the server actually clears the
+        // field. The store's applyConfig normalizes any null back to null
+        // and the existing defaultModel?: type allows absence.
+        patch.defaultModel = null;
+      }
+      await mutate(async () => {
         const cfg = await window.api.configUpdate(patch);
         const resolvedList = cfg.deactivatedMainModels ?? nextMainList;
         setDeactivatedMain(new Set(resolvedList));
@@ -267,22 +268,21 @@ export function ModelsCard() {
           // typed for setting, not clearing).
           useStore.setState({ defaultModel: null });
         }
-      } finally {
-        setBusy(null);
-      }
+      });
+      setBusy(null);
     },
-    [busy, models, deactivatedMain, savedDefault],
+    [busy, mutate, models, deactivatedMain, savedDefault],
   );
 
   const toggleSub = useCallback(
     async (key: string, currentlyActive: boolean) => {
       if (busy || !models) return;
       setBusy(key);
-      try {
-        const nextSet = new Set(deactivatedSub);
-        if (currentlyActive) nextSet.add(key);
-        else nextSet.delete(key);
-        const nextList = [...nextSet];
+      const nextSet = new Set(deactivatedSub);
+      if (currentlyActive) nextSet.add(key);
+      else nextSet.delete(key);
+      const nextList = [...nextSet];
+      await mutate(async () => {
         const cfg = await window.api.configUpdate({ deactivatedSubagents: nextList });
         const resolvedList = cfg.deactivatedSubagents ?? nextList;
         await window.api.opencodeSyncSubagents({
@@ -293,11 +293,10 @@ export function ModelsCard() {
         // Sub toggles write opencode.jsonc agent blocks — a restart is
         // required for opencode to re-read them. Raise the panel banner.
         useStore.getState().setOpencodeRestartNeeded(true);
-      } finally {
-        setBusy(null);
-      }
+      });
+      setBusy(null);
     },
-    [busy, models, deactivatedSub],
+    [busy, mutate, models, deactivatedSub],
   );
 
   // Default radio — single-select. Writes defaultModel via the store's
@@ -306,14 +305,13 @@ export function ModelsCard() {
     async (providerID: string, modelID: string) => {
       if (busy) return;
       setBusy("__default__");
-      try {
+      await mutate(async () => {
         await setStoreDefaultModel({ providerID, modelID });
         void refresh();
-      } finally {
-        setBusy(null);
-      }
+      });
+      setBusy(null);
     },
-    [busy, setStoreDefaultModel, refresh],
+    [busy, mutate, setStoreDefaultModel, refresh],
   );
 
   // Save a model display override (name / description / context) drafted in the
@@ -325,7 +323,7 @@ export function ModelsCard() {
     async (key: string, _model: OpencodeModel, override: ModelOverride) => {
       if (busy) return;
       setBusy(key);
-      try {
+      await mutate(async () => {
         const cfg = await window.api.configGet();
         const existing = cfg.modelOverrides ?? {};
         const next = { ...existing };
@@ -337,11 +335,10 @@ export function ModelsCard() {
         await refresh();
         setEditing(null);
         refreshModelCatalog();
-      } finally {
-        setBusy(null);
-      }
+      });
+      setBusy(null);
     },
-    [busy, refresh],
+    [busy, mutate, refresh],
   );
 
   // ---- Render ----

@@ -17,7 +17,7 @@ function Probe({
   resourceKey: string;
   fetcher: () => Promise<number>;
 }) {
-  const { data, loading, error, refresh } = useCachedResource<number>(resourceKey, fetcher);
+  const { data, loading, error, refresh, mutate } = useCachedResource<number>(resourceKey, fetcher);
   return (
     <div>
       <span data-testid="loading">{String(loading)}</span>
@@ -25,6 +25,12 @@ function Probe({
       <span data-testid="error">{error ?? ""}</span>
       <button data-testid="refresh" onClick={() => void refresh()}>
         refresh
+      </button>
+      <button data-testid="mutate-fail" onClick={() => void mutate(async () => { throw new Error("nope"); })}>
+        mutate fail
+      </button>
+      <button data-testid="mutate-ok" onClick={() => void mutate(async () => {})}>
+        mutate ok
       </button>
     </div>
   );
@@ -109,6 +115,41 @@ describe("useCachedResource", () => {
     invalidateCachedResource("invalidate");
     h = mount(<Probe resourceKey="invalidate" fetcher={async () => 42} />);
     expect(loadState()).toEqual({ loading: "true", data: "null", error: "" });
+    await h.flush();
+    expect(loadState()).toEqual({ loading: "false", data: "42", error: "" });
+  });
+
+  it("mutate failure sets error and leaves cached data alone", async () => {
+    h = mount(<Probe resourceKey="mutate-fail" fetcher={async () => 42} />);
+    await h.flush();
+    expect(loadState()).toEqual({ loading: "false", data: "42", error: "" });
+    act(() => {
+      document.body.querySelector('[data-testid="mutate-fail"]')?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    await h.flush();
+    // Error surfaces, cached data untouched, loading never flips.
+    expect(loadState()).toEqual({ loading: "false", data: "42", error: "nope" });
+  });
+
+  it("mutate success clears a previous error", async () => {
+    h = mount(<Probe resourceKey="mutate-ok" fetcher={async () => 42} />);
+    await h.flush();
+    // Set an error first via a failing mutate.
+    act(() => {
+      document.body.querySelector('[data-testid="mutate-fail"]')?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    await h.flush();
+    expect(loadState().error).toBe("nope");
+    // A succeeding mutate clears it, data unchanged.
+    act(() => {
+      document.body.querySelector('[data-testid="mutate-ok"]')?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
     await h.flush();
     expect(loadState()).toEqual({ loading: "false", data: "42", error: "" });
   });

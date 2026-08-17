@@ -108,7 +108,7 @@ export function ConnectProvider({
 }: {
   id: string;
   label: string;
-  onDone: (connected: boolean) => void;
+  onDone: () => void;
   onCancel: () => void;
 }): JSX.Element {
   const [phase, setPhase] = useState<ConnectPhase>({ kind: "starting" });
@@ -552,7 +552,7 @@ export function ConnectProvider({
   // the flow never advanced; BET-354 cycle-2 Block #1).
   useEffect(() => {
     if (phase.kind !== "done") return;
-    onDone(true);
+    onDone();
   }, [phase.kind, onDone]);
 
   const retry = useCallback(() => {

@@ -31,6 +31,20 @@ export function useCachedResource<T>(
   error: string | null;
   /** Force a refetch and update the cache. Never flips `loading`. */
   refresh: () => Promise<void>;
+  /** Run a mutation that writes to this resource, routing a failure into the
+   *  SAME `error` this hook already exposes — so the card needs no second
+   *  error state and no extra JSX. Never throws and never flips `loading`.
+   *
+   *  On success `error` is cleared. On a throw the message lands in `error`
+   *  and NOTHING ELSE RUNS — which is why every call site puts its own
+   *  `refresh()` INSIDE `fn`: a refresh after a failed mutation would call
+   *  `load()`, whose success path clears `error`, wiping the message that was
+   *  just set. (A failed mutation changed nothing on the box, so there is
+   *  nothing to refetch anyway.)
+   *
+   *  An API that reports failure as a RESULT rather than a rejection (e.g.
+   *  `{ ok: false, error }`) must be turned into a `throw` inside `fn`. */
+  mutate: (fn: () => Promise<void>) => Promise<void>;
 } {
   const [data, setData] = useState<T | null>(() =>
     cache.has(key) ? (cache.get(key) as T) : null,
@@ -80,7 +94,16 @@ export function useCachedResource<T>(
     await load(false);
   }, [load]);
 
-  return { data, loading, error, refresh };
+  const mutate = useCallback(async (fn: () => Promise<void>) => {
+    try {
+      await fn();
+      if (!cancelledRef.current) setError(null);
+    } catch (e) {
+      if (!cancelledRef.current) setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  return { data, loading, error, refresh, mutate };
 }
 
 export function invalidateCachedResource(key: string): void {

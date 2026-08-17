@@ -98,7 +98,7 @@ export function ProvidersStep({
   const canContinue = canContinueProviders(statuses ?? []);
 
   const onConnectDone = useCallback(
-    (_ok: boolean) => {
+    () => {
       setConnectingId(null);
       void refresh();
     },
