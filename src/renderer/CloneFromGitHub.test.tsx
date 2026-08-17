@@ -333,4 +333,83 @@ describe("CloneFromGitHub picker", () => {
     expect(container!.querySelector(".manta-loader")).toBeNull();
     expect(container!.querySelector('input[aria-label="Clone alpha"]')).toBeTruthy();
   });
+
+  it("routes a rejected repo listing back to the connect panel, not an error message (BET-1059)", async () => {
+    // First forgeDeviceStart call: an existing credential, so the picker (and
+    // the repo fetch) run. When the box reports `rejected` and the component
+    // drops to `connected: false`, the second call keeps it OFF the picker and
+    // ON the connect screen so the user can sign in again — this is what makes
+    // the box's behaviour after clearing a dead credential testable instead of
+    // an infinite re-connect loop.
+    let deviceStartCalls = 0;
+    installMockApi({
+      forgeDeviceStart: () => {
+        deviceStartCalls++;
+        return Promise.resolve(
+          deviceStartCalls === 1
+            ? { connected: true, grant: null }
+            : {
+                connected: false,
+                grant: {
+                  grantId: "g1",
+                  userCode: "ABCD-1234",
+                  verificationUri: "https://github.com/login/device",
+                  expiresIn: 900,
+                  pollInterval: 5,
+                },
+                error: null,
+              },
+        );
+      },
+      forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "rejected" }),
+      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
+      );
+    });
+    await flushMicro();
+    await flushMicro();
+    await flushMicro();
+
+    const text = container!.textContent ?? "";
+    // The connect screen (its device code) is the next screen after the box
+    // clears a dead credential — NOT a permanent error stuck on the picker.
+    expect(text).toContain("ABCD-1234");
+    expect(text).not.toContain("Couldn't list your repositories from GitHub.");
+    expect(text).not.toContain("Clone a repository");
+  });
+
+  it("renders an error message for a network failure and does NOT drop to the connect panel (BET-1059)", async () => {
+    installMockApi({
+      forgeDeviceStart: () => Promise.resolve({ connected: true, grant: null }),
+      forgeRepos: () => Promise.resolve({ repos: [], stale: false, error: "network" }),
+      forgeCloneStart: () => Promise.resolve({ id: "c1" }),
+      forgeCloneStatus: () => Promise.resolve(CLONE_IN_PROGRESS),
+    });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root!.render(
+        <CloneFromGitHub defaultRoot="/root" onCancel={() => {}} onCloned={() => {}} />,
+      );
+    });
+    await flushMicro();
+    await flushMicro();
+
+    const text = container!.textContent ?? "";
+    // The network message renders inside the picker's error callout…
+    expect(text).toContain(
+      "Couldn't reach GitHub from your box. Check its connection and try again.",
+    );
+    // …and the picker stays up — a blip must not look like a sign-out.
+    expect(text).toContain("Clone a repository");
+    expect(container!.querySelector('input[aria-label="Search repositories"]')).toBeTruthy();
+  });
 });

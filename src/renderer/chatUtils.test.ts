@@ -119,6 +119,7 @@ import {
   commentableLines,
   cloneErrorKind,
   repoListErrorMessage,
+  forgeCredentialSecondary,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -4782,18 +4783,80 @@ describe("cloneErrorKind", () => {
 });
 
 describe("repoListErrorMessage (BET-1011)", () => {
-  it("maps the server's not_connected code to sign-in guidance", () => {
+  it("maps the server's not_connected and rejected codes to sign-in guidance", () => {
     expect(repoListErrorMessage("not_connected")).toBe(
       "GitHub isn't connected. Go back and sign in again.",
+    );
+    expect(repoListErrorMessage("rejected")).toBe(
+      "GitHub isn't connected. Go back and sign in again.",
+    );
+  });
+
+  it("explains a rate-limited listing", () => {
+    expect(repoListErrorMessage("rate_limited")).toBe(
+      "GitHub's rate limit is used up. Try again in a few minutes.",
+    );
+  });
+
+  it("explains a forbidden listing with an SSO hint", () => {
+    expect(repoListErrorMessage("forbidden")).toBe(
+      "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.",
+    );
+  });
+
+  it("explains a network failure", () => {
+    expect(repoListErrorMessage("network")).toBe(
+      "Couldn't reach GitHub from your box. Check its connection and try again.",
     );
   });
 
   it("falls back to a generic message for any other code or absence", () => {
     const generic = "Couldn't list your repositories from GitHub.";
-    expect(repoListErrorMessage("rate_limited")).toBe(generic);
+    expect(repoListErrorMessage("bogus")).toBe(generic);
     expect(repoListErrorMessage("")).toBe(generic);
     expect(repoListErrorMessage(null)).toBe(generic);
     expect(repoListErrorMessage(undefined)).toBe(generic);
+  });
+});
+
+describe("forgeCredentialSecondary (BET-1059)", () => {
+  it("explains a rejected gh CLI credential", () => {
+    expect(forgeCredentialSecondary({ login: "a", source: "cli", valid: false })).toBe(
+      "GitHub rejected the gh CLI sign-in on your box. Run `gh auth login` there, or Disconnect.",
+    );
+  });
+
+  it("explains a rejected env-var credential", () => {
+    expect(forgeCredentialSecondary({ login: "a", source: "env", valid: false })).toBe(
+      "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your box. Replace it there, or Disconnect.",
+    );
+  });
+
+  it("explains a rejected stored credential without a provenance hint", () => {
+    expect(forgeCredentialSecondary({ login: "a", source: "stored", valid: false })).toBe(
+      "GitHub rejected this sign-in. Disconnect, then connect again.",
+    );
+    expect(forgeCredentialSecondary({ login: null, source: null, valid: false })).toBe(
+      "GitHub rejected this sign-in. Disconnect, then connect again.",
+    );
+  });
+
+  it("valid with a login → @login · <where>", () => {
+    expect(forgeCredentialSecondary({ login: "antoinedc", source: "cli", valid: true })).toBe(
+      "@antoinedc · from the gh CLI on your box",
+    );
+  });
+
+  it("valid with no login → the bare <where>", () => {
+    expect(forgeCredentialSecondary({ login: null, source: "stored", valid: true })).toBe(
+      "signed in on this box",
+    );
+  });
+
+  it("valid null is treated like valid true — not-yet-probed never renders as rejected", () => {
+    expect(forgeCredentialSecondary({ login: "antoinedc", source: "env", valid: null })).toBe(
+      "@antoinedc · from the MANTA_GITHUB_TOKEN env var",
+    );
   });
 });
 
