@@ -219,6 +219,33 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(on.title, "Plan mode on — edits blocked. Click to build.")
     }
 
+    // MARK: - ChatModel.shortName
+
+    func testShortNameStripsKnownBrandPrefix() {
+        XCTAssertEqual(ChatModel.shortName("Claude Opus 5"), "Opus 5")
+    }
+
+    func testShortNameLeavesUnknownPrefixAlone() {
+        XCTAssertEqual(ChatModel.shortName("Kimi K3 Turbo"), "Kimi K3 Turbo")
+    }
+
+    func testShortNameLeavesSingleWordAlone() {
+        XCTAssertEqual(ChatModel.shortName("Claude"), "Claude")
+        XCTAssertEqual(ChatModel.shortName("o3"), "o3")
+    }
+
+    func testShortNameMatchingIsCaseSensitive() {
+        XCTAssertEqual(ChatModel.shortName("claude opus 5"), "claude opus 5")
+    }
+
+    func testShortNameHandlesSurroundingAndDoubledInnerWhitespace() {
+        XCTAssertEqual(ChatModel.shortName("  Claude  Opus 5  "), "Opus 5")
+    }
+
+    func testShortNameRemovesOnlyFirstWord() {
+        XCTAssertEqual(ChatModel.shortName("Gemini Claude Weird"), "Claude Weird")
+    }
+
     // MARK: - ChatVoice.mime
 
     func testMimeFromFilenameExtension() {
