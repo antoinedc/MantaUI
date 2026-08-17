@@ -440,3 +440,130 @@ final class ModelRecentsTests: XCTestCase {
         }
     }
 }
+
+// ===========================================================================
+// BET-1025 — ChatModelStore per-mode model keys. Plan and build are remembered
+// separately (desktop: `manta:chat:<sid>:model` / `…:model:plan`), plan falls
+// back to build when its own key is absent, build never falls back to plan, and
+// toggling modes restores each mode's remembered model with no cross-
+// contamination. The literal key strings are assertions, because cross-client
+// compatibility depends on them matching the desktop's keys byte-for-byte.
+// ===========================================================================
+
+@MainActor
+final class ChatModelStoreKeyTests: XCTestCase {
+
+    private let sid = "test-session"
+    private let otherSid = "test-session-2"
+    private var buildKey: String { ChatModelStore.storageKey(for: sid, mode: .build) }
+    private var planKey: String { ChatModelStore.storageKey(for: sid, mode: .plan) }
+    private var otherBuildKey: String { ChatModelStore.storageKey(for: otherSid, mode: .build) }
+    private var otherPlanKey: String { ChatModelStore.storageKey(for: otherSid, mode: .plan) }
+    private var workingKeys: [String] {
+        [buildKey, planKey, otherBuildKey, otherPlanKey,
+         ChatModelStore.planKey(for: sid), ChatModelStore.variantKey(for: sid),
+         ChatModelStore.planKey(for: otherSid), ChatModelStore.variantKey(for: otherSid)]
+    }
+
+    override func setUp() {
+        super.setUp()
+        for key in workingKeys { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    override func tearDown() {
+        for key in workingKeys { UserDefaults.standard.removeObject(forKey: key) }
+        super.tearDown()
+    }
+
+    private func store(_ id: String) -> ChatModelStore {
+        ChatModelStore(sessionId: id, api: MantaAPIClient(serverURL: URL(string: "https://example.com")!))
+    }
+
+    private func model(_ m: String) -> OpencodeModelID {
+        OpencodeModelID(providerID: "anthropic", modelID: m)
+    }
+
+    // MARK: - Literal key strings (cross-client compatibility)
+
+    func testStorageKeyLiteralStrings() {
+        XCTAssertEqual(ChatModelStore.storageKey(for: "S", mode: .build), "manta:chat:S:model")
+        XCTAssertEqual(ChatModelStore.storageKey(for: "S", mode: .plan), "manta:chat:S:model:plan")
+    }
+
+    // MARK: - Read with fallback
+
+    func testPlanReadWithPlanValueStoredReturnsIt() {
+        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
+        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
+        XCTAssertEqual(ChatModelStore.loadOverride(for: sid, mode: .plan), model("plan-model"))
+    }
+
+    func testPlanReadWithOnlyBuildValueReturnsBuild() {
+        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
+        XCTAssertEqual(ChatModelStore.loadOverride(for: sid, mode: .plan), model("build-model"))
+    }
+
+    func testBuildReadWithOnlyPlanValueReturnsNil() {
+        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
+        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .build))
+    }
+
+    func testPlanReadWithNothingStoredReturnsNil() {
+        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .plan))
+        XCTAssertNil(ChatModelStore.loadOverride(for: sid, mode: .build))
+    }
+
+    // MARK: - rebind copies BOTH keys, leaves the old ones alone
+
+    func testRebindCopiesBothKeysAndLeavesOldAlone() {
+        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
+        UserDefaults.standard.set(ChatModel.encode(model("plan-model")), forKey: planKey)
+        store(sid).rebind(to: otherSid)
+
+        XCTAssertEqual(UserDefaults.standard.string(forKey: otherBuildKey), ChatModel.encode(model("build-model")))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: otherPlanKey), ChatModel.encode(model("plan-model")))
+        // The source session's keys are untouched.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: buildKey), ChatModel.encode(model("build-model")))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: planKey), ChatModel.encode(model("plan-model")))
+    }
+
+    func testRebindLeavesAbsentPlanKeyAbsentOnDestination() {
+        // Only a build model stored — the destination must NOT get a plan key
+        // stamped with the build fallback (that would "activate" plan mode).
+        UserDefaults.standard.set(ChatModel.encode(model("build-model")), forKey: buildKey)
+        store(sid).rebind(to: otherSid)
+
+        XCTAssertEqual(UserDefaults.standard.string(forKey: otherBuildKey), ChatModel.encode(model("build-model")))
+        XCTAssertNil(UserDefaults.standard.string(forKey: otherPlanKey))
+    }
+
+    // MARK: - Mode toggle restores each mode's model (no cross-contamination)
+
+    func testTogglePlanTwiceReturnsOriginalModel() {
+        let s = store(sid)
+
+        s.setOverride(model("build-a"))                    // pick A in build mode
+        XCTAssertEqual(UserDefaults.standard.string(forKey: buildKey), ChatModel.encode(model("build-a")))
+        XCTAssertEqual(s.override, model("build-a"))
+
+        s.setPlan(true)                                    // plan on — plan key absent, falls back to build-a
+        XCTAssertEqual(s.override, model("build-a"))
+
+        s.setOverride(model("plan-b"))                     // pick B in plan mode
+        XCTAssertEqual(UserDefaults.standard.string(forKey: planKey), ChatModel.encode(model("plan-b")))
+        XCTAssertEqual(s.override, model("plan-b"))
+
+        s.setPlan(false)                                   // plan off — build key holds A again
+        XCTAssertEqual(s.override, model("build-a"))
+
+        s.setPlan(true)                                    // plan on again — plan key holds B
+        XCTAssertEqual(s.override, model("plan-b"))
+    }
+
+    func testModeDoesNotWriteWhenValueUnchanged() {
+        let s = store(sid)
+        s.setPlan(false)                                   // already build — no re-read, no write
+        XCTAssertNil(UserDefaults.standard.string(forKey: buildKey))
+        XCTAssertNil(UserDefaults.standard.string(forKey: planKey))
+    }
+}
