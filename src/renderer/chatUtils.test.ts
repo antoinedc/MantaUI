@@ -3590,6 +3590,7 @@ describe("usageDialState", () => {
       visible: false,
       pct: 0,
       tone: "under",
+      awaitingReset: false,
       window: null,
     });
   });
@@ -3597,6 +3598,36 @@ describe("usageDialState", () => {
   it("a null snapshot is not visible", () => {
     expect(usageDialState(null, true).visible).toBe(false);
     expect(usageDialState(undefined, true).visible).toBe(false);
+  });
+
+  it("a waiting primary keeps its own window, reports no value, and holds its place", () => {
+    const snap = usageSnapshot({ windows: [
+      { kind: "session", label: "Session (5h)", pct: 100, stale: true },
+      { kind: "weekly", label: "Weekly", pct: 45 },
+    ] });
+    const st = usageDialState(snap, false);
+    expect(st.awaitingReset).toBe(true);
+    expect(st.window?.kind).toBe("session"); // never switches to the weekly window
+    expect(st.pct).toBe(0);
+    expect(st.tone).toBe("under");
+    expect(st.visible).toBe(true);           // stays on screen rather than vanishing
+  });
+
+  it("a live primary is untouched", () => {
+    const st = usageDialState(usageSnapshot({ windows: [{ kind: "session", label: "S", pct: 95 }] }), false);
+    expect(st.awaitingReset).toBe(false);
+    expect(st.pct).toBe(95);
+    expect(st.tone).toBe("danger");
+  });
+
+  it("a waiting NON-primary window does not blank the primary", () => {
+    const snap = usageSnapshot({ windows: [
+      { kind: "session", label: "S", pct: 80 },
+      { kind: "weekly", label: "W", pct: 99, stale: true },
+    ] });
+    const st = usageDialState(snap, false);
+    expect(st.awaitingReset).toBe(false);
+    expect(st.pct).toBe(80);
   });
 });
 

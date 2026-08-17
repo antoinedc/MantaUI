@@ -2904,6 +2904,9 @@ export type UsageDialState = {
   visible: boolean;
   pct: number;
   tone: UsageDialTone;
+  // The reported window has passed its reset instant and the provider has not
+  // published its replacement numbers yet.
+  awaitingReset: boolean;
   // The window the dial reports — always `windows[0]`, the snapshot's primary
   // (shortest) window. NOT the highest-pct one: visibility uses the worst
   // window, but the number and colour shown are the primary window's.
@@ -2933,7 +2936,7 @@ export function usageDialState(
 ): UsageDialState {
   const windows = snapshot?.windows ?? [];
   if (windows.length === 0) {
-    return { visible: false, pct: 0, tone: "under", window: null };
+    return { visible: false, pct: 0, tone: "under", awaitingReset: false, window: null };
   }
   // The dial reports the PRIMARY window — `windows[0]`, which every adapter
   // emits shortest-first (session before weekly; see the ordering contract on
@@ -2949,10 +2952,19 @@ export function usageDialState(
   // empty, or the number about to block you is invisible unless the opt-in
   // "always show" setting is on.
   const worstPct = windows.reduce((max, w) => (w.pct > max ? w.pct : max), 0);
+  // A window past its reset instant is reporting the number the PREVIOUS
+  // window finished on. We keep reporting that SAME window (switching to the
+  // next one would silently swap which number the dial means), but we report
+  // no value for it: pct 0 and the neutral tone render the existing ring as an
+  // empty track with no branching in the component. Visibility deliberately
+  // still uses the pre-reset worst pct, so the dial holds its place instead of
+  // vanishing.
+  const awaitingReset = primary.stale === true;
   return {
     visible: worstPct >= 70 || alwaysShow,
-    pct: primary.pct,
-    tone: usageTone(primary.pct),
+    pct: awaitingReset ? 0 : primary.pct,
+    tone: awaitingReset ? "under" : usageTone(primary.pct),
+    awaitingReset,
     window: primary,
   };
 }
