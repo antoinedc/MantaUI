@@ -30,6 +30,7 @@ export function SubscriptionsCard() {
     loading,
     error,
     refresh,
+    mutate,
   } = useCachedResource<SubscriptionStatus[]>("subscriptions", async () => {
     const res = await window.api.opencodeProviderAuth({ action: "status" });
     // Route protocol surprises through the hook's error path rather than
@@ -49,16 +50,17 @@ export function SubscriptionsCard() {
     async (id: string) => {
       if (busy) return;
       setBusy(id);
-      try {
-        await window.api.opencodeProviderAuth({ action: "disconnect", id });
-      } finally {
-        setBusy(null);
-        setDisconnectConfirmId(null);
+      await mutate(async () => {
+        const res = await window.api.opencodeProviderAuth({ action: "disconnect", id });
+        if (res.action !== "disconnect") throw new Error("Unexpected response from the box.");
+        if (!res.ok) throw new Error(res.error ?? "Disconnect failed.");
         // Refetch to reflect the box's current state after the mutation.
         void refresh();
-      }
+      });
+      setBusy(null);
+      setDisconnectConfirmId(null);
     },
-    [busy, refresh],
+    [busy, mutate, refresh],
   );
 
   const onConnectDone = useCallback(() => {

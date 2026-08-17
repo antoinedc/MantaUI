@@ -27,6 +27,7 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
     loading,
     error,
     refresh,
+    mutate,
   } = useCachedResource<ProviderEndpoint[]>("providers", () =>
     window.api.opencodeGetProviders(),
   );
@@ -60,32 +61,30 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
       ? ep.enabledModels.filter((m) => m !== modelId)
       : [...ep.enabledModels, modelId];
     setBusy(ep.id);
-    try {
+    await mutate(async () => {
       const res = await window.api.opencodeSetProviders({
         upsert: [{ id: ep.id, name: ep.name, baseURL: ep.baseURL, enabledModels: enabled }],
       });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(res.error ?? "Save failed");
       onRestartNeeded();
       refresh();
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, refresh, onRestartNeeded]);
+    });
+    setBusy(null);
+  }, [busy, mutate, refresh, onRestartNeeded]);
 
   const removeEndpoint = useCallback(async (ep: ProviderEndpoint) => {
     if (busy) return;
     setBusy(ep.id);
-    try {
+    await mutate(async () => {
       const res = await window.api.opencodeSetProviders({ remove: [ep.id] });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(res.error ?? "Remove failed");
       setDiscovered((d) => { const { [ep.id]: _drop, ...rest } = d; return rest; });
       setDiscoverError((er) => { const { [ep.id]: _drop, ...rest } = er; return rest; });
       onRestartNeeded();
       refresh();
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, refresh, onRestartNeeded]);
+    });
+    setBusy(null);
+  }, [busy, mutate, refresh, onRestartNeeded]);
 
   return (
     <div className="space-y-2">
