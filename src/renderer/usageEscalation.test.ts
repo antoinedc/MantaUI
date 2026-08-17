@@ -3,7 +3,6 @@ import {
   usageAlertLevel,
   buildUsageLevels,
   shouldFireUsageAlert,
-  shouldWarnStaleCache,
   buildWarnMessage,
   buildLimitMessage,
 } from "./usageEscalation";
@@ -222,20 +221,6 @@ describe("shouldFireUsageAlert — fire-once semantics", () => {
     const fired = shouldFireUsageAlert(prev, reCross);
     expect(fired).toHaveLength(1);
     expect(fired[0].provider).toBe("codex");
-  });
-});
-
-describe("shouldWarnStaleCache", () => {
-  const now = Date.now();
-  it("is true beyond the 5m TTL and false within it", () => {
-    expect(shouldWarnStaleCache(now + 6 * 60_000, now, "5m")).toBe(true);
-    expect(shouldWarnStaleCache(now + 4 * 60_000, now, "5m")).toBe(false);
-    expect(shouldWarnStaleCache(now + 90_000, now, "5m")).toBe(false);
-  });
-
-  it("is true beyond the 1h TTL and false within it", () => {
-    expect(shouldWarnStaleCache(now + 61 * 60_000, now, "1h")).toBe(true);
-    expect(shouldWarnStaleCache(now + 59 * 60_000, now, "1h")).toBe(false);
   });
 });
 

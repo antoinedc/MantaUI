@@ -54,7 +54,7 @@ import {
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
-import { startUsagePoller, recheckAdapterAtLimit } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots } from "./usage.mjs";
 import {
   createCapJob,
   getJob,
@@ -84,8 +84,9 @@ import {
 } from "./servePage.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
-import { upsertStopped } from "./stoppedStore.mjs";
+import { upsertStopped, markStoppedRan, bumpStoppedAttempts } from "./stoppedStore.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
+import { createUsageResumeEngine } from "./usageResume.mjs";
 import * as appControl from "./appControl.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
@@ -348,7 +349,40 @@ const { stop: stopDeferredMobilePoller } = push.startDeferredMobilePoller();
 // (src/server/rpc.mjs → usage.mjs listSnapshots()). NOT the context-window
 // indicator — see src/server/usage.mjs for that boundary.
 // eslint-disable-next-line no-unused-vars
-const { stop: stopUsagePoller } = startUsagePoller(bus);
+const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus);
+
+// Usage-stop resume engine (BET-1048): watches the ARMED entries in the
+// usage-stopped record and resumes them once their provider's usage genuinely
+// recovers — sending the literal "Keep going" on the model pinned in the
+// record, staggered a few seconds apart, via the shared prompt-delivery engine
+// (so a mid-turn conversation defers until idle). It reuses THIS usage poller:
+// every `usage.updated` snapshot drives a check, and a one-shot re-check timer
+// at the earliest still-limited provider reset forces usagePollerTick() to
+// re-fetch immediately — no second polling loop. observeEvent is fed the
+// opencode pump below. This engine replaces (and only the engine replaces) the
+// old renderer-side reset+60s continuation path, which is deleted.
+const resumeEngine = createUsageResumeEngine({
+  markRan: (input) => markStoppedRan(input, { publish: (evt) => bus.publish(evt) }),
+  bumpAttempts: (input) => bumpStoppedAttempts(input, { publish: (evt) => bus.publish(evt) }),
+  deliver: (args) => promptDelivery.deliver(args),
+  providerIDForAdapter,
+  forceRecheck: () => usagePollerTick(),
+  publish: (evt) => bus.publish(evt),
+});
+// eslint-disable-next-line no-unused-vars
+const stopUsageResume = bus.subscribe((evt) => {
+  if (evt?.kind === "usage.updated" && Array.isArray(evt.payload?.snapshots)) {
+    void resumeEngine.deliverSnapshots(evt.payload.snapshots).catch((e) =>
+      console.warn("[usage-resume] deliverSnapshots failed:", e?.message ?? e),
+    );
+  }
+});
+// Prime on startup: covers the poller's immediate first tick racing our
+// subscription, and the "box asleep across the reset -> run on wake, however
+// late" case — evaluate now against whatever the poller already has cached.
+void resumeEngine.deliverSnapshots(listSnapshots()).catch((e) =>
+  console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e),
+);
 
 // Usage-stop enrolment (BET-1047 stage 1): derives durable "stopped
 // conversation" records from the opencode stream (see usageStopEnroll.mjs).
@@ -919,6 +953,13 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     usageStopEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[usage-stop] observeEvent failed:", e?.message ?? e);
+  }
+  // Resume engine outcome watching: a refused "Keep going" re-queues (or is
+  // flagged at the cap); an idle/step without a refusal clears the record.
+  try {
+    resumeEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[usage-resume] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
