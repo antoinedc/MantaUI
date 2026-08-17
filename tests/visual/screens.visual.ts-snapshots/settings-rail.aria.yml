@@ -1,9 +1,0 @@
-- tablist "Settings sections":
-  - tab "General" [selected]
-  - tab "Box"
-  - tab "Accounts"
-  - tab "Models"
-  - tab "Sessions"
-  - tab "Files"
-  - tab "Extensions"
-  - tab "Voice"

@@ -73,10 +73,9 @@ function formatTimeout(ms: number): string {
 // hook (BET-724 lifted it out of here into Modal.tsx's shared implementation
 // — this is the one remaining caller of the "own top-level dialog" flavor).
 // Escape-to-close stays local to Settings, since Settings itself isn't built
-// on the Modal primitive; it defers to a nested Modal (e.g. the "Remove box?"
-// / "Reset all settings?" confirms rendered inline below, or a portal'd
-// dialog like the model-edit modal) whenever one is open, so Escape closes
-// only the innermost dialog instead of closing all of Settings around it.
+// on the Modal primitive. It closes Settings only when no other dialog is
+// currently open in the document (portalled or inline): otherwise Escape
+// closes the innermost dialog instead of closing all of Settings around it.
 function useDialog(onClose: () => void) {
   const ref = useRef<HTMLDivElement | null>(null);
   useFocusTrap(ref, true);
@@ -93,18 +92,14 @@ function useDialog(onClose: () => void) {
     if (!root) return;
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      const target = e.target as HTMLElement | null;
-      // A portal'd nested modal (e.g. the model-edit dialog, rendered into
-      // document.body) lives outside `root` in the DOM — its own Escape
-      // handler owns it, not Settings'.
-      if (target instanceof Node && !root.contains(target)) return;
-      // An INLINE nested modal (e.g. the "Remove box?" / "Reset all
-      // settings?" confirms, rendered as normal children of this dialog) IS
-      // inside `root` — but if focus is currently inside ITS panel, that
-      // modal's own Escape ownership (Modal.tsx, BET-724) should win, not
-      // Settings'. Bail so Settings never steals Escape from an open confirm.
-      const nestedDialog = target?.closest('[role="dialog"]');
-      if (nestedDialog && nestedDialog !== root) return;
+      // Bail only if another dialog is currently open in the document —
+      // portalled to document.body or rendered inline as a child of Settings
+      // — so that dialog's own Escape handler owns the key. Otherwise close
+      // Settings regardless of where focus currently sits.
+      const otherDialogOpen = Array.from(
+        document.querySelectorAll('[role="dialog"]'),
+      ).some((d) => d !== root && !d.contains(root));
+      if (otherDialogOpen) return;
       e.preventDefault();
       onCloseRef.current();
     };
@@ -1067,6 +1062,7 @@ export function Settings({
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
+        <div className="titlebar-drag h-10 shrink-0" />
         <div className="flex items-center gap-3 p-4 border-b border-border">
           <div className="flex-1">
             <div className="max-w-sm">
