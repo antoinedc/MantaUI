@@ -73,9 +73,9 @@ export function windowsFromSnapshots(snapshots) {
   for (const s of snapshots ?? []) {
     if (!s || typeof s?.provider !== "string") continue;
     const windows = Array.isArray(s.windows) ? s.windows.filter(Boolean) : [];
-    // Only key providers we actually have a usable reading for — a provider
-    // with no windows is absent, never "under its limit" (isUsageAtLimit([])
-    // is false, but that reading doesn't exist and must not hold a resume up).
+    // Only key providers we actually have a usable reading for. A provider
+    // with no windows is ABSENT, and an absent reading must HOLD a resume up
+    // (providerState waits) — never resume on a reading we do not have.
     if (windows.length > 0) out[s.provider] = windows;
   }
   return out;
@@ -83,10 +83,21 @@ export function windowsFromSnapshots(snapshots) {
 
 /**
  * The pure resume decision for one armed entry against its provider's current
- * windows. Never raises a reading we do not have: no windows -> ready (the
- * gate is "every window under its limit", and there are none to block it).
+ * windows. Gates on recovery, not on a clock: the entry is only `ready` when
+ * we have a real window reading for its provider showing it under its limit.
+ *
+ * "No reading yet" (provider absent from the snapshot set, or an empty windows
+ * array) is categorically DIFFERENT from "recovered" — at boot the poller's
+ * first tick is still in flight, so before it lands the snapshot set is empty
+ * and, until the warmup drives a real `usage.updated`, resuming on that empty
+ * state would send "Keep going" with zero evidence quota returned. That is the
+ * exact failure mode this feature exists to remove, so a missing reading is
+ * `wait`, never `ready`. The warmup (the first real poll) then supplies a fresh
+ * reading and sets recovery.
+ *
  * @param {object} entry  an armed StoppedRecord
- * @param {object[]|undefined} windows  the provider's windows (all of them)
+ * @param {object[]|undefined} windows  the provider's windows (all of them), or
+ *                                     undefined when we hold no reading for it
  * @param {object} [cfg]
  * @param {number} [cfg.maxAttempts]
  * @returns {"wait"|"ready"|"flagged"}
@@ -96,8 +107,9 @@ export function providerState(entry, windows, { maxAttempts = MAX_RESUME_ATTEMPT
   // surfaced as needing attention — it stays in the record, armed, but is
   // never sent again (spec §8 / issue "up to the cap, then flagged").
   if ((entry?.attempts ?? 0) > maxAttempts) return PROVIDER_FLAGGED;
-  if (isUsageAtLimit(windows)) return PROVIDER_NOT_READY;
-  return PROVIDER_READY;
+  // No usable reading -> wait (never resume on an absent reading).
+  if (!Array.isArray(windows) || windows.length === 0) return PROVIDER_NOT_READY;
+  return isUsageAtLimit(windows) ? PROVIDER_NOT_READY : PROVIDER_READY;
 }
 
 /**

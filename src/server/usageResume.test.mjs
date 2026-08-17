@@ -137,11 +137,12 @@ test("gating: not sent while ANY window for the provider is at its limit", () =>
   assert.equal(unblocked.sends[0].conversation, "a");
 });
 
-test("gating: no snapshot for the provider never blocks a resume", () => {
-  // There are no windows to be over the limit, so the gate (every window under
-  // its limit) cannot hold us back — never wait on a reading we do not have.
+test("gating: no reading for the provider → wait (nothing sent, never resume on an absent reading)", () => {
+  // An absent/empty reading (e.g. the pre-first-poll empty snapshot set at
+  // boot) is categorically different from "recovered": we must not resume on
+  // zero evidence that quota returned.
   const { sends } = planResumeBatch([armed("a")], {}, { now: () => T0 });
-  assert.equal(sends.length, 1);
+  assert.equal(sends.length, 0);
 });
 
 test("stagger: sends are ordered oldest-first and spaced a few seconds apart", () => {
@@ -242,6 +243,28 @@ test("engine: nothing sent while a window is at its limit, and a recheck is arme
   // engine itself sends nothing (that happens on the next deliverSnapshots).
   assert.equal(called.forceRecheck, 1);
   assert.equal(called.deliver.length, 0);
+});
+
+test("engine: boot with an empty snapshot set sends nothing until a real reading exists", async () => {
+  const { engine, timers, called } = harness({
+    records: [armed("a")],
+  });
+  // The poller's first tick is still in flight at boot, so the snapshot set is
+  // empty (listSnapshots() returns []). Resuming here would send "Keep going"
+  // with zero evidence quota returned — the exact failure mode this issue
+  // exists to eliminate. Must be wait, not ready.
+  await engine.deliverSnapshots([]);
+  assert.equal(called.deliver.length, 0);
+  assert.deepEqual(timers.pending.map((t) => t.ms), []); // nothing armed either
+
+  // The warmup's first real poll supplies a fresh reading showing recovery →
+  // then (and only then) the continuation goes out.
+  await engine.deliverSnapshots(snapshotsFor({ claude: [win("session", 20)] }));
+  assert.equal(called.deliver.length, 0); // staggered, not yet fired
+  timers.fireAll();
+  await flush();
+  assert.equal(called.deliver.length, 1);
+  assert.equal(called.deliver[0].text, KEEP_GOING_PROMPT);
 });
 
 test("engine: refusal re-queues, retried on the next check, flagged after the cap", async () => {
