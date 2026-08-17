@@ -75,15 +75,15 @@ struct VoiceRecordingHeldView: View {
                 .padding(.trailing, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp2)
         }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp3)
-        .contentShape(Rectangle())
+        // Purely presentational (BET-1051 decision #4) and drawn directly over the
+        // control row, whose mic button still owns the in-flight touch. It must never
+        // intercept a hit.
+        .allowsHitTesting(false)
         // One accessibility element for the whole held surface (children stay
         // individually reachable), so `voice-recording-held` resolves to a
         // single element instead of propagating to every child in the AX tree.
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("voice-recording-held")
-        .modifier(BoxChrome(cornerRadius: Metrics.radius.xl, stroke: tokens.borderSubtle, tint: tokens.panel.opacity(0.35)))
     }
 
     // MARK: records

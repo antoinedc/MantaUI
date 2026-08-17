@@ -209,25 +209,13 @@ struct ComposerView: View {
                 )
                 .transition(.opacity)
             } else {
-                // The composer stays MOUNTED while a take is held — the mic button owns
-                // the in-flight touch and a view removed mid-gesture stops receiving it
-                // (BET-1051). It is hidden, not unmounted, so the recording surface is
-                // what you see while the gesture underneath survives.
-                ZStack(alignment: .bottom) {
-                    inputBox
-                        .opacity(recorder.isHeld ? 0 : 1)
-                    if recorder.isHeld {
-                        VoiceRecordingHeldView(
-                            recorder: recorder,
-                            translation: micTranslation,
-                            isRTL: isRTL,
-                            tokens: tokens
-                        )
-                        .frame(maxWidth: .infinity)
-                        .transition(.opacity)
-                    }
-                }
-                .transition(.opacity)
+                // ONE glass box, always. While a take is held the box keeps its size and
+                // its chrome and swaps its CONTENTS for the recording surface (see
+                // `inputBox`) — the composer stays MOUNTED because the mic button owns the
+                // in-flight touch and a view removed mid-gesture stops receiving it
+                // (BET-1051).
+                inputBox
+                    .transition(.opacity)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -327,35 +315,50 @@ struct ComposerView: View {
     /// the box, inside the same glass, so model + attach / mic + send read as
     /// the box's own footer rather than loose chrome below it.
     private var inputBox: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            // Chips rail — ONLY when something is actually attached. When the
-            // box is merely tall there is no rail; the expand control is an
-            // overlay (below) and so needs no row of its own.
-            if !attachments.isEmpty {
-                chipsRow
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // Stop short of the expand control so a long chip list
-                    // scrolls under its own clip instead of running into it.
-                    .padding(.trailing, isTall ? Metrics.spacing.sp6 : 0)
-                    .clipped()
+        ZStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                // Chips rail — ONLY when something is actually attached. When the
+                // box is merely tall there is no rail; the expand control is an
+                // overlay (below) and so needs no row of its own.
+                if !attachments.isEmpty {
+                    chipsRow
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        // Stop short of the expand control so a long chip list
+                        // scrolls under its own clip instead of running into it.
+                        .padding(.trailing, isTall ? Metrics.spacing.sp6 : 0)
+                        .clipped()
+                }
+
+                // Plan mode label — one line above the text area so the mode stays
+                // visible where you type (BET-952). Phones lose ambient state
+                // fastest, so plan mode must be readable at a glance.
+                if modelStore.planOn {
+                    Label("Plan mode · edits blocked", systemImage: planIcon)
+                        .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
+                        .foregroundColor(tokens.accentTx)
+                        .padding(.bottom, Metrics.spacing.spPx)
+                }
+
+                // The message line.
+                textArea
+
+                // Control row — pinned to the box's final line. No separator above
+                // it: the text and the controls sit on one continuous glass surface.
+                controlRow
             }
+            // Hidden, never unmounted: `controlRow` holds the mic button, and the
+            // touch that started this take is still being delivered to it.
+            .opacity(recorder.isHeld ? 0 : 1)
 
-            // Plan mode label — one line above the text area so the mode stays
-            // visible where you type (BET-952). Phones lose ambient state
-            // fastest, so plan mode must be readable at a glance.
-            if modelStore.planOn {
-                Label("Plan mode · edits blocked", systemImage: planIcon)
-                    .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.medium)))
-                    .foregroundColor(tokens.accentTx)
-                    .padding(.bottom, Metrics.spacing.spPx)
+            if recorder.isHeld {
+                VoiceRecordingHeldView(
+                    recorder: recorder,
+                    translation: micTranslation,
+                    isRTL: isRTL,
+                    tokens: tokens
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            // The message line.
-            textArea
-
-            // Control row — pinned to the box's final line. No separator above
-            // it: the text and the controls sit on one continuous glass surface.
-            controlRow
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -364,7 +367,7 @@ struct ComposerView: View {
         // right corner whether or not there are chips to share a line with, and
         // as an overlay it costs no vertical space when there are none.
         .overlay(alignment: .topTrailing) {
-            if isTall {
+            if isTall && !recorder.isHeld {
                 expandButton
                     .padding(.top, Metrics.spacing.sp2)
                     .padding(.trailing, Metrics.spacing.sp3)
