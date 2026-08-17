@@ -89,11 +89,6 @@ export function ProvidersCard({ onRestartNeeded }: Props) {
 
   return (
     <div className="space-y-2">
-      <div className="text-meta text-text-faint">
-        OpenAI-compatible endpoints opencode can serve. Refresh to discover models,
-        then enable the ones you want in the model picker.
-      </div>
-
       {error && <div className="text-meta text-danger">{error}</div>}
 
       {loading ? (

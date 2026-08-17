@@ -162,12 +162,13 @@ function SegmentedField({ entry, value, onApply }: {
 // confirmation (role=status), no toast. The ONE blur-commit exception called
 // out in the spec.
 function SettingField({ entry, value, onCommit, credential }: {
-  entry: SettingEntry; value: string; onCommit: (v: string) => void;
+  entry: SettingEntry; value: string; onCommit: (v: string) => void | Promise<void>;
   credential?: boolean;
 }) {
   const id = fieldId(entry);
   const [draft, setDraft] = useState(value);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
   const focused = useRef(false);
   // Keep the draft in sync with the store ONLY when the field is NOT focused
   // (so an external change — a rollback, a reset — is picked up,
@@ -187,14 +188,29 @@ function SettingField({ entry, value, onCommit, credential }: {
       onFocus={() => { focused.current = true; }}
       onBlur={() => {
         focused.current = false;
-        if (draft !== value) {
-          onCommit(draft);
-          if (credential) setSavedAt(Date.now());
+        if (draft !== value && !saving) {
+          void (async () => {
+            setSaving(true);
+            try {
+              await onCommit(draft);
+              if (credential) setSavedAt(Date.now());
+            } finally {
+              setSaving(false);
+            }
+          })();
         }
       }}
       autoComplete={credential ? "off" : undefined}
       help={entry.help}
-      footer={credential && savedAt ? <div role="status" className="text-meta text-ok">Saved</div> : undefined}
+      footer={
+        saving ? (
+          <div role="status" className="text-meta text-text-faint flex items-center gap-2">
+            <MantaLoader size="inline" /> Saving…
+          </div>
+        ) : credential && savedAt ? (
+          <div role="status" className="text-meta text-ok">Saved</div>
+        ) : undefined
+      }
     />
   );
 }
@@ -281,7 +297,6 @@ export function Settings({
   const updatePrompt = useStore((s) => s.updatePrompt);
   const boxToken = useStore((s) => s.boxToken);
   const serverUrl = useStore((s) => s.serverUrl);
-  const boxId = useStore((s) => s.boxId);
   const push = useStore((s) => s.pushAppToast);
   const applySetting = useApplySetting(push);
   const dialogRef = useDialog(onClose);
@@ -654,10 +669,10 @@ export function Settings({
       case "segmented":
         return <SegmentedField entry={entry} value={String(cur ?? "")} onApply={(v) => void commitKey(entry, v)} />;
       case "password":
-        return <SettingField credential entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v.trim())} />;
+        return <SettingField credential entry={entry} value={String(cur ?? "")} onCommit={(v) => commitKey(entry, v.trim())} />;
       case "text":
       case "path":
-        return <SettingField entry={entry} value={String(cur ?? "")} onCommit={(v) => void commitKey(entry, v)} />;
+        return <SettingField entry={entry} value={String(cur ?? "")} onCommit={(v) => commitKey(entry, v)} />;
       default:
         return null;
     }
@@ -682,7 +697,7 @@ export function Settings({
             )}
           </GroupCard>
           <GroupCard title="Danger zone" danger>
-            <div className="flex items-start justify-between gap-4">
+            <div className="space-y-3">
               <div className="text-body text-text-faint">Restore every setting below to its default. This does not remove your box pairing or projects.</div>
               <Button onClick={() => setConfirmReset(true)} tone="danger">Reset all settings…</Button>
             </div>
@@ -706,10 +721,6 @@ export function Settings({
                 <dt className="text-text-faint shrink-0">Server URL</dt>
                 <dd className="text-text-muted font-mono break-all">{serverUrl || "—"}</dd>
               </div>
-              <div className="flex gap-2">
-                <dt className="text-text-faint shrink-0">Box ID</dt>
-                <dd className="text-text-muted font-mono break-all">{boxId || "—"}</dd>
-              </div>
               {serverVersion && (
                 <div className="flex gap-2">
                   <dt className="text-text-faint shrink-0">Server</dt>
@@ -721,7 +732,7 @@ export function Settings({
 
           <GroupCard title="Devices">
             <AddPhonePanel />
-            <div className="flex items-center justify-between">
+            <div className="space-y-3">
               <div className="text-body text-text-faint">Re-run the guided setup (pairing, providers, first project).</div>
               <Button onClick={() => { void useStore.getState().relaunchOnboarding(); onClose(); }} tone="default">Run setup again</Button>
             </div>
@@ -751,7 +762,7 @@ export function Settings({
           </GroupCard>
 
           <GroupCard title="Danger zone" danger>
-            <div className="flex items-center justify-between">
+            <div className="space-y-3">
               <div className="text-body text-text-faint">Forget this box on the desktop. If the box is reachable, its current token is revoked too.</div>
               <Button onClick={() => setConfirmRemove(true)} disabled={removingBox} tone="default">
                 {removingBox ? "Removing…" : "Remove box"}
@@ -781,7 +792,7 @@ export function Settings({
     }
     if (section === "models") {
       return (
-        <GroupCard>
+        <GroupCard title="Models">
           <ModelsCard />
         </GroupCard>
       );
