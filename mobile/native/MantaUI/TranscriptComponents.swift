@@ -635,6 +635,11 @@ enum TranscriptBlock: Equatable {
     case user(String, at: Date?)
     case prose(String, at: Date?)
     case steps(StepGroupContent)
+    /// A file/attachment reference (e.g. a voice note) rendered inline next to
+    /// the message it belongs to. GENERAL on purpose — image and generic-file
+    /// rendering will reuse this case; only the voice-note flavour is rendered
+    /// today (BET-1029).
+    case file(TranscriptAttachment)
     /// A terminal system notice (session error / truncation) at the end of the
     /// turn it belongs to.
     case notice(String, SystemNotice)
@@ -646,9 +651,20 @@ enum TranscriptBlock: Equatable {
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps, .notice, .queuedPrompt: return nil
+        case .steps, .file, .notice, .queuedPrompt: return nil
         }
     }
+}
+
+/// A file/attachment reference carried by a `.file` transcript block. Only the
+/// `.voiceNote` flavour renders today; image and generic-file rendering are
+/// deliberately not implemented yet (BET-1029) — a file part that is not a
+/// voice note renders nothing, exactly as it did before.
+struct TranscriptAttachment: Equatable {
+    enum Kinds: Equatable {
+        case voiceNote(VoiceNote)
+    }
+    let kind: Kinds
 }
 
 // MARK: - "Load earlier messages"

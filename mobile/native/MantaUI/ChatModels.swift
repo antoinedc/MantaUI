@@ -234,6 +234,11 @@ enum ChatRollup {
 enum ChatTranscriptMapper {
 
     static func blocks(from messages: [OpencodeMessage]) -> [TranscriptBlock] {
+        blocks(from: messages, voiceNotes: [])
+    }
+
+    static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote]) -> [TranscriptBlock] {
+        let voiceMap = buildVoiceNoteMap(messages: messages, notes: voiceNotes)
         var blocks: [TranscriptBlock] = []
         var pending: [StepGroupRow] = []
 
@@ -247,6 +252,11 @@ enum ChatTranscriptMapper {
                     // it finished. Both are what the reader means by "when did
                     // this happen".
                     blocks.append(.user(text, at: ChatClock.date(epochMs: msg.info.time?.created)))
+                    // The voice-note player renders directly under the user band
+                    // that dictated it, claimed by transcript-text match.
+                    if let note = voiceMap[msg.info.id] {
+                        blocks.append(.file(TranscriptAttachment(kind: .voiceNote(note))))
+                    }
                 }
             case "assistant":
                 // An assistant message still streaming (time.completed == nil)
@@ -355,8 +365,15 @@ enum ChatTranscriptMapper {
             } else {
                 pending.append(.step(step(from: part, tool: tool, indexWithinMessage: index)))
             }
+        case "file":
+            // A file part that is not a voice note renders nothing. Voice
+            // notes attach at the USER-message level (buildVoiceNoteMap), not
+            // here; image and generic-file rendering are deliberately not
+            // implemented yet (BET-1029), so do not silently reuse the
+            // `default: break` for them — this case is where they will land.
+            break
         default:
-            // reasoning / file / etc. — no §8 block type renders it; skip.
+            // reasoning / etc. — no §8 block type renders it; skip.
             break
         }
     }
@@ -369,6 +386,51 @@ enum ChatTranscriptMapper {
                   let t = part.text, !isBlank(t) else { return nil }
             return t
         }.joined(separator: "\n")
+    }
+
+    /// A user-message-id → voice-note map, forged by claiming each note against
+    /// the first unclaimed user message whose concatenated text equals the
+    /// note's transcript. Port of `buildVoiceNoteMap`
+    /// (src/renderer/chatUtils.ts:3666-3687) — SAME association rule so both
+    /// clients agree which bubble owns which clip; there is no id on the wire.
+    ///
+    /// Walk user messages OLDEST → NEWEST and notes OLDEST → NEWEST; claim the
+    /// FIRST unclaimed user message whose text equals the note's trimmed
+    /// transcript. Each note and each message is claimed at most once; a note
+    /// matching nothing is dropped. Do NOT invent an id-based scheme.
+    static func buildVoiceNoteMap(messages: [OpencodeMessage], notes: [VoiceNote]) -> [String: VoiceNote] {
+        var map: [String: VoiceNote] = [:]
+        guard !notes.isEmpty else { return map }
+        let users = messages.filter { $0.info.role.rawValue == "user" }
+        var claimed = Set<String>()
+        for note in notes {
+            let transcript = note.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !transcript.isEmpty else { continue }
+            for msg in users {
+                guard !claimed.contains(msg.info.id) else { continue }
+                if concatUserMessageText(msg) == transcript {
+                    map[msg.info.id] = note
+                    claimed.insert(msg.info.id)
+                    break
+                }
+            }
+        }
+        return map
+    }
+
+    /// The user-turn text a note's transcript is matched against — the
+    /// concatenated (newline-joined) non-synthetic, non-ignored text parts with
+    /// trailing whitespace stripped. Mirrors `concatUserMessageText` in the
+    /// desktop, so the claim can never diverge from what the row displays.
+    private static func concatUserMessageText(_ msg: OpencodeMessage) -> String {
+        let joined = msg.parts.compactMap { part -> String? in
+            guard part.type == "text",
+                  part.synthetic != true,
+                  part.ignored != true,
+                  let t = part.text else { return nil }
+            return t
+        }.joined(separator: "\n")
+        return joined.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
     }
 
     /// A text part is "blank" when it contains no visible content — empty, or

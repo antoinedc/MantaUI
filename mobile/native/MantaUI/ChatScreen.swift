@@ -140,6 +140,11 @@ private struct ChatScreenContent: View {
     /// The plan-usage snapshot set (BET-824), polled every 60s while the chat
     /// is open. Feeds the composer dot, the usage sheet and the weekly banner.
     @StateObject private var usageStore: UsageStore
+    /// The conversation-scoped voice-note playback engine (BET-1029). Owned
+    /// ABOVE the transcript list — a player owned by a recycled cell would be
+    /// destroyed by scrolling; this one survives it and plays one note at a
+    /// time. Injected into the transcript via `Environment`.
+    @StateObject private var voicePlayer: VoicePlaybackEngine
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -226,6 +231,7 @@ private struct ChatScreenContent: View {
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
         _usageStore = StateObject(wrappedValue: UsageStore(api: api))
+        _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: api))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -242,6 +248,7 @@ private struct ChatScreenContent: View {
         // the permission poll, which `start()`'s run-once guard would then
         // refuse to restart.
         content
+            .environmentObject(voicePlayer)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
