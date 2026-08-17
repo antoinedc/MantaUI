@@ -34,6 +34,7 @@
 		4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */; };
 		4FBB551A50B4DA5B955968DD /* MantaUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87CBDB00B3F0D138CB44A326 /* MantaUIApp.swift */; };
 		51F9E82B1001E68644519724 /* MantaRunningStateCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17673950838B843917DA660F /* MantaRunningStateCaptureUITests.swift */; };
+		52C319CA847D3FECBC1297E2 /* VoiceRecordingSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F06F838B4779D52B29E1173 /* VoiceRecordingSurface.swift */; };
 		578DA0FFC68283A72AF914E8 /* VoiceGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */; };
 		5A03FC0627C87718E260CC02 /* MantaActionRPCWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */; };
 		5CDC4D3B2FD207C5E38A9AA1 /* MultilineTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D7B8DB3BFDE6329FED7D5F /* MultilineTextView.swift */; };
@@ -49,6 +50,7 @@
 		685261838F0EFABC1AB8B6B1 /* MantaPairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB2884AC2B1D0FE1E0DA8EB /* MantaPairingTests.swift */; };
 		68760CC316BA947A82F360EE /* Scrim.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C440016971186430E8C464B /* Scrim.swift */; };
 		6A720AF41BDA6F4FC40A5585 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F7631E09B6FF7B150392A83 /* ChatModels.swift */; };
+		708332CA7D72971C6626C9FC /* MantaVoiceRecordingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59B1B02BB0060065B306394F /* MantaVoiceRecordingUITests.swift */; };
 		74D756D48A7D2A5483170A8B /* MantaLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 872DDE9D9BAD041950DAC24A /* MantaLoader.swift */; };
 		754FEC92229B58783D516DC4 /* ModelPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2C97C92B5E1ADA62F799D73 /* ModelPickerSheet.swift */; };
 		75B97ECFE219AB9C7D45EDE3 /* Waveform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D7B1F4E5EF7E0ADD2238839 /* Waveform.swift */; };
@@ -164,6 +166,7 @@
 		4F7631E09B6FF7B150392A83 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
 		570E190164DB3AB83DC14283 /* MantaChatSurfaceCaptureUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaChatSurfaceCaptureUITests.swift; sourceTree = "<group>"; };
 		57FFB984A951D5C7BD8D02F9 /* MantaSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaSettingsTests.swift; sourceTree = "<group>"; };
+		59B1B02BB0060065B306394F /* MantaVoiceRecordingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaVoiceRecordingUITests.swift; sourceTree = "<group>"; };
 		5AE55697AC4EC2304E05D8A1 /* BranchLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BranchLabelTests.swift; sourceTree = "<group>"; };
 		5B4D07F9EBDCD8A693C141FF /* MantaQRScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaQRScanner.swift; sourceTree = "<group>"; };
 		5C02DA420B52094269A88E80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -201,6 +204,7 @@
 		9BF85CE7BB8B25AABF039BC5 /* MantaTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaTransportTests.swift; sourceTree = "<group>"; };
 		9CA2F9C1585492985A5D82ED /* MantaActionRPCWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MantaActionRPCWireTests.swift; sourceTree = "<group>"; };
 		9DD6CA51FD8B7CE80314E0CD /* ModelRecents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelRecents.swift; sourceTree = "<group>"; };
+		9F06F838B4779D52B29E1173 /* VoiceRecordingSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingSurface.swift; sourceTree = "<group>"; };
 		A1E78B0F5B521937B40937DC /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
 		A26BEC5EF47268C8B29239F0 /* TranscriptComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptComponents.swift; sourceTree = "<group>"; };
 		A2C97C92B5E1ADA62F799D73 /* ModelPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerSheet.swift; sourceTree = "<group>"; };
@@ -401,6 +405,7 @@
 				CAFF319B4F3CD4F13A20A1EB /* UsageStore.swift */,
 				6717B2E85100A1BCAC163A31 /* VoiceGesture.swift */,
 				4B4BD7922C8909E3A3961957 /* VoiceRecorder.swift */,
+				9F06F838B4779D52B29E1173 /* VoiceRecordingSurface.swift */,
 				8D7B1F4E5EF7E0ADD2238839 /* Waveform.swift */,
 				6C581AFB55001DF333A22728 /* Resources */,
 			);
@@ -431,6 +436,7 @@
 				12A39FBE813A8B20F7F00055 /* MantaSubagentDrillInUITests.swift */,
 				714E922397017504533FC4EE /* MantaUIHierarchyCaptureUITests.swift */,
 				5EF0199856D7E4C0B0D2595C /* MantaUIOverflowCaptureUITests.swift */,
+				59B1B02BB0060065B306394F /* MantaVoiceRecordingUITests.swift */,
 			);
 			path = MantaUIUITests;
 			sourceTree = "<group>";
@@ -603,6 +609,7 @@
 				DE5E17651AB0E9C750C4D712 /* MantaSubagentDrillInUITests.swift in Sources */,
 				4DFA9582998C586AAC579F31 /* MantaUIHierarchyCaptureUITests.swift in Sources */,
 				ECB0360A8A26279B6EEF955F /* MantaUIOverflowCaptureUITests.swift in Sources */,
+				708332CA7D72971C6626C9FC /* MantaVoiceRecordingUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -699,6 +706,7 @@
 				1E8A1AB9FB3945E6092CA2E2 /* UsageStore.swift in Sources */,
 				578DA0FFC68283A72AF914E8 /* VoiceGesture.swift in Sources */,
 				98A26A0ABAFE54728AE97FEE /* VoiceRecorder.swift in Sources */,
+				52C319CA847D3FECBC1297E2 /* VoiceRecordingSurface.swift in Sources */,
 				75B97ECFE219AB9C7D45EDE3 /* Waveform.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
