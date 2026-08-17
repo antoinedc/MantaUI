@@ -3370,23 +3370,6 @@ export function zeroStateMode(input: {
   return input.repos.length > 0 ? "list" : "fresh";
 }
 
-// The pre-checked set of repos, capped at `cap`. Rows are considered
-// most-recent-first and only *local* rows can be pre-checked (anything that
-// would require a clone must land unchecked). The cap stops a box with many
-// repos from silently creating that many tmux sessions.
-export function initialRepoSelection(repos: RepoRow[], cap: number): RepoRow[] {
-  const sorted = [...repos].sort(
-    (a, b) => (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0),
-  );
-  const selected: RepoRow[] = [];
-  for (const repo of sorted) {
-    if (!repo.local) continue;
-    if (selected.length >= cap) break;
-    selected.push(repo);
-  }
-  return selected;
-}
-
 // Substitute a leading home-dir prefix with `~` for display, matching the
 // manta-forge zero-state mockup (`~/scratch`). Given no homeDir (unavailable),
 // the absolute path is shown unchanged. Pure.

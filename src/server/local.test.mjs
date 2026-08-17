@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone } from "./local.mjs";
+import { fsListDirs, parseWorktrees, shouldSkipDir, dedupeRepoHits, sortRepoHits, parseGhAuthStatus, parseCloneProgress, gitPush, gitClone, scanRepos } from "./local.mjs";
 
 test("parseWorktrees parses `git worktree list --porcelain`", () => {
   const out = parseWorktrees(
@@ -326,4 +326,89 @@ test("gitClone: no token emits no -c argument at all", async () => {
   await gitClone({ url: "https://github.com/acme/public.git" }, { spawn });
   assert.ok(!calls[0].includes("-c"), "public clone emits no extraheader");
   assert.deepEqual(calls[0], ["-C", "/", "clone", "--progress", "https://github.com/acme/public.git"]);
+});
+
+// ---------------------------------------------------------------------------
+// BET-1075: only real git repos are offered, and never $HOME itself. The scan
+// runs against an injected readdir/readFile/realpath/stat/gitRun so no real
+// filesystem is touched. `dirs` maps a directory to its Dirent-like entries;
+// `files` maps a path to the bytes readFile returns (absent = ENOENT).
+// ---------------------------------------------------------------------------
+
+function scanEnt(name, type) {
+  return {
+    name,
+    isDirectory: () => type === "dir",
+    isFile: () => type === "file",
+  };
+}
+
+function fakeRepoSys({ dirs, files = {} }) {
+  return {
+    readdir: async (dir) => dirs[dir] ?? [],
+    realpath: async (p) => p,
+    stat: async () => ({ mtimeMs: 1 }),
+    readFile: async (p) => {
+      if (!(p in files)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return files[p];
+    },
+    gitRun: async () => ({ stdout: "" }),
+  };
+}
+
+test("scanRepos: a directory whose .git is a directory is recorded", async () => {
+  const sys = fakeRepoSys({
+    dirs: {
+      "/home/u": [scanEnt("projects", "dir")],
+      "/home/u/projects": [scanEnt("repoa", "dir")],
+      "/home/u/projects/repoa": [scanEnt(".git", "dir")],
+    },
+  });
+  const { repos } = await scanRepos({ roots: ["/home/u"], home: "/home/u", ...sys });
+  assert.ok(repos.some((r) => r.path === "/home/u/projects/repoa"),
+    `ordinary .git dir recorded: ${JSON.stringify(repos.map((r) => r.path))}`);
+});
+
+test("scanRepos: a .git file starting with gitdir: is recorded (worktree/submodule)", async () => {
+  const sys = fakeRepoSys({
+    dirs: {
+      "/home/u": [scanEnt("projects", "dir")],
+      "/home/u/projects": [scanEnt("wt", "dir")],
+      "/home/u/projects/wt": [scanEnt(".git", "file")],
+    },
+    files: { "/home/u/projects/wt/.git": "gitdir: /home/u/main/.git/worktrees/wt" },
+  });
+  const { repos } = await scanRepos({ roots: ["/home/u"], home: "/home/u", ...sys });
+  assert.ok(repos.some((r) => r.path === "/home/u/projects/wt"),
+    `gitdir: worktree recorded: ${JSON.stringify(repos.map((r) => r.path))}`);
+});
+
+test("scanRepos: a .git file with other content is not a repo, but its subdirs are scanned", async () => {
+  const sys = fakeRepoSys({
+    dirs: {
+      "/home/u": [scanEnt("fake", "dir")],
+      "/home/u/fake": [scanEnt(".git", "file"), scanEnt("child", "dir")],
+      "/home/u/fake/child": [scanEnt(".git", "dir")],
+    },
+    files: { "/home/u/fake/.git": "this is not a gitdir at all" },
+  });
+  const { repos } = await scanRepos({ roots: ["/home/u"], home: "/home/u", ...sys });
+  assert.ok(!repos.some((r) => r.path === "/home/u/fake"),
+    "bogus .git file is not offered");
+  assert.ok(repos.some((r) => r.path === "/home/u/fake/child"),
+    "the bogus dir is still descended into, so its real repo shows up");
+});
+
+test("scanRepos: $HOME itself is never a workspace, while its children are scanned", async () => {
+  const sys = fakeRepoSys({
+    dirs: {
+      "/home/u": [scanEnt(".git", "dir"), scanEnt("projects", "dir")],
+      "/home/u/projects": [scanEnt("repo", "dir")],
+      "/home/u/projects/repo": [scanEnt(".git", "dir")],
+    },
+  });
+  const { repos } = await scanRepos({ roots: ["/home/u"], home: "/home/u", ...sys });
+  const paths = repos.map((r) => r.path);
+  assert.ok(!paths.includes("/home/u"), `home excluded: ${JSON.stringify(paths)}`);
+  assert.ok(paths.includes("/home/u/projects/repo"), `home's children still scanned: ${JSON.stringify(paths)}`);
 });

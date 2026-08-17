@@ -53,7 +53,6 @@ import { useVoiceRecorder } from "./voice";
 import {
   describeRepoRow,
   formatAge,
-  initialRepoSelection,
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
@@ -166,7 +165,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // Probe the box for git repos + the gh CLI. The scan is purely additive: if
   // it fails or is unavailable we degrade to exactly today's behaviour (the
   // folder picker), never a state worse than the one the screen used to have.
-  const PROBE_PRE_CHECK_CAP = 8;
   const [probePending, setProbePending] = useState(false);
   const [probeFailed, setProbeFailed] = useState(false);
   const [probeRepos, setProbeRepos] = useState<RepoHit[]>([]);
@@ -245,18 +243,6 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     probeFailed,
     repos: probeRepos,
   });
-
-  // Pre-check rule: check what already exists on disk, capped at 8, most
-  // recent first. Never check anything that would require a clone.
-  useEffect(() => {
-    if (probePending || probeFailed) {
-      setChecked(new Set());
-      return;
-    }
-    setChecked(
-      new Set(initialRepoSelection(rows, PROBE_PRE_CHECK_CAP).map((r) => r.path)),
-    );
-  }, [probePending, probeFailed, rows]);
 
   const toggleRow = (path: string, on: boolean) => {
     setChecked((prev) => {
