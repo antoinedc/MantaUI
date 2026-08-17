@@ -35,6 +35,8 @@ import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
 import { forgeCredentialSecondary } from "./chatUtils";
+import { useCachedResource } from "./useCachedResource";
+import { MantaLoader } from "./MantaLoader";
 import {
   useLaunchers,
   updateLauncherFlag,
@@ -460,8 +462,13 @@ export function Settings({
 
   // Plugins (desktop-only Mac-local toggle + registry list).
   const [pluginsOn, setPluginsOn] = useState(false);
-  const [plugins, setPlugins] = useState<PluginRegistryRow[] | null>(null);
-  const [pluginsError, setPluginsError] = useState<string | null>(null);
+  // The registry list goes through the shared cache (BET-1057).
+  const {
+    data: plugins,
+    loading: pluginsLoading,
+    error: pluginsError,
+    refresh: refreshPlugins,
+  } = useCachedResource<PluginRegistryRow[]>("plugins", () => window.api.pluginsRegistry());
   useEffect(() => {
     const preload = getMantaPreload();
     if (!preload?.pluginsGetEnabled) return;
@@ -480,18 +487,13 @@ export function Settings({
       push({ id: `err-plugins-${Date.now()}`, message: errorDisclosure("Couldn't toggle plugins.", e) });
     }
   };
+  // Poll the registry while the Extensions tab is open. refresh() never flips
+  // loading, so a poll tick can't flash the loader (only the cold first open).
   useEffect(() => {
     if (activeTab !== "extensions") return;
-    let cancelled = false;
-    const fetchOnce = () => {
-      window.api.pluginsRegistry()
-        .then((rows) => { if (!cancelled) { setPlugins(rows); setPluginsError(null); } })
-        .catch((e) => { if (!cancelled) setPluginsError(e instanceof Error ? e.message : String(e)); });
-    };
-    fetchOnce();
-    const timer = setInterval(fetchOnce, 10_000);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [activeTab]);
+    const timer = setInterval(() => void refreshPlugins(), 10_000);
+    return () => clearInterval(timer);
+  }, [activeTab, refreshPlugins]);
 
   // Forge integration (BET-798, mockup [G1]): the connected account + where
   // the token came from + Disconnect, the one global "start agents" toggle
@@ -499,22 +501,31 @@ export function Settings({
   // with rules, each showing rule count + validity with invalid ones inline.
   const [forgeRulesOn, setForgeRulesOn] = useState(false);
   const [forgeStatus, setForgeStatus] = useState<ForgeStatusResult | null>(null);
-  const [forgeRules, setForgeRules] = useState<ForgeRuleRow[] | null>(null);
-  const [forgeRulesError, setForgeRulesError] = useState<string | null>(null);
+  // The rules list goes through the shared cache (BET-1057). Only the
+  // forgeRulesList() call is cached — the enabled flag + connection status
+  // stay on a separate plain effect below.
+  const {
+    data: forgeRules,
+    loading: forgeRulesLoading,
+    error: forgeRulesError,
+    refresh: refreshForgeRules,
+  } = useCachedResource<ForgeRuleRow[]>("forgeRules", () => window.api.forgeRulesList());
+  // Enabled-flag + connection status: a separate plain effect, refreshed when
+  // the Extensions tab is opened (not part of the cached rules list).
   useEffect(() => {
     if (activeTab !== "extensions") return;
     let cancelled = false;
-    const load = () => {
-      window.api.configGet().then((c) => { if (!cancelled) setForgeRulesOn(c.forgeRulesEnabled === true); }).catch(() => {});
-      window.api.forgeStatus({ validate: true }).then((s) => { if (!cancelled) setForgeStatus(s); }).catch(() => {});
-      window.api.forgeRulesList()
-        .then((rows) => { if (!cancelled) { setForgeRules(rows); setForgeRulesError(null); } })
-        .catch((e) => { if (!cancelled) setForgeRulesError(e instanceof Error ? e.message : String(e)); });
-    };
-    load();
-    const timer = setInterval(load, 10_000);
-    return () => { cancelled = true; clearInterval(timer); };
+    window.api.configGet().then((c) => { if (!cancelled) setForgeRulesOn(c.forgeRulesEnabled === true); }).catch(() => {});
+    window.api.forgeStatus({ validate: true }).then((s) => { if (!cancelled) setForgeStatus(s); }).catch(() => {});
+    return () => { cancelled = true; };
   }, [activeTab]);
+  // Poll the rules list while the Extensions tab is open. refresh() never
+  // flips loading.
+  useEffect(() => {
+    if (activeTab !== "extensions") return;
+    const timer = setInterval(() => void refreshForgeRules(), 10_000);
+    return () => clearInterval(timer);
+  }, [activeTab, refreshForgeRules]);
   const toggleForgeRules = async (on: boolean) => {
     const prev = forgeRulesOn;
     setForgeRulesOn(on);
@@ -786,13 +797,15 @@ export function Settings({
             )}
             {pluginsError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the plugins list.", pluginsError)}</div>
-            ) : plugins === null ? (
-              <div className="text-body text-text-faint">Loading…</div>
-            ) : plugins.length === 0 ? (
+            ) : pluginsLoading ? (
+              <div className="py-2">
+                <MantaLoader size="inline" label="Loading plugins" />
+              </div>
+            ) : (plugins ?? []).length === 0 ? (
               <div className="text-body text-text-faint">No plugins installed yet. The AI can author them with <code className="text-text-muted">plugin.write</code> when this toggle is on.</div>
             ) : (
               <div className="space-y-2">
-                {plugins.map((p) => (
+                {(plugins ?? []).map((p) => (
                   <div key={p.name} className="border border-border rounded-xs p-3 bg-bg-soft space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="text-body font-medium text-text">{p.name}</span>
@@ -843,13 +856,15 @@ export function Settings({
             </div>
             {forgeRulesError ? (
               <div role="alert" className="text-body text-danger">{errorDisclosure("Couldn't load the forge rules list.", forgeRulesError)}</div>
-            ) : forgeRules === null ? (
-              <div className="text-body text-text-faint">Loading…</div>
-            ) : forgeRules.length === 0 ? (
+            ) : forgeRulesLoading ? (
+              <div className="py-2">
+                <MantaLoader size="inline" label="Loading forge rules" />
+              </div>
+            ) : (forgeRules ?? []).length === 0 ? (
               <div className="text-body text-text-faint">No forge rules yet. The AI authors them on the box with <code className="text-text-muted">forge_rules.save</code>; each is a YAML file at <code className="text-text-muted">~/.manta/forge-rules/</code>.</div>
             ) : (
               <div className="space-y-1">
-                {forgeRules.map((r) =>
+                {(forgeRules ?? []).map((r) =>
                   r.valid ? (
                     <ListRow
                       key={r.repoKey}
