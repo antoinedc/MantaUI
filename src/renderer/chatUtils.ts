@@ -2910,7 +2910,7 @@ export type UsageDialState = {
   window: UsageWindow | null;
 };
 
-function usageTone(pct: number): UsageDialTone {
+export function usageTone(pct: number): UsageDialTone {
   if (pct >= 100) return "over";
   if (pct >= 90) return "danger";
   if (pct >= 70) return "warn";

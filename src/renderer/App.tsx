@@ -445,7 +445,7 @@ function Shell() {
       // Seed the escalation baseline from the SAME payload that primes the dial,
       // so the first live update after a launch does not re-fire for a window
       // that was already over the threshold.
-      usageLevelsRef.current = buildUsageLevels(list, usageLevelsRef.current);
+      usageLevelsRef.current = buildUsageLevels(list);
     } catch {
       // Older box or a transport blip — leave the slice as-is; UsageDial's own
       // null-snapshot path already renders nothing.
@@ -779,7 +779,7 @@ function Shell() {
       }
       // Write back the CURRENT levels so a holding level doesn't re-fire and a
       // drop (after reset) re-arms the key for the next crossing.
-      usageLevelsRef.current = buildUsageLevels(next, usageLevelsRef.current);
+      usageLevelsRef.current = buildUsageLevels(next);
     });
     return off;
   }, [apiGeneration, scheduleAtReset, pushAppToastStore, dismissAppToastStore]);
