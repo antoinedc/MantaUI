@@ -88,6 +88,13 @@ const POLL_MS = 600_000; // 10 minutes
 // How long after a tick that first saw an expired window we re-poll, so the
 // carried-forward reading is replaced in seconds rather than up to POLL_MS.
 const STALE_RETRY_MS = 20_000;
+// How many CONSECUTIVE fast re-polls a waiting window may trigger. Bounded on
+// purpose: a provider only publishes the replacement numbers once there is
+// activity, so an idle user's window can sit past its reset instant
+// indefinitely and an unbounded retry-while-stale loop would hammer a
+// rate-limited endpoint forever. Three attempts covers the ordinary case in
+// about a minute, then we fall back to the normal poll.
+const MAX_STALE_RETRIES = 3;
 // A 429 backoff is always clamped into this band. The floor exists because
 // Anthropic's usage endpoint answers with `retry-after: 0` — honouring that
 // literally would hot-loop the endpoint — and the ceiling exists because a
@@ -169,10 +176,10 @@ export function createUsagePoller({
   // failure TRANSITION rather than once per tick while a provider stays
   // broken.
   const failing = new Set();
-  // Whether the PREVIOUS tick saw an expired window — the fast re-poll is
-  // armed on the false->true edge only (see the header note on why a
-  // retry-while-stale loop would never terminate for an idle user).
-  let hadStale = false;
+  // How many consecutive fast re-polls the current waiting streak has already
+  // used. Reset to 0 the moment no window is waiting, so each reset boundary
+  // gets its own budget.
+  let staleRetries = 0;
   let staleRetry = null;
 
   function warnOnce(adapterId, e) {
@@ -268,13 +275,19 @@ export function createUsagePoller({
           }
         }
       }
-      if (anyStale && !hadStale) {
-        console.log(`[usage] window past its reset instant — re-polling in ${staleRetryMs}ms`);
+      if (!anyStale) {
+        staleRetries = 0;
+        clearTimeout(staleRetry);
+      } else if (staleRetries < MAX_STALE_RETRIES) {
+        staleRetries += 1;
+        console.log(
+          `[usage] window past its reset instant — re-polling in ${staleRetryMs}ms ` +
+            `(${staleRetries}/${MAX_STALE_RETRIES})`,
+        );
         clearTimeout(staleRetry);
         staleRetry = setTimeout(() => void tick(), staleRetryMs);
         staleRetry?.unref?.();
       }
-      hadStale = anyStale;
 
       snapshots = results;
       const key = contentKey(results);

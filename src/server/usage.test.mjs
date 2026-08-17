@@ -787,30 +787,58 @@ test("poller: a window with no resetsAt is never marked stale", async () => {
   assert.equal("stale" in w, false);
 });
 
-test("poller: first stale tick re-polls once; a second consecutive stale tick arms nothing (edge-only)", async () => {
+test("poller: a waiting window re-polls a bounded number of times, then stops", async () => {
   let nowMs = 1000;
   let fetchCalls = 0;
   const adapter = makeAdapter("a", {
     detect: async () => true,
     fetch: async () => {
       fetchCalls++;
+      // resetsAt stays in the past: the provider never publishes replacements,
+      // which is the idle-user case the bound exists for.
       return { windows: [{ kind: "session", label: "s", pct: 78, resetsAt: 500 }] };
     },
   });
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, staleRetryMs: 5 });
 
-  await poller.tick(); // first stale tick → arms one retry
+  await poller.tick(); // retry 1 armed
   assert.equal(fetchCalls, 1);
 
-  await sleep(40); // the armed retry lands
-  assert.equal(fetchCalls, 2, "the false->true edge must trigger exactly one extra re-poll");
+  // Each armed retry is itself a tick that arms the next, up to the cap of 3.
+  await sleep(60);
+  assert.equal(fetchCalls, 4, "the initial tick plus exactly MAX_STALE_RETRIES re-polls");
 
-  const before = fetchCalls;
-  await poller.tick(); // still stale, but hadStale is already true → no new arm
-  assert.equal(fetchCalls, before + 1, "an explicit tick still runs its fetch");
-  const afterManual = fetchCalls;
+  await sleep(60);
+  assert.equal(fetchCalls, 4, "the budget is spent — no further re-poll while it stays stale");
+});
 
-  await sleep(40); // nothing was armed — no further fetch
-  assert.equal(fetchCalls, afterManual, "a second consecutive stale tick arms no further retry");
+test("poller: the retry budget re-arms once the window stops waiting", async () => {
+  let nowMs = 1000;
+  let fetchCalls = 0;
+  let resetsAt = 500; // in the past → waiting
+  const adapter = makeAdapter("a", {
+    detect: async () => true,
+    fetch: async () => {
+      fetchCalls++;
+      return { windows: [{ kind: "session", label: "s", pct: 78, resetsAt }] };
+    },
+  });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const poller = createUsagePoller({ adapters: [adapter], now: () => nowMs, staleRetryMs: 5 });
+
+  await poller.tick();
+  await sleep(60);
+  const spent = fetchCalls;
+  assert.ok(spent >= 2, "budget was used while waiting");
+
+  resetsAt = 99999; // provider published the new window
+  await poller.tick();
+  await sleep(30);
+  const afterFresh = fetchCalls;
+
+  resetsAt = 500; // a later boundary
+  await poller.tick();
+  await sleep(60);
+  assert.ok(fetchCalls > afterFresh + 1, "a fresh boundary gets a fresh retry budget");
 });

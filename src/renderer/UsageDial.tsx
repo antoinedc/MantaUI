@@ -90,10 +90,11 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
   const label = providerLabel(snapshot.provider);
   const windowLabel = state.window?.label ?? "usage";
   const resetLine = formatWindowReset(state.window?.resetsAt, nowMs);
-  const title =
-    `${label} · ${pctClamped}% of the ${windowLabel}` +
-    (resetLine ? ` — ${resetLine}` : "") +
-    " · click for details";
+  const title = state.awaitingReset
+    ? `${label} · the ${windowLabel} quota is resetting · click for details`
+    : `${label} · ${pctClamped}% of the ${windowLabel}` +
+      (resetLine ? ` — ${resetLine}` : "") +
+      " · click for details";
 
   return (
     <>
@@ -119,7 +120,10 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
             2/24 of the box, both scaled by the 16px icon size. */}
         <span
           aria-hidden="true"
-          className="inline-flex items-center justify-center"
+          className={
+            "inline-flex items-center justify-center" +
+            (state.awaitingReset ? " animate-pulse" : "")
+          }
           style={{ width: 16, height: 16 }}
         >
           <span
@@ -174,6 +178,12 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
             )}
           </div>
 
+          {state.awaitingReset && (
+            <div className="mb-3 text-meta text-text-faint">
+              Quota is being reset. Usage numbers might look off for a few minutes.
+            </div>
+          )}
+
           <div className="flex flex-col gap-3">
             {snapshot.windows.map((w) => (
               <UsageWindowRow key={w.kind} usageWindow={w} nowMs={nowMs} />
@@ -211,10 +221,15 @@ export const UsageDial = memo(function UsageDial({ providerID }: UsageDialProps)
 // never hardcodes "session"/"weekly" so a provider with a third window (or a
 // daily one) renders with zero changes here.
 function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWindow; nowMs: number }) {
-  const pctClamped = Math.max(0, Math.min(100, w.pct));
+  // Awaiting its replacement numbers: show no value and no fill rather than a
+  // figure we know is the previous window's. The notice above the list says
+  // why, and formatWindowReset already renders "resetting…" below.
+  const awaitingReset = w.stale === true;
+  const pctClamped = awaitingReset ? 0 : Math.max(0, Math.min(100, w.pct));
   const fill = toneRingColor(usageTone(pctClamped));
-  const value =
-    w.used != null && w.limit != null
+  const value = awaitingReset
+    ? "—"
+    : w.used != null && w.limit != null
       ? `${w.used.toLocaleString()} / ${w.limit.toLocaleString()} · ${pctClamped}%`
       : `${pctClamped}%`;
   const resetLine = formatWindowReset(w.resetsAt, nowMs);
