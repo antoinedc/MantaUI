@@ -7,6 +7,7 @@ import {
   type ServerUpdateAvailablePayload,
   type AutoUpdateInfo,
   type AutoUpdateErrorInfo,
+  type DesktopUpdateCheck,
   type InstallerEvent,
   type InstallerState,
   type InstallerStageSnapshotRow,
@@ -166,6 +167,12 @@ const api = {
   // pattern as peekRemoteFile).
   autoUpdateDownload: (): Promise<void> => ipcRenderer.invoke(IPC.autoUpdateDownload),
   autoUpdateInstall: (): Promise<void> => ipcRenderer.invoke(IPC.autoUpdateInstall),
+  autoUpdateCheck: (): Promise<DesktopUpdateCheck> => ipcRenderer.invoke(IPC.autoUpdateCheck),
+  onAutoUpdateProgress: (cb: (p: { percent: number }) => void): (() => void) => {
+    const listener = (_: unknown, p: { percent: number }) => cb(p);
+    ipcRenderer.on(IPC.autoUpdateProgress, listener);
+    return () => ipcRenderer.removeListener(IPC.autoUpdateProgress, listener);
+  },
   onAutoUpdateAvailable: (cb: (info: AutoUpdateInfo) => void): (() => void) => {
     const listener = (_: unknown, info: AutoUpdateInfo) => cb(info);
     ipcRenderer.on(IPC.autoUpdateAvailable, listener);

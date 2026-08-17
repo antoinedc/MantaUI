@@ -1096,6 +1096,70 @@ export function chooseUpdateSkewVariant(
   return isClientTooOld(clientVersion, minClient) ? "outdated" : "ok";
 }
 
+// ===== "Check for updates": rendering the two verdicts =====
+//
+// Settings → About checks two INDEPENDENT things behind one button: the desktop
+// app (electron-updater, a local concern) and the box server (the update
+// poller's manifest compare, a remote concern). Either can be up to date,
+// behind, or unanswerable, and the three must stay visually distinct.
+//
+// The tone matters more than it looks. "up to date" and "couldn't check" are
+// opposite facts that a careless UI renders identically as an absence of an
+// update button — and a reassuring silence over a failed check is exactly how
+// this app shipped a macOS updater that could never install anything for its
+// whole life without anyone noticing. So an unanswerable check is NEVER
+// rendered as "ok".
+
+export type UpdateRowTone = "ok" | "action" | "muted" | "error";
+export type UpdateRow = { tone: UpdateRowTone; text: string };
+
+/**
+ * Describe the desktop leg of an update check.
+ *
+ * `supported:false` deliberately maps to "muted", not "ok": an unpacked dev
+ * build and a mobile client have no updater at all, and claiming they are "up
+ * to date" would be a statement about something that was never checked.
+ */
+export function describeDesktopUpdate(
+  r: { supported: boolean; available: boolean; version: string | null; error?: string } | null,
+): UpdateRow | null {
+  if (r == null) return null;
+  if (r.error) return { tone: "error", text: r.error };
+  if (!r.supported) return { tone: "muted", text: "Updates aren’t available in this build." };
+  if (r.available) {
+    return {
+      tone: "action",
+      text: r.version ? `Manta UI ${r.version} is available.` : "An update is available.",
+    };
+  }
+  return { tone: "ok", text: "Manta UI is up to date." };
+}
+
+/**
+ * Describe the box leg of an update check.
+ *
+ * The server check resolves `{available:false}` both when the box is current
+ * AND when the manifest fetch failed — `createUpdateCheck` swallows fetch
+ * errors by design so a flaky feed can never crash the poller. That conflation
+ * is invisible and acceptable for a background poll, but it means this row can
+ * only ever claim "up to date" as the box's own best answer; `failed` is passed
+ * separately by the caller when the RPC itself did not come back.
+ */
+export function describeServerUpdate(
+  r: { available: boolean; version?: string } | null,
+  opts: { failed?: boolean } = {},
+): UpdateRow | null {
+  if (opts.failed) return { tone: "error", text: "Couldn’t reach the box to check." };
+  if (r == null) return null;
+  if (r.available) {
+    return {
+      tone: "action",
+      text: r.version ? `Box update ${r.version} is available.` : "A box update is available.",
+    };
+  }
+  return { tone: "ok", text: "The box is up to date." };
+}
+
 // ===== Box self-update: transient network failure vs real failure =====
 //
 // When a box self-upgrade SUCCEEDS, `scripts/self-update.sh` restarts

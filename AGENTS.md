@@ -2520,6 +2520,31 @@ entirely) — treat it as a bonus, never the plan.
 
 - **arm64 ONLY** (`electron-builder.yml` `mac.target.arch: [arm64]`) — halves
   build + (if on) notarization time. Re-add `x64` only if an Intel tester needs it.
+- **BOTH a `dmg` AND a `zip` are built, and the ZIP is the one auto-update
+  needs.** The DMG is the human download; electron-updater cannot install from
+  it. Its macOS path hands the update to Squirrel.Mac, which only accepts a
+  zipped `.app`: `MacUpdater` resolves the artifact with
+  `findFile(files, "zip", ["pkg", "dmg"])` — **dmg is on the EXCLUDED list, not
+  a fallback** — and throws `ERR_UPDATER_ZIP_FILE_NOT_FOUND` when the feed has
+  none. `latest-mac.yml` shipped DMG-only from the start, so **every download
+  attempt on every Mac threw instantly and desktop auto-update never worked at
+  all**, from 0.0.x through 0.0.35. It was invisible because the message
+  contains no `checksum`/`signature`/permission keyword, so
+  `src/shared/updateError.mjs` classified it "transient" and swallowed it —
+  the same silence as the 0.0.13/0.0.14 checksum bug, a different cause, and it
+  hid *behind* that fix (a correct digest for an artifact the updater refuses to
+  read still installs nothing). Consequences while it was broken: `update-
+  downloaded` never fired, so the sidebar update dot and About's "Restart to
+  update" strip were both unreachable on macOS. Three guards now exist —
+  a `"feed"` class in the classifier (checked BEFORE integrity, because the real
+  message embeds the file list JSON and therefore contains the substring
+  `sha512`), a codemagic step that fails the build if the feed lists no `.zip`,
+  and a warning in `publish.sh`. **Do not drop the `zip` target to save build
+  time.** It is packed from the already-notarized `.app` and is not rewritten
+  afterwards (unlike the DMG, which the staple step rewrites — hence
+  `restamp-update-feed.mjs`), so its feed digest is correct as written and it
+  needs no separate notarization pass. It is uploaded to the update feed dir
+  only, never to `downloads/`.
 - **node-gyp needs `distutils`** — the runner's Python 3.12 removed it from
   stdlib; the "Provide distutils" step `pip install "setuptools<81"` before
   `npm ci` (electron-builder rebuilds native `node-pty`, which the DESKTOP app
@@ -2559,6 +2584,69 @@ entirely) — treat it as a bonus, never the plan.
   `electron-builder.yml` + `app.setAppUserModelId`). Icon is the navy-square
   manta mark (`assets/icon.icns` + `assets/icons/*.png`, regenerated from the
   iOS AppIcon).
+
+### Checking for updates — two independent systems, one button
+
+The desktop app and the box update themselves through **completely separate
+mechanisms with separate manifests**, and conflating them is the main way to get
+lost here:
+
+| | Desktop app | Box server |
+|---|---|---|
+| Mechanism | electron-updater (Squirrel.Mac / NSIS) | `scripts/self-update.sh` |
+| Manifest | `updates/latest-mac.yml` (per-platform) | `updates/server.json` (detect) + `releases/manta-latest.txt` (apply) |
+| Compares | app version vs feed version | version (detect) / **git commit** (apply) |
+| Triggered by | `autoUpdateCheck` → `autoUpdateDownload` → `autoUpdateInstall` | `serverUpdateCheck` → `serverUpdateApply` |
+
+They can and routinely do disagree (as of 0.0.36 the box manifest was a version
+ahead of the desktop feed) — that is expected, not a bug.
+
+**Settings → About runs both in parallel behind one "Check for updates"
+button**, with `Promise.allSettled` so one leg failing still reports the other,
+and renders a tone-coded row per target. The tone is load-bearing: "up to date"
+and "couldn't check" both render as a sentence with no button, so without the
+colour they read identically — and a reassuring silence over a failed check is
+precisely how a permanently broken macOS updater passed for a healthy one.
+`describeDesktopUpdate` / `describeServerUpdate` (pure, in `chatUtils.ts`)
+encode this — note `supported:false` (dev build, or mobile with no updater) maps
+to **muted, never "ok"**: claiming a build is current is a statement about
+something that was never checked.
+
+Three rules that keep this honest:
+
+- **The check must be AWAITABLE, not event-derived.** `checkForUpdates()`
+  resolves with `{isUpdateAvailable, updateInfo}`. The `update-available` /
+  `update-not-available` events cannot answer a specific button press (the
+  not-available one was log-only), so an event-based button can only
+  timeout-and-guess.
+- **About never calls `serverUpdateApply()` itself.** Its "Update & restart"
+  button raises `onRequestServerUpdate` and `App.tsx` runs its existing flow —
+  the confirm dialog (which warns every running agent turn dies), the in-flight
+  and progress state, the 120s safety cap, and `isTransientUpdateNetworkError`
+  (without which a *successful* upgrade looks like a failure, since the box
+  restarts mid-RPC). A second call site would be a second, subtly different copy
+  of all of that.
+- **The on-demand server check is the poller's OWN tick**
+  (`startServerUpdatePoller` returns `{stop, check}`), not a second
+  fetch+compare. So a manual check that finds an update also raises the normal
+  banner and push (deduped per version), and the button and the banner can never
+  report different things. The dedup gates the SIDE EFFECTS only — the verdict is
+  always returned, so pressing twice answers twice.
+
+**Poll cadence: 30 min with a conditional GET, not 6h with a full fetch.**
+`defaultFetchManifest` sends `If-None-Match` and the website serves an ETag, so
+a poll that finds nothing is a bodyless 304 — twelve of those an hour move less
+data than one 200 every six hours did. The cadence is only the backstop for when
+nobody is looking (it still fires the push). Latency at the moment that actually
+matters comes from **checking on events, not on a clock**: the desktop runs a
+check when its connection goes live and on every reconnect, so opening the app
+surfaces a box release immediately. If you find yourself shortening the interval
+to improve responsiveness, add an event-driven check instead.
+
+Also note `createUpdateCheck`'s re-entrancy guard **joins** an in-flight tick
+rather than returning `{available:false}` early. The early return was safe while
+a 6h timer was the only caller and became a lie once a human could ask: a manual
+check landing during a poll would report "up to date" with nothing compared.
 
 ### Windows desktop (`win-v*`) — GitHub-hosted, published as a GitHub Release
 

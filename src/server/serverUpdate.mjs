@@ -20,7 +20,20 @@ import { isUpdateAvailable } from "../shared/versionCompare.mjs";
 import { resolveBoxChannel } from "../shared/channel.mjs";
 import { startPoller } from "./startPoller.mjs";
 
-const POLL_MS = 6 * 60 * 60 * 1000; // 6h, per the stage-2 spec.
+// 30 min. This was 6h, chosen when every poll cost a full manifest download.
+// It no longer does: `defaultFetchManifest` sends `If-None-Match`, and the
+// website serves an ETag, so a poll that finds nothing new is a bodyless 304.
+// Twelve 304s an hour move LESS data than one 200 every six hours did, and the
+// worst-case "a release is out and the box hasn't noticed" window drops from
+// 6h to 30min.
+//
+// Latency at the moment it actually matters is handled separately and does not
+// depend on this cadence at all: the desktop runs an on-demand check when it
+// connects, and Settings → About has a manual button. Both call the same
+// `check()` this poller returns. A shorter interval here is the backstop for
+// the case where nobody is looking (so the push notification still lands),
+// NOT the primary path.
+const POLL_MS = 30 * 60 * 1000;
 
 // Not user-configurable — the update endpoint is part of the deployed website
 // (website/updates/server.json) and a box must not be able to point itself at
@@ -47,21 +60,73 @@ export function manifestUrl(channel = resolveBoxChannel()) {
 export const MANIFEST_URL = "https://mantaui.com/updates/server.json";
 
 /**
+ * Build a conditional-GET manifest fetcher.
+ *
+ * The manifest is a ~95-byte JSON file that changes a handful of times a month,
+ * polled forever by every box. Re-downloading it on every tick is pure waste,
+ * and that waste is what forced the poll interval to be slow (6h) in the first
+ * place. The website serves `ETag` + `Last-Modified` on it (Caddy, verified),
+ * so we send `If-None-Match` and the server answers `304 Not Modified` with no
+ * body whenever nothing has changed.
+ *
+ * A 304 carries no body to parse, so the last-seen manifest is cached in the
+ * closure and returned as-is. That keeps the fetcher's contract unchanged from
+ * the caller's point of view — it always resolves to a manifest object — so
+ * `createUpdateCheck` needs to know nothing about caching.
+ *
+ * A 304 with no cached manifest (possible only if a proxy fabricates one)
+ * throws, and `createUpdateCheck` treats a throw as "no update", which is the
+ * safe direction.
+ *
+ * Each returned fetcher owns its own cache, so tests get a clean one per call
+ * and the poller's fetcher is never shared with an unrelated caller.
+ *
+ * `fetchImpl` is resolved PER CALL, not captured at construction: the previous
+ * `defaultFetchManifest` was a plain function that called the global `fetch`
+ * when invoked, so a caller (or a test) replacing `globalThis.fetch` after
+ * import still took effect. Binding it once at module load would have silently
+ * removed that.
+ */
+export function createManifestFetcher({ fetchImpl } = {}) {
+  let etag = null;
+  let cached = null;
+
+  return async function fetchManifest(url = MANIFEST_URL) {
+    const doFetch = fetchImpl ?? globalThis.fetch;
+    const headers = etag ? { "if-none-match": etag } : undefined;
+    const res = await doFetch(url, headers ? { headers } : undefined);
+
+    if (res.status === 304) {
+      if (cached === null) {
+        throw new Error("manifest fetch returned 304 with no cached manifest");
+      }
+      return cached;
+    }
+    if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
+
+    const manifest = await res.json();
+    // Only remember the validator once the body parsed — caching an ETag for a
+    // body we failed to read would make every later poll a 304 that returns a
+    // stale/absent manifest.
+    const nextEtag = res.headers?.get?.("etag") ?? null;
+    etag = typeof nextEtag === "string" && nextEtag !== "" ? nextEtag : null;
+    cached = manifest;
+    return manifest;
+  };
+}
+
+/**
  * Default `fetchManifest` used when no override is supplied — fetches the
- * manifest URL and parses JSON. Any non-2xx is treated as a fetch failure so
+ * manifest URL and parses JSON, with the conditional-GET caching above. Any
+ * non-2xx (other than 304) is treated as a fetch failure so
  * `createUpdateCheck`'s catch-handler returns `{ available:false }` rather than
- * crashing the poller. Kept tiny on purpose so the override-injection point
- * the spec requires stays a single line in production wiring.
+ * crashing the poller.
  *
  * Exported separately so tests can import it as a baseline stub shape and
  * so production callers can swap to a different fetch impl without rewriting
  * the URL/parse logic.
  */
-export async function defaultFetchManifest(url = MANIFEST_URL) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`manifest fetch failed: ${res.status}`);
-  return await res.json();
-}
+export const defaultFetchManifest = createManifestFetcher();
 
 /**
  * Build a single update-check step (testable without timers or a live bus).
@@ -71,8 +136,16 @@ export async function defaultFetchManifest(url = MANIFEST_URL) {
  * manifest (missing/non-string `version`) it returns `{ available:false }`
  * and does NOT re-throw — a flaky manifest URL must never crash the server.
  *
- * Re-entrancy guarded (same shape as `createOutboxScanner`): a tick that is
- * still running when a second one is invoked returns immediately.
+ * Re-entrancy guarded: a tick invoked while another is still running JOINS the
+ * in-flight one and resolves with its result.
+ *
+ * It deliberately does NOT return `{available:false}` early, which is what the
+ * guard used to do. That shortcut was safe while the only caller was a 6h
+ * timer, and became a lie the moment a human could ask: a manual "check for
+ * updates" that happened to land during a poller tick would be told "up to
+ * date" without anything having been compared. Reporting a stale "no update"
+ * to someone who explicitly asked is the one answer this whole feature exists
+ * to avoid, so concurrent callers share the real answer instead.
  *
  * @param {object} deps
  * @param {(url:string) => Promise<any>} deps.fetchManifest
@@ -80,18 +153,12 @@ export async function defaultFetchManifest(url = MANIFEST_URL) {
  * @returns {{ tick: () => Promise<{available:boolean, version?:string, notesUrl?:string|null}> }}
  */
 export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
-  let inFlight = false;
+  let inFlight = null;
   // Channel-derived by default (prod → /updates, staging → /staging/updates).
   // `null` means this build has no feed — see tick().
   const feedUrl = url === undefined ? manifestUrl() : url;
 
-  async function tick() {
-    if (inFlight) return { available: false };
-    // A dev build has `updateFeed: null`. Report "no update" rather than
-    // falling back to the prod feed: a local build must never talk a real box
-    // into installing a public release over it.
-    if (!feedUrl) return { available: false };
-    inFlight = true;
+  async function run() {
     try {
       const manifest = await fetchManifest(feedUrl);
       if (!manifest || typeof manifest.version !== "string") {
@@ -105,9 +172,19 @@ export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
         : { available: false };
     } catch {
       return { available: false };
-    } finally {
-      inFlight = false;
     }
+  }
+
+  function tick() {
+    // A dev build has `updateFeed: null`. Report "no update" rather than
+    // falling back to the prod feed: a local build must never talk a real box
+    // into installing a public release over it.
+    if (!feedUrl) return Promise.resolve({ available: false });
+    if (inFlight) return inFlight;
+    inFlight = run().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   }
 
   return { tick };
@@ -129,17 +206,29 @@ export function createUpdateCheck({ fetchManifest, currentVersion, url }) {
  * `fetchManifest` defaults to `defaultFetchManifest` (uses `globalThis.fetch`).
  * Tests inject a stub.
  *
+ * Returns `{ stop, check }`. `check()` runs the SAME tick the timer runs and
+ * resolves with its result, so an on-demand check (the `server:update-check`
+ * RPC behind Settings → About, and the desktop's check-on-connect) reuses one
+ * code path instead of growing a second fetch+compare that could disagree with
+ * the banner. It is deliberately the full `runTick`, not a bare `tick`: a
+ * manual check that finds an update should also raise the banner and fire the
+ * notification exactly as the timer would, and the per-version dedup makes
+ * that idempotent no matter how often the user clicks.
+ *
  * @param {object} deps
  * @param {{ publish: (evt:any) => void }} deps.bus
  * @param {string} deps.currentVersion
  * @param {(args:{message:string, title?:string, sessionID?:string|null}) => Promise<any>} [deps.notify]
  * @param {(url:string) => Promise<any>} [deps.fetchManifest]
- * @returns {{ stop: () => void }}
+ * @returns {{ stop: () => void, check: () => Promise<{available:boolean, version?:string, notesUrl?:string|null}> }}
  */
 export function startServerUpdatePoller(
   { bus, currentVersion, notify, fetchManifest } = {},
 ) {
-  const realFetchManifest = fetchManifest ?? defaultFetchManifest;
+  // A fetcher of this poller's OWN, not the shared `defaultFetchManifest`
+  // singleton, so the conditional-GET cache belongs to exactly one poller and
+  // two instances (a test's and production's) can never see each other's ETag.
+  const realFetchManifest = fetchManifest ?? createManifestFetcher();
   const { tick } = createUpdateCheck({
     fetchManifest: realFetchManifest,
     currentVersion,
@@ -148,8 +237,13 @@ export function startServerUpdatePoller(
 
   async function runTick() {
     const result = await tick();
-    if (!result?.available || !result.version) return;
-    if (result.version === lastNotifiedVersion) return;
+    // Always hand the caller the comparison result — `check()` returns this so
+    // a manual check can say "up to date" as confidently as "update available".
+    // The dedup below gates only the SIDE EFFECTS (banner + push), never the
+    // answer, so clicking the button twice reports the truth twice while
+    // notifying at most once.
+    if (!result?.available || !result.version) return result ?? { available: false };
+    if (result.version === lastNotifiedVersion) return result;
     lastNotifiedVersion = result.version;
 
     // Match the bus envelope documented in src/server/events.mjs: every
@@ -179,9 +273,16 @@ export function startServerUpdatePoller(
         );
       }
     }
+
+    return result;
   }
 
-  return startPoller(runTick, { intervalMs: POLL_MS, label: "server-update" });
+  const { stop } = startPoller(runTick, {
+    intervalMs: POLL_MS,
+    label: "server-update",
+  });
+
+  return { stop, check: runTick };
 }
 
 /**

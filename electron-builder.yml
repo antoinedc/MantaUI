@@ -64,6 +64,34 @@ mac:
         # testers are Apple Silicon; re-add `- x64` here if an Intel tester
         # needs it (Rosetta can't run an arm64 build).
         - arm64
+    # ZIP IS REQUIRED FOR AUTO-UPDATE. It is not a second download format for
+    # humans — nobody is ever pointed at it — it is the ONLY artifact
+    # electron-updater can install on macOS, and its absence silently disabled
+    # desktop auto-update completely.
+    #
+    # electron-updater's macOS path hands the update to Squirrel.Mac, which
+    # only accepts a zipped .app. MacUpdater resolves it with
+    # `findFile(files, "zip", ["pkg", "dmg"])` — note DMG is on the EXCLUDED
+    # list, so it is explicitly not a fallback — and throws
+    # ERR_UPDATER_ZIP_FILE_NOT_FOUND when the feed has none. With a DMG-only
+    # feed every download attempt on every Mac threw instantly, and the message
+    # matched none of the integrity/permission patterns in
+    # src/shared/updateError.mjs, so it was classified transient and swallowed:
+    # the app simply never updated and never said why. (That classifier now has
+    # a "feed" class for exactly this, so a regression is loud.)
+    #
+    # This is the same CLASS of bug as the 0.0.13/0.0.14 checksum mismatch that
+    # scripts/release/restamp-update-feed.mjs was written to fix — and it hid
+    # behind that fix, because a correct digest for an artifact the updater
+    # refuses to read still cannot update anything.
+    #
+    # Do NOT remove this target to save build time. The zip is packed from the
+    # already-notarized .app and is not rewritten afterwards (unlike the DMG,
+    # which the staple step rewrites — hence the restamp script), so its feed
+    # digest is correct as written.
+    - target: zip
+      arch:
+        - arm64
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: "assets/entitlements.mac.plist"

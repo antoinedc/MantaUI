@@ -277,6 +277,7 @@ export function buildHandlers({
   serverVersion,
   opencodeVersion,
   runServerSelfUpdate,
+  checkServerUpdate = () => Promise.resolve({ available: false }),
   delegate,
   progress,
   voiceNotes,
@@ -806,6 +807,18 @@ export function buildHandlers({
     // rpc.test.mjs for the regression guard) — see the comment block
     // above buildHandlers for why this isn't a module-level import.
     "server:update-apply": () => runServerSelfUpdate(SELF_UPDATE_SCRIPT),
+
+    // preload: ipcRenderer.invoke(IPC.serverUpdateCheck) → no args.
+    // Runs the update poller's own tick on demand and returns its verdict, so
+    // Settings → About can answer "up to date" / "0.0.37 available" the moment
+    // the user asks instead of waiting up to 30 min for the next poll. The
+    // check is the poller's `runTick`, so a manual check that finds something
+    // also raises the usual banner + push (deduped per version) rather than
+    // reporting an update the rest of the UI knows nothing about.
+    // Injected via buildHandlers deps for the same reason as
+    // runServerSelfUpdate: the poller owns the state and is wired in
+    // src/server/index.mjs.
+    "server:update-check": () => checkServerUpdate(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeDefaultModel)  → no args
     "opencode:default-model": () => oc.getDefaultModel(),

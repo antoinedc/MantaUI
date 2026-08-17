@@ -11,6 +11,7 @@ import {
   type PluginRegistryRow,
   type PtyEvent,
   type ServerUpdateAvailablePayload,
+  type ServerUpdateCheck,
   type StreamEnvelope,
   type UsageSnapshot,
   type StoppedListResult,
@@ -1159,9 +1160,20 @@ export const httpApi: Api = {
   autoUpdateInstall: async () => {
     await getMantaPreload()?.autoUpdateInstall();
   },
+  // No preload = no desktop to update (mobile/web). Resolve `supported:false`
+  // rather than `available:false`: the caller must be able to hide the desktop
+  // row entirely instead of rendering a false "up to date" for a client that
+  // has no updater.
+  autoUpdateCheck: async () =>
+    (await getMantaPreload()?.autoUpdateCheck()) ?? {
+      supported: false,
+      available: false,
+      version: null,
+    },
   onAutoUpdateAvailable: (cb) => getMantaPreload()?.onAutoUpdateAvailable(cb) ?? (() => {}),
   onAutoUpdateDownloaded: (cb) => getMantaPreload()?.onAutoUpdateDownloaded(cb) ?? (() => {}),
   onAutoUpdateError: (cb) => getMantaPreload()?.onAutoUpdateError(cb) ?? (() => {}),
+  onAutoUpdateProgress: (cb) => getMantaPreload()?.onAutoUpdateProgress(cb) ?? (() => {}),
 
   // -- typeahead --
   opencodeCommands: () => rpc(IPC.opencodeCommands),
@@ -1245,6 +1257,13 @@ export const httpApi: Api = {
   // fixed-argv execFile, no injection surface).
   serverUpdateApply: () =>
     rpc<{ ok: boolean; error?: string }>(IPC.serverUpdateApply),
+
+  // -- server-update check on demand --
+  // Runs the box poller's own tick and returns its verdict, so Settings →
+  // About can answer immediately instead of waiting out the poll interval.
+  // Same channel on desktop and mobile — this is server state, not a
+  // device capability.
+  serverUpdateCheck: () => rpc<ServerUpdateCheck>(IPC.serverUpdateCheck),
 
   // -- server-update available subscription (BET-225 stage 3) --
   // /events WS stream publishes `{kind: "serverUpdateAvailable", payload}`
