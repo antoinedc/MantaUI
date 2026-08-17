@@ -76,7 +76,7 @@ session-state snapshot.
   and tests.
 - `src/shared/` — transport mode resolution (`transport.mjs`), plus pure logic
   shared by renderer + server (`groq.mjs`, `subagentSync.mjs`,
-  `voiceClassifier.mjs`, `modelGuide.mjs`).
+  `modelGuide.mjs`).
 
 ## Build / run
 
