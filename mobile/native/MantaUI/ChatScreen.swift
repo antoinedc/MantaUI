@@ -206,6 +206,9 @@ private struct ChatScreenContent: View {
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
+    /// The box client bound to this session's paired server. Shared by the two
+    /// stores and used by the plan card to build the deterministic plan-page URL.
+    private let api: MantaAPIClient
 
     init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void) {
         self.title = title
@@ -214,6 +217,7 @@ private struct ChatScreenContent: View {
         self._path = path
         self.onCleared = onCleared
         let api = MantaAPIClient.live()
+        self.api = api
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
@@ -1046,6 +1050,27 @@ private struct ChatScreenContent: View {
                     store.replyPermission(permission, reply: reply)
                 }
             }
+            // The plan_exit question upgrades into a dedicated PlanCard and is
+            // EXCLUDED from newestQuestion (below), exactly as desktop excludes
+            // it from its inline question stack (`ChatPanel.tsx:2896`) — so the
+            // plan card and the generic question card never render for the
+            // same question.
+            if let planQ = newestPlanQuestion {
+                PlanCard(
+                    question: planQ,
+                    messages: store.messages,
+                    buildModelName: buildModelName,
+                    planURL: planURL,
+                    tokens: tokens,
+                    onBuildHere: { feedback in
+                        handleBuildHere(planQ, feedback: feedback)
+                    },
+                    onKeepPlanning: { feedback in
+                        store.keepPlanning(question: planQ, feedback: feedback)
+                    },
+                    onOpenPage: { openPlanPage() }
+                )
+            }
             if let question = newestQuestion {
                 QuestionCard(question: question, tokens: tokens) { answers in
                     store.replyQuestion(question, answers: answers)
@@ -1062,8 +1087,57 @@ private struct ChatScreenContent: View {
         store.permissions.last
     }
 
+    /// The newest pending question EXCLUDING the plan_exit question (which is
+    /// rendered by the dedicated PlanCard). Matching the exact tool callID via
+    /// `PlanDerivation.isPlanExitQuestion` — never the question text — so the
+    /// plan card and the generic question card can never appear simultaneously.
     private var newestQuestion: QuestionRequest? {
-        store.questions.last
+        store.questions.last(where: { !PlanDerivation.isPlanExitQuestion($0, in: store.messages) })
+    }
+
+    private var newestPlanQuestion: QuestionRequest? {
+        store.questions.last(where: { PlanDerivation.isPlanExitQuestion($0, in: store.messages) })
+    }
+
+    /// The deterministic plan-page URL for this session (`<base>/pages/plan-…`,
+    /// auto-published by the plan agent's plan_render tool), or nil when no
+    /// usable subdomain slug can be formed. There is no on-device publish call
+    /// — the URL is derived, mirroring the current desktop
+    /// (`ChatPanel.tsx:2544-2552`) which standardized on the single-HTML plan
+    /// page auto-published under the per-session subdomain.
+    private var planURL: String? {
+        PlanDerivation.planPageURL(sessionID: store.sessionId, baseURL: api.serverURL)
+    }
+
+    /// The session's BUILD-model name for the card's "Ready to build · …"
+    /// subtitle — the remembered build model, independent of the current
+    /// plan/build mode, falling back to the server default (the plan model is
+    /// only ever the composer's active model while plan mode is on).
+    private var buildModelName: String {
+        let buildID = ChatModelStore.loadOverride(for: store.sessionId, mode: .build)
+        return ChatModel.label(modelStore.models, override: buildID, default: modelStore.defaultModel)
+    }
+
+    private func handleBuildHere(_ question: QuestionRequest, feedback: String) {
+        // Port of the desktop's buildHere: answer "Yes" (switches to the build
+        // agent), flip local plan state off so the BUILD model becomes active,
+        // then re-send the plan text ourselves (feedback appended) with that
+        // build model — opencode's own "yes" would otherwise stamp the injected
+        // build turn with the planning model.
+        var prompt = PlanDerivation.extractPlanData(question, in: store.messages).text
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            prompt = prompt.isEmpty ? trimmed : "\(prompt)\n\n\(trimmed)"
+        }
+        modelStore.setPlan(false)
+        let buildModel = modelStore.promptModel
+        store.buildHere(question: question, planText: prompt, buildModel: buildModel)
+    }
+
+    private func openPlanPage() {
+        if let planURL, let url = URL(string: planURL) {
+            UIApplication.shared.open(url)
+        }
     }
 
     // MARK: - Load failure
@@ -1508,5 +1582,141 @@ private struct QuestionCard: View {
                 customText: customText
             )
         )
+    }
+}
+
+// MARK: - Plan card (BET-1026)
+
+/// The plan_exit question upgraded into a dedicated card. Detection is EXACT
+/// (`PlanDerivation.isPlanExitQuestion`, a matching `plan_exit` tool callID —
+/// never the question text), so this card REPLACES the generic QuestionCard for
+/// that question and never coexists with it.
+///
+/// Recipes are reused, not invented: the container matches `PermissionCard`
+/// / `QuestionCard` (`tokens.panel`, `Metrics.radius.md`, 1pt `borderSubtle`
+/// stroke, `Metrics.spacing.sp3` padding); the feedback field is QuestionCard's
+/// free-text field verbatim; the Build here / Open page buttons are
+/// PermissionCard's "Allow once" / "Allow always" recipes; Keep planning is a
+/// bare text button in `tx3` (not `danger` — keeping planning is not
+/// destructive). All colours/spacing/radii/type resolve through the existing
+/// generated tokens — no new token.
+private struct PlanCard: View {
+    let question: QuestionRequest
+    let messages: [OpencodeMessage]
+    /// The session's BUILD-model name for "Ready to build · <model>".
+    let buildModelName: String
+    /// The deterministic plan-page URL (nil when no usable slug can be formed).
+    let planURL: String?
+    let tokens: Tokens
+    let onBuildHere: (String) -> Void
+    let onKeepPlanning: (String) -> Void
+    let onOpenPage: () -> Void
+
+    @State private var feedback = ""
+
+    private var data: PlanData { PlanDerivation.extractPlanData(question, in: messages) }
+    private var metrics: (steps: Int, files: Int) { PlanDerivation.planMetrics(data.text) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            // Eyebrow — same recipe as PermissionCard's "Permission needed" header.
+            Text("Plan ready")
+                .font(.manta(size: Metrics.type.xs, weight: mantaFontWeight(Metrics.type.semibold)))
+                .foregroundColor(tokens.tx4)
+            Text(data.title)
+                .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.semibold)))
+                .foregroundColor(tokens.tx1)
+                .lineLimit(2)
+            Text(buildModelName.isEmpty ? "Ready to build" : "Ready to build · \(buildModelName)")
+                .font(.manta(size: Metrics.type.twoXS))
+                .foregroundColor(tokens.tx4)
+            // The metrics line is hidden entirely when no plan path was recovered
+            // (a plan authored via `write`/`plan` without a discoverable path) —
+            // never an empty bullet, never a crash (BET-1026 decision 6).
+            if let path = data.path {
+                Text("\(metrics.steps) steps · \(metrics.files) files · \(path)")
+                    .font(.manta(size: Metrics.type.twoXS, design: .monospaced))
+                    .foregroundColor(tokens.tx3)
+                    .lineLimit(1)
+            }
+            if let planURL {
+                Button(action: onOpenPage) {
+                    HStack(spacing: Metrics.spacing.sp1) {
+                        Image(systemName: "link")
+                            .font(.system(size: Metrics.type.twoXS))
+                            .foregroundColor(tokens.accentTx)
+                        Text(planURL)
+                            .font(.manta(size: Metrics.type.twoXS))
+                            .foregroundColor(tokens.accentTx)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            // Feedback field — QuestionCard's free-text field verbatim.
+            TextField("Anything to change before we start?", text: $feedback)
+                .font(.manta(size: Metrics.type.small))
+                .foregroundColor(tokens.tx1)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+            HStack(spacing: Metrics.spacing.sp2) {
+                buildButton
+                openPageButton
+                Spacer(minLength: 0)
+                keepPlanningButton
+            }
+        }
+        .padding(Metrics.spacing.sp3)
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("plan-card")
+    }
+
+    /// PermissionCard's "Allow once" recipe (accent-solid capsule).
+    private var buildButton: some View {
+        Button { onBuildHere(feedback) } label: {
+            Text("Build here")
+                .font(.manta(size: Metrics.type.small, weight: .semibold))
+                .foregroundColor(tokens.onAccent)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .background(tokens.accentSolid, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// PermissionCard's "Allow always" recipe (accent-soft capsule) with the
+    /// spec's ↗ glyph.
+    private var openPageButton: some View {
+        Button(action: onOpenPage) {
+            HStack(spacing: Metrics.spacing.sp1) {
+                Text("Open page")
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: Metrics.type.small, weight: .semibold))
+            }
+            .font(.manta(size: Metrics.type.small, weight: .semibold))
+            .foregroundColor(tokens.accentTx)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp2)
+            .background(tokens.accentSoft, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// "Keep planning" — bare text mirroring "Reject"'s text treatment, but in
+    /// `tx3`, not `danger` (keeping planning is not destructive).
+    private var keepPlanningButton: some View {
+        Button { onKeepPlanning(feedback) } label: {
+            Text("Keep planning")
+                .font(.manta(size: Metrics.type.small, weight: .medium))
+                .foregroundColor(tokens.tx3)
+        }
+        .buttonStyle(.plain)
     }
 }
