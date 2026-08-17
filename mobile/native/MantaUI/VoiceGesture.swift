@@ -82,16 +82,27 @@ enum VoiceInput: Equatable {
 
 enum VoiceGesture {
 
+    /// The two distances the recording gesture is defined by, in points. The
+    /// machine DECIDES with these and the view DRAWS with them, so they live in
+    /// exactly one place — a view that filled its lane against a different number
+    /// than the machine acted on would show you a lie.
+    enum Thresholds {
+        /// Drag up this far to arm the lock.
+        static let lock: Double = 80
+        /// Drag left (mirrored in RTL) this far to arm cancel.
+        static let cancel: Double = 96
+    }
+
     /// The whole machine. Thresholds are parameters with defaults
-    /// `lockThreshold = 80pt`, `cancelThreshold = 64pt`.
+    /// `lockThreshold = Thresholds.lock`, `cancelThreshold = Thresholds.cancel`.
     /// `isRTL` mirrors the horizontal drag direction for right-to-left layouts.
     static func transition(
         currentPhase: VoicePhase,
         input: VoiceInput,
         elapsedMs: Int,
         isRTL: Bool = false,
-        lockThreshold: Double = 80,
-        cancelThreshold: Double = 64
+        lockThreshold: Double = Thresholds.lock,
+        cancelThreshold: Double = Thresholds.cancel
     ) -> (VoicePhase, VoiceEffect) {
 
         // An external interruption invalidates the take from any phase — it
@@ -222,7 +233,7 @@ enum VoiceGesture {
     /// the vertical axis, so `isRTL` is deliberately absent. The view uses this
     /// to brighten the lock lane / scale its glyph as the lock threshold is
     /// approached; it must NOT decide the transition itself.
-    static func lockProgress(dy: Double, threshold: Double = 80) -> Double {
+    static func lockProgress(dy: Double, threshold: Double = Thresholds.lock) -> Double {
         guard threshold > 0 else { return 0 }
         return min(1, max(0, -dy / threshold))
     }
@@ -230,7 +241,7 @@ enum VoiceGesture {
     /// 0...1 of how far the horizontal drag is toward the cancel threshold,
     /// with the direction mirrored for RTL (mirrors the machine's own mirror
     /// so the hint/veil track the true cancel direction). Clamped.
-    static func cancelProgress(dx: Double, isRTL: Bool, threshold: Double = 64) -> Double {
+    static func cancelProgress(dx: Double, isRTL: Bool, threshold: Double = Thresholds.cancel) -> Double {
         let x = isRTL ? -dx : dx
         guard threshold > 0 else { return 0 }
         return min(1, max(0, -x / threshold))

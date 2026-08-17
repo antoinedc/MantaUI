@@ -229,19 +229,28 @@ final class VoiceGestureTests: XCTestCase {
 
     func testCancelProgressLTR() {
         XCTAssertEqual(VoiceGesture.cancelProgress(dx: 0, isRTL: false), 0, accuracy: 0.0001)
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -64, isRTL: false), 1, accuracy: 0.0001)
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -32, isRTL: false), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -VoiceGesture.Thresholds.cancel, isRTL: false), 1, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -(VoiceGesture.Thresholds.cancel / 2), isRTL: false), 0.5, accuracy: 0.0001)
         // Clamped.
         XCTAssertEqual(VoiceGesture.cancelProgress(dx: -200, isRTL: false), 1, accuracy: 0.0001)
         // Dragging right is not cancel in LTR.
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 64, isRTL: false), 0, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: VoiceGesture.Thresholds.cancel, isRTL: false), 0, accuracy: 0.0001)
     }
 
     func testCancelProgressMirrorsForRTL() {
         // In RTL the SAME physical drag (right) advances cancel, mirroring the
         // machine's own horizontal mirror.
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 64, isRTL: true), 1, accuracy: 0.0001)
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: 32, isRTL: true), 0.5, accuracy: 0.0001)
-        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -64, isRTL: true), 0, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: VoiceGesture.Thresholds.cancel, isRTL: true), 1, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: VoiceGesture.Thresholds.cancel / 2, isRTL: true), 0.5, accuracy: 0.0001)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -VoiceGesture.Thresholds.cancel, isRTL: true), 0, accuracy: 0.0001)
+    }
+
+    func testProgressHelpersReachOneExactlyAtTheMachineThreshold() {
+        // Just short of the threshold: armed by neither, and not full on the lane.
+        XCTAssertLessThan(VoiceGesture.lockProgress(dy: -(VoiceGesture.Thresholds.lock - 1)), 1)
+        XCTAssertLessThan(VoiceGesture.cancelProgress(dx: -(VoiceGesture.Thresholds.cancel - 1), isRTL: false), 1)
+        // At the threshold: full lane, and the machine acts.
+        XCTAssertEqual(VoiceGesture.lockProgress(dy: -VoiceGesture.Thresholds.lock), 1)
+        XCTAssertEqual(VoiceGesture.cancelProgress(dx: -VoiceGesture.Thresholds.cancel, isRTL: false), 1)
     }
 }
