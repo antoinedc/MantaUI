@@ -405,21 +405,23 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     }
   };
 
-  // The clone root [S6] proposes inline: `~/projects`, or the common parent of
-  // the repos the probe found when they share one. Editable inside the picker.
+  // The clone root [S6] proposes inline: the box's real home dir + `/projects`,
+  // or the common parent of the repos the probe found when they share one.
+  // Editable inside the picker. When homeDir is unknown the root is empty and
+  // the clone button stays disabled — never invent a fallback string.
   const proposedCloneRoot = useMemo(() => {
     const dirs = probeRepos
       .map((r) => (r.path?.includes("/") ? r.path.split("/").slice(0, -1).join("/") : ""))
       .filter(Boolean);
-    if (dirs.length === 0) return "~/projects";
+    if (dirs.length === 0) return homeDir ? `${homeDir}/projects` : "";
     let common = dirs[0];
     for (const d of dirs.slice(1)) {
       while (common && !d.startsWith(common)) {
         common = common.slice(0, common.lastIndexOf("/"));
       }
     }
-    return common && common !== "/" && !common.startsWith("/root") ? common : "~/projects";
-  }, [probeRepos]);
+    return common && common !== "/" ? common : homeDir ? `${homeDir}/projects` : "";
+  }, [probeRepos, homeDir]);
 
 
 

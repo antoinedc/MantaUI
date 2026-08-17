@@ -39,8 +39,9 @@ import { getCloneStore } from "./clone.mjs";
 import { createGithubAdapter, GithubRequestError, buildInboxQueries, mergeInboxSources } from "./github.mjs";
 import { createGitlabAdapter } from "./gitlab.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
-import { readFile as fsReadFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile as fsReadFile, stat as fsStat, readdir as fsReaddir, mkdir as fsMkdir } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { expandTilde, assertAbsolutePath } from "../../shared/paths.mjs";
 
 // How long a fetched value is served from memory with no network request at
 // all. After this, the ETag conditional GET (If-None-Match) takes over.
@@ -507,11 +508,17 @@ export async function forgeListRepos({
  * Never returns the token.
  *
  * @param {{ url: string, dest: string, name: string }} input
- * @param {{ resolveToken?: typeof authResolveToken, store?: ReturnType<typeof getCloneStore> }} [deps]
+ * @param {{ resolveToken?: typeof authResolveToken, store?: ReturnType<typeof getCloneStore>, stat?: typeof fsStat, readdir?: typeof fsReaddir, mkdir?: typeof fsMkdir }} [deps]
  */
 export async function forgeCloneStart(
   input,
-  { resolveToken = authResolveToken, store = getCloneStore() } = {},
+  {
+    resolveToken = authResolveToken,
+    store = getCloneStore(),
+    stat = fsStat,
+    readdir = fsReaddir,
+    mkdir = fsMkdir,
+  } = {},
 ) {
   const url = input?.url;
   const dest = input?.dest;
@@ -519,8 +526,44 @@ export async function forgeCloneStart(
   if (typeof url !== "string" || !url || typeof dest !== "string" || !dest) {
     return { error: "bad_request" };
   }
+
+  // Tilde expansion is a shell feature; the spawned clone performs none. Expand
+  // once here, against the home dir of the user the box server runs as, and
+  // reject anything still non-absolute (including the `~user/...` form that
+  // expandTilde does not handle) so the destination can never be created
+  // relative to some process's cwd or literally named `~` at the filesystem root.
+  let abs;
+  try {
+    abs = assertAbsolutePath(expandTilde(dest), "clone destination");
+  } catch (err) {
+    return { error: "bad_dest", message: err instanceof Error ? err.message : String(err) };
+  }
+
+  // Preflight the destination BEFORE starting the clone — don't infer
+  // destination problems from git's stderr (that tends to blame the token).
+  try {
+    const st = await stat(abs);
+    if (!st.isDirectory()) {
+      return { error: "dest_exists", message: `${abs} already exists and is not a folder.` };
+    }
+    if ((await readdir(abs)).length > 0) {
+      return { error: "dest_not_empty", message: `${abs} already exists and isn't empty.` };
+    }
+  } catch (err) {
+    // ENOENT on the destination is fine — git creates the leaf itself.
+    if (!(err && err.code === "ENOENT")) {
+      return { error: "dest_unwritable", message: `Can't inspect ${abs}: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  try {
+    await mkdir(dirname(abs), { recursive: true });
+  } catch (err) {
+    return { error: "dest_unwritable", message: `Can't create ${dirname(abs)}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
   const tok = await resolveToken(GH_HOST);
-  const id = store.start({ url, dest, name: name || "", token: tok?.token ?? undefined });
+  const id = store.start({ url, dest: abs, name: name || "", token: tok?.token ?? undefined });
   return { id };
 }
 

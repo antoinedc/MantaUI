@@ -346,10 +346,17 @@ export function CloneFromGitHub({
                       change
                     </button>
                   )}
+                  {!editingRoot && root.trim() === "" && (
+                    <span className="text-[11.5px] text-text-warn ml-1">Set a clone folder</span>
+                  )}
                 </div>
 
                 <div className="flex gap-2 mt-3">
-                  <Button tone="primary" disabled={selected.length === 0} onClick={() => runClones(selected, 0)}>
+                  <Button
+                    tone="primary"
+                    disabled={selected.length === 0 || root.trim() === ""}
+                    onClick={() => runClones(selected, 0)}
+                  >
                     Clone {selected.length} selected
                   </Button>
                   <Button tone="ghost" onClick={onCancel}>
@@ -452,6 +459,10 @@ function failedMessage(kind: CloneErrorKind, raw: string): string {
       return "not enough disk space in the clone location.";
     case "network":
       return "a network error prevented the clone.";
+    case "destination":
+      // The server's preflight message is already specific and user-facing —
+      // pass it through verbatim (it names the folder, not the token).
+      return raw || "the clone destination is not usable.";
     default:
       return raw || "the clone failed.";
   }

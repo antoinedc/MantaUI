@@ -17,6 +17,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  assertAbsolutePath,
   expandTilde,
   patchPath,
   DARWIN_PATH_PREFIX,
@@ -91,7 +92,47 @@ describe("paths — state directory resolution", () => {
   });
 });
 
-describe("paths — expandTilde", () => {
+describe("paths — assertAbsolutePath", () => {
+  it("accepts an absolute path and returns it", () => {
+    expect(assertAbsolutePath("/a/b", "clone destination")).toBe("/a/b");
+  });
+
+  it("rejects a tilde path that the shell would expand, not the process", () => {
+    expect(() => assertAbsolutePath("~/a", "clone destination")).toThrow(
+      "clone destination must be an absolute path",
+    );
+  });
+
+  it("rejects the ~user/... form that expandTilde does not handle", () => {
+    expect(() => assertAbsolutePath("~bob/a", "clone destination")).toThrow(
+      "clone destination must be an absolute path",
+    );
+  });
+
+  it("rejects a bare relative path", () => {
+    expect(() => assertAbsolutePath("a/b", "clone destination")).toThrow(
+      "clone destination must be an absolute path",
+    );
+  });
+
+  it("rejects an empty string", () => {
+    expect(() => assertAbsolutePath("", "clone destination")).toThrow(
+      "clone destination must be an absolute path",
+    );
+  });
+
+  it("rejects undefined", () => {
+    expect(() => assertAbsolutePath(undefined, "clone destination")).toThrow(
+      "clone destination must be an absolute path",
+    );
+  });
+
+  it("names the label in the error message", () => {
+    expect(() => assertAbsolutePath("rel", "some label")).toThrow("some label must be an absolute path");
+  });
+});
+
+
   it("expands a bare `~` to the user's homedir", () => {
     expect(expandTilde("~")).toBe(homedir());
   });
