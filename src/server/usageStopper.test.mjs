@@ -151,3 +151,30 @@ test("match wins even when the meter reads under limit, and keeps its window", (
   assert.equal(decision.enrol, true);
   assert.equal(decision.window, "weekly");
 });
+
+// Regression for reviewer Question (cycle 2): an explicit never-enrol negative
+// must suppress the meter-correlation signal — a throttle / credit refusal that
+// fires while a provider sits at 100% must NOT be mislabelled a plan-limit stop.
+test("an explicit never-enrol (throttle / credits) suppresses enrolment even at limit", () => {
+  // A throttle wording with the meter at its limit → no enrol.
+  const throttle = classifyUsageStopped({ provider: "claude", errorName: "Error", errorMessage: "...temporarily limiting requests..." });
+  assert.equal(throttle.enrolled, false);
+  assert.equal(throttle.neverEnrol, true);
+  assert.equal(decideUsageEnrolment({ match: throttle, atLimit: true }).enrol, false);
+
+  // A credit/overage refusal with the meter at its limit → no enrol.
+  const credits = classifyUsageStopped({ provider: "claude", errorName: "Error", errorMessage: "usage credits are required" });
+  assert.equal(credits.enrolled, false);
+  assert.equal(credits.neverEnrol, true);
+  assert.equal(decideUsageEnrolment({ match: credits, atLimit: true }).enrol, false);
+
+  // Codex overload at limit → no enrol.
+  const overload = classifyUsageStopped({ provider: "codex", errorName: "Error", errorMessage: "server_is_overloaded" });
+  assert.equal(overload.neverEnrol, true);
+  assert.equal(decideUsageEnrolment({ match: overload, atLimit: true }).enrol, false);
+
+  // Kimi tier-entitlement at limit → no enrol.
+  const tier = classifyUsageStopped({ provider: "kimi", errorName: "Error", errorMessage: "this account does not have access to" });
+  assert.equal(tier.neverEnrol, true);
+  assert.equal(decideUsageEnrolment({ match: tier, atLimit: true }).enrol, false);
+});

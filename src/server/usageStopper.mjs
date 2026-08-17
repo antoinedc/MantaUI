@@ -121,32 +121,44 @@ function asString(v) {
 /**
  * Classify a failed turn. Pure.
  *
+ * The result distinguishes TWO kinds of "not a match", because they feed the
+ * correlation signal differently:
+ *   { enrolled:true, window }                 — a refusal wording matched; this is a plan-limit stop.
+ *   { enrolled:false, neverEnrol:true }       — an EXPLICIT never-enrol: an auth/credential
+ *                                                failure, an abort or context overflow, or an
+ *                                                affirmative NOT-quota phrase (throttle/overload/
+ *                                                tier/credits). These are load-bearing (spec §4.1):
+ *                                                they suppress BOTH signals, so the meter
+ *                                                correlation must NOT over-enrol them.
+ *   { enrolled:false }                        — nothing matched and nothing opposed: not a limit
+ *                                                by wording, but the meter correlation may still
+ *                                                enrol (spec §4 signal 2).
+ *
  * @param {object} input
  * @param {string|undefined} input.provider       usage-engine adapter id ("claude"|"codex"|"kimi")
  * @param {unknown} [input.errorName]             the typed error name (e.g. `usage_limit_reached`, `ApiError`)
  * @param {unknown} [input.errorMessage]          the human/immediate error message (spec §4.2 "body")
  * @param {unknown} [input.error]                 the full error object, when available (used to reuse the
  *                                                existing auth-error predicate for exclusion)
- * @returns {{ enrolled: false } | { enrolled: true, window: UsageWindowKind|null }}
+ * @returns {{ enrolled: true, window: UsageWindowKind|null } | { enrolled: false, neverEnrol?: true }}
  */
 export function classifyUsageStopped({ provider, errorName, errorMessage, error }) {
   // Unknown provider → out of scope by construction (spec §3).
-  if (!isStoppedProvider(provider)) return { enrolled: false };
+  if (!isStoppedProvider(provider)) return { enrolled: false, neverEnrol: true };
 
   const name = asString(errorName).toLowerCase();
   const msg = asString(errorMessage).toLowerCase();
 
   // A user abort or a context overflow is structurally never a plan-limit stop,
-  // by name — suppress the match signal here too (defense in depth; the
-  // enrolment path additionally skips these before the meter correlation runs).
-  if (isNonLimitFailure(errorName)) return { enrolled: false };
+  // by name (spec §4.1) — neverEnrol so the correlation cannot over-enrol it.
+  if (isNonLimitFailure(errorName)) return { enrolled: false, neverEnrol: true };
 
   // Auth/credential failures must NEVER enrol. Reuse the existing auth-error
   // predicate rather than writing a second one (spec §4.1, issue Build §1).
   // It only matches Claude credential errors and returns false harmlessly for
-  // everything else.
+  // everything else. neverEnrol so the correlation cannot over-enrol it.
   if (isClaudeCredentialError(error ?? { name: errorName, data: { message: errorMessage } })) {
-    return { enrolled: false };
+    return { enrolled: false, neverEnrol: true };
   }
 
   const hay = name + "\n" + msg;
@@ -154,9 +166,10 @@ export function classifyUsageStopped({ provider, errorName, errorMessage, error 
 
   // The negative list is as load-bearing as the positive one — momentary
   // throttles / overload / tier / credit refusals share tokens and status codes
-  // with real limits and must never enrol. A negative always wins.
+  // with real limits and must never enrol (spec §4.1). A negative ALWAYS wins —
+  // including against the meter correlation, which is why it sets neverEnrol.
   for (const neg of table.negative) {
-    if (hay.includes(neg)) return { enrolled: false };
+    if (hay.includes(neg)) return { enrolled: false, neverEnrol: true };
   }
 
   for (const entry of table.positive) {
@@ -193,14 +206,27 @@ export function isUsageAtLimit(windows) {
  * opposite directions — the match is precise but only knows seen wordings; the
  * correlation is fuzzy but catches everything.
  *
+ * One override: an EXPLICIT never-enrol in the classifier (`match.neverEnrol`
+ * — an auth failure, an abort/context overflow, or an affirmative NOT-quota
+ * phrase) suppresses enrolment even when the meter reads at its limit. Without
+ * this, a throttle or credit refusal that happens to fire while a provider sits
+ * at 100% would be mislabelled a plan-limit stop (spec §4.1: "must not enrol").
+ *
  * @param {object} input
- * @param {{enrolled:boolean, window:UsageWindowKind|null}} input.match   classifier result
- * @param {boolean} input.atLimit                                           provider's meter re-checked on the failure
+ * @param {{enrolled:boolean, window:UsageWindowKind|null, neverEnrol?:boolean}} input.match   classifier result
+ * @param {boolean} input.atLimit   provider's meter re-checked on the failure
  * @returns {{ enrol: false } | { enrol: true, window: UsageWindowKind|null }}
  */
 export function decideUsageEnrolment({ match, atLimit }) {
-  if (match?.enrolled || atLimit) {
-    return { enrol: true, window: match?.enrolled ? match.window : null };
+  if (match?.enrolled) {
+    return { enrol: true, window: match.window ?? null };
+  }
+  // An explicit never-enrol wins against the correlation signal too.
+  if (match?.neverEnrol) {
+    return { enrol: false };
+  }
+  if (atLimit) {
+    return { enrol: true, window: null };
   }
   return { enrol: false };
 }

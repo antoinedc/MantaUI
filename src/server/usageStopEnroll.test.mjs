@@ -69,6 +69,23 @@ test("no signal: unmatched wording + provider under limit → no enrolment", asy
   assert.equal(upserts.length, 0);
 });
 
+// Regression for reviewer Question (cycle 2): a never-enrol negative must
+// suppress the meter-correlation signal on the ENROLMENT path too — a throttle
+// that fires while a provider sits at its limit must not land a stopped record.
+test("a throttle refused at limit still never enrols (neverEnrol beats correlation)", async () => {
+  const { engine, upserts } = harness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1", "Error", "...temporarily limiting requests..."));
+  assert.equal(upserts.length, 0, "a throttle at-limit must not land a stopped record");
+});
+
+test("a credit/overage refusal at limit never enrols", async () => {
+  const { engine, upserts } = harness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1", "Error", "usage credits are required"));
+  assert.equal(upserts.length, 0);
+});
+
 test("auth/credential failures never enrol even when at limit", async () => {
   const { engine, upserts } = harness({ atLimit: true });
   engine.observeEvent(stepEvent("s1"));
