@@ -296,6 +296,15 @@ final class MantaAPIClient: Sendable {
         try await call("opencode:agents", args: [], as: [OpencodeAgent].self) ?? []
     }
 
+    /// `opencode:session-agent` — the agent opencode currently has attached to
+    /// this session ("plan", "build", …). Authoritative: a session put into
+    /// plan mode outside this device is only discoverable this way. Nil when
+    /// absent / unknown / the box erred — failure is non-fatal (the caller
+    /// keeps its stored value).
+    func sessionAgent(sessionId: String) async throws -> String? {
+        try await call("opencode:session-agent", args: [sessionId], as: String.self)
+    }
+
     /// `opencode:compact-session` — free context for the voice `compact` action.
     func compactSession(sessionId: String) async throws {
         _ = try await callVoid("opencode:compact-session", args: [sessionId])

@@ -54,9 +54,10 @@ final class ChatModelStore: ObservableObject {
         self.sessionId = sessionId
         self.catalog = catalog
         self.api = api
-        self.override = Self.loadOverride(for: sessionId)
+        let planOn = UserDefaults.standard.bool(forKey: Self.planKey(for: sessionId))
+        self.planOn = planOn
+        self.override = Self.loadOverride(for: sessionId, mode: planOn ? .plan : .build)
         self.variant = UserDefaults.standard.string(forKey: Self.variantKey(for: sessionId))
-        self.planOn = UserDefaults.standard.bool(forKey: Self.planKey(for: sessionId))
 
         // Seed + mirror the shared catalog so the box-wide list and default are
         // published here (keeps every existing caller reading
@@ -78,9 +79,24 @@ final class ChatModelStore: ObservableObject {
         loaded = catalog.loaded
     }
 
-    /// The UserDefaults key mirroring the desktop's per-session model key.
-    static func storageKey(for sessionId: String) -> String {
-        "manta:chat:\(sessionId):model"
+    /// Which model a session remembers. Plan and build are remembered
+    /// separately so switching modes restores the model the user last chose
+    /// for that mode — and so "Build here" has a build model to return to.
+    /// Mirrors the desktop keys in src/renderer/chatShared.tsx exactly.
+    enum ModelMode: String {
+        case build
+        case plan
+    }
+
+    /// The UserDefaults key mirroring the desktop's per-session model key —
+    /// one per mode. `build` uses the original `…:model` key so every
+    /// existing session keeps its model and nothing migrates; `plan` gets its
+    /// own key (`…:model:plan`), same stored shape.
+    static func storageKey(for sessionId: String, mode: ModelMode) -> String {
+        switch mode {
+        case .build: return "manta:chat:\(sessionId):model"
+        case .plan:  return "manta:chat:\(sessionId):model:plan"
+        }
     }
 
     static func variantKey(for sessionId: String) -> String {
@@ -112,10 +128,22 @@ final class ChatModelStore: ObservableObject {
     /// before a clear swaps the id, so the rebuilt store for the new session
     /// picks up the same model the user had chosen — matching the desktop,
     /// which copies the override into the new session's key on /clear.
+    ///
+    /// Copies BOTH per-mode model keys (mirroring the desktop's
+    /// `copySavedModels`), preserving their independence: the RAW stored value
+    /// of each key is copied — not `loadOverride`, whose plan→build fallback
+    /// would stamp the build model into a plan key that was never explicitly
+    /// written — and a plan key absent on the source stays absent on the new
+    /// session. The old session's keys are left alone.
     func rebind(to newSessionId: String) {
         guard newSessionId != sessionId else { return }
-        if let override {
-            UserDefaults.standard.set(ChatModel.encode(override), forKey: Self.storageKey(for: newSessionId))
+        let defaults = UserDefaults.standard
+        for mode in [ModelMode.build, .plan] {
+            let fromKey = Self.storageKey(for: sessionId, mode: mode)
+            let toKey = Self.storageKey(for: newSessionId, mode: mode)
+            if let raw = defaults.string(forKey: fromKey) {
+                defaults.set(raw, forKey: toKey)
+            }
         }
         if let variant, !variant.isEmpty {
             UserDefaults.standard.set(variant, forKey: Self.variantKey(for: newSessionId))
@@ -136,16 +164,23 @@ final class ChatModelStore: ObservableObject {
         return SendPromptInput.Model(providerID: active.providerID, modelID: active.modelID, variant: variant)
     }
 
-    /// Set (or clear, with nil) the per-session override, persisting it. A
-    /// model change drops the effort variant: the levels one model offers mean
-    /// nothing on another, and most models offer none at all.
+    /// The mode the session is currently in — drives which per-mode key the
+    /// model selection reads and writes. Plan builds on the plan key; build
+    /// (and the default) use the build key.
+    var mode: ModelMode { planOn ? .plan : .build }
+
+    /// Set (or clear, with nil) the per-session override, persisting it to the
+    /// CURRENT mode's key. A model change drops the effort variant: the levels
+    /// one model offers mean nothing on another, and most models offer none at
+    /// all.
     func setOverride(_ id: OpencodeModelID?) {
         let modelChanged = id != override
         override = id
+        let key = Self.storageKey(for: sessionId, mode: mode)
         if let id {
-            UserDefaults.standard.set(ChatModel.encode(id), forKey: Self.storageKey(for: sessionId))
+            UserDefaults.standard.set(ChatModel.encode(id), forKey: key)
         } else {
-            UserDefaults.standard.removeObject(forKey: Self.storageKey(for: sessionId))
+            UserDefaults.standard.removeObject(forKey: key)
         }
         if modelChanged { setVariant(nil) }
     }
@@ -236,14 +271,39 @@ final class ChatModelStore: ObservableObject {
         ChatModel.planToggle(agents: agents, on: planOn)
     }
 
-    /// Flip plan mode for this session, persisting the boolean.
+    /// Flip plan mode for this session, persisting the boolean. When the mode
+    /// actually changes, the composer's active model becomes the mode being
+    /// entered's remembered model (mirroring `ChatPanel.tsx`'s togglePlan):
+    /// reading plan pulls the plan key, falling back to build; reading build
+    /// never consults the plan key. The model key is NOT written here — only
+    /// on an explicit model pick.
     func setPlan(_ on: Bool) {
+        let modeChanged = on != planOn
         planOn = on
         UserDefaults.standard.set(on, forKey: Self.planKey(for: sessionId))
+        guard modeChanged else { return }
+        let remembered = Self.loadOverride(for: sessionId, mode: mode)
+        if remembered != override {
+            override = remembered
+            setVariant(nil)
+        }
     }
 
-    static func loadOverride(for sessionId: String) -> OpencodeModelID? {
-        guard let raw = UserDefaults.standard.string(forKey: storageKey(for: sessionId)) else { return nil }
-        return ChatModel.decode(raw)
+    /// The remembered per-session model for a mode, or nil when the session
+    /// has none (the server default applies). Plan reads the plan key first,
+    /// falling back to the build key when the plan key is absent — that is the
+    /// desktop's asymmetric rule and is what makes a first toggle to plan keep
+    /// the build model until the user picks one while in plan mode. Build never
+    /// falls back to plan. A present-but-malformed value counts as absent for
+    /// the purpose of the fallback.
+    static func loadOverride(for sessionId: String, mode: ModelMode) -> OpencodeModelID? {
+        let key = storageKey(for: sessionId, mode: mode)
+        if let raw = UserDefaults.standard.string(forKey: key), let decoded = ChatModel.decode(raw) {
+            return decoded
+        }
+        if mode == .plan, let build = loadOverride(for: sessionId, mode: .build) {
+            return build
+        }
+        return nil
     }
 }

@@ -258,6 +258,7 @@ private struct ChatScreenContent: View {
                 store.start()
                 modelStore.load()
                 modelStore.loadAgentsIfNeeded()
+                seedPlanModeFromBox()
                 Task { await settingsStore.load() }
                 usageStore.start()
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
@@ -545,6 +546,21 @@ private struct ChatScreenContent: View {
         let api = MantaAPIClient.live()
         if let jobs = try? await api.listSchedules(sessionId: store.sessionId) {
             scheduleCount = jobs.count
+        }
+    }
+
+    /// Seed plan mode from opencode's own session agent (the desktop's
+    /// BET-949 §5 behaviour). A session pre-set to plan OUTSIDE this device is
+    /// only discoverable here — its stored `planOn` key can't know, so the chip
+    /// would otherwise read off until some unrelated event happened to arrive.
+    /// Non-fatal: on failure or absence the stored value is left alone and no
+    /// error is surfaced. `setPlan` also re-reads the model for the mode being
+    /// entered, so the composer shows that mode's remembered model.
+    private func seedPlanModeFromBox() {
+        Task {
+            guard let agent = try? await MantaAPIClient.live().sessionAgent(sessionId: store.sessionId) else { return }
+            let planNow = agent == "plan"
+            modelStore.setPlan(planNow)
         }
     }
 
